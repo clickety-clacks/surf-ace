@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
+import { EventEmitter } from "node:events";
 import fs from "node:fs/promises";
+import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -23,32 +25,79 @@ import {
   writeChecksumReceipt,
 } from "./release-lib.mjs";
 import { compareReleaseBuilds } from "./compare-release-builds.mjs";
-import { cargoLockedPackages, lockedPackages, packagedProductionInventory } from "./lockfile-inventory.mjs";
+import { cargoLockedPackages, lockedPackages, packagedProductionInventory, workspaceProductionInventory } from "./lockfile-inventory.mjs";
 import { verifySri } from "./verify-sri.mjs";
-import { verifyOpenclawPackage } from "./verify-openclaw-package.mjs";
-import * as openclawReleaseBuilder from "./build-openclaw-release.mjs";
 import {
+  assembleTightbeamCliStage,
   assembleTightbeamLinuxStage,
+  assertTightbeamLinuxQualificationClaims,
+  buildTightbeamLinuxQualification,
   buildTightbeamRelease,
+  installLinuxElectronLauncher,
+  TIGHTBEAM_CLI_FILES,
+  TIGHTBEAM_LINUX_SERVER_FILES,
   TIGHTBEAM_LINUX_RUNTIME_FILES,
+  copyTightbeamSkillAsset,
+  verifyStandaloneElectronSource,
+  writeTightbeamManifest,
+  verifyTightbeamCliStage,
   verifyTightbeamLinuxStage,
 } from "./build-tightbeam-release.mjs";
-import { OPENCLAW, OPENCLAW_BUILD_COMMANDS, OPENCLAW_TEST_COMMANDS, TIGHTBEAM, TOOLING_TAG } from "./release-config.mjs";
-import { runLinuxStateDriver, validateTightbeamStateSequence } from "./smoke-tightbeam-release.mjs";
+import {
+  TIGHTBEAM,
+  TIGHTBEAM_BUILD_COMMANDS,
+  TIGHTBEAM_PUBLIC_FILES,
+  TIGHTBEAM_ROUTING,
+  TIGHTBEAM_SKILL_ASSET,
+  TIGHTBEAM_TEST_COMMANDS,
+  TIGHTBEAM_TOOLING_TAG,
+  TOOLCHAINS,
+} from "./tightbeam-release-config.mjs";
+import {
+  assertTightbeamElectronPackageIdentity,
+  assertTightbeamSmokeParticipantIdentities,
+  assertTightbeamSmokeParticipantAssetBytes,
+  electronSmokePlan,
+  macosSmokePlan,
+  buildTightbeamSmokeParticipantIdentities,
+  formatSmokeFailure,
+  installElectronArchive,
+  runMacosSmokePlan,
+  smokeLinuxFreshInstall,
+  runLinuxFreshInstallStateDriver,
+  smokeTightbeamLinuxQualification,
+  validateTightbeamFreshInstallState,
+  verifyTightbeamChecksums,
+} from "./smoke-tightbeam-release.mjs";
+import { verifyClientAppVersion } from "./smoke-lib.mjs";
 import { verifySmokeReceipt, writeSmokeReceipt } from "./write-smoke-receipt.mjs";
+import tightbeamServerLauncher from "./tightbeam-server-launcher.cjs";
 
 const exec = promisify(execFile);
+const workspaceRequire = createRequire(import.meta.url);
+const { WebSocketServer } = workspaceRequire("../../packages/electron/node_modules/ws");
 const repository = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../..");
-const { buildOpenclawRelease } = openclawReleaseBuilder;
-const reviewedOpenclawToolingBase = "61c70f99f4d2ba00248f5117e3c927c03e8cb7ba";
-const currentOpenclawToolingBase = "70909bd8ceea4ceb6cf5438422e741588ebd8340";
-const openclawToolingTag = "surf-ace-release-tooling-openclaw-v0.1.4";
-const consumedOpenclawToolingTags = [
-  "surf-ace-release-tooling-openclaw-v0.1.3",
-  "surf-ace-release-tooling-openclaw-v0.1.2",
-];
-const openclawProductCommit = "801fc08047886028bd6fefc4ce35c8be04f7dff4";
-const openclawProductTag = "surf-ace-openclaw-v0.1.1";
+
+function smokeParticipantIdentities(component, changes = {}) {
+  const assetNames = component === "linux"
+    ? TIGHTBEAM.assets.slice(0, 3)
+    : [TIGHTBEAM.assets[3], TIGHTBEAM.assets[4]];
+  const roles = component === "linux" ? ["server", "cli", "client"] : ["cli", "client"];
+  const details = assetNames.map((name) => ({ name, sha256: "a".repeat(64), sizeBytes: 1 }));
+  return buildTightbeamSmokeParticipantIdentities({
+    assetDetails: details,
+    component,
+    identityBasis: "manifest-and-SHA256SUMS",
+    sourceCommit: TIGHTBEAM.candidateCommit,
+    toolingCommit: "b".repeat(40),
+    version: TIGHTBEAM.version,
+  }).map((identity) => ({ ...identity, ...changes[identity.participant] }));
+}
+
+async function recordClientAppLaunch(logPath, version = TIGHTBEAM.version) {
+  await fs.mkdir(path.dirname(logPath), { recursive: true });
+  await fs.writeFile(logPath, `2026-09-27T00:00:00.000Z [surf-ace:app] event=app_launch app_version=${version} platform=linux\n`);
+}
 
 function workflowRunScript(workflow, stepName) {
   const marker = `      - name: ${stepName}\n`;
@@ -65,78 +114,6 @@ function workflowRunScript(workflow, stepName) {
     else break;
   }
   return body.join("\n").trimEnd();
-}
-
-async function workflowAtRevision(revision, relativePath) {
-  return (await exec("git", ["show", `${revision}:${relativePath}`], { cwd: repository })).stdout;
-}
-
-async function runWorkflowGuard(t, script, overrides = {}) {
-  const root = await temporary(t);
-  const bin = path.join(root, "bin");
-  const ghLog = path.join(root, "gh.log");
-  await fs.mkdir(bin);
-  await fs.writeFile(path.join(bin, "gh"), `#!/usr/bin/env node
-const fs = require("node:fs");
-const [command, endpoint] = process.argv.slice(2);
-fs.appendFileSync(process.env.GH_LOG, JSON.stringify({ command, endpoint }) + "\\n");
-if (command !== "api") process.exit(90);
-if (endpoint.endsWith("/git/ref/tags/" + process.env.TOOLING_TAG)) {
-  console.log("commit " + process.env.MOCK_TOOLING_REMOTE);
-} else if (endpoint.endsWith("/git/ref/tags/" + process.env.PRODUCT_TAG)) {
-  console.log("commit " + process.env.MOCK_PRODUCT_REMOTE);
-} else if (endpoint.includes("/actions/runs/")) {
-  console.log([
-    process.env.MOCK_GATE4_EVENT,
-    process.env.MOCK_GATE4_STATUS,
-    process.env.MOCK_GATE4_CONCLUSION,
-    process.env.MOCK_GATE4_HEAD_SHA,
-    process.env.MOCK_GATE4_PATH,
-  ].join("\\t"));
-} else {
-  process.exit(91);
-}
-`, { mode: 0o755 });
-  await fs.writeFile(ghLog, "");
-
-  const toolingCommit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-  const productCommit = openclawProductCommit;
-  const toolingTag = openclawToolingTag;
-  const environment = {
-    ...process.env,
-    PATH: `${bin}:${process.env.PATH}`,
-    GH_LOG: ghLog,
-    GH_TOKEN: "test-token",
-    GITHUB_REPOSITORY: "clickety-clacks/surf-ace",
-    GITHUB_EVENT_NAME: "workflow_dispatch",
-    GITHUB_REF_TYPE: "tag",
-    GITHUB_REF: `refs/tags/${toolingTag}`,
-    GITHUB_SHA: toolingCommit,
-    TOOLING_TAG: toolingTag,
-    PRODUCT_TAG: openclawProductTag,
-    PRODUCT_COMMIT: productCommit,
-    GATE4_RUN_ID: "123456",
-    TRIGGER_REF: "refs/heads/release/run-tightbeam-v0.2.0",
-    MOCK_TOOLING_REMOTE: toolingCommit,
-    MOCK_PRODUCT_REMOTE: productCommit,
-    MOCK_GATE4_EVENT: "workflow_dispatch",
-    MOCK_GATE4_STATUS: "completed",
-    MOCK_GATE4_CONCLUSION: "success",
-    MOCK_GATE4_HEAD_SHA: toolingCommit,
-    MOCK_GATE4_PATH: ".github/workflows/release-openclaw.yml",
-    ...overrides,
-  };
-  try {
-    const result = await exec("/bin/bash", ["-c", script], { cwd: root, env: environment });
-    return { ...result, exitCode: 0, ghLog: await fs.readFile(ghLog, "utf8") };
-  } catch (error) {
-    return {
-      exitCode: error.code,
-      stdout: error.stdout ?? "",
-      stderr: error.stderr ?? "",
-      ghLog: await fs.readFile(ghLog, "utf8"),
-    };
-  }
 }
 
 async function temporary(t) {
@@ -160,8 +137,8 @@ test("release paths cannot escape the owned root", () => {
   assert.equal(resolveInside("/tmp/release", "a/b"), "/tmp/release/a/b");
   assert.throws(() => resolveInside("/tmp/release", "../input"), /path_escapes_root/);
   assert.throws(() => assertDisjointTrees("/tmp/source", "/tmp/source/build"), /release_trees_overlap/);
-  assert.equal(requiredReleaseOutput("openclaw", "build/release/openclaw"), path.resolve("build/release/openclaw"));
-  assert.throws(() => requiredReleaseOutput("openclaw", "/tmp/output"), /release_output_mismatch/);
+  assert.equal(requiredReleaseOutput("tightbeam", "build/release/tightbeam"), path.resolve("build/release/tightbeam"));
+  assert.throws(() => requiredReleaseOutput("tightbeam", "/tmp/output"), /release_output_mismatch/);
 });
 
 test("normalized tar-gzip and zip bytes are stable across mtime and creation order", async (t) => {
@@ -200,170 +177,6 @@ test("archive creation refuses absolute and escaping symbolic links", async (t) 
   await fs.writeFile(path.join(longRoot, longTarget), "target\n");
   await fs.symlink(longTarget, path.join(longRoot, "long-link"));
   await assert.rejects(createTarGz(longRoot, path.join(root, "long.tgz"), 1_700_000_000), /tar_link_target_too_long/);
-});
-
-test("OpenClaw deploy normalization removes only the exact diagnosed workspace self-link", async (t) => {
-  const root = await temporary(t);
-  const sourceDir = path.join(root, "build/source");
-  const dependencyClosure = path.join(root, "build/release/openclaw/dependency-closure");
-  const extensionDir = path.join(sourceDir, "packages/extension");
-  const selfLink = path.join(dependencyClosure, "node_modules/.pnpm/node_modules/@surf-ace/extension");
-  await fs.mkdir(extensionDir, { recursive: true });
-  await fs.writeFile(path.join(extensionDir, "package.json"), '{"name":"@surf-ace/extension"}\n');
-  await fs.mkdir(path.dirname(selfLink), { recursive: true });
-  await fs.symlink(path.relative(path.dirname(selfLink), extensionDir), selfLink);
-
-  await assert.rejects(
-    createTarGz(dependencyClosure, path.join(root, "before.tgz"), 1_700_000_000),
-    /path_escapes_root:\.\.\/\.\.\/\.\.\/source\/packages\/extension/,
-  );
-
-  const normalize = openclawReleaseBuilder.normalizeOpenclawDependencyClosure;
-  assert.equal(typeof normalize, "function", "shipped builder must expose its deploy normalizer");
-  await normalize(sourceDir, dependencyClosure);
-  await assert.rejects(fs.lstat(selfLink), { code: "ENOENT" });
-  await createTarGz(dependencyClosure, path.join(root, "after.tgz"), 1_700_000_000);
-
-  const builder = await fs.readFile(path.join(repository, "scripts/release/build-openclaw-release.mjs"), "utf8");
-  const deployOffset = builder.indexOf('"deploy", "--legacy", dependencyClosure');
-  const normalizeOffset = builder.indexOf("await normalizeOpenclawDependencyClosure(sourceDir, dependencyClosure)");
-  const assembleOffset = builder.indexOf("await assembleOpenclawPackage(sourceDir, dependencyClosure, packageRoot)");
-  const archiveOffset = builder.indexOf("await createDirectoryTarGz(packageRoot");
-  assert.ok(deployOffset >= 0 && deployOffset < normalizeOffset);
-  assert.ok(normalizeOffset < assembleOffset && assembleOffset < archiveOffset);
-});
-
-test("OpenClaw deploy normalization removes pnpm path and timestamp ephemera before archiving", async (t) => {
-  const normalize = openclawReleaseBuilder.normalizeOpenclawDependencyClosure;
-  const makeClosure = async (name, prunedAt) => {
-    const root = path.join(await temporary(t), name);
-    const sourceDir = path.join(root, "source");
-    const dependencyClosure = path.join(root, "dependency-closure");
-    const extensionDir = path.join(sourceDir, "packages/extension");
-    const selfLink = path.join(dependencyClosure, "node_modules/.pnpm/node_modules/@surf-ace/extension");
-    const bin = path.join(dependencyClosure, "node_modules/.pnpm/node_modules/.bin");
-    await fs.mkdir(extensionDir, { recursive: true });
-    await fs.mkdir(path.dirname(selfLink), { recursive: true });
-    await fs.mkdir(bin, { recursive: true });
-    await fs.writeFile(path.join(extensionDir, "package.json"), '{"name":"@surf-ace/extension"}\n');
-    await fs.writeFile(path.join(dependencyClosure, "payload.js"), "export const value = 1;\n");
-    await fs.writeFile(path.join(dependencyClosure, "node_modules/.modules.yaml"),
-      `prunedAt: ${prunedAt}\nstoreDir: ${root}/store/v10\n`);
-    await fs.writeFile(path.join(bin, "multicast-dns"), `#!/bin/sh\nNODE_PATH=${root}/dependency-closure/node_modules\n`);
-    await fs.symlink(path.relative(path.dirname(selfLink), extensionDir), selfLink);
-    await normalize(sourceDir, dependencyClosure);
-    return { dependencyClosure, root };
-  };
-
-  const left = await makeClosure("left", "Sat, 26 Sep 2026 20:24:33 GMT");
-  const right = await makeClosure("right", "Sat, 26 Sep 2026 20:28:11 GMT");
-  await assert.rejects(fs.access(path.join(left.dependencyClosure, "node_modules/.modules.yaml")));
-  await assert.rejects(fs.access(path.join(right.dependencyClosure, "node_modules/.modules.yaml")));
-  await assert.rejects(fs.access(path.join(left.dependencyClosure, "node_modules/.pnpm/node_modules/.bin")));
-  await assert.rejects(fs.access(path.join(right.dependencyClosure, "node_modules/.pnpm/node_modules/.bin")));
-  const leftArchive = path.join(left.root, "closure.tgz");
-  const rightArchive = path.join(right.root, "closure.tgz");
-  await createTarGz(left.dependencyClosure, leftArchive, 1_700_000_000);
-  await createTarGz(right.dependencyClosure, rightArchive, 1_700_000_000);
-  assert.deepEqual(await fs.readFile(leftArchive), await fs.readFile(rightArchive));
-});
-
-test("OpenClaw deploy normalization rejects every non-exact self-link shape and preserves unrelated root escapes", async (t) => {
-  const normalize = openclawReleaseBuilder.normalizeOpenclawDependencyClosure;
-  assert.equal(typeof normalize, "function", "shipped builder must expose its deploy normalizer");
-
-  const fixture = async (name, configure) => {
-    const root = path.join(await temporary(t), name);
-    const sourceDir = path.join(root, "build/source");
-    const dependencyClosure = path.join(root, "build/release/openclaw/dependency-closure");
-    const extensionDir = path.join(sourceDir, "packages/extension");
-    const selfLink = path.join(dependencyClosure, "node_modules/.pnpm/node_modules/@surf-ace/extension");
-    await fs.mkdir(extensionDir, { recursive: true });
-    await fs.writeFile(path.join(extensionDir, "package.json"), '{"name":"@surf-ace/extension"}\n');
-    await fs.mkdir(path.dirname(selfLink), { recursive: true });
-    await configure({ dependencyClosure, extensionDir, root, selfLink, sourceDir });
-    return { dependencyClosure, extensionDir, root, selfLink, sourceDir };
-  };
-
-  const missing = await fixture("missing", async () => {});
-  await assert.rejects(normalize(missing.sourceDir, missing.dependencyClosure), /openclaw_deploy_self_link_missing/);
-
-  const changed = await fixture("changed", async ({ selfLink }) => fs.symlink("../../../../../../../changed/packages/extension", selfLink));
-  await assert.rejects(normalize(changed.sourceDir, changed.dependencyClosure), /openclaw_deploy_self_link_target_mismatch/);
-
-  const sibling = await fixture("sibling", async ({ selfLink, sourceDir }) => {
-    const siblingDir = path.join(sourceDir, "packages/controller");
-    await fs.mkdir(siblingDir, { recursive: true });
-    await fs.symlink(path.relative(path.dirname(selfLink), siblingDir), selfLink);
-  });
-  await assert.rejects(normalize(sibling.sourceDir, sibling.dependencyClosure), /openclaw_deploy_self_link_target_mismatch/);
-
-  const absolute = await fixture("absolute", async ({ extensionDir, selfLink }) => fs.symlink(extensionDir, selfLink));
-  await assert.rejects(normalize(absolute.sourceDir, absolute.dependencyClosure), /openclaw_deploy_self_link_absolute/);
-
-  const nonLink = await fixture("non-link", async ({ selfLink }) => fs.writeFile(selfLink, "not a link\n"));
-  await assert.rejects(normalize(nonLink.sourceDir, nonLink.dependencyClosure), /openclaw_deploy_self_link_not_symlink/);
-
-  const unrelated = await fixture("unrelated", async ({ dependencyClosure, extensionDir, selfLink }) => {
-    await fs.symlink(path.relative(path.dirname(selfLink), extensionDir), selfLink);
-    await fs.symlink("../../outside", path.join(dependencyClosure, "unrelated-escape"));
-  });
-  await normalize(unrelated.sourceDir, unrelated.dependencyClosure);
-  await assert.rejects(
-    createTarGz(unrelated.dependencyClosure, path.join(unrelated.root, "unrelated.tgz"), 1_700_000_000),
-    /path_escapes_root/,
-  );
-});
-
-test("OpenClaw Electron packaging is explicitly nonpublishing in ordinary and tag environments", async () => {
-  const packageElectron = openclawReleaseBuilder.packageOpenclawElectron;
-  assert.equal(typeof packageElectron, "function", "shipped builder must expose its Electron packaging step");
-
-  for (const environment of [
-    { PATH: process.env.PATH },
-    {
-      PATH: process.env.PATH,
-      GITHUB_REF: `refs/tags/${openclawToolingTag}`,
-      GITHUB_REF_NAME: openclawToolingTag,
-      GITHUB_REF_TYPE: "tag",
-    },
-  ]) {
-    const calls = [];
-    await packageElectron("source", async (command, args, options) => {
-      calls.push({ args, command, env: options.env });
-    }, environment);
-    assert.deepEqual(calls.map(({ args, command }) => ({ args, command })), [
-      {
-        command: "pnpm",
-        args: ["--dir", "source", "--filter", "@surf-ace/electron", "build"],
-      },
-      {
-        command: "pnpm",
-        args: [
-          "--dir", "source", "--filter", "@surf-ace/electron", "exec",
-          "electron-builder", "--mac", "dir", "--arm64", "--publish", "never",
-        ],
-      },
-    ]);
-    const packagerArgs = calls[1].args;
-    assert.equal(packagerArgs.filter((argument) => argument === "--publish").length, 1);
-    assert.equal(packagerArgs.at(packagerArgs.indexOf("--publish") + 1), "never");
-    assert.equal(calls[0].env.CSC_IDENTITY_AUTO_DISCOVERY, "false");
-    assert.equal(calls[1].env.CSC_IDENTITY_AUTO_DISCOVERY, "false");
-    assert.equal(calls.some(({ args, command }) => /(?:github|release|upload)/i.test([command, ...args].join(" "))), false);
-  }
-
-  assert.deepEqual(OPENCLAW_BUILD_COMMANDS.slice(-3), [
-    "pnpm --dir source --filter @surf-ace/electron build",
-    "pnpm --dir source --filter @surf-ace/electron exec electron-builder --mac dir --arm64 --publish never",
-    "node tooling/scripts/release/verify-openclaw-package.mjs --package-dir build/release/openclaw/package-root --lockfile source/pnpm-lock.yaml",
-  ]);
-  const builder = await fs.readFile(path.join(repository, "scripts/release/build-openclaw-release.mjs"), "utf8");
-  assert.match(builder, /await packageOpenclawElectron\(sourceArgument\)/);
-  assert.doesNotMatch(builder, /"@surf-ace\/electron", "package"/);
-  assert.match(builder, new RegExp(`--candidate-commit ${openclawProductCommit}`));
-  for (const file of OPENCLAW.files) assert.match(builder, new RegExp(file.replaceAll(".", "\\.")));
-  assert.doesNotMatch(builder, /v0\.1\.0/);
 });
 
 test("release archive wrappers retain the required install roots", async (t) => {
@@ -409,57 +222,6 @@ test("Cargo lock inventory binds every registry dependency to its checksum", asy
   const lockfile = path.join(root, "Cargo.lock");
   await fs.writeFile(lockfile, 'version = 4\n\n[[package]]\nname = "alpha"\nversion = "1.2.3"\nsource = "registry+https://github.com/rust-lang/crates.io-index"\nchecksum = "aaaaaaaa"\n\n[[package]]\nname = "workspace-root"\nversion = "0.1.0"\n');
   assert.deepEqual(await cargoLockedPackages(lockfile), [{ checksum: "aaaaaaaa", name: "alpha", version: "1.2.3" }]);
-});
-
-test("OpenClaw package verification enforces runtime layout, tools, and the locked production closure", async (t) => {
-  const root = await temporary(t);
-  const packageDir = path.join(root, "package");
-  const files = {
-    "dist/extension/src/index.js": 'export { type OpenClawPluginApi } from "openclaw/plugin-sdk";\n',
-    "dist/extension/src/openclaw-lockless-controller.js": "export {};\n",
-    "dist/extension/src/surf-ace-tools.js": 'export const surfAceToolNames = ["surf_ace_list"];\n',
-    "dist/protocol/schema.json": "{}\n",
-    "dist/protocol/src/schemas.js": 'new URL("../schema.json", import.meta.url);\n',
-    "dist/surf-ace.js": "export {};\n",
-    "node_modules/@surf-ace/controller/dist/index.js": "export {};\n",
-    "node_modules/@surf-ace/protocol/dist/index.js": "export {};\n",
-    "node_modules/@surf-ace/protocol/schema.json": "{}\n",
-    "node_modules/alpha/package.json": '{"name":"alpha","version":"1.2.3"}\n',
-    "node_modules/bonjour-service/package.json": '{"name":"bonjour-service","version":"1.0.0"}\n',
-    "node_modules/ws/package.json": '{"name":"ws","version":"1.0.0"}\n',
-    "openclaw.plugin.json": '{"tools":["surf_ace_list"],"contracts":{"tools":["surf_ace_list"]}}\n',
-    "package.json": '{"name":"surf-ace","type":"module","openclaw":{"extensions":["./surf-ace.ts"],"runtimeExtensions":["./dist/extension/src/index.js"]}}\n',
-    "surf-ace.ts": "export {};\n",
-  };
-  for (const [relative, contents] of Object.entries(files)) {
-    const file = path.join(packageDir, relative);
-    await fs.mkdir(path.dirname(file), { recursive: true });
-    await fs.writeFile(file, contents);
-  }
-  const lockfile = path.join(root, "pnpm-lock.yaml");
-  await fs.writeFile(lockfile, "lockfileVersion: '9.0'\npackages:\n\n  alpha@1.2.3:\n    resolution: {integrity: sha512-AAAA}\n\n  bonjour-service@1.0.0:\n    resolution: {integrity: sha512-BBBB}\n\n  ws@1.0.0:\n    resolution: {integrity: sha512-CCCC}\n\nsnapshots:\n\n  alpha@1.2.3: {}\n\n  bonjour-service@1.0.0: {}\n\n  ws@1.0.0: {}\n");
-  const cutoffVerifier = path.join(root, "cutoff/packages/extension/scripts/verify-openclaw-package.mjs");
-  await fs.mkdir(path.dirname(cutoffVerifier), { recursive: true });
-  const repository = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../..");
-  await fs.writeFile(cutoffVerifier, await fs.readFile(path.join(repository, "packages/extension/scripts/verify-openclaw-package.mjs")));
-  assert.deepEqual(await verifyOpenclawPackage(packageDir, lockfile, cutoffVerifier), [
-    { integrity: "sha512-AAAA", name: "alpha", version: "1.2.3" },
-    { integrity: "sha512-BBBB", name: "bonjour-service", version: "1.0.0" },
-    { integrity: "sha512-CCCC", name: "ws", version: "1.0.0" },
-  ]);
-  await fs.rm(path.join(packageDir, "node_modules/bonjour-service"), { force: true, recursive: true });
-  await assert.rejects(verifyOpenclawPackage(packageDir, lockfile, cutoffVerifier));
-  await fs.mkdir(path.join(packageDir, "node_modules/bonjour-service"), { recursive: true });
-  await fs.writeFile(path.join(packageDir, "node_modules/bonjour-service/package.json"), '{"name":"bonjour-service","version":"1.0.0"}\n');
-  await fs.rm(path.join(packageDir, "node_modules/ws"), { force: true, recursive: true });
-  await assert.rejects(verifyOpenclawPackage(packageDir, lockfile, cutoffVerifier));
-  await fs.mkdir(path.join(packageDir, "node_modules/ws"), { recursive: true });
-  await fs.writeFile(path.join(packageDir, "node_modules/ws/package.json"), '{"name":"ws","version":"1.0.0"}\n');
-  await fs.rm(path.join(packageDir, "dist/extension/src/openclaw-lockless-controller.js"));
-  await assert.rejects(verifyOpenclawPackage(packageDir, lockfile, cutoffVerifier));
-  await fs.writeFile(path.join(packageDir, "dist/extension/src/openclaw-lockless-controller.js"), "export {};\n");
-  await fs.writeFile(path.join(packageDir, "openclaw.plugin.json"), '{"tools":["wrong"],"contracts":{"tools":["wrong"]}}\n');
-  await assert.rejects(verifyOpenclawPackage(packageDir, lockfile, cutoffVerifier));
 });
 
 test("two-build comparison requires identical receipts and every public byte", async (t) => {
@@ -529,11 +291,32 @@ test("Electron handshake binds smoke identity to an explicit userData launch pat
   const root = await temporary(t);
   const home = path.join(root, "profile");
   const { electronLaunchConfig, launchElectron } = await import("./smoke-lib.mjs");
-  const launch = electronLaunchConfig(home, 19101);
-  assert.equal(launch.userDataDir, path.join(home, "user-data"));
-  assert.deepEqual(launch.args, [`--user-data-dir=${launch.userDataDir}`]);
-  assert.equal(launch.env.HOME, home);
-  assert.equal(launch.env.SURF_ACE_STATE_DIR, undefined);
+  const priorRegistry = process.env.SURF_ACE_SERVER;
+  const priorGpu = process.env.SURF_ACE_DISABLE_GPU;
+  let launch;
+  try {
+    process.env.SURF_ACE_SERVER = "ws://operator-registry.invalid/ws";
+    delete process.env.SURF_ACE_DISABLE_GPU;
+    launch = electronLaunchConfig(home, 19101, null, undefined, "darwin");
+    assert.equal(launch.userDataDir, path.join(home, "user-data"));
+    assert.deepEqual(launch.args, [`--user-data-dir=${launch.userDataDir}`]);
+    assert.equal(launch.env.HOME, home);
+    assert.equal(launch.env.SURF_ACE_STATE_DIR, undefined);
+    assert.equal(launch.env.SURF_ACE_SERVER, undefined, "unqualified host registry configuration is stripped");
+    assert.equal(electronLaunchConfig(home, 19101, null, undefined, "darwin").env.SURF_ACE_DISABLE_GPU, undefined);
+    assert.equal(electronLaunchConfig(home, 19101, null, undefined, "darwin", true).env.SURF_ACE_DISABLE_GPU, "1");
+    assert.equal(electronLaunchConfig(home, 19101, null, undefined, "linux").env.SURF_ACE_DISABLE_GPU, undefined);
+    assert.equal(electronLaunchConfig(home, 19101, "ws://127.0.0.1:19301/ws").env.SURF_ACE_SERVER, "ws://127.0.0.1:19301/ws");
+    assert.deepEqual(
+      electronLaunchConfig(home, 19101, null, undefined, "linux").args,
+      [`--user-data-dir=${launch.userDataDir}`, "--disable-gpu", "--disable-dev-shm-usage"],
+    );
+  } finally {
+    if (priorRegistry === undefined) delete process.env.SURF_ACE_SERVER;
+    else process.env.SURF_ACE_SERVER = priorRegistry;
+    if (priorGpu === undefined) delete process.env.SURF_ACE_DISABLE_GPU;
+    else process.env.SURF_ACE_DISABLE_GPU = priorGpu;
+  }
   const sentinel = {};
   let invocation;
   const launched = await launchElectron("/fixture/Surf Ace", home, 19101, (command, args, options) => {
@@ -542,59 +325,352 @@ test("Electron handshake binds smoke identity to an explicit userData launch pat
   });
   assert.equal(launched.started, sentinel);
   assert.deepEqual(invocation, {
-    args: launch.args,
+    args: launched.launch.args,
     command: "/fixture/Surf Ace",
-    options: { env: launch.env },
+    options: { env: launched.launch.env },
   });
+  let gpuFallbackInvocation;
+  await launchElectron("/fixture/Surf Ace", home, 19101, (command, args, options) => {
+    gpuFallbackInvocation = { args, command, options };
+    return sentinel;
+  }, undefined, undefined, true);
+  assert.equal(gpuFallbackInvocation.options.env.SURF_ACE_DISABLE_GPU, "1");
   assert.equal((await fs.stat(launch.userDataDir)).isDirectory(), true);
 });
 
-test("Tightbeam macOS smoke retains one profile across baseline upgrade and rollback", async (t) => {
+test("Linux Electron ZIP launcher binds the expected name and documented sandbox contract", async (t) => {
+  const builder = await fs.readFile(path.join(repository, "scripts/release/build-tightbeam-release.mjs"), "utf8");
+  assert.match(builder, /"--config\.executableName", "surf-ace"/);
+  assert.match(builder, /installLinuxElectronLauncher\(electronRoot\)/);
+
+  const root = await temporary(t);
+  const electronRoot = path.join(root, "linux-unpacked");
+  await fs.mkdir(electronRoot, { recursive: true });
+  await fs.writeFile(path.join(electronRoot, "surf-ace"), "#!/bin/sh\nprintf '%s\\n' \"$@\"\n", { mode: 0o755 });
+  const launcher = await installLinuxElectronLauncher(electronRoot);
+  assert.equal(launcher, path.join(electronRoot, "surf-ace"));
+  assert.equal((await fs.stat(launcher)).mode & 0o777, 0o755);
+  assert.equal((await fs.stat(path.join(electronRoot, "surf-ace-bin"))).mode & 0o777, 0o755);
+  assert.match(await fs.readFile(launcher, "utf8"), /--no-sandbox/);
+  const invoked = await exec(launcher, ["--fixture-argument", "value"]);
+  assert.equal(invoked.stdout, "--no-sandbox\n--fixture-argument\nvalue\n");
+
+  const packageSource = path.join(root, "package-source");
+  const packagedRoot = path.join(packageSource, "Surf Ace");
+  await fs.mkdir(packagedRoot, { recursive: true });
+  await fs.cp(electronRoot, packagedRoot, { recursive: true });
+  const archive = path.join(root, "electron.zip");
+  await createDirectoryZip(packageSource, ".", archive, 1_790_000_000);
+  const installed = await installElectronArchive(archive, path.join(root, "installed"), "linux");
+  assert.equal(installed, path.join(root, "installed/Surf Ace/surf-ace"));
+  assert.equal((await fs.stat(installed)).mode & 0o111, 0o111);
+});
+
+test("smoke stop treats an already signal-exited child as exited", async () => {
+  const { start, stop } = await import("./smoke-lib.mjs");
+  const started = start(process.execPath, ["-e", "process.kill(process.pid, 'SIGKILL')"]);
+  const outcome = await new Promise((resolve) => started.child.once("exit", (code, signal) => resolve({ code, signal })));
+  assert.equal(outcome.code, null);
+  assert.equal(outcome.signal, "SIGKILL");
+  let timer;
+  try {
+    await Promise.race([
+      stop(started),
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("signal_exit_cleanup_timeout")), 2_000); }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+});
+
+test("Tightbeam macOS smoke plans one exact candidate profile", async (t) => {
   const root = await temporary(t);
   const candidate = path.join(root, "candidate.zip");
-  const baseline = path.join(root, "baseline.zip");
   const { electronLaunchConfig } = await import("./smoke-lib.mjs");
-  const { macosSmokePlan, runMacosSmokePlan } = await import("./smoke-tightbeam-release.mjs");
-  const plan = macosSmokePlan(root, candidate, baseline);
-  assert.deepEqual(plan.map(({ archive, phase }) => ({ archive, phase })), [
-    { archive: candidate, phase: "clean-install" },
-    { archive: baseline, phase: "baseline" },
-    { archive: candidate, phase: "upgrade" },
-    { archive: baseline, phase: "rollback" },
+  const { macosSmokePlan } = await import("./smoke-tightbeam-release.mjs");
+  const plan = macosSmokePlan(root, candidate);
+  assert.equal(plan.length, 1);
+  assert.deepEqual(plan.map(({ archive, phase }) => ({ archive, phase })), [{ archive: candidate, phase: "candidate" }]);
+  assert.equal(plan[0].identityFile, path.join(electronLaunchConfig(plan[0].home, plan[0].port).userDataDir, "surface-identity.json"));
+});
+
+test("smoke participant identity gate binds server, CLI, and client to exact v0.2.1 package bytes", () => {
+  const valid = smokeParticipantIdentities("linux");
+  assert.deepEqual(assertTightbeamSmokeParticipantIdentities(valid, "linux").map(({ participant, version }) => ({ participant, version })), [
+    { participant: "server", version: "0.2.1" },
+    { participant: "cli", version: "0.2.1" },
+    { participant: "client", version: "0.2.1" },
   ]);
-  assert.notEqual(plan[0].home, plan[1].home);
-  assert.equal(plan[1].home, plan[2].home);
-  assert.equal(plan[2].home, plan[3].home);
-  assert.equal(new Set(plan.map(({ installRoot }) => installRoot)).size, 4);
-  for (const step of plan) {
-    assert.equal(step.identityFile, path.join(electronLaunchConfig(step.home, step.port).userDataDir, "surface-identity.json"));
+  for (const participant of ["server", "cli", "client"]) {
+    const mismatched = valid.map((identity) => identity.participant === participant
+      ? { ...identity, version: "0.1.0" }
+      : identity);
+    assert.throws(() => assertTightbeamSmokeParticipantIdentities(mismatched, "linux"),
+      new RegExp(`tightbeam_smoke_participant_identity_mismatch:${participant}`));
   }
+  assert.deepEqual(assertTightbeamElectronPackageIdentity({ packageName: "@surf-ace/electron", version: TIGHTBEAM.version }), {
+    packageName: "@surf-ace/electron", version: TIGHTBEAM.version,
+  });
+  assert.throws(() => assertTightbeamElectronPackageIdentity({ packageName: "@surf-ace/electron", version: "0.1.0" }),
+    /tightbeam_smoke_electron_package_identity_mismatch/);
+  assert.throws(() => assertTightbeamElectronPackageIdentity({ name: "@surf-ace/electron", version: TIGHTBEAM.version }),
+    /tightbeam_smoke_electron_package_identity_mismatch/);
+});
 
-  const handshakes = [];
-  const extract = async (_archive, installRoot) => fs.mkdir(path.join(installRoot, "Surf Ace.app/Contents/MacOS"), { recursive: true });
-  const handshake = async (_executable, home, port) => {
-    handshakes.push({ home, port });
-    const identity = path.join(electronLaunchConfig(home, port).userDataDir, "surface-identity.json");
-    await fs.mkdir(path.dirname(identity), { recursive: true });
-    try {
-      await fs.access(identity);
-    } catch {
-      await fs.writeFile(identity, `identity:${home}`);
-    }
-  };
-  await runMacosSmokePlan(plan, { extract, handshake });
-  assert.deepEqual(handshakes.map(({ home }) => home), plan.map(({ home }) => home));
+test("smoke hashes each actual server, CLI, and client archive before participant use", async (t) => {
+  const root = await temporary(t);
+  const roles = ["server", "cli", "client"];
+  const assetNames = TIGHTBEAM.assets.slice(0, 3);
+  const assetPaths = Object.fromEntries(await Promise.all(roles.map(async (role, index) => {
+    const assetPath = path.join(root, assetNames[index]);
+    await fs.writeFile(assetPath, `v0.2.1-${role}`);
+    return [role, assetPath];
+  })));
+  const details = await Promise.all(roles.map(async (role, index) => {
+    const assetPath = assetPaths[role];
+    const bytes = await fs.readFile(assetPath);
+    return { name: assetNames[index], sha256: createHash("sha256").update(bytes).digest("hex"), sizeBytes: bytes.byteLength };
+  }));
+  const identities = buildTightbeamSmokeParticipantIdentities({
+    assetDetails: details,
+    component: "linux",
+    identityBasis: "manifest-and-SHA256SUMS",
+    sourceCommit: TIGHTBEAM.candidateCommit,
+    toolingCommit: "b".repeat(40),
+    version: TIGHTBEAM.version,
+  });
+  assert.deepEqual(await assertTightbeamSmokeParticipantAssetBytes(identities, "linux", assetPaths), identities);
 
-  let transition = 0;
+  for (const role of roles) {
+    const original = await fs.readFile(assetPaths[role]);
+    await fs.writeFile(assetPaths[role], `${original.toString()}-substituted`);
+    await assert.rejects(assertTightbeamSmokeParticipantAssetBytes(identities, "linux", assetPaths),
+      new RegExp(`tightbeam_smoke_participant_asset_digest_mismatch:${role}`));
+    await fs.writeFile(assetPaths[role], original);
+  }
+});
+
+test("Linux smoke fails on a changed participant archive before requiring or launching the smoke fixture", async (t) => {
+  const root = await temporary(t);
+  const assetNames = TIGHTBEAM.assets.slice(0, 3);
+  const roles = ["server", "cli", "client"];
+  const assetPaths = Object.fromEntries(await Promise.all(roles.map(async (role, index) => {
+    const name = assetNames[index];
+    const assetPath = path.join(root, name);
+    await fs.writeFile(assetPath, name);
+    return [role, assetPath];
+  })));
+  const details = await Promise.all(roles.map(async (role, index) => {
+    const name = assetNames[index];
+    const bytes = await fs.readFile(assetPaths[role]);
+    return { name, sha256: createHash("sha256").update(bytes).digest("hex"), sizeBytes: bytes.byteLength };
+  }));
+  const participantIdentities = buildTightbeamSmokeParticipantIdentities({
+    assetDetails: details,
+    component: "linux",
+    identityBasis: "manifest-and-SHA256SUMS",
+    sourceCommit: TIGHTBEAM.candidateCommit,
+    toolingCommit: "b".repeat(40),
+    version: TIGHTBEAM.version,
+  });
+  await fs.writeFile(assetPaths.server, "substituted server archive");
+  const priorDriver = process.env.SURF_ACE_TIGHTBEAM_STATE_DRIVER;
+  delete process.env.SURF_ACE_TIGHTBEAM_STATE_DRIVER;
+  try {
+    await assert.rejects(smokeLinuxFreshInstall({
+      backend: assetPaths.server,
+      cli: assetPaths.cli,
+      electron: assetPaths.client,
+      participantIdentities,
+    }), /tightbeam_smoke_participant_asset_digest_mismatch:server/);
+  } finally {
+    if (priorDriver === undefined) delete process.env.SURF_ACE_TIGHTBEAM_STATE_DRIVER;
+    else process.env.SURF_ACE_TIGHTBEAM_STATE_DRIVER = priorDriver;
+  }
+});
+
+test("running Electron release identity is read from one app_launch diagnostic and hash-bound", async (t) => {
+  const root = await temporary(t);
+  const diagnostic = path.join(root, "client-flight-recorder.ndjson");
+  await recordClientAppLaunch(diagnostic, "0.2.1");
+  const identity = await verifyClientAppVersion(diagnostic, "0.2.1");
+  assert.equal(identity.source, "electron.app.getVersion");
+  assert.equal(identity.version, "0.2.1");
+  assert.equal(identity.evidenceSha256, createHash("sha256").update(await fs.readFile(diagnostic)).digest("hex"));
+  await recordClientAppLaunch(diagnostic, "0.1.0");
+  await assert.rejects(verifyClientAppVersion(diagnostic, "0.2.1"), /tightbeam_client_app_version_mismatch/);
+  await fs.writeFile(diagnostic, "no app launch evidence\n");
+  await assert.rejects(verifyClientAppVersion(diagnostic, "0.2.1"), /tightbeam_client_app_launch_identity_missing_or_ambiguous/);
+});
+
+test("Electron smoke rejects a mismatched participant identity before launching a client", async (t) => {
+  const root = await temporary(t);
+  const plan = macosSmokePlan(root, "candidate.zip");
+  let launches = 0;
+  const identities = smokeParticipantIdentities("macos", { cli: { version: "0.1.0" } });
   await assert.rejects(runMacosSmokePlan(plan, {
-    extract,
-    handshake: async (_executable, home, port) => {
-      const identity = path.join(electronLaunchConfig(home, port).userDataDir, "surface-identity.json");
-      await fs.mkdir(path.dirname(identity), { recursive: true });
-      if (home === plan[1].home && transition++ === 1) await fs.writeFile(identity, "changed identity");
-      else if (!(await fs.stat(identity).catch(() => null))) await fs.writeFile(identity, `identity:${home}`);
+    cliBinary: "/fixture/bin/surf-ace",
+    participantIdentities: identities,
+    launchClient: async () => { launches += 1; return { async stop() {} }; },
+  }), /tightbeam_smoke_participant_identity_mismatch:cli/);
+  assert.equal(launches, 0);
+});
+
+test("Electron smoke rejects the packaged client version before launching it", async (t) => {
+  const root = await temporary(t);
+  const plan = macosSmokePlan(root, "candidate.zip");
+  let launches = 0;
+  await assert.rejects(runMacosSmokePlan(plan, {
+    cliBinary: "/fixture/bin/surf-ace",
+    extract: async (_archive, installRoot) => fs.mkdir(path.join(installRoot, "Surf Ace.app/Contents/MacOS"), { recursive: true }),
+    participantIdentities: smokeParticipantIdentities("macos"),
+    readElectronPackageIdentity: async () => ({ packageName: "@surf-ace/electron", version: "0.1.0" }),
+    launchClient: async () => { launches += 1; return { async stop() {} }; },
+  }), /tightbeam_smoke_electron_package_identity_mismatch/);
+  assert.equal(launches, 0);
+});
+
+test("Electron smoke checks the running app version before any CLI request", async (t) => {
+  const root = await temporary(t);
+  const plan = macosSmokePlan(root, "candidate.zip");
+  let cliCalls = 0;
+  await assert.rejects(runMacosSmokePlan(plan, {
+    cliBinary: "/fixture/bin/surf-ace",
+    extract: async (_archive, installRoot) => fs.mkdir(path.join(installRoot, "Surf Ace.app/Contents/MacOS"), { recursive: true }),
+    participantIdentities: smokeParticipantIdentities("macos"),
+    readElectronPackageIdentity: async () => ({ packageName: "@surf-ace/electron", version: TIGHTBEAM.version }),
+    invokeCli: async () => { cliCalls += 1; throw new Error("CLI must not run after an identity Red"); },
+    launchClient: async (_executable, step, _endpoint, evidence) => {
+      await fs.mkdir(path.dirname(step.identityFile), { recursive: true });
+      await fs.writeFile(step.identityFile, "test-identity");
+      await recordClientAppLaunch(evidence.diagnosticLogPath, "0.1.0");
+      return { async stop() {} };
     },
-  }), /tightbeam_macos_upgrade_did_not_reuse_canonical_identity/);
+    stateRoot: path.join(root, "cli-state"),
+    waitForEndpoint: async () => undefined,
+  }), /tightbeam_client_app_version_mismatch:0\.1\.0:0\.2\.1/);
+  assert.equal(cliCalls, 0);
+});
+
+test("Tightbeam macOS smoke uses the packaged CLI directly against one candidate client", async (t) => {
+  const root = await temporary(t);
+  const { macosSmokePlan, runMacosSmokePlan } = await import("./smoke-tightbeam-release.mjs");
+  const plan = macosSmokePlan(root, "candidate.zip");
+  let visibleId;
+  const calls = [];
+  let activePort;
+  const launchClient = async (_exe, step, _endpoint, evidence) => {
+    activePort = step.port;
+    assert.equal(evidence.disableGpu, true, "macOS smoke must request the GPU fallback for headless hosted runners");
+    await fs.mkdir(path.dirname(step.identityFile), { recursive: true });
+    await fs.writeFile(step.identityFile, "candidate");
+    await recordClientAppLaunch(evidence.diagnosticLogPath);
+    assert.ok(evidence.rawCliEvidencePath.endsWith("macos-candidate-raw-cli-evidence.ndjson"));
+    return { async stop() {} };
+  };
+  const invokeCli = async (commandName, input, endpoint) => {
+    if (endpoint === undefined) endpoint = `ws://127.0.0.1:${activePort}/ws`;
+    calls.push({ commandName, endpoint, input });
+    const surfaceId = "sf_macos_candidate";
+    if (commandName === "list") return { ok: true, result: { surfaces: [{ surfaceId, topology: { panes: [{ paneId: 1 }], topologyRevision: 1 } }] } };
+    if (commandName === "push") {
+      if (input.surfaceId !== surfaceId) return { ok: false, error: "unknown_surface" };
+      visibleId = input.contentId;
+      return { ok: true, result: { accepted: true } };
+    }
+    if (commandName === "capture-pane") return { ok: true, result: {
+      contentId: visibleId, visibleText: `${visibleId}:${surfaceId}:1`, paneId: input.paneId, revision: calls.length,
+    } };
+    if (commandName === "read") return { ok: true, result: {
+      cacheStatus: "current", consumableLoss: null,
+      currentContentRecord: { recordClass: "content", payload: {
+        contentId: visibleId, historyEntryId: "history-1", paneId: 1, revision: calls.length, surfaceId,
+      } }, scopeId: input.scopeId,
+    } };
+    throw new Error(`unexpected CLI command ${commandName}`);
+  };
+  const result = await runMacosSmokePlan(plan, {
+    cliBinary: "/fixture/bin/surf-ace",
+    extract: async (_archive, installRoot) => fs.mkdir(path.join(installRoot, "Surf Ace.app/Contents/MacOS"), { recursive: true }),
+    invokeCli, launchClient,
+    participantIdentities: smokeParticipantIdentities("macos"),
+    readElectronPackageIdentity: async () => ({ packageName: "@surf-ace/electron", version: TIGHTBEAM.version }),
+    stateRoot: path.join(root, "cli-state"), waitForEndpoint: async () => undefined,
+  });
+  assert.deepEqual(result.phases.map(({ phase }) => phase), ["candidate"]);
+  assert.equal(result.phases[0].currentContentId, result.phases[0].contentId);
+  assert.equal(result.phases[0].wrongSurfaceRejection.expectedSurfaceId, "sf_macos_candidate");
+  assert.deepEqual(calls.map(({ commandName }) => commandName), ["list", "push", "capture-pane", "read", "push"]);
+  assert.ok(calls.filter(({ commandName }) => commandName === "read").every(({ endpoint }) => endpoint === null));
+  assert.ok(calls.filter(({ commandName }) => commandName !== "read").every(({ endpoint }) => endpoint === "ws://127.0.0.1:19101/ws"));
+});
+
+test("Tightbeam direct capture rejects a contradictory response surface", async (t) => {
+  const root = await temporary(t);
+  const { macosSmokePlan, runMacosSmokePlan } = await import("./smoke-tightbeam-release.mjs");
+  const [step] = macosSmokePlan(root, "candidate.zip");
+  await assert.rejects(runMacosSmokePlan([step], {
+    cliBinary: "/fixture/bin/surf-ace",
+    extract: async (_archive, installRoot) => fs.mkdir(path.join(installRoot, "Surf Ace.app/Contents/MacOS"), { recursive: true }),
+    invokeCli: async (commandName, input) => {
+      if (commandName === "list") return { ok: true, result: { surfaces: [{ surfaceId: "sf_expected", topology: { panes: [{ paneId: 1 }], topologyRevision: 1 } }] } };
+      if (commandName === "push") return { ok: true, result: { accepted: true } };
+      if (commandName === "capture-pane") return { ok: true, result: { contentId: "candidate-write", paneId: input.paneId, revision: 1, surfaceId: "sf_wrong" } };
+      throw new Error(`unexpected CLI command ${commandName}`);
+    },
+    launchClient: async (_executable, launchedStep, _endpoint, evidence) => {
+      await fs.mkdir(path.dirname(launchedStep.identityFile), { recursive: true });
+      await fs.writeFile(launchedStep.identityFile, "test-identity");
+      await recordClientAppLaunch(evidence.diagnosticLogPath);
+      return { async stop() {} };
+    },
+    participantIdentities: smokeParticipantIdentities("macos"),
+    readElectronPackageIdentity: async () => ({ packageName: "@surf-ace/electron", version: TIGHTBEAM.version }),
+    stateRoot: path.join(root, "cli-state"), waitForEndpoint: async () => undefined,
+  }), /tightbeam_macos_candidate_capture_target_mismatch/);
+});
+
+test("Tightbeam direct smoke rejects missing current content despite a matching scroll event", async (t) => {
+  const root = await temporary(t);
+  const { macosSmokePlan, runMacosSmokePlan } = await import("./smoke-tightbeam-release.mjs");
+  const [step] = macosSmokePlan(root, "candidate.zip");
+  await assert.rejects(runMacosSmokePlan([step], {
+    cliBinary: "/fixture/bin/surf-ace",
+    extract: async (_archive, installRoot) => fs.mkdir(path.join(installRoot, "Surf Ace.app/Contents/MacOS"), { recursive: true }),
+    invokeCli: async (commandName, input) => {
+      if (commandName === "list") return { ok: true, result: { surfaces: [{ surfaceId: "sf_expected", topology: { panes: [{ paneId: 1 }], topologyRevision: 1 } }] } };
+      if (commandName === "push") return { ok: true, result: { accepted: true } };
+      if (commandName === "capture-pane") return { ok: true, result: {
+        contentId: "tightbeam-macos-candidate-write", paneId: input.paneId,
+        visibleText: "tightbeam-macos-candidate-write:sf_expected:1",
+      } };
+      if (commandName === "read") return { ok: true, result: {
+        cacheStatus: "current", consumableLoss: null, currentContentRecord: null,
+        records: [{ recordClass: "scroll", payload: { contentId: "tightbeam-macos-candidate-write" } }],
+        scopeId: input.scopeId,
+      } };
+      throw new Error(`unexpected CLI command ${commandName}`);
+    },
+    launchClient: async (_executable, launchedStep, _endpoint, evidence) => {
+      await fs.mkdir(path.dirname(launchedStep.identityFile), { recursive: true });
+      await fs.writeFile(launchedStep.identityFile, "test-identity");
+      await recordClientAppLaunch(evidence.diagnosticLogPath);
+      return { async stop() {} };
+    },
+    participantIdentities: smokeParticipantIdentities("macos"),
+    readElectronPackageIdentity: async () => ({ packageName: "@surf-ace/electron", version: TIGHTBEAM.version }),
+    stateRoot: path.join(root, "cli-state"), waitForEndpoint: async () => undefined,
+  }), /tightbeam_macos_candidate_capture_read_content_mismatch/);
+});
+
+test("Tightbeam Linux Electron smoke plans one matching candidate client", async (t) => {
+  const root = await temporary(t);
+  const candidate = path.join(root, "candidate.zip");
+  const { electronLaunchConfig } = await import("./smoke-lib.mjs");
+  const plan = electronSmokePlan(root, candidate, "linux");
+  assert.equal(plan.length, 1);
+  assert.deepEqual(plan.map(({ archive, phase, platform }) => ({ archive, phase, platform })), [{ archive: candidate, phase: "candidate", platform: "linux" }]);
+  assert.equal(plan[0].identityFile, path.join(electronLaunchConfig(plan[0].home, plan[0].port).userDataDir, "surface-identity.json"));
 });
 
 test("tracked-product guard detects worktree and index changes", async (t) => {
@@ -625,6 +701,7 @@ test("source identity binds HEAD and the immutable source tag to one commit", as
   await exec("git", ["add", "tracked.txt"], { cwd: root });
   await exec("git", ["commit", "-qm", "one"], { cwd: root });
   const commit = (await exec("git", ["rev-parse", "HEAD"], { cwd: root })).stdout.trim();
+  await assert.rejects(assertSourceIdentity(root, "product-v1", commit));
   await exec("git", ["tag", "product-v1"], { cwd: root });
   await assertSourceIdentity(root, "product-v1", commit);
   await fs.writeFile(path.join(root, "tracked.txt"), "two\n");
@@ -632,170 +709,423 @@ test("source identity binds HEAD and the immutable source tag to one commit", as
   await assert.rejects(assertSourceIdentity(root, "product-v1", commit), /source_commit_mismatch/);
 });
 
-test("channel builders reject any source identity outside the reviewed constants before I/O", async () => {
-  const openclawIdentity = {
-    sourceDir: ".",
-    outputDir: "build/release/openclaw",
-    sourceTag: OPENCLAW.sourceTag,
-    sourceCommit: OPENCLAW.candidateCommit,
-    toolingTag: openclawToolingTag,
-    version: OPENCLAW.version,
-  };
-  for (const [field, value] of [
-    ["sourceTag", "surf-ace-openclaw-v0.1.0"],
-    ["sourceCommit", "58ac8c435679e6611903d31abaecec11bb9d7f75"],
-    ["version", "0.1.0"],
-  ]) {
-    await assert.rejects(
-      buildOpenclawRelease({ ...openclawIdentity, [field]: value }),
-      /openclaw_release_identity_mismatch/,
-      `wrong OpenClaw ${field} must fail before I/O`,
-    );
-  }
-  await assert.rejects(buildOpenclawRelease({ sourceDir: ".", outputDir: "build/release/openclaw", sourceTag: OPENCLAW.sourceTag, sourceCommit: OPENCLAW.candidateCommit, version: OPENCLAW.version }), /openclaw_tooling_tag_required/);
+test("standalone release builder rejects source identity drift before I/O", async () => {
   await assert.rejects(buildTightbeamRelease({ sourceDir: ".", outputDir: "build/release/tightbeam", sourceTag: "wrong", sourceCommit: "wrong", version: "0", target: "wrong" }), /tightbeam_release_identity_mismatch/);
 });
 
-test("Tightbeam v0.2.0 binds the reviewed cutoff, same-architecture baseline, and unissued tooling successor", () => {
-  assert.equal(TOOLING_TAG, "surf-ace-release-tooling-v0.1.1");
+test("Linux qualification accepts only exact P and full tooling SHA claims", () => {
+  const toolingCommit = "a".repeat(40);
+  assert.doesNotThrow(() => assertTightbeamLinuxQualificationClaims({
+    sourceCommit: TIGHTBEAM.candidateCommit,
+    toolingCommit,
+    version: TIGHTBEAM.version,
+    target: TOOLCHAINS.linuxRustTarget,
+  }));
+  assert.throws(() => assertTightbeamLinuxQualificationClaims({
+    sourceCommit: "b".repeat(40), toolingCommit, version: TIGHTBEAM.version, target: TOOLCHAINS.linuxRustTarget,
+  }), /tightbeam_linux_qualification_identity_mismatch/);
+  assert.throws(() => assertTightbeamLinuxQualificationClaims({
+    sourceCommit: TIGHTBEAM.candidateCommit, toolingCommit: "short", version: TIGHTBEAM.version, target: TOOLCHAINS.linuxRustTarget,
+  }), /tightbeam_linux_qualification_tooling_commit_invalid/);
+  assert.throws(() => assertTightbeamLinuxQualificationClaims({
+    sourceCommit: TIGHTBEAM.candidateCommit, toolingCommit, version: "0.0.0", target: TOOLCHAINS.linuxRustTarget,
+  }), /tightbeam_linux_qualification_identity_mismatch/);
+  assert.throws(() => assertTightbeamLinuxQualificationClaims({
+    sourceCommit: TIGHTBEAM.candidateCommit, toolingCommit, version: TIGHTBEAM.version, target: "wrong-target",
+  }), /tightbeam_linux_qualification_identity_mismatch/);
+});
+
+test("tagless Linux qualification verifies exact HEADs and emits only Linux packages", async (t) => {
+  const root = await temporary(t);
+  const sourceDir = path.join(root, "source");
+  const toolingRoot = path.join(root, "tooling");
+  const outputDir = path.join(root, "qualification-output");
+  await fs.mkdir(sourceDir);
+  await fs.mkdir(toolingRoot);
+  const toolingCommit = "c".repeat(40);
+  const gitCalls = [];
+  const cleanCalls = [];
+  let buildCalls = 0;
+  const previousComponent = process.env.SURF_ACE_RELEASE_COMPONENT;
+  process.env.SURF_ACE_RELEASE_COMPONENT = "linux";
+  t.after(() => {
+    if (previousComponent === undefined) delete process.env.SURF_ACE_RELEASE_COMPONENT;
+    else process.env.SURF_ACE_RELEASE_COMPONENT = previousComponent;
+  });
+
+  const result = await buildTightbeamLinuxQualification({
+    outputDir,
+    sourceCommit: TIGHTBEAM.candidateCommit,
+    sourceDir,
+    target: TOOLCHAINS.linuxRustTarget,
+    toolingCommit,
+    version: TIGHTBEAM.version,
+  }, {
+    assertTrackedInputsUnchanged: async (tree) => { cleanCalls.push(tree); },
+    buildLinuxPackages: async (inputs) => {
+      buildCalls += 1;
+      assert.deepEqual(inputs, { sourceDir, outputDir, target: TOOLCHAINS.linuxRustTarget, includeSkillAsset: false });
+      return { files: ["server.tar.gz", "cli.tar.gz", "electron.zip"], outputDir };
+    },
+    capture: async (command, args) => {
+      gitCalls.push([command, args]);
+      return args[1] === sourceDir ? TIGHTBEAM.candidateCommit : toolingCommit;
+    },
+    toolingRoot,
+  });
+
+  assert.deepEqual(gitCalls, [
+    ["git", ["-C", sourceDir, "rev-parse", "HEAD"]],
+    ["git", ["-C", toolingRoot, "rev-parse", "HEAD"]],
+    ["git", ["-C", sourceDir, "rev-parse", "HEAD"]],
+    ["git", ["-C", toolingRoot, "rev-parse", "HEAD"]],
+  ]);
+  assert.deepEqual(cleanCalls, [sourceDir, toolingRoot, sourceDir, toolingRoot]);
+  assert.equal(buildCalls, 1);
+  assert.equal(result.qualificationOnly, true);
+  assert.equal(result.releaseAdmitted, false);
+  assert.equal(result.sourceCommit, TIGHTBEAM.candidateCommit);
+  assert.equal(result.toolingCommit, toolingCommit);
+  assert.deepEqual(result.files, ["server.tar.gz", "cli.tar.gz", "electron.zip"]);
+  assert.equal(Object.hasOwn(result, "manifestPath"), false);
+});
+
+test("tagless Linux qualification fails closed before output/build on drift or non-Linux component", async (t) => {
+  const root = await temporary(t);
+  const sourceDir = path.join(root, "source");
+  const toolingRoot = path.join(root, "tooling");
+  const outputDir = path.join(root, "output");
+  await fs.mkdir(sourceDir);
+  await fs.mkdir(toolingRoot);
+  const previousComponent = process.env.SURF_ACE_RELEASE_COMPONENT;
+  process.env.SURF_ACE_RELEASE_COMPONENT = "linux";
+  t.after(() => {
+    if (previousComponent === undefined) delete process.env.SURF_ACE_RELEASE_COMPONENT;
+    else process.env.SURF_ACE_RELEASE_COMPONENT = previousComponent;
+  });
+  let buildCalls = 0;
+  let readCount = 0;
+  const options = {
+    outputDir,
+    sourceCommit: TIGHTBEAM.candidateCommit,
+    sourceDir,
+    target: TOOLCHAINS.linuxRustTarget,
+    toolingCommit: "d".repeat(40),
+    version: TIGHTBEAM.version,
+  };
+  const dependencies = {
+    assertTrackedInputsUnchanged: async () => {},
+    buildLinuxPackages: async () => { buildCalls += 1; return { files: [] }; },
+    capture: async () => { readCount += 1; return "e".repeat(40); },
+    toolingRoot,
+  };
+  await assert.rejects(buildTightbeamLinuxQualification(options, dependencies), /source_commit_mismatch/);
+  assert.equal(readCount, 1);
+  assert.equal(buildCalls, 0);
+  await assert.rejects(fs.access(outputDir));
+
+  process.env.SURF_ACE_RELEASE_COMPONENT = "manifest";
+  await assert.rejects(buildTightbeamLinuxQualification(options, dependencies), /requires_linux_component/);
+  assert.equal(readCount, 1);
+  assert.equal(buildCalls, 0);
+});
+
+test("tagless Linux qualification refuses a non-empty output directory without replacing evidence", async (t) => {
+  const root = await temporary(t);
+  const sourceDir = path.join(root, "source");
+  const toolingRoot = path.join(root, "tooling");
+  const outputDir = path.join(root, "output");
+  await fs.mkdir(sourceDir);
+  await fs.mkdir(toolingRoot);
+  await fs.mkdir(outputDir);
+  const sentinel = path.join(outputDir, "preserve.txt");
+  await fs.writeFile(sentinel, "do not overwrite\n");
+  const previousComponent = process.env.SURF_ACE_RELEASE_COMPONENT;
+  process.env.SURF_ACE_RELEASE_COMPONENT = "linux";
+  t.after(() => {
+    if (previousComponent === undefined) delete process.env.SURF_ACE_RELEASE_COMPONENT;
+    else process.env.SURF_ACE_RELEASE_COMPONENT = previousComponent;
+  });
+  let buildCalls = 0;
+  await assert.rejects(buildTightbeamLinuxQualification({
+    outputDir,
+    sourceCommit: TIGHTBEAM.candidateCommit,
+    sourceDir,
+    target: TOOLCHAINS.linuxRustTarget,
+    toolingCommit: "e".repeat(40),
+    version: TIGHTBEAM.version,
+  }, {
+    assertTrackedInputsUnchanged: async () => {},
+    buildLinuxPackages: async () => { buildCalls += 1; return { files: [] }; },
+    capture: async (_command, args) => args[1] === sourceDir ? TIGHTBEAM.candidateCommit : "e".repeat(40),
+    toolingRoot,
+  }), /output_not_empty/);
+  assert.equal(buildCalls, 0);
+  assert.equal(await fs.readFile(sentinel, "utf8"), "do not overwrite\n");
+});
+
+test("tagless Linux qualification detects a source HEAD change during packaging", async (t) => {
+  const root = await temporary(t);
+  const sourceDir = path.join(root, "source");
+  const toolingRoot = path.join(root, "tooling");
+  const outputDir = path.join(root, "output");
+  await fs.mkdir(sourceDir);
+  await fs.mkdir(toolingRoot);
+  const previousComponent = process.env.SURF_ACE_RELEASE_COMPONENT;
+  process.env.SURF_ACE_RELEASE_COMPONENT = "linux";
+  t.after(() => {
+    if (previousComponent === undefined) delete process.env.SURF_ACE_RELEASE_COMPONENT;
+    else process.env.SURF_ACE_RELEASE_COMPONENT = previousComponent;
+  });
+  let sourceReads = 0;
+  let buildCalls = 0;
+  await assert.rejects(buildTightbeamLinuxQualification({
+    outputDir,
+    sourceCommit: TIGHTBEAM.candidateCommit,
+    sourceDir,
+    target: TOOLCHAINS.linuxRustTarget,
+    toolingCommit: "a".repeat(40),
+    version: TIGHTBEAM.version,
+  }, {
+    assertTrackedInputsUnchanged: async () => {},
+    buildLinuxPackages: async () => { buildCalls += 1; return { files: ["partial-linux-output"] }; },
+    capture: async (_command, args) => {
+      if (args[1] === sourceDir) {
+        sourceReads += 1;
+        return sourceReads === 1 ? TIGHTBEAM.candidateCommit : "b".repeat(40);
+      }
+      return "a".repeat(40);
+    },
+    toolingRoot,
+  }), /source_commit_changed_during_qualification/);
+  assert.equal(sourceReads, 2);
+  assert.equal(buildCalls, 1);
+});
+
+test("tagless Linux qualification smoke binds exact P/S heads and only the three Linux assets", async (t) => {
+  const root = await temporary(t);
+  const sourceDir = path.join(root, "source");
+  const toolingRoot = path.join(root, "tooling");
+  const packageDir = path.join(root, "packages");
+  await fs.mkdir(sourceDir);
+  await fs.mkdir(toolingRoot);
+  await fs.mkdir(packageDir);
+  for (const name of TIGHTBEAM.assets.slice(0, 3)) await fs.writeFile(path.join(packageDir, name), `fixture:${name}\n`);
+
+  const previousComponent = process.env.SURF_ACE_SMOKE_COMPONENT;
+  process.env.SURF_ACE_SMOKE_COMPONENT = "linux";
+  t.after(() => {
+    if (previousComponent === undefined) delete process.env.SURF_ACE_SMOKE_COMPONENT;
+    else process.env.SURF_ACE_SMOKE_COMPONENT = previousComponent;
+  });
+
+  const toolingCommit = "f".repeat(40);
+  const assetDetails = await Promise.all(TIGHTBEAM.assets.slice(0, 3).map(async (name) => {
+    const bytes = await fs.readFile(path.join(packageDir, name));
+    return { name, sha256: createHash("sha256").update(bytes).digest("hex"), sizeBytes: bytes.byteLength };
+  }));
+  const expectedParticipantIdentities = buildTightbeamSmokeParticipantIdentities({
+    assetDetails,
+    component: "linux",
+    identityBasis: "source-tooling-HEAD-and-package-SHA256",
+    sourceCommit: TIGHTBEAM.candidateCommit,
+    toolingCommit,
+    version: TIGHTBEAM.version,
+  });
+  const gitCalls = [];
+  const cleanCalls = [];
+  let smokeCalls = 0;
+  const dependencies = {
+    assertTrackedInputsUnchanged: async (tree) => { cleanCalls.push(tree); },
+    capture: async (command, args) => {
+      gitCalls.push([command, args]);
+      return args[1] === sourceDir ? TIGHTBEAM.candidateCommit : toolingCommit;
+    },
+    runLinuxFreshInstallSmoke: async (options) => {
+      smokeCalls += 1;
+      assert.deepEqual(options, {
+        backend: path.join(packageDir, TIGHTBEAM.assets[0]),
+        candidateCommit: TIGHTBEAM.candidateCommit,
+        cli: path.join(packageDir, TIGHTBEAM.assets[1]),
+        electron: path.join(packageDir, TIGHTBEAM.assets[2]),
+        participantIdentities: expectedParticipantIdentities,
+        sourceDir,
+      });
+      return { component: "linux", mode: "fresh-install", status: "passed" };
+    },
+    toolingRoot,
+  };
+  const options = {
+    packageDir,
+    sourceCommit: TIGHTBEAM.candidateCommit,
+    sourceDir,
+    toolingCommit,
+  };
+  const result = await smokeTightbeamLinuxQualification(options, dependencies);
+  assert.equal(smokeCalls, 1);
+  assert.deepEqual(gitCalls, [
+    ["git", ["-C", sourceDir, "rev-parse", "HEAD"]],
+    ["git", ["-C", toolingRoot, "rev-parse", "HEAD"]],
+    ["git", ["-C", sourceDir, "rev-parse", "HEAD"]],
+    ["git", ["-C", toolingRoot, "rev-parse", "HEAD"]],
+  ]);
+  assert.deepEqual(cleanCalls, [sourceDir, toolingRoot, sourceDir, toolingRoot]);
+  assert.equal(result.qualificationOnly, true);
+  assert.equal(result.releaseAdmitted, false);
+  assert.equal(result.sourceCommit, TIGHTBEAM.candidateCommit);
+  assert.equal(result.toolingCommit, toolingCommit);
+  assert.deepEqual(result.participantIdentities, expectedParticipantIdentities);
+  assert.equal(result.status, "passed");
+  assert.equal(Object.keys(result.assets).length, 3);
+  assert.equal(Object.hasOwn(result, "manifest"), false);
+
+  await fs.writeFile(path.join(packageDir, TIGHTBEAM.manifest), "not-an-admitted-manifest\n");
+  await assert.rejects(smokeTightbeamLinuxQualification(options, dependencies), /asset_set_mismatch/);
+  assert.equal(smokeCalls, 1);
+});
+
+test("tagless Linux qualification smoke rejects a moving source HEAD after smoke", async (t) => {
+  const root = await temporary(t);
+  const sourceDir = path.join(root, "source");
+  const toolingRoot = path.join(root, "tooling");
+  const packageDir = path.join(root, "packages");
+  await fs.mkdir(sourceDir);
+  await fs.mkdir(toolingRoot);
+  await fs.mkdir(packageDir);
+  for (const name of TIGHTBEAM.assets.slice(0, 3)) await fs.writeFile(path.join(packageDir, name), `fixture:${name}\n`);
+  const previousComponent = process.env.SURF_ACE_SMOKE_COMPONENT;
+  process.env.SURF_ACE_SMOKE_COMPONENT = "linux";
+  t.after(() => {
+    if (previousComponent === undefined) delete process.env.SURF_ACE_SMOKE_COMPONENT;
+    else process.env.SURF_ACE_SMOKE_COMPONENT = previousComponent;
+  });
+  const toolingCommit = "c".repeat(40);
+  let sourceReads = 0;
+  let smokeCalls = 0;
+  await assert.rejects(smokeTightbeamLinuxQualification({
+    packageDir,
+    sourceCommit: TIGHTBEAM.candidateCommit,
+    sourceDir,
+    toolingCommit,
+  }, {
+    assertTrackedInputsUnchanged: async () => {},
+    capture: async (_command, args) => {
+      if (args[1] === sourceDir) {
+        sourceReads += 1;
+        return sourceReads === 1 ? TIGHTBEAM.candidateCommit : "d".repeat(40);
+      }
+      return toolingCommit;
+    },
+    runLinuxFreshInstallSmoke: async () => { smokeCalls += 1; return { status: "passed" }; },
+    toolingRoot,
+  }), /source_commit_changed_during_qualification_smoke/);
+  assert.equal(sourceReads, 2);
+  assert.equal(smokeCalls, 1);
+});
+
+test("tagless qualification leaves release build and manifest-smoke tag admission intact", async () => {
+  const builder = await fs.readFile(path.join(repository, "scripts/release/build-tightbeam-release.mjs"), "utf8");
+  const builderRelease = builder.slice(builder.indexOf("export async function buildTightbeamRelease"), builder.indexOf("if (import.meta.url === pathToFileURL(process.argv[1]).href)"));
+  assert.match(builderRelease, /await assertSourceIdentity\(sourceDir, options\.sourceTag, options\.sourceCommit\)/);
+  assert.match(builderRelease, /refs\/tags\/\$\{TIGHTBEAM_TOOLING_TAG\}\^\{commit\}/);
+  assert.doesNotMatch(builderRelease, /qualificationOnly|buildTightbeamLinuxQualification/);
+
+  const smoke = await fs.readFile(path.join(repository, "scripts/release/smoke-tightbeam-release.mjs"), "utf8");
+  const manifestSmoke = smoke.slice(smoke.indexOf("export async function smokeTightbeam(options)"));
+  assert.match(manifestSmoke, /await verifyManifestFiles\(options\.manifest, assetFiles\)/);
+  assert.match(manifestSmoke, /await verifyTightbeamChecksums\(options\.manifest\)/);
+  assert.match(manifestSmoke, /manifest_identity_mismatch/);
+  const linuxQualificationSmoke = smoke.slice(smoke.indexOf("async function smokeLinuxFreshInstall"), smoke.indexOf("export function macosSmokePlan"));
+  assert.match(linuxQualificationSmoke, /runLinuxFreshInstallSmoke/);
+  assert.match(linuxQualificationSmoke, /tightbeam_smoke_state_driver_not_current_tooling_input/);
+  assert.doesNotMatch(linuxQualificationSmoke, /baselineCommit/);
+  const freshInstallFixture = await fs.readFile(path.join(repository, "scripts/release/tightbeam-state-smoke-fixture.ts"), "utf8");
+  const freshInstallMain = freshInstallFixture.slice(freshInstallFixture.indexOf("async function freshInstallMain"), freshInstallFixture.indexOf("async function main()"));
+  assert.ok(freshInstallMain.indexOf("await verifyDisplayReady()") < freshInstallMain.indexOf("await startPackagedElectronClient("));
+  assert.match(freshInstallMain, /fresh_install_wrong_surface_changed_valid_target/);
+});
+
+test("Tightbeam v0.2.1 binds the reviewed candidate, six hosted assets, and tooling identity", () => {
+  assert.equal(TIGHTBEAM_TOOLING_TAG, "surf-ace-release-tooling-tightbeam-v0.2.1");
   assert.deepEqual(TIGHTBEAM, {
-    baselineCommit: "cf91ef1baab26d6045fac5300487c29d0ddf332d",
-    candidateCommit: "8fc9f508ae9b4371a3c25f6318920940fbad10cd",
-    files: [
-      "surf-ace-tightbeam-electron-macos-arm64-v0.2.0.zip",
-      "surf-ace-tightbeam-linux-x86_64-v0.2.0.tar.gz",
-      "surf-ace-tightbeam-v0.2.0-manifest.json",
-    ],
-    sourceTag: "surf-ace-tightbeam-v0.2.0",
-    version: "0.2.0",
+    candidateCommit: "f0e3ef58e64347ca721ea83f653d5f80958588d5",
+    sourceTag: "surf-ace-tightbeam-v0.2.1", version: "0.2.1", toolingTag: TIGHTBEAM_TOOLING_TAG,
+    assets: ["surf-ace-tightbeam-server-linux-x86_64-v0.2.1.tar.gz","surf-ace-tightbeam-cli-linux-x86_64-v0.2.1.tar.gz","surf-ace-tightbeam-electron-linux-x86_64-v0.2.1.zip","surf-ace-tightbeam-cli-macos-arm64-v0.2.1.tar.gz","surf-ace-tightbeam-electron-macos-arm64-v0.2.1.zip",TIGHTBEAM_SKILL_ASSET],
+    manifest: "surf-ace-tightbeam-v0.2.1-manifest.json", checksums: "SHA256SUMS",
+  });
+  assert.equal(TIGHTBEAM_SKILL_ASSET, "surf-ace-tightbeam-skill-v0.2.1.md");
+  assert.equal(TIGHTBEAM.assets.length, 6);
+  assert.equal(TIGHTBEAM.sourceTag, "surf-ace-tightbeam-v0.2.1");
+  assert.equal(TOOLCHAINS.macosRunner, "xcode-27");
+  assert.equal(TOOLCHAINS.xcode, "27.0");
+  assert.deepEqual(TIGHTBEAM_ROUTING, {
+    clientOperations: "packaged-cli-direct-to-client-websocket",
+    registryResponsibilities: ["client-registration", "global-window-label-allocation", "postgresql-backed-registry-health"],
+    securityBoundary: "tailnet",
   });
 });
 
-test("OpenClaw v0.1.1 binds reviewed Product P and the exact public file set", () => {
-  assert.deepEqual(OPENCLAW, {
-    baselineCommit: "d889f2f4bfb554bc3bfde0eb9927372552d40e51",
-    candidateCommit: openclawProductCommit,
-    files: [
-      "surf-ace-openclaw-electron-macos-arm64-v0.1.1.zip",
-      "surf-ace-openclaw-extension-v0.1.1.tgz",
-      "surf-ace-openclaw-v0.1.1-manifest.json",
-    ],
-    hostIntegrity: "sha512-ycF3yPcbjN6bUPeaUx6Mh6vze1hQWoD3CT/wWcmD7a8xaHHHRUaAlaq+lFxMHf1ssEgODVAwjlzYqp2twkYZ7g==",
-    hostVersion: "2026.7.1-2",
-    sourceTag: openclawProductTag,
-    version: "0.1.1",
-  });
+test("Tightbeam SHA256SUMS binds exactly the six hosted assets and manifest", async (t) => {
+  const root = await temporary(t);
+  const names = [...TIGHTBEAM.assets, TIGHTBEAM.manifest].sort();
+  const lines = [];
+  for (const name of names) {
+    const bytes = `fixture:${name}\n`;
+    await fs.writeFile(path.join(root, name), bytes);
+    lines.push(`${createHash("sha256").update(bytes).digest("hex")}  ${name}`);
+  }
+  const sums = path.join(root, TIGHTBEAM.checksums);
+  await fs.writeFile(sums, `${lines.join("\n")}\n`);
+  assert.deepEqual((await verifyTightbeamChecksums(path.join(root, TIGHTBEAM.manifest))).files, names);
+  await fs.writeFile(path.join(root, names[0]), "tampered\n");
+  await assert.rejects(verifyTightbeamChecksums(path.join(root, TIGHTBEAM.manifest)), /tightbeam_checksum_mismatch/);
 });
 
-test("committed channel guards enforce their actual selected tooling tags", async (t) => {
-  const predecessor = "6bdf393a234c73174185032e61b0b155d65124d4";
-  const openclawTag = openclawToolingTag;
-  const tightbeamTag = TOOLING_TAG;
-  const reservedTag = "surf-ace-release-tooling-openclaw-v0.1.1";
-  const arbitraryTag = "surf-ace-release-tooling-other-v9.9.9";
-  const gate4Path = ".github/workflows/release-openclaw.yml";
-  const gate5Path = ".github/workflows/release-openclaw-gate5.yml";
-  const gate4Step = "Require immutable tooling dispatch and product tag";
-  const gate5Step = "Require an exact successful Gate 4 run and immutable refs";
-  const gate4 = workflowRunScript(await fs.readFile(path.join(repository, gate4Path), "utf8"), gate4Step);
-  const gate5 = workflowRunScript(await fs.readFile(path.join(repository, gate5Path), "utf8"), gate5Step);
-  const predecessorGate4 = workflowRunScript(await workflowAtRevision(predecessor, gate4Path), gate4Step);
-  const predecessorGate5 = workflowRunScript(await workflowAtRevision(predecessor, gate5Path), gate5Step);
-  const reviewedBaseGate4 = workflowRunScript(await workflowAtRevision(reviewedOpenclawToolingBase, gate4Path), gate4Step);
-  const reviewedBaseGate5 = workflowRunScript(await workflowAtRevision(reviewedOpenclawToolingBase, gate5Path), gate5Step);
-  const currentBaseGate4 = workflowRunScript(await workflowAtRevision(currentOpenclawToolingBase, gate4Path), gate4Step);
-  const currentBaseGate5 = workflowRunScript(await workflowAtRevision(currentOpenclawToolingBase, gate5Path), gate5Step);
-
-  for (const [name, script] of [["Gate 4", predecessorGate4], ["Gate 5", predecessorGate5]]) {
-    await t.test(`${name} predecessor accepted the Tightbeam tag at the same tooling commit`, async (t) => {
-      const result = await runWorkflowGuard(t, script, {
-        TOOLING_TAG: tightbeamTag,
-        GITHUB_REF: `refs/tags/${tightbeamTag}`,
-      });
-      assert.equal(result.exitCode, 0, result.stderr);
-    });
+test("Tightbeam manifest assembles the six hosted assets including the exact skill bytes without iOS distribution signing", async (t) => {
+  const outputDir = await temporary(t);
+  for (const name of TIGHTBEAM.assets) {
+    if (name !== TIGHTBEAM_SKILL_ASSET) await fs.writeFile(path.join(outputDir, name), `fixture:${name}\n`);
   }
+  await copyTightbeamSkillAsset(repository, outputDir);
 
-  for (const [name, script] of [["Gate 4", reviewedBaseGate4], ["Gate 5", reviewedBaseGate5]]) {
-    await t.test(`${name} reviewed base accepted the consumed v0.1.2 tag`, async (t) => {
-      const result = await runWorkflowGuard(t, script, {
-        TOOLING_TAG: consumedOpenclawToolingTags[1],
-        GITHUB_REF: `refs/tags/${consumedOpenclawToolingTags[1]}`,
-      });
-      assert.equal(result.exitCode, 0, result.stderr);
-    });
-  }
-
-  for (const [name, script] of [["Gate 4", currentBaseGate4], ["Gate 5", currentBaseGate5]]) {
-    await t.test(`${name} current base accepted the consumed v0.1.3 tag`, async (t) => {
-      const result = await runWorkflowGuard(t, script, {
-        TOOLING_TAG: consumedOpenclawToolingTags[0],
-        GITHUB_REF: `refs/tags/${consumedOpenclawToolingTags[0]}`,
-        PRODUCT_TAG: "surf-ace-openclaw-v0.1.0",
-        PRODUCT_COMMIT: "58ac8c435679e6611903d31abaecec11bb9d7f75",
-        MOCK_PRODUCT_REMOTE: "58ac8c435679e6611903d31abaecec11bb9d7f75",
-      });
-      assert.equal(result.exitCode, 0, result.stderr);
-    });
-  }
-
-  for (const [name, script] of [["Gate 4", gate4], ["Gate 5", gate5]]) {
-    await t.test(`${name} accepts only its own valid channel dispatch`, async (t) => {
-      const result = await runWorkflowGuard(t, script);
-      assert.equal(result.exitCode, 0, result.stderr);
-    });
-    for (const rejectedTag of [...consumedOpenclawToolingTags, tightbeamTag, reservedTag, arbitraryTag]) {
-      await t.test(`${name} rejects ${rejectedTag} even when it peels to the same commit`, async (t) => {
-        const result = await runWorkflowGuard(t, script, {
-          TOOLING_TAG: rejectedTag,
-          GITHUB_REF: `refs/tags/${rejectedTag}`,
-        });
-        assert.notEqual(result.exitCode, 0);
-        assert.equal(result.ghLog, "", "wrong-channel tag must stop before any GitHub API call");
-      });
-    }
-    for (const [failure, overrides] of [
-      ["wrong event", { GITHUB_EVENT_NAME: "push" }],
-      ["wrong ref type", { GITHUB_REF_TYPE: "branch" }],
-      ["wrong ref", { GITHUB_REF: `refs/tags/${openclawTag}-other` }],
-      ["wrong tooling peel", { MOCK_TOOLING_REMOTE: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }],
-      ["wrong product peel", { MOCK_PRODUCT_REMOTE: "cccccccccccccccccccccccccccccccccccccccc" }],
-    ]) {
-      await t.test(`${name} rejects ${failure}`, async (t) => {
-        const result = await runWorkflowGuard(t, script, overrides);
-        assert.notEqual(result.exitCode, 0);
-      });
-    }
-  }
-
-  for (const [failure, overrides] of [
-    ["event", { MOCK_GATE4_EVENT: "push" }],
-    ["status", { MOCK_GATE4_STATUS: "in_progress" }],
-    ["conclusion", { MOCK_GATE4_CONCLUSION: "failure" }],
-    ["tooling head", { MOCK_GATE4_HEAD_SHA: "dddddddddddddddddddddddddddddddddddddddd" }],
-    ["workflow path", { MOCK_GATE4_PATH: ".github/workflows/other.yml" }],
-  ]) {
-    await t.test(`Gate 5 rejects a mismatched Gate 4 ${failure}`, async (t) => {
-      const result = await runWorkflowGuard(t, gate5, overrides);
-      assert.notEqual(result.exitCode, 0);
-    });
-  }
-
-  await t.test("Tightbeam committed guard accepts its own valid channel dispatch", async (t) => {
-    const workflow = await fs.readFile(path.join(repository, ".github/workflows/release-tightbeam.yml"), "utf8");
-    const script = workflowRunScript(workflow, "Require immutable tooling dispatch and reviewed product tag");
-    const result = await runWorkflowGuard(t, script, {
-      GITHUB_EVENT_NAME: "push",
-      GITHUB_REF_TYPE: "branch",
-      GITHUB_REF: "refs/heads/release/run-tightbeam-v0.2.0",
-      GITHUB_SHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-      TOOLING_TAG: tightbeamTag,
-      PRODUCT_TAG: "surf-ace-tightbeam-v0.2.0",
-      PRODUCT_COMMIT: "8fc9f508ae9b4371a3c25f6318920940fbad10cd",
-      MOCK_PRODUCT_REMOTE: "8fc9f508ae9b4371a3c25f6318920940fbad10cd",
-    });
-    assert.equal(result.exitCode, 0, result.stderr);
+  const result = await writeTightbeamManifest({
+    outputDir,
+    sourceDir: repository,
+    toolingCommit: "a".repeat(40),
   });
+  const manifest = JSON.parse(await fs.readFile(result.manifestPath, "utf8"));
+  assert.deepEqual(result.files, TIGHTBEAM_PUBLIC_FILES);
+  assert.deepEqual(manifest.assets.map(({ name }) => name), TIGHTBEAM.assets);
+  const skillRecord = manifest.assets.find(({ name }) => name === TIGHTBEAM_SKILL_ASSET);
+  assert.equal(skillRecord.sha256, createHash("sha256").update(await fs.readFile(path.join(repository, "integrations/tightbeam/skills/surf-ace/SKILL.md"))).digest("hex"));
+  assert.match(await fs.readFile(path.join(outputDir, TIGHTBEAM_SKILL_ASSET), "utf8"), /surf-ace-tightbeam-skill-v0\.2\.1\.md/);
+  assert.equal(Object.hasOwn(manifest, "iosSigning"), false);
+  assert.deepEqual((await verifyTightbeamChecksums(result.manifestPath)).files,
+    [...TIGHTBEAM.assets, TIGHTBEAM.manifest].sort());
+  assert.deepEqual((await fs.readdir(outputDir)).sort(), [...TIGHTBEAM_PUBLIC_FILES].sort());
+
+  await fs.writeFile(path.join(outputDir, TIGHTBEAM_SKILL_ASSET), "changed skill bytes\n");
+  await assert.rejects(writeTightbeamManifest({
+    outputDir,
+    sourceDir: repository,
+    toolingCommit: "a".repeat(40),
+  }), /tightbeam_skill_asset_source_mismatch/);
+  await copyTightbeamSkillAsset(repository, outputDir);
+
+  await fs.writeFile(path.join(outputDir, "surf-ace-tightbeam-ios-ipad-v0.2.1.ipa"), "stale\n");
+  await assert.rejects(writeTightbeamManifest({
+    outputDir,
+    sourceDir: repository,
+    toolingCommit: "a".repeat(40),
+  }), /public_file_set_mismatch/);
+});
+
+test("Tightbeam manifest inventory follows only Electron production dependencies", async () => {
+  const inventory = await workspaceProductionInventory(path.join(repository, "pnpm-lock.yaml"), "packages/electron");
+  const names = new Set(inventory.map(({ name }) => name));
+  for (const name of ["bonjour-service", "linkedom", "pdfjs-dist", "ws"]) assert.ok(names.has(name));
+  for (const name of ["electron", "electron-builder", "esbuild", "typescript"]) assert.equal(names.has(name), false);
+  assert.ok(inventory.every(({ integrity }) => integrity.startsWith("sha512-")));
 });
 
 test("Tightbeam Linux stage contains only the standalone CLI, callable server closure, schemas, and lifecycle docs", async (t) => {
@@ -825,15 +1155,188 @@ test("Tightbeam Linux stage contains only the standalone CLI, callable server cl
     }
   }
   await walk(stage);
-  assert.deepEqual(actual.sort(), [...TIGHTBEAM_LINUX_RUNTIME_FILES].sort());
+  assert.deepEqual(actual.sort(), [...TIGHTBEAM_LINUX_SERVER_FILES].sort());
+  assert.deepEqual(TIGHTBEAM_LINUX_RUNTIME_FILES, TIGHTBEAM_LINUX_SERVER_FILES);
   const guide = await fs.readFile(path.join(stage, "README.md"), "utf8");
   assert.match(guide, /startCentralServer\(config, name\)/);
   assert.match(guide, /await service\.close\(\)/);
-  assert.match(guide, /already-provisioned PostgreSQL custody/);
-  assert.doesNotMatch(actual.join("\n"), /systemd|service|surf-ace-runtime|controller\/dist\/main\.js/);
+  assert.match(guide, /already-provisioned PostgreSQL (?:16 )?custody/);
+  assert.match(guide, /foreground launcher/);
+  assert.match(guide, /does not install or enable a service/);
+  assert.doesNotMatch(actual.join("\n"), /surf-ace-runtime|controller\/dist\/main\.js/);
+  const unit = await fs.readFile(path.join(stage, "service/surf-ace-server@.service"), "utf8");
+  assert.match(unit, /Type=simple/);
+  assert.match(unit, /Restart=on-failure/);
+  assert.match(unit, /KillSignal=SIGTERM/);
+  assert.match(unit, /TimeoutStopSec=30s/);
+  assert.match(unit, /^Environment=SURF_ACE_CLIENT_DIAGNOSTIC_LOG=\/run\/surf-ace-server\/client-flight-recorder\.log$/m);
+  const operations = await fs.readFile(path.join(stage, "docs/OPERATIONS.md"), "utf8");
+  assert.match(operations, /pg_dump --format=custom/);
+  assert.match(operations, /pg_restore --clean --if-exists --exit-on-error/);
+  assert.match(operations, /discard-staging-and-retain-original/);
+
+  await fs.chmod(path.join(stage, "bin/surf-ace"), 0o644);
+  await assert.rejects(verifyTightbeamLinuxStage(stage), /tightbeam_linux_runtime_cli_not_executable/);
+  await fs.chmod(path.join(stage, "bin/surf-ace"), 0o755);
+  await fs.chmod(path.join(stage, "bin/surf-ace-server"), 0o644);
+  await assert.rejects(verifyTightbeamLinuxStage(stage), /tightbeam_linux_server_launcher_not_executable/);
+  await fs.chmod(path.join(stage, "bin/surf-ace-server"), 0o755);
+
+  await fs.appendFile(path.join(stage, "service/surf-ace-server@.service"), "ExecStartPre=/usr/bin/pg_restore --dbname prod backup.dump\n");
+  await assert.rejects(verifyTightbeamLinuxStage(stage), /tightbeam_linux_unit_performs_provisioning/);
+  await fs.copyFile(path.join(repository, "scripts/release/templates/surf-ace-server@.service"), path.join(stage, "service/surf-ace-server@.service"));
 
   await fs.writeFile(path.join(stage, "surf-ace-runtime"), "obsolete daemon launcher\n");
   await assert.rejects(verifyTightbeamLinuxStage(stage), /tightbeam_linux_runtime_closure_mismatch/);
+});
+
+function validTightbeamServerConfig(overrides = {}) {
+  return {
+    custody: {
+      expectedClusterSystemId: "7410123456789012345",
+      fleetId: "fleet-release-smoke",
+      primaryUrl: "postgresql://allocator_writer:fixture-password@127.0.0.1:5432/postgres",
+      recoveryUrl: "postgresql://allocator_recovery:fixture-password@127.0.0.1:5432/postgres",
+      witnessApplicationName: "surf_ace_witness",
+      witnessPhysicalSlot: "surf_ace_smoke_witness_slot",
+      witnessServerId: "witness-smoke",
+      witnessUrl: "postgresql://allocator_witness:fixture-password@127.0.0.1:5433/postgres",
+    },
+    hostLockPath: "/var/run/surf-ace-server/controller.lock",
+    listenHost: "127.0.0.1",
+    listenPort: 19001,
+    name: "Surf Ace test server",
+    ...overrides,
+  };
+}
+
+test("Tightbeam foreground launcher validates exact PG16 config and WebSocket health safely", async (t) => {
+  const root = await temporary(t);
+  const configPath = path.join(root, "server.json");
+  await fs.writeFile(configPath, `${JSON.stringify(validTightbeamServerConfig())}\n`, { mode: 0o600 });
+  await fs.chmod(configPath, 0o600);
+  assert.deepEqual(tightbeamServerLauncher.validateServerConfig(validTightbeamServerConfig()), validTightbeamServerConfig());
+  assert.deepEqual(await tightbeamServerLauncher.readServerConfig(configPath), validTightbeamServerConfig());
+  assert.throws(() => tightbeamServerLauncher.validateServerConfig(validTightbeamServerConfig({ listenPort: 0 })), /server_config_listen_port_invalid/);
+  assert.throws(() => tightbeamServerLauncher.validateServerConfig(validTightbeamServerConfig({ listenPort: 65536 })), /server_config_listen_port_invalid/);
+  assert.throws(() => tightbeamServerLauncher.validateServerConfig(validTightbeamServerConfig({ listenHost: "http://127.0.0.1" })), /server_config_listen_host_invalid/);
+  assert.throws(() => tightbeamServerLauncher.validateServerConfig(validTightbeamServerConfig({ unexpected: true })), /server_config_shape_invalid/);
+  assert.throws(() => tightbeamServerLauncher.validateServerConfig(validTightbeamServerConfig({
+    custody: { ...validTightbeamServerConfig().custody, witnessApplicationName: "wrong" },
+  })), /server_config_custody_shape_invalid|server_config_witness_application_invalid/);
+  assert.throws(() => tightbeamServerLauncher.healthUrl("ws://user:secret@127.0.0.1:19001/ws"), /health_endpoint_invalid/);
+  assert.throws(() => tightbeamServerLauncher.healthUrl("ws://127.0.0.1:19001/not-ws"), /health_endpoint_invalid/);
+  assert.equal(tightbeamServerLauncher.healthUrl("ws://127.0.0.1:19001/ws").pathname, "/ws");
+  if (process.platform === "linux") {
+    await fs.chmod(configPath, 0o644);
+    await assert.rejects(tightbeamServerLauncher.readServerConfig(configPath), /server_config_permissions_too_open/);
+    await fs.chmod(configPath, 0o600);
+  }
+
+  const healthServer = new WebSocketServer({ host: "127.0.0.1", path: "/ws", port: 0 });
+  await new Promise((resolve, reject) => {
+    healthServer.once("error", reject);
+    healthServer.once("listening", resolve);
+  });
+  const address = healthServer.address();
+  const endpoint = `ws://127.0.0.1:${address.port}/ws`;
+  try {
+    assert.deepEqual(await tightbeamServerLauncher.checkHealth(endpoint), {
+      endpoint: `ws://127.0.0.1:${address.port}`,
+      status: "healthy",
+      transport: "websocket-open",
+    });
+  } finally {
+    await new Promise((resolve, reject) => healthServer.close((error) => error ? reject(error) : resolve()));
+  }
+  await assert.rejects(tightbeamServerLauncher.checkHealth(endpoint), /health_check_unavailable/);
+});
+
+test("Tightbeam foreground output separates product diagnostics from lifecycle events", () => {
+  const diagnostic = "[surf-ace:server] event=server_bind_ok host=127.0.0.1 port=59625 ws_path=/ws";
+  assert.deepEqual(tightbeamServerLauncher.parseForegroundOutputLine(diagnostic), {
+    event: "server_bind_ok", kind: "diagnostic", scope: "server",
+  });
+  assert.deepEqual(tightbeamServerLauncher.parseForegroundOutputLine("[surf-ace:bonjour] event=publish_start port=59625"), {
+    event: "publish_start", kind: "diagnostic", scope: "bonjour",
+  });
+  assert.deepEqual(tightbeamServerLauncher.parseForegroundOutputLine(JSON.stringify({
+    endpoint: "ws://127.0.0.1:59625/ws", event: "ready", host: "127.0.0.1", pid: 1234, port: 59625,
+  })), {
+    event: { endpoint: "ws://127.0.0.1:59625/ws", event: "ready", host: "127.0.0.1", pid: 1234, port: 59625 },
+    kind: "lifecycle",
+  });
+  assert.throws(() => tightbeamServerLauncher.parseForegroundOutputLine("unstructured unexpected output"), /server_output_line_invalid/);
+  assert.throws(() => tightbeamServerLauncher.parseForegroundOutputLine(JSON.stringify({ event: "unknown" })), /server_output_line_invalid/);
+  assert.throws(
+    () => tightbeamServerLauncher.parseForegroundOutputLine("unstructured unexpected output"),
+    (error) => error.publicCode === "server_output_line_invalid" && error.outputIssue === "not_json_or_server_diagnostic",
+  );
+  assert.throws(
+    () => tightbeamServerLauncher.parseForegroundOutputLine(JSON.stringify({ event: "unknown" })),
+    (error) => error.publicCode === "server_output_line_invalid" && error.outputIssue === "lifecycle_event_unexpected",
+  );
+  assert.throws(
+    () => tightbeamServerLauncher.parseForegroundOutputLine("[surf-ace:allocator] event=unexpected"),
+    (error) => error.publicCode === "server_output_line_invalid" && error.outputIssue === "product_diagnostic_scope_allocator",
+  );
+  const config = validTightbeamServerConfig({ hostLockPath: "/run/surf-ace-server/instance.lock" });
+  assert.equal(tightbeamServerLauncher.defaultDiagnosticLogPath(config, {}), "/run/surf-ace-server/client-flight-recorder.log");
+  assert.equal(tightbeamServerLauncher.defaultDiagnosticLogPath(config, {
+    SURF_ACE_CLIENT_DIAGNOSTIC_LOG: "/private/tmp/fixture-diagnostics.log",
+  }), "/private/tmp/fixture-diagnostics.log");
+  assert.throws(() => tightbeamServerLauncher.defaultDiagnosticLogPath(config, {
+    SURF_ACE_CLIENT_DIAGNOSTIC_LOG: "relative/diagnostics.log",
+  }), /server_diagnostic_log_path_invalid/);
+});
+
+test("Tightbeam foreground lifecycle holds and releases its server on SIGTERM without logging custody URLs", async (t) => {
+  const root = await temporary(t);
+  const modulePath = path.join(root, "central-server.cjs");
+  const markerPath = path.join(root, "closed.marker");
+  await fs.writeFile(modulePath, `
+    const fs = require("node:fs");
+    module.exports = { startCentralServer: async () => ({
+      server: { address: { host: "127.0.0.1", port: 19001, url: "ws://127.0.0.1:19001" } },
+      close: async () => fs.writeFileSync(${JSON.stringify(markerPath)}, "closed\\n"),
+    }) };
+  `);
+  const signals = new EventEmitter();
+  const lines = [];
+  let readyResolve;
+  const ready = new Promise((resolve) => { readyResolve = resolve; });
+  const running = tightbeamServerLauncher.startForeground(validTightbeamServerConfig(), {
+    serverModulePath: modulePath,
+    signalSource: signals,
+    write(line) {
+      lines.push(JSON.parse(line));
+      if (lines.at(-1).event === "ready") readyResolve();
+    },
+  });
+  await ready;
+  signals.emit("SIGTERM");
+  assert.deepEqual(await running, { endpoint: "ws://127.0.0.1:19001/ws", status: "stopped" });
+  assert.deepEqual(lines.map(({ event }) => event), ["ready", "stopped"]);
+  assert.equal(await fs.readFile(markerPath, "utf8"), "closed\n");
+  assert.doesNotMatch(JSON.stringify(lines), /fixture-password/);
+});
+
+test("Tightbeam CLI distribution is a separate exact client-only package", async (t) => {
+  const root = await temporary(t);
+  const binary = path.join(root, "surf-ace");
+  const stage = path.join(root, "cli-stage");
+  await fs.writeFile(binary, "offline fixture binary\n");
+  await assembleTightbeamCliStage({ binary, stageDir: stage, platform: "Linux x86_64" });
+  const verified = await verifyTightbeamCliStage(stage);
+  assert.deepEqual(verified.files, [...TIGHTBEAM_CLI_FILES].sort());
+  const guide = await fs.readFile(path.join(stage, "README.md"), "utf8");
+  assert.match(guide, /does not start a\s+server or provision PostgreSQL/);
+  assert.match(guide, /--state-root/);
+  await fs.chmod(path.join(stage, "bin/surf-ace"), 0o644);
+  await assert.rejects(verifyTightbeamCliStage(stage), /tightbeam_cli_not_executable/);
+  await fs.chmod(path.join(stage, "bin/surf-ace"), 0o755);
+  await fs.writeFile(path.join(stage, "server.cjs"), "must not ship\n");
+  await assert.rejects(verifyTightbeamCliStage(stage), /tightbeam_cli_runtime_closure_mismatch/);
 });
 
 test("Tightbeam Linux builder creates source-declared dependencies before the Electron server bundle", async () => {
@@ -843,17 +1346,66 @@ test("Tightbeam Linux builder creates source-declared dependencies before the El
   const functionEnd = builder.indexOf("export async function buildTightbeamRelease", functionStart);
   const body = builder.slice(functionStart, functionEnd);
   const protocol = body.indexOf('"@surf-ace/protocol", "build"');
+  const allocator = body.indexOf('"@surf-ace/allocator", "build"');
   const controller = body.indexOf('"@surf-ace/controller", "build"');
   const electron = body.indexOf('"@surf-ace/electron", "build"');
   assert.ok(protocol >= 0, "protocol build is required");
-  assert.ok(controller > protocol, "controller build must follow protocol");
+  assert.ok(allocator > protocol, "allocator smoke helpers must compile against the exact product source");
+  assert.ok(controller > allocator, "controller build must follow allocator");
   assert.ok(electron > controller, "Electron server bundle must follow controller");
+});
+
+test("Tightbeam Linux clean tests build required workspace packages before controller tests and stop on prerequisite failure", async (t) => {
+  const workflow = await fs.readFile(path.join(repository, ".github/workflows/release-tightbeam.yml"), "utf8");
+  const script = workflowRunScript(workflow, "Install frozen dependencies and run Linux product tests");
+  const protocolBuild = script.indexOf("pnpm --dir source --filter @surf-ace/protocol build");
+  const allocatorBuild = script.indexOf("pnpm --dir source --filter @surf-ace/allocator build");
+  const controllerBuild = script.indexOf("pnpm --dir source --filter @surf-ace/controller build");
+  const controllerTest = script.indexOf("pnpm --dir source --filter @surf-ace/controller test");
+  const protocolTest = script.indexOf("pnpm --dir source --filter @surf-ace/protocol test");
+  assert.ok(protocolBuild >= 0 && allocatorBuild > protocolBuild && controllerBuild > allocatorBuild &&
+    controllerTest > controllerBuild && protocolTest > controllerTest,
+  "a clean install must build protocol and allocator before controller tests load dist entrypoints");
+  assert.ok(TIGHTBEAM_TEST_COMMANDS.indexOf("pnpm --dir source --filter @surf-ace/protocol build") <
+    TIGHTBEAM_TEST_COMMANDS.indexOf("pnpm --dir source --filter @surf-ace/allocator build"));
+  assert.ok(TIGHTBEAM_TEST_COMMANDS.indexOf("pnpm --dir source --filter @surf-ace/allocator build") <
+    TIGHTBEAM_TEST_COMMANDS.indexOf("pnpm --dir source --filter @surf-ace/controller test"));
+  assert.ok(TIGHTBEAM_BUILD_COMMANDS.some((command) => command.includes("--config.executableName surf-ace")),
+    "the manifest must bind the same Linux executable-name override as the packaged builder");
+
+  const root = await temporary(t);
+  const bin = path.join(root, "bin");
+  const log = path.join(root, "commands.log");
+  await fs.mkdir(bin);
+  await fs.writeFile(path.join(bin, "git"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  await fs.writeFile(path.join(bin, "pnpm"), "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$COMMAND_LOG\"\nif test \"$*\" = \"$FAIL_COMMAND\"; then exit 37; fi\n", { mode: 0o755 });
+  await fs.writeFile(path.join(bin, "cargo"), "#!/bin/sh\nprintf '%s\\n' \"cargo $*\" >> \"$COMMAND_LOG\"\n", { mode: 0o755 });
+  const invoke = async (failCommand = "") => {
+    await fs.writeFile(log, "");
+    const invocation = exec("/bin/bash", ["-c", script], {
+      cwd: root,
+      env: { ...process.env, COMMAND_LOG: log, FAIL_COMMAND: failCommand, PATH: `${bin}:${process.env.PATH}` },
+    });
+    if (failCommand) await assert.rejects(invocation);
+    else await invocation;
+    return (await fs.readFile(log, "utf8")).trim().split("\n").filter(Boolean);
+  };
+  const expected = [
+    "--dir source fetch --frozen-lockfile",
+    "--dir source install --offline --frozen-lockfile",
+    "--dir source --filter @surf-ace/protocol build",
+    "--dir source --filter @surf-ace/allocator build",
+    "--dir source --filter @surf-ace/controller build",
+    "--dir source --filter @surf-ace/controller test",
+    "--dir source --filter @surf-ace/protocol test",
+    "cargo test --manifest-path source/packages/cli/Cargo.toml --locked",
+  ];
+  assert.deepEqual(await invoke(), expected);
+  assert.deepEqual(await invoke(expected[2]), expected.slice(0, 3));
 });
 
 function semanticPhase(sourceCommit, overrides = {}) {
   const phase = {
-    acknowledgedWriteIds: [],
-    acknowledgementEvidence: [],
     allocatorAfterRegistration: {
       allocatorId: "allocator-owned", assignmentCount: 1, nextOrdinalFence: 7, primaryHeadSeq: 4, stateVersion: 1,
     },
@@ -864,22 +1416,31 @@ function semanticPhase(sourceCommit, overrides = {}) {
     allocatorHeadSeq: 4,
     allocatorIdentity: "allocator-owned",
     allocatorStateVersion: 1,
-    clientIdentity: "client-stable",
+    clientIdentity: "0123abcd",
+    commandRoute: "direct-client-websocket",
+    controllerIdentity: "controller-stable",
     currentContentRecord: null,
     databaseIdentity: "database-owned",
+    directClientEndpoint: "ws://127.0.0.1:19001/ws",
     loss: null,
-    registrationIdentity: "registered-client-stable",
+    registrationIdentity: `0123abcd${"a".repeat(56)}`,
+    registryEndpoint: "ws://127.0.0.1:19002/ws",
+    registryRegistration: {
+      panes: [{ paneId: "1", paneLabel: 1 }],
+      surfaceId: "sf_1",
+      windowLabel: "a",
+    },
     resetCount: 0,
     resetEvidence: { databaseIdentity: "database-owned", priorDatabaseIdentity: null },
     semanticState: {
       content: { seed: { contentId: "seed" } },
       history: { "pane:sf_1:1": ["seed"] },
       labels: { pane1: 1, surface: "a" },
-      outbox: ["ack-seed"],
       panes: [1, 2],
       tombstones: ["pane-old"],
     },
     sequence: 12,
+    surfaceId: "sf_1",
     sourceCommit,
     ...overrides,
   };
@@ -903,11 +1464,10 @@ function semanticPhase(sourceCommit, overrides = {}) {
   }
   phase.readEvidence ??= [{
     captureOutput: {
-      controllerInstanceId: phase.clientIdentity,
       result: { contentId: records.at(-1)?.payload?.contentId ?? null, contentType: "html", paneId: 1, revision: 1 },
     },
     output: {
-      controllerInstanceId: phase.clientIdentity,
+      controllerInstanceId: phase.controllerIdentity,
       result: {
         cacheStatus: "current",
         consumableLoss: null,
@@ -916,545 +1476,1069 @@ function semanticPhase(sourceCommit, overrides = {}) {
         scopeId: "pane:sf_1:1",
       },
     },
+    endpoint: phase.directClientEndpoint,
+    paneId: 1,
     scopeId: "pane:sf_1:1",
+    surfaceId: phase.surfaceId,
   }];
-  phase.readControllerIdentities ??= [phase.clientIdentity];
-  phase.acknowledgementEvidence ??= [];
-  if (phase.acknowledgedWriteIds.length > 0 && phase.acknowledgementEvidence.length === 0) {
-    phase.acknowledgementEvidence = [{
-      cursor: records.length + 1,
-      idempotencyKey: "pane:sf_1:1:ack",
-      scopeId: "pane:sf_1:1",
-      writeIds: [...phase.acknowledgedWriteIds],
-    }];
-  }
-  const state = {
-    acknowledgementOutbox: [],
-    controllerInstanceId: phase.clientIdentity,
-    scopes: {
-      "pane:sf_1:1": {
-        clientCursor: records.length + 1,
-        lastRetainedSequence: records.length,
-        records: [],
-        synchronized: true,
-      },
-    },
-    version: 1,
-  };
-  phase.controllerStateBeforeAcknowledgement ??= state;
-  phase.controllerStateAfterAcknowledgement ??= structuredClone(state);
+  phase.readControllerIdentities ??= [phase.controllerIdentity];
   return phase;
 }
 
-test("Tightbeam state sequence preserves one database and identity and retains candidate-acknowledged writes through rollback", () => {
-  const baselineBefore = semanticPhase(TIGHTBEAM.baselineCommit);
-  const semanticState = {
-    ...baselineBefore.semanticState,
-    content: { ...baselineBefore.semanticState.content, "write-candidate-1": { contentId: "write-candidate-1" } },
-    history: { ...baselineBefore.semanticState.history, "pane:sf_1:2": ["write-candidate-1"] },
+function postgresRecoveryFixture(candidateContentId = "write-candidate-1", overrides = {}) {
+  const lifecycleCheck = (phase, delta) => ({
+    appendedRevisionHeads: delta,
+    custodyRevisionDelta: delta,
+    journalHeadUnchanged: true,
+    leaseGenerationDelta: delta,
+    ok: true,
+    phase,
+    semanticProjectionUnchanged: true,
+  });
+  return {
+    backup: { bytes: 4096, format: "custom", listSha256: "b".repeat(64), sha256: "a".repeat(64) },
+    rollback: {
+      originalProjectionAfterStageSha256: "c".repeat(64),
+      originalProjectionBeforeStageSha256: "c".repeat(64),
+      strategy: "discard-staging-and-retain-original",
+      verified: true,
+    },
+    schema: { has_fleets: true, has_journal: true, has_journal_validator: true, has_read_state: true },
+    sourceDatabaseIdentity: "database-owned",
+    stagedDatabaseIdentity: "staging-owned",
+    stagedProjectionAfterServiceSha256: "e".repeat(64),
+    stagedProjectionBeforeServiceSha256: "d".repeat(64),
+    stagedLifecycleEvidence: {
+      checks: {
+        completeCycle: lifecycleCheck("completed", 2),
+        healthRead: { afterProjectionSha256: "e".repeat(64), beforeProjectionSha256: "e".repeat(64), ok: true },
+        serviceRelease: lifecycleCheck("released", 1),
+        serviceStart: lifecycleCheck("active", 1),
+      },
+      path: "fixture/staged-server-lifecycle.json",
+      sha256: "f".repeat(64),
+    },
+    clientObservation: {
+      endpoint: "ws://127.0.0.1:19001/ws",
+      paneId: 1,
+      route: "packaged-cli-direct-client",
+      surfaceId: "sf_1",
+    },
+    stagedServer: {
+      health: { status: "healthy", transport: "websocket-open" },
+      lifecycle: { exitCode: 0, stopped: { signal: "SIGTERM", status: "clean" } },
+    },
+    ...overrides,
   };
-  const candidateAfter = semanticPhase(TIGHTBEAM.candidateCommit, {
-    acknowledgedWriteIds: ["write-candidate-1"],
-    allocatorFence: 8,
-    currentContentRecord: { contentId: "write-candidate-1", revision: 2 },
-    semanticState,
-    sequence: 20,
+}
+
+function postgresRestartFixture(overrides = {}) {
+  const lifecycle = (pid) => ({
+    pidAfter: pid + 1,
+    pidBefore: pid,
+    startExitCode: 0,
+    startStdout: "server started\n",
+    stopExitCode: 0,
+    stopStdout: "server stopped\n",
   });
-  const rollbackAfter = semanticPhase(TIGHTBEAM.baselineCommit, {
-    acknowledgedWriteIds: ["write-candidate-1"],
-    allocatorFence: 8,
-    currentContentRecord: { contentId: "write-candidate-1", revision: 2 },
-    semanticState,
-    sequence: 21,
-  });
-  assert.deepEqual(validateTightbeamStateSequence({ baselineBefore, candidateAfter, rollbackAfter }), {
-    acknowledgedWriteIds: ["write-candidate-1"],
-    baselineCommit: TIGHTBEAM.baselineCommit,
-    candidateCommit: TIGHTBEAM.candidateCommit,
-    clientIdentity: "client-stable",
+  return {
     databaseIdentity: "database-owned",
-    status: "passed",
-  });
-});
-
-test("Tightbeam state sequence rejects dropped or regressed packaged controller scopes even when capture remains current", () => {
-  const baselineBefore = semanticPhase(TIGHTBEAM.baselineCommit);
-  const semanticState = {
-    ...baselineBefore.semanticState,
-    content: { ...baselineBefore.semanticState.content, "write-candidate-1": { contentId: "write-candidate-1" } },
-    history: { ...baselineBefore.semanticState.history, "pane:sf_1:2": ["write-candidate-1"] },
+    lifecycle: { primary: lifecycle(101), witness: lifecycle(201) },
+    projectionAfterSha256: "e".repeat(64),
+    projectionBeforeSha256: "e".repeat(64),
+    registryHealth: { event: "health", status: "healthy", transport: "websocket-open" },
+    status: "verified",
+    witnessSynchronized: true,
+    ...overrides,
   };
-  const candidateAfter = semanticPhase(TIGHTBEAM.candidateCommit, {
-    acknowledgedWriteIds: ["write-candidate-1"],
-    currentContentRecord: { contentId: "write-candidate-1", revision: 2 },
-    semanticState,
-    sequence: 20,
-  });
-  const rollbackAfter = semanticPhase(TIGHTBEAM.baselineCommit, {
-    acknowledgedWriteIds: ["write-candidate-1"],
-    currentContentRecord: { contentId: "write-candidate-1", revision: 2 },
-    semanticState,
-    sequence: 21,
-  });
-  const scopeId = "pane:sf_1:1";
-  const validateCandidateState = (controllerStateAfterAcknowledgement) => validateTightbeamStateSequence({
-    baselineBefore,
-    candidateAfter: { ...candidateAfter, controllerStateAfterAcknowledgement },
-    rollbackAfter,
-  });
-  const validateRollbackState = (controllerStateAfterAcknowledgement) => validateTightbeamStateSequence({
-    baselineBefore,
-    candidateAfter,
-    rollbackAfter: { ...rollbackAfter, controllerStateAfterAcknowledgement },
-  });
+}
 
-  const droppedScope = structuredClone(candidateAfter.controllerStateAfterAcknowledgement);
-  delete droppedScope.scopes[scopeId];
-  assert.throws(() => validateCandidateState(droppedScope), /candidate_controller_state_scope_missing/);
 
-  const droppedRollbackScope = structuredClone(rollbackAfter.controllerStateAfterAcknowledgement);
-  delete droppedRollbackScope.scopes[scopeId];
-  assert.throws(() => validateRollbackState(droppedRollbackScope), /rollback_controller_state_scope_missing/);
 
-  for (const [field, value] of [["clientCursor", 0], ["lastRetainedSequence", 0]]) {
-    const regressedScope = structuredClone(candidateAfter.controllerStateAfterAcknowledgement);
-    regressedScope.scopes[scopeId][field] = value;
-    assert.throws(() => validateCandidateState(regressedScope), new RegExp(`candidate_controller_state_scope_${field}_regression`));
-  }
 
-  const unsynchronizedScope = structuredClone(candidateAfter.controllerStateAfterAcknowledgement);
-  unsynchronizedScope.scopes[scopeId].synchronized = false;
-  assert.throws(() => validateCandidateState(unsynchronizedScope), /candidate_controller_state_scope_not_synchronized/);
 
-  assert.ok(candidateAfter.readEvidence[0].captureOutput, "negative cases retain packaged capture evidence");
-});
 
-test("Tightbeam state sequence rejects wrong sources, loss, reset, identity drift, and stale rollback", () => {
-  const before = semanticPhase(TIGHTBEAM.baselineCommit);
-  const semanticState = {
-    ...before.semanticState,
-    content: { ...before.semanticState.content, "write-candidate-1": { contentId: "write-candidate-1" } },
-    history: { ...before.semanticState.history, "pane:sf_1:2": ["write-candidate-1"] },
-  };
-  const candidate = semanticPhase(TIGHTBEAM.candidateCommit, {
-    acknowledgedWriteIds: ["write-candidate-1"],
-    currentContentRecord: { contentId: "write-candidate-1", revision: 2 },
-    semanticState,
-    sequence: 20,
-  });
-  const rollback = semanticPhase(TIGHTBEAM.baselineCommit, {
-    acknowledgedWriteIds: ["write-candidate-1"],
-    currentContentRecord: { contentId: "write-candidate-1", revision: 2 },
-    semanticState,
-    sequence: 21,
-  });
-  const validate = (change) => validateTightbeamStateSequence({ baselineBefore: before, candidateAfter: candidate, rollbackAfter: rollback, ...change });
-  assert.throws(() => validate({ baselineBefore: { ...before, sourceCommit: "wrong" } }), /baseline_source_mismatch/);
-  assert.throws(() => validate({ candidateAfter: { ...candidate, sourceCommit: TIGHTBEAM.baselineCommit } }), /candidate_source_mismatch/);
-  assert.throws(() => validate({ candidateAfter: { ...candidate, loss: { from: 13, to: 14 } } }), /consumable_loss/);
-  assert.throws(() => validate({
-    rollbackAfter: {
-      ...rollback,
-      allocatorIdentity: "changed",
-      allocatorAfterRegistration: { ...rollback.allocatorAfterRegistration, allocatorId: "changed" },
-    },
-  }), /allocator_reset/);
-  assert.throws(() => validate({ rollbackAfter: { ...rollback, clientIdentity: "changed" } }), /controller_state_identity_mismatch/);
-  assert.throws(() => validate({ rollbackAfter: { ...rollback, semanticState: before.semanticState } }), /candidate_discarded_baseline_content/);
-  assert.throws(() => validate({ rollbackAfter: { ...rollback, sequence: 11 } }), /sequence_regression/);
-  assert.throws(() => validate({ rollbackAfter: { ...rollback, resetCount: 1 } }), /database_reset/);
-  assert.throws(() => validate({
-    candidateAfter: {
-      ...candidate,
-      semanticState: {
-        ...candidate.semanticState,
-        content: { "write-candidate-1": { contentId: "write-candidate-1" } },
-      },
-    },
-  }), /candidate_discarded_baseline_content/);
-  assert.throws(() => validate({
-    candidateAfter: {
-      ...candidate,
-      semanticState: {
-        ...candidate.semanticState,
-        history: { "pane:sf_1:2": ["write-candidate-1"] },
-      },
-    },
-  }), /candidate_discarded_baseline_history/);
-  assert.throws(() => validate({
-    rollbackAfter: {
-      ...rollback,
-      semanticState: {
-        ...rollback.semanticState,
-        tombstones: [],
-      },
-    },
-  }), /candidate_discarded_baseline_tombstones/);
-  assert.throws(() => validate({
-    candidateAfter: {
-      ...candidate,
-      readEvidence: [{
-        output: {
-          controllerInstanceId: candidate.clientIdentity,
-          result: {
-            cacheStatus: "current",
-            consumableLoss: null,
-            currentContentRecord: null,
-            records: [],
-            scopeId: "pane:sf_1:1",
-          },
-        },
-        scopeId: "pane:sf_1:1",
-      }],
-    },
-  }), /candidate_packaged_read_content_missing/);
-});
 
-test("cf91 macOS baseline is packaged from a clean external source and output root", async () => {
+test("Tightbeam PG restart continuity is part of candidate fresh-install smoke only", async () => {
   const repository = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../..");
-  const script = await fs.readFile(path.join(repository, "scripts/release/build-smoke-baseline.mjs"), "utf8");
-  assert.match(script, /git.*archive/);
-  assert.match(script, /\.macos-source/);
-  assert.match(script, /--config\.directories\.output=/);
-  assert.match(script, /tightbeam_baseline_macos_recursive_package/);
-  assert.doesNotMatch(script, /stagedSource, "--filter", "@surf-ace\/electron", "package"/);
+  const fixture = await fs.readFile(path.join(repository, "scripts/release/tightbeam-state-smoke-fixture.ts"), "utf8");
+  const main = fixture.slice(fixture.indexOf("async function main()"));
+  assert.match(main, /await freshInstallMain\(options\)/);
+  assert.doesNotMatch(fixture, /registryStopBeforePostgresRestart|async function runPhase/);
+  assert.match(fixture, /const postgresRestart = await restartPostgresCluster\(cluster, allocatorProjectionAfterRegistryShutdown\)/);
+  assert.match(fixture, /fresh-install-registry-after-restart/);
 });
 
-test("Tightbeam Linux publication gate requires the executable state driver and validates its three phases", async () => {
+test("Tightbeam fresh install separates expected registry lease release from PostgreSQL restart continuity", async () => {
   const repository = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../..");
+  const fixture = await fs.readFile(path.join(repository, "scripts/release/tightbeam-state-smoke-fixture.ts"), "utf8");
   const smoke = await fs.readFile(path.join(repository, "scripts/release/smoke-tightbeam-release.mjs"), "utf8");
-  const fixture = await fs.readFile(path.join(repository, "scripts/release/tightbeam-state-smoke-fixture.ts"), "utf8");
-  const workflow = await fs.readFile(path.join(repository, ".github/workflows/release-tightbeam.yml"), "utf8");
-  assert.match(smoke, /tightbeam_smoke_state_driver_required/);
-  assert.match(smoke, /validateTightbeamStateSequence\(stateSequence\)/);
-  assert.match(fixture, /startCentralServer/);
-  assert.match(fixture, /PostgresCustodyAdapter\.initializeAbsentFleet/);
-  assert.match(fixture, /bin\/surf-ace/);
-  assert.match(fixture, /await runPhase\("baseline"/);
-  assert.match(fixture, /await runPhase\("candidate"/);
-  assert.match(fixture, /await runPhase\("rollback"/);
-  assert.match(workflow, /tightbeam-state-smoke-fixture\.ts/);
-  assert.match(workflow, /pnpm --dir tooling --filter @surf-ace\/electron exec esbuild/);
-  assert.doesNotMatch(workflow, /pnpm --dir tooling exec esbuild/);
-  assert.match(workflow, /--banner:js='import \{ createRequire as __createRequire \} from "node:module"; const require = __createRequire\(import\.meta\.url\);'/);
-  assert.match(fixture, /const nodeRequire = createRequire\(import\.meta\.url\)/);
-  assert.doesNotMatch(fixture, /const require = createRequire\(import\.meta\.url\)/);
-  assert.match(workflow, /SURF_ACE_TIGHTBEAM_STATE_DRIVER/);
-  assert.match(workflow, /^  attest-and-publish:\n    needs: \[smoke-linux, smoke-macos\]/m);
+  const freshInstall = fixture.slice(
+    fixture.indexOf("async function freshInstallMain("),
+    fixture.indexOf("async function main()"),
+  );
+  const projectionBeforeStop = freshInstall.indexOf("const allocatorProjectionBeforeRestart = await allocatorDatabaseProjection(cluster.adminUrl, cluster.config.fleetId);");
+  const stop = freshInstall.indexOf("const registryShutdownBeforeRestart = await registryProcess.stop();");
+  const projectionAfterStop = freshInstall.indexOf("const allocatorProjectionAfterRegistryShutdown = await allocatorDatabaseProjection(cluster.adminUrl, cluster.config.fleetId);");
+  const releaseContinuity = freshInstall.indexOf("const registryShutdownContinuity = verifyAllocatorServiceLifecycle(");
+  const restart = freshInstall.indexOf("const postgresRestart = await restartPostgresCluster(cluster, allocatorProjectionAfterRegistryShutdown);");
+  const start = freshInstall.indexOf('"fresh-install-registry-after-restart"');
+  assert.ok(projectionBeforeStop >= 0 && projectionBeforeStop < stop && stop < projectionAfterStop &&
+    projectionAfterStop < releaseContinuity && releaseContinuity < restart && restart < start);
+  assert.match(freshInstall, /if \(!registryShutdownContinuity\.ok\)\s*\{\s*throw new Error\(`fresh_install_registry_shutdown_semantics_changed:/);
+  assert.match(freshInstall, /verifyAllocatorServiceLifecycle\(\s*allocatorProjectionBeforeRestart,\s*allocatorProjectionAfterRegistryShutdown,\s*"released",\s*\)/);
+  assert.doesNotMatch(freshInstall, /allocatorProjectionBeforeRestart\.projectionSha256\s*!==\s*postgresRestart\.projectionBeforeSha256/);
+  assert.match(fixture, /async function restartPostgresCluster\(\s*cluster: Cluster,\s*expectedProjectionBefore\?: Awaited<ReturnType<typeof allocatorDatabaseProjection>>,\s*\)/);
+  assert.match(fixture, /const projectionBefore = expectedProjectionBefore \?\? await allocatorDatabaseProjection\(cluster\.adminUrl, cluster\.config\.fleetId\)/);
+  assert.match(smoke, /const registryShutdown = restart\.registryShutdown/);
+  assert.match(smoke, /registryShutdown\.releasedProjectionSha256 !== restart\.projectionBeforeSha256/);
+  assert.match(smoke, /registryShutdown\.continuity\?\.semanticProjectionUnchanged !== true/);
 });
 
-test("Tightbeam Linux state evidence comes from packaged CLI reads and durable controller state", async () => {
+test("Tightbeam registered direct targets bind client, surface, and valid pane IDs rather than display labels", async () => {
+  const { matchesRegisteredDirectTarget } = await import("./smoke-lib.mjs");
+  assert.equal(typeof matchesRegisteredDirectTarget, "function");
+  const registration = {
+    client: { clientId: "client-expected" },
+    surface: {
+      panes: [{ paneId: 99, paneLabel: 99 }],
+      surfaceId: "sf_expected",
+      windowLabel: "a",
+    },
+  };
+  const directSurface = {
+    surfaceId: "sf_expected",
+    topology: { panes: [{ paneId: 1, paneLabel: 1 }, { paneId: 4, paneLabel: 2 }] },
+    windowLabel: "b",
+  };
+
+  assert.equal(matchesRegisteredDirectTarget("client-expected", registration, directSurface), true,
+    "the client's direct pane IDs and exact registered surface remain authoritative when display labels lag");
+  assert.equal(matchesRegisteredDirectTarget("other-client", registration, directSurface), false);
+  assert.equal(matchesRegisteredDirectTarget("client-expected", registration, { ...directSurface, surfaceId: "sf_wrong" }), false);
+  assert.equal(matchesRegisteredDirectTarget("client-expected", registration, {
+    ...directSurface, topology: { panes: [{ paneId: 0 }, { paneId: 1 }] },
+  }), false);
+  assert.equal(matchesRegisteredDirectTarget("client-expected", registration, {
+    ...directSurface, topology: { panes: [{ paneId: 1 }, { paneId: 1 }] },
+  }), false);
+});
+
+test("Tightbeam PG backup validation parses pg_restore schema and table tokens", async () => {
+  const { hasRequiredAllocatorBackupObjects } = await import("./smoke-lib.mjs");
+  assert.equal(typeof hasRequiredAllocatorBackupObjects, "function");
+  const complete = [
+    "222; 1259 16527 TABLE surf_ace_allocator custody_journal surf_ace_allocator_owner",
+    "218; 1259 16437 TABLE surf_ace_allocator fleets surf_ace_allocator_owner",
+    "3992; 0 16527 TABLE DATA surf_ace_allocator custody_journal surf_ace_allocator_owner",
+    "3988; 0 16437 TABLE DATA surf_ace_allocator fleets surf_ace_allocator_owner",
+  ].join("\n");
+  assert.equal(hasRequiredAllocatorBackupObjects(complete), true);
+  const missingFleets = [
+    "222; 1259 16527 TABLE surf_ace_allocator custody_journal surf_ace_allocator_owner",
+    "3992; 0 16527 TABLE DATA surf_ace_allocator custody_journal surf_ace_allocator_owner",
+  ].join("\n");
+  assert.equal(hasRequiredAllocatorBackupObjects(missingFleets), false);
+  assert.equal(hasRequiredAllocatorBackupObjects(complete.replaceAll("surf_ace_allocator", "wrong_schema")), false);
+});
+
+test("Tightbeam staged restore preserves the packaged server custody config envelope", async () => {
   const repository = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../..");
   const fixture = await fs.readFile(path.join(repository, "scripts/release/tightbeam-state-smoke-fixture.ts"), "utf8");
-  assert.match(fixture, /readPackagedControllerState/);
-  assert.match(fixture, /controllerStateBeforeAcknowledgement/);
-  assert.match(fixture, /controllerStateAfterAcknowledgement/);
-  assert.match(fixture, /acknowledgementOutbox/);
-  assert.match(fixture, /controllerInstanceId/);
-  assert.match(fixture, /primaryHeadSeq/);
-  assert.match(fixture, /resultDerivedSplitChildren\(split, paneId, 3\)/);
+  assert.match(fixture, /const serverConfig = \{\s* custody: stage\.config,/);
+  assert.doesNotMatch(fixture, /const serverConfig = \{\s*\.\.\.stage\.config,/);
+});
+
+test("Tightbeam staged server allows only append-only writer lease bookkeeping", async () => {
+  const { verifyAllocatorServiceLifecycle } = await import("./smoke-lib.mjs");
+  assert.equal(typeof verifyAllocatorServiceLifecycle, "function");
+  const beforeFleet = {
+    accepted_generation_id: "gen-1", allocator_id: "alloc-smoke", custody_revision: 5,
+    fleet_id: "fleet-smoke", head_hash: "head-3", head_seq: 3, last_commit_at: "before",
+    lease_backend_pid: 111, lease_generation: 4, lease_id: "lease_old", lease_mode: "writer",
+    lifecycle: "active", next_ordinal_fence: 2, state_version: 1,
+  };
+  const before = { databaseIdentity: "db-stage", tables: {
+    allocation_transactions: [{ transaction_id: "tx-1", status: "committed" }],
+    assignments: [{ surface_id: "sf_one", ordinal: 1, window_label: "a" }],
+    authority_owners: [{ authority_id: "auth-one", owner_anchor_id: "owner-one" }],
+    custody_journal: [{ head_seq: 3, head_hash: "head-3", event: { type: "allocation" } }],
+    custody_revision_heads: [
+      { custody_revision: 4, head_seq: 3, head_hash: "head-3" },
+      { custody_revision: 5, head_seq: 3, head_hash: "head-3" },
+    ],
+    fleet_tombstones: [{ fleet_id: "fleet-smoke", first_allocator_id: "alloc-smoke" }],
+    fleets: [beforeFleet],
+    restore_generations: [],
+  } };
+  const acquiredFleet = {
+    ...beforeFleet, custody_revision: 6, last_commit_at: "acquired", lease_backend_pid: 222,
+    lease_generation: 5, lease_id: "lease_new", lease_mode: "writer",
+  };
+  const active = { ...before, tables: {
+    ...before.tables,
+    custody_revision_heads: [
+      ...before.tables.custody_revision_heads,
+      { custody_revision: 6, head_seq: 3, head_hash: "head-3" },
+    ],
+    fleets: [acquiredFleet],
+  } };
+  const releasedFleet = {
+    ...acquiredFleet, custody_revision: 7, last_commit_at: "released", lease_backend_pid: null,
+    lease_generation: 6, lease_id: null, lease_mode: null,
+  };
+  const released = { ...active, tables: {
+    ...active.tables,
+    custody_revision_heads: [
+      ...active.tables.custody_revision_heads,
+      { custody_revision: 7, head_seq: 3, head_hash: "head-3" },
+    ],
+    fleets: [releasedFleet],
+  } };
+
+  assert.equal(verifyAllocatorServiceLifecycle(before, active, "active").ok, true);
+  assert.equal(verifyAllocatorServiceLifecycle(active, released, "released").ok, true);
+  assert.equal(verifyAllocatorServiceLifecycle(before, released, "completed").ok, true);
+  assert.equal(verifyAllocatorServiceLifecycle(before, { tables: {
+    ...released.tables, assignments: [{ surface_id: "sf_wrong", ordinal: 1, window_label: "a" }],
+  } }, "completed").ok, false);
+  assert.equal(verifyAllocatorServiceLifecycle(before, { tables: {
+    ...released.tables, custody_journal: [...released.tables.custody_journal, { head_seq: 4, head_hash: "head-4" }],
+  } }, "completed").ok, false);
+  assert.equal(verifyAllocatorServiceLifecycle(before, { tables: {
+    ...released.tables, custody_revision_heads: released.tables.custody_revision_heads.slice(0, -1),
+  } }, "completed").ok, false);
+  assert.equal(verifyAllocatorServiceLifecycle(before, { tables: {
+    ...released.tables, fleets: [{ ...releasedFleet, lease_id: "lease_still_active", lease_mode: "writer", lease_backend_pid: 222 }],
+  } }, "completed").ok, false);
+  assert.equal(verifyAllocatorServiceLifecycle(before, { ...active, tables: {
+    ...active.tables, fleets: [{ ...acquiredFleet, custody_revision: 8 }],
+  } }, "active").reason, "lease_revision_delta_invalid");
+});
+
+test("Tightbeam Linux acceptance uses packaged behavior, not transient acknowledgement helper fields", async () => {
+  const repository = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../..");
+  const fixture = await fs.readFile(path.join(repository, "scripts/release/tightbeam-state-smoke-fixture.ts"), "utf8");
+  const smoke = await fs.readFile(path.join(repository, "scripts/release/smoke-tightbeam-release.mjs"), "utf8");
+  const shared = await fs.readFile(path.join(repository, "scripts/release/smoke-lib.mjs"), "utf8");
+  assert.doesNotMatch(fixture, /readPackagedControllerState|acknowledgeObservedReads|acknowledgementOutbox|acknowledgedWriteIds|clientCursor|lastRetainedSequence|acknowledgementEvidence/);
+  assert.doesNotMatch(smoke, /acknowledgement_state_not_current|acknowledgedWriteIds|outboxBeforeCount|outboxAfterCount|clientCursor|lastRetainedSequence/);
+  assert.doesNotMatch(shared, /acknowledgementEvidenceForReads/);
   assert.match(fixture, /raw-cli-evidence\.ndjson/);
   assert.match(fixture, /rawCliEvidenceSha256/);
-  assert.match(fixture, /rollback-observer-cli/);
-  assert.match(fixture, /latestContentRecord\(\[rollbackRead\]\)/);
-  assert.match(fixture, /currentCaptureObservation\(\[rollbackRead\]\)/);
-  assert.match(fixture, /source: "packaged-capture-pane"/);
-  assert.match(fixture, /semanticContentProjection/);
-  assert.match(fixture, /readControllerIdentities/);
-  assert.match(fixture, /priorDatabaseIdentity !== databaseIdentity/);
-  assert.match(fixture, /resetEvidence: \{ databaseIdentity, priorDatabaseIdentity \}/);
-  assert.doesNotMatch(fixture, /splitPayload\?\.createdPaneIds/);
-  assert.match(fixture, /witnessApplicationName: "surf_ace_witness"/);
-  assert.doesNotMatch(fixture, /application_name=surf_ace_smoke_witness/);
-  assert.doesNotMatch(fixture, /ALTER SYSTEM SET synchronous_commit = 'remote_apply'; SELECT pg_reload_conf\(\);/);
-  assert.doesNotMatch(fixture, /semanticState\(core, writes\)/);
-  assert.doesNotMatch(fixture, /resetCount:\s*0/);
+  assert.match(fixture, /rawCliEvidenceBase64/);
+  assert.match(fixture, /function summarizeFreshInstallPhase/);
+  assert.match(fixture, /matchesFreshInstallCurrentContent\(firstRecord, contentId, surfaceId, paneId\)/);
+  assert.match(fixture, /content: currentContentRecord/);
+  assert.match(fixture, /const directList = await cli\(options\.cliBinary, cliStateRoot, "list", \{\}, app\.endpoint\)/);
+  assert.match(fixture, /await cli\(options\.cliBinary, cliStateRoot, "push",/);
+  assert.match(fixture, /pushOutput\.command !== "push" \|\| pushOutput\.ok !== true/);
+  assert.match(fixture, /firstCapture\?\.contentId !== contentId/);
+  assert.match(fixture, /const firstRead = await readPane\(options\.cliBinary, cliStateRoot, app\.endpoint, surfaceId, paneId\)/);
+  assert.match(fixture, /const afterWrongSurfaceRead = await readPane\(options\.cliBinary, cliStateRoot, app\.endpoint, surfaceId, paneId\)/);
+  assert.match(fixture, /rejectedWrongSurfacePush\(/);
+  assert.match(fixture, /const registryShutdownBeforeRestart = await registryProcess\.stop\(\)/);
+  assert.match(fixture, /const postgresRestart = await restartPostgresCluster\(cluster, allocatorProjectionAfterRegistryShutdown\)/);
+  assert.match(fixture, /const registryStop = await registryProcess\.stop\(\)/);
+  assert.match(smoke, /function requireLinuxFreshInstallRawCliCoverage/);
+  assert.match(smoke, /matchesFreshInstallCurrentContent\(result\?\.currentContentRecord/);
+  assert.match(fixture, /matchesRegisteredDirectTarget\(electronClientId, registration, listed\)/);
+  assert.match(fixture, /await verifyDisplayReady\(\)/);
+  assert.doesNotMatch(fixture, /function semanticState\(/);
+  assert.doesNotMatch(fixture, /runPhase\("(?:baseline|candidate|rollback)"/);
 });
 
-test("Linux state driver gate executes one driver and rejects a baseline-to-candidate loss", async (t) => {
-  const root = await temporary(t);
-  const output = path.join(root, "state.json");
-  const baselineBefore = semanticPhase(TIGHTBEAM.baselineCommit);
-  const retained = {
-    ...baselineBefore.semanticState,
-    content: { ...baselineBefore.semanticState.content, "candidate-write": { contentId: "candidate-write" } },
-    history: { ...baselineBefore.semanticState.history, "pane:sf_1:2": ["candidate-write"] },
-    outbox: [...baselineBefore.semanticState.outbox, "candidate-write"],
+function rawCliEvidenceFixture(endpoint = "ws://127.0.0.1:19001/ws", stateRoot = "/fixture/state/cli") {
+  const events = [];
+  const record = (command, input, target = endpoint) => {
+    const inputJson = JSON.stringify(input);
+    const args = ["--state-root", stateRoot];
+    if (target) args.push("--endpoint", target, "--product-label", "Surf Ace release smoke");
+    args.push(command, "--input-json", inputJson);
+    const output = { ok: true, result: {} };
+    events.push({
+      args,
+      command,
+      endpoint: target,
+      input,
+      inputJson,
+      output,
+      route: target ? "direct-client-websocket" : "endpointless-local-read",
+      status: 0,
+      stderr: "",
+      stdout: JSON.stringify(output),
+    });
   };
-  const candidateAfter = semanticPhase(TIGHTBEAM.candidateCommit, {
-    acknowledgedWriteIds: ["candidate-write"],
-    currentContentRecord: { contentId: "candidate-write", revision: 2 },
-    semanticState: retained,
-    sequence: 20,
+  record("list", {});
+  record("topology-intent", { action: "split", count: 3, paneId: 1, surfaceId: "sf_1" });
+  record("push", { contentId: "candidate-write", paneId: 2, surfaceId: "sf_1" });
+  record("capture-pane", { includeImage: true, paneId: 2, surfaceId: "sf_1" });
+  record("read", { scopeId: "pane:sf_1:2" }, null);
+  record("topology-intent", { action: "close", paneId: 3, surfaceId: "sf_1" });
+  const bytes = Buffer.from(`${events.map((event) => JSON.stringify(event)).join("\n")}\n`);
+  return {
+    rawCliEvidenceBase64: bytes.toString("base64"),
+    rawCliEvidenceBytes: bytes.byteLength,
+    rawCliEvidenceSha256: createHash("sha256").update(bytes).digest("hex"),
+  };
+}
+
+test("fresh-install Linux qualification requires direct current content, wrong-surface rejection, and restart continuity", async () => {
+  const contentId = "linux-fresh-install-content";
+  const visibleText = "fresh-install-visible-marker";
+  const clientIdentity = "1234abcd";
+  const registrationIdentity = `${clientIdentity}${"a".repeat(56)}`;
+  const directClientEndpoint = "ws://127.0.0.1:19001/ws";
+  const registryEndpoint = "ws://127.0.0.1:19999/ws";
+  const phase = (overrides = {}) => ({
+    capture: { contentId, paneId: 1, requestSurfaceId: "sf_fresh", responseSurfaceId: null, visibleText },
+    clientIdentity,
+    clientAppVersion: TIGHTBEAM.version,
+    clientAppVersionEvidenceSha256: "d".repeat(64),
+    commandRoute: "direct-client-websocket",
+    controllerIdentity: "ctl_fresh",
+    currentRead: {
+      cacheStatus: "current",
+      consumableLoss: null,
+      content: {
+        recordClass: "content",
+        payload: {
+          contentId,
+          historyEntryId: "he_fresh_install_1",
+          paneId: 1,
+          revision: 1,
+          surfaceId: "sf_fresh",
+        },
+      },
+      contentId,
+      scopeId: "pane:sf_fresh:1",
+    },
+    databaseIdentity: "db_fresh",
+    directClientEndpoint,
+    paneId: 1,
+    paneLabel: 1,
+    registeredClientId: registrationIdentity,
+    registeredPaneIds: [1],
+    registeredPaneLabel: 1,
+    registeredSurfaceId: "sf_fresh",
+    registeredWindowLabel: "a",
+    registrationIdentity,
+    registryEndpoint,
+    sourceCommit: TIGHTBEAM.candidateCommit,
+    surfaceId: "sf_fresh",
+    windowLabel: "a",
+    ...overrides,
   });
-  const rollbackAfter = semanticPhase(TIGHTBEAM.baselineCommit, {
-    acknowledgedWriteIds: ["candidate-write"],
-    currentContentRecord: { contentId: "candidate-write", revision: 2 },
-    semanticState: retained,
-    sequence: 21,
+  const projection = "b".repeat(64);
+  const evidence = {
+    mode: "fresh-install",
+    sourceCommit: TIGHTBEAM.candidateCommit,
+    displayReady: { display: ":99", probeSha256: "a".repeat(64), status: "verified", tool: "xdpyinfo" },
+    expectedContentId: contentId,
+    expectedVisibleText: visibleText,
+    expectedVersion: TIGHTBEAM.version,
+    initial: phase(),
+    afterRestart: phase(),
+    wrongSurfaceRejection: {
+      directClientEndpoint,
+      expectedSurfaceId: "sf_fresh",
+      requestedSurfaceId: "sf_wrong",
+      status: "rejected",
+      errorCode: "unknown_surface",
+    },
+    postgresRestart: {
+      status: "verified",
+      databaseIdentity: "db_fresh",
+      projectionBeforeSha256: projection,
+      projectionAfterSha256: projection,
+      registryShutdown: {
+        activeProjectionSha256: "c".repeat(64),
+        releasedProjectionSha256: projection,
+        continuity: {
+          appendedRevisionHeads: 1,
+          custodyRevisionDelta: 1,
+          journalHeadUnchanged: true,
+          leaseGenerationDelta: 1,
+          ok: true,
+          phase: "released",
+          semanticProjectionUnchanged: true,
+        },
+      },
+      witnessSynchronized: true,
+      registryHealth: { event: "health", status: "healthy", transport: "websocket-open" },
+      registryShutdownClean: true,
+      initialRegistryHealth: { event: "health", status: "healthy", transport: "websocket-open" },
+      schema: { has_fleets: true, has_journal: true, has_read_state: true, has_journal_validator: true },
+      lifecycle: {
+        primary: { stopExitCode: 0, startExitCode: 0, pidBefore: 100, pidAfter: 101, stopStdout: "stopped", startStdout: "started" },
+        witness: { stopExitCode: 0, startExitCode: 0, pidBefore: 200, pidAfter: 201, stopStdout: "stopped", startStdout: "started" },
+      },
+    },
+    cleanup: { clientStopped: true, registryStopped: true, postgresStopped: true },
+  };
+
+  const validated = validateTightbeamFreshInstallState(evidence);
+  assert.equal(validated.status, "passed");
+  assert.equal(validated.clientAppVersion, TIGHTBEAM.version);
+  assert.equal(validated.clientAppVersionEvidenceSha256, "d".repeat(64));
+  assert.throws(() => validateTightbeamFreshInstallState({
+    ...evidence,
+    postgresRestart: { ...evidence.postgresRestart, registryShutdown: undefined },
+  }), /fresh_install_registry_shutdown_projection_not_verified/);
+  assert.throws(() => validateTightbeamFreshInstallState({
+    ...evidence,
+    initial: phase({ currentRead: { ...phase().currentRead, contentId: "other" } }),
+  }), /fresh_install_initial_content_read_mismatch/);
+  assert.throws(() => validateTightbeamFreshInstallState({
+    ...evidence,
+    initial: phase({ currentRead: {
+      ...phase().currentRead,
+      content: {
+        ...phase().currentRead.content,
+        payload: { ...phase().currentRead.content.payload, surfaceId: "sf_wrong" },
+      },
+    } }),
+  }), /fresh_install_initial_content_read_mismatch/);
+  assert.throws(() => validateTightbeamFreshInstallState({
+    ...evidence,
+    initial: phase({ capture: { ...phase().capture, responseSurfaceId: "sf_wrong" } }),
+  }), /fresh_install_initial_rendered_capture_mismatch/);
+  assert.throws(() => validateTightbeamFreshInstallState({
+    ...evidence,
+    afterRestart: phase({ clientAppVersion: "0.1.0" }),
+  }), /fresh_install_after_restart_client_release_identity_mismatch/);
+  assert.throws(() => validateTightbeamFreshInstallState({
+    ...evidence,
+    wrongSurfaceRejection: { ...evidence.wrongSurfaceRejection, status: "accepted" },
+  }), /fresh_install_wrong_surface_not_rejected/);
+  assert.throws(() => validateTightbeamFreshInstallState({
+    ...evidence,
+    afterRestart: phase({
+      clientIdentity: "deadbeef",
+      registrationIdentity: `deadbeef${"c".repeat(56)}`,
+      registeredClientId: `deadbeef${"c".repeat(56)}`,
+    }),
+  }), /fresh_install_client_identity_changed/);
+  assert.throws(() => validateTightbeamFreshInstallState({
+    ...evidence,
+    postgresRestart: { ...evidence.postgresRestart, projectionAfterSha256: "c".repeat(64) },
+  }), /fresh_install_postgres_restart_changed_projection/);
+  assert.throws(() => validateTightbeamFreshInstallState({
+    ...evidence,
+    postgresRestart: {
+      ...evidence.postgresRestart,
+      registryShutdown: { ...evidence.postgresRestart.registryShutdown, releasedProjectionSha256: "d".repeat(64) },
+    },
+  }), /fresh_install_registry_shutdown_projection_not_verified/);
+  assert.throws(() => validateTightbeamFreshInstallState({
+    ...evidence,
+    postgresRestart: {
+      ...evidence.postgresRestart,
+      registryShutdown: {
+        ...evidence.postgresRestart.registryShutdown,
+        continuity: { ...evidence.postgresRestart.registryShutdown.continuity, semanticProjectionUnchanged: false },
+      },
+    },
+  }), /fresh_install_registry_shutdown_projection_not_verified/);
+  assert.throws(() => validateTightbeamFreshInstallState({
+    ...evidence,
+    cleanup: { ...evidence.cleanup, postgresStopped: false },
+  }), /fresh_install_owned_process_cleanup_unverified/);
+  assert.throws(() => validateTightbeamFreshInstallState({
+    ...evidence,
+    afterRestart: phase({ directClientEndpoint: "ws://127.0.0.1:19002/ws" }),
+  }), /fresh_install_endpoint_changed_after_restart/);
+});
+
+test("fresh-install wrong-surface probe omits fixture metadata from the packaged CLI request", async () => {
+  const fixture = await fs.readFile(path.join(repository, "scripts/release/tightbeam-state-smoke-fixture.ts"), "utf8");
+  const start = fixture.indexOf("async function rejectedWrongSurfacePush(");
+  const end = fixture.indexOf("\nfunction summarizeFreshInstallPhase", start);
+  assert.ok(start >= 0 && end > start);
+  const helper = fixture.slice(start, end);
+  assert.match(helper, /const \{ expectedSurfaceId, \.\.\.request \} = input;/);
+  assert.match(helper, /const inputJson = JSON\.stringify\(request\);/);
+  assert.match(helper, /unknown_surface:\$\{request\.surfaceId\}/);
+  assert.match(helper, /input: request/);
+  assert.doesNotMatch(helper, /JSON\.stringify\(input\)/);
+  const returnedSummary = helper.slice(helper.lastIndexOf("  return {"));
+  assert.match(returnedSummary, /request,/,
+    "the smoke summary must use the request field consumed by the independent validator");
+  assert.doesNotMatch(returnedSummary, /input: request/);
+});
+
+test("Linux fresh-install acceptance is based on direct current-content evidence", () => {
+  const phase = (contentId = "linux-fresh-install-content") => ({
+    capture: { contentId, paneId: 1, requestSurfaceId: "sf_fresh", responseSurfaceId: null, visibleText: "fresh-install-visible-marker" },
+    clientIdentity: "1234abcd",
+    clientAppVersion: TIGHTBEAM.version,
+    clientAppVersionEvidenceSha256: "d".repeat(64),
+    commandRoute: "direct-client-websocket",
+    controllerIdentity: "ctl_fresh",
+    currentRead: {
+      cacheStatus: "current",
+      consumableLoss: null,
+      content: { recordClass: "content", payload: { contentId, historyEntryId: "he_fresh", paneId: 1, revision: 1, surfaceId: "sf_fresh" } },
+      contentId,
+      scopeId: "pane:sf_fresh:1",
+    },
+    databaseIdentity: "db_fresh",
+    directClientEndpoint: "ws://127.0.0.1:19001/ws",
+    paneId: 1,
+    paneLabel: 1,
+    registeredClientId: `1234abcd${"a".repeat(56)}`,
+    registeredPaneIds: [1],
+    registeredPaneLabel: 1,
+    registeredSurfaceId: "sf_fresh",
+    registeredWindowLabel: "a",
+    registrationIdentity: `1234abcd${"a".repeat(56)}`,
+    registryEndpoint: "ws://127.0.0.1:19999/ws",
+    sourceCommit: TIGHTBEAM.candidateCommit,
+    surfaceId: "sf_fresh",
+    windowLabel: "a",
+  });
+  const projection = "b".repeat(64);
+  const contentId = "linux-fresh-install-content";
+  const state = {
+    mode: "fresh-install",
+    sourceCommit: TIGHTBEAM.candidateCommit,
+    displayReady: { display: ":99", probeSha256: "a".repeat(64), status: "verified", tool: "xdpyinfo" },
+    expectedContentId: contentId,
+    expectedVisibleText: "fresh-install-visible-marker",
+    expectedVersion: TIGHTBEAM.version,
+    initial: phase(contentId),
+    afterRestart: phase(contentId),
+    wrongSurfaceRejection: {
+      directClientEndpoint: "ws://127.0.0.1:19001/ws",
+      expectedSurfaceId: "sf_fresh",
+      requestedSurfaceId: "sf_wrong",
+      status: "rejected",
+      errorCode: "unknown_surface",
+    },
+    postgresRestart: {
+      status: "verified",
+      databaseIdentity: "db_fresh",
+      projectionBeforeSha256: projection,
+      projectionAfterSha256: projection,
+      registryShutdown: {
+        activeProjectionSha256: "c".repeat(64),
+        releasedProjectionSha256: projection,
+        continuity: {
+          appendedRevisionHeads: 1,
+          custodyRevisionDelta: 1,
+          journalHeadUnchanged: true,
+          leaseGenerationDelta: 1,
+          ok: true,
+          phase: "released",
+          semanticProjectionUnchanged: true,
+        },
+      },
+      witnessSynchronized: true,
+      registryHealth: { event: "health", status: "healthy", transport: "websocket-open" },
+      registryShutdownClean: true,
+      initialRegistryHealth: { event: "health", status: "healthy", transport: "websocket-open" },
+      schema: { has_fleets: true, has_journal: true, has_read_state: true, has_journal_validator: true },
+      lifecycle: {
+        primary: { stopExitCode: 0, startExitCode: 0, pidBefore: 100, pidAfter: 101, stopStdout: "stopped", startStdout: "started" },
+        witness: { stopExitCode: 0, startExitCode: 0, pidBefore: 200, pidAfter: 201, stopStdout: "stopped", startStdout: "started" },
+      },
+    },
+    cleanup: { clientStopped: true, registryStopped: true, postgresStopped: true },
+  };
+  assert.equal(validateTightbeamFreshInstallState(state).status, "passed");
+});
+
+test("Linux fresh-install state driver binds candidate-only inputs and packaged CLI evidence", async (t) => {
+  const root = await temporary(t);
+  const output = path.join(root, "fresh-install-state.json");
+  const stateRoot = path.join(root, "state");
+  const driver = path.join(root, "tightbeam-state-smoke-fixture.ts");
+  const productSourceDir = path.join(root, "product");
+  const tsxLoader = path.join(productSourceDir, "packages/allocator/node_modules/tsx/dist/loader.mjs");
+  await fs.mkdir(path.dirname(tsxLoader), { recursive: true });
+  await fs.writeFile(tsxLoader, "export {};\n");
+  const initialEndpoint = "ws://127.0.0.1:19001/ws";
+  const contentId = "linux-fresh-install-content";
+  const visibleText = "fresh-install-visible-marker";
+  const clientIdentity = "1234abcd";
+  const registrationIdentity = `${clientIdentity}${"a".repeat(56)}`;
+  const phase = (endpoint) => ({
+    capture: { contentId, paneId: 1, requestSurfaceId: "sf_fresh", responseSurfaceId: null, visibleText },
+    clientIdentity,
+    clientAppVersion: TIGHTBEAM.version,
+    clientAppVersionEvidenceSha256: "d".repeat(64),
+    commandRoute: "direct-client-websocket",
+    controllerIdentity: "ctl_fresh",
+    currentRead: {
+      cacheStatus: "current",
+      consumableLoss: null,
+      content: {
+        recordClass: "content",
+        payload: {
+          contentId,
+          historyEntryId: "he_fresh_install_1",
+          paneId: 1,
+          revision: 1,
+          surfaceId: "sf_fresh",
+        },
+      },
+      contentId,
+      scopeId: "pane:sf_fresh:1",
+    },
+    databaseIdentity: "db_fresh",
+    directClientEndpoint: endpoint,
+    paneId: 1,
+    paneLabel: 1,
+    registeredClientId: registrationIdentity,
+    registeredPaneIds: [1],
+    registeredPaneLabel: 1,
+    registeredSurfaceId: "sf_fresh",
+    registeredWindowLabel: "a",
+    registrationIdentity,
+    registryEndpoint: "ws://127.0.0.1:19999/ws",
+    sourceCommit: TIGHTBEAM.candidateCommit,
+    surfaceId: "sf_fresh",
+    windowLabel: "a",
+  });
+  const stateSequence = {
+    mode: "fresh-install",
+    sourceCommit: TIGHTBEAM.candidateCommit,
+    expectedVersion: TIGHTBEAM.version,
+    displayReady: { display: ":99", probeSha256: "a".repeat(64), status: "verified", tool: "xdpyinfo" },
+    expectedContentId: contentId,
+    expectedVisibleText: visibleText,
+    initial: phase(initialEndpoint),
+    afterRestart: phase(initialEndpoint),
+    wrongSurfaceRejection: {
+      directClientEndpoint: initialEndpoint,
+      endpoint: initialEndpoint,
+      expectedSurfaceId: "sf_fresh",
+      requestedSurfaceId: "sf_wrong",
+      status: "rejected",
+      errorCode: "unknown_surface",
+      request: { surfaceId: "sf_wrong" },
+      rawOutput: "unknown_surface:sf_wrong",
+    },
+    postgresRestart: {
+      status: "verified",
+      databaseIdentity: "db_fresh",
+      projectionBeforeSha256: "b".repeat(64),
+      projectionAfterSha256: "b".repeat(64),
+      registryShutdown: {
+        activeProjectionSha256: "c".repeat(64),
+        releasedProjectionSha256: "b".repeat(64),
+        continuity: {
+          appendedRevisionHeads: 1,
+          custodyRevisionDelta: 1,
+          journalHeadUnchanged: true,
+          leaseGenerationDelta: 1,
+          ok: true,
+          phase: "released",
+          semanticProjectionUnchanged: true,
+        },
+      },
+      witnessSynchronized: true,
+      registryHealth: { event: "health", status: "healthy", transport: "websocket-open" },
+      registryShutdownClean: true,
+      initialRegistryHealth: { event: "health", status: "healthy", transport: "websocket-open" },
+      schema: { has_fleets: true, has_journal: true, has_read_state: true, has_journal_validator: true },
+      lifecycle: {
+        primary: { stopExitCode: 0, startExitCode: 0, pidBefore: 100, pidAfter: 101, stopStdout: "stopped", startStdout: "started" },
+        witness: { stopExitCode: 0, startExitCode: 0, pidBefore: 200, pidAfter: 201, stopStdout: "stopped", startStdout: "started" },
+      },
+    },
+    cleanup: { clientStopped: true, registryStopped: true, postgresStopped: true },
+  };
+  const events = [];
+  const record = (command, input, endpoint, response = {}) => {
+    const inputJson = JSON.stringify(input);
+    const args = ["--state-root", path.join(stateRoot, "cli")];
+    if (endpoint) args.push("--endpoint", endpoint, "--product-label", "Surf Ace release smoke");
+    args.push(command, "--input-json", inputJson);
+    const output = { command, controllerInstanceId: "ctl_fresh", ok: true, result: { ok: true, ...response } };
+    const stdout = JSON.stringify(output);
+    events.push({ args, command, endpoint: endpoint ?? null, input, inputJson,
+      route: endpoint ? "direct-client-websocket" : "endpointless-local-read", status: 0,
+      stderr: "", output, stdout });
+  };
+  const listed = { surfaces: [{ surfaceId: "sf_fresh", topology: { panes: [{ paneId: 1 }] } }] };
+  const capture = { contentId, paneId: 1, surfaceId: null, visibleText };
+  const read = {
+    cacheStatus: "current",
+    consumableLoss: null,
+    currentContentRecord: {
+      recordClass: "content",
+      payload: {
+        contentId,
+        historyEntryId: "he_fresh_install_1",
+        paneId: 1,
+        revision: 1,
+        surfaceId: "sf_fresh",
+      },
+    },
+    scopeId: "pane:sf_fresh:1",
+  };
+  record("list", {}, initialEndpoint, listed);
+  record("push", { content: { html: `<main>${visibleText}</main>` }, contentId, paneId: 1, surfaceId: "sf_fresh" }, initialEndpoint);
+  record("capture-pane", { includeImage: true, paneId: 1, surfaceId: "sf_fresh" }, initialEndpoint, capture);
+  record("read", { scopeId: "pane:sf_fresh:1" }, null, read);
+  events.push({
+    args: ["--state-root", path.join(stateRoot, "cli"), "--endpoint", initialEndpoint,
+      "--product-label", "Surf Ace release smoke", "push", "--input-json",
+      JSON.stringify({ contentId: `${contentId}-wrong-surface`, paneId: 1, surfaceId: "sf_wrong" })],
+    command: "push",
+    endpoint: initialEndpoint,
+    expectedRejection: { code: "unknown_surface", expectedSurfaceId: "sf_fresh", requestedSurfaceId: "sf_wrong" },
+    input: { contentId: `${contentId}-wrong-surface`, paneId: 1, surfaceId: "sf_wrong" },
+    inputJson: JSON.stringify({ contentId: `${contentId}-wrong-surface`, paneId: 1, surfaceId: "sf_wrong" }),
+    route: "direct-client-websocket", status: 1, stderr: "", stdout: "unknown_surface:sf_wrong",
+  });
+  record("capture-pane", { includeImage: true, paneId: 1, surfaceId: "sf_fresh" }, initialEndpoint, capture);
+  record("read", { scopeId: "pane:sf_fresh:1" }, null, read);
+  record("list", {}, initialEndpoint, listed);
+  record("capture-pane", { includeImage: true, paneId: 1, surfaceId: "sf_fresh" }, initialEndpoint, capture);
+  record("read", { scopeId: "pane:sf_fresh:1" }, null, read);
+  const bytes = Buffer.from(`${events.map((event) => JSON.stringify(event)).join("\n")}\n`);
+  Object.assign(stateSequence, {
+    rawCliEvidenceBase64: bytes.toString("base64"),
+    rawCliEvidenceBytes: bytes.byteLength,
+    rawCliEvidenceSha256: createHash("sha256").update(bytes).digest("hex"),
   });
   let calls = 0;
   const options = {
-    baselineCommit: TIGHTBEAM.baselineCommit,
-    baselineRoot: path.join(root, "baseline"),
     candidateCommit: TIGHTBEAM.candidateCommit,
+    candidateElectron: path.join(root, "candidate-electron/Surf Ace/surf-ace"),
     candidateRoot: path.join(root, "candidate"),
-    driver: path.join(root, "driver.mjs"),
+    cliBinary: path.join(root, "cli/bin/surf-ace"),
+    driver,
     output,
-    stateRoot: path.join(root, "state"),
+    productSourceDir,
+    stateRoot,
   };
-  const execute = async (command, args) => {
-    calls++;
+  const result = await runLinuxFreshInstallStateDriver(options, async (command, args, invocationOptions) => {
+    calls += 1;
     assert.equal(command, process.execPath);
     assert.deepEqual(args, [
-      options.driver,
-      "--baseline-commit", options.baselineCommit,
-      "--baseline-root", options.baselineRoot,
+      "--import", tsxLoader,
+      driver,
+      "--mode", "fresh-install",
       "--candidate-commit", options.candidateCommit,
+      "--expected-version", TIGHTBEAM.version,
+      "--candidate-electron", options.candidateElectron,
       "--candidate-root", options.candidateRoot,
+      "--cli-binary", options.cliBinary,
+      "--product-source", options.productSourceDir,
       "--output", options.output,
       "--state-root", options.stateRoot,
     ]);
-    await fs.writeFile(output, JSON.stringify({ baselineBefore, candidateAfter, rollbackAfter }));
-  };
-  assert.equal((await runLinuxStateDriver(options, execute)).status, "passed");
+    assert.equal(invocationOptions.env.SURF_ACE_CLIENT_DIAGNOSTIC_LOG, path.join(stateRoot, "client-flight-recorder.log"));
+    assert.equal(args.includes("--baseline-commit"), false);
+    await fs.writeFile(output, JSON.stringify(stateSequence));
+  });
   assert.equal(calls, 1);
-  await assert.rejects(runLinuxStateDriver(options, async () => {
-    await fs.writeFile(output, JSON.stringify({
-      baselineBefore,
-      candidateAfter: {
-        ...candidateAfter,
-        semanticState: { ...retained, content: { "candidate-write": { contentId: "candidate-write" } } },
-      },
-      rollbackAfter,
-    }));
-  }), /candidate_discarded_baseline_content/);
-});
-
-test("canonical spec and workflows preserve reviewed bytes and immutable action pins", async () => {
-  const repository = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../..");
-  const specificationPath = path.join(repository, "docs/release/openclaw-tightbeam-release-split.md");
-  const specification = await fs.readFile(specificationPath, "utf8");
-  assert.equal(await sha256(specificationPath), "b3532729738dd610e66455e2e5d96228082a9d9db089474f74bc6ab48aad58f6");
-  assert.match(specification, /58ac8c435679e6611903d31abaecec11bb9d7f75/);
-  assert.match(specification, /8fc9f508ae9b4371a3c25f6318920940fbad10cd/);
-  assert.match(specification, /cf91ef1baab26d6045fac5300487c29d0ddf332d/);
-  assert.match(specification, /surf-ace-release-tooling-v0\.1\.1/);
-  assert.match(specification, /surf-ace-release-tooling-openclaw-v0\.1\.3/);
-  assert.match(specification, /surf-ace-release-tooling-openclaw-v0\.1\.4/);
-  assert.match(specification, /801fc08047886028bd6fefc4ce35c8be04f7dff4/);
-  assert.match(specification, /3e9675d0579f1ed46bf7310cee720efeb8e32997/);
-  assert.match(specification, /att_ea20cac9/);
-  assert.match(specification, /art_bab59fdf/);
-  assert.match(specification, /consumed predecessor\s+`surf-ace-release-tooling-openclaw-v0\.1\.2` remains immutable history/);
-  assert.equal((specification.match(/surf-ace-release-tooling-v0\.1\.0/g) ?? []).length, 1);
-  assert.match(specification, /surf-ace-release-tooling-v0\.1\.0` points to\n`9d8ca5a490a32a57c5177e4769aef4100dd5f5bf`/);
-  assert.match(specification, /incident tag `surf-ace-release-tooling-openclaw-v0\.1\.1` is present and\nreserved/);
-  assert.match(specification, /26ce99cf43463e817c5322c8793bcdd2d9eadc2e/);
-  assert.match(specification, /failed Gate 4 runs `36222148637` and `36222183104`/);
-  assert.doesNotMatch(specification, /absent incident|currently absent incident/);
-  assert.match(specification, /surf-ace-tightbeam-v0\.2\.0` always resolves to exact product commit/);
-  assert.match(specification, /Any copied or generated rendering is non-authoritative/);
-  assert.doesNotMatch(specification, /surf-ace-tightbeam-v0\.2\.0` at the exact new `main` commit/);
-  assert.doesNotMatch(specification, /resident controller, thin Rust CLI, systemd unit/);
-  for (const file of OPENCLAW.files) assert.match(specification, new RegExp(file.replaceAll(".", "\\.")));
-  const correctionCommand = [
-    "node tooling/scripts/release/build-openclaw-release.mjs",
-    "--source-dir source",
-    "--output-dir build/release/openclaw",
-    `--source-tag ${OPENCLAW.sourceTag}`,
-    `--source-commit ${OPENCLAW.candidateCommit}`,
-    `--version ${OPENCLAW.version}`,
-  ];
-  const correctionBlock = specification.match(/The Product P Gate 4 builder invocation is exactly:\n\n```sh\n([\s\S]*?)\n```/);
-  assert.ok(correctionBlock, "missing Product P builder command block");
-  assert.deepEqual(
-    correctionBlock[1].replaceAll(/\\\n\s*/g, " ").split(" ").filter(Boolean),
-    correctionCommand.flatMap((part) => part.split(" ")),
-  );
-  const openclawCommandsMarker = "Instead, it must run these exact build and frozen-deployment commands:\n\n```sh\n";
-  const openclawCommandsOffset = specification.indexOf(openclawCommandsMarker);
-  assert.notEqual(openclawCommandsOffset, -1, "missing canonical OpenClaw build command block");
-  const openclawCommandsEnd = specification.indexOf("\n```", openclawCommandsOffset + openclawCommandsMarker.length);
-  assert.notEqual(openclawCommandsEnd, -1, "unterminated canonical OpenClaw build command block");
-  const documentedOpenclawCommands = specification
-    .slice(openclawCommandsOffset + openclawCommandsMarker.length, openclawCommandsEnd)
-    .replaceAll(/\\\n\s*/g, " ")
-    .split("\n")
-    .filter(Boolean);
-  assert.deepEqual(documentedOpenclawCommands, OPENCLAW_BUILD_COMMANDS.slice(2, -1));
-  assert.equal(documentedOpenclawCommands.filter((command) => command.includes("--publish never")).length, 1);
-  assert.ok(documentedOpenclawCommands.every((command) => !command.endsWith("@surf-ace/electron package")));
-  assert.ok((await lockedPackages(path.join(repository, "pnpm-lock.yaml"))).size > 100);
-  assert.ok((await cargoLockedPackages(path.join(repository, "packages/cli/Cargo.lock"))).length > 10);
-  for (const workflow of ["release-openclaw.yml", "release-openclaw-gate5.yml", "release-tightbeam.yml"]) {
-    const workflowPath = path.join(repository, ".github/workflows", workflow);
-    const text = await fs.readFile(workflowPath, "utf8");
-    await exec("ruby", ["-e", "require 'yaml'; YAML.load_file(ARGV.fetch(0))", workflowPath]);
-    for (const match of text.matchAll(/^\s*uses:\s*([^\s]+)$/gm)) {
-      assert.match(match[1], /@[0-9a-f]{40}$/);
-    }
-    if (workflow !== "release-openclaw-gate5.yml") {
-      assert.match(text, /git -C source diff --exit-code HEAD -- \./);
-      assert.match(text, /git -C source diff --cached --exit-code HEAD -- \./);
-    }
-  }
-  const tightbeamWorkflow = await fs.readFile(path.join(repository, ".github/workflows/release-tightbeam.yml"), "utf8");
-  assert.doesNotMatch(tightbeamWorkflow, /workflow_dispatch/);
-  assert.match(tightbeamWorkflow, /release\/run-tightbeam-v0\.2\.0/);
-  assert.match(tightbeamWorkflow, /test "\$\{GITHUB_REF\}" = "\$\{TRIGGER_REF\}"/);
-  assert.match(tightbeamWorkflow, /--output linux-smoke-receipt\.json/);
-  assert.match(tightbeamWorkflow, /--output macos-smoke-receipt\.json/);
-  assert.match(tightbeamWorkflow, /subject-path: release\/\.receipts\/linux-smoke-receipt\.json/);
-  assert.match(tightbeamWorkflow, /subject-path: release\/\.receipts\/macos-smoke-receipt\.json/);
-  assert.match(tightbeamWorkflow, /PRODUCT_COMMIT: 8fc9f508ae9b4371a3c25f6318920940fbad10cd/);
-  assert.match(tightbeamWorkflow, /TOOLING_TAG: surf-ace-release-tooling-v0\.1\.1/);
-  assert.match(tightbeamWorkflow, /tooling_remote="\$\(peel_tag "\$\{TOOLING_TAG\}"\)"/);
-  assert.match(tightbeamWorkflow, /test "\$\{tooling_remote\}" = "\$\{GITHUB_SHA\}"/);
-  assert.match(tightbeamWorkflow, /ref: cf91ef1baab26d6045fac5300487c29d0ddf332d/);
-  assert.doesNotMatch(tightbeamWorkflow, /24b4a389|ec623c546|package:linux|surf-ace-runtime|systemd-analyze/);
-  assert.match(tightbeamWorkflow, /^  attest-and-publish:\n    needs: \[smoke-linux, smoke-macos\]/m);
-});
-
-test("OpenClaw Gate 4 dispatch cannot reach smoke or publication", async () => {
-  const repository = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../..");
-  const workflow = await fs.readFile(path.join(repository, ".github/workflows/release-openclaw.yml"), "utf8");
-  assert.match(workflow, /workflow_dispatch:/);
-  assert.doesNotMatch(workflow, /^\s+push:/m);
-  assert.match(workflow, /TOOLING_TAG: \$\{\{ github\.ref_name \}\}/);
-  assert.match(workflow, /test "\$\{GITHUB_REF_TYPE\}" = tag/);
-  assert.match(workflow, /test "\$\{TOOLING_TAG\}" = surf-ace-release-tooling-openclaw-v0\.1\.4/);
-  assert.match(workflow, /PRODUCT_COMMIT: 801fc08047886028bd6fefc4ce35c8be04f7dff4/);
-  assert.match(workflow, /PRODUCT_TREE: 3e9675d0579f1ed46bf7310cee720efeb8e32997/);
-  assert.match(workflow, /PRODUCT_TAG: surf-ace-openclaw-v0\.1\.1/);
-  assert.match(workflow, /group: surf-ace-openclaw-v0\.1\.1/);
-  assert.match(workflow, /--version 0\.1\.1/);
-  for (const file of OPENCLAW.files) assert.match(workflow, new RegExp(file.replaceAll(".", "\\.")));
-  assert.doesNotMatch(workflow, /v0\.1\.0/);
-  assert.match(workflow, /test "\$\{GITHUB_REF\}" = "refs\/tags\/\$\{TOOLING_TAG\}"/);
-  assert.match(workflow, /tooling_remote="\$\(peel_tag "\$\{TOOLING_TAG\}"\)"/);
-  assert.match(workflow, /test "\$\{tooling_remote\}" = "\$\{GITHUB_SHA\}"/);
-  assert.doesNotMatch(workflow, /surf-ace-release-tooling-v0\.1\.1/);
-  assert.match(workflow, /^  build:\n    needs: guard/m);
-  assert.match(workflow, /^  compare:\n    needs: build/m);
-  assert.match(workflow, /^  compare:/m);
-  assert.doesNotMatch(workflow, /^  smoke:/m);
-  assert.doesNotMatch(workflow, /^  attest-and-publish:/m);
-  assert.doesNotMatch(workflow, /^\s+contents: write$/m);
-  assert.doesNotMatch(workflow, /^\s+id-token:/m);
-  assert.doesNotMatch(workflow, /^\s+attestations:/m);
-});
-
-test("OpenClaw Gate 4 builds imported workspace prerequisites before extension tests and stops on failure", async (t) => {
-  const repository = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../..");
-  const workflow = await fs.readFile(path.join(repository, ".github/workflows/release-openclaw.yml"), "utf8");
-  const marker = "      - name: Run exact OpenClaw tests without changing tracked inputs\n        run: |\n";
-  const markerOffset = workflow.indexOf(marker);
-  assert.notEqual(markerOffset, -1, "missing exact OpenClaw test step");
-  const lines = workflow.slice(markerOffset + marker.length).split("\n");
-  const body = [];
-  for (const line of lines) {
-    if (line.startsWith("          ")) body.push(line.slice(10));
-    else if (line === "") body.push("");
-    else break;
-  }
-  const script = body.join("\n").trimEnd();
-  const expected = [
-    "guard",
-    "pnpm --dir source --filter @surf-ace/protocol build",
-    "guard",
-    "pnpm --dir source --filter @surf-ace/controller build",
-    "guard",
-    "pnpm --dir source/packages/extension exec sh -c 'node --import tsx --test src/*.test.ts scripts/*.test.mjs'",
-    "guard",
-    "pnpm --dir source --filter @surf-ace/controller test",
-    "guard",
-    "pnpm --dir source --filter @surf-ace/protocol test",
-    "guard",
-    "pnpm --dir source --filter @surf-ace/electron build",
-    "guard",
-    "pnpm --dir source/packages/electron exec node --test --test-concurrency=1 ./dist/test/*.test.js",
-    "guard",
-  ];
-  assert.equal(
-    OPENCLAW_TEST_COMMANDS.at(-1),
-    "pnpm --dir source/packages/electron exec node --test --test-concurrency=1 ./dist/test/*.test.js",
-  );
-  let offset = -1;
-  for (const command of expected) {
-    const next = script.indexOf(command, offset + 1);
-    assert.ok(next > offset, `missing or misordered Gate 4 command: ${command}`);
-    offset = next;
-  }
-
-  const root = await temporary(t);
-  const bin = path.join(root, "bin");
-  const log = path.join(root, "pnpm.log");
-  await fs.mkdir(bin);
-  await fs.writeFile(path.join(bin, "git"), `#!/bin/sh
-if test "$3" = rev-parse; then
-  case "$4" in
-    HEAD) printf '%s\\n' '${openclawProductCommit}' ;;
-    'HEAD^{tree}') printf '%s\\n' '3e9675d0579f1ed46bf7310cee720efeb8e32997' ;;
-    *) exit 92 ;;
-  esac
-fi
-exit 0
-`, { mode: 0o755 });
-  await fs.writeFile(path.join(bin, "pnpm"), "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$PNPM_LOG\"\nif test \"$*\" = \"$FAIL_COMMAND\"; then exit 29; fi\n", { mode: 0o755 });
-  const runStep = async (failCommand) => {
-    await fs.writeFile(log, "");
-    const result = exec("/bin/bash", ["-c", script], {
-      cwd: root,
-      env: {
-        ...process.env,
-        PATH: `${bin}:${process.env.PATH}`,
-        PNPM_LOG: log,
-        FAIL_COMMAND: failCommand,
-        PRODUCT_COMMIT: openclawProductCommit,
-        PRODUCT_TREE: "3e9675d0579f1ed46bf7310cee720efeb8e32997",
-      },
-    });
-    if (failCommand) await assert.rejects(result);
-    else await result;
-    return (await fs.readFile(log, "utf8")).trim().split("\n").filter(Boolean);
+  assert.equal(result.mode, "fresh-install");
+  assert.equal(result.status, "passed");
+  assert.equal(result.rawCliEvidence.events.length, 10);
+  assert.equal(result.rawCliEvidence.events.at(-1).command, "read");
+  const unacceptedPushEvents = events.map((event, index) => index === 1
+    ? { ...event, output: { ...event.output, ok: false }, stdout: JSON.stringify({ ...event.output, ok: false }) }
+    : event);
+  const unacceptedPushBytes = Buffer.from(`${unacceptedPushEvents.map((event) => JSON.stringify(event)).join("\n")}\n`);
+  const unacceptedPushSequence = {
+    ...stateSequence,
+    rawCliEvidenceBase64: unacceptedPushBytes.toString("base64"),
+    rawCliEvidenceBytes: unacceptedPushBytes.byteLength,
+    rawCliEvidenceSha256: createHash("sha256").update(unacceptedPushBytes).digest("hex"),
   };
-
-  assert.deepEqual(await runStep("--dir source --filter @surf-ace/protocol build"), [
-    "--dir source --filter @surf-ace/protocol build",
-  ]);
-  assert.deepEqual(await runStep("--dir source --filter @surf-ace/controller build"), [
-    "--dir source --filter @surf-ace/protocol build",
-    "--dir source --filter @surf-ace/controller build",
-  ]);
-  assert.deepEqual(await runStep(""), [
-    "--dir source --filter @surf-ace/protocol build",
-    "--dir source --filter @surf-ace/controller build",
-    "--dir source/packages/extension exec sh -c node --import tsx --test src/*.test.ts scripts/*.test.mjs",
-    "--dir source --filter @surf-ace/controller test",
-    "--dir source --filter @surf-ace/protocol test",
-    "--dir source --filter @surf-ace/electron build",
-    "--dir source/packages/electron exec node --test --test-concurrency=1 ./dist/test/*.test.js",
-  ]);
+  await assert.rejects(runLinuxFreshInstallStateDriver(options, async () => {
+    await fs.writeFile(output, JSON.stringify(unacceptedPushSequence));
+  }), /linux_fresh_install_raw_cli_stdout_result_mismatch/);
+  const invalidEvents = [...events.map((event) => ({ ...event }))];
+  invalidEvents[4] = {
+    ...invalidEvents[4],
+    expectedRejection: { ...invalidEvents[4].expectedRejection, code: "accepted" },
+  };
+  const invalidRawBytes = Buffer.from(`${invalidEvents.map((event) => JSON.stringify(event)).join("\n")}\n`);
+  const invalidSequence = {
+    ...stateSequence,
+    rawCliEvidenceBase64: invalidRawBytes.toString("base64"),
+    rawCliEvidenceBytes: invalidRawBytes.byteLength,
+    rawCliEvidenceSha256: createHash("sha256").update(invalidRawBytes).digest("hex"),
+  };
+  await assert.rejects(runLinuxFreshInstallStateDriver(options, async () => {
+    await fs.writeFile(output, JSON.stringify(invalidSequence));
+  }), /linux_fresh_install_raw_cli_unexpected_nonzero_result/);
+  const wrongCurrentRecordEvents = events.map((event) => {
+    if (event.command !== "read") return event;
+    const outputWithWrongTarget = {
+      ...event.output,
+      result: {
+        ...event.output.result,
+        currentContentRecord: {
+          ...event.output.result.currentContentRecord,
+          payload: { ...event.output.result.currentContentRecord.payload, surfaceId: "sf_wrong" },
+        },
+      },
+    };
+    return { ...event, output: outputWithWrongTarget, stdout: JSON.stringify(outputWithWrongTarget) };
+  });
+  const wrongCurrentRecordBytes = Buffer.from(`${wrongCurrentRecordEvents.map((event) => JSON.stringify(event)).join("\n")}\n`);
+  const wrongCurrentRecordSequence = {
+    ...stateSequence,
+    rawCliEvidenceBase64: wrongCurrentRecordBytes.toString("base64"),
+    rawCliEvidenceBytes: wrongCurrentRecordBytes.byteLength,
+    rawCliEvidenceSha256: createHash("sha256").update(wrongCurrentRecordBytes).digest("hex"),
+  };
+  await assert.rejects(runLinuxFreshInstallStateDriver(options, async () => {
+    await fs.writeFile(output, JSON.stringify(wrongCurrentRecordSequence));
+  }), /linux_fresh_install_current_content_read_evidence_missing/);
+  const wrongCaptureSurfaceEvents = events.map((event) => {
+    if (event.command !== "capture-pane") return event;
+    const outputWithWrongTarget = {
+      ...event.output,
+      result: { ...event.output.result, surfaceId: "sf_wrong" },
+    };
+    return { ...event, output: outputWithWrongTarget, stdout: JSON.stringify(outputWithWrongTarget) };
+  });
+  const wrongCaptureSurfaceBytes = Buffer.from(`${wrongCaptureSurfaceEvents.map((event) => JSON.stringify(event)).join("\n")}\n`);
+  const wrongCaptureSurfaceSequence = {
+    ...stateSequence,
+    rawCliEvidenceBase64: wrongCaptureSurfaceBytes.toString("base64"),
+    rawCliEvidenceBytes: wrongCaptureSurfaceBytes.byteLength,
+    rawCliEvidenceSha256: createHash("sha256").update(wrongCaptureSurfaceBytes).digest("hex"),
+  };
+  await assert.rejects(runLinuxFreshInstallStateDriver(options, async () => {
+    await fs.writeFile(output, JSON.stringify(wrongCaptureSurfaceSequence));
+  }), /linux_fresh_install_direct_capture_target_mismatch/);
+  await assert.rejects(runLinuxFreshInstallStateDriver(options, async () => {
+    await fs.writeFile(output, JSON.stringify({ ...stateSequence, rawCliEvidenceSha256: "c".repeat(64) }));
+  }), /raw_cli_evidence_digest_mismatch/);
 });
 
-test("OpenClaw Gate 5 requires a separate exact successful Gate 4 run", async () => {
-  const repository = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../..");
-  const workflow = await fs.readFile(path.join(repository, ".github/workflows/release-openclaw-gate5.yml"), "utf8");
-  assert.match(workflow, /workflow_dispatch:/);
-  assert.doesNotMatch(workflow, /^\s+push:/m);
-  assert.match(workflow, /gate4_run_id:/);
-  assert.match(workflow, /TOOLING_TAG: \$\{\{ github\.ref_name \}\}/);
-  assert.match(workflow, /test "\$\{TOOLING_TAG\}" = surf-ace-release-tooling-openclaw-v0\.1\.4/);
-  assert.match(workflow, /PRODUCT_COMMIT: 801fc08047886028bd6fefc4ce35c8be04f7dff4/);
-  assert.match(workflow, /PRODUCT_TAG: surf-ace-openclaw-v0\.1\.1/);
-  assert.match(workflow, /group: surf-ace-openclaw-v0\.1\.1/);
-  for (const file of OPENCLAW.files) assert.match(workflow, new RegExp(file.replaceAll(".", "\\.")));
-  assert.doesNotMatch(workflow, /v0\.1\.0/);
-  assert.match(workflow, /test "\$\{gate4_conclusion\}" = success/);
-  assert.match(workflow, /test "\$\{gate4_head_sha\}" = "\$\{GITHUB_SHA\}"/);
-  assert.match(workflow, /test "\$\{gate4_path\}" = \.github\/workflows\/release-openclaw\.yml/);
-  assert.match(workflow, /run-id: \$\{\{ inputs\.gate4_run_id \}\}/);
-  assert.match(workflow, /^  smoke:\n    needs: guard/m);
-  assert.match(workflow, /^  attest-and-publish:\n    needs: smoke/m);
+test("Linux smoke reports the persisted state-driver failure and subprocess diagnostics", async (t) => {
+  const root = await temporary(t);
+  const output = path.join(root, "fresh-install-state.json");
+  const productSourceDir = path.join(root, "product");
+  const tsxLoader = path.join(productSourceDir, "packages/allocator/node_modules/tsx/dist/loader.mjs");
+  await fs.mkdir(path.dirname(tsxLoader), { recursive: true });
+  await fs.writeFile(tsxLoader, "export {};\n");
+  const options = {
+    candidateCommit: TIGHTBEAM.candidateCommit,
+    candidateElectron: path.join(root, "candidate-electron/Surf Ace/surf-ace"),
+    candidateRoot: path.join(root, "candidate"),
+    cliBinary: path.join(root, "cli/bin/surf-ace"),
+    driver: path.join(root, "tightbeam-state-smoke-fixture.ts"),
+    output,
+    productSourceDir,
+    stateRoot: path.join(root, "state"),
+  };
+  const processError = Object.assign(new Error("state driver exited nonzero"), {
+    code: 1,
+    stderr: "client launch failed: ECONNREFUSED 127.0.0.1:19001 password=hunter2",
+    stdout: "",
+  });
+
+  await assert.rejects(runLinuxFreshInstallStateDriver(options, async () => {
+    await fs.mkdir(options.stateRoot, { recursive: true });
+    await fs.writeFile(path.join(options.stateRoot, "client-flight-recorder.log"), [
+      "[surf-ace:app] event=app_launch app_version=0.2.1 platform=linux",
+      "[surf-ace:app] event=window_created error_message=ECONNREFUSED",
+    ].join("\n"));
+    await fs.writeFile(output, JSON.stringify({
+      error: "fresh-install-direct-client-endpoint-timeout:last=ECONNREFUSED",
+      mode: "fresh-install",
+      sourceCommit: TIGHTBEAM.candidateCommit,
+      status: "failed",
+    }));
+    throw processError;
+  }), (error) => {
+    const jobLog = formatSmokeFailure(error);
+    assert.match(jobLog, /fresh-install-direct-client-endpoint-timeout:last=ECONNREFUSED/);
+    assert.match(jobLog, /ECONNREFUSED 127\.0\.0\.1:19001/);
+    assert.match(jobLog, /client_flight_recorder_tail:/);
+    assert.match(jobLog, /event=window_created error_message=ECONNREFUSED/);
+    assert.match(jobLog, /exit_code: 1/);
+    assert.match(jobLog, /stderr:/);
+    assert.match(jobLog, /password=\[REDACTED\]/);
+    assert.doesNotMatch(jobLog, /hunter2/);
+    return true;
+  });
+});
+
+test("smoke CLI writes caught failures to stderr for the hosted job log", async () => {
+  const smokeScript = path.join(repository, "scripts/release/smoke-tightbeam-release.mjs");
+  await assert.rejects(exec(process.execPath, [smokeScript, "--invalid", "value"]), (error) => {
+    assert.equal(error.code, 1);
+    assert.match(error.stderr, /tightbeam_release_smoke_failed/);
+    assert.match(error.stderr, /unknown_argument:--invalid/);
+    return true;
+  });
+});
+
+test("Tightbeam Linux smoke fixture binds adapter dependencies to the exact product checkout", async () => {
+  const fixture = await fs.readFile(path.join(repository, "scripts/release/tightbeam-state-smoke-fixture.ts"), "utf8");
+  const smoke = await fs.readFile(path.join(repository, "scripts/release/smoke-tightbeam-release.mjs"), "utf8");
+  assert.match(fixture, /createRequire\(allocatorPackage\)/);
+  assert.match(fixture, /packages\/allocator\/src\/custody\.ts/);
+  assert.match(fixture, /packages\/protocol\/src\/lockless\.ts/);
+  assert.match(fixture, /allocatorRequire\("pg"\)/);
+  assert.match(fixture, /allocatorRequire\("ws"\)/);
+  assert.match(smoke, /packages\/allocator\/node_modules\/tsx\/dist\/loader\.mjs/);
+  assert.doesNotMatch(fixture, /^import\s+(?:pg|WebSocket)\s+from\s+["'](?:pg|ws)["']/m);
+});
+
+test("task-local PostgreSQL smoke uses disk-backed dynamic shared memory", async () => {
+  const fixture = await fs.readFile(path.join(repository, "scripts/release/tightbeam-state-smoke-fixture.ts"), "utf8");
+  assert.match(fixture, /const primaryData = path\.join\(root, "primary"\)/);
+  assert.match(fixture, /dynamic_shared_memory_type = 'mmap'/);
+});
+
+test("Linux smoke fixture starts through the product TSX loader and rejects retired phase inputs", async () => {
+  const fixture = path.join(repository, "scripts/release/tightbeam-state-smoke-fixture.ts");
+  const loader = path.join(repository, "packages/allocator/node_modules/tsx/dist/loader.mjs");
+  await fs.access(loader);
+  await assert.rejects(exec(process.execPath, ["--import", loader, fixture, "--mode", "transition"]), (error) => {
+    assert.match(error.stderr, /old_version_smoke_mode_forbidden/);
+    assert.doesNotMatch(error.stderr, /Top-level await is currently not supported/);
+    return true;
+  });
+  await assert.rejects(exec(process.execPath, ["--import", loader, fixture, "--baseline-commit", "cf91ef1baab26d6045fac5300487c29d0ddf332d"]), (error) => {
+    assert.match(error.stderr, /old_version_smoke_inputs_forbidden/);
+    assert.doesNotMatch(error.stderr, /Top-level await is currently not supported/);
+    return true;
+  });
+});
+
+
+test("v0.2.1 standalone specification and release gates bind the product and all public assets", async () => {
+  const specification = await fs.readFile(path.join(repository, "docs/release/tightbeam-standalone-v0.2.1.md"), "utf8");
+  const readme = await fs.readFile(path.join(repository, "README.md"), "utf8");
+  const skill = await fs.readFile(path.join(repository, "integrations/tightbeam/skills/surf-ace/SKILL.md"), "utf8");
+  const workflowPath = path.join(repository, ".github/workflows/release-tightbeam.yml");
+  const workflow = await fs.readFile(workflowPath, "utf8");
+  assert.match(specification, /Product source: proposed tag/);
+  assert.match(specification, /f0e3ef58e64347ca721ea83f653d5f80958588d5/);
+  assert.match(specification, /No old-version participant/);
+  assert.match(specification, /surf-ace-release-tooling-tightbeam-v0\.2\.1/);
+  for (const name of TIGHTBEAM_PUBLIC_FILES) assert.ok(specification.includes(name));
+  assert.match(specification, /custom-format backup/);
+  assert.match(specification, /restores only into a\s+separate staged cluster/);
+  assert.match(specification, /packaged CLI connects\s+directly to the selected client's/);
+  assert.match(specification, /Publication is separately opt-in/);
+  assert.match(readme, /surf-ace-tightbeam-skill-v0\.2\.1\.md/);
+  assert.match(readme, /register\s+the verified Markdown file/);
+  assert.match(readme, /sha256sum -c SHA256SUMS/);
+  assert.match(readme, /bare `surf-ace` command/);
+  assert.match(readme, /BIN_DIR="\$HOME\/\.local\/bin"/);
+  assert.match(readme, /export PATH="\$BIN_DIR:\$PATH"/);
+  assert.match(readme, /readlink.*command -v surf-ace/);
+  assert.match(readme, /does not implement a `--version` switch/);
+  assert.match(readme, /do not use `surf-ace --version`/);
+  assert.match(readme, /server archive\s+includes `docs\/OPERATIONS\.md`/);
+  assert.match(readme, /## Install and run/);
+  assert.match(skill, /surf-ace-tightbeam-skill-v0\.2\.1\.md/);
+  assert.match(skill, /register the verified Markdown content/);
+  assert.doesNotMatch(`${readme}\n${skill}`, /\b(?:Racter|Plumbus|Shrdlu|Gibson|Eezo)\b|\/Users\/mike\/|\b100\.64\.\d{1,3}\.\d{1,3}\b/i);
+  assert.match(workflow, /^on:\n  workflow_dispatch:/m);
+  await exec("ruby", ["-e", "require \"yaml\"; YAML.load_file(ARGV.fetch(0))", workflowPath]);
+  for (const match of workflow.matchAll(/^\s*uses:\s*([^\s]+)$/gm)) assert.match(match[1], /@[0-9a-f]{40}$/);
+  assert.match(workflow, /run_smoke:[\s\S]*?default: false/);
+  assert.match(workflow, /publish_release:[\s\S]*?default: false/);
+  assert.match(workflow, /PRODUCT_COMMIT: f0e3ef58e64347ca721ea83f653d5f80958588d5/);
+  assert.match(workflow, /PRODUCT_TAG: surf-ace-tightbeam-v0\.2\.1/);
+  assert.match(workflow, /TOOLING_TAG: surf-ace-release-tooling-tightbeam-v0\.2\.1/);
+  assert.match(workflow, /GITHUB_EVENT_NAME/);
+  assert.match(workflow, /GITHUB_REF_TYPE/);
+  assert.match(workflow, /node tooling\/scripts\/release\/build-tightbeam-release\.mjs/);
+  assert.doesNotMatch(workflow, /build-ios|tightbeam-ios-ipa|xcodebuild archive|-exportArchive|\.ipa\b|IOS_CERTIFICATE|IOS_PROVISIONING_PROFILE|tightbeam-ios-signing/);
+  const linuxStart = workflow.indexOf("  build-linux:\n");
+  const macosStart = workflow.indexOf("  build-macos:\n", linuxStart);
+  const linuxJob = workflow.slice(linuxStart, macosStart);
+  assert.match(linuxJob, /^    defaults:\n      run:\n        shell: bash$/m);
+  const linuxTests = workflowRunScript(workflow, "Install frozen dependencies and run Linux product tests");
+  const linuxBuildOrder = [
+    "pnpm --dir source --filter @surf-ace/protocol build",
+    "pnpm --dir source --filter @surf-ace/allocator build",
+    "pnpm --dir source --filter @surf-ace/controller build",
+    "pnpm --dir source --filter @surf-ace/controller test",
+  ].map((command) => linuxTests.indexOf(command));
+  assert.ok(linuxBuildOrder.every((index) => index >= 0));
+  assert.deepEqual([...linuxBuildOrder].sort((left, right) => left - right), linuxBuildOrder);
+  const linuxSmokeHostDependencies = workflowRunScript(workflow, "Install Linux smoke host dependencies");
+  for (const packageName of ["libpq-dev", "postgresql-16", "postgresql-client-16", "tar", "unzip", "x11-utils", "xauth", "xvfb"]) {
+    assert.ok(linuxSmokeHostDependencies.includes(packageName), `missing Linux smoke host package ${packageName}`);
+  }
+  assert.match(linuxSmokeHostDependencies, /for tool in xvfb-run Xvfb xauth xdpyinfo pg_config tar unzip; do/);
+  assert.match(linuxSmokeHostDependencies, /command -v "\$\{tool\}"/);
+  assert.match(linuxSmokeHostDependencies, /for tool in initdb postgres pg_ctl psql pg_basebackup pg_dump pg_restore; do/);
+  assert.match(linuxSmokeHostDependencies, /linux_smoke_required_postgres_tool_missing/);
+  const linuxNodePin = workflow.indexOf("      - name: Pin Node", workflow.indexOf("  smoke-linux:\n"));
+  const linuxRuntimeDeps = workflow.indexOf("      - name: Install Linux smoke host dependencies", workflow.indexOf("  smoke-linux:\n"));
+  const linuxPrepare = workflow.indexOf("      - name: Prepare the exact candidate product and state driver", workflow.indexOf("  smoke-linux:\n"));
+  const linuxAcceptance = workflow.indexOf("      - name: Run PostgreSQL-backed server, packaged CLI, and Linux client acceptance", workflow.indexOf("  smoke-linux:\n"));
+  assert.ok(linuxNodePin >= 0 && linuxNodePin < linuxRuntimeDeps && linuxRuntimeDeps < linuxPrepare && linuxPrepare < linuxAcceptance);
+  const linuxSmoke = workflowRunScript(workflow, "Run PostgreSQL-backed server, packaged CLI, and Linux client acceptance");
+  assert.match(linuxSmoke, /smoke_tmp="\$\(mktemp -d \/tmp\/sa\.XXXXXX\)"/);
+  assert.match(linuxSmoke, /trap 'rm -rf "\$smoke_tmp"' EXIT/);
+  assert.match(linuxSmoke, /TMPDIR="\$smoke_tmp" xvfb-run -a node tooling\/scripts\/release\/smoke-tightbeam-release\.mjs/);
+  const macosTests = workflowRunScript(workflow, "Install frozen dependencies and run macOS/iPadOS tests");
+  const macosBuildOrder = [
+    "pnpm --dir source --filter @surf-ace/protocol build",
+    "pnpm --dir source --filter @surf-ace/allocator build",
+    "pnpm --dir source --filter @surf-ace/controller build",
+    "pnpm --dir source --filter @surf-ace/electron build",
+    "pnpm --dir source --filter @surf-ace/controller test",
+    "pnpm --dir source --filter @surf-ace/protocol test",
+    "pnpm --dir source --filter @surf-ace/electron test",
+  ].map((command) => macosTests.indexOf(command));
+  assert.ok(macosBuildOrder.every((index) => index >= 0));
+  assert.deepEqual([...macosBuildOrder].sort((left, right) => left - right), macosBuildOrder);
+  const macosSmokeDependencies = workflowRunScript(workflow, "Install packaged Electron inspection dependencies");
+  assert.match(macosSmokeDependencies, /corepack prepare "pnpm@\$\{PNPM_VERSION\}" --activate/);
+  assert.match(macosSmokeDependencies, /pnpm --dir source fetch --frozen-lockfile/);
+  assert.match(macosSmokeDependencies, /pnpm --dir source install --offline --frozen-lockfile/);
+  const macosSmokeDependencyOffset = workflow.indexOf("      - name: Install packaged Electron inspection dependencies\n");
+  const macosSmokeRunOffset = workflow.indexOf("      - name: Run the matching macOS candidate client and CLI smoke\n");
+  assert.ok(macosSmokeRunOffset > macosSmokeDependencyOffset,
+    "macOS smoke must install source package-inspection dependencies before launching the packaged app");
+  assert.ok(workflow.includes("xcodebuild test"), "hosted iPad simulator tests remain distinct from IPA distribution signing");
+  assert.match(workflow, /name: tightbeam-linux-build-a/);
+  assert.match(workflow, /name: tightbeam-linux-build-b/);
+  assert.match(workflow, /name: tightbeam-macos-build-a/);
+  assert.match(workflow, /name: tightbeam-macos-build-b/);
+  assert.match(workflow, /subject-path: release\/\.receipts\/linux-smoke-receipt\.json/);
+  assert.match(workflow, /subject-path: release\/\.receipts\/macos-smoke-receipt\.json/);
+  const compareStart = workflow.indexOf("  compare:\n");
+  const assembleStart = workflow.indexOf("  assemble:\n", compareStart);
+  const compareJob = workflow.slice(compareStart, assembleStart);
+  for (const name of TIGHTBEAM.assets) assert.ok(compareJob.includes(name));
+  assert.match(compareJob, /surf-ace-tightbeam-skill-v0\.2\.1\.md/);
+  assert.match(workflow, /needs: \[assemble, smoke-linux, smoke-macos\]/);
+  for (const command of [
+    "cargo build --manifest-path source/packages/cli/Cargo.toml",
+    "pnpm --dir source --filter @surf-ace/protocol build",
+    "pnpm --dir source --filter @surf-ace/controller build",
+    "pnpm --dir source --filter @surf-ace/electron exec electron-builder",
+  ]) assert.ok(TIGHTBEAM_BUILD_COMMANDS.some((item) => item.startsWith(command)));
+  assert.doesNotMatch(TIGHTBEAM_BUILD_COMMANDS.join("\n"), /xcodebuild archive|-exportArchive|\.ipa\b/);
+  assert.ok(TIGHTBEAM_TEST_COMMANDS.includes("cargo test --manifest-path source/packages/cli/Cargo.toml --locked"));
+  assert.ok(TIGHTBEAM_TEST_COMMANDS.some((command) => command.startsWith("xcodebuild test ")));
+});
+
+test("v0.2.1 release smoke gates bind only matching candidate participants", async () => {
+  const workflow = await fs.readFile(path.join(repository, ".github/workflows/release-tightbeam.yml"), "utf8");
+  const smoke = await fs.readFile(path.join(repository, "scripts/release/smoke-tightbeam-release.mjs"), "utf8");
+  const fixture = await fs.readFile(path.join(repository, "scripts/release/tightbeam-state-smoke-fixture.ts"), "utf8");
+  const specification = await fs.readFile(path.join(repository, "docs/release/tightbeam-standalone-v0.2.1.md"), "utf8");
+
+  assert.equal(Object.hasOwn(TIGHTBEAM, "baselineCommit"), false);
+  for (const input of [workflow, smoke]) assert.doesNotMatch(input, /cf91ef1baab26d6045fac5300487c29d0ddf332d/);
+  assert.doesNotMatch(workflow, /build-smoke-baseline|BASELINE_(?:BACKEND|ELECTRON)|baseline-(?:commit|electron|root)/i);
+  assert.doesNotMatch(smoke, /SURF_ACE_TIGHTBEAM_BASELINE|function smokeLinux\(|runLinuxStateDriver|validateTightbeamStateSequence/);
+  assert.match(workflow, /--candidate-commit f0e3ef58e64347ca721ea83f653d5f80958588d5/);
+  assert.match(smoke, /validateTightbeamFreshInstallState/);
+  assert.match(fixture, /mode: "fresh-install"/);
+  assert.doesNotMatch(fixture, /runPhase\("baseline"|runPhase\("candidate"|runPhase\("rollback"/);
+  assert.match(specification, /Smoke is an explicit candidate-only gate/);
+  assert.match(specification, /Historical old-version results\s+remain archived/);
 });

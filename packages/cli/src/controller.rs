@@ -217,17 +217,12 @@ fn execute_local(invocation: Invocation) -> Result<CliOutput, CliError> {
                 "synchronizationCutoff": null,
             });
         };
-        let current_content_record = scope
-            .records
-            .iter()
-            .filter_map(|record| {
-                let sequence = record.get("sequence").and_then(Value::as_u64)?;
-                (sequence > 0
-                    && record.get("recordClass").and_then(Value::as_str) == Some("content"))
-                .then_some((sequence, record))
-            })
-            .max_by_key(|(sequence, _)| *sequence)
-            .map(|(_, record)| record.clone());
+        update_current_content_from_records(scope, &scope_id);
+        let current_content_record = if scope.synchronized && scope.gap.is_none() {
+            scope.current_content_record.clone()
+        } else {
+            None
+        };
         let records = scope
             .records
             .iter()
@@ -280,6 +275,117 @@ fn execute_local(invocation: Invocation) -> Result<CliOutput, CliError> {
         reconciliations: vec![],
         result,
     })
+}
+
+fn update_current_content_from_records(scope: &mut ScopeProjection, scope_id: &str) {
+    for record in &scope.records {
+        update_current_content(
+            scope_id,
+            record,
+            &mut scope.current_content_record,
+            &mut scope.current_content_sequence,
+        );
+    }
+}
+
+fn update_current_content(
+    scope_id: &str,
+    record: &Value,
+    current_content_record: &mut Option<Value>,
+    current_content_sequence: &mut Option<u64>,
+) {
+    if record.get("recordClass").and_then(Value::as_str) != Some("content") {
+        return;
+    }
+    let Some(sequence) = record
+        .get("sequence")
+        .and_then(Value::as_u64)
+        .filter(|sequence| *sequence > 0)
+    else {
+        return;
+    };
+    if current_content_sequence.is_some_and(|previous| sequence <= previous) {
+        return;
+    }
+
+    *current_content_sequence = Some(sequence);
+    let payload = record.get("payload").unwrap_or(&Value::Null);
+    let explicit_clear = payload.get("operation").and_then(Value::as_str) == Some("content.clear")
+        || (payload.get("currentContentId").is_some_and(Value::is_null)
+            && payload.get("contentId").is_some_and(Value::is_null)
+            && payload.get("contentType").is_some_and(Value::is_null));
+    if explicit_clear || !content_record_matches_scope(record, scope_id) {
+        *current_content_record = None;
+    } else {
+        *current_content_record = Some(record.clone());
+    }
+}
+
+fn content_record_matches_scope(record: &Value, scope_id: &str) -> bool {
+    let payload = record.get("payload").unwrap_or(&Value::Null);
+    let Some(surface_id) = payload.get("surfaceId").and_then(Value::as_str) else {
+        return false;
+    };
+    let Some(pane_id) = payload.get("paneId").and_then(Value::as_u64) else {
+        return false;
+    };
+    scope_id == format!("pane:{}:{pane_id}", encode_scope_component(surface_id))
+}
+
+fn encode_scope_component(value: &str) -> String {
+    value
+        .bytes()
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric() || b"-_.!~*()'".contains(&byte) {
+                char::from(byte).to_string()
+            } else {
+                format!("%{byte:02X}")
+            }
+        })
+        .collect()
+}
+
+fn scopes_closed_by(operation: &str, payload: &Value) -> Vec<String> {
+    let Some(surface_id) = payload.get("surfaceId").and_then(Value::as_str) else {
+        return vec![];
+    };
+    let encoded_surface = encode_scope_component(surface_id);
+    match operation {
+        "pane.close" => payload
+            .get("paneId")
+            .and_then(Value::as_u64)
+            .map(|pane_id| vec![format!("pane:{encoded_surface}:{pane_id}")])
+            .unwrap_or_default(),
+        "surface.window.close" => vec![
+            format!("surface:{encoded_surface}"),
+            format!("pane:{encoded_surface}:"),
+        ],
+        _ => vec![],
+    }
+}
+
+fn forget_closed_scopes(
+    root: &mut LockedStateRoot,
+    closed_scope_selectors: &[String],
+) -> Result<(), CliError> {
+    let matches_closed_scope = |scope_id: &str| {
+        closed_scope_selectors.iter().any(|selector| {
+            if selector.ends_with(':') {
+                scope_id.starts_with(selector)
+            } else {
+                scope_id == selector
+            }
+        })
+    };
+    root.mutate(|state| {
+        state
+            .scopes
+            .retain(|scope_id, _| !matches_closed_scope(scope_id));
+        state
+            .acknowledgement_outbox
+            .retain(|intent| !matches_closed_scope(&intent.scope_id));
+    })?;
+    Ok(())
 }
 
 fn operation_surface_id(invocation: &Invocation) -> Result<Option<String>, CliError> {
@@ -359,6 +465,7 @@ fn perform_mutation(
 ) -> Result<Value, CliError> {
     let request_id = format!("rq_{}", Uuid::new_v4().simple());
     let digest = format!("{:x}", Sha256::digest(serde_json::to_vec(&payload)?));
+    let closed_scopes = scopes_closed_by(op, &payload);
     root.mutate(|state| {
         state.unresolved.insert(
             request_id.clone(),
@@ -426,6 +533,9 @@ fn perform_mutation(
         correlation.terminal_response = Some(terminal.clone());
     })?;
     acknowledge_receipt(root, wire, &request_id)?;
+    if response.response.ok == Some(true) && !closed_scopes.is_empty() {
+        forget_closed_scopes(root, &closed_scopes)?;
+    }
     Ok(terminal)
 }
 
@@ -797,6 +907,41 @@ fn apply_snapshot(root: &mut LockedStateRoot, snapshot: &Value) -> Result<(), Cl
     for record in &records {
         validate_target_result_record(record)?;
     }
+    let previous_scope = root.state().scopes.get(&scope_id);
+    let mut current_content_record =
+        previous_scope.and_then(|scope| scope.current_content_record.clone());
+    let mut current_content_sequence =
+        previous_scope.and_then(|scope| scope.current_content_sequence);
+    let gap = snapshot
+        .get("cursor")
+        .and_then(|cursor| cursor.get("gap"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    if !gap.is_null() {
+        current_content_record = None;
+        let lost_through = gap
+            .get("lastLostSequence")
+            .or_else(|| gap.get("lastDiscardedSequence"))
+            .and_then(Value::as_u64)
+            .or_else(|| {
+                snapshot
+                    .get("firstRetainedSequence")
+                    .and_then(Value::as_u64)
+                    .map(|first| first.saturating_sub(1))
+            });
+        if let Some(lost_through) = lost_through {
+            current_content_sequence =
+                Some(current_content_sequence.unwrap_or(0).max(lost_through));
+        }
+    }
+    for record in &records {
+        update_current_content(
+            &scope_id,
+            record,
+            &mut current_content_record,
+            &mut current_content_sequence,
+        );
+    }
     let scope = ScopeProjection {
         client_cursor: cursor,
         projected_cursor: projected,
@@ -808,11 +953,10 @@ fn apply_snapshot(root: &mut LockedStateRoot, snapshot: &Value) -> Result<(), Cl
             .get("lastRetainedSequence")
             .and_then(Value::as_u64)
             .unwrap_or(cursor),
+        current_content_record,
+        current_content_sequence,
         records,
-        gap: snapshot
-            .get("cursor")
-            .and_then(|cursor| cursor.get("gap"))
-            .cloned(),
+        gap: if gap.is_null() { None } else { Some(gap) },
         synchronized: true,
         synchronization_cutoff: snapshot.get("synchronizationCutoff").cloned(),
     };
@@ -852,6 +996,12 @@ fn apply_delta(root: &mut LockedStateRoot, payload: &Value) -> Result<(), CliErr
             scope
                 .records
                 .retain(|retained| !record_is_superseded(retained, &record));
+            update_current_content(
+                &scope_id,
+                &record,
+                &mut scope.current_content_record,
+                &mut scope.current_content_sequence,
+            );
             scope.records.push(record);
             scope.last_retained_sequence = sequence;
         }
@@ -905,6 +1055,22 @@ fn apply_gap(root: &mut LockedStateRoot, payload: &Value) -> Result<(), CliError
         scope.gap = Some(gap);
         scope.first_retained_sequence = first;
         scope.last_retained_sequence = scope.last_retained_sequence.max(last);
+        scope.current_content_record = None;
+        let lost_through = scope
+            .gap
+            .as_ref()
+            .and_then(|gap| {
+                gap.get("lastLostSequence")
+                    .or_else(|| gap.get("lastDiscardedSequence"))
+            })
+            .and_then(Value::as_u64)
+            .unwrap_or_else(|| first.saturating_sub(1));
+        scope.current_content_sequence = Some(
+            scope
+                .current_content_sequence
+                .unwrap_or(0)
+                .max(lost_through),
+        );
         scope
             .records
             .retain(|record| record.get("sequence").and_then(Value::as_u64).unwrap_or(0) >= first);

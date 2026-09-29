@@ -13,8 +13,8 @@ label is compiled in.
 surf-ace \
   --state-root /path/to/controller-state \
   --endpoint ws://surf-ace.example:3210 \
-  --product-label Clawline \
-  push --input-json '{"surfaceId":"sf_1","paneId":1,"contentId":"c1","contentType":"markdown","content":{"markdown":"Hello"},"friendlyChatName":"OpenClaw"}'
+  --product-label Surf-Ace-CLI \
+  push --input-json '{"surfaceId":"sf_1","paneId":1,"contentId":"c1","contentType":"markdown","content":{"markdown":"Hello"},"friendlyChatName":"Terminal"}'
 ```
 
 `push` validates the protocol's discriminated content value: `html` uses
@@ -31,8 +31,12 @@ result to standard output. `read` is strictly local and rejects `--endpoint`.
 
 `read` keeps unread-delta consumption and current-state inspection separate.
 Its `records` array contains only records at or beyond the projected cursor;
-`currentContentRecord` independently returns the newest retained `content`
-record for the exact requested scope, or `null` when none is retained.
+`currentContentRecord` independently returns the newest observed `content`
+record for the exact pane scope, even after its consumable record is acknowledged
+and pruned. A newer content record replaces it; an explicit clear, scope close,
+or consumable-loss gap invalidates it. Scroll and other non-content records never
+become current content. The value is withheld while the scope is unsynchronized
+or has an unresolved loss gap.
 
 `target-apply` returns after Surf Ace has durably committed the target intent,
 before browser/native materialization. Its `operationReceipt` proves that intent

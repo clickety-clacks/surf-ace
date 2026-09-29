@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { cp, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { cp, mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -27,57 +27,8 @@ import {
   writePersistentStateFile,
 } from "../src/persistent-state-file.js";
 import { SurfaceWsServer } from "../src/ws-server.js";
-import {
-  OpenClawLocklessController,
-} from "../../extension/src/openclaw-lockless-controller.js";
-import type {
-  SurfAceDiscoveryEndpoint,
-  SurfAceDiscoveryService,
-} from "../../extension/src/surf-ace-discovery.js";
 
 let nextPort = 25901;
-
-class CopiedRootDiscovery implements SurfAceDiscoveryService {
-  private listener: ((endpoints: SurfAceDiscoveryEndpoint[]) => void) | null = null;
-
-  constructor(private readonly endpoint: SurfAceDiscoveryEndpoint) {}
-
-  getSnapshot(): SurfAceDiscoveryEndpoint[] {
-    return [this.endpoint];
-  }
-
-  async refreshNow(): Promise<void> {}
-
-  async start(): Promise<void> {
-    this.listener?.([this.endpoint]);
-  }
-
-  async stop(): Promise<void> {}
-
-  subscribe(listener: (endpoints: SurfAceDiscoveryEndpoint[]) => void): () => void {
-    this.listener = listener;
-    return () => {
-      this.listener = null;
-    };
-  }
-}
-
-function copiedRootEndpoint(port: number): SurfAceDiscoveryEndpoint {
-  return {
-    busy: false,
-    capabilitiesBitmask: 0,
-    endpointId: "electron-copied-root",
-    fingerprintPrefix: "sf",
-    host: "127.0.0.1",
-    instanceName: "Surf Ace",
-    lastSeenAt: Date.now(),
-    name: "Surf Ace",
-    port,
-    protocolVersion: 1,
-    viewport: { height: 800, scale: 2, width: 1200 },
-    wsPath: "/ws",
-  };
-}
 
 async function connect(url: string): Promise<WebSocket> {
   const socket = new WebSocket(url);
@@ -3225,12 +3176,10 @@ test("AC-SURF-04: concurrent lifecycle requests serialize once and stale callers
   }
 });
 
-test("copied Electron and extension roots cold-start the production lockless server and controller", async () => {
+test("copied Electron roots cold-start the production lockless server and admit a client", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "surf-ace-copied-composition-"));
   const electronSourceRoot = path.join(root, "electron-source");
   const electronCopiedRoot = path.join(root, "electron-copy");
-  const extensionSourceRoot = path.join(root, "extension-source");
-  const extensionCopiedRoot = path.join(root, "extension-copy");
   const electronStateFile = "surf-ace-state.json";
   let electronWrites = Promise.resolve();
   const settleElectronWrites = async (): Promise<void> => await electronWrites;
@@ -3252,7 +3201,6 @@ test("copied Electron and extension roots cold-start the production lockless ser
       viewport: () => ({ height: 800, scale: 2, width: 1200 }),
     });
   try {
-    await mkdir(extensionSourceRoot, { recursive: true });
     const sourceCore = new SurfaceCore({ clientIdentity: "electron-copied-root" });
     const sourceSurface = sourceCore.ensurePrimarySurface("Surf Ace", {
       height: 800,
@@ -3263,19 +3211,14 @@ test("copied Electron and extension roots cold-start the production lockless ser
     const sourceServer = createServer(sourceCore, sourcePort, electronSourceRoot);
     await writePersistentStateFile(electronSourceRoot, electronStateFile, sourceCore.getPersistentState());
     await sourceServer.start();
-    const sourceController = new OpenClawLocklessController({
-      discovery: new CopiedRootDiscovery(copiedRootEndpoint(sourcePort)),
-      stateDir: extensionSourceRoot,
-    });
-    await sourceController.start();
-    assert.equal((await sourceController.listScreens())[0]?.fingerprint, sourceSurface.surfaceId);
-    await sourceController.stop();
+    const sourceSocket = await connect(`ws://127.0.0.1:${sourcePort}${sourceServer.wsPath}`);
+    assert.equal((await pair(sourceSocket, "electron-source", sourceSurface.surfaceId)).ok, true);
+    sourceSocket.close();
     await sourceServer.stop();
     await settleElectronWrites();
     await writePersistentStateFile(electronSourceRoot, electronStateFile, sourceCore.getPersistentState());
 
     await cp(electronSourceRoot, electronCopiedRoot, { recursive: true });
-    await cp(extensionSourceRoot, extensionCopiedRoot, { recursive: true });
     const loaded = await loadPersistentStateFile(electronCopiedRoot, electronStateFile);
     assert.equal(loaded.writeGuard, false);
     assert.ok(loaded.state);
@@ -3291,18 +3234,13 @@ test("copied Electron and extension roots cold-start the production lockless ser
     const copiedPort = nextPort++;
     const copiedServer = createServer(copiedCore, copiedPort, electronCopiedRoot);
     await copiedServer.start();
-    const copiedController = new OpenClawLocklessController({
-      discovery: new CopiedRootDiscovery(copiedRootEndpoint(copiedPort)),
-      stateDir: extensionCopiedRoot,
-    });
-    await copiedController.start();
+    const copiedSocket = await connect(`ws://127.0.0.1:${copiedPort}${copiedServer.wsPath}`);
     try {
-      const copiedScreens = await copiedController.listScreens();
-      assert.equal(copiedScreens[0]?.fingerprint, sourceSurface.surfaceId);
+      assert.equal((await pair(copiedSocket, "electron-source", sourceSurface.surfaceId)).ok, true);
       assert.ok(Object.values(copiedCore.locklessAuthority.exportState().controllers)
         .some((controller) => controller.status === "live"));
     } finally {
-      await copiedController.stop();
+      copiedSocket.close();
       await copiedServer.stop();
       await settleElectronWrites();
     }
@@ -3315,19 +3253,17 @@ test("copied Electron and extension roots cold-start the production lockless ser
 test("copied clean Electron, iPhone, and iPad product roots admit through unchanged production authority semantics", async (t) => {
   const products = [
     { clientIdentity: "surf-ace-electron", endpointName: "Surf Ace Electron", product: "Electron" },
-    { clientIdentity: "clawline-iphone", endpointName: "Clawline iPhone", product: "iPhone" },
-    { clientIdentity: "clawline-ipad", endpointName: "Clawline iPad", product: "iPad" },
+    { clientIdentity: "surf-ace-iphone", endpointName: "Surf Ace iPhone", product: "iPhone" },
+    { clientIdentity: "surf-ace-ipad", endpointName: "Surf Ace iPad", product: "iPad" },
   ] as const;
   for (const product of products) {
     await t.test(product.product, async () => {
       const root = await mkdtemp(path.join(tmpdir(), `surf-ace-${product.product.toLowerCase()}-copy-`));
       const sourceRoot = path.join(root, "source");
       const copiedRoot = path.join(root, "copy");
-      const extensionRoot = path.join(root, "extension");
       const stateFile = "surf-ace-state.json";
       let writes = Promise.resolve();
       try {
-        await mkdir(extensionRoot, { recursive: true });
         const sourceCore = new SurfaceCore({ clientIdentity: product.clientIdentity });
         const sourceSurface = sourceCore.ensurePrimarySurface(product.endpointName, {
           height: 800,
@@ -3366,20 +3302,11 @@ test("copied clean Electron, iPhone, and iPad product roots admit through unchan
           viewport: () => ({ height: 800, scale: 2, width: 1200 }),
         });
         await server.start();
-        const controller = new OpenClawLocklessController({
-          discovery: new CopiedRootDiscovery({
-            ...copiedRootEndpoint(port),
-            endpointId: product.clientIdentity,
-            instanceName: product.endpointName,
-            name: product.endpointName,
-          }),
-          stateDir: extensionRoot,
-        });
-        await controller.start();
+        const client = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
         try {
-          assert.equal((await controller.listScreens())[0]?.fingerprint, sourceSurface.surfaceId);
+          assert.equal((await pair(client, product.clientIdentity, sourceSurface.surfaceId)).ok, true);
         } finally {
-          await controller.stop();
+          client.close();
           await server.stop();
           await writes;
         }

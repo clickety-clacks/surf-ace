@@ -41,6 +41,94 @@ export async function lockedPackages(lockfile) {
   return inventory;
 }
 
+export async function workspaceProductionInventory(lockfile, importer) {
+  const text = await fs.readFile(lockfile, "utf8");
+  const lines = text.split(/\r?\n/);
+  const importerHeader = `  ${importer}:`;
+  const importersStart = lines.indexOf("importers:");
+  const packagesStart = lines.indexOf("packages:");
+  const snapshotsStart = lines.indexOf("snapshots:");
+  if (importersStart < 0 || packagesStart < 0 || snapshotsStart < packagesStart) {
+    throw new Error("unsupported_pnpm_lockfile:missing_workspace_sections");
+  }
+
+  const importerIndex = lines.indexOf(importerHeader, importersStart + 1);
+  if (importerIndex < 0 || importerIndex >= packagesStart) throw new Error(`lockfile_importer_missing:${importer}`);
+  const importerRefs = [];
+  let section = null;
+  let dependencyName = null;
+  for (let index = importerIndex + 1; index < packagesStart; index += 1) {
+    const line = lines[index];
+    if (/^  \S.*:$/.test(line)) break;
+    const sectionMatch = /^    (dependencies|optionalDependencies):$/.exec(line);
+    if (sectionMatch) {
+      section = sectionMatch[1];
+      dependencyName = null;
+      continue;
+    }
+    if (/^    [A-Za-z][A-Za-z0-9]*:$/.test(line)) {
+      section = null;
+      dependencyName = null;
+      continue;
+    }
+    if (!section) continue;
+    const nameMatch = /^      (.+):$/.exec(line);
+    if (nameMatch) {
+      dependencyName = unquote(nameMatch[1]);
+      continue;
+    }
+    const versionMatch = /^        version: (.+)$/.exec(line);
+    if (versionMatch && dependencyName) importerRefs.push({ name: dependencyName, version: unquote(versionMatch[1].trim()) });
+  }
+  if (importerRefs.length === 0) throw new Error(`lockfile_importer_dependencies_missing:${importer}`);
+
+  const snapshots = new Map();
+  let currentSnapshot = null;
+  section = null;
+  for (const line of lines.slice(snapshotsStart + 1)) {
+    const snapshotMatch = /^  (\S.*):(?: \{\})?$/.exec(line);
+    if (snapshotMatch) {
+      currentSnapshot = unquote(snapshotMatch[1]);
+      snapshots.set(currentSnapshot, []);
+      section = null;
+      continue;
+    }
+    if (!currentSnapshot) continue;
+    const sectionMatch = /^    (dependencies|optionalDependencies):$/.exec(line);
+    if (sectionMatch) {
+      section = sectionMatch[1];
+      continue;
+    }
+    if (/^    [A-Za-z][A-Za-z0-9]*:/.test(line)) {
+      section = null;
+      continue;
+    }
+    const dependencyMatch = /^      (.+): (.+)$/.exec(line);
+    if (section && dependencyMatch) {
+      snapshots.get(currentSnapshot).push({ name: unquote(dependencyMatch[1]), version: unquote(dependencyMatch[2].trim()) });
+    }
+  }
+
+  const lock = await lockedPackages(lockfile);
+  const visited = new Set();
+  const result = new Map();
+  const visit = (name, version) => {
+    if (version.startsWith("link:") || name.startsWith("@surf-ace/")) return;
+    const snapshotKey = `${name}@${version}`;
+    if (visited.has(snapshotKey)) return;
+    visited.add(snapshotKey);
+    const { name: packageName, version: packageVersion } = splitPackageKey(snapshotKey);
+    const locked = lock.get(`${packageName}@${packageVersion}`);
+    if (!locked) throw new Error(`workspace_dependency_not_locked:${snapshotKey}`);
+    const dependencies = snapshots.get(snapshotKey);
+    if (!dependencies) throw new Error(`workspace_dependency_snapshot_missing:${snapshotKey}`);
+    result.set(`${packageName}@${packageVersion}`, locked);
+    for (const dependency of dependencies) visit(dependency.name, dependency.version);
+  };
+  for (const dependency of importerRefs) visit(dependency.name, dependency.version);
+  return [...result.values()].sort((left, right) => `${left.name}@${left.version}`.localeCompare(`${right.name}@${right.version}`));
+}
+
 export async function cargoLockedPackages(lockfile) {
   const text = await fs.readFile(lockfile, "utf8");
   const inventory = [];

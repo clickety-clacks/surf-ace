@@ -1,0 +1,27 @@
+[Unit]
+Description=Surf Ace central server (%i)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=surf-ace
+Group=surf-ace
+WorkingDirectory=/opt/surf-ace-server
+ExecStart=/usr/bin/node /opt/surf-ace-server/bin/surf-ace-server start --config /etc/surf-ace-server/%i.json
+Environment=SURF_ACE_CLIENT_DIAGNOSTIC_LOG=/run/surf-ace-server/client-flight-recorder.log
+Restart=on-failure
+RestartSec=2s
+KillSignal=SIGTERM
+TimeoutStopSec=30s
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+RuntimeDirectory=surf-ace-server
+RuntimeDirectoryMode=0750
+ReadWritePaths=/run/surf-ace-server
+
+[Install]
+WantedBy=multi-user.target

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { SurfAceDiscoveryEndpoint } from "./surf-ace-discovery.js";
-import { __test } from "./surf-ace-discovery.js";
+import type { SurfAceDiscoveryEndpoint } from "../src/surf-ace-discovery.js";
+import { __test } from "../src/surf-ace-discovery.js";
 
 function endpoint(params?: Partial<SurfAceDiscoveryEndpoint>): SurfAceDiscoveryEndpoint {
   return {

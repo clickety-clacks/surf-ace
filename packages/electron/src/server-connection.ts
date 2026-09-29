@@ -1,7 +1,7 @@
 import {
   createBonjourSurfAceDiscoveryService,
   type SurfAceDiscoveryService,
-} from "../../extension/src/surf-ace-discovery.js";
+} from "./surf-ace-discovery.js";
 import { ConfiguredServerRegistration } from "./configured-server.js";
 import type { SurfaceCore } from "./surface-core.js";
 
