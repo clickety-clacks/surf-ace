@@ -986,7 +986,7 @@ function summarizeFreshInstallPhase(options: {
 }
 
 async function freshInstallMain(options: Options) {
-  if (options.candidateCommit !== "0c181cc512816ee3e03a0284fdcea9a70a175019" || options.expectedVersion !== "0.2.0") {
+  if (options.candidateCommit !== "f0e3ef58e64347ca721ea83f653d5f80958588d5" || options.expectedVersion !== "0.2.1") {
     throw new Error("fresh_install_participant_identity_binding_invalid");
   }
   await fs.mkdir(options.stateRoot, { recursive: true, mode: 0o700 });

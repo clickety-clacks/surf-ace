@@ -1,30 +1,33 @@
-export const TIGHTBEAM_TOOLING_TAG = "surf-ace-release-tooling-tightbeam-v0.2.0";
+export const TIGHTBEAM_TOOLING_TAG = "surf-ace-release-tooling-tightbeam-v0.2.1";
+
+export const TIGHTBEAM_SKILL_ASSET = "surf-ace-tightbeam-skill-v0.2.1.md";
 
 export const TOOLCHAINS = Object.freeze({
   linuxContainer: "rust:1.89.0-bookworm@sha256:948f9b08a66e7fe01b03a98ef1c7568292e07ec2e4fe90d88c07bb14563c84ff",
-  macosRunner: "macos-15",
+  macosRunner: "xcode-27",
   node: "24.3.0",
   pnpm: "10.15.1",
   postgres: "16",
   rust: "1.89.0",
   linuxRustTarget: "x86_64-unknown-linux-gnu",
   macosRustTarget: "aarch64-apple-darwin",
-  xcode: "16.4",
+  xcode: "27.0",
 });
 
 export const TIGHTBEAM = Object.freeze({
-  candidateCommit: "0c181cc512816ee3e03a0284fdcea9a70a175019",
-  sourceTag: "surf-ace-tightbeam-v0.2.0",
-  version: "0.2.0",
+  candidateCommit: "f0e3ef58e64347ca721ea83f653d5f80958588d5",
+  sourceTag: "surf-ace-tightbeam-v0.2.1",
+  version: "0.2.1",
   toolingTag: TIGHTBEAM_TOOLING_TAG,
   assets: [
-    "surf-ace-tightbeam-server-linux-x86_64-v0.2.0.tar.gz",
-    "surf-ace-tightbeam-cli-linux-x86_64-v0.2.0.tar.gz",
-    "surf-ace-tightbeam-electron-linux-x86_64-v0.2.0.zip",
-    "surf-ace-tightbeam-cli-macos-arm64-v0.2.0.tar.gz",
-    "surf-ace-tightbeam-electron-macos-arm64-v0.2.0.zip",
+    "surf-ace-tightbeam-server-linux-x86_64-v0.2.1.tar.gz",
+    "surf-ace-tightbeam-cli-linux-x86_64-v0.2.1.tar.gz",
+    "surf-ace-tightbeam-electron-linux-x86_64-v0.2.1.zip",
+    "surf-ace-tightbeam-cli-macos-arm64-v0.2.1.tar.gz",
+    "surf-ace-tightbeam-electron-macos-arm64-v0.2.1.zip",
+    TIGHTBEAM_SKILL_ASSET,
   ],
-  manifest: "surf-ace-tightbeam-v0.2.0-manifest.json",
+  manifest: "surf-ace-tightbeam-v0.2.1-manifest.json",
   checksums: "SHA256SUMS",
 });
 
@@ -49,7 +52,7 @@ export const TIGHTBEAM_TEST_COMMANDS = Object.freeze([
   "pnpm --dir source --filter @surf-ace/protocol test",
   "cargo test --manifest-path source/packages/cli/Cargo.toml --locked",
   "pnpm --dir source --filter @surf-ace/electron test",
-  "xcodebuild test -project source/packages/ios/SurfAce.xcodeproj -scheme SurfAce -configuration Release -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M4)'",
+  "xcodebuild test -project source/packages/ios/SurfAce.xcodeproj -scheme SurfAce -configuration Release ENABLE_TESTABILITY=YES -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M5),OS=27.0'",
 ]);
 
 export const TIGHTBEAM_BUILD_COMMANDS = Object.freeze([

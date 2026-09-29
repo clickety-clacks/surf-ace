@@ -7,6 +7,7 @@ import {
   TIGHTBEAM_BUILD_COMMANDS,
   TIGHTBEAM_PUBLIC_FILES,
   TIGHTBEAM_ROUTING,
+  TIGHTBEAM_SKILL_ASSET,
   TIGHTBEAM_TEST_COMMANDS,
   TIGHTBEAM_TOOLING_TAG,
   TOOLCHAINS,
@@ -250,7 +251,25 @@ export async function buildTightbeamLinuxStage({ sourceDir, stageDir, target = T
   return assembleTightbeamLinuxStage({ sourceDir: source, stageDir, target });
 }
 
-export async function buildTightbeamLinuxPackages({ sourceDir, outputDir, target = TOOLCHAINS.linuxRustTarget }) {
+const TIGHTBEAM_SKILL_SOURCE = "integrations/tightbeam/skills/surf-ace/SKILL.md";
+
+export async function copyTightbeamSkillAsset(sourceDir, outputDir) {
+  const source = path.resolve(sourceDir, TIGHTBEAM_SKILL_SOURCE);
+  const output = path.join(path.resolve(outputDir), TIGHTBEAM_SKILL_ASSET);
+  await fs.mkdir(path.dirname(output), { recursive: true });
+  await fs.copyFile(source, output);
+  return output;
+}
+
+export async function verifyTightbeamSkillAsset(sourceDir, outputDir) {
+  const source = await fs.readFile(path.resolve(sourceDir, TIGHTBEAM_SKILL_SOURCE));
+  const output = path.join(path.resolve(outputDir), TIGHTBEAM_SKILL_ASSET);
+  const packaged = await fs.readFile(output);
+  if (!source.equals(packaged)) throw new Error("tightbeam_skill_asset_source_mismatch");
+  return { filename: TIGHTBEAM_SKILL_ASSET, sha256: await sha256(output) };
+}
+
+export async function buildTightbeamLinuxPackages({ sourceDir, outputDir, target = TOOLCHAINS.linuxRustTarget, includeSkillAsset = true }) {
   const source = path.resolve(sourceDir);
   const output = path.resolve(outputDir);
   const epoch = await sourceDateEpoch(source);
@@ -275,8 +294,12 @@ export async function buildTightbeamLinuxPackages({ sourceDir, outputDir, target
   await fs.access(path.join(electronRoot, "resources/app.asar"));
   await installLinuxElectronLauncher(electronRoot);
   await createDirectoryZip(electronRoot, "Surf Ace", electronArchive, epoch);
+  if (includeSkillAsset) await copyTightbeamSkillAsset(source, output);
   await assertTrackedInputsUnchanged(source);
-  return { files: TIGHTBEAM.assets.slice(0, 3), outputDir: output };
+  return {
+    files: includeSkillAsset ? [...TIGHTBEAM.assets.slice(0, 3), TIGHTBEAM_SKILL_ASSET] : TIGHTBEAM.assets.slice(0, 3),
+    outputDir: output,
+  };
 }
 
 export async function buildTightbeamMacosPackages({ sourceDir, outputDir }) {
@@ -348,6 +371,7 @@ export async function writeTightbeamManifest({ sourceDir, outputDir, toolingComm
   const source = path.resolve(sourceDir);
   const output = path.resolve(outputDir);
   await verifyStandaloneElectronSource(source);
+  await verifyTightbeamSkillAsset(source, output);
   const assetDetails = [];
   for (const name of TIGHTBEAM.assets) {
     const file = path.join(output, name);
@@ -442,7 +466,7 @@ export async function buildTightbeamLinuxQualification(options, dependencies = {
   await cleanInputs(currentToolingRoot);
   await ensureEmptyQualificationOutput(outputDir);
   await fs.mkdir(outputDir, { recursive: true });
-  const assets = await buildLinuxPackages({ sourceDir, outputDir, target: options.target });
+  const assets = await buildLinuxPackages({ sourceDir, outputDir, target: options.target, includeSkillAsset: false });
   await cleanInputs(sourceDir);
   await cleanInputs(currentToolingRoot);
   const sourceHeadAfter = await captureCommand("git", ["-C", sourceDir, "rev-parse", "HEAD"]);

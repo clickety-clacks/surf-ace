@@ -1,7 +1,7 @@
 # Surf Ace standalone Linux server operations
 
-This v0.2.0 runbook applies only to product commit
-`0c181cc512816ee3e03a0284fdcea9a70a175019` and PostgreSQL 16. It assumes a
+This v0.2.1 runbook applies only to product commit
+`f0e3ef58e64347ca721ea83f653d5f80958588d5` and PostgreSQL 16. It assumes a
 single configured allocator fleet, one server process at a time, and an
 already-provisioned PostgreSQL primary with its configured synchronous witness.
 The archive never installs a service or provisions, upgrades, or changes a host.
@@ -61,7 +61,7 @@ current/no-loss reads.
 
 ## Schema and upgrade boundary
 
-The only schema shipped by v0.2.0 is
+The only schema shipped by v0.2.1 is
 `schemas/allocator/001_allocator.sql`. It initializes an empty PostgreSQL 16
 database; it is not an in-place upgrade script. The server does not auto-migrate
 or accept an unknown schema version. Do not rerun it over an existing fleet or
