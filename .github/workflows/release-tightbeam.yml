@@ -374,6 +374,26 @@ jobs:
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: ${{ env.NODE_VERSION }}
+      - name: Install Linux smoke host dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            libpq-dev postgresql-16 postgresql-client-16 \
+            tar unzip x11-utils xauth xvfb
+          for tool in xvfb-run Xvfb xauth xdpyinfo pg_config tar unzip; do
+            if ! command -v "${tool}" >/dev/null 2>&1; then
+              echo "linux_smoke_required_tool_missing:${tool}" >&2
+              exit 127
+            fi
+          done
+          pg_bin="$(pg_config --bindir)"
+          for tool in initdb postgres pg_ctl psql pg_basebackup pg_dump pg_restore; do
+            if [[ ! -x "${pg_bin}/${tool}" ]]; then
+              echo "linux_smoke_required_postgres_tool_missing:${pg_bin}/${tool}" >&2
+              exit 127
+            fi
+          done
       - name: Prepare the exact candidate product and state driver
         run: |
           set -euo pipefail

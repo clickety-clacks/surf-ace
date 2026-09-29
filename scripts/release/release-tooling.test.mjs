@@ -2428,6 +2428,19 @@ test("standalone specification and release gates bind the fixed product and publ
   ].map((command) => linuxTests.indexOf(command));
   assert.ok(linuxBuildOrder.every((index) => index >= 0));
   assert.deepEqual([...linuxBuildOrder].sort((left, right) => left - right), linuxBuildOrder);
+  const linuxSmokeHostDependencies = workflowRunScript(workflow, "Install Linux smoke host dependencies");
+  for (const packageName of ["libpq-dev", "postgresql-16", "postgresql-client-16", "tar", "unzip", "x11-utils", "xauth", "xvfb"]) {
+    assert.ok(linuxSmokeHostDependencies.includes(packageName), `missing Linux smoke host package ${packageName}`);
+  }
+  assert.match(linuxSmokeHostDependencies, /for tool in xvfb-run Xvfb xauth xdpyinfo pg_config tar unzip; do/);
+  assert.match(linuxSmokeHostDependencies, /command -v "\$\{tool\}"/);
+  assert.match(linuxSmokeHostDependencies, /for tool in initdb postgres pg_ctl psql pg_basebackup pg_dump pg_restore; do/);
+  assert.match(linuxSmokeHostDependencies, /linux_smoke_required_postgres_tool_missing/);
+  const linuxNodePin = workflow.indexOf("      - name: Pin Node", workflow.indexOf("  smoke-linux:\n"));
+  const linuxRuntimeDeps = workflow.indexOf("      - name: Install Linux smoke host dependencies", workflow.indexOf("  smoke-linux:\n"));
+  const linuxPrepare = workflow.indexOf("      - name: Prepare the exact candidate product and state driver", workflow.indexOf("  smoke-linux:\n"));
+  const linuxAcceptance = workflow.indexOf("      - name: Run PostgreSQL-backed server, packaged CLI, and Linux client acceptance", workflow.indexOf("  smoke-linux:\n"));
+  assert.ok(linuxNodePin >= 0 && linuxNodePin < linuxRuntimeDeps && linuxRuntimeDeps < linuxPrepare && linuxPrepare < linuxAcceptance);
   const linuxSmoke = workflowRunScript(workflow, "Run PostgreSQL-backed server, packaged CLI, and Linux client acceptance");
   assert.match(linuxSmoke, /smoke_tmp="\$\(mktemp -d \/tmp\/sa\.XXXXXX\)"/);
   assert.match(linuxSmoke, /trap 'rm -rf "\$smoke_tmp"' EXIT/);
