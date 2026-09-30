@@ -1,6 +1,6 @@
-export const TIGHTBEAM_TOOLING_TAG = "surf-ace-release-tooling-tightbeam-v0.2.1";
+export const TIGHTBEAM_TOOLING_TAG = "surf-ace-release-tooling-tightbeam-v0.2.2";
 
-export const TIGHTBEAM_SKILL_ASSET = "surf-ace-tightbeam-skill-v0.2.1.md";
+export const TIGHTBEAM_SKILL_ASSET = "surf-ace-tightbeam-skill-v0.2.2.md";
 
 export const TOOLCHAINS = Object.freeze({
   linuxContainer: "rust:1.89.0-bookworm@sha256:948f9b08a66e7fe01b03a98ef1c7568292e07ec2e4fe90d88c07bb14563c84ff",
@@ -15,19 +15,19 @@ export const TOOLCHAINS = Object.freeze({
 });
 
 export const TIGHTBEAM = Object.freeze({
-  candidateCommit: "f0e3ef58e64347ca721ea83f653d5f80958588d5",
-  sourceTag: "surf-ace-tightbeam-v0.2.1",
-  version: "0.2.1",
+  candidateCommit: "ebff52a23f2de88b179eb6472f46cffe3e32c40a",
+  sourceTag: "surf-ace-tightbeam-v0.2.2",
+  version: "0.2.2",
   toolingTag: TIGHTBEAM_TOOLING_TAG,
   assets: [
-    "surf-ace-tightbeam-server-linux-x86_64-v0.2.1.tar.gz",
-    "surf-ace-tightbeam-cli-linux-x86_64-v0.2.1.tar.gz",
-    "surf-ace-tightbeam-electron-linux-x86_64-v0.2.1.zip",
-    "surf-ace-tightbeam-cli-macos-arm64-v0.2.1.tar.gz",
-    "surf-ace-tightbeam-electron-macos-arm64-v0.2.1.zip",
+    "surf-ace-tightbeam-server-linux-x86_64-v0.2.2.tar.gz",
+    "surf-ace-tightbeam-cli-linux-x86_64-v0.2.2.tar.gz",
+    "surf-ace-tightbeam-electron-linux-x86_64-v0.2.2.zip",
+    "surf-ace-tightbeam-cli-macos-arm64-v0.2.2.tar.gz",
+    "surf-ace-tightbeam-electron-macos-arm64-v0.2.2.zip",
     TIGHTBEAM_SKILL_ASSET,
   ],
-  manifest: "surf-ace-tightbeam-v0.2.1-manifest.json",
+  manifest: "surf-ace-tightbeam-v0.2.2-manifest.json",
   checksums: "SHA256SUMS",
 });
 

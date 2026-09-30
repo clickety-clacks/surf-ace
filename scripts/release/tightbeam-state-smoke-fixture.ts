@@ -986,7 +986,7 @@ function summarizeFreshInstallPhase(options: {
 }
 
 async function freshInstallMain(options: Options) {
-  if (options.candidateCommit !== "f0e3ef58e64347ca721ea83f653d5f80958588d5" || options.expectedVersion !== "0.2.1") {
+  if (options.candidateCommit !== "44421f305516ff3b8b305bc2df24c0f4c40b65c0" || options.expectedVersion !== "0.2.2") {
     throw new Error("fresh_install_participant_identity_binding_invalid");
   }
   await fs.mkdir(options.stateRoot, { recursive: true, mode: 0o700 });
@@ -1055,7 +1055,7 @@ async function freshInstallMain(options: Options) {
     const contentId = "linux-fresh-install-content";
     const visibleText = "Surf Ace fresh-install direct-client verification";
     const pushOutput = await cli(options.cliBinary, cliStateRoot, "push", {
-      content: { html: `<main>${visibleText}</main>` },
+      content: { html: `<p>${visibleText}</p>` },
       contentId,
       contentType: "html",
       paneId,
