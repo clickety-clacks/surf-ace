@@ -11,7 +11,7 @@ resident service.
 
 The repository source for this skill is
 `integrations/tightbeam/skills/surf-ace/SKILL.md`. To enable it for a
-Tightbeam agent, download the separate `surf-ace-tightbeam-skill-v0.2.1.md`
+Tightbeam agent, download the separate `surf-ace-tightbeam-skill-v0.2.2.md`
 release asset with its manifest and `SHA256SUMS`, then verify the checksum.
 Ask the workspace administrator to register the verified Markdown content in
 the served identity as `surf-ace`, attach `surf-ace` to the chosen archetype,
@@ -21,7 +21,7 @@ separately from the platform-specific CLI asset.
 
 ## Install and verify the CLI
 
-Choose the versioned CLI archive for the host: `surf-ace-tightbeam-cli-linux-x86_64-v0.2.1.tar.gz` or `surf-ace-tightbeam-cli-macos-arm64-v0.2.1.tar.gz`. Download the archive, release manifest, and checksum file from the same published release. Verify the selected asset against `SHA256SUMS` before extracting it. For example, after downloading the full release asset set:
+Choose the versioned CLI archive for the host: `surf-ace-tightbeam-cli-linux-x86_64-v0.2.2.tar.gz` or `surf-ace-tightbeam-cli-macos-arm64-v0.2.2.tar.gz`. Download the archive, release manifest, and checksum file from the same published release. Verify the selected asset against `SHA256SUMS` before extracting it. For example, after downloading the full release asset set:
 
 ```sh
 # Linux
@@ -35,7 +35,7 @@ Extract into a versioned, user-owned directory and keep the prior version
 available until the new copy is checked:
 
 ```sh
-VERSION=0.2.1
+VERSION=0.2.2
 INSTALL_ROOT="$HOME/.local/opt/surf-ace/$VERSION"
 mkdir -p "$INSTALL_ROOT"
 tar -xzf "surf-ace-tightbeam-cli-linux-x86_64-v${VERSION}.tar.gz" -C "$INSTALL_ROOT"
@@ -52,10 +52,10 @@ updater is provided.
 ## Verify release-smoke participants
 
 Before a release smoke starts or uses any server, CLI, or client, check that
-participant independently against its exact v0.2.1 asset name, byte size,
+participant independently against its exact v0.2.2 asset name, byte size,
 SHA-256, product commit, and tooling commit. Rehash the archive bytes and stop
 before launch or CLI operations on any mismatch. For Electron, also require the
-packaged version and runtime `electron.app.getVersion()` to equal `0.2.1`, with
+packaged version and runtime `electron.app.getVersion()` to equal `0.2.2`, with
 the runtime check completed before CLI operations. Do not infer the server or
 CLI version from command output; identify those archives through their
 versioned names, manifest, and checksum.

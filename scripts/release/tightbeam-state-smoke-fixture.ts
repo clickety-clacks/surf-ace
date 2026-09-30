@@ -9,6 +9,7 @@ import { pathToFileURL } from "node:url";
 
 import type { PostgresCustodyConfig } from "../../packages/allocator/src/custody.js";
 import { electronLaunchConfig, hasRequiredAllocatorBackupObjects, launchElectron, matchesRegisteredDirectTarget, stop as stopElectron, verifyAllocatorServiceLifecycle, verifyClientAppVersion } from "./smoke-lib.mjs";
+import { TIGHTBEAM } from "./tightbeam-release-config.mjs";
 import tightbeamServerLauncher from "./tightbeam-server-launcher.cjs";
 
 const execFile = promisify(execFileCallback);
@@ -986,7 +987,7 @@ function summarizeFreshInstallPhase(options: {
 }
 
 async function freshInstallMain(options: Options) {
-  if (options.candidateCommit !== "f0e3ef58e64347ca721ea83f653d5f80958588d5" || options.expectedVersion !== "0.2.1") {
+  if (options.candidateCommit !== TIGHTBEAM.candidateCommit || options.expectedVersion !== TIGHTBEAM.version) {
     throw new Error("fresh_install_participant_identity_binding_invalid");
   }
   await fs.mkdir(options.stateRoot, { recursive: true, mode: 0o700 });
@@ -1055,7 +1056,7 @@ async function freshInstallMain(options: Options) {
     const contentId = "linux-fresh-install-content";
     const visibleText = "Surf Ace fresh-install direct-client verification";
     const pushOutput = await cli(options.cliBinary, cliStateRoot, "push", {
-      content: { html: `<main>${visibleText}</main>` },
+      content: { html: `<p>${visibleText}</p>` },
       contentId,
       contentType: "html",
       paneId,
