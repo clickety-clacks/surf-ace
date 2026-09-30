@@ -1001,7 +1001,7 @@ async function runDirectClientCandidate(step, executable, cliBinary, stateRoot, 
       reads.push(evidence);
       return { capture, read, evidence };
     };
-    const contentId = `tightbeam-${channel}-v020-candidate-write`;
+    const contentId = `tightbeam-${channel}-v023-candidate-write`;
     const html = [
       "<style>",
       "html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden}",
