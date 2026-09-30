@@ -1,7 +1,7 @@
 # Surf Ace standalone Linux server operations
 
 This v0.2.2 runbook applies only to product commit
-`44421f305516ff3b8b305bc2df24c0f4c40b65c0` and PostgreSQL 16. It assumes a
+`ebff52a23f2de88b179eb6472f46cffe3e32c40a` and PostgreSQL 16. It assumes a
 single configured allocator fleet, one server process at a time, and an
 already-provisioned PostgreSQL primary with its configured synchronous witness.
 The archive never installs a service or provisions, upgrades, or changes a host.

@@ -9,6 +9,7 @@ import { pathToFileURL } from "node:url";
 
 import type { PostgresCustodyConfig } from "../../packages/allocator/src/custody.js";
 import { electronLaunchConfig, hasRequiredAllocatorBackupObjects, launchElectron, matchesRegisteredDirectTarget, stop as stopElectron, verifyAllocatorServiceLifecycle, verifyClientAppVersion } from "./smoke-lib.mjs";
+import { TIGHTBEAM } from "./tightbeam-release-config.mjs";
 import tightbeamServerLauncher from "./tightbeam-server-launcher.cjs";
 
 const execFile = promisify(execFileCallback);
@@ -986,7 +987,7 @@ function summarizeFreshInstallPhase(options: {
 }
 
 async function freshInstallMain(options: Options) {
-  if (options.candidateCommit !== "44421f305516ff3b8b305bc2df24c0f4c40b65c0" || options.expectedVersion !== "0.2.2") {
+  if (options.candidateCommit !== TIGHTBEAM.candidateCommit || options.expectedVersion !== TIGHTBEAM.version) {
     throw new Error("fresh_install_participant_identity_binding_invalid");
   }
   await fs.mkdir(options.stateRoot, { recursive: true, mode: 0o700 });

@@ -1065,6 +1065,19 @@ test("Tightbeam v0.2.2 binds the reviewed candidate, six hosted assets, and tool
   });
 });
 
+test("Linux fresh-install fixture binds its identity gate to the release candidate", async () => {
+  const fixture = await fs.readFile(path.join(repository, "scripts/release/tightbeam-state-smoke-fixture.ts"), "utf8");
+  const operations = await fs.readFile(path.join(repository, "docs/release/tightbeam-linux-operations.md"), "utf8");
+
+  assert.match(fixture, /import \{ TIGHTBEAM \} from "\.\/tightbeam-release-config\.mjs";/);
+  assert.match(fixture, /options\.candidateCommit !== TIGHTBEAM\.candidateCommit \|\| options\.expectedVersion !== TIGHTBEAM\.version/);
+  assert.equal(TIGHTBEAM.candidateCommit, "ebff52a23f2de88b179eb6472f46cffe3e32c40a");
+  assert.match(operations, /applies only to product commit\s+`ebff52a23f2de88b179eb6472f46cffe3e32c40a`/);
+  for (const source of [fixture, operations]) {
+    assert.doesNotMatch(source, /44421f305516ff3b8b305bc2df24c0f4c40b65c0/);
+  }
+});
+
 test("v0.2.2 fresh-install smoke pushes a bare paragraph fragment", async () => {
   const fixture = await fs.readFile(path.join(repository, "scripts/release/tightbeam-state-smoke-fixture.ts"), "utf8");
   assert.match(fixture, /content: \{ html: `<p>\$\{visibleText\}<\/p>` \}/);
