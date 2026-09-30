@@ -7,6 +7,7 @@ const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Command {
+    FleetList,
     List,
     Push,
     Read,
@@ -21,7 +22,8 @@ pub enum Command {
 }
 
 impl Command {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
+        Self::FleetList,
         Self::List,
         Self::Push,
         Self::Read,
@@ -43,6 +45,7 @@ impl Command {
 
     pub const fn name(self) -> &'static str {
         match self {
+            Self::FleetList => "fleet-list",
             Self::List => "list",
             Self::Push => "push",
             Self::Read => "read",
@@ -62,12 +65,16 @@ impl Command {
     }
 
     pub const fn is_mutation(self) -> bool {
-        !matches!(self, Self::List | Self::Read | Self::CapturePane)
+        !matches!(
+            self,
+            Self::FleetList | Self::List | Self::Read | Self::CapturePane
+        )
     }
 
     pub fn wire_operation(self, input: &Map<String, Value>) -> Result<&'static str, String> {
         self.validate(input)?;
         match self {
+            Self::FleetList => Err("fleet_list_requires_registry".into()),
             Self::List => Ok("surfaces.list"),
             Self::Push => Ok("content.set"),
             Self::Read => Err("read_is_local".into()),
@@ -95,6 +102,11 @@ impl Command {
 
     pub fn validate(self, input: &Map<String, Value>) -> Result<(), String> {
         match self {
+            Self::FleetList => {
+                if !input.is_empty() {
+                    return Err("invalid_input:fleet_list_properties".into());
+                }
+            }
             Self::List => {
                 if !input.is_empty() {
                     return Err("invalid_input:list_properties".into());
@@ -666,6 +678,7 @@ fn direction(input: &Map<String, Value>) -> Result<(), String> {
 pub struct Invocation {
     pub command: Command,
     pub endpoint: Option<String>,
+    pub registry: Option<String>,
     pub input: Map<String, Value>,
     pub product_label: Option<String>,
     pub projection_capacity_bytes: u64,

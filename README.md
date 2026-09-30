@@ -15,8 +15,22 @@ or provider configuration and does not require an agent gateway.
   It does not relay pair or content operations.
 - Electron clients run on Linux and macOS. The iPadOS client is built and
   signed separately and is not a hosted release asset.
-- The `surf-ace` CLI sends network operations directly to the selected client's
-  WebSocket endpoint. The registry endpoint is not a CLI target.
+- The `surf-ace` CLI uses `fleet-list` with an explicit registry WebSocket URL
+  to read registered client, surface, pane, and label inventory from
+  `fleet.topology`. That snapshot is registration inventory only; it does not
+  establish endpoint addresses, client reachability, or live application
+  health. For operations on one selected client, the CLI connects directly to
+  that client's WebSocket endpoint.
+
+Use `fleet-list` for registry-known inventory:
+
+```sh
+surf-ace --state-root "$HOME/.local/state/surf-ace" \
+  --registry "ws://registry.example:3210" fleet-list
+```
+
+Pass the registry explicitly; the CLI does not infer one from configuration or
+environment variables.
 
 Electron clients can discover a registry on their network or use an explicit
 registry WebSocket URL with `SURF_ACE_SERVER`. The registry identifies
@@ -25,9 +39,9 @@ and surface in your deployment's inventory, then use that client's direct
 `/ws` address; if the inventory does not provide the address, configure it
 explicitly. Do not substitute the registry URL for the client's URL.
 
-Every CLI invocation uses a state root. Networked commands also require the
-client endpoint and a product label; `read` is a local state projection and
-does not take an endpoint:
+Every CLI invocation uses a state root. Client-directed network commands also
+require the selected client's endpoint and a product label; `read` is a local
+state projection and does not take an endpoint:
 
 ```sh
 surf-ace \
@@ -37,9 +51,10 @@ surf-ace \
   list
 ```
 
-The CLI provides `list`, `push`, `read`, `capture-pane`, topology, surface,
-annotation, and target commands. See the packaged CLI README and protocol
-documentation for the exact inputs and outputs. The Linux server archive
+The CLI provides `fleet-list` for registry-known inventory, `list` for one
+selected client, `push`, `read`, `capture-pane`, topology, surface, annotation,
+and target commands. See the packaged CLI README and protocol documentation
+for the exact inputs and outputs. The Linux server archive
 includes `docs/OPERATIONS.md` with PostgreSQL configuration, health checks,
 backup, staged restore, and rollback guidance.
 

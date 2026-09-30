@@ -1586,22 +1586,49 @@ test("Tightbeam foreground lifecycle holds and releases its server on SIGTERM wi
   assert.doesNotMatch(JSON.stringify(lines), /fixture-password/);
 });
 
-test("Tightbeam CLI distribution is a separate exact client-only package", async (t) => {
+test("Tightbeam Linux and macOS CLI packages carry the same fleet discovery guidance", async (t) => {
   const root = await temporary(t);
   const binary = path.join(root, "surf-ace");
-  const stage = path.join(root, "cli-stage");
   await fs.writeFile(binary, "offline fixture binary\n");
-  await assembleTightbeamCliStage({ binary, stageDir: stage, platform: "Linux x86_64" });
-  const verified = await verifyTightbeamCliStage(stage);
-  assert.deepEqual(verified.files, [...TIGHTBEAM_CLI_FILES].sort());
-  const guide = await fs.readFile(path.join(stage, "README.md"), "utf8");
-  assert.match(guide, /does not start a\s+server or provision PostgreSQL/);
-  assert.match(guide, /--state-root/);
-  await fs.chmod(path.join(stage, "bin/surf-ace"), 0o644);
-  await assert.rejects(verifyTightbeamCliStage(stage), /tightbeam_cli_not_executable/);
-  await fs.chmod(path.join(stage, "bin/surf-ace"), 0o755);
-  await fs.writeFile(path.join(stage, "server.cjs"), "must not ship\n");
-  await assert.rejects(verifyTightbeamCliStage(stage), /tightbeam_cli_runtime_closure_mismatch/);
+  const guides = [];
+  for (const platform of ["Linux x86_64", "macOS arm64"]) {
+    const stage = path.join(root, `cli-stage-${platform.replaceAll(" ", "-")}`);
+    await assembleTightbeamCliStage({ binary, stageDir: stage, platform });
+    const verified = await verifyTightbeamCliStage(stage);
+    assert.deepEqual(verified.files, [...TIGHTBEAM_CLI_FILES].sort());
+    const guide = await fs.readFile(path.join(stage, "README.md"), "utf8");
+    assert.match(guide, /does not start a\s+server or provision PostgreSQL/);
+    assert.match(guide, /--state-root/);
+    assert.match(guide, /--registry .*fleet-list/);
+    assert.match(guide, /registered inventory only/);
+    assert.match(guide, /does not report client endpoints/);
+    assert.match(guide, /directly to that client/);
+    assert.match(guide, /does not infer one from\s+configuration or environment variables/);
+    guides.push(guide.replace(`# Surf Ace standalone ${platform} CLI`, "# Surf Ace standalone PLATFORM CLI"));
+    await fs.chmod(path.join(stage, "bin/surf-ace"), 0o644);
+    await assert.rejects(verifyTightbeamCliStage(stage), /tightbeam_cli_not_executable/);
+    await fs.chmod(path.join(stage, "bin/surf-ace"), 0o755);
+    await fs.writeFile(path.join(stage, "server.cjs"), "must not ship\n");
+    await assert.rejects(verifyTightbeamCliStage(stage), /tightbeam_cli_runtime_closure_mismatch/);
+  }
+  assert.equal(guides[0], guides[1]);
+});
+
+test("fleet-list discovery is the first client-selection step in the shipped skill and public docs", async () => {
+  const skill = await fs.readFile(path.join(repository, "integrations/tightbeam/skills/surf-ace/SKILL.md"), "utf8");
+  const selectionStart = skill.indexOf("## Discover registered clients, then select a client");
+  const endpointStart = skill.indexOf("## Select a client and endpoint");
+  assert.ok(selectionStart >= 0 && endpointStart > selectionStart);
+  assert.match(skill, /--registry "ws:\/\/<registry-host>:<port>" fleet-list/);
+  assert.match(skill, /does not\s+report endpoint addresses, reachability, or live application health/);
+  assert.match(skill, /Always pass the registry URL explicitly/);
+
+  for (const file of ["README.md", "packages/cli/README.md"]) {
+    const readme = await fs.readFile(path.join(repository, file), "utf8");
+    assert.match(readme, /--registry[\s\S]{0,120}fleet-list/);
+    assert.match(readme, /fleet-list/);
+    assert.doesNotMatch(readme, /\b(?:gibson|racter|shrdlu|plumbus|osanwe|eezo|tars)\b/i);
+  }
 });
 
 test("Tightbeam Linux builder creates source-declared dependencies before the Electron server bundle", async () => {

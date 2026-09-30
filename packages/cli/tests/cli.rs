@@ -229,6 +229,7 @@ fn invocation(temp: &TempDir, command: Command, input: Value) -> Invocation {
     Invocation {
         command,
         endpoint: Some("ws://unused.test".into()),
+        registry: None,
         input: input.as_object().cloned().unwrap_or_else(Map::new),
         product_label: Some("Clawline".into()),
         projection_capacity_bytes: 1024 * 1024,
@@ -328,6 +329,262 @@ fn native_cli_read(temp: &TempDir, scope_id: &str) -> Value {
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
+fn spawn_registry_server(
+    payload: Value,
+    response_op: &'static str,
+    response_ok: bool,
+) -> (String, thread::JoinHandle<Value>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let task = thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut socket = accept(stream).unwrap();
+        let request = match socket.read().unwrap() {
+            Message::Text(text) => serde_json::from_str::<Value>(&text).unwrap(),
+            message => panic!("unexpected registry request frame: {message:?}"),
+        };
+        let mut response = json!({
+            "id": request["id"],
+            "op": response_op,
+            "payload": payload,
+            "type": "response",
+            "v": 1,
+            "ok": response_ok,
+        });
+        if !response_ok {
+            response["error"] = json!({ "code": "registry_unavailable" });
+        }
+        socket
+            .send(Message::Text(response.to_string().into()))
+            .unwrap();
+        let _ = socket.close(None);
+        request
+    });
+    (format!("ws://{address}"), task)
+}
+
+fn run_native_cli(arguments: &[&str]) -> std::process::Output {
+    ProcessCommand::new(env!("CARGO_BIN_EXE_surf-ace"))
+        .args(arguments)
+        .output()
+        .unwrap()
+}
+
+fn fleet_inventory_fixture() -> Value {
+    json!({
+        "clients": [
+            {
+                "clientId": "a".repeat(64),
+                "surfaces": [
+                    {
+                        "surfaceId": "sf_primary",
+                        "windowLabel": "a",
+                        "panes": [
+                            { "paneId": "1", "paneLabel": 1, "paneAddress": "a1" },
+                            { "paneId": "2", "paneLabel": 2, "paneAddress": "a2" }
+                        ]
+                    },
+                    {
+                        "surfaceId": "sf_secondary",
+                        "windowLabel": "b",
+                        "panes": [{ "paneId": "1", "paneLabel": 1, "paneAddress": "b1" }]
+                    }
+                ]
+            },
+            {
+                "clientId": "b".repeat(64),
+                "surfaces": [{
+                    "surfaceId": "sf_other_client",
+                    "windowLabel": "c",
+                    "panes": [{ "paneId": "7", "paneLabel": 3, "paneAddress": "c3" }]
+                }]
+            }
+        ]
+    })
+}
+
+#[test]
+fn fleet_list_queries_registered_inventory_without_pairing_or_local_state_mutation() {
+    let expected = fleet_inventory_fixture();
+    let (registry, server) = spawn_registry_server(expected.clone(), "fleet.topology", true);
+    let temp = TempDir::new().unwrap();
+    let state_root = temp.path().join("state-must-remain-absent");
+    let state_root_text = state_root.to_str().unwrap();
+    let output = run_native_cli(&[
+        "--state-root",
+        state_root_text,
+        "--registry",
+        &registry,
+        "fleet-list",
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let output_json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(output_json["ok"], true);
+    assert_eq!(output_json["command"], "fleet-list");
+    assert!(output_json.get("controllerInstanceId").is_none());
+    assert_eq!(output_json["result"], expected);
+    assert!(
+        !state_root.exists(),
+        "fleet-list must not create controller state"
+    );
+
+    let request = server.join().unwrap();
+    assert_eq!(request["v"], 1);
+    assert_eq!(request["type"], "request");
+    assert_eq!(request["op"], "fleet.topology");
+    assert_eq!(request["payload"], json!({}));
+    assert!(request["id"]
+        .as_str()
+        .is_some_and(|id| id.starts_with("rq_")));
+}
+
+#[test]
+fn fleet_list_distinguishes_an_empty_registry_from_an_unavailable_registry() {
+    let (registry, server) =
+        spawn_registry_server(json!({ "clients": [] }), "fleet.topology", true);
+    let temp = TempDir::new().unwrap();
+    let state_root = temp.path().join("empty-state");
+    let state_root_text = state_root.to_str().unwrap();
+    let empty = run_native_cli(&[
+        "--state-root",
+        state_root_text,
+        "--registry",
+        &registry,
+        "fleet-list",
+    ]);
+    assert!(empty.status.success());
+    let empty_json: Value = serde_json::from_slice(&empty.stdout).unwrap();
+    assert_eq!(empty_json["result"]["clients"], json!([]));
+    assert!(server.join().is_ok());
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let unavailable_url = format!("ws://{}", listener.local_addr().unwrap());
+    drop(listener);
+    let unavailable_state = temp.path().join("unavailable-state");
+    let unavailable_state_text = unavailable_state.to_str().unwrap();
+    let unavailable = run_native_cli(&[
+        "--state-root",
+        unavailable_state_text,
+        "--registry",
+        &unavailable_url,
+        "fleet-list",
+    ]);
+    assert!(!unavailable.status.success());
+    let unavailable_json: Value = serde_json::from_slice(&unavailable.stdout).unwrap();
+    assert_eq!(unavailable_json["error"]["code"], "transport_error");
+    assert!(unavailable_json["error"]["details"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("before_send:reachability:"));
+    assert_ne!(empty_json["result"]["clients"], unavailable_json["error"]);
+    assert!(!unavailable_state.exists());
+}
+
+#[test]
+fn fleet_list_rejects_ambiguous_invalid_and_malformed_registry_routes() {
+    let temp = TempDir::new().unwrap();
+    let state_root = temp.path().join("unused-state");
+    let state_root_text = state_root.to_str().unwrap();
+
+    let ambiguous = run_native_cli(&[
+        "--state-root",
+        state_root_text,
+        "--endpoint",
+        "ws://client.invalid",
+        "--registry",
+        "ws://registry.invalid",
+        "fleet-list",
+    ]);
+    assert!(!ambiguous.status.success());
+    let ambiguous_json: Value = serde_json::from_slice(&ambiguous.stdout).unwrap();
+    assert_eq!(
+        ambiguous_json["error"]["details"]["message"],
+        "invalid_input:ambiguous_endpoint_registry"
+    );
+
+    let invalid = run_native_cli(&[
+        "--state-root",
+        state_root_text,
+        "--registry",
+        "https://registry.example",
+        "fleet-list",
+    ]);
+    assert!(!invalid.status.success());
+    let invalid_json: Value = serde_json::from_slice(&invalid.stdout).unwrap();
+    assert_eq!(
+        invalid_json["error"]["details"]["message"],
+        "invalid_input:invalid_registry"
+    );
+
+    let missing = run_native_cli(&["--state-root", state_root_text, "fleet-list"]);
+    assert!(!missing.status.success());
+    let missing_json: Value = serde_json::from_slice(&missing.stdout).unwrap();
+    assert_eq!(
+        missing_json["error"]["details"]["message"],
+        "invalid_input:missing_registry"
+    );
+
+    let malformed_payload =
+        json!({ "clients": [{ "clientId": "not-a-fingerprint", "surfaces": [] }] });
+    let (registry, server) = spawn_registry_server(malformed_payload, "fleet.topology", true);
+    let malformed = run_native_cli(&[
+        "--state-root",
+        state_root_text,
+        "--registry",
+        &registry,
+        "fleet-list",
+    ]);
+    assert!(!malformed.status.success());
+    let malformed_json: Value = serde_json::from_slice(&malformed.stdout).unwrap();
+    assert_eq!(malformed_json["error"]["code"], "protocol_error");
+    assert!(malformed_json["error"]["details"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("invalid_fleet_topology_client_id"));
+    assert!(server.join().is_ok());
+    assert!(!state_root.exists());
+
+    let (registry, server) =
+        spawn_registry_server(fleet_inventory_fixture(), "client.register", true);
+    let malformed_envelope = run_native_cli(&[
+        "--state-root",
+        state_root_text,
+        "--registry",
+        &registry,
+        "fleet-list",
+    ]);
+    assert!(!malformed_envelope.status.success());
+    let malformed_envelope_json: Value =
+        serde_json::from_slice(&malformed_envelope.stdout).unwrap();
+    assert_eq!(malformed_envelope_json["error"]["code"], "protocol_error");
+    assert_eq!(
+        malformed_envelope_json["error"]["details"]["message"],
+        "protocol_error:invalid_fleet_topology_envelope"
+    );
+    assert!(server.join().is_ok());
+
+    let ordinary_command = run_native_cli(&[
+        "--state-root",
+        state_root_text,
+        "--registry",
+        "ws://registry.invalid",
+        "list",
+    ]);
+    assert!(!ordinary_command.status.success());
+    let ordinary_command_json: Value = serde_json::from_slice(&ordinary_command.stdout).unwrap();
+    assert_eq!(
+        ordinary_command_json["error"]["details"]["message"],
+        "invalid_input:registry_only_for_fleet_list"
+    );
+}
+
 #[test]
 fn command_surface_is_exact_and_matches_package_and_canonical_vectors() {
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -339,7 +596,7 @@ fn command_surface_is_exact_and_matches_package_and_canonical_vectors() {
         .iter()
         .map(|command| command.name())
         .collect::<Vec<_>>();
-    assert_eq!(expected.len(), 11);
+    assert_eq!(expected.len(), 12);
     assert_eq!(package["commands"], json!(expected));
     assert_eq!(
         package["receiptResolutionOutcomes"],
@@ -611,7 +868,7 @@ fn canonical_target_admission_cases_execute_rust_controller_semantics() {
 }
 
 #[test]
-fn all_eleven_commands_map_to_the_public_wire_and_return_json() {
+fn canonical_client_commands_map_to_the_public_wire_and_return_json() {
     for (command, input, expected_operation) in canonical_network_cases() {
         let temp = TempDir::new().unwrap();
         let mut wire = FakeWire::ordinary();
@@ -626,6 +883,56 @@ fn all_eleven_commands_map_to_the_public_wire_and_return_json() {
     local.product_label = None;
     let output = execute(local).unwrap();
     assert_eq!(output.result["cacheStatus"], "unsynchronized");
+}
+
+#[test]
+fn packaged_linux_and_macos_cli_assets_use_the_same_command_surface() {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let repository = manifest_dir.join("../..");
+    let config =
+        fs::read_to_string(repository.join("scripts/release/tightbeam-release-config.mjs"))
+            .unwrap();
+    for target in ["x86_64-unknown-linux-gnu", "aarch64-apple-darwin"] {
+        assert!(
+            config.contains(&format!(
+                "cargo build --manifest-path source/packages/cli/Cargo.toml --target-dir source/packages/cli/target --release --locked --target {target}"
+            )),
+            "release config must build the CLI crate for {target}"
+        );
+    }
+
+    let builder =
+        fs::read_to_string(repository.join("scripts/release/build-tightbeam-release.mjs")).unwrap();
+    let linux_stage = builder
+        .split("export async function buildTightbeamLinuxStage")
+        .nth(1)
+        .unwrap()
+        .split("const TIGHTBEAM_SKILL_SOURCE")
+        .next()
+        .unwrap();
+    let linux_packages = builder
+        .split("export async function buildTightbeamLinuxPackages")
+        .nth(1)
+        .unwrap()
+        .split("export async function buildTightbeamMacosPackages")
+        .next()
+        .unwrap();
+    let macos = builder
+        .split("export async function buildTightbeamMacosPackages")
+        .nth(1)
+        .unwrap()
+        .split("export async function buildTightbeamLinuxQualification")
+        .next()
+        .unwrap();
+    for platform_builder in [linux_stage, macos] {
+        assert!(platform_builder.contains("path.join(source, \"packages/cli/Cargo.toml\")"));
+    }
+    for package_builder in [linux_packages, macos] {
+        assert!(package_builder.contains("packages/cli/target"));
+        assert!(package_builder.contains("release/surf-ace"));
+        assert!(package_builder.contains("assembleTightbeamCliStage"));
+    }
+    assert!(builder.contains("path.join(stageDir, \"bin/surf-ace\")"));
 }
 
 #[test]

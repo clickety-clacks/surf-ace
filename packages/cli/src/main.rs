@@ -30,6 +30,7 @@ fn parse() -> Result<Invocation, surf_ace_cli::CliError> {
     let mut args = env::args().skip(1).peekable();
     let mut state_root: Option<PathBuf> = None;
     let mut endpoint = None;
+    let mut registry = None;
     let mut product_label = None;
     let mut projection_capacity_bytes = 16 * 1024 * 1024;
     let mut input_json = None;
@@ -38,6 +39,7 @@ fn parse() -> Result<Invocation, surf_ace_cli::CliError> {
         match argument.as_str() {
             "--state-root" => state_root = Some(PathBuf::from(value(&mut args, "state-root")?)),
             "--endpoint" => endpoint = Some(value(&mut args, "endpoint")?),
+            "--registry" => registry = Some(value(&mut args, "registry")?),
             "--product-label" => product_label = Some(value(&mut args, "product-label")?),
             "--projection-capacity-bytes" => {
                 projection_capacity_bytes = value(&mut args, "projection-capacity-bytes")?
@@ -56,6 +58,11 @@ fn parse() -> Result<Invocation, surf_ace_cli::CliError> {
     }
     let command = command.ok_or_else(|| input_error("command"))?;
     let state_root = state_root.ok_or_else(|| input_error("state-root"))?;
+    if endpoint.is_some() && registry.is_some() {
+        return Err(surf_ace_cli::CliError::Input(
+            "ambiguous_endpoint_registry".into(),
+        ));
+    }
     let encoded = if let Some(input) = input_json {
         input
     } else {
@@ -77,6 +84,7 @@ fn parse() -> Result<Invocation, surf_ace_cli::CliError> {
     Ok(Invocation {
         command,
         endpoint,
+        registry,
         input,
         product_label,
         projection_capacity_bytes,
