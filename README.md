@@ -43,6 +43,12 @@ documentation for the exact inputs and outputs. The Linux server archive
 includes `docs/OPERATIONS.md` with PostgreSQL configuration, health checks,
 backup, staged restore, and rollback guidance.
 
+Every successful `capture-pane` call returns the requested pane's PNG screenshot
+and capture metadata; there is no option to suppress the screenshot. It does not
+extract visible text from the image or rendered page. Use `read` for the current
+content record. Settled `event.scroll` visible text, when available, remains a
+separate event and is not part of screenshot capture.
+
 ## Release assets
 
 The v0.2.2 release contains six versioned assets, a manifest, and

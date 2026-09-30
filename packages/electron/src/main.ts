@@ -1573,9 +1573,6 @@ function installIpc(): void {
       if ("viewport" in payload) {
         snapshot.viewport = payload.viewport as never;
       }
-      if ("visibleText" in payload) {
-        snapshot.visibleText = String(payload.visibleText ?? "");
-      }
       core.updatePaneSnapshot(surfaceId, Number(payload.paneId), snapshot);
     } catch {
       // Renderer snapshot updates are best-effort; stale pane ids should not crash the app.

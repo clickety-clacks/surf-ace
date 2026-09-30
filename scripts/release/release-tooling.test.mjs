@@ -73,6 +73,26 @@ import { verifyClientAppVersion } from "./smoke-lib.mjs";
 import { verifySmokeReceipt, writeSmokeReceipt } from "./write-smoke-receipt.mjs";
 import tightbeamServerLauncher from "./tightbeam-server-launcher.cjs";
 
+const screenshotFixturePng = "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAECAIAAAA8r+mnAAAAFUlEQVR4nGO4aWYGRyrZ5+CIgXoSADGsKiGSGiX+AAAAAElFTkSuQmCC";
+const screenshotFixtureImage = createRequire(import.meta.url)("./png-pixel-evidence.cjs").inspectScreenshotPixels;
+const screenshotPixelFixtureHtml = [
+  "<style>",
+  "html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden}",
+  ".left,.right{position:absolute;top:0;bottom:0;width:50%}",
+  ".left{left:0;background:#d93636}",
+  ".right{right:0;background:#246bce}",
+  "</style><div class=left></div><div class=right></div>",
+].join("");
+
+test("capture screenshot evidence decodes the expected pixels and rejects a different image", () => {
+  const evidence = screenshotFixtureImage(screenshotFixturePng, ["#d93636", "246bce"]);
+  assert.equal(evidence.width, 8);
+  assert.equal(evidence.height, 4);
+  assert.deepEqual(evidence.matchedRgbHex, ["246bce", "d93636"]);
+  assert.throws(() => screenshotFixtureImage(screenshotFixturePng, ["#ff00ff"]), /capture_screenshot_expected_pixels_missing/);
+  assert.throws(() => screenshotFixtureImage("not a png", ["d93636"]), /capture_screenshot_image_missing/);
+});
+
 const exec = promisify(execFile);
 const workspaceRequire = createRequire(import.meta.url);
 const { WebSocketServer } = workspaceRequire("../../packages/electron/node_modules/ws");
@@ -579,7 +599,7 @@ test("Tightbeam macOS smoke uses the packaged CLI directly against one candidate
       return { ok: true, result: { accepted: true } };
     }
     if (commandName === "capture-pane") return { ok: true, result: {
-      contentId: visibleId, visibleText: `${visibleId}:${surfaceId}:1`, paneId: input.paneId, revision: calls.length,
+      contentId: visibleId, image: screenshotFixturePng, paneId: input.paneId, revision: calls.length,
     } };
     if (commandName === "read") return { ok: true, result: {
       cacheStatus: "current", consumableLoss: null,
@@ -642,7 +662,7 @@ test("Tightbeam direct smoke rejects missing current content despite a matching 
       if (commandName === "push") return { ok: true, result: { accepted: true } };
       if (commandName === "capture-pane") return { ok: true, result: {
         contentId: "tightbeam-macos-candidate-write", paneId: input.paneId,
-        visibleText: "tightbeam-macos-candidate-write:sf_expected:1",
+        image: screenshotFixturePng,
       } };
       if (commandName === "read") return { ok: true, result: {
         cacheStatus: "current", consumableLoss: null, currentContentRecord: null,
@@ -1078,10 +1098,15 @@ test("Linux fresh-install fixture binds its identity gate to the release candida
   }
 });
 
-test("v0.2.2 fresh-install smoke pushes a bare paragraph fragment", async () => {
+test("fresh-install smoke validates returned screenshot pixels instead of extracting screenshot text", async () => {
   const fixture = await fs.readFile(path.join(repository, "scripts/release/tightbeam-state-smoke-fixture.ts"), "utf8");
-  assert.match(fixture, /content: \{ html: `<p>\$\{visibleText\}<\/p>` \}/);
-  assert.doesNotMatch(fixture, /content: \{ html: `<main>\$\{visibleText\}<\/main>` \}/);
+  const smoke = await fs.readFile(path.join(repository, "scripts/release/smoke-tightbeam-release.mjs"), "utf8");
+  assert.match(fixture, /inspectScreenshotPixels\(firstCapture\?\.image, expectedScreenshotColors\)/);
+  assert.match(smoke, /inspectScreenshotPixels\(visible\.capture\.image, expectedScreenshotColors\)/);
+  assert.match(fixture, /\.left\{left:0;background:#d93636\}/);
+  assert.match(fixture, /\.right\{right:0;background:#246bce\}/);
+  assert.doesNotMatch(fixture, /expectedVisibleText|capture\?\.visibleText/);
+  assert.doesNotMatch(smoke, /capture\.visibleText|expectedVisibleText/);
 });
 
 test("Tightbeam SHA256SUMS binds exactly the six hosted assets and manifest", async (t) => {
@@ -1791,7 +1816,7 @@ function rawCliEvidenceFixture(endpoint = "ws://127.0.0.1:19001/ws", stateRoot =
   record("list", {});
   record("topology-intent", { action: "split", count: 3, paneId: 1, surfaceId: "sf_1" });
   record("push", { contentId: "candidate-write", paneId: 2, surfaceId: "sf_1" });
-  record("capture-pane", { includeImage: true, paneId: 2, surfaceId: "sf_1" });
+  record("capture-pane", { paneId: 2, surfaceId: "sf_1" });
   record("read", { scopeId: "pane:sf_1:2" }, null);
   record("topology-intent", { action: "close", paneId: 3, surfaceId: "sf_1" });
   const bytes = Buffer.from(`${events.map((event) => JSON.stringify(event)).join("\n")}\n`);
@@ -1804,13 +1829,13 @@ function rawCliEvidenceFixture(endpoint = "ws://127.0.0.1:19001/ws", stateRoot =
 
 test("fresh-install Linux qualification requires direct current content, wrong-surface rejection, and restart continuity", async () => {
   const contentId = "linux-fresh-install-content";
-  const visibleText = "fresh-install-visible-marker";
+  const screenshotPixelEvidence = screenshotFixtureImage(screenshotFixturePng, ["246bce", "d93636"]);
   const clientIdentity = "1234abcd";
   const registrationIdentity = `${clientIdentity}${"a".repeat(56)}`;
   const directClientEndpoint = "ws://127.0.0.1:19001/ws";
   const registryEndpoint = "ws://127.0.0.1:19999/ws";
   const phase = (overrides = {}) => ({
-    capture: { contentId, paneId: 1, requestSurfaceId: "sf_fresh", responseSurfaceId: null, visibleText },
+    capture: { contentId, paneId: 1, requestSurfaceId: "sf_fresh", responseSurfaceId: null, pixelEvidence: screenshotPixelEvidence },
     clientIdentity,
     clientAppVersion: TIGHTBEAM.version,
     clientAppVersionEvidenceSha256: "d".repeat(64),
@@ -1854,7 +1879,7 @@ test("fresh-install Linux qualification requires direct current content, wrong-s
     sourceCommit: TIGHTBEAM.candidateCommit,
     displayReady: { display: ":99", probeSha256: "a".repeat(64), status: "verified", tool: "xdpyinfo" },
     expectedContentId: contentId,
-    expectedVisibleText: visibleText,
+    expectedScreenshotColors: ["246bce", "d93636"],
     expectedVersion: TIGHTBEAM.version,
     initial: phase(),
     afterRestart: phase(),
@@ -1921,7 +1946,7 @@ test("fresh-install Linux qualification requires direct current content, wrong-s
   assert.throws(() => validateTightbeamFreshInstallState({
     ...evidence,
     initial: phase({ capture: { ...phase().capture, responseSurfaceId: "sf_wrong" } }),
-  }), /fresh_install_initial_rendered_capture_mismatch/);
+  }), /fresh_install_initial_screenshot_pixel_evidence_mismatch/);
   assert.throws(() => validateTightbeamFreshInstallState({
     ...evidence,
     afterRestart: phase({ clientAppVersion: "0.1.0" }),
@@ -1987,8 +2012,9 @@ test("fresh-install wrong-surface probe omits fixture metadata from the packaged
 });
 
 test("Linux fresh-install acceptance is based on direct current-content evidence", () => {
+  const screenshotPixelEvidence = screenshotFixtureImage(screenshotFixturePng, ["246bce", "d93636"]);
   const phase = (contentId = "linux-fresh-install-content") => ({
-    capture: { contentId, paneId: 1, requestSurfaceId: "sf_fresh", responseSurfaceId: null, visibleText: "fresh-install-visible-marker" },
+    capture: { contentId, paneId: 1, requestSurfaceId: "sf_fresh", responseSurfaceId: null, pixelEvidence: screenshotPixelEvidence },
     clientIdentity: "1234abcd",
     clientAppVersion: TIGHTBEAM.version,
     clientAppVersionEvidenceSha256: "d".repeat(64),
@@ -2023,7 +2049,7 @@ test("Linux fresh-install acceptance is based on direct current-content evidence
     sourceCommit: TIGHTBEAM.candidateCommit,
     displayReady: { display: ":99", probeSha256: "a".repeat(64), status: "verified", tool: "xdpyinfo" },
     expectedContentId: contentId,
-    expectedVisibleText: "fresh-install-visible-marker",
+    expectedScreenshotColors: ["246bce", "d93636"],
     expectedVersion: TIGHTBEAM.version,
     initial: phase(contentId),
     afterRestart: phase(contentId),
@@ -2078,11 +2104,11 @@ test("Linux fresh-install state driver binds candidate-only inputs and packaged 
   await fs.writeFile(tsxLoader, "export {};\n");
   const initialEndpoint = "ws://127.0.0.1:19001/ws";
   const contentId = "linux-fresh-install-content";
-  const visibleText = "fresh-install-visible-marker";
+  const screenshotPixelEvidence = screenshotFixtureImage(screenshotFixturePng, ["246bce", "d93636"]);
   const clientIdentity = "1234abcd";
   const registrationIdentity = `${clientIdentity}${"a".repeat(56)}`;
   const phase = (endpoint) => ({
-    capture: { contentId, paneId: 1, requestSurfaceId: "sf_fresh", responseSurfaceId: null, visibleText },
+    capture: { contentId, paneId: 1, requestSurfaceId: "sf_fresh", responseSurfaceId: null, pixelEvidence: screenshotPixelEvidence },
     clientIdentity,
     clientAppVersion: TIGHTBEAM.version,
     clientAppVersionEvidenceSha256: "d".repeat(64),
@@ -2125,7 +2151,7 @@ test("Linux fresh-install state driver binds candidate-only inputs and packaged 
     expectedVersion: TIGHTBEAM.version,
     displayReady: { display: ":99", probeSha256: "a".repeat(64), status: "verified", tool: "xdpyinfo" },
     expectedContentId: contentId,
-    expectedVisibleText: visibleText,
+    expectedScreenshotColors: ["246bce", "d93636"],
     initial: phase(initialEndpoint),
     afterRestart: phase(initialEndpoint),
     wrongSurfaceRejection: {
@@ -2181,7 +2207,7 @@ test("Linux fresh-install state driver binds candidate-only inputs and packaged 
       stderr: "", output, stdout });
   };
   const listed = { surfaces: [{ surfaceId: "sf_fresh", topology: { panes: [{ paneId: 1 }] } }] };
-  const capture = { contentId, paneId: 1, surfaceId: null, visibleText };
+  const capture = { contentId, image: screenshotFixturePng, paneId: 1, surfaceId: null };
   const read = {
     cacheStatus: "current",
     consumableLoss: null,
@@ -2198,8 +2224,8 @@ test("Linux fresh-install state driver binds candidate-only inputs and packaged 
     scopeId: "pane:sf_fresh:1",
   };
   record("list", {}, initialEndpoint, listed);
-  record("push", { content: { html: `<main>${visibleText}</main>` }, contentId, paneId: 1, surfaceId: "sf_fresh" }, initialEndpoint);
-  record("capture-pane", { includeImage: true, paneId: 1, surfaceId: "sf_fresh" }, initialEndpoint, capture);
+  record("push", { content: { html: screenshotPixelFixtureHtml }, contentId, paneId: 1, surfaceId: "sf_fresh" }, initialEndpoint);
+  record("capture-pane", { paneId: 1, surfaceId: "sf_fresh" }, initialEndpoint, capture);
   record("read", { scopeId: "pane:sf_fresh:1" }, null, read);
   events.push({
     args: ["--state-root", path.join(stateRoot, "cli"), "--endpoint", initialEndpoint,
@@ -2212,10 +2238,10 @@ test("Linux fresh-install state driver binds candidate-only inputs and packaged 
     inputJson: JSON.stringify({ contentId: `${contentId}-wrong-surface`, paneId: 1, surfaceId: "sf_wrong" }),
     route: "direct-client-websocket", status: 1, stderr: "", stdout: "unknown_surface:sf_wrong",
   });
-  record("capture-pane", { includeImage: true, paneId: 1, surfaceId: "sf_fresh" }, initialEndpoint, capture);
+  record("capture-pane", { paneId: 1, surfaceId: "sf_fresh" }, initialEndpoint, capture);
   record("read", { scopeId: "pane:sf_fresh:1" }, null, read);
   record("list", {}, initialEndpoint, listed);
-  record("capture-pane", { includeImage: true, paneId: 1, surfaceId: "sf_fresh" }, initialEndpoint, capture);
+  record("capture-pane", { paneId: 1, surfaceId: "sf_fresh" }, initialEndpoint, capture);
   record("read", { scopeId: "pane:sf_fresh:1" }, null, read);
   const bytes = Buffer.from(`${events.map((event) => JSON.stringify(event)).join("\n")}\n`);
   Object.assign(stateSequence, {

@@ -224,16 +224,10 @@ impl Command {
                 nonempty_string_array(input, "strokeIds")?;
             }
             Self::CapturePane => {
-                exact_fields(
-                    input,
-                    &["paneId", "surfaceId"],
-                    &["includeDrawings", "includeImage", "includeVisibleText"],
-                )?;
+                exact_fields(input, &["paneId", "surfaceId"], &["includeDrawings"])?;
                 required_string(input, "surfaceId")?;
                 positive_integer(input, "paneId")?;
-                for key in ["includeDrawings", "includeImage", "includeVisibleText"] {
-                    optional_boolean(input, key)?;
-                }
+                optional_boolean(input, "includeDrawings")?;
             }
             Self::SurfaceIntent => {
                 nonnegative_integer(input, "expectedSurfaceSetRevision")?;

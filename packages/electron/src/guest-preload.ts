@@ -5,7 +5,7 @@ type ContentEventPayload =
   | { type: "navigation"; url: string }
   | { selection: SelectionPayload | null; type: "selection" }
   | { kind: "long_press" | "tap"; nearestContent?: string; position: { x: number; y: number }; type: "tap" }
-  | { type: "ready"; viewport: ViewportPayload; visibleText: string }
+  | { type: "ready"; viewport: ViewportPayload }
   | { type: "scroll"; viewport: ViewportPayload; visibleText: string };
 
 type SelectionPayload = {
@@ -176,5 +176,5 @@ document.addEventListener("submit", (event) => {
 }, { capture: true });
 
 window.addEventListener("DOMContentLoaded", () => {
-  emit({ type: "ready", viewport: currentViewport(), visibleText: visibleText() });
+  emit({ type: "ready", viewport: currentViewport() });
 });

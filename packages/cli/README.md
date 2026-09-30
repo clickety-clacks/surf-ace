@@ -28,6 +28,8 @@ The complete command set is `list`, `push`, `read`, `topology-intent`,
 `surface-intent`, `target-register`, and `target-apply`. Each command accepts
 one JSON object via `--input-json` or standard input and writes exactly one JSON
 result to standard output. `read` is strictly local and rejects `--endpoint`.
+Every successful `capture-pane` call includes its PNG screenshot; the command
+has no option to suppress it.
 
 `read` keeps unread-delta consumption and current-state inspection separate.
 Its `records` array contains only records at or beyond the projected cursor;

@@ -73,7 +73,7 @@ test("production validation matches the shared Rust CLI boundary vector", () => 
       operation: string;
     }>;
   };
-  assert.equal(vector.cases.length, 64);
+  assert.equal(vector.cases.length, 65);
   for (const entry of vector.cases) {
     const { action: _action, ...payload } = entry.input;
     const envelope = request(entry.operation, payload);
@@ -83,6 +83,41 @@ test("production validation matches the shared Rust CLI boundary vector", () => 
       entry.id,
     );
   }
+});
+
+test("snapshot capture always returns an image and has no suppression flag", () => {
+  const requestProperties = (protocolSchemaDefs.SnapshotGetRequest as any).properties.payload.properties;
+  const responseProperties = (protocolSchemaDefs.SnapshotResponse as any).properties.payload.properties;
+  assert.equal(Object.hasOwn(requestProperties, "includeVisibleText"), false);
+  assert.equal(Object.hasOwn(responseProperties, "visibleText"), false);
+  assert.equal(Object.hasOwn(requestProperties, "includeImage"), false);
+  assert.deepEqual(
+    (protocolSchemaDefs.SnapshotResponse as any).properties.payload.required,
+    ["paneId", "contentId", "revision", "contentType", "viewport", "selection", "image"],
+  );
+  assert.deepEqual(
+    validateLocklessEnvelope(request("snapshot.get", {
+      paneId: 1,
+      surfaceId: "sf_capture",
+    })),
+    { ok: true },
+  );
+  assert.deepEqual(
+    validateLocklessEnvelope(request("snapshot.get", {
+      includeImage: false,
+      paneId: 1,
+      surfaceId: "sf_capture",
+    })),
+    { ok: false, reason: "unknown_property:includeImage" },
+  );
+  assert.deepEqual(
+    validateLocklessEnvelope(request("snapshot.get", {
+      includeVisibleText: true,
+      paneId: 1,
+      surfaceId: "sf_capture",
+    })),
+    { ok: false, reason: "unknown_property:includeVisibleText" },
+  );
 });
 
 test("lockless schema exports request, response, and event branches", () => {

@@ -1133,14 +1133,12 @@ test("surface core ignores snapshot updates for stale pane ids", () => {
   const paneId = applyProviderBootstrap(core, surface.surfaceId, 7);
 
   assert.doesNotThrow(() => {
-    updateResolvedPaneSnapshot(core, surface.surfaceId, 819, {
-      visibleText: "stale",
-    });
+    updateResolvedPaneSnapshot(core, surface.surfaceId, 819, {});
   });
   assert.ok(warnings.some((warning) => warning.includes("unknown pane 819")));
 });
 
-test("surface core falls back to authoritative html text when renderer snapshot is still empty", () => {
+test("surface core capture metadata does not expose extracted html text", () => {
   const core = new SurfaceCore({
     persistentState: {
       primarySurfaceId: null,
@@ -1160,14 +1158,17 @@ test("surface core falls back to authoritative html text when renderer snapshot 
     revision: 1 as never,
   });
   updateResolvedPaneSnapshot(core, surface.surfaceId, paneId, {
-    visibleText: "",
+    viewport: { contentSize: { height: 800, width: 1200 }, scrollOffset: { x: 0, y: 0 }, visibleRect: { height: 800, width: 1200, x: 0, y: 0 }, zoomLevel: 1 },
   });
 
   const snapshot = core.captureSnapshot(surface.surfaceId, paneId);
-  assert.equal(snapshot.visibleText, "pane two\nready");
+  assert.equal(snapshot.contentId, "ct_html");
+  assert.equal(snapshot.contentType, "html");
+  assert.equal(snapshot.viewport.visibleRect.width, 1200);
+  assert.equal(Object.hasOwn(snapshot, "visibleText"), false);
 });
 
-test("surface core extracts visible text from an accepted HTML fragment when renderer snapshot is empty", () => {
+test("surface core snapshot omits text extracted from accepted HTML fragments", () => {
   const core = new SurfaceCore({
     persistentState: {
       primarySurfaceId: null,
@@ -1187,7 +1188,7 @@ test("surface core extracts visible text from an accepted HTML fragment when ren
 
   const snapshot = core.captureSnapshot(surface.surfaceId, paneId);
   assert.equal(snapshot.contentId, "ct_html_fragment");
-  assert.equal(snapshot.visibleText, "accepted fragment is visible");
+  assert.equal(Object.hasOwn(snapshot, "visibleText"), false);
 });
 
 test("surface core starts browser_url targets without reporting unverified navigation as applied", () => {

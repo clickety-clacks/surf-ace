@@ -451,7 +451,6 @@ function reportPaneSnapshot(view: PaneView): void {
     });
     return;
   }
-  const visibleText = currentVisibleText(view);
   const selection = currentSelectionWithin(view);
   const viewport = currentViewport(view);
   window.surfAce.reportSnapshot({
@@ -460,7 +459,6 @@ function reportPaneSnapshot(view: PaneView): void {
     paneId: view.paneId,
     selection,
     viewport,
-    visibleText,
   });
 }
 
@@ -1792,7 +1790,6 @@ function reportBrowserUrlKeyboardScroll(view: PaneView, result: BrowserUrlKeyboa
     paneId: view.paneId,
     selection: null,
     viewport: result.viewport,
-    visibleText: result.visibleText,
   });
 }
 
@@ -2365,7 +2362,6 @@ function wireBrowserContentEvents(view: PaneView, paneId: number, webview: Brows
         paneId,
         selection: null,
         viewport: payload.viewport,
-        visibleText: payload.visibleText,
       });
     }
   };

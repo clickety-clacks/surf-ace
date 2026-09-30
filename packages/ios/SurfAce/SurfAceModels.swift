@@ -522,7 +522,6 @@ func surfAceRemovingAnnotationStrokes(
 
 struct SurfAceSurfaceSnapshot {
     let viewport: SurfAceViewport
-    let visibleText: String
     let selection: SurfAceSelection?
     let imageBase64: String?
 }
@@ -1042,7 +1041,8 @@ protocol SurfAcePaneBridging: AnyObject {
     func restoreDrawing(from drawingData: Data, strokes: [SurfAceStroke]) -> Bool
     func restoreDrawingStrokes(_ strokes: [SurfAceStroke]) -> Bool
     func captureDrawingData() -> Data
-    func fetchSnapshot(includeImage: Bool) async -> SurfAceSurfaceSnapshot?
+    func fetchSnapshot() async -> SurfAceSurfaceSnapshot?
+    func fetchSnapshotMetadata() async -> SurfAceSurfaceSnapshot?
     func applyHTMLPatch(_ patch: SurfAceFramePatchRequest) async -> SurfAceHTMLPatchResult
     func removeDrawingStrokeIDs(_ strokeIDs: [String])
     func clearDrawings()

@@ -2055,12 +2055,13 @@ export class SurfaceWsServer {
         request.payload.surfaceId,
         request.payload.paneId,
       );
-      const image = request.payload.includeImage
-        ? await this.capturePaneImage(
-            request.payload.surfaceId,
-            request.payload.paneId,
-          )
-        : undefined;
+      const image = await this.capturePaneImage(
+        request.payload.surfaceId,
+        request.payload.paneId,
+      );
+      if (!image) {
+        throw new SurfaceCoreError("render_failed", "snapshot PNG capture was unavailable");
+      }
       return locklessSuccess(request, {
         ...snapshot,
         drawings: request.payload.includeDrawings
@@ -2070,11 +2071,7 @@ export class SurfaceWsServer {
                 (pane) => pane.paneId === request.payload.paneId,
               )?.drawings
           : undefined,
-        image: image ?? undefined,
-        visibleText:
-          request.payload.includeVisibleText === false
-            ? undefined
-            : snapshot.visibleText,
+        image,
       });
     }
     if (request.op === "target.apply") {
@@ -4870,9 +4867,10 @@ export class SurfaceWsServer {
   private async handleSnapshotGet(socket: WebSocket, request: SnapshotGetRequest): Promise<Response> {
     const surfaceId = this.requirePairedSurfaceId(socket);
     const snapshot = this.core.captureSnapshot(surfaceId, Number(request.payload.paneId));
-    const image = request.payload.includeImage
-      ? await this.capturePaneImage(surfaceId, Number(request.payload.paneId))
-      : undefined;
+    const image = await this.capturePaneImage(surfaceId, Number(request.payload.paneId));
+    if (!image) {
+      throw new SurfaceCoreError("render_failed", "snapshot PNG capture was unavailable");
+    }
 
     return {
       id: request.id,
@@ -4883,8 +4881,7 @@ export class SurfaceWsServer {
         drawings: request.payload.includeDrawings
           ? this.core.getRendererWindowState(surfaceId).panes.find((pane) => pane.paneId === Number(request.payload.paneId))?.drawings
           : undefined,
-        image: image ?? undefined,
-        visibleText: request.payload.includeVisibleText === false ? undefined : snapshot.visibleText,
+        image,
       },
       sentAt: Date.now(),
       type: "response",
@@ -5307,7 +5304,10 @@ export class SurfaceWsServer {
     });
   }
 
-  private tryCaptureSnapshot(surfaceId: string, paneId: number): SnapshotResponse["payload"] | null {
+  private tryCaptureSnapshot(
+    surfaceId: string,
+    paneId: number,
+  ): Omit<SnapshotResponse["payload"], "image"> | null {
     try {
       return this.core.captureSnapshot(surfaceId, paneId);
     } catch (error) {

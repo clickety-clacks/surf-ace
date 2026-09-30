@@ -67,7 +67,6 @@ function multiWindowState(): PersistentSurfaceState {
                 bounds: null,
                 selection: { text: "" },
                 viewport: { height: 1, scale: 1, width: 1 },
-                visibleText: "",
               },
               toast: null,
             },

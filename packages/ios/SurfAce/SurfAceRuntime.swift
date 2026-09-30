@@ -2540,13 +2540,19 @@ final class SurfAceRuntime {
                 )
             )
         }
-        let includeImage = payload["includeImage"] as? Bool ?? false
-        let includeVisibleText = payload["includeVisibleText"] as? Bool ?? true
         let includeDrawings = payload["includeDrawings"] as? Bool ?? false
-        let snapshot = await pane.bridge?.fetchSnapshot(includeImage: includeImage)
-        pane.lastViewport = snapshot?.viewport ?? defaultViewport(surface: surfaceById[surfaceId])
-        if let visibleText = snapshot?.visibleText { pane.lastVisibleText = visibleText }
-        pane.lastSelection = snapshot?.selection ?? pane.lastSelection
+        guard let snapshot = await pane.bridge?.fetchSnapshot(),
+              let image = snapshot.imageBase64,
+              !image.isEmpty else {
+            return SurfAceProcessedRequestResult(
+                responseObject: makeErrorResponse(
+                    op: "snapshot.get", id: id, code: "render_failed",
+                    message: "snapshot PNG capture was unavailable"
+                )
+            )
+        }
+        pane.lastViewport = snapshot.viewport
+        pane.lastSelection = snapshot.selection ?? pane.lastSelection
 
         var responsePayload: [String: Any] = [
             "paneId": paneId,
@@ -2556,9 +2562,6 @@ final class SurfAceRuntime {
             "viewport": jsonObject(fromEncodable: pane.lastViewport) ?? NSNull(),
             "selection": jsonObject(fromEncodable: pane.lastSelection) ?? NSNull(),
         ]
-        if includeVisibleText {
-            responsePayload["visibleText"] = pane.lastVisibleText.prefix(maxVisibleTextBytes).description
-        }
         if includeDrawings,
            case .object(let annotations) = authorityPane.history.visible.annotations,
            case .object(let strokes) = annotations["strokesById"] {
@@ -2566,7 +2569,7 @@ final class SurfAceRuntime {
                 strokes[key].map(Self.foundationJSON)
             }
         }
-        if includeImage, let image = snapshot?.imageBase64 { responsePayload["image"] = image }
+        responsePayload["image"] = image
         return SurfAceProcessedRequestResult(
             responseObject: [
                 "v": 1, "type": "response", "op": "snapshot.get", "id": id,
@@ -3594,9 +3597,8 @@ final class SurfAceRuntime {
         )
         let restoreViewport: SurfAceViewport?
         if shouldRestoreViewport,
-           let snapshot = await pane.bridge?.fetchSnapshot(includeImage: false) {
+           let snapshot = await pane.bridge?.fetchSnapshotMetadata() {
             pane.lastViewport = snapshot.viewport
-            pane.lastVisibleText = snapshot.visibleText
             pane.lastSelection = snapshot.selection ?? pane.lastSelection
             restoreViewport = snapshot.viewport
         } else if shouldRestoreViewport {

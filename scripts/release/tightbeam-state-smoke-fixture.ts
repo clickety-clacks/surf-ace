@@ -12,6 +12,13 @@ import { electronLaunchConfig, hasRequiredAllocatorBackupObjects, launchElectron
 import { TIGHTBEAM } from "./tightbeam-release-config.mjs";
 import tightbeamServerLauncher from "./tightbeam-server-launcher.cjs";
 
+const { inspectScreenshotPixels } = createRequire(import.meta.url)("./png-pixel-evidence.cjs") as {
+  inspectScreenshotPixels: (imageBase64: unknown, expectedColors: string[]) => {
+    height: number; matchedRgbHex: string[]; pngBytes: number; sha256: string; width: number;
+  };
+};
+const expectedScreenshotColors = ["246bce", "d93636"];
+
 const execFile = promisify(execFileCallback);
 let Client: any;
 let PostgresCustodyAdapter: any;
@@ -506,7 +513,6 @@ function matchesFreshInstallCurrentContent(record: any, contentId: string, surfa
 async function readPane(binary: string, stateRoot: string, endpoint: string, surfaceId: string, paneId: number) {
   const captureOutput = await cli(binary, stateRoot, "capture-pane", {
     includeDrawings: true,
-    includeImage: true,
     paneId,
     surfaceId,
   }, endpoint);
@@ -954,9 +960,9 @@ function summarizeFreshInstallPhase(options: {
     capture: {
       contentId: capture?.contentId ?? null,
       paneId: Number(capture?.paneId),
+      pixelEvidence: inspectScreenshotPixels(capture?.image, expectedScreenshotColors),
       requestSurfaceId: options.read.surfaceId,
       responseSurfaceId: capture?.surfaceId ?? null,
-      visibleText: capture?.visibleText ?? null,
     },
     clientIdentity: options.app.identity.fingerprintPrefix,
     commandRoute: "direct-client-websocket",
@@ -1054,9 +1060,16 @@ async function freshInstallMain(options: Options) {
     }
 
     const contentId = "linux-fresh-install-content";
-    const visibleText = "Surf Ace fresh-install direct-client verification";
+    const html = [
+      "<style>",
+      "html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden}",
+      ".left,.right{position:absolute;top:0;bottom:0;width:50%}",
+      ".left{left:0;background:#d93636}",
+      ".right{right:0;background:#246bce}",
+      "</style><div class=left></div><div class=right></div>",
+    ].join("");
     const pushOutput = await cli(options.cliBinary, cliStateRoot, "push", {
-      content: { html: `<p>${visibleText}</p>` },
+      content: { html },
       contentId,
       contentType: "html",
       paneId,
@@ -1068,12 +1081,13 @@ async function freshInstallMain(options: Options) {
     const firstRead = await readPane(options.cliBinary, cliStateRoot, app.endpoint, surfaceId, paneId);
     const firstCapture = resultPayload(firstRead.captureOutput);
     const firstRecord = resultPayload(firstRead.output)?.currentContentRecord;
+    inspectScreenshotPixels(firstCapture?.image, expectedScreenshotColors);
     if (firstRead.surfaceId !== surfaceId || firstRead.paneId !== paneId ||
         firstCapture?.contentId !== contentId ||
         (firstCapture?.surfaceId != null && firstCapture.surfaceId !== surfaceId) ||
-        Number(firstCapture?.paneId) !== paneId || !String(firstCapture?.visibleText ?? "").includes(visibleText) ||
+        Number(firstCapture?.paneId) !== paneId ||
         !matchesFreshInstallCurrentContent(firstRecord, contentId, surfaceId, paneId)) {
-      throw new Error("fresh_install_initial_content_render_or_read_mismatch");
+      throw new Error("fresh_install_initial_capture_target_or_read_mismatch");
     }
 
     const wrongSurfaceId = `${surfaceId}-wrong-target`;
@@ -1088,10 +1102,10 @@ async function freshInstallMain(options: Options) {
     const afterWrongSurfaceRead = await readPane(options.cliBinary, cliStateRoot, app.endpoint, surfaceId, paneId);
     const afterWrongCapture = resultPayload(afterWrongSurfaceRead.captureOutput);
     const afterWrongRecord = resultPayload(afterWrongSurfaceRead.output)?.currentContentRecord;
+    inspectScreenshotPixels(afterWrongCapture?.image, expectedScreenshotColors);
     if (afterWrongSurfaceRead.surfaceId !== surfaceId || afterWrongSurfaceRead.paneId !== paneId ||
         afterWrongCapture?.contentId !== contentId ||
         (afterWrongCapture?.surfaceId != null && afterWrongCapture.surfaceId !== surfaceId) ||
-        !String(afterWrongCapture?.visibleText ?? "").includes(visibleText) ||
         !matchesFreshInstallCurrentContent(afterWrongRecord, contentId, surfaceId, paneId)) {
       throw new Error("fresh_install_wrong_surface_changed_valid_target");
     }
@@ -1160,10 +1174,11 @@ async function freshInstallMain(options: Options) {
     const afterRestartRead = await readPane(options.cliBinary, cliStateRoot, app.endpoint, surfaceId, paneId);
     const resumedCapture = resultPayload(afterRestartRead.captureOutput);
     const resumedRecord = resultPayload(afterRestartRead.output)?.currentContentRecord;
+    inspectScreenshotPixels(resumedCapture?.image, expectedScreenshotColors);
     if (afterRestartRead.surfaceId !== surfaceId || afterRestartRead.paneId !== paneId ||
         resumedCapture?.contentId !== contentId ||
         (resumedCapture?.surfaceId != null && resumedCapture.surfaceId !== surfaceId) ||
-        Number(resumedCapture?.paneId) !== paneId || !String(resumedCapture?.visibleText ?? "").includes(visibleText) ||
+        Number(resumedCapture?.paneId) !== paneId ||
         !matchesFreshInstallCurrentContent(resumedRecord, contentId, surfaceId, paneId) ||
         resultPayload(afterRestartRead.output)?.cacheStatus !== "current" ||
         resultPayload(afterRestartRead.output)?.consumableLoss !== null) {
@@ -1221,7 +1236,7 @@ async function freshInstallMain(options: Options) {
     const stateSequence = {
       afterRestart,
       expectedContentId: contentId,
-      expectedVisibleText: visibleText,
+      expectedScreenshotColors,
       expectedVersion: options.expectedVersion,
       displayReady,
       initial,

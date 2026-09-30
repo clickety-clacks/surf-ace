@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { cp, mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import WebSocket from "ws";
 
@@ -29,6 +30,16 @@ import {
 import { SurfaceWsServer } from "../src/ws-server.js";
 
 let nextPort = 25901;
+
+function authorityVectorUrl(): URL {
+  const candidates = [
+    new URL("../../protocol/vectors/authority-conformance.json", import.meta.url),
+    new URL("../../../protocol/vectors/authority-conformance.json", import.meta.url),
+  ];
+  const found = candidates.find((candidate) => existsSync(fileURLToPath(candidate)));
+  assert.ok(found, "authority conformance vectors not found from source or compiled test layout");
+  return found;
+}
 
 async function connect(url: string): Promise<WebSocket> {
   const socket = new WebSocket(url);
@@ -144,7 +155,7 @@ type TargetAdmissionVectorCase = {
 function targetAdmissionVectorCases(): TargetAdmissionVectorCase[] {
   const vectors = JSON.parse(
     readFileSync(
-      new URL("../../../protocol/vectors/authority-conformance.json", import.meta.url),
+      authorityVectorUrl(),
       "utf8",
     ),
   ) as { vectors: Array<{ cases?: TargetAdmissionVectorCase[]; id: string }> };
@@ -2798,9 +2809,12 @@ test("three surfaces recover independently and complete the offline push-capture
     }),
   ];
   const port = nextPort++;
+  let imageCaptureCount = 0;
   const server = new SurfaceWsServer({
-    capturePaneImage: async (surfaceId, paneId) =>
-      Buffer.from(`${surfaceId}:${paneId}`).toString("base64"),
+    capturePaneImage: async (surfaceId, paneId) => {
+      imageCaptureCount += 1;
+      return Buffer.from(`${surfaceId}:${paneId}`).toString("base64");
+    },
     compositorSocketPath: null,
     core,
     endpointName: "Surf Ace",
@@ -2849,7 +2863,6 @@ test("three surfaces recover independently and complete the offline push-capture
       });
       assert.equal(pushed.ok, true, JSON.stringify(pushed));
       const captured = await request(surfaceSockets[index]!, "snapshot.get", {
-        includeImage: true,
         paneId,
         surfaceId: surface.surfaceId,
       });
@@ -2860,6 +2873,15 @@ test("three surfaces recover independently and complete the offline push-capture
         Buffer.from(`${surface.surfaceId}:${paneId}`).toString("base64"),
       );
       assert.equal(captured.payload.revision, pushed.payload.revision);
+      assert.equal(imageCaptureCount, index + 1);
+
+      const suppressed = await request(surfaceSockets[index]!, "snapshot.get", {
+        includeImage: false,
+        paneId,
+        surfaceId: surface.surfaceId,
+      });
+      assert.equal(suppressed.ok, false, "removed flag cannot suppress screenshot capture");
+      assert.equal(imageCaptureCount, index + 1, "rejected flag does not reach the renderer");
     }
 
     assert.deepEqual(
@@ -2869,6 +2891,42 @@ test("three surfaces recover independently and complete the offline push-capture
   } finally {
     for (const socket of surfaceSockets) socket.close();
     lifecycle.close();
+    await server.stop();
+  }
+});
+
+test("snapshot.get fails rather than returning success without a screenshot", async () => {
+  const core = new SurfaceCore();
+  const surface = core.ensurePrimarySurface("No screenshot", {
+    height: 800,
+    scale: 2,
+    width: 1200,
+  });
+  const port = nextPort++;
+  const server = new SurfaceWsServer({
+    capturePaneImage: async () => null,
+    compositorSocketPath: null,
+    core,
+    endpointName: "Surf Ace",
+    hostName: "localhost",
+    port,
+    viewport: () => ({ height: 800, scale: 2, width: 1200 }),
+  });
+  await server.start();
+  const socket = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+  try {
+    const paired = await pair(socket, "missing-screenshot-controller", surface.surfaceId);
+    assert.equal(paired.ok, true, JSON.stringify(paired));
+    const panes = await request(socket, "panes.list", { surfaceId: surface.surfaceId });
+    const paneId = Number(panes.payload.topology.panes[0].paneId);
+    const captured = await request(socket, "snapshot.get", {
+      paneId,
+      surfaceId: surface.surfaceId,
+    });
+    assert.equal(captured.ok, false, JSON.stringify(captured));
+    assert.equal(captured.error.code, "render_failed");
+  } finally {
+    socket.close();
     await server.stop();
   }
 });
@@ -3348,7 +3406,7 @@ test("a saturated terminal ledger still admits push, capture, close and cleanup"
 
   const port = nextPort++;
   const server = new SurfaceWsServer({
-    capturePaneImage: async () => null,
+    capturePaneImage: async () => "cG5n",
     compositorSocketPath: null,
     core,
     endpointName: "Surf Ace",
@@ -3384,22 +3442,15 @@ test("a saturated terminal ledger still admits push, capture, close and cleanup"
     });
     assert.equal(pushed.ok, true, JSON.stringify(pushed));
 
-    // Stand in for the renderer through the existing updatePaneSnapshot seam,
-    // which is exactly what the real renderer drives, so the capture proves
-    // expected VISIBLE CONTENT rather than only content identity.
-    core.updatePaneSnapshot(surface.surfaceId, paneId, { visibleText: marker });
     const captured = await request(socket, "snapshot.get", {
-      includeVisibleText: true,
       paneId,
       surfaceId: surface.surfaceId,
     });
     assert.equal(captured.ok, true, JSON.stringify(captured));
-    // html content yields visible text deterministically from the pushed
-    // bytes, so the capture proves the expected VISIBLE CONTENT, not merely
-    // that some snapshot came back.
-    assert.equal(captured.payload.visibleText, marker);
+    assert.equal(Object.hasOwn(captured.payload, "visibleText"), false);
     assert.equal(captured.payload.contentId, "content-saturated");
     assert.equal(captured.payload.revision > 0, true);
+    assert.equal(captured.payload.image, "cG5n");
 
     // split then close, so pane close and cleanup close both run paired
     const split = await request(socket, "pane.split", {
@@ -3453,7 +3504,7 @@ test("cumulative content above 1 MiB keeps every individual push valid and the b
 
   const port = nextPort++;
   const server = new SurfaceWsServer({
-    capturePaneImage: async () => null,
+    capturePaneImage: async () => "cG5n",
     compositorSocketPath: null,
     core,
     endpointName: "Surf Ace",
@@ -3492,19 +3543,15 @@ test("cumulative content above 1 MiB keeps every individual push valid and the b
     assert(cumulative > 1024 * 1024);
 
     // exact final content, after more than a megabyte of cumulative input
-    core.updatePaneSnapshot(surface.surfaceId, paneId, {
-      visibleText: lastMarker,
-    });
     const captured = await request(socket, "snapshot.get", {
-      includeVisibleText: true,
       paneId,
       surfaceId: surface.surfaceId,
     });
     assert.equal(captured.ok, true, JSON.stringify(captured));
-    // exact final visible content after more than a megabyte of cumulative input
-    assert.equal(captured.payload.visibleText, lastMarker);
+    assert.equal(Object.hasOwn(captured.payload, "visibleText"), false);
     assert.equal(captured.payload.contentId, lastContentId);
     assert.equal(captured.payload.revision > 0, true);
+    assert.equal(captured.payload.image, "cG5n");
   } finally {
     socket.close();
     await server.stop();
@@ -3530,7 +3577,7 @@ test("a saturated ledger persisted and restarted still pairs and serves content"
   });
   const port = nextPort++;
   const server = new SurfaceWsServer({
-    capturePaneImage: async () => null,
+    capturePaneImage: async () => "cG5n",
     compositorSocketPath: null,
     core: restored,
     endpointName: "Surf Ace",
@@ -3557,16 +3604,13 @@ test("a saturated ledger persisted and restarted still pairs and serves content"
       surfaceId: restoredSurface.surfaceId,
     });
     assert.equal(pushed.ok, true, JSON.stringify(pushed));
-    restored.updatePaneSnapshot(restoredSurface.surfaceId, paneId, {
-      visibleText: marker,
-    });
     const captured = await request(socket, "snapshot.get", {
-      includeVisibleText: true,
       paneId,
       surfaceId: restoredSurface.surfaceId,
     });
-    assert.equal(captured.payload.visibleText, marker);
+    assert.equal(Object.hasOwn(captured.payload, "visibleText"), false);
     assert.equal(captured.payload.contentId, "content-restored");
+    assert.equal(captured.payload.image, "cG5n");
   } finally {
     socket.close();
     await server.stop();

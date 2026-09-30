@@ -665,7 +665,7 @@ fn rust_validation_matches_the_shared_production_boundary_vector() {
     )
     .unwrap();
     let cases = shared["cases"].as_array().unwrap();
-    assert_eq!(cases.len(), 64);
+    assert_eq!(cases.len(), 65);
     for case in cases {
         let id = case["id"].as_str().unwrap();
         let command = Command::parse(case["command"].as_str().unwrap()).unwrap();
@@ -2465,11 +2465,16 @@ fn production_empty_scope_lifecycle_routes_pending_acks_after_listing() {
             let operation = read_request(&mut socket);
             if stage == 1 {
                 assert_eq!(operation["op"], "snapshot.get");
+                assert_eq!(
+                    operation["payload"].get("includeImage"),
+                    None,
+                    "capture-pane has no image suppression option"
+                );
                 send_response(
                     &mut socket,
                     operation["id"].as_str().unwrap(),
                     "snapshot.result",
-                    json!({"snapshotId":"sn_a"}),
+                    json!({"snapshotId":"sn_a", "image":"cG5n"}),
                 );
             } else {
                 assert_eq!(operation["op"], "surfaces.list");
@@ -2538,6 +2543,7 @@ fn production_empty_scope_lifecycle_routes_pending_acks_after_listing() {
     );
     capture.endpoint = Some(a_endpoint.clone());
     let initial = execute(capture).unwrap();
+    assert_eq!(initial.result["payload"]["image"], "cG5n");
     for pane in [1, 2] {
         let mut read = invocation(
             &temp,

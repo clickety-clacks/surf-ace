@@ -118,6 +118,11 @@ Supported commands are `list`, `push`, `read`, `topology-intent`,
 `surface-intent`, `target-register`, and `target-apply`. Bind mutations and
 reads to the exact `surfaceId` and numeric `paneId` required by each command.
 
+Every successful `capture-pane` returns a PNG screenshot and capture metadata;
+there is no option to suppress the screenshot, and it does not extract visible
+text. Use `read` for the current content record. Settled
+`event.scroll` visible text, when available, remains a separate event.
+
 `read` is special: omit `--endpoint` and `--product-label`. It is a local,
 locked projection transaction and performs no network access. If it reports
 `cacheStatus: "unsynchronized"`, use a later explicit networked command to
