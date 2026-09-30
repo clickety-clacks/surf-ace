@@ -1791,10 +1791,6 @@
               "type": "boolean",
               "default": false
             },
-            "includeVisibleText": {
-              "type": "boolean",
-              "default": true
-            },
             "includeDrawings": {
               "type": "boolean",
               "default": false
@@ -2355,9 +2351,6 @@
             },
             "viewport": {
               "$ref": "#/$defs/Viewport"
-            },
-            "visibleText": {
-              "type": "string"
             },
             "selection": {
               "$ref": "#/$defs/Selection"

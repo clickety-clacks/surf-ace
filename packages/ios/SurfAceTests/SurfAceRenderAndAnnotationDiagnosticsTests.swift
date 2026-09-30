@@ -701,8 +701,6 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(snapshot.viewport.contentSize.width, Double(frame.width) - 1)
         XCTAssertGreaterThanOrEqual(snapshot.viewport.contentSize.height, Double(frame.height) - 1)
         XCTAssertEqual(snapshot.viewport.scrollOffset, SurfAcePoint(x: 0, y: 0))
-        XCTAssertEqual(snapshot.visibleText, markdown)
-
         let imageBase64 = try XCTUnwrap(snapshot.imageBase64)
         let imageData = try XCTUnwrap(Data(base64Encoded: imageBase64))
         let image = try XCTUnwrap(UIImage(data: imageData))

@@ -9,8 +9,11 @@ import { assertTightbeamLinuxQualificationClaims, verifyTightbeamCliStage, verif
 import { TIGHTBEAM, TIGHTBEAM_TOOLING_TAG, TOOLCHAINS } from "./tightbeam-release-config.mjs";
 import { assertDisjointTrees, assertTrackedInputsUnchanged, capture, parseArgs, removeIfExists, run, sha256, verifyManifestFiles } from "./release-lib.mjs";
 import { electronLaunchConfig, launchElectron, stop as stopElectron, verifyClientAppVersion } from "./smoke-lib.mjs";
+import pngPixelEvidence from "./png-pixel-evidence.cjs";
 
 const toolingRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+const expectedScreenshotColors = ["246bce", "d93636"];
+const { inspectScreenshotPixels } = pngPixelEvidence;
 
 const participantAssets = Object.freeze({
   linux: [
@@ -294,7 +297,7 @@ function requireLinuxFreshInstallRawCliCoverage(stateSequence, rawCliEvidence) {
     event.status === 0 && event.output?.ok === true && event.output?.command === "push" &&
     event.input.surfaceId === initial.surfaceId && event.input.paneId === initial.paneId &&
     event.input.contentId === stateSequence.expectedContentId &&
-    JSON.stringify(event.input.content ?? {}).includes(stateSequence.expectedVisibleText), initialListIndex + 1);
+    expectedScreenshotColors.every((color) => JSON.stringify(event.input.content ?? {}).includes(`#${color}`)), initialListIndex + 1);
   if (pushIndex < 0) throw new Error("linux_fresh_install_direct_push_target_mismatch");
   const rejectedPushIndex = eventIndex((event) => event.command === "push" && event.status !== 0 &&
     event.endpoint === initial.directClientEndpoint &&
@@ -326,12 +329,17 @@ function requireLinuxFreshInstallRawCliCoverage(stateSequence, rawCliEvidence) {
   }
   const captureMatches = (phase) => (event) => {
     const capture = event.output?.result?.payload ?? event.output?.result;
-    return event.command === "capture-pane" && event.endpoint === phase.directClientEndpoint && event.status === 0 &&
+    if (!(event.command === "capture-pane" && event.endpoint === phase.directClientEndpoint && event.status === 0 &&
       event.output?.ok === true && event.output?.command === "capture-pane" &&
       event.input.surfaceId === phase.surfaceId && event.input.paneId === phase.paneId &&
       (capture?.surfaceId == null || capture.surfaceId === phase.surfaceId) && capture?.paneId === phase.paneId &&
-      capture?.contentId === stateSequence.expectedContentId &&
-      typeof capture.visibleText === "string" && capture.visibleText.includes(stateSequence.expectedVisibleText);
+      capture?.contentId === stateSequence.expectedContentId)) return false;
+    try {
+      inspectScreenshotPixels(capture?.image, expectedScreenshotColors);
+      return true;
+    } catch {
+      return false;
+    }
   };
   const initialCaptureIndex = eventIndex(captureMatches(initial), pushIndex + 1);
   const postDenialCaptureIndex = eventIndex(captureMatches(initial), rejectedPushIndex + 1);
@@ -393,9 +401,11 @@ function requireFreshInstallPhase(phase, name, expected) {
   const capture = phase.capture;
   if (capture?.contentId !== expected.contentId || capture.requestSurfaceId !== phase.surfaceId ||
       (capture.responseSurfaceId !== null && capture.responseSurfaceId !== undefined && capture.responseSurfaceId !== phase.surfaceId) ||
-      capture.paneId !== phase.paneId || typeof capture.visibleText !== "string" ||
-      !capture.visibleText.includes(expected.visibleText)) {
-    throw new Error(`${name}_rendered_capture_mismatch`);
+      capture.paneId !== phase.paneId ||
+      capture.pixelEvidence?.width < 1 || capture.pixelEvidence?.height < 1 ||
+      capture.pixelEvidence?.pngBytes < 1 || !/^[a-f0-9]{64}$/.test(capture.pixelEvidence?.sha256 ?? "") ||
+      JSON.stringify(capture.pixelEvidence?.matchedRgbHex) !== JSON.stringify(expected.screenshotColors)) {
+    throw new Error(`${name}_screenshot_pixel_evidence_mismatch`);
   }
 }
 
@@ -404,7 +414,7 @@ export function validateTightbeamFreshInstallState(stateSequence) {
       stateSequence.sourceCommit !== TIGHTBEAM.candidateCommit ||
       stateSequence.expectedVersion !== TIGHTBEAM.version ||
       typeof stateSequence.expectedContentId !== "string" || !stateSequence.expectedContentId ||
-      typeof stateSequence.expectedVisibleText !== "string" || !stateSequence.expectedVisibleText) {
+      JSON.stringify(stateSequence.expectedScreenshotColors) !== JSON.stringify(expectedScreenshotColors)) {
     throw new Error("fresh_install_state_identity_invalid");
   }
   if (stateSequence.displayReady?.status !== "verified" ||
@@ -415,7 +425,7 @@ export function validateTightbeamFreshInstallState(stateSequence) {
   }
   const expected = {
     contentId: stateSequence.expectedContentId,
-    visibleText: stateSequence.expectedVisibleText,
+    screenshotColors: expectedScreenshotColors,
   };
   requireFreshInstallPhase(stateSequence.initial, "fresh_install_initial", expected);
   requireFreshInstallPhase(stateSequence.afterRestart, "fresh_install_after_restart", expected);
@@ -992,16 +1002,24 @@ async function runDirectClientCandidate(step, executable, cliBinary, stateRoot, 
       return { capture, read, evidence };
     };
     const contentId = `tightbeam-${channel}-v020-candidate-write`;
-    const visibleText = `${contentId}:${surfaceId}:${paneId}`;
+    const html = [
+      "<style>",
+      "html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden}",
+      ".left,.right{position:absolute;top:0;bottom:0;width:50%}",
+      ".left{left:0;background:#d93636}",
+      ".right{right:0;background:#246bce}",
+      "</style><div class=left></div><div class=right></div>",
+    ].join("");
     await invoke("push", {
-      content: { html: `<p>${visibleText}</p>` }, contentId, contentType: "html", paneId, surfaceId,
+      content: { html }, contentId, contentType: "html", paneId, surfaceId,
     });
     const visible = await captureRead(paneId);
+    const pixelEvidence = inspectScreenshotPixels(visible.capture.image, expectedScreenshotColors);
     const observedId = visible.read.currentContentRecord?.payload?.contentId ?? visible.read.currentContentRecord?.contentId;
     if (observedId !== contentId || !matchesFreshInstallCurrentContent(visible.read.currentContentRecord, {
       contentId, surfaceId, paneId,
-    }) || !String(visible.capture.visibleText ?? "").includes(visibleText)) {
-      throw new Error(`tightbeam_${channel}_candidate_content_not_current_or_visible`);
+    })) {
+      throw new Error(`tightbeam_${channel}_candidate_content_not_current`);
     }
     const wrongSurfaceId = `${surfaceId}-wrong-release-target`;
     const wrongSurfaceRejection = await invoke("push", {
@@ -1026,11 +1044,11 @@ async function runDirectClientCandidate(step, executable, cliBinary, stateRoot, 
       contentId,
       paneId,
       phase: "candidate",
+      pixelEvidence,
       rawCliEvidence,
       readEvidence: reads,
       sourceCommit: step.sourceCommit,
       surfaceId,
-      visibleText,
       currentContentId: observedId ?? null,
       wrongSurfaceRejection: { code: "unknown_surface", expectedSurfaceId: surfaceId, requestedSurfaceId: wrongSurfaceId },
     };

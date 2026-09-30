@@ -522,7 +522,6 @@ func surfAceRemovingAnnotationStrokes(
 
 struct SurfAceSurfaceSnapshot {
     let viewport: SurfAceViewport
-    let visibleText: String
     let selection: SurfAceSelection?
     let imageBase64: String?
 }

@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { cp, mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import WebSocket from "ws";
 
@@ -29,6 +30,16 @@ import {
 import { SurfaceWsServer } from "../src/ws-server.js";
 
 let nextPort = 25901;
+
+function authorityVectorUrl(): URL {
+  const candidates = [
+    new URL("../../protocol/vectors/authority-conformance.json", import.meta.url),
+    new URL("../../../protocol/vectors/authority-conformance.json", import.meta.url),
+  ];
+  const found = candidates.find((candidate) => existsSync(fileURLToPath(candidate)));
+  assert.ok(found, "authority conformance vectors not found from source or compiled test layout");
+  return found;
+}
 
 async function connect(url: string): Promise<WebSocket> {
   const socket = new WebSocket(url);
@@ -144,7 +155,7 @@ type TargetAdmissionVectorCase = {
 function targetAdmissionVectorCases(): TargetAdmissionVectorCase[] {
   const vectors = JSON.parse(
     readFileSync(
-      new URL("../../../protocol/vectors/authority-conformance.json", import.meta.url),
+      authorityVectorUrl(),
       "utf8",
     ),
   ) as { vectors: Array<{ cases?: TargetAdmissionVectorCase[]; id: string }> };
@@ -3384,20 +3395,13 @@ test("a saturated terminal ledger still admits push, capture, close and cleanup"
     });
     assert.equal(pushed.ok, true, JSON.stringify(pushed));
 
-    // Stand in for the renderer through the existing updatePaneSnapshot seam,
-    // which is exactly what the real renderer drives, so the capture proves
-    // expected VISIBLE CONTENT rather than only content identity.
-    core.updatePaneSnapshot(surface.surfaceId, paneId, { visibleText: marker });
     const captured = await request(socket, "snapshot.get", {
-      includeVisibleText: true,
+      includeImage: true,
       paneId,
       surfaceId: surface.surfaceId,
     });
     assert.equal(captured.ok, true, JSON.stringify(captured));
-    // html content yields visible text deterministically from the pushed
-    // bytes, so the capture proves the expected VISIBLE CONTENT, not merely
-    // that some snapshot came back.
-    assert.equal(captured.payload.visibleText, marker);
+    assert.equal(Object.hasOwn(captured.payload, "visibleText"), false);
     assert.equal(captured.payload.contentId, "content-saturated");
     assert.equal(captured.payload.revision > 0, true);
 
@@ -3492,17 +3496,12 @@ test("cumulative content above 1 MiB keeps every individual push valid and the b
     assert(cumulative > 1024 * 1024);
 
     // exact final content, after more than a megabyte of cumulative input
-    core.updatePaneSnapshot(surface.surfaceId, paneId, {
-      visibleText: lastMarker,
-    });
     const captured = await request(socket, "snapshot.get", {
-      includeVisibleText: true,
       paneId,
       surfaceId: surface.surfaceId,
     });
     assert.equal(captured.ok, true, JSON.stringify(captured));
-    // exact final visible content after more than a megabyte of cumulative input
-    assert.equal(captured.payload.visibleText, lastMarker);
+    assert.equal(Object.hasOwn(captured.payload, "visibleText"), false);
     assert.equal(captured.payload.contentId, lastContentId);
     assert.equal(captured.payload.revision > 0, true);
   } finally {
@@ -3557,15 +3556,11 @@ test("a saturated ledger persisted and restarted still pairs and serves content"
       surfaceId: restoredSurface.surfaceId,
     });
     assert.equal(pushed.ok, true, JSON.stringify(pushed));
-    restored.updatePaneSnapshot(restoredSurface.surfaceId, paneId, {
-      visibleText: marker,
-    });
     const captured = await request(socket, "snapshot.get", {
-      includeVisibleText: true,
       paneId,
       surfaceId: restoredSurface.surfaceId,
     });
-    assert.equal(captured.payload.visibleText, marker);
+    assert.equal(Object.hasOwn(captured.payload, "visibleText"), false);
     assert.equal(captured.payload.contentId, "content-restored");
   } finally {
     socket.close();

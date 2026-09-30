@@ -1,25 +1,37 @@
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
+
+function rendererSourceUrl(relativePath: string): URL {
+  const candidates = [
+    new URL(`../src/${relativePath}`, import.meta.url),
+    new URL(`../../src/${relativePath}`, import.meta.url),
+  ];
+  const found = candidates.find((candidate) => existsSync(fileURLToPath(candidate)));
+  assert.ok(found, `renderer source not found for ${relativePath}`);
+  return found;
+}
 
 async function rendererSource(): Promise<string> {
-  return fs.readFile(new URL("../../src/renderer/renderer.ts", import.meta.url), "utf8");
+  return fs.readFile(rendererSourceUrl("renderer/renderer.ts"), "utf8");
 }
 
 async function rendererStyles(): Promise<string> {
-  return fs.readFile(new URL("../../src/renderer/styles.css", import.meta.url), "utf8");
+  return fs.readFile(rendererSourceUrl("renderer/styles.css"), "utf8");
 }
 
 async function mainSource(): Promise<string> {
-  return fs.readFile(new URL("../../src/main.ts", import.meta.url), "utf8");
+  return fs.readFile(rendererSourceUrl("main.ts"), "utf8");
 }
 
 async function guestPreloadSource(): Promise<string> {
-  return fs.readFile(new URL("../../src/guest-preload.ts", import.meta.url), "utf8");
+  return fs.readFile(rendererSourceUrl("guest-preload.ts"), "utf8");
 }
 
 async function preloadSource(): Promise<string> {
-  return fs.readFile(new URL("../../src/preload.ts", import.meta.url), "utf8");
+  return fs.readFile(rendererSourceUrl("preload.ts"), "utf8");
 }
 
 
@@ -101,7 +113,7 @@ test("renderer reports pane snapshots after layout commits", async () => {
   assert.match(source, /reportCompositorOverlayRegions[\s\S]*revision: latestState\.geometryRevision[\s\S]*topologyEpoch: String\(latestState\.topologyRevision\)/);
 });
 
-test("main preserves omitted browser-hosted snapshot fields", async () => {
+test("main preserves snapshot geometry but no longer caches extracted visible text", async () => {
   const source = await mainSource();
   const snapshotIndex = source.indexOf("ipcMain.on(\"surface:snapshot\"");
   const pageIndex = source.indexOf("ipcMain.on(\"surface:page\"", snapshotIndex);
@@ -110,11 +122,21 @@ test("main preserves omitted browser-hosted snapshot fields", async () => {
   assert.ok(snapshotIndex > -1);
   assert.ok(pageIndex > snapshotIndex);
   assert.match(handlerSource, /const snapshot: Parameters<SurfaceCore\["updatePaneSnapshot"\]>\[2\] = \{\};/);
-  for (const key of ["bounds", "geometryRevision", "selection", "surfaceEpoch", "topologyRevision", "viewport", "visibleText"]) {
+  for (const key of ["bounds", "geometryRevision", "selection", "surfaceEpoch", "topologyRevision", "viewport"]) {
     assert.match(handlerSource, new RegExp(`if \\("${key}" in payload\\)`));
   }
   assert.doesNotMatch(handlerSource, /selection:\s*\(payload\.selection \?\? null\)/);
-  assert.doesNotMatch(handlerSource, /visibleText:\s*String\(payload\.visibleText \?\? ""\)/);
+  assert.doesNotMatch(handlerSource, /visibleText/);
+});
+
+test("renderer snapshots omit text while scroll events retain their independent text field", async () => {
+  const source = await rendererSource();
+  const snapshotIndex = source.indexOf("function reportPaneSnapshot");
+  const snapshotEnd = source.indexOf("function reportAllPaneSnapshots", snapshotIndex);
+  const snapshotSource = source.slice(snapshotIndex, snapshotEnd);
+  assert.ok(snapshotIndex > -1 && snapshotEnd > snapshotIndex);
+  assert.doesNotMatch(snapshotSource, /visibleText|currentVisibleText/);
+  assert.match(source, /type: "scroll",[\s\S]{0,160}visibleText: currentVisibleText\(view\)/);
 });
 
 test("pane capture reserves compositor pixels for native-hosted panes", async () => {

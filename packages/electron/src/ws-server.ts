@@ -2071,10 +2071,6 @@ export class SurfaceWsServer {
               )?.drawings
           : undefined,
         image: image ?? undefined,
-        visibleText:
-          request.payload.includeVisibleText === false
-            ? undefined
-            : snapshot.visibleText,
       });
     }
     if (request.op === "target.apply") {
@@ -4884,7 +4880,6 @@ export class SurfaceWsServer {
           ? this.core.getRendererWindowState(surfaceId).panes.find((pane) => pane.paneId === Number(request.payload.paneId))?.drawings
           : undefined,
         image: image ?? undefined,
-        visibleText: request.payload.includeVisibleText === false ? undefined : snapshot.visibleText,
       },
       sentAt: Date.now(),
       type: "response",

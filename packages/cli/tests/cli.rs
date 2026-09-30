@@ -665,7 +665,7 @@ fn rust_validation_matches_the_shared_production_boundary_vector() {
     )
     .unwrap();
     let cases = shared["cases"].as_array().unwrap();
-    assert_eq!(cases.len(), 64);
+    assert_eq!(cases.len(), 65);
     for case in cases {
         let id = case["id"].as_str().unwrap();
         let command = Command::parse(case["command"].as_str().unwrap()).unwrap();

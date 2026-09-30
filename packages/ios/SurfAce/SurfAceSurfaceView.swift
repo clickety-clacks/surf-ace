@@ -2171,32 +2171,10 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
         await waitForPendingHTMLRenderIfNeeded()
 
         switch currentEntry?.payload {
-        case .html:
-            if let payload = await evaluateSnapshotPayload() {
-                lastViewport = payload.viewport
-                lastVisibleText = payload.visibleText
-                lastSelection = payload.selection ?? lastSelection
-            }
-        case .markdown(let markdown):
+        case .html, .markdown, .image, .terminal, .browserURL, .video, .canvas:
             await refreshWebViewportFromDocument()
-            lastVisibleText = markdown
-        case .image(_, _, let alt):
-            await refreshWebViewportFromDocument()
-            lastVisibleText = alt ?? ""
-        case .pdf(let data):
+        case .pdf:
             lastViewport = pdfViewport()
-            lastVisibleText = currentPDFPageText() ?? extractPDFText(data)
-            lastSelection = nil
-        case .terminal(let lines, _):
-            await refreshWebViewportFromDocument()
-            lastVisibleText = lines.suffix(200).map(SurfAceANSI.strip).joined(separator: "\n")
-        case .browserURL(let url, _, _):
-            await refreshWebViewportFromDocument()
-            lastVisibleText = url
-            lastSelection = nil
-        case .some(.video), .some(.canvas):
-            await refreshWebViewportFromDocument()
-            lastVisibleText = ""
             lastSelection = nil
         case nil:
             break
@@ -2206,7 +2184,6 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
 
         return SurfAceSurfaceSnapshot(
             viewport: lastViewport,
-            visibleText: lastVisibleText.prefix(4096).description,
             selection: lastSelection,
             imageBase64: imageBase64
         )
@@ -2729,8 +2706,25 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
         )
     }
 
-    private func evaluateSnapshotPayload() async -> (viewport: SurfAceViewport, visibleText: String, selection: SurfAceSelection?)? {
+    private func evaluateSnapshotPayload() async -> (viewport: SurfAceViewport, selection: SurfAceSelection?)? {
         let script = "window.__surfAceSnapshotPayload ? JSON.stringify(window.__surfAceSnapshotPayload()) : null;"
+        guard let object = await evaluateJSONObject(script),
+              let viewport = parseViewport(object["viewport"] as? [String: Any]) else {
+            return nil
+        }
+
+        var selection: SurfAceSelection?
+        if let selectionObject = object["selection"] as? [String: Any],
+           let text = selectionObject["text"] as? String,
+           let rect = parseRect(selectionObject["boundingRect"] as? [String: Any]) {
+            selection = .text(text, boundingRect: rect.surfAceRect)
+        }
+
+        return (viewport, selection)
+    }
+
+    private func evaluateScrollPayload() async -> (viewport: SurfAceViewport, visibleText: String, selection: SurfAceSelection?)? {
+        let script = "window.__surfAceScrollPayload ? JSON.stringify(window.__surfAceScrollPayload()) : null;"
         guard let object = await evaluateJSONObject(script),
               let viewport = parseViewport(object["viewport"] as? [String: Any]) else {
             return nil
@@ -2825,7 +2819,7 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
 
     private func publishCurrentWebViewportIfNeeded() async {
         guard case .some(.html) = currentEntry?.payload else { return }
-        guard let payload = await evaluateSnapshotPayload() else { return }
+        guard let payload = await evaluateScrollPayload() else { return }
         lastViewport = payload.viewport
         lastVisibleText = payload.visibleText
         lastSelection = payload.selection ?? lastSelection
@@ -2835,6 +2829,7 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
     private func refreshWebViewportFromDocument() async {
         guard let payload = await evaluateSnapshotPayload() else { return }
         lastViewport = payload.viewport
+        lastSelection = payload.selection ?? lastSelection
     }
 
     private func parseViewport(_ object: [String: Any]?) -> SurfAceViewport? {
@@ -3190,9 +3185,13 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
                 },
                 zoomLevel: (window.visualViewport && window.visualViewport.scale) || 1
               },
-              visibleText: collectVisibleText(),
               selection: currentSelection()
             };
+          };
+
+          window.__surfAceScrollPayload = function() {
+            const payload = window.__surfAceSnapshotPayload();
+            return { ...payload, visibleText: collectVisibleText() };
           };
 
           function postSelectionIfAvailable() {

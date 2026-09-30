@@ -2541,11 +2541,9 @@ final class SurfAceRuntime {
             )
         }
         let includeImage = payload["includeImage"] as? Bool ?? false
-        let includeVisibleText = payload["includeVisibleText"] as? Bool ?? true
         let includeDrawings = payload["includeDrawings"] as? Bool ?? false
         let snapshot = await pane.bridge?.fetchSnapshot(includeImage: includeImage)
         pane.lastViewport = snapshot?.viewport ?? defaultViewport(surface: surfaceById[surfaceId])
-        if let visibleText = snapshot?.visibleText { pane.lastVisibleText = visibleText }
         pane.lastSelection = snapshot?.selection ?? pane.lastSelection
 
         var responsePayload: [String: Any] = [
@@ -2556,9 +2554,6 @@ final class SurfAceRuntime {
             "viewport": jsonObject(fromEncodable: pane.lastViewport) ?? NSNull(),
             "selection": jsonObject(fromEncodable: pane.lastSelection) ?? NSNull(),
         ]
-        if includeVisibleText {
-            responsePayload["visibleText"] = pane.lastVisibleText.prefix(maxVisibleTextBytes).description
-        }
         if includeDrawings,
            case .object(let annotations) = authorityPane.history.visible.annotations,
            case .object(let strokes) = annotations["strokesById"] {
@@ -3596,7 +3591,6 @@ final class SurfAceRuntime {
         if shouldRestoreViewport,
            let snapshot = await pane.bridge?.fetchSnapshot(includeImage: false) {
             pane.lastViewport = snapshot.viewport
-            pane.lastVisibleText = snapshot.visibleText
             pane.lastSelection = snapshot.selection ?? pane.lastSelection
             restoreViewport = snapshot.viewport
         } else if shouldRestoreViewport {

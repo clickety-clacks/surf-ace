@@ -587,7 +587,8 @@ These rules are normative for the lockless shared history model:
 #### `canvas` (v1 reserved, v2 required)
 - `content.set` payload is optional: a background specification (`{ color, grid }`) or empty.
 - There is no underlying document — annotations are the primary artifact, not an overlay.
-- `visibleText` in snapshot is always empty.
+- Snapshots do not extract or return visible text. When available, visible text
+  remains part of the separate settled `event.scroll` payload.
 - Navigation events do not fire (no URLs, no links).
 - `content.clear` clears the background spec and ALL annotations (same global rule as all content types).
 - Scroll and page registers do not apply.
@@ -599,7 +600,8 @@ These rules are normative for the lockless shared history model:
 - Scroll and page registers do not apply.
 - Two additional registers are active for `video` content (see Section 13.2): `playbackPosition` and `playbackState`.
 - Strokes carry an optional `videoTimestamp` field (seconds from video start) indicating the playback position when the stroke was made. This allows annotations to be temporally anchored.
-- `visibleText` reflects any closed captions or subtitles visible at the current playback position, if available.
+- When available, closed captions or subtitles may appear in the separate
+  settled `event.scroll` payload; snapshots remain image/metadata only.
 - Navigation events do not fire.
 - `content.clear` clears the video and all annotations.
 
@@ -1457,7 +1459,6 @@ The schema below defines every v1 application message type over WS.
               "description": "Target pane. Required — OpenClaw must always specify which pane to target."
             },
             "includeImage": { "type": "boolean", "default": false },
-            "includeVisibleText": { "type": "boolean", "default": true },
             "includeDrawings": { "type": "boolean", "default": false }
           }
         }
@@ -1727,7 +1728,6 @@ The schema below defines every v1 application message type over WS.
               "oneOf": [{ "$ref": "#/$defs/ContentType" }, { "type": "null" }]
             },
             "viewport": { "$ref": "#/$defs/Viewport" },
-            "visibleText": { "type": "string" },
             "selection": { "$ref": "#/$defs/Selection" },
             "drawings": {
               "type": "array",
@@ -2517,7 +2517,8 @@ Resolution: surface remains passive and non-interpreting; only OpenClaw decides 
 Resolution: `content.set` and `content.clear` both hard-clear the drawing overlay; no cross-content carryover is allowed.
 
 15. Snapshot bloat and recovery failure.
-Resolution: `visibleText` and `drawings` are conditional fields governed by request flags (`includeVisibleText` default true, `includeDrawings` default false).
+Resolution: extracted visible text is not part of `snapshot.get`; drawings remain
+conditional on `includeDrawings` (default false).
 
 16. Heartbeat false timeouts during heavy rendering.
 Resolution: surface must prioritize pong generation over render/mutation queue work.
@@ -2549,7 +2550,9 @@ Protocol is ready for implementation when these checks pass in integration tests
 10. Heartbeat pong is emitted within SLA even while render queue is busy.
 11. Pair request times out at 10s when `pair.response` is missing.
 12. Reconnect path buffers events until snapshot succeeds, then replays in order; on snapshot failure provider reconnects.
-13. `snapshot.get` returns base64 PNG for `image` and conditionally includes `visibleText`/`drawings` per request flags.
+13. `snapshot.get` returns a base64 PNG for `image` and conditionally includes
+    drawings per `includeDrawings`; visible text is carried only by the separate
+    settled `event.scroll` operation when available.
 14. All messages validate against the schema in Section 10.
 15. Surf Ace extension skills are present at these provider paths and load successfully:
    - `extensions/surf-ace/skills/surf-ace-ops/SKILL.md` (tool usage for list/push/read/clear/pane ops)
@@ -3088,7 +3091,6 @@ contentSnapshot   object?  Current cached pane content, or null if none is local
 	                             contentType   string?
                              revision      int
                              viewport      object
-                             visibleText?  string
                              image?        string
                              drawings?     array
                              selection     object?

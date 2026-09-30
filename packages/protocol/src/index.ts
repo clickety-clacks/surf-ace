@@ -500,7 +500,6 @@ export type SnapshotGetRequest = RequestBase<"snapshot.get"> & {
   payload: {
     paneId: PaneId;
     includeImage?: boolean;
-    includeVisibleText?: boolean;
     includeDrawings?: boolean;
   };
 };
@@ -753,7 +752,6 @@ export type SnapshotResponse = ResponseBase<"snapshot.get"> & {
     revision: Revision;
     contentType: ContentType | null;
     viewport: Viewport;
-    visibleText?: string;
     selection: Selection;
     drawings?: Stroke[];
     image?: string;

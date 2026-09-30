@@ -227,11 +227,11 @@ impl Command {
                 exact_fields(
                     input,
                     &["paneId", "surfaceId"],
-                    &["includeDrawings", "includeImage", "includeVisibleText"],
+                    &["includeDrawings", "includeImage"],
                 )?;
                 required_string(input, "surfaceId")?;
                 positive_integer(input, "paneId")?;
-                for key in ["includeDrawings", "includeImage", "includeVisibleText"] {
+                for key in ["includeDrawings", "includeImage"] {
                     optional_boolean(input, key)?;
                 }
             }

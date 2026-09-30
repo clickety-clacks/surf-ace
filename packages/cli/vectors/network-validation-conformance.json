@@ -61,6 +61,7 @@
     {"id":"unsafe-content-clear-revision","command":"clear","operation":"content.clear","accepted":false,"input":{"surfaceId":"sf_1","paneId":1,"expectedRevision":9007199254740992}},
     {"id":"invalid-annotation-stroke-id","command":"annotations-remove","operation":"annotations.remove","accepted":false,"input":{"surfaceId":"sf_1","paneId":1,"contentId":"c_1","strokeIds":[""]}},
     {"id":"invalid-snapshot-flag","command":"capture-pane","operation":"snapshot.get","accepted":false,"input":{"surfaceId":"sf_1","paneId":1,"includeImage":"yes"}},
+    {"id":"removed-snapshot-visible-text-option","command":"capture-pane","operation":"snapshot.get","accepted":false,"input":{"surfaceId":"sf_1","paneId":1,"includeVisibleText":true}},
     {"id":"invalid-surface-open-placement","command":"surface-intent","operation":"surface.window.open","accepted":false,"input":{"action":"open","expectedSurfaceSetRevision":1,"placement":"center"}},
     {"id":"unsafe-surface-close-revision","command":"surface-intent","operation":"surface.window.close","accepted":false,"input":{"action":"close","expectedSurfaceSetRevision":1,"expectedTopologyRevision":9007199254740992,"surfaceId":"sf_1"}},
     {"id":"invalid-surface-restore-placement","command":"surface-intent","operation":"surface.window.restore","accepted":false,"input":{"action":"restore","expectedSurfaceSetRevision":1,"tombstoneId":"st_1","placement":"center"}}

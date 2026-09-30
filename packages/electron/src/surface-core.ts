@@ -108,7 +108,6 @@ type PaneSnapshot = {
   surfaceEpoch: string | null;
   topologyRevision: number | null;
   viewport: SnapshotResponse["payload"]["viewport"];
-  visibleText: string;
 };
 
 type PaneState = {
@@ -3319,7 +3318,6 @@ export class SurfaceCore {
         ? reportedIdentity!.topologyRevision
         : pane.snapshot.topologyRevision,
       viewport: snapshot.viewport ?? pane.snapshot.viewport,
-      visibleText: snapshot.visibleText ?? pane.snapshot.visibleText,
     };
     const nextBounds = pane.snapshot.bounds;
     const nextIdentity = paneSnapshotIdentity(pane.snapshot);
@@ -3342,7 +3340,6 @@ export class SurfaceCore {
       revision: current.revision as Revision,
       selection: pane.snapshot.selection,
       viewport: structuredClone(pane.snapshot.viewport),
-      visibleText: snapshotVisibleText(pane, current),
     };
   }
 
@@ -3791,7 +3788,6 @@ function createPaneState(paneId: number, paneLabel: number, now: number): PaneSt
         visibleRect: { ...DEFAULT_VISIBLE_RECT },
         zoomLevel: 1,
       },
-      visibleText: "",
     },
     toast: null,
   };
@@ -3986,7 +3982,6 @@ function isPristineProviderBootstrapPane(
     !pane.pendingAnnotationCommit &&
     (allowResolvedGeometry || pane.snapshot.bounds === null) &&
     pane.snapshot.selection === null &&
-    pane.snapshot.visibleText === "" &&
     pane.toast === null &&
     entry.annotations.length === 0 &&
     entry.content === null &&
@@ -4079,32 +4074,6 @@ function isReloadableEntry(entry: HistoryEntry, externalNative: boolean): boolea
     return false;
   }
   return entry.contentType === "browser_url" || entry.reloadSource?.kind === "file";
-}
-
-function htmlVisibleText(content: HtmlContent): string | null {
-  const isFullDocument = /^\s*<!doctype\s+html/i.test(content.html) || /^\s*<html[\s>]/i.test(content.html);
-  const html = isFullDocument
-    ? content.html
-    : `<!doctype html><html><head></head><body>${content.html}</body></html>`;
-  const { document } = parseHTML(html);
-  const text = (document.body?.innerText ?? document.body?.textContent ?? "").trim();
-  return text ? text.slice(0, 4096) : null;
-}
-
-function snapshotVisibleText(pane: PaneState, entry: HistoryEntry): string {
-  const snapshotText = pane.snapshot.visibleText;
-  if (
-    entry.contentType !== "html" ||
-    entry.content === null ||
-    typeof entry.content !== "object" ||
-    !("html" in entry.content)
-  ) {
-    return snapshotText;
-  }
-  if (snapshotText) {
-    return snapshotText;
-  }
-  return htmlVisibleText(entry.content as HtmlContent) ?? snapshotText;
 }
 
 function currentMutationAck(pane: PaneState): MutationAckResponse["payload"] {
