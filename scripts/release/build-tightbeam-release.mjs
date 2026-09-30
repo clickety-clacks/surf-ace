@@ -269,7 +269,7 @@ export async function verifyTightbeamSkillAsset(sourceDir, outputDir) {
   return { filename: TIGHTBEAM_SKILL_ASSET, sha256: await sha256(output) };
 }
 
-export async function buildTightbeamLinuxPackages({ sourceDir, outputDir, target = TOOLCHAINS.linuxRustTarget, includeSkillAsset = true }) {
+export async function buildTightbeamLinuxPackages({ sourceDir, outputDir, target = TOOLCHAINS.linuxRustTarget, includeSkillAsset = true, skillSourceDir = toolingRoot }) {
   const source = path.resolve(sourceDir);
   const output = path.resolve(outputDir);
   const epoch = await sourceDateEpoch(source);
@@ -294,7 +294,7 @@ export async function buildTightbeamLinuxPackages({ sourceDir, outputDir, target
   await fs.access(path.join(electronRoot, "resources/app.asar"));
   await installLinuxElectronLauncher(electronRoot);
   await createDirectoryZip(electronRoot, "Surf Ace", electronArchive, epoch);
-  if (includeSkillAsset) await copyTightbeamSkillAsset(source, output);
+  if (includeSkillAsset) await copyTightbeamSkillAsset(skillSourceDir, output);
   await assertTrackedInputsUnchanged(source);
   return {
     files: includeSkillAsset ? [...TIGHTBEAM.assets.slice(0, 3), TIGHTBEAM_SKILL_ASSET] : TIGHTBEAM.assets.slice(0, 3),
@@ -367,11 +367,11 @@ export async function installLinuxElectronLauncher(electronRoot) {
   return launcher;
 }
 
-export async function writeTightbeamManifest({ sourceDir, outputDir, toolingCommit }) {
+export async function writeTightbeamManifest({ sourceDir, outputDir, toolingCommit, skillSourceDir = toolingRoot }) {
   const source = path.resolve(sourceDir);
   const output = path.resolve(outputDir);
   await verifyStandaloneElectronSource(source);
-  await verifyTightbeamSkillAsset(source, output);
+  await verifyTightbeamSkillAsset(skillSourceDir, output);
   const assetDetails = [];
   for (const name of TIGHTBEAM.assets) {
     const file = path.join(output, name);
@@ -504,7 +504,7 @@ export async function buildTightbeamRelease(options) {
   }
   await fs.mkdir(outputDir, { recursive: true });
   if (component === "linux") {
-    return { ...await buildTightbeamLinuxPackages({ sourceDir: sourceArgument, outputDir, target: options.target ?? TOOLCHAINS.linuxRustTarget }), sourceCommit: options.sourceCommit, toolingCommit };
+    return { ...await buildTightbeamLinuxPackages({ sourceDir: sourceArgument, outputDir, target: options.target ?? TOOLCHAINS.linuxRustTarget, skillSourceDir: toolingRoot }), sourceCommit: options.sourceCommit, toolingCommit };
   }
   if (component === "macos") {
     return { ...await buildTightbeamMacosPackages({ sourceDir: sourceArgument, outputDir }), sourceCommit: options.sourceCommit, toolingCommit };
@@ -512,6 +512,7 @@ export async function buildTightbeamRelease(options) {
   const manifest = await writeTightbeamManifest({
     outputDir,
     sourceDir,
+    skillSourceDir: toolingRoot,
     toolingCommit,
   });
   return { ...manifest, outputDir, sourceCommit: options.sourceCommit, toolingCommit };

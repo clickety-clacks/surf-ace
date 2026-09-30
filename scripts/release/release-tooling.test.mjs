@@ -38,6 +38,7 @@ import {
   TIGHTBEAM_LINUX_SERVER_FILES,
   TIGHTBEAM_LINUX_RUNTIME_FILES,
   copyTightbeamSkillAsset,
+  verifyTightbeamSkillAsset,
   verifyStandaloneElectronSource,
   writeTightbeamManifest,
   verifyTightbeamCliStage,
@@ -414,12 +415,12 @@ test("Tightbeam macOS smoke plans one exact candidate profile", async (t) => {
   assert.equal(plan[0].identityFile, path.join(electronLaunchConfig(plan[0].home, plan[0].port).userDataDir, "surface-identity.json"));
 });
 
-test("smoke participant identity gate binds server, CLI, and client to exact v0.2.2 package bytes", () => {
+test("smoke participant identity gate binds server, CLI, and client to exact v0.2.3 package bytes", () => {
   const valid = smokeParticipantIdentities("linux");
   assert.deepEqual(assertTightbeamSmokeParticipantIdentities(valid, "linux").map(({ participant, version }) => ({ participant, version })), [
-    { participant: "server", version: "0.2.2" },
-    { participant: "cli", version: "0.2.2" },
-    { participant: "client", version: "0.2.2" },
+    { participant: "server", version: "0.2.3" },
+    { participant: "cli", version: "0.2.3" },
+    { participant: "client", version: "0.2.3" },
   ]);
   for (const participant of ["server", "cli", "client"]) {
     const mismatched = valid.map((identity) => identity.participant === participant
@@ -443,7 +444,7 @@ test("smoke hashes each actual server, CLI, and client archive before participan
   const assetNames = TIGHTBEAM.assets.slice(0, 3);
   const assetPaths = Object.fromEntries(await Promise.all(roles.map(async (role, index) => {
     const assetPath = path.join(root, assetNames[index]);
-    await fs.writeFile(assetPath, `v0.2.2-${role}`);
+    await fs.writeFile(assetPath, `v0.2.3-${role}`);
     return [role, assetPath];
   })));
   const details = await Promise.all(roles.map(async (role, index) => {
@@ -568,7 +569,7 @@ test("Electron smoke checks the running app version before any CLI request", asy
     },
     stateRoot: path.join(root, "cli-state"),
     waitForEndpoint: async () => undefined,
-  }), /tightbeam_client_app_version_mismatch:0\.1\.0:0\.2\.2/);
+  }), /tightbeam_client_app_version_mismatch:0\.1\.0:0\.2\.3/);
   assert.equal(cliCalls, 0);
 });
 
@@ -1065,17 +1066,17 @@ test("tagless qualification leaves release build and manifest-smoke tag admissio
   assert.match(freshInstallMain, /fresh_install_wrong_surface_changed_valid_target/);
 });
 
-test("Tightbeam v0.2.2 binds the reviewed candidate, six hosted assets, and tooling identity", () => {
-  assert.equal(TIGHTBEAM_TOOLING_TAG, "surf-ace-release-tooling-tightbeam-v0.2.2");
+test("Tightbeam v0.2.3 binds the landed screenshot-only candidate, six hosted assets, and tooling identity", () => {
+  assert.equal(TIGHTBEAM_TOOLING_TAG, "surf-ace-release-tooling-tightbeam-v0.2.3");
   assert.deepEqual(TIGHTBEAM, {
-    candidateCommit: "ebff52a23f2de88b179eb6472f46cffe3e32c40a",
-    sourceTag: "surf-ace-tightbeam-v0.2.2", version: "0.2.2", toolingTag: TIGHTBEAM_TOOLING_TAG,
-    assets: ["surf-ace-tightbeam-server-linux-x86_64-v0.2.2.tar.gz","surf-ace-tightbeam-cli-linux-x86_64-v0.2.2.tar.gz","surf-ace-tightbeam-electron-linux-x86_64-v0.2.2.zip","surf-ace-tightbeam-cli-macos-arm64-v0.2.2.tar.gz","surf-ace-tightbeam-electron-macos-arm64-v0.2.2.zip",TIGHTBEAM_SKILL_ASSET],
-    manifest: "surf-ace-tightbeam-v0.2.2-manifest.json", checksums: "SHA256SUMS",
+    candidateCommit: "66d2b693533b1e6f4d5fb60079695e3010731286",
+    sourceTag: "surf-ace-tightbeam-v0.2.3", version: "0.2.3", toolingTag: TIGHTBEAM_TOOLING_TAG,
+    assets: ["surf-ace-tightbeam-server-linux-x86_64-v0.2.3.tar.gz","surf-ace-tightbeam-cli-linux-x86_64-v0.2.3.tar.gz","surf-ace-tightbeam-electron-linux-x86_64-v0.2.3.zip","surf-ace-tightbeam-cli-macos-arm64-v0.2.3.tar.gz","surf-ace-tightbeam-electron-macos-arm64-v0.2.3.zip",TIGHTBEAM_SKILL_ASSET],
+    manifest: "surf-ace-tightbeam-v0.2.3-manifest.json", checksums: "SHA256SUMS",
   });
-  assert.equal(TIGHTBEAM_SKILL_ASSET, "surf-ace-tightbeam-skill-v0.2.2.md");
+  assert.equal(TIGHTBEAM_SKILL_ASSET, "surf-ace-tightbeam-skill-v0.2.3.md");
   assert.equal(TIGHTBEAM.assets.length, 6);
-  assert.equal(TIGHTBEAM.sourceTag, "surf-ace-tightbeam-v0.2.2");
+  assert.equal(TIGHTBEAM.sourceTag, "surf-ace-tightbeam-v0.2.3");
   assert.equal(TOOLCHAINS.macosRunner, "xcode-27");
   assert.equal(TOOLCHAINS.xcode, "27.0");
   assert.deepEqual(TIGHTBEAM_ROUTING, {
@@ -1091,18 +1092,19 @@ test("Linux fresh-install fixture binds its identity gate to the release candida
 
   assert.match(fixture, /import \{ TIGHTBEAM \} from "\.\/tightbeam-release-config\.mjs";/);
   assert.match(fixture, /options\.candidateCommit !== TIGHTBEAM\.candidateCommit \|\| options\.expectedVersion !== TIGHTBEAM\.version/);
-  assert.equal(TIGHTBEAM.candidateCommit, "ebff52a23f2de88b179eb6472f46cffe3e32c40a");
-  assert.match(operations, /applies only to product commit\s+`ebff52a23f2de88b179eb6472f46cffe3e32c40a`/);
+  assert.equal(TIGHTBEAM.candidateCommit, "66d2b693533b1e6f4d5fb60079695e3010731286");
+  assert.match(operations, /applies only to product commit\s+`66d2b693533b1e6f4d5fb60079695e3010731286`/);
   for (const source of [fixture, operations]) {
     assert.doesNotMatch(source, /44421f305516ff3b8b305bc2df24c0f4c40b65c0/);
   }
 });
 
-test("fresh-install smoke validates returned screenshot pixels instead of extracting screenshot text", async () => {
+test("fresh-install smoke requests no image option and validates returned screenshot pixels", async () => {
   const fixture = await fs.readFile(path.join(repository, "scripts/release/tightbeam-state-smoke-fixture.ts"), "utf8");
   const smoke = await fs.readFile(path.join(repository, "scripts/release/smoke-tightbeam-release.mjs"), "utf8");
   assert.match(fixture, /inspectScreenshotPixels\(firstCapture\?\.image, expectedScreenshotColors\)/);
   assert.match(smoke, /inspectScreenshotPixels\(visible\.capture\.image, expectedScreenshotColors\)/);
+  assert.doesNotMatch(`${fixture}\n${smoke}`, /includeImage/);
   assert.match(fixture, /\.left\{left:0;background:#d93636\}/);
   assert.match(fixture, /\.right\{right:0;background:#246bce\}/);
   assert.doesNotMatch(fixture, /expectedVisibleText|capture\?\.visibleText/);
@@ -1127,21 +1129,28 @@ test("Tightbeam SHA256SUMS binds exactly the six hosted assets and manifest", as
 
 test("Tightbeam manifest assembles the six hosted assets including the exact skill bytes without iOS distribution signing", async (t) => {
   const outputDir = await temporary(t);
+  const toolingSkillDir = await temporary(t);
+  const toolingSkillPath = path.join(toolingSkillDir, "integrations/tightbeam/skills/surf-ace/SKILL.md");
+  await fs.mkdir(path.dirname(toolingSkillPath), { recursive: true });
+  const toolingSkillBytes = await fs.readFile(path.join(repository, "integrations/tightbeam/skills/surf-ace/SKILL.md"));
+  await fs.writeFile(toolingSkillPath, toolingSkillBytes);
   for (const name of TIGHTBEAM.assets) {
     if (name !== TIGHTBEAM_SKILL_ASSET) await fs.writeFile(path.join(outputDir, name), `fixture:${name}\n`);
   }
-  await copyTightbeamSkillAsset(repository, outputDir);
+  await copyTightbeamSkillAsset(toolingSkillDir, outputDir);
 
   const result = await writeTightbeamManifest({
     outputDir,
     sourceDir: repository,
+    skillSourceDir: toolingSkillDir,
     toolingCommit: "a".repeat(40),
   });
   const manifest = JSON.parse(await fs.readFile(result.manifestPath, "utf8"));
   assert.deepEqual(result.files, TIGHTBEAM_PUBLIC_FILES);
   assert.deepEqual(manifest.assets.map(({ name }) => name), TIGHTBEAM.assets);
   const skillRecord = manifest.assets.find(({ name }) => name === TIGHTBEAM_SKILL_ASSET);
-  assert.equal(skillRecord.sha256, createHash("sha256").update(await fs.readFile(path.join(repository, "integrations/tightbeam/skills/surf-ace/SKILL.md"))).digest("hex"));
+  assert.equal(skillRecord.sha256, createHash("sha256").update(toolingSkillBytes).digest("hex"));
+  assert.deepEqual(await fs.readFile(path.join(outputDir, TIGHTBEAM_SKILL_ASSET)), toolingSkillBytes);
   assert.ok((await fs.readFile(path.join(outputDir, TIGHTBEAM_SKILL_ASSET), "utf8")).includes(TIGHTBEAM_SKILL_ASSET));
   assert.equal(Object.hasOwn(manifest, "iosSigning"), false);
   assert.deepEqual((await verifyTightbeamChecksums(result.manifestPath)).files,
@@ -1152,16 +1161,46 @@ test("Tightbeam manifest assembles the six hosted assets including the exact ski
   await assert.rejects(writeTightbeamManifest({
     outputDir,
     sourceDir: repository,
+    skillSourceDir: toolingSkillDir,
     toolingCommit: "a".repeat(40),
   }), /tightbeam_skill_asset_source_mismatch/);
-  await copyTightbeamSkillAsset(repository, outputDir);
+  await copyTightbeamSkillAsset(toolingSkillDir, outputDir);
 
   await fs.writeFile(path.join(outputDir, "surf-ace-tightbeam-ios-ipad-v0.2.1.ipa"), "stale\n");
   await assert.rejects(writeTightbeamManifest({
     outputDir,
     sourceDir: repository,
+    skillSourceDir: toolingSkillDir,
     toolingCommit: "a".repeat(40),
   }), /public_file_set_mismatch/);
+});
+
+test("v0.2.3 packages the skill from the tooling identity, not the product checkout", async (t) => {
+  const outputDir = await temporary(t);
+  const toolingSkillDir = await temporary(t);
+  const productSkillDir = await temporary(t);
+  const skillRelativePath = "integrations/tightbeam/skills/surf-ace/SKILL.md";
+  const toolingSkillPath = path.join(toolingSkillDir, skillRelativePath);
+  const productSkillPath = path.join(productSkillDir, skillRelativePath);
+  await fs.mkdir(path.dirname(toolingSkillPath), { recursive: true });
+  await fs.mkdir(path.dirname(productSkillPath), { recursive: true });
+  const toolingBytes = await fs.readFile(path.join(repository, skillRelativePath));
+  const productBytes = Buffer.from("stale product-checkout skill bytes\n");
+  await fs.writeFile(toolingSkillPath, toolingBytes);
+  await fs.writeFile(productSkillPath, productBytes);
+
+  await copyTightbeamSkillAsset(toolingSkillDir, outputDir);
+  const verified = await verifyTightbeamSkillAsset(toolingSkillDir, outputDir);
+  assert.equal(verified.filename, TIGHTBEAM_SKILL_ASSET);
+  assert.equal(verified.sha256, createHash("sha256").update(toolingBytes).digest("hex"));
+  assert.deepEqual(await fs.readFile(path.join(outputDir, TIGHTBEAM_SKILL_ASSET)), toolingBytes);
+  assert.notDeepEqual(toolingBytes, productBytes);
+
+  const builder = await fs.readFile(path.join(repository, "scripts/release/build-tightbeam-release.mjs"), "utf8");
+  assert.match(builder, /skillSourceDir = toolingRoot/);
+  assert.match(builder, /copyTightbeamSkillAsset\(skillSourceDir, output\)/);
+  assert.match(builder, /skillSourceDir: toolingRoot/);
+  assert.match(builder, /verifyTightbeamSkillAsset\(skillSourceDir, output\)/);
 });
 
 test("Tightbeam manifest inventory follows only Electron production dependencies", async () => {
@@ -2455,22 +2494,25 @@ test("Linux smoke fixture starts through the product TSX loader and rejects reti
 });
 
 
-test("v0.2.2 standalone specification and release gates bind the product and all public assets", async () => {
-  const specification = await fs.readFile(path.join(repository, "docs/release/tightbeam-standalone-v0.2.2.md"), "utf8");
+test("v0.2.3 standalone specification and release gates bind the product and all public assets", async () => {
+  const specification = await fs.readFile(path.join(repository, "docs/release/tightbeam-standalone-v0.2.3.md"), "utf8");
   const readme = await fs.readFile(path.join(repository, "README.md"), "utf8");
   const skill = await fs.readFile(path.join(repository, "integrations/tightbeam/skills/surf-ace/SKILL.md"), "utf8");
   const workflowPath = path.join(repository, ".github/workflows/release-tightbeam.yml");
   const workflow = await fs.readFile(workflowPath, "utf8");
   assert.match(specification, /Product source: proposed tag/);
-  assert.match(specification, /ebff52a23f2de88b179eb6472f46cffe3e32c40a/);
+  assert.match(specification, /66d2b693533b1e6f4d5fb60079695e3010731286/);
   assert.match(specification, /No old-version participant/);
-  assert.match(specification, /surf-ace-release-tooling-tightbeam-v0\.2\.2/);
+  assert.match(specification, /surf-ace-release-tooling-tightbeam-v0\.2\.3/);
+  assert.match(specification, /surf-ace-tightbeam-v0\.2\.3/);
+  assert.match(specification, /copied byte-for-byte from the pinned tooling checkout/);
   for (const name of TIGHTBEAM_PUBLIC_FILES) assert.ok(specification.includes(name));
   assert.match(specification, /custom-format backup/);
   assert.match(specification, /restores only into a\s+separate staged cluster/);
   assert.match(specification, /packaged CLI connects\s+directly to the selected client's/);
   assert.match(specification, /Publication is separately opt-in/);
-  assert.match(readme, /surf-ace-tightbeam-skill-v0\.2\.2\.md/);
+  assert.match(readme, /surf-ace-tightbeam-skill-v0\.2\.3\.md/);
+  assert.match(readme, /The v0\.2\.3 release contains six versioned assets/);
   assert.match(readme, /register\s+the verified Markdown file/);
   assert.match(readme, /sha256sum -c SHA256SUMS/);
   assert.match(readme, /bare `surf-ace` command/);
@@ -2481,7 +2523,7 @@ test("v0.2.2 standalone specification and release gates bind the product and all
   assert.match(readme, /do not use `surf-ace --version`/);
   assert.match(readme, /server archive\s+includes `docs\/OPERATIONS\.md`/);
   assert.match(readme, /## Install and run/);
-  assert.match(skill, /surf-ace-tightbeam-skill-v0\.2\.2\.md/);
+  assert.match(skill, /surf-ace-tightbeam-skill-v0\.2\.3\.md/);
   assert.match(skill, /register the verified Markdown content/);
   assert.doesNotMatch(`${readme}\n${skill}`, /\b(?:Racter|Plumbus|Shrdlu|Gibson|Eezo)\b|\/Users\/mike\/|\b100\.64\.\d{1,3}\.\d{1,3}\b/i);
   assert.match(workflow, /^on:\n  workflow_dispatch:/m);
@@ -2489,9 +2531,9 @@ test("v0.2.2 standalone specification and release gates bind the product and all
   for (const match of workflow.matchAll(/^\s*uses:\s*([^\s]+)$/gm)) assert.match(match[1], /@[0-9a-f]{40}$/);
   assert.match(workflow, /run_smoke:[\s\S]*?default: false/);
   assert.match(workflow, /publish_release:[\s\S]*?default: false/);
-  assert.match(workflow, /PRODUCT_COMMIT: ebff52a23f2de88b179eb6472f46cffe3e32c40a/);
-  assert.match(workflow, /PRODUCT_TAG: surf-ace-tightbeam-v0\.2\.2/);
-  assert.match(workflow, /TOOLING_TAG: surf-ace-release-tooling-tightbeam-v0\.2\.2/);
+  assert.match(workflow, /PRODUCT_COMMIT: 66d2b693533b1e6f4d5fb60079695e3010731286/);
+  assert.match(workflow, /PRODUCT_TAG: surf-ace-tightbeam-v0\.2\.3/);
+  assert.match(workflow, /TOOLING_TAG: surf-ace-release-tooling-tightbeam-v0\.2\.3/);
   assert.match(workflow, /GITHUB_EVENT_NAME/);
   assert.match(workflow, /GITHUB_REF_TYPE/);
   assert.match(workflow, /node tooling\/scripts\/release\/build-tightbeam-release\.mjs/);
@@ -2557,7 +2599,7 @@ test("v0.2.2 standalone specification and release gates bind the product and all
   const assembleStart = workflow.indexOf("  assemble:\n", compareStart);
   const compareJob = workflow.slice(compareStart, assembleStart);
   for (const name of TIGHTBEAM.assets) assert.ok(compareJob.includes(name));
-  assert.match(compareJob, /surf-ace-tightbeam-skill-v0\.2\.2\.md/);
+  assert.match(compareJob, /surf-ace-tightbeam-skill-v0\.2\.3\.md/);
   assert.match(workflow, /needs: \[assemble, smoke-linux, smoke-macos\]/);
   for (const command of [
     "cargo build --manifest-path source/packages/cli/Cargo.toml",
@@ -2570,17 +2612,20 @@ test("v0.2.2 standalone specification and release gates bind the product and all
   assert.ok(TIGHTBEAM_TEST_COMMANDS.some((command) => command.startsWith("xcodebuild test ")));
 });
 
-test("v0.2.2 release smoke gates bind only matching candidate participants", async () => {
+test("v0.2.3 release smoke gates bind only matching candidate participants", async () => {
   const workflow = await fs.readFile(path.join(repository, ".github/workflows/release-tightbeam.yml"), "utf8");
   const smoke = await fs.readFile(path.join(repository, "scripts/release/smoke-tightbeam-release.mjs"), "utf8");
   const fixture = await fs.readFile(path.join(repository, "scripts/release/tightbeam-state-smoke-fixture.ts"), "utf8");
-  const specification = await fs.readFile(path.join(repository, "docs/release/tightbeam-standalone-v0.2.2.md"), "utf8");
+  const specification = await fs.readFile(path.join(repository, "docs/release/tightbeam-standalone-v0.2.3.md"), "utf8");
 
   assert.equal(Object.hasOwn(TIGHTBEAM, "baselineCommit"), false);
   for (const input of [workflow, smoke]) assert.doesNotMatch(input, /cf91ef1baab26d6045fac5300487c29d0ddf332d/);
   assert.doesNotMatch(workflow, /build-smoke-baseline|BASELINE_(?:BACKEND|ELECTRON)|baseline-(?:commit|electron|root)/i);
   assert.doesNotMatch(smoke, /SURF_ACE_TIGHTBEAM_BASELINE|function smokeLinux\(|runLinuxStateDriver|validateTightbeamStateSequence/);
-  assert.match(workflow, /--candidate-commit ebff52a23f2de88b179eb6472f46cffe3e32c40a/);
+  assert.match(workflow, /--candidate-commit 66d2b693533b1e6f4d5fb60079695e3010731286/);
+  assert.match(smoke, /tightbeam-\$\{channel\}-v023-candidate-write/);
+  assert.match(smoke, /inspectScreenshotPixels\(visible\.capture\.image, expectedScreenshotColors\)/);
+  assert.doesNotMatch(`${smoke}\n${fixture}`, /includeImage/);
   assert.match(smoke, /validateTightbeamFreshInstallState/);
   assert.match(fixture, /mode: "fresh-install"/);
   assert.doesNotMatch(fixture, /runPhase\("baseline"|runPhase\("candidate"|runPhase\("rollback"/);
