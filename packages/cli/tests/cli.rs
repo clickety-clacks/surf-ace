@@ -446,6 +446,77 @@ fn fleet_list_queries_registered_inventory_without_pairing_or_local_state_mutati
 }
 
 #[test]
+fn fleet_list_selects_only_the_explicit_registry_without_environment_fallback() {
+    let first_inventory = fleet_inventory_fixture();
+    let second_inventory = json!({
+        "clients": [{
+            "clientId": "c".repeat(64),
+            "surfaces": [{
+                "surfaceId": "sf_registry_two",
+                "windowLabel": "z",
+                "panes": [{ "paneId": "pane-unique", "paneLabel": 4, "paneAddress": "z4" }]
+            }]
+        }]
+    });
+    let (first_registry, first_server) =
+        spawn_registry_server(first_inventory.clone(), "fleet.topology", true);
+    let (second_registry, second_server) =
+        spawn_registry_server(second_inventory.clone(), "fleet.topology", true);
+    let temp = TempDir::new().unwrap();
+    let state_root = temp.path().join("must-remain-absent");
+    let state_root_text = state_root.to_str().unwrap();
+
+    for (registry, expected, foreign_client_id, server) in [
+        (
+            first_registry.as_str(),
+            &first_inventory,
+            "c".repeat(64),
+            first_server,
+        ),
+        (
+            second_registry.as_str(),
+            &second_inventory,
+            "a".repeat(64),
+            second_server,
+        ),
+    ] {
+        let output = run_native_cli(&[
+            "--state-root",
+            state_root_text,
+            "--registry",
+            registry,
+            "fleet-list",
+        ]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let output_json: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(output_json["result"], *expected);
+        assert!(output_json.to_string().find(&foreign_client_id).is_none());
+
+        let request = server.join().unwrap();
+        assert_eq!(request["op"], "fleet.topology");
+        assert_eq!(request["payload"], json!({}));
+    }
+    assert!(!state_root.exists(), "fleet-list must remain state-free");
+
+    // A registry environment value must not silently become the selected route.
+    let no_explicit_registry = ProcessCommand::new(env!("CARGO_BIN_EXE_surf-ace"))
+        .env("SURF_ACE_SERVER", &first_registry)
+        .args(["--state-root", state_root_text, "fleet-list"])
+        .output()
+        .unwrap();
+    assert!(!no_explicit_registry.status.success());
+    let no_explicit_json: Value = serde_json::from_slice(&no_explicit_registry.stdout).unwrap();
+    assert_eq!(
+        no_explicit_json["error"]["details"]["message"],
+        "invalid_input:missing_registry"
+    );
+}
+
+#[test]
 fn fleet_list_distinguishes_an_empty_registry_from_an_unavailable_registry() {
     let (registry, server) =
         spawn_registry_server(json!({ "clients": [] }), "fleet.topology", true);
