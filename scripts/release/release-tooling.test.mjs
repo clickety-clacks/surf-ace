@@ -1816,7 +1816,7 @@ function rawCliEvidenceFixture(endpoint = "ws://127.0.0.1:19001/ws", stateRoot =
   record("list", {});
   record("topology-intent", { action: "split", count: 3, paneId: 1, surfaceId: "sf_1" });
   record("push", { contentId: "candidate-write", paneId: 2, surfaceId: "sf_1" });
-  record("capture-pane", { includeImage: true, paneId: 2, surfaceId: "sf_1" });
+  record("capture-pane", { paneId: 2, surfaceId: "sf_1" });
   record("read", { scopeId: "pane:sf_1:2" }, null);
   record("topology-intent", { action: "close", paneId: 3, surfaceId: "sf_1" });
   const bytes = Buffer.from(`${events.map((event) => JSON.stringify(event)).join("\n")}\n`);
@@ -2225,7 +2225,7 @@ test("Linux fresh-install state driver binds candidate-only inputs and packaged 
   };
   record("list", {}, initialEndpoint, listed);
   record("push", { content: { html: screenshotPixelFixtureHtml }, contentId, paneId: 1, surfaceId: "sf_fresh" }, initialEndpoint);
-  record("capture-pane", { includeImage: true, paneId: 1, surfaceId: "sf_fresh" }, initialEndpoint, capture);
+  record("capture-pane", { paneId: 1, surfaceId: "sf_fresh" }, initialEndpoint, capture);
   record("read", { scopeId: "pane:sf_fresh:1" }, null, read);
   events.push({
     args: ["--state-root", path.join(stateRoot, "cli"), "--endpoint", initialEndpoint,
@@ -2238,10 +2238,10 @@ test("Linux fresh-install state driver binds candidate-only inputs and packaged 
     inputJson: JSON.stringify({ contentId: `${contentId}-wrong-surface`, paneId: 1, surfaceId: "sf_wrong" }),
     route: "direct-client-websocket", status: 1, stderr: "", stdout: "unknown_surface:sf_wrong",
   });
-  record("capture-pane", { includeImage: true, paneId: 1, surfaceId: "sf_fresh" }, initialEndpoint, capture);
+  record("capture-pane", { paneId: 1, surfaceId: "sf_fresh" }, initialEndpoint, capture);
   record("read", { scopeId: "pane:sf_fresh:1" }, null, read);
   record("list", {}, initialEndpoint, listed);
-  record("capture-pane", { includeImage: true, paneId: 1, surfaceId: "sf_fresh" }, initialEndpoint, capture);
+  record("capture-pane", { paneId: 1, surfaceId: "sf_fresh" }, initialEndpoint, capture);
   record("read", { scopeId: "pane:sf_fresh:1" }, null, read);
   const bytes = Buffer.from(`${events.map((event) => JSON.stringify(event)).join("\n")}\n`);
   Object.assign(stateSequence, {

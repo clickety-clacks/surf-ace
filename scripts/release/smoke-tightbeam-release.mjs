@@ -980,7 +980,7 @@ async function runDirectClientCandidate(step, executable, cliBinary, stateRoot, 
     const reads = [];
     const captureRead = async (targetPaneId) => {
       const captureOutput = await invoke("capture-pane", {
-        includeDrawings: true, includeImage: true, paneId: targetPaneId, surfaceId,
+        includeDrawings: true, paneId: targetPaneId, surfaceId,
       });
       const capture = cliResult(captureOutput);
       if (Number(capture.paneId) !== targetPaneId ||

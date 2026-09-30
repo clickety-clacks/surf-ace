@@ -513,7 +513,6 @@ function matchesFreshInstallCurrentContent(record: any, contentId: string, surfa
 async function readPane(binary: string, stateRoot: string, endpoint: string, surfaceId: string, paneId: number) {
   const captureOutput = await cli(binary, stateRoot, "capture-pane", {
     includeDrawings: true,
-    includeImage: true,
     paneId,
     surfaceId,
   }, endpoint);

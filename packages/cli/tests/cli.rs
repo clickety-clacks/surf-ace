@@ -2465,11 +2465,15 @@ fn production_empty_scope_lifecycle_routes_pending_acks_after_listing() {
             let operation = read_request(&mut socket);
             if stage == 1 {
                 assert_eq!(operation["op"], "snapshot.get");
+                assert_eq!(
+                    operation["payload"]["includeImage"], true,
+                    "default capture-pane must request its screenshot"
+                );
                 send_response(
                     &mut socket,
                     operation["id"].as_str().unwrap(),
                     "snapshot.result",
-                    json!({"snapshotId":"sn_a"}),
+                    json!({"snapshotId":"sn_a", "image":"cG5n"}),
                 );
             } else {
                 assert_eq!(operation["op"], "surfaces.list");
@@ -2538,6 +2542,7 @@ fn production_empty_scope_lifecycle_routes_pending_acks_after_listing() {
     );
     capture.endpoint = Some(a_endpoint.clone());
     let initial = execute(capture).unwrap();
+    assert_eq!(initial.result["payload"]["image"], "cG5n");
     for pane in [1, 2] {
         let mut read = invocation(
             &temp,

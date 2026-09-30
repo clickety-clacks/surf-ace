@@ -344,6 +344,9 @@ impl Command {
             Self::SurfaceIntent => {
                 input.remove("action");
             }
+            Self::CapturePane => {
+                input.entry("includeImage").or_insert(Value::Bool(true));
+            }
             _ => {}
         }
         Ok(Value::Object(input))

@@ -9,7 +9,7 @@
     {"id":"rq-6","op":"topology.apply","payload":{"surfaceId":"sf_1","expectedTopologyRevision":1,"target":{"root":true},"desired":{"type":"pane"},"allowDestroyPaneIds":[]},"sentAt":1785619273922,"type":"request","v":1},
     {"id":"rq-7","op":"content.clear","payload":{"surfaceId":"sf_1","paneId":1,"expectedRevision":1},"sentAt":1785619273922,"type":"request","v":1},
     {"id":"rq-8","op":"annotations.remove","payload":{"surfaceId":"sf_1","paneId":1,"contentId":"c_1","strokeIds":["st_1"]},"sentAt":1785619273922,"type":"request","v":1},
-    {"id":"rq-9","op":"snapshot.get","payload":{"surfaceId":"sf_1","paneId":1,"includeDrawings":true},"sentAt":1785619273922,"type":"request","v":1},
+    {"id":"rq-9","op":"snapshot.get","payload":{"surfaceId":"sf_1","paneId":1,"includeDrawings":true,"includeImage":true},"sentAt":1785619273922,"type":"request","v":1},
     {"id":"rq-10","op":"surface.window.open","payload":{"expectedSurfaceSetRevision":1,"placement":{}},"sentAt":1785619273922,"type":"request","v":1},
     {"id":"rq-11","op":"surface.window.close","payload":{"expectedSurfaceSetRevision":1,"expectedTopologyRevision":1,"surfaceId":"sf_1"},"sentAt":1785619273922,"type":"request","v":1},
     {"id":"rq-12","op":"surface.window.restore","payload":{"expectedSurfaceSetRevision":1,"tombstoneId":"st_1","placement":{}},"sentAt":1785619273922,"type":"request","v":1},
