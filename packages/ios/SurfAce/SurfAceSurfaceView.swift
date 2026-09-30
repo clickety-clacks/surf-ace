@@ -1620,8 +1620,12 @@ private struct SurfAcePaneRepresentable: UIViewRepresentable {
             hostView?.captureDrawingData() ?? Data()
         }
 
-        func fetchSnapshot(includeImage: Bool) async -> SurfAceSurfaceSnapshot? {
-            await hostView?.fetchSnapshot(includeImage: includeImage)
+        func fetchSnapshot() async -> SurfAceSurfaceSnapshot? {
+            await hostView?.fetchSnapshot()
+        }
+
+        func fetchSnapshotMetadata() async -> SurfAceSurfaceSnapshot? {
+            await hostView?.fetchSnapshotMetadata()
         }
 
         func applyHTMLPatch(_ patch: SurfAceFramePatchRequest) async -> SurfAceHTMLPatchResult {
@@ -2167,7 +2171,20 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
         canvasView.drawing.dataRepresentation()
     }
 
-    func fetchSnapshot(includeImage: Bool) async -> SurfAceSurfaceSnapshot? {
+    func fetchSnapshot() async -> SurfAceSurfaceSnapshot? {
+        let metadata = await fetchSnapshotMetadata()
+        guard let imageBase64 = await captureRenderedImageBase64(), !imageBase64.isEmpty else {
+            return nil
+        }
+
+        return SurfAceSurfaceSnapshot(
+            viewport: metadata.viewport,
+            selection: metadata.selection,
+            imageBase64: imageBase64
+        )
+    }
+
+    func fetchSnapshotMetadata() async -> SurfAceSurfaceSnapshot {
         await waitForPendingHTMLRenderIfNeeded()
 
         switch currentEntry?.payload {
@@ -2180,12 +2197,10 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
             break
         }
 
-        let imageBase64 = includeImage ? await captureRenderedImageBase64() : nil
-
         return SurfAceSurfaceSnapshot(
             viewport: lastViewport,
             selection: lastSelection,
-            imageBase64: imageBase64
+            imageBase64: nil
         )
     }
 

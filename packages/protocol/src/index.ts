@@ -499,7 +499,6 @@ export type AnnotationsRemoveRequest = RequestBase<"annotations.remove"> & {
 export type SnapshotGetRequest = RequestBase<"snapshot.get"> & {
   payload: {
     paneId: PaneId;
-    includeImage?: boolean;
     includeDrawings?: boolean;
   };
 };
@@ -754,7 +753,7 @@ export type SnapshotResponse = ResponseBase<"snapshot.get"> & {
     viewport: Viewport;
     selection: Selection;
     drawings?: Stroke[];
-    image?: string;
+    image: string;
   };
 };
 

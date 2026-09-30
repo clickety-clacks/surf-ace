@@ -670,7 +670,7 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         XCTAssertTrue(hostView.hasPendingWebContentRenderForTesting)
     }
 
-    func testMarkdownSnapshotReportsMeasuredViewportAndPreservesSourceText() async throws {
+    func testDefaultMarkdownSnapshotIncludesScreenshotAndMeasuredViewport() async throws {
         let frame = CGRect(x: 0, y: 0, width: 320, height: 240)
         let hostView = SurfAceSurfaceHostView(frame: frame)
         hostView.setNeedsLayout()
@@ -694,7 +694,7 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
             restoreViewport: nil
         )
 
-        let rawSnapshot = await hostView.fetchSnapshot(includeImage: true)
+        let rawSnapshot = await hostView.fetchSnapshot()
         let snapshot = try XCTUnwrap(rawSnapshot)
         XCTAssertEqual(snapshot.viewport.visibleRect.width, Double(frame.width), accuracy: 1)
         XCTAssertEqual(snapshot.viewport.visibleRect.height, Double(frame.height), accuracy: 1)
@@ -1323,7 +1323,11 @@ private final class RecordingPaneBridge: SurfAcePaneBridging {
         Data()
     }
 
-    func fetchSnapshot(includeImage: Bool) async -> SurfAceSurfaceSnapshot? {
+    func fetchSnapshot() async -> SurfAceSurfaceSnapshot? {
+        nil
+    }
+
+    func fetchSnapshotMetadata() async -> SurfAceSurfaceSnapshot? {
         nil
     }
 

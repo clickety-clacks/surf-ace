@@ -85,11 +85,31 @@ test("production validation matches the shared Rust CLI boundary vector", () => 
   }
 });
 
-test("snapshot capture contract excludes visible-text extraction", () => {
+test("snapshot capture always returns an image and has no suppression flag", () => {
   const requestProperties = (protocolSchemaDefs.SnapshotGetRequest as any).properties.payload.properties;
   const responseProperties = (protocolSchemaDefs.SnapshotResponse as any).properties.payload.properties;
   assert.equal(Object.hasOwn(requestProperties, "includeVisibleText"), false);
   assert.equal(Object.hasOwn(responseProperties, "visibleText"), false);
+  assert.equal(Object.hasOwn(requestProperties, "includeImage"), false);
+  assert.deepEqual(
+    (protocolSchemaDefs.SnapshotResponse as any).properties.payload.required,
+    ["paneId", "contentId", "revision", "contentType", "viewport", "selection", "image"],
+  );
+  assert.deepEqual(
+    validateLocklessEnvelope(request("snapshot.get", {
+      paneId: 1,
+      surfaceId: "sf_capture",
+    })),
+    { ok: true },
+  );
+  assert.deepEqual(
+    validateLocklessEnvelope(request("snapshot.get", {
+      includeImage: false,
+      paneId: 1,
+      surfaceId: "sf_capture",
+    })),
+    { ok: false, reason: "unknown_property:includeImage" },
+  );
   assert.deepEqual(
     validateLocklessEnvelope(request("snapshot.get", {
       includeVisibleText: true,

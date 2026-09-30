@@ -1787,10 +1787,6 @@
               "$ref": "#/$defs/PaneId",
               "description": "Target pane. Required — callers must always specify which pane to target."
             },
-            "includeImage": {
-              "type": "boolean",
-              "default": false
-            },
             "includeDrawings": {
               "type": "boolean",
               "default": false
@@ -2320,7 +2316,8 @@
             "revision",
             "contentType",
             "viewport",
-            "selection"
+            "selection",
+            "image"
           ],
           "properties": {
             "paneId": {

@@ -1458,7 +1458,6 @@ The schema below defines every v1 application message type over WS.
               "$ref": "#/$defs/PaneId",
               "description": "Target pane. Required — OpenClaw must always specify which pane to target."
             },
-            "includeImage": { "type": "boolean", "default": false },
             "includeDrawings": { "type": "boolean", "default": false }
           }
         }
@@ -3719,7 +3718,7 @@ However, geometry-based inference of the "between" region still requires underst
 - Does the provider maintain a rendered image cache proactively, or only on demand?
 - For "full screen" requests, is the image the current viewport or the full scrollable content?
 
-**Status:** Partially resolved. Coordinate space is settled (viewport coordinates per A.1). In the capture frame model, each frame includes a viewport screenshot — OpenClaw receives the image directly in `surf_ace_read` without needing a separate buffer crop. The region-of-interest question is moot for closed frames (each frame image is already the viewport at capture time). For live/open frame inspection, `snapshot.get` with `includeImage=true` remains available over the WS protocol.
+**Status:** Partially resolved. Coordinate space is settled (viewport coordinates per A.1). In the capture frame model, each frame includes a viewport screenshot — OpenClaw receives the image directly in `surf_ace_read` without needing a separate buffer crop. The region-of-interest question is moot for closed frames (each frame image is already the viewport at capture time). For live/open frame inspection, every successful `snapshot.get` response includes the viewport screenshot; there is no image-inclusion request option.
 
 ---
 

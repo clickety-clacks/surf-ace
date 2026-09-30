@@ -2466,8 +2466,9 @@ fn production_empty_scope_lifecycle_routes_pending_acks_after_listing() {
             if stage == 1 {
                 assert_eq!(operation["op"], "snapshot.get");
                 assert_eq!(
-                    operation["payload"]["includeImage"], true,
-                    "default capture-pane must request its screenshot"
+                    operation["payload"].get("includeImage"),
+                    None,
+                    "capture-pane has no image suppression option"
                 );
                 send_response(
                     &mut socket,

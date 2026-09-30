@@ -2809,9 +2809,12 @@ test("three surfaces recover independently and complete the offline push-capture
     }),
   ];
   const port = nextPort++;
+  let imageCaptureCount = 0;
   const server = new SurfaceWsServer({
-    capturePaneImage: async (surfaceId, paneId) =>
-      Buffer.from(`${surfaceId}:${paneId}`).toString("base64"),
+    capturePaneImage: async (surfaceId, paneId) => {
+      imageCaptureCount += 1;
+      return Buffer.from(`${surfaceId}:${paneId}`).toString("base64");
+    },
     compositorSocketPath: null,
     core,
     endpointName: "Surf Ace",
@@ -2860,7 +2863,6 @@ test("three surfaces recover independently and complete the offline push-capture
       });
       assert.equal(pushed.ok, true, JSON.stringify(pushed));
       const captured = await request(surfaceSockets[index]!, "snapshot.get", {
-        includeImage: true,
         paneId,
         surfaceId: surface.surfaceId,
       });
@@ -2871,6 +2873,15 @@ test("three surfaces recover independently and complete the offline push-capture
         Buffer.from(`${surface.surfaceId}:${paneId}`).toString("base64"),
       );
       assert.equal(captured.payload.revision, pushed.payload.revision);
+      assert.equal(imageCaptureCount, index + 1);
+
+      const suppressed = await request(surfaceSockets[index]!, "snapshot.get", {
+        includeImage: false,
+        paneId,
+        surfaceId: surface.surfaceId,
+      });
+      assert.equal(suppressed.ok, false, "removed flag cannot suppress screenshot capture");
+      assert.equal(imageCaptureCount, index + 1, "rejected flag does not reach the renderer");
     }
 
     assert.deepEqual(
@@ -2880,6 +2891,42 @@ test("three surfaces recover independently and complete the offline push-capture
   } finally {
     for (const socket of surfaceSockets) socket.close();
     lifecycle.close();
+    await server.stop();
+  }
+});
+
+test("snapshot.get fails rather than returning success without a screenshot", async () => {
+  const core = new SurfaceCore();
+  const surface = core.ensurePrimarySurface("No screenshot", {
+    height: 800,
+    scale: 2,
+    width: 1200,
+  });
+  const port = nextPort++;
+  const server = new SurfaceWsServer({
+    capturePaneImage: async () => null,
+    compositorSocketPath: null,
+    core,
+    endpointName: "Surf Ace",
+    hostName: "localhost",
+    port,
+    viewport: () => ({ height: 800, scale: 2, width: 1200 }),
+  });
+  await server.start();
+  const socket = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+  try {
+    const paired = await pair(socket, "missing-screenshot-controller", surface.surfaceId);
+    assert.equal(paired.ok, true, JSON.stringify(paired));
+    const panes = await request(socket, "panes.list", { surfaceId: surface.surfaceId });
+    const paneId = Number(panes.payload.topology.panes[0].paneId);
+    const captured = await request(socket, "snapshot.get", {
+      paneId,
+      surfaceId: surface.surfaceId,
+    });
+    assert.equal(captured.ok, false, JSON.stringify(captured));
+    assert.equal(captured.error.code, "render_failed");
+  } finally {
+    socket.close();
     await server.stop();
   }
 });
@@ -3359,7 +3406,7 @@ test("a saturated terminal ledger still admits push, capture, close and cleanup"
 
   const port = nextPort++;
   const server = new SurfaceWsServer({
-    capturePaneImage: async () => null,
+    capturePaneImage: async () => "cG5n",
     compositorSocketPath: null,
     core,
     endpointName: "Surf Ace",
@@ -3396,7 +3443,6 @@ test("a saturated terminal ledger still admits push, capture, close and cleanup"
     assert.equal(pushed.ok, true, JSON.stringify(pushed));
 
     const captured = await request(socket, "snapshot.get", {
-      includeImage: true,
       paneId,
       surfaceId: surface.surfaceId,
     });
@@ -3404,6 +3450,7 @@ test("a saturated terminal ledger still admits push, capture, close and cleanup"
     assert.equal(Object.hasOwn(captured.payload, "visibleText"), false);
     assert.equal(captured.payload.contentId, "content-saturated");
     assert.equal(captured.payload.revision > 0, true);
+    assert.equal(captured.payload.image, "cG5n");
 
     // split then close, so pane close and cleanup close both run paired
     const split = await request(socket, "pane.split", {
@@ -3457,7 +3504,7 @@ test("cumulative content above 1 MiB keeps every individual push valid and the b
 
   const port = nextPort++;
   const server = new SurfaceWsServer({
-    capturePaneImage: async () => null,
+    capturePaneImage: async () => "cG5n",
     compositorSocketPath: null,
     core,
     endpointName: "Surf Ace",
@@ -3504,6 +3551,7 @@ test("cumulative content above 1 MiB keeps every individual push valid and the b
     assert.equal(Object.hasOwn(captured.payload, "visibleText"), false);
     assert.equal(captured.payload.contentId, lastContentId);
     assert.equal(captured.payload.revision > 0, true);
+    assert.equal(captured.payload.image, "cG5n");
   } finally {
     socket.close();
     await server.stop();
@@ -3529,7 +3577,7 @@ test("a saturated ledger persisted and restarted still pairs and serves content"
   });
   const port = nextPort++;
   const server = new SurfaceWsServer({
-    capturePaneImage: async () => null,
+    capturePaneImage: async () => "cG5n",
     compositorSocketPath: null,
     core: restored,
     endpointName: "Surf Ace",
@@ -3562,6 +3610,7 @@ test("a saturated ledger persisted and restarted still pairs and serves content"
     });
     assert.equal(Object.hasOwn(captured.payload, "visibleText"), false);
     assert.equal(captured.payload.contentId, "content-restored");
+    assert.equal(captured.payload.image, "cG5n");
   } finally {
     socket.close();
     await server.stop();

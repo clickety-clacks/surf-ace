@@ -300,7 +300,11 @@ private final class ControlledPaneBridge: SurfAcePaneBridging {
         Data()
     }
 
-    func fetchSnapshot(includeImage: Bool) async -> SurfAceSurfaceSnapshot? {
+    func fetchSnapshot() async -> SurfAceSurfaceSnapshot? {
+        nil
+    }
+
+    func fetchSnapshotMetadata() async -> SurfAceSurfaceSnapshot? {
         nil
     }
 

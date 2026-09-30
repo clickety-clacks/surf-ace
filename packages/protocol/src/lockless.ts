@@ -481,7 +481,6 @@ export type LocklessRequest =
       "snapshot.get",
       {
         includeDrawings?: boolean;
-        includeImage?: boolean;
         paneId: number;
         surfaceId: string;
       }
@@ -783,7 +782,7 @@ const LOCKLESS_REQUEST_FIELDS: Record<
     required: ["contentId", "paneId", "strokeIds", "surfaceId"],
   },
   "snapshot.get": {
-    optional: ["includeDrawings", "includeImage"],
+    optional: ["includeDrawings"],
     required: ["paneId", "surfaceId"],
   },
   "heartbeat.ping": {
@@ -1480,9 +1479,7 @@ function validateLocklessRequestPayload(
         ? null
         : "invalid_annotations_remove";
     case "snapshot.get":
-      return paneAndSurface() &&
-        optionalBoolean(payload, "includeDrawings") &&
-        optionalBoolean(payload, "includeImage")
+      return paneAndSurface() && optionalBoolean(payload, "includeDrawings")
         ? null
         : "invalid_snapshot_get";
     case "heartbeat.ping":

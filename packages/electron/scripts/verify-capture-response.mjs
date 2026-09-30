@@ -110,7 +110,6 @@ try {
   assert.equal(pushed.ok, true, JSON.stringify(pushed));
 
   const captured = await runCli("capture-pane", {
-    includeImage: true,
     paneId,
     surfaceId: surface.surfaceId,
   }, 20_000);
