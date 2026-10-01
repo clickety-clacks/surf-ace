@@ -1170,10 +1170,14 @@ async function freshInstallMain(options: Options) {
     const fleetPaneUniqueness = {
       firstClientId: electronClientId, firstPaneNumber, firstSurfaceId: surfaceId,
       secondClientId, secondPaneNumber, secondSurfaceId: secondSurface.surfaceId,
+      secondDirectClientEndpoint: secondApp.endpoint,
       sharedRegistryEndpoint: registryEndpoint,
     };
     if (!matchesRegisteredDirectTarget(electronClientId, registration, firstVisible)) {
       throw new Error("fresh_install_direct_client_registry_target_mismatch");
+    }
+    if (!matchesRegisteredDirectTarget(secondClientId, secondRegistration, secondVisible)) {
+      throw new Error("fresh_install_second_direct_client_registry_target_mismatch");
     }
     const diagnosticsAfterRegistration = await allocatorDiagnostics(cluster.adminUrl, cluster.config.fleetId);
     if (diagnosticsAfterRegistration.assignmentCount < diagnosticsBeforeRegistration.assignmentCount ||
