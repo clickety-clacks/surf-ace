@@ -1174,6 +1174,7 @@ async function freshInstallMain(options: Options) {
     const fleetPaneUniqueness = {
       firstClientId: electronClientId, firstPaneNumber, firstSurfaceId: surfaceId,
       secondClientId, secondPaneNumber, secondSurfaceId: secondSurface.surfaceId,
+      secondDirectClientEndpoint: secondApp.endpoint,
       sharedRegistryEndpoint: registryEndpoint,
     };
     if (!matchesRegisteredDirectTarget(electronClientId, registration, firstVisible)) {

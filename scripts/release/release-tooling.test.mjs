@@ -1177,8 +1177,43 @@ test("Linux packaged acceptance allocates pane numbers uniquely across two clien
   assert.match(freshInstallMain, /fresh_install_two_clients_not_distinct/);
   assert.match(freshInstallMain, /firstPaneNumber === secondPaneNumber/);
   assert.match(freshInstallMain, /fresh_install_fleet_pane_numbers_not_unique_or_unconfirmed/);
+  assert.match(freshInstallMain, /secondDirectClientEndpoint: secondApp\.endpoint/);
   assert.match(freshInstallMain, /Number\(registration\.surface\.panes\[0\]\?\.paneLabel\) !== firstPaneNumber/);
   assert.match(freshInstallMain, /Number\(secondRegistration\.surface\.panes\[0\]\?\.paneLabel\) !== secondPaneNumber/);
+});
+
+test("Linux fresh-install raw CLI evidence binds two isolated roots to their client endpoints", async () => {
+  const { assertLinuxFreshInstallCliStateRoots } = await import("./smoke-tightbeam-release.mjs");
+  const firstEndpoint = "ws://127.0.0.1:19001/ws";
+  const secondEndpoint = "ws://127.0.0.1:19002/ws";
+  const firstStateRoot = "/fixture/state/cli";
+  const secondStateRoot = "/fixture/state/second-cli";
+  const event = (stateRoot, endpoint, command = "list") => {
+    const args = ["--state-root", stateRoot];
+    if (endpoint) args.push("--endpoint", endpoint, "--product-label", "Surf Ace release smoke");
+    args.push(command, "--input-json", "{}");
+    return { args, endpoint };
+  };
+  const bindings = { firstEndpoint, firstStateRoot, secondEndpoint, secondStateRoot };
+
+  assert.doesNotThrow(() => assertLinuxFreshInstallCliStateRoots([
+    event(firstStateRoot, firstEndpoint),
+    event(secondStateRoot, secondEndpoint),
+    event(firstStateRoot, null, "read"),
+  ], bindings));
+  assert.throws(() => assertLinuxFreshInstallCliStateRoots([
+    event(firstStateRoot, firstEndpoint),
+    event(firstStateRoot, secondEndpoint),
+  ], bindings), /linux_fresh_install_cli_state_root_not_bound/);
+  assert.throws(() => assertLinuxFreshInstallCliStateRoots([
+    event(firstStateRoot, firstEndpoint),
+    event(secondStateRoot, secondEndpoint),
+    event(secondStateRoot, null, "read"),
+  ], bindings), /linux_fresh_install_cli_state_root_not_bound/);
+  assert.throws(() => assertLinuxFreshInstallCliStateRoots([
+    event(firstStateRoot, firstEndpoint),
+    event(secondStateRoot, "ws://127.0.0.1:19003/ws"),
+  ], bindings), /linux_fresh_install_cli_state_root_not_bound/);
 });
 
 test("Tightbeam v0.2.4 binds the fleet-pane candidate, six hosted assets, and tooling identity", () => {
@@ -2067,6 +2102,7 @@ test("fresh-install Linux qualification requires direct current content, wrong-s
       secondClientId: `5678abcd${"b".repeat(56)}`,
       secondPaneNumber: 2,
       secondSurfaceId: "sf_second",
+      secondDirectClientEndpoint: "ws://127.0.0.1:19002/ws",
       sharedRegistryEndpoint: registryEndpoint,
     },
     migrationEvidence: {
@@ -2251,6 +2287,7 @@ test("Linux fresh-install acceptance is based on direct current-content evidence
       secondClientId: `5678abcd${"b".repeat(56)}`,
       secondPaneNumber: 2,
       secondSurfaceId: "sf_second",
+      secondDirectClientEndpoint: "ws://127.0.0.1:19002/ws",
       sharedRegistryEndpoint: "ws://127.0.0.1:19999/ws",
     },
     migrationEvidence: {
@@ -2308,6 +2345,7 @@ test("Linux fresh-install state driver binds candidate-only inputs and packaged 
   await fs.mkdir(path.dirname(tsxLoader), { recursive: true });
   await fs.writeFile(tsxLoader, "export {};\n");
   const initialEndpoint = "ws://127.0.0.1:19001/ws";
+  const secondEndpoint = "ws://127.0.0.1:19002/ws";
   const contentId = "linux-fresh-install-content";
   const screenshotPixelEvidence = screenshotFixtureImage(screenshotFixturePng, ["246bce", "d93636"]);
   const clientIdentity = "1234abcd";
@@ -2366,6 +2404,7 @@ test("Linux fresh-install state driver binds candidate-only inputs and packaged 
       secondClientId: `5678abcd${"b".repeat(56)}`,
       secondPaneNumber: 2,
       secondSurfaceId: "sf_second",
+      secondDirectClientEndpoint: "ws://127.0.0.1:19002/ws",
       sharedRegistryEndpoint: "ws://127.0.0.1:19999/ws",
     },
     migrationEvidence: {
@@ -2416,7 +2455,8 @@ test("Linux fresh-install state driver binds candidate-only inputs and packaged 
   const events = [];
   const record = (command, input, endpoint, response = {}) => {
     const inputJson = JSON.stringify(input);
-    const args = ["--state-root", path.join(stateRoot, "cli")];
+    const cliRoot = endpoint === secondEndpoint ? "second-cli" : "cli";
+    const args = ["--state-root", path.join(stateRoot, cliRoot)];
     if (endpoint) args.push("--endpoint", endpoint, "--product-label", "Surf Ace release smoke");
     args.push(command, "--input-json", inputJson);
     const output = { command, controllerInstanceId: "ctl_fresh", ok: true, result: { ok: true, ...response } };
@@ -2426,6 +2466,7 @@ test("Linux fresh-install state driver binds candidate-only inputs and packaged 
       stderr: "", output, stdout });
   };
   const listed = { surfaces: [{ surfaceId: "sf_fresh", topology: { panes: [{ paneId: 1 }] } }] };
+  const secondListed = { surfaces: [{ surfaceId: "sf_second", topology: { panes: [{ paneId: 2 }] } }] };
   const capture = { contentId, image: screenshotFixturePng, paneId: 1, surfaceId: null };
   const read = {
     cacheStatus: "current",
@@ -2443,6 +2484,7 @@ test("Linux fresh-install state driver binds candidate-only inputs and packaged 
     scopeId: "pane:sf_fresh:1",
   };
   record("list", {}, initialEndpoint, listed);
+  record("list", {}, secondEndpoint, secondListed);
   record("push", { content: { html: screenshotPixelFixtureHtml }, contentId, paneId: 1, surfaceId: "sf_fresh" }, initialEndpoint);
   record("capture-pane", { paneId: 1, surfaceId: "sf_fresh" }, initialEndpoint, capture);
   record("read", { scopeId: "pane:sf_fresh:1" }, null, read);
@@ -2502,9 +2544,9 @@ test("Linux fresh-install state driver binds candidate-only inputs and packaged 
   assert.equal(calls, 1);
   assert.equal(result.mode, "fresh-install");
   assert.equal(result.status, "passed");
-  assert.equal(result.rawCliEvidence.events.length, 10);
+  assert.equal(result.rawCliEvidence.events.length, 11);
   assert.equal(result.rawCliEvidence.events.at(-1).command, "read");
-  const unacceptedPushEvents = events.map((event, index) => index === 1
+  const unacceptedPushEvents = events.map((event) => event.command === "push" && event.status === 0
     ? { ...event, output: { ...event.output, ok: false }, stdout: JSON.stringify({ ...event.output, ok: false }) }
     : event);
   const unacceptedPushBytes = Buffer.from(`${unacceptedPushEvents.map((event) => JSON.stringify(event)).join("\n")}\n`);
@@ -2517,11 +2559,10 @@ test("Linux fresh-install state driver binds candidate-only inputs and packaged 
   await assert.rejects(runLinuxFreshInstallStateDriver(options, async () => {
     await fs.writeFile(output, JSON.stringify(unacceptedPushSequence));
   }), /linux_fresh_install_raw_cli_stdout_result_mismatch/);
-  const invalidEvents = [...events.map((event) => ({ ...event }))];
-  invalidEvents[4] = {
-    ...invalidEvents[4],
-    expectedRejection: { ...invalidEvents[4].expectedRejection, code: "accepted" },
-  };
+  const invalidEvents = events.map((event) => event.expectedRejection ? {
+    ...event,
+    expectedRejection: { ...event.expectedRejection, code: "accepted" },
+  } : { ...event });
   const invalidRawBytes = Buffer.from(`${invalidEvents.map((event) => JSON.stringify(event)).join("\n")}\n`);
   const invalidSequence = {
     ...stateSequence,
