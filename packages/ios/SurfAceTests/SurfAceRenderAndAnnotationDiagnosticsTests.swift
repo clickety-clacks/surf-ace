@@ -217,6 +217,28 @@ private func annotationStrokesById(_ strokeIds: [String]) -> [String: SurfAceStr
 
 @MainActor
 final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
+    private final class PaneClaimRegistryTransport: SurfAceRegistrationTransport {
+        private var nextLabel: Int64 = 1
+
+        func register(clientId: String, surfaces: [SurfAceRegistrationSurface]) async throws -> [SurfAceRegistrationAssignment] {
+            let highestLabel = surfaces.flatMap(\.panes).map(\.paneLabel).max() ?? 0
+            nextLabel = max(nextLabel, highestLabel + 1)
+            return surfaces.map { surface in
+                SurfAceRegistrationAssignment(
+                    surfaceId: surface.surfaceId,
+                    windowLabel: "a",
+                    panes: surface.panes
+                )
+            }
+        }
+
+        func claimPaneLabel(clientId: String, surfaceId: String, paneId: Int64, paneLineageId: String) async throws -> Int64 {
+            defer { nextLabel += 1 }
+            return nextLabel
+        }
+
+        func close() {}
+    }
 
     func testCentralStatusBindsIdentityChromeWithoutChangingLabelsOrProvenance() throws {
         let runtime = SurfAceRuntime(userDefaults: isolatedUserDefaults())
@@ -237,7 +259,7 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         runtime.updateCentralRegistrationStatus(.disconnected)
         XCTAssertEqual(surface.connectionBarState, .disconnected)
         XCTAssertEqual(later.connectionBarState, .disconnected)
-        XCTAssertFalse(surfAcePaneChromeShowsIdentityLabels(connectionState: surface.connectionBarState))
+        XCTAssertTrue(surfAcePaneChromeShowsIdentityLabels(connectionState: surface.connectionBarState))
         XCTAssertEqual(surface.windowLabel, "a")
         XCTAssertEqual(pane.paneLabel, 1)
         XCTAssertEqual(pane.currentCompositeProvenance().plainLabel, provenance)
@@ -316,7 +338,7 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         runtime.project(topology: topology, onto: surface)
         XCTAssertEqual(bridge.renderCallEntries.count, 1)
         XCTAssertEqual(surface.windowLabel, "b")
-        XCTAssertEqual(pane.paneLabel, 2)
+        XCTAssertEqual(pane.paneLabel, 0, "an unconfirmed topology value must not be displayed as a fleet allocation")
 
         topology.panes[0].currentEntry = purple
         topology.panes[0].backStack = []
@@ -1208,6 +1230,21 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         let closed = closedState.state.liveSurfaces[surfaceId]
         XCTAssertNil(closed?.panes[String(createdPaneId)])
         XCTAssertEqual(closed?.paneTombstones.map(\.tombstoneId), [tombstoneId])
+
+        let transport = PaneClaimRegistryTransport()
+        let registration = SurfAceCentralRegistration(
+            clientId: "test-client",
+            configured: URL(string: "ws://registry.test/ws"),
+            discover: { [] },
+            makeTransport: { _ in transport },
+            snapshot: {
+                SurfAceRegistrationSurface.snapshot(await adapter.snapshot())
+            },
+            apply: { _, _ in }
+        )
+        try await registration.synchronize()
+        runtime.installCentralRegistrationForTesting(registration)
+        addTeardownBlock { registration.stop() }
 
         let restoredPaneId = try await runtime.restorePaneLocally(
             surfaceId: surfaceId,

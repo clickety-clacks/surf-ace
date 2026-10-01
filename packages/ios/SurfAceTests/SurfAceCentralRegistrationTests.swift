@@ -313,7 +313,7 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         var persisted = false
         let registration = SurfAceCentralRegistration(clientId: "real-test-identity", configured: url,
             discover: { [] }, makeTransport: { _ in transport },
-            snapshot: { [.init(surfaceId: "sf_one", panes: [.init(paneId: "1", paneLabel: 1)])] },
+            snapshot: { [.init(surfaceId: "sf_one", panes: [.init(paneId: "1", paneLineageId: "pl_one", paneLabel: 1)])] },
             apply: { _, _ in
                 XCTAssertNotEqual(statuses.last, .connected)
                 persisted = true
@@ -411,7 +411,7 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         var attempts: [URL] = []
         var discoveries = 0
         var applied: [String] = []
-        let surfaces = [SurfAceRegistrationSurface(surfaceId: "sf_one", panes: [.init(paneId: "1", paneLabel: 1)])]
+        let surfaces = [SurfAceRegistrationSurface(surfaceId: "sf_one", panes: [.init(paneId: "1", paneLineageId: "pl_one", paneLabel: 1)])]
         let registration = SurfAceCentralRegistration(clientId: String(repeating: "a", count: 64), configured: configured,
             discover: { discoveries += 1; return [discovered] },
             makeTransport: { url in attempts.append(url); return url == configured ? primary : fallback },
@@ -448,7 +448,7 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
                 discover: { [hostname] },
                 makeTransport: { url in attempts.append(url); return url == hostname ? host : address },
                 transportFallbacks: { _ in [numeric] },
-                snapshot: { [.init(surfaceId: "sf_one", panes: [.init(paneId: "1", paneLabel: 1)])] },
+                snapshot: { [.init(surfaceId: "sf_one", panes: [.init(paneId: "1", paneLineageId: "pl_one", paneLabel: 1)])] },
                 apply: { _, _ in applied = true })
             do { try await registration.synchronize() } catch {
                 XCTAssertEqual(code, .cannotConnectToHost)

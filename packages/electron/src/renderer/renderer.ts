@@ -2860,19 +2860,18 @@ function updatePane(view: PaneView, pane: RendererPaneState): void {
     Boolean(pane.label),
     Boolean(visibleWindowLabel),
   );
-  const showsIdentity = connectionBar === "connected";
-  labelWrap.title = showsIdentity
-    ? [visibleWindowLabel ? `window ${visibleWindowLabel}` : null, visibleAddress ? `pane ${visibleAddress}` : null]
-      .filter(Boolean)
-      .join(" ")
-    : "Surf Ace disconnected";
+  const identityDescription = [
+    visibleWindowLabel ? ` window ${visibleWindowLabel}` : null,
+    pane.label ? `pane ${visibleAddress}` : null,
+  ].filter(Boolean).join(" ");
+  const connectionDescription = connectionBar === "connected" ? null : connectionBar;
+  const accessibleIdentity = pane.label
+    ? `Surf Ace${visibleWindowLabel ? ` window ${visibleWindowLabel}` : ""} pane ${visibleAddress}`
+    : `Surf Ace${visibleWindowLabel ? ` window ${visibleWindowLabel}` : ""}`;
+  labelWrap.title = `${identityDescription}${connectionDescription ? ` ${connectionDescription}` : ""}`.trim() || "Surf Ace";
   labelWrap.setAttribute(
     "aria-label",
-    showsIdentity
-      ? visibleAddress
-        ? `Surf Ace${visibleWindowLabel ? ` window ${visibleWindowLabel}` : ""} pane ${visibleAddress}`
-        : ""
-      : "Surf Ace disconnected",
+    [accessibleIdentity, connectionDescription].filter(Boolean).join(" "),
   );
   fitPaneLabelToVisibleBounds(view);
   buildControls(view, pane);

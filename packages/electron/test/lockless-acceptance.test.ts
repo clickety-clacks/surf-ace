@@ -152,15 +152,58 @@ async function pair(
   });
 }
 
+function createTestPaneRegistry() {
+  let nextPaneLabel = 100_000;
+  const labels = new Map<string, number>();
+  const claimPaneLabel = async (
+    surfaceId: string,
+    paneId: number,
+    paneLineageId: string,
+  ): Promise<number> => {
+    const identity = `${surfaceId}\0${paneId}\0${paneLineageId}`;
+    const existing = labels.get(identity);
+    if (existing !== undefined) return existing;
+    const paneLabel = nextPaneLabel++;
+    labels.set(identity, paneLabel);
+    return paneLabel;
+  };
+  const synchronize = async (core: SurfaceCore): Promise<void> => {
+    const assignments = await Promise.all(core.listSurfaces().map(async (surface) => ({
+      surfaceId: surface.surfaceId,
+      panes: await Promise.all(core.pairState(surface.surfaceId).panes.map(async (pane) => ({
+        paneId: String(pane.paneId),
+        paneLineageId: pane.paneLineageId,
+        paneLabel: await claimPaneLabel(
+          surface.surfaceId,
+          Number(pane.paneId),
+          pane.paneLineageId,
+        ),
+      }))),
+    })));
+    core.applyRegistryPaneLabels(assignments);
+    core.confirmRegistryPaneLabels(assignments);
+  };
+  return { claimPaneLabel, synchronize };
+}
+
 async function withServer<T>(
   core: SurfaceCore,
   operation: (
-    context: { server: SurfaceWsServer; url: string },
+    context: {
+      server: SurfaceWsServer;
+      synchronizePaneLabels: () => Promise<void>;
+      url: string;
+    },
   ) => Promise<T>,
 ): Promise<T> {
   const port = await freePort();
+  // These lockless acceptance tests exercise the server without a PostgreSQL
+  // registry. Supply explicit test authority rather than relying on a local
+  // pane-number fallback: each lineage gets one stable, fleet-unique label.
+  const registry = createTestPaneRegistry();
   const server = new SurfaceWsServer({
     capturePaneImage: async () => null,
+    claimPaneLabel: registry.claimPaneLabel,
     compositorSocketPath: null,
     core,
     endpointName: "Surf Ace acceptance",
@@ -172,6 +215,7 @@ async function withServer<T>(
   try {
     return await operation({
       server,
+      synchronizePaneLabels: () => registry.synchronize(core),
       url: `ws://127.0.0.1:${port}${server.wsPath}`,
     });
   } finally {
@@ -404,12 +448,13 @@ test("AC-HIST-01..05: production SurfaceCore appends mixed-controller history, r
 test("AC-TOPO-01 AC-TOPO-02 AC-TOPO-03 AC-TOPO-05 AC-TOPO-06 AC-OPS-02: stale topology intent is never rebased retried or transformed and exact receipts replay", async () => {
   const core = coreWithLimits(acceptanceLimits({ maxPanesPerSurface: 4 }));
   const surface = core.ensurePrimarySurface("Surf Ace", viewport);
-  await withServer(core, async ({ url }) => {
+  await withServer(core, async ({ synchronizePaneLabels, url }) => {
     const alpha = await connect(url);
     const beta = await connect(url);
     try {
       assert.equal((await pair(alpha, "openclaw-alpha", surface.surfaceId)).ok, true);
       assert.equal((await pair(beta, "tight-beta", surface.surfaceId)).ok, true);
+      await synchronizePaneLabels();
       const listed = await request(alpha, "panes.list", {
         surfaceId: surface.surfaceId,
       });
@@ -497,10 +542,11 @@ test("AC-CAP-01 AC-CLOSE-01..08: P/T conservation permits exact restore over P a
     maxRetainedTombstones: 3,
   }));
   const surface = core.ensurePrimarySurface("Surf Ace", viewport);
-  await withServer(core, async ({ url }) => {
+  await withServer(core, async ({ synchronizePaneLabels, url }) => {
     const socket = await connect(url);
     try {
       assert.equal((await pair(socket, "openclaw-capacity", surface.surfaceId)).ok, true);
+      await synchronizePaneLabels();
       const initial = await request(socket, "panes.list", {
         surfaceId: surface.surfaceId,
       });
@@ -677,10 +723,11 @@ test("CAP-3 websocket mutations reject exact surface and pane byte classes atomi
     maxSurfaceRecoverableBaseBytes: surfaceLimit,
   }));
   const surface = surfaceLimitedCore.ensurePrimarySurface("Surf Ace", viewport);
-  await withServer(surfaceLimitedCore, async ({ url }) => {
+  await withServer(surfaceLimitedCore, async ({ synchronizePaneLabels, url }) => {
     const socket = await connect(url);
     try {
       assert.equal((await pair(socket, "tight-cap-surface", surface.surfaceId)).ok, true);
+      await synchronizePaneLabels();
       const initial = await request(socket, "panes.list", {
         surfaceId: surface.surfaceId,
       });
@@ -743,10 +790,11 @@ test("CAP-3 websocket mutations reject exact surface and pane byte classes atomi
     maxPaneRecoverableStateBytes: paneLimit,
   }));
   const paneSurface = paneLimitedCore.ensurePrimarySurface("Surf Ace", viewport);
-  await withServer(paneLimitedCore, async ({ url }) => {
+  await withServer(paneLimitedCore, async ({ synchronizePaneLabels, url }) => {
     const socket = await connect(url);
     try {
       assert.equal((await pair(socket, "tight-cap-pane", paneSurface.surfaceId)).ok, true);
+      await synchronizePaneLabels();
       const initial = await request(socket, "panes.list", {
         surfaceId: paneSurface.surfaceId,
       });
@@ -821,12 +869,13 @@ test("global tombstone lifecycle seam serializes concurrent cross-surface pane c
   }));
   const firstSurface = core.ensurePrimarySurface("Surf Ace", viewport);
   const secondSurface = core.createAdditionalSurface("Surf Ace 2", viewport);
-  await withServer(core, async ({ url }) => {
+  await withServer(core, async ({ synchronizePaneLabels, url }) => {
     const first = await connect(url);
     const second = await connect(url);
     try {
       assert.equal((await pair(first, "close-first", firstSurface.surfaceId)).ok, true);
       assert.equal((await pair(second, "close-second", secondSurface.surfaceId)).ok, true);
+      await synchronizePaneLabels();
       const firstInitial = await request(first, "panes.list", {
         surfaceId: firstSurface.surfaceId,
       });

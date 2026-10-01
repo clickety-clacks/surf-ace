@@ -349,16 +349,20 @@ final class SurfAceRuntime {
         case .connecting: centralConnectionState = .connecting
         case .disconnected: centralConnectionState = .disconnected
         }
-        if status != .connected {
-            confirmedPaneLabels.removeAll()
-            for surface in surfaces {
-                for pane in surface.panesById.values { pane.paneLabel = 0 }
-            }
-        }
+        // A transient transport state does not revoke a previously confirmed
+        // fleet allocation. Keep assigned pane numbers visible until the
+        // registry replaces their topology; unconfirmed panes remain unlabeled.
         for surface in surfaces {
             surface.connectionBarState = centralConnectionState
         }
     }
+
+    // Tests may provide a real registration state machine backed by an in-memory
+    // transport. Production registration is still created only by startCentralRegistration().
+    func installCentralRegistrationForTesting(_ registration: SurfAceCentralRegistration) {
+        centralRegistration = registration
+    }
+
     @ObservationIgnored private var isStarted = false
     @ObservationIgnored private var isStarting = false
     @ObservationIgnored private var surfaceById: [String: SurfAceSurfaceModel] = [:]

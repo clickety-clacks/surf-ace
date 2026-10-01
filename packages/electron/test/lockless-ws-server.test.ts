@@ -31,6 +31,42 @@ import { SurfaceWsServer } from "../src/ws-server.js";
 
 let nextPort = 25901;
 
+function createTestPaneRegistry() {
+  let nextPaneLabel = 100_000;
+  const labels = new Map<string, number>();
+  const claimPaneLabel = async (
+    surfaceId: string,
+    paneId: number,
+    paneLineageId: string,
+  ): Promise<number> => {
+    const identity = `${surfaceId}\0${paneId}\0${paneLineageId}`;
+    const existing = labels.get(identity);
+    if (existing !== undefined) {
+      return existing;
+    }
+    const paneLabel = nextPaneLabel++;
+    labels.set(identity, paneLabel);
+    return paneLabel;
+  };
+  const synchronize = async (core: SurfaceCore): Promise<void> => {
+    const assignments = await Promise.all(core.listSurfaces().map(async (surface) => ({
+      surfaceId: surface.surfaceId,
+      panes: await Promise.all(core.pairState(surface.surfaceId).panes.map(async (pane) => ({
+        paneId: String(pane.paneId),
+        paneLineageId: pane.paneLineageId,
+        paneLabel: await claimPaneLabel(
+          surface.surfaceId,
+          Number(pane.paneId),
+          pane.paneLineageId,
+        ),
+      }))),
+    })));
+    core.applyRegistryPaneLabels(assignments);
+    core.confirmRegistryPaneLabels(assignments);
+  };
+  return { claimPaneLabel, synchronize };
+}
+
 function authorityVectorUrl(): URL {
   const candidates = [
     new URL("../../protocol/vectors/authority-conformance.json", import.meta.url),
@@ -1102,9 +1138,11 @@ test("canonical target-admission cases execute Electron authority semantics", as
       scale: 2,
       width: 1200,
     });
+    const registry = createTestPaneRegistry();
     const port = nextPort++;
     const server = new SurfaceWsServer({
       capturePaneImage: async () => null,
+      claimPaneLabel: registry.claimPaneLabel,
       compositorSocketPath: null,
       core,
       endpointName: "Surf Ace",
@@ -1128,6 +1166,7 @@ test("canonical target-admission cases execute Electron authority semantics", as
       if (second) {
         assert.equal((await pair(second, "controller-b", surface.surfaceId)).ok, true);
       }
+      await registry.synchronize(core);
       let panes = (await request(first, "panes.list", {
         surfaceId: surface.surfaceId,
       })).payload.panes as Array<{ paneId: number; paneLineageId: string }>;
@@ -1258,9 +1297,11 @@ test("AC-TOPO-04: split rename resize close restore and realization share stable
     scale: 2,
     width: 1200,
   });
+  const registry = createTestPaneRegistry();
   const port = nextPort++;
   const server = new SurfaceWsServer({
     capturePaneImage: async () => null,
+    claimPaneLabel: registry.claimPaneLabel,
     compositorSocketPath: null,
     core,
     endpointName: "Surf Ace",
@@ -1276,6 +1317,7 @@ test("AC-TOPO-04: split rename resize close restore and realization share stable
     const secondPair = await pair(second, "tight-beam", surface.surfaceId);
     assert.equal(firstPair.ok, true, JSON.stringify(firstPair));
     assert.equal(secondPair.ok, true, JSON.stringify(secondPair));
+    await registry.synchronize(core);
     assert.equal(firstPair.payload.mode, "lockless");
     assert.equal(
       firstPair.payload.capabilities.protocolFeatures.includes(
@@ -2214,6 +2256,7 @@ test("queued topology mutation invalidates a later target before FIFO admission"
     scale: 2,
     width: 1200,
   });
+  const registry = createTestPaneRegistry();
   let gatePersistence = false;
   let persistenceBlocked = false;
   let releasePersistence = (): void => {};
@@ -2227,6 +2270,7 @@ test("queued topology mutation invalidates a later target before FIFO admission"
   const port = nextPort++;
   const server = new SurfaceWsServer({
     capturePaneImage: async () => null,
+    claimPaneLabel: registry.claimPaneLabel,
     compositorSocketPath: null,
     core,
     endpointName: "Surf Ace",
@@ -2246,6 +2290,7 @@ test("queued topology mutation invalidates a later target before FIFO admission"
   try {
     assert.equal((await pair(first, "controller-first", firstSurface.surfaceId)).ok, true);
     assert.equal((await pair(second, "controller-second", secondSurface.surfaceId)).ok, true);
+    await registry.synchronize(core);
     const firstPane = Number((await request(first, "panes.list", {
       surfaceId: firstSurface.surfaceId,
     })).payload.panes[0].paneId);
@@ -2975,9 +3020,11 @@ test("AC-SURF-02: complete surface close persists a tombstone before zero-live s
     scale: 2,
     width: 1200,
   });
+  const registry = createTestPaneRegistry();
   const firstPort = nextPort++;
   const firstServer = new SurfaceWsServer({
     capturePaneImage: async () => null,
+    claimPaneLabel: registry.claimPaneLabel,
     compositorSocketPath: null,
     core,
     endpointName: "Surf Ace",
@@ -3000,6 +3047,7 @@ test("AC-SURF-02: complete surface close persists a tombstone before zero-live s
   );
   assert.equal(lifecyclePair.ok, true, JSON.stringify(lifecyclePair));
   assert.equal(surfacePair.ok, true, JSON.stringify(surfacePair));
+  await registry.synchronize(core);
   const listed = await request(lifecycle, "surfaces.list", {});
   const panes = await request(surfaceSession, "panes.list", {
     surfaceId: surface.surfaceId,
@@ -3087,6 +3135,7 @@ test("AC-SURF-02: complete surface close persists a tombstone before zero-live s
   const secondPort = nextPort++;
   const secondServer = new SurfaceWsServer({
     capturePaneImage: async () => null,
+    claimPaneLabel: registry.claimPaneLabel,
     compositorSocketPath: null,
     core: restarted,
     endpointName: "Surf Ace",
@@ -3401,12 +3450,14 @@ test("a saturated terminal ledger still admits push, capture, close and cleanup"
     scale: 2,
     width: 1200,
   });
+  const registry = createTestPaneRegistry();
   const seeded = seedFullTerminalLedger(core);
   assert.equal(seeded, LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPTS);
 
   const port = nextPort++;
   const server = new SurfaceWsServer({
     capturePaneImage: async () => "cG5n",
+    claimPaneLabel: registry.claimPaneLabel,
     compositorSocketPath: null,
     core,
     endpointName: "Surf Ace",
@@ -3420,6 +3471,7 @@ test("a saturated terminal ledger still admits push, capture, close and cleanup"
     // pairing itself is what the baseline refused forever once the ledger filled
     const paired = await pair(socket, "openclaw", surface.surfaceId);
     assert.equal(paired.ok, true, JSON.stringify(paired));
+    await registry.synchronize(core);
     assert(
       core.listSurfaceAdmissionAttempts().length <=
         LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPTS,

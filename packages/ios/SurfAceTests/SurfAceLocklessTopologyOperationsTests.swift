@@ -69,7 +69,13 @@ enum TestRegistryTopology {
         tombstoneId: String, anchorPaneId: Int64, direction: String,
         expectedTopologyRevision: Int64
     ) throws -> SurfAceLocklessPaneRestoreResult {
-        let assigned = nextLabel(state)
+        guard let surface = state.liveSurfaces[surfaceId],
+              let tombstone = surface.paneTombstones.first(where: { $0.tombstoneId == tombstoneId }) else {
+            throw SurfAceLocklessTopologyOperationError.tombstoneNotFound(tombstoneId)
+        }
+        let previousLabel = tombstone.pane.paneLabel
+        let labelIsAvailable = !surface.panes.values.contains { $0.paneLabel == previousLabel }
+        let assigned = labelIsAvailable ? previousLabel : nextLabel(state)
         return try SurfAceLocklessTopologyOperations.paneRestore(
             state: &state, surfaceId: surfaceId, tombstoneId: tombstoneId,
             anchorPaneId: anchorPaneId, direction: direction,

@@ -2676,39 +2676,48 @@ export class SurfaceWsServer {
         this.core.transactionAsync(async () => {
         const rollbackSurface =
           this.core.captureSurfaceMutationRollback(surfaceId);
+        const rollbackAuthority =
+          this.core.locklessAuthority.exportState();
         const topology = this.core.topologyState(surfaceId);
         try {
-          return await this.core.locklessAuthority.transactionAsync(async () => {
-            this.core.locklessAuthority.assertTopologyRevision(
-              request.payload.expectedTopologyRevision,
-              Number(topology.topologyRevision),
-              topology,
-            );
-            const tombstone = this.core.locklessAuthority.restoreTombstone(
-              request.payload.tombstoneId,
-              "pane",
-            );
-            const restoredPayload = structuredClone(tombstone.payload as ReturnType<
-              SurfaceCore["capturePaneTombstonePayload"]
-            >);
-            const pane = restoredPayload.pane;
-            pane.paneLabel = await this.claimPaneLabel(
-              surfaceId, pane.paneId, pane.paneLineageId,
-            );
-            const restored = this.core.restorePaneTombstone(
-              surfaceId,
-              restoredPayload,
-              request.payload.anchorPaneId,
-              request.payload.direction,
-            );
-            this.core.confirmRegistryPaneLabels([{ surfaceId, panes: [{
-              paneId: String(pane.paneId), paneLineageId: pane.paneLineageId,
-              paneLabel: pane.paneLabel,
-            }] }]);
-            return restored;
-          });
+          this.core.locklessAuthority.assertTopologyRevision(
+            request.payload.expectedTopologyRevision,
+            Number(topology.topologyRevision),
+            topology,
+          );
+          // handleLocklessMessage already holds the authority transaction for
+          // every mutating request. Do not nest transactionAsync here: that
+          // would queue behind itself and leave pane.restore unanswered.
+          const tombstone = this.core.locklessAuthority.restoreTombstone(
+            request.payload.tombstoneId,
+            "pane",
+          );
+          const restoredPayload = structuredClone(tombstone.payload as ReturnType<
+            SurfaceCore["capturePaneTombstonePayload"]
+          >);
+          const pane = restoredPayload.pane;
+          pane.paneLabel = await this.claimPaneLabel(
+            surfaceId, pane.paneId, pane.paneLineageId,
+          );
+          const restored = this.core.restorePaneTombstone(
+            surfaceId,
+            restoredPayload,
+            request.payload.anchorPaneId,
+            request.payload.direction,
+          );
+          this.core.confirmRegistryPaneLabels([{ surfaceId, panes: [{
+            paneId: String(pane.paneId), paneLineageId: pane.paneLineageId,
+            paneLabel: pane.paneLabel,
+          }] }]);
+          return restored;
         } catch (error) {
           rollbackSurface();
+          // dispatch converts operation failures into protocol responses
+          // inside the enclosing authority transaction, so restore the
+          // tombstone/scope snapshot explicitly before returning that error.
+          this.core.locklessAuthority.restorePersistentState(
+            rollbackAuthority,
+          );
           throw error;
         }
         }),
@@ -2752,7 +2761,7 @@ export class SurfaceWsServer {
     request: Extract<LocklessRequest, { op: "topology.apply" }>,
   ): Promise<LocklessTopologyRealizeResult> {
     const surfaceId = request.payload.surfaceId;
-    return await this.runLifecycleTransactionAsync(async () => {
+    return await this.runLifecycleMutationAsync(async () => {
       const current = this.core.topologyState(surfaceId);
       this.core.locklessAuthority.assertTopologyRevision(
         request.payload.expectedTopologyRevision,
@@ -3291,7 +3300,7 @@ export class SurfaceWsServer {
     }
   }
 
-  private async runLifecycleTransactionAsync<T>(
+  private async runLifecycleMutationAsync<T>(
     operation: () => Promise<T>,
     surfaceId: string,
   ): Promise<T> {
@@ -3302,11 +3311,11 @@ export class SurfaceWsServer {
     this.lifecycleMutationQueue = queued;
     await previous.catch(() => undefined);
     try {
-      return await this.runSurfaceMutation(surfaceId, () =>
-        this.core.transactionAsync(() =>
-          this.core.locklessAuthority.transactionAsync(operation),
-        ),
-      );
+      // handleLocklessMessage already owns both async transactions for this
+      // mutation. This helper only serializes lifecycle/surface ordering;
+      // reacquiring the authority transaction here would queue behind the
+      // current request and leave topology.apply unanswered.
+      return await this.runSurfaceMutation(surfaceId, operation);
     } finally {
       releaseQueue();
       if (this.lifecycleMutationQueue === queued) this.lifecycleMutationQueue = Promise.resolve();
