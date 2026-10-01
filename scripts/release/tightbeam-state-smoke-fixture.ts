@@ -1160,6 +1160,9 @@ async function freshInstallMain(options: Options) {
     const secondVisible = listedSurface(confirmedSecondList, secondSurface.surfaceId);
     const firstPaneNumber = Number(firstVisible.topology.panes[0]?.paneLabel);
     const secondPaneNumber = Number(secondVisible.topology.panes[0]?.paneLabel);
+    if (!matchesRegisteredDirectTarget(secondClientId, secondRegistration, secondVisible)) {
+      throw new Error("fresh_install_second_direct_client_registry_target_mismatch");
+    }
     if (!Number.isSafeInteger(firstPaneNumber) || firstPaneNumber < 1 ||
         !Number.isSafeInteger(secondPaneNumber) || secondPaneNumber < 1 ||
         firstPaneNumber === secondPaneNumber ||
