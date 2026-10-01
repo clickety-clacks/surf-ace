@@ -992,8 +992,8 @@ func surfAcePaneChromeIdentityParts(surface: SurfAceSurfaceModel, pane: SurfAceP
     )
 }
 
-func surfAcePaneChromeShowsIdentityLabels(connectionState: SurfAceConnectionBarState) -> Bool {
-    connectionState != .disconnected
+func surfAcePaneChromeShowsIdentityLabels(connectionState _: SurfAceConnectionBarState) -> Bool {
+    true
 }
 
 private struct SurfAcePaneIdentityOverlay: View {
@@ -1029,13 +1029,6 @@ private struct SurfAcePaneIdentityOverlay: View {
                     .lineLimit(1)
                     .minimumScaleFactor(0.35)
                     .alignmentGuide(.surfAceIdentityBaseline) { dimensions in dimensions[.lastTextBaseline] }
-            } else {
-                Image(systemName: "wifi.slash")
-                    .font(.system(size: fontSize * 0.46, weight: .regular))
-                    .foregroundStyle(connectionColor.opacity(0.35))
-                    .symbolRenderingMode(.monochrome)
-                    .accessibilityHidden(true)
-                    .alignmentGuide(.surfAceIdentityBaseline) { dimensions in dimensions[.bottom] }
             }
         }
         .alignmentGuide(.bottom) { dimensions in dimensions[.surfAceIdentityBaseline] }

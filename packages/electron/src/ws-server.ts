@@ -2672,28 +2672,39 @@ export class SurfaceWsServer {
     }
 
     if (request.op === "pane.restore") {
-      const result = await this.runSurfaceMutation(surfaceId, () =>
-        this.core.transactionAsync(async () => {
+      const result = await this.runSurfaceMutation(surfaceId, async () => {
         const rollbackSurface =
           this.core.captureSurfaceMutationRollback(surfaceId);
         const topology = this.core.topologyState(surfaceId);
         try {
-          return await this.core.locklessAuthority.transactionAsync(async () => {
-            this.core.locklessAuthority.assertTopologyRevision(
-              request.payload.expectedTopologyRevision,
-              Number(topology.topologyRevision),
-              topology,
+          this.core.locklessAuthority.assertTopologyRevision(
+            request.payload.expectedTopologyRevision,
+            Number(topology.topologyRevision),
+            topology,
+          );
+          const retained = this.core.locklessAuthority.listTombstones("pane")
+            .find((candidate) => candidate.tombstoneId === request.payload.tombstoneId);
+          if (!retained) {
+            throw new LocklessAuthorityError(
+              "tombstone_not_found",
+              "Unknown pane tombstone",
+              { tombstoneId: request.payload.tombstoneId },
             );
-            const tombstone = this.core.locklessAuthority.restoreTombstone(
+          }
+          const restoredPayload = structuredClone(retained.payload as ReturnType<
+            SurfaceCore["capturePaneTombstonePayload"]
+          >);
+          const pane = restoredPayload.pane;
+          // Claim before mutating the retained ledger so allocator failure leaves
+          // the tombstone intact. The authority work queue held by this request
+          // prevents a competing restore/reclaim while the claim is in flight.
+          pane.paneLabel = await this.claimPaneLabel(
+            surfaceId, pane.paneId, pane.paneLineageId,
+          );
+          return this.core.locklessAuthority.transaction(() => {
+            this.core.locklessAuthority.restoreTombstone(
               request.payload.tombstoneId,
               "pane",
-            );
-            const restoredPayload = structuredClone(tombstone.payload as ReturnType<
-              SurfaceCore["capturePaneTombstonePayload"]
-            >);
-            const pane = restoredPayload.pane;
-            pane.paneLabel = await this.claimPaneLabel(
-              surfaceId, pane.paneId, pane.paneLineageId,
             );
             const restored = this.core.restorePaneTombstone(
               surfaceId,
@@ -2711,8 +2722,7 @@ export class SurfaceWsServer {
           rollbackSurface();
           throw error;
         }
-        }),
-      );
+      });
       this.core.markLocklessAuthorityChanged(surfaceId);
       return locklessSuccess(request, {
         ...result,
@@ -2752,7 +2762,7 @@ export class SurfaceWsServer {
     request: Extract<LocklessRequest, { op: "topology.apply" }>,
   ): Promise<LocklessTopologyRealizeResult> {
     const surfaceId = request.payload.surfaceId;
-    return await this.runLifecycleTransactionAsync(async () => {
+    return await this.runSurfaceMutation(surfaceId, async () => {
       const current = this.core.topologyState(surfaceId);
       this.core.locklessAuthority.assertTopologyRevision(
         request.payload.expectedTopologyRevision,
@@ -2914,54 +2924,55 @@ export class SurfaceWsServer {
         this.core.capturePaneTombstonePayload(surfaceId, paneId),
       );
       try {
-            const result = this.core.topologyApply(surfaceId, {
+        return this.core.locklessAuthority.transaction(() => {
+          const result = this.core.topologyApply(surfaceId, {
               layout,
               panes,
               topologyRevision:
                 (request.payload.expectedTopologyRevision + 1) as never,
               windowLabel: current.windowLabel,
             }, new Map([...created].map(([paneId, entry]) => [paneId, entry.paneLineageId])));
-            this.assertLocklessRecoverableCapacity(surfaceId, beforeRecord);
-            this.core.confirmRegistryPaneLabels([{ surfaceId, panes: [...created].map(([paneId, entry]) => ({
+          this.assertLocklessRecoverableCapacity(surfaceId, beforeRecord);
+          this.core.confirmRegistryPaneLabels([{ surfaceId, panes: [...created].map(([paneId, entry]) => ({
               paneId: String(paneId), paneLabel: entry.paneLabel,
             })) }]);
-            const destroyedPaneTombstones = [];
-            for (const payload of removedPanePayloads) {
-              const tombstone =
-                this.core.locklessAuthority.createTombstone({
+          const destroyedPaneTombstones = [];
+          for (const payload of removedPanePayloads) {
+            const tombstone = this.core.locklessAuthority.createTombstone({
                 kind: "pane",
                 payload,
                 surfaceId,
               });
-              destroyedPaneTombstones.push({
-                closedSequence: tombstone.closedSequence,
-                paneId: payload.pane.paneId,
-                tombstoneId: tombstone.tombstoneId,
-              });
-            }
-            for (const paneId of created.keys()) {
-              this.core.locklessAuthority.ensureScope(
-                locklessPaneScopeId(surfaceId, paneId),
-                "pane",
-              );
-            }
-            const topology = this.core.topologyState(surfaceId);
-            return {
-              createdPaneIds: [...created.keys()],
-              destroyedPaneIds: removed,
-              destroyedPaneTombstones,
-              panes: this.core.panesList(surfaceId).panes,
-              preservedPaneIds: [...resultingIds].filter((paneId) =>
-                existing.has(paneId),
-              ),
-              topology: topology.layout,
-              topologyRevision: Number(result.topologyRevision),
-            };
+            destroyedPaneTombstones.push({
+              closedSequence: tombstone.closedSequence,
+              paneId: payload.pane.paneId,
+              tombstoneId: tombstone.tombstoneId,
+            });
+          }
+          for (const paneId of created.keys()) {
+            this.core.locklessAuthority.ensureScope(
+              locklessPaneScopeId(surfaceId, paneId),
+              "pane",
+            );
+          }
+          const topology = this.core.topologyState(surfaceId);
+          return {
+            createdPaneIds: [...created.keys()],
+            destroyedPaneIds: removed,
+            destroyedPaneTombstones,
+            panes: this.core.panesList(surfaceId).panes,
+            preservedPaneIds: [...resultingIds].filter((paneId) =>
+              existing.has(paneId),
+            ),
+            topology: topology.layout,
+            topologyRevision: Number(result.topologyRevision),
+          };
+        });
       } catch (error) {
         rollback();
         throw error;
       }
-    }, surfaceId);
+    });
   }
 
   private async dispatchRequest(socket: WebSocket, request: Request): Promise<Response> {

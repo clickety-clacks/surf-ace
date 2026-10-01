@@ -237,7 +237,7 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         runtime.updateCentralRegistrationStatus(.disconnected)
         XCTAssertEqual(surface.connectionBarState, .disconnected)
         XCTAssertEqual(later.connectionBarState, .disconnected)
-        XCTAssertFalse(surfAcePaneChromeShowsIdentityLabels(connectionState: surface.connectionBarState))
+        XCTAssertTrue(surfAcePaneChromeShowsIdentityLabels(connectionState: surface.connectionBarState))
         XCTAssertEqual(surface.windowLabel, "a")
         XCTAssertEqual(pane.paneLabel, 1)
         XCTAssertEqual(pane.currentCompositeProvenance().plainLabel, provenance)

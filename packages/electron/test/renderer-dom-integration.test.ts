@@ -170,12 +170,14 @@ test("renderer DOM integrates authoritative connection states and live scale con
     pane: document.querySelector(".pane-label__number")!,
     window: document.querySelector(".pane-label__window")!,
   });
-  assert.equal(chrome().glyph.hasAttribute("hidden"), false);
-  assert.equal(chrome().pane.hasAttribute("hidden"), true);
+  assert.equal(chrome().glyph.hasAttribute("hidden"), true);
+  assert.equal(chrome().pane.hasAttribute("hidden"), false);
+  assert.equal(chrome().window.hasAttribute("hidden"), false);
 
   stateListener!(state("connecting"));
-  assert.equal(chrome().glyph.classList.contains("is-connecting"), true);
-  assert.equal(chrome().pane.hasAttribute("hidden"), true);
+  assert.equal(chrome().glyph.hasAttribute("hidden"), true);
+  assert.equal(chrome().pane.hasAttribute("hidden"), false);
+  assert.equal(chrome().window.hasAttribute("hidden"), false);
   stateListener!(state("connected"));
   assert.equal(chrome().glyph.hasAttribute("hidden"), true);
   assert.equal(chrome().pane.hasAttribute("hidden"), false);
@@ -188,8 +190,10 @@ test("renderer DOM integrates authoritative connection states and live scale con
     "Surf Ace window a pane a1",
   );
   stateListener!(state("disconnected"));
-  assert.equal(chrome().glyph.hasAttribute("hidden"), false);
-  assert.equal(chrome().pane.hasAttribute("hidden"), true);
+  assert.equal(chrome().glyph.hasAttribute("hidden"), true);
+  assert.equal(chrome().pane.hasAttribute("hidden"), false);
+  assert.equal(chrome().window.hasAttribute("hidden"), false);
+  assert.equal(document.querySelector(".pane-label")?.getAttribute("title"), "window a pane a1 disconnected");
 
   (document.querySelector(".font-size-toggle") as HTMLElement).click();
   (document.querySelector(".font-size-step") as HTMLElement).click();

@@ -23,6 +23,7 @@ import {
 import { PublicControllerWireClient } from "../../controller/src/wire.js";
 
 const viewport = { height: 800, scale: 2, width: 1200 };
+let nextRegistryPaneLabel = 100_000;
 
 function acceptanceLimits(
   overrides: Partial<LocklessCapacityLimits> = {},
@@ -84,6 +85,7 @@ async function request(
   id = `rq_acceptance_${crypto.randomUUID().replaceAll("-", "")}`,
 ): Promise<Record<string, any>> {
   const response = new Promise<Record<string, any>>((resolve, reject) => {
+    let timeout: NodeJS.Timeout;
     const onMessage = (raw: WebSocket.RawData) => {
       const message = JSON.parse(String(raw)) as Record<string, any>;
       if (message.type !== "response" || message.id !== id) return;
@@ -95,11 +97,16 @@ async function request(
       reject(error);
     };
     const cleanup = () => {
+      clearTimeout(timeout);
       socket.off("message", onMessage);
       socket.off("error", onError);
     };
     socket.on("message", onMessage);
     socket.on("error", onError);
+    timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error(`Timed out waiting for ${op} response ${id}`));
+    }, 10_000);
   });
   socket.send(JSON.stringify({
     id,
@@ -157,10 +164,12 @@ async function withServer<T>(
   operation: (
     context: { server: SurfaceWsServer; url: string },
   ) => Promise<T>,
+  claimPaneLabel?: ConstructorParameters<typeof SurfaceWsServer>[0]["claimPaneLabel"],
 ): Promise<T> {
   const port = await freePort();
   const server = new SurfaceWsServer({
     capturePaneImage: async () => null,
+    ...(claimPaneLabel ? { claimPaneLabel } : {}),
     compositorSocketPath: null,
     core,
     endpointName: "Surf Ace acceptance",
@@ -177,6 +186,43 @@ async function withServer<T>(
   } finally {
     await server.stop();
   }
+}
+
+function applyRegistryInitialTopology(core: SurfaceCore): Array<{
+  surfaceId: string;
+  panes: Array<{ paneId: string; paneLineageId: string; paneLabel: number }>;
+}> {
+  const assignments = core.listSurfaces().map(({ surfaceId }, surfaceIndex) => {
+    const panes = core.panesList(surfaceId).panes;
+    assert.equal(panes.length, 1, "registry fixture expects one initial pane per surface");
+    const paneLabel = nextRegistryPaneLabel++;
+    core.resetProviderBootstrapTopology(surfaceId, {
+      initialPaneId: 1,
+      initialPaneLabel: paneLabel,
+      windowLabel: String.fromCharCode(97 + surfaceIndex),
+    });
+    return {
+      surfaceId,
+      panes: core.panesList(surfaceId).panes.map((pane) => ({
+        paneId: String(pane.paneId),
+        paneLineageId: pane.paneLineageId,
+        paneLabel,
+      })),
+    };
+  });
+  if (assignments.length > 0) {
+    core.applyRegistryPaneLabels(assignments);
+    core.confirmRegistryPaneLabels(assignments);
+  }
+  return assignments;
+}
+
+async function withRegistryServer<T>(
+  core: SurfaceCore,
+  operation: (context: { server: SurfaceWsServer; url: string }) => Promise<T>,
+): Promise<T> {
+  applyRegistryInitialTopology(core);
+  return withServer(core, operation, async () => nextRegistryPaneLabel++);
 }
 
 function persistedPane(core: SurfaceCore, surfaceId: string) {
@@ -404,7 +450,7 @@ test("AC-HIST-01..05: production SurfaceCore appends mixed-controller history, r
 test("AC-TOPO-01 AC-TOPO-02 AC-TOPO-03 AC-TOPO-05 AC-TOPO-06 AC-OPS-02: stale topology intent is never rebased retried or transformed and exact receipts replay", async () => {
   const core = coreWithLimits(acceptanceLimits({ maxPanesPerSurface: 4 }));
   const surface = core.ensurePrimarySurface("Surf Ace", viewport);
-  await withServer(core, async ({ url }) => {
+  await withRegistryServer(core, async ({ url }) => {
     const alpha = await connect(url);
     const beta = await connect(url);
     try {
@@ -497,7 +543,7 @@ test("AC-CAP-01 AC-CLOSE-01..08: P/T conservation permits exact restore over P a
     maxRetainedTombstones: 3,
   }));
   const surface = core.ensurePrimarySurface("Surf Ace", viewport);
-  await withServer(core, async ({ url }) => {
+  await withRegistryServer(core, async ({ url }) => {
     const socket = await connect(url);
     try {
       assert.equal((await pair(socket, "openclaw-capacity", surface.surfaceId)).ok, true);
@@ -668,6 +714,7 @@ test("AC-CAP-02 AC-CLOSE-06 AC-CLOSE-09: exact byte limits accept equality, reje
 test("CAP-3 websocket mutations reject exact surface and pane byte classes atomically", async () => {
   const surfaceProbe = coreWithLimits(acceptanceLimits());
   const probeSurface = surfaceProbe.ensurePrimarySurface("Surf Ace", viewport);
+  applyRegistryInitialTopology(surfaceProbe);
   surfaceProbe.admitSurfaceToLockless(probeSurface.surfaceId);
   const surfaceLimit = exactDurableBytes(
     surfaceProbe.captureSurfaceRecoverableBase(probeSurface.surfaceId),
@@ -677,7 +724,7 @@ test("CAP-3 websocket mutations reject exact surface and pane byte classes atomi
     maxSurfaceRecoverableBaseBytes: surfaceLimit,
   }));
   const surface = surfaceLimitedCore.ensurePrimarySurface("Surf Ace", viewport);
-  await withServer(surfaceLimitedCore, async ({ url }) => {
+  await withRegistryServer(surfaceLimitedCore, async ({ url }) => {
     const socket = await connect(url);
     try {
       assert.equal((await pair(socket, "tight-cap-surface", surface.surfaceId)).ok, true);
@@ -729,6 +776,7 @@ test("CAP-3 websocket mutations reject exact surface and pane byte classes atomi
 
   const paneProbe = coreWithLimits(acceptanceLimits());
   const probePaneSurface = paneProbe.ensurePrimarySurface("Surf Ace", viewport);
+  applyRegistryInitialTopology(paneProbe);
   paneProbe.admitSurfaceToLockless(probePaneSurface.surfaceId);
   const probePaneId = paneProbe.activePaneIds(probePaneSurface.surfaceId)[0]!;
   const paneLimit =
@@ -743,7 +791,7 @@ test("CAP-3 websocket mutations reject exact surface and pane byte classes atomi
     maxPaneRecoverableStateBytes: paneLimit,
   }));
   const paneSurface = paneLimitedCore.ensurePrimarySurface("Surf Ace", viewport);
-  await withServer(paneLimitedCore, async ({ url }) => {
+  await withRegistryServer(paneLimitedCore, async ({ url }) => {
     const socket = await connect(url);
     try {
       assert.equal((await pair(socket, "tight-cap-pane", paneSurface.surfaceId)).ok, true);
@@ -821,7 +869,7 @@ test("global tombstone lifecycle seam serializes concurrent cross-surface pane c
   }));
   const firstSurface = core.ensurePrimarySurface("Surf Ace", viewport);
   const secondSurface = core.createAdditionalSurface("Surf Ace 2", viewport);
-  await withServer(core, async ({ url }) => {
+  await withRegistryServer(core, async ({ url }) => {
     const first = await connect(url);
     const second = await connect(url);
     try {

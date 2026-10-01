@@ -33,6 +33,29 @@ let nextPort = 25901;
 let nextTestRegistryPaneLabel = 100_000;
 const claimTestRegistryPaneLabel = async (): Promise<number> => nextTestRegistryPaneLabel++;
 
+function initializeRegistryBootstrapPanes(core: SurfaceCore): void {
+  const assignments = core.listSurfaces().map(({ surfaceId }, surfaceIndex) => {
+    const paneLabel = nextTestRegistryPaneLabel++;
+    core.resetProviderBootstrapTopology(surfaceId, {
+      initialPaneId: 1,
+      initialPaneLabel: paneLabel,
+      windowLabel: String.fromCharCode(97 + surfaceIndex),
+    });
+    return {
+      surfaceId,
+      panes: core.panesList(surfaceId).panes.map((pane) => ({
+        paneId: String(pane.paneId),
+        paneLineageId: pane.paneLineageId,
+        paneLabel,
+      })),
+    };
+  });
+  if (assignments.length > 0) {
+    core.applyRegistryPaneLabels(assignments);
+    core.confirmRegistryPaneLabels(assignments);
+  }
+}
+
 function authorityVectorUrl(): URL {
   const candidates = [
     new URL("../../protocol/vectors/authority-conformance.json", import.meta.url),
@@ -1104,6 +1127,7 @@ test("canonical target-admission cases execute Electron authority semantics", as
       scale: 2,
       width: 1200,
     });
+    initializeRegistryBootstrapPanes(core);
     const port = nextPort++;
     const server = new SurfaceWsServer({
       capturePaneImage: async () => null,
@@ -1261,6 +1285,7 @@ test("AC-TOPO-04: split rename resize close restore and realization share stable
     scale: 2,
     width: 1200,
   });
+  initializeRegistryBootstrapPanes(core);
   const port = nextPort++;
   const server = new SurfaceWsServer({
     capturePaneImage: async () => null,
@@ -2218,6 +2243,7 @@ test("queued topology mutation invalidates a later target before FIFO admission"
     scale: 2,
     width: 1200,
   });
+  initializeRegistryBootstrapPanes(core);
   let gatePersistence = false;
   let persistenceBlocked = false;
   let releasePersistence = (): void => {};
@@ -2980,6 +3006,7 @@ test("AC-SURF-02: complete surface close persists a tombstone before zero-live s
     scale: 2,
     width: 1200,
   });
+  initializeRegistryBootstrapPanes(core);
   const firstPort = nextPort++;
   const firstServer = new SurfaceWsServer({
     capturePaneImage: async () => null,
@@ -3408,6 +3435,7 @@ test("a saturated terminal ledger still admits push, capture, close and cleanup"
     scale: 2,
     width: 1200,
   });
+  initializeRegistryBootstrapPanes(core);
   const seeded = seedFullTerminalLedger(core);
   assert.equal(seeded, LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPTS);
 

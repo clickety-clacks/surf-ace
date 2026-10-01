@@ -91,6 +91,19 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
     }
 
     @MainActor
+    func testUnassignedPaneHasNoGuessedNumberWhileWindowLabelRemainsVisibleOffline() {
+        let surface = SurfAceSurfaceModel(sceneKey: "scene-unassigned", surfaceId: "sf_unassigned", windowLabel: "g", name: "Surf Ace")
+        let pane = SurfAcePaneModel(paneId: 901, paneLabel: 0, name: "Unnumbered")
+        surface.connectionBarState = .disconnected
+
+        let identity = surfAcePaneChromeIdentityParts(surface: surface, pane: pane)
+
+        XCTAssertEqual(identity.windowLabel, "g")
+        XCTAssertEqual(identity.displayId, "")
+        XCTAssertTrue(surfAcePaneChromeShowsIdentityLabels(connectionState: surface.connectionBarState))
+    }
+
+    @MainActor
     func testPaneChromeIdentityUsesGlobalPaneTokenAndWindowLabelOnly() {
         let surface = SurfAceSurfaceModel(sceneKey: "scene-chrome", surfaceId: "sf_chrome", windowLabel: "c", name: "Surf Ace")
         let pane = SurfAcePaneModel(paneId: 9, paneLabel: 42, name: "Right")

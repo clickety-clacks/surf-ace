@@ -19,10 +19,10 @@ final class SurfAceToolbarThemeTests: XCTestCase {
         XCTAssertTrue(surfAceToolbarChromeStrokeColor(for: .dark).surfAceIsLightForTesting)
     }
 
-    func testPaneIdentityChromeReplacesLabelsWithDisconnectedGlyph() {
+    func testPaneIdentityChromeKeepsAssignedLabelsAcrossConnectionStates() {
         XCTAssertTrue(surfAcePaneChromeShowsIdentityLabels(connectionState: .connected))
         XCTAssertTrue(surfAcePaneChromeShowsIdentityLabels(connectionState: .connecting))
-        XCTAssertFalse(surfAcePaneChromeShowsIdentityLabels(connectionState: .disconnected))
+        XCTAssertTrue(surfAcePaneChromeShowsIdentityLabels(connectionState: .disconnected))
     }
 }
 

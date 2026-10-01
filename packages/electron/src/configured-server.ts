@@ -25,7 +25,6 @@ export class ConfiguredServerRegistration {
     const url = new URL(address);
     if (url.protocol !== "ws:" && url.protocol !== "wss:") throw new Error("server address must use ws or wss");
     this.wire = new PublicControllerWireClient(url.toString(), requestTimeoutMs);
-    this.wire.onClose(() => this.core.clearRegistryPaneConfirmations());
   }
 
   onClose(listener: () => void): () => void {
@@ -78,9 +77,7 @@ export class ConfiguredServerRegistration {
       this.core.confirmRegistryPaneLabels(payload.surfaces);
       if (!this.wire.isOpen()) throw new Error("controller_wire_closed");
     });
-    this.pending = run.catch(() => {
-      this.core.clearRegistryPaneConfirmations();
-    });
+    this.pending = run.catch(() => undefined);
     return run;
   }
 
@@ -94,7 +91,6 @@ export class ConfiguredServerRegistration {
 
   async stop(): Promise<void> {
     this.stopped = true;
-    this.core.clearRegistryPaneConfirmations();
     clearTimeout(this.timer);
     this.wire.abort();
     await this.pending;

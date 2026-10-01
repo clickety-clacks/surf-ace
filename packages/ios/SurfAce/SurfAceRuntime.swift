@@ -349,12 +349,9 @@ final class SurfAceRuntime {
         case .connecting: centralConnectionState = .connecting
         case .disconnected: centralConnectionState = .disconnected
         }
-        if status != .connected {
-            confirmedPaneLabels.removeAll()
-            for surface in surfaces {
-                for pane in surface.panesById.values { pane.paneLabel = 0 }
-            }
-        }
+        // A transient transport state does not revoke a previously confirmed
+        // fleet allocation. Keep assigned pane numbers visible until the
+        // registry replaces their topology; unconfirmed panes remain unlabeled.
         for surface in surfaces {
             surface.connectionBarState = centralConnectionState
         }
