@@ -1212,6 +1212,15 @@ test("v0.2.3 migration fixture creates lease IDs accepted by the allocator schem
   assert.match(fixture, /const leaseId = `lease_\$\{randomBytes\(16\)\.toString\("base64url"\)\}`;/);
 });
 
+test("Linux packaged client smoke opts into software rendering on virtual displays", async () => {
+  const fixture = await fs.readFile(path.join(repository, "scripts/release/tightbeam-state-smoke-fixture.ts"), "utf8");
+  const clientLauncher = fixture.slice(
+    fixture.indexOf("async function startPackagedElectronClient("),
+    fixture.indexOf("async function startCluster("),
+  );
+  assert.match(clientLauncher, /launchElectron\([\s\S]*?diagnosticLogPath,\s*process\.platform === "linux"\s*,?\s*\)/);
+});
+
 test("Linux fresh-install fixture binds its identity gate to the release candidate", async () => {
   const fixture = await fs.readFile(path.join(repository, "scripts/release/tightbeam-state-smoke-fixture.ts"), "utf8");
   const operations = await fs.readFile(path.join(repository, "docs/release/tightbeam-linux-operations.md"), "utf8");
