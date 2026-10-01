@@ -135,7 +135,7 @@ These are normative, settled statements about Surf Ace behavior. Implementations
 10. **Client-allocated content revisions.** Accepted append-style content operations traverse the client mutation seam; the client allocates the next content revision and a new history-entry ID atomically. Controllers do not submit authoritative content revisions or history-owner tokens.
 11. **Annotation reads are pane-scoped at the OpenClaw boundary.** `surf_ace_read` and related OpenClaw-facing operations target a pane only. Surfaces/providers may keep any additional history restore state internally, but OpenClaw does not pass or track history identifiers.
 12. **Lifecycle events are always-on.** Surface lifecycle events (`event.surface_appeared`, `event.surface_removed`, `event.surface_resumed`) and pane lifecycle events (`event.pane_created`, `event.pane_removed`, `event.pane_renamed`) are never profile-gated. Lockless committed content/history/topology/lifecycle events fan out to every admitted controller for the affected surface; cursor-specific availability/overflow signals target only the affected controller without conferring authority.
-13. **Platform target floor policy.** Surf Ace targets the newest released OS major version as the minimum deployment target (current decision: iOS/iPadOS 26 and macOS 26 for native surface builds).
+13. **Platform target floor policy.** Native Surf Ace targets use the newest released OS major version as the minimum deployment target (current decision: iOS/iPadOS and visionOS 27). The macOS desktop client is Electron, not a native Xcode target.
 14. **Portable extension packaging.** Surf Ace MUST remain buildable as a standalone OpenClaw extension bundle without requiring Clawline as a dependency or core patches. Provider startup, provider deployment, and persistent Surf Ace launchd/auto-start installation require explicit validated host configuration. Each operation fails before mutation when its configuration is absent, malformed, or excludes the current destination.
 
 ## 3. Transport and Discovery
@@ -2585,7 +2585,7 @@ OpenClaw reads from this local projection only; no ordinary `surf_ace_read` call
 
 ---
 
-#### Annotation Context Frame Model (Context-Keyed, Not Session-Keyed)
+#### Annotation Context Frame Model (Context-Keyed, Commit-Delimited)
 
 Annotation data is keyed by **context**, not by annotation session.
 
@@ -2598,16 +2598,16 @@ A context key is:
 1. Scroll alone does **not** create a new context frame.
 2. Navigation/content change alone does **not** create a frame.
 3. A new frame is created only when annotation actually occurs in that context.
-4. Re-entering annotation mode in the same context appends to the same mutable context frame.
+4. Re-entry is keyed by context and the explicit commit boundary: returning to the same context before its live frame is explicitly committed continues that mutable frame; returning after commit opens a new live frame for the same context, leaving the prior committed frame sealed.
 
 Current content readback is separate from annotation frames. A content push updates the local current content snapshot, but does not create a live annotation frame or a closed annotation frame by itself.
 
 **Lifecycle (dual-channel semantics):**
 1. On first stroke in a context with no open frame, the client creates/opens the bounded mutable live-frame record.
 2. While annotating in that context, `event.drawing_flush` strokes coalesce deterministically by stable stroke ID into that client record and are projected through ordered deltas.
-3. Exiting annotation mode via **Done** does **not** force frame finalization by itself; it only pauses live writes. Re-entry in the same context resumes appending to the same frame.
+3. Exiting annotation mode via **Done** requests explicit frame commit. The surface sends `event.annotation_committed` only after the final `event.drawing_flush` for the current live frame has been delivered. Before that commit boundary, same-context re-entry continues appending to the existing mutable frame. After the commit boundary, that frame is sealed and a later same-context annotation opens a new live frame.
 4. While annotation mode is active, pane content replacement and user navigation are blocked; there is no visibility switch until the user taps **Done**.
-5. After **Done**, any user navigation or explicit content replacement/clear (`content.set` / `content.clear`) is a normal context switch. The provider finalizes the current open frame before applying that switch, then opens/resumes the next context as needed.
+5. After **Done**, any user navigation or explicit content replacement/clear (`content.set` / `content.clear`) is a normal context switch. The provider finalizes any still-open current frame before applying that switch, then opens/resumes the next context as needed.
 
 Note: This section governs **frame finalization** only. Transport flush/send cadence for `event.drawing_flush` remains governed by Section 7.1 flush-gate timing (`idleWindowMs` / `maxIntervalMs`).
 
@@ -2617,7 +2617,7 @@ This preserves context-coherent payloads while still allowing OpenClaw to react 
 
 ```
 {
-  frameId:       string      Stablele frame identity (fr_<hex>)
+  frameId:       string      Stable identity for this committed/live frame (fr_<hex>); distinct frames in one context have distinct IDs
   contextKey:    string      Stablele context identity for this frame
   contentId:     string      contentId active when frame was first opened
   url?:          string      URL for HTML contexts
@@ -3456,7 +3456,9 @@ This section is a consolidated copy/reference index of existing UI/UX mentions e
 
 **Decision record (Mike, 2026-10-01):** fleet-wide pane-number allocation and always-visible window/pane identity are restored and remain normative. The audit's other reviewed changes remain as-is and authorized: annotation mode keeps its current Done-only action (the separate always-present drawing-input control remains unchanged); Windows remains unsupported; screenshot capture does not return visible text; app-window open/close remains Spatial-only for now; internal pane IDs remain scoped per surface; OpenClaw-era items retain their current scope; label opacity and the single-pane iOS focus outline remain cosmetic/current behavior; and the larger history, lockless, and controller redesigns remain unchanged. None of those kept items is restored or broadened by this ruling.
 
-Every named invariant in this index, including later single-invariant index entries, MUST have a build-failing conformance check in the release-gated Electron or iOS test suites, or in a packaged-release acceptance check when it depends on the registry, real clients, or rendered output. `scripts/release/release-tooling.test.mjs` verifies that the index and its test-coverage map stay in one-to-one agreement and that each mapped check is present in a suite or packaged acceptance path executed by the release workflow.
+**Decision record (Mike, 2026-10-01, addendum):** Same-context annotation re-entry continues the live frame until explicit `event.annotation_committed`; after that event seals the frame, re-entry opens a new live frame (see §§13.2 and A.8). Native iOS/iPadOS and visionOS minimum deployment targets follow the newest-released-OS invariant at major version 27.
+
+The v0.2.4 release gate MUST pass fleet-wide window-label and pane-number allocation, always-visible window/pane labels, the annotation commit/re-entry boundary, and the newest-released native OS floor. Pane-number and always-visible label acceptance MUST exercise two distinct clients on different hosts against one registry/server, and verify allocator-confirmed, unequal pane numbers and visible labels on both clients. Every invariant that already has a positive release-gated conformance check remains a gate. Any named invariant not positively covered in this release MUST be listed under **Known coverage gaps** below; a listed gap is non-blocking for v0.2.4 and must be closed by a follow-up release. `scripts/release/release-tooling.test.mjs` verifies the index's required-check/known-gap classification and that each required mapped check is present in a suite or packaged-release acceptance path executed by the release workflow.
 
 - **Window Letter Labels** — "Window labels (a, b, c…) are allocated by the single fleet-wide label allocator and are unique across the entire fleet; a client that cannot obtain one displays no label." Source: §3.1.1 core invariant
 - **Pane Name Authority** — "Pane names are optional extension-assigned metadata. They do not replace `paneLabel` as the visible identity token." Source: §3.1.1
@@ -3506,6 +3508,14 @@ Every named invariant in this index, including later single-invariant index entr
 - **Canvas Presentation** — "The surface renders a blank or gridded background." Source: §A.9
 - **Native Overlay Model Markup Goal** — "Model markups render visually on the surface alongside (but distinguishable from) user strokes." Source: §A.12
 - **Future Interactive Affordances** — "widgets, buttons, state displays" may become part of a future native-overlay markup model. Source: §A.12
+- **Annotation Frame Commit Re-entry** — "Same-context re-entry before explicit commit continues the live frame; after commit seals it, re-entry creates a distinct live frame." Source: §13.2 / §A.8
+- **Native Minimum OS** — "Native iOS/iPadOS and visionOS deployment targets follow the newest released OS major version, currently 27." Source: §2.2
+
+**Known coverage gaps (non-blocking for v0.2.4; follow-up releases):**
+- `Canvas Presentation`: automated tests cover rejection of unsupported canvas wire content, not rendered blank/gridded canvas behavior.
+- `Native Overlay Visual Distinction Gap`: no positive rendering conformance test exists for a visual distinction protocol for future model-authored marks.
+- `Native Overlay Model Markup Goal`: model-authored native overlay rendering remains future work; current tests only guard that it is not advertised as shipped UI.
+- `Future Interactive Affordances`: future overlay widgets/buttons/state displays are not implemented or release-gated in v0.2.4.
 
 ---
 
@@ -3772,12 +3782,12 @@ In v2+, restore-on-revisit will require a new wire operation (e.g. `content.rest
 
 ### A.8 Frame Lifecycle When Context Never Changes (Explicit Annotation Settlement)
 
-**Decision:** Frame finalization uses an explicit surface signal, not a provider timeout heuristic. When the user exits annotation mode for a pane, the surface MUST emit `event.annotation_committed` after the final `event.drawing_flush` for that annotation session has been delivered. That event is the authoritative settlement boundary for same-context work.
+**Decision:** Frame finalization uses an explicit surface signal, not a provider timeout heuristic. When the user exits annotation mode for a pane, the surface MUST emit `event.annotation_committed` after the final `event.drawing_flush` for that live frame has been delivered. That event is the authoritative settlement boundary for same-context work.
 
 Rules:
 1. Live channel remains authoritative for in-context work-in-progress while annotation mode is active.
 2. Closed-frame queue exists to preserve settled annotation sessions and older contexts until `surf_ace_read` consumes them.
-3. Same-context annotation re-entry starts a new live frame after the prior session has been explicitly committed.
+3. Same-context annotation re-entry before the prior live frame's explicit commit continues that same mutable frame. Once `event.annotation_committed` seals it, same-context re-entry opens a new live frame with a distinct frame ID; it MUST NOT append to or mutate the sealed record.
 4. Frame finalization occurs on one of:
    - explicit `event.annotation_committed` from the surface,
    - context switch (different URL/content context with annotation starting there),
