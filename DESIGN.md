@@ -135,7 +135,7 @@ These are normative, settled statements about Surf Ace behavior. Implementations
 10. **Client-allocated content revisions.** Accepted append-style content operations traverse the client mutation seam; the client allocates the next content revision and a new history-entry ID atomically. Controllers do not submit authoritative content revisions or history-owner tokens.
 11. **Annotation reads are pane-scoped at the OpenClaw boundary.** `surf_ace_read` and related OpenClaw-facing operations target a pane only. Surfaces/providers may keep any additional history restore state internally, but OpenClaw does not pass or track history identifiers.
 12. **Lifecycle events are always-on.** Surface lifecycle events (`event.surface_appeared`, `event.surface_removed`, `event.surface_resumed`) and pane lifecycle events (`event.pane_created`, `event.pane_removed`, `event.pane_renamed`) are never profile-gated. Lockless committed content/history/topology/lifecycle events fan out to every admitted controller for the affected surface; cursor-specific availability/overflow signals target only the affected controller without conferring authority.
-13. **Platform target floor policy.** Surf Ace targets the newest released OS major version as the minimum deployment target (current decision: iOS/iPadOS 26 and macOS 26 for native surface builds).
+13. **Platform target floor policy.** Surf Ace targets the newest released OS major version as the minimum deployment target (current decision: iOS/iPadOS 27 and visionOS 27; any native macOS surface target uses macOS 27).
 14. **Portable extension packaging.** Surf Ace MUST remain buildable as a standalone OpenClaw extension bundle without requiring Clawline as a dependency or core patches. Provider startup, provider deployment, and persistent Surf Ace launchd/auto-start installation require explicit validated host configuration. Each operation fails before mutation when its configuration is absent, malformed, or excludes the current destination.
 
 ## 3. Transport and Discovery
@@ -2585,9 +2585,14 @@ OpenClaw reads from this local projection only; no ordinary `surf_ace_read` call
 
 ---
 
-#### Annotation Context Frame Model (Context-Keyed, Not Session-Keyed)
+#### Annotation Context Frame Model (Context-Keyed Until Explicit Commit)
 
-Annotation data is keyed by **context**, not by annotation session.
+Annotation data is keyed by **context** while its live frame remains open. A
+pause/re-entry before an explicit commit continues that frame; once
+`event.annotation_committed` is emitted, the frame is sealed and later
+annotation in the same context starts a new live frame. Mike's Oct 1 v0.2.4
+ruling makes this commit event—not a timeout or a context change—the boundary
+between same-context frames.
 
 A context key is:
 - OpenClaw-pushed content: active `contentId`
@@ -2598,14 +2603,14 @@ A context key is:
 1. Scroll alone does **not** create a new context frame.
 2. Navigation/content change alone does **not** create a frame.
 3. A new frame is created only when annotation actually occurs in that context.
-4. Re-entering annotation mode in the same context appends to the same mutable context frame.
+4. Re-entering annotation mode in the same context before explicit commit appends to the same mutable context frame; after `event.annotation_committed`, re-entry opens a new live frame.
 
 Current content readback is separate from annotation frames. A content push updates the local current content snapshot, but does not create a live annotation frame or a closed annotation frame by itself.
 
 **Lifecycle (dual-channel semantics):**
 1. On first stroke in a context with no open frame, the client creates/opens the bounded mutable live-frame record.
 2. While annotating in that context, `event.drawing_flush` strokes coalesce deterministically by stable stroke ID into that client record and are projected through ordered deltas.
-3. Exiting annotation mode via **Done** does **not** force frame finalization by itself; it only pauses live writes. Re-entry in the same context resumes appending to the same frame.
+3. Exiting annotation mode via **Done** pauses live writes and requests `event.annotation_committed` after pending `event.drawing_flush` delivery. If the user re-enters the same context before that commit is emitted, the pending commit is canceled and the open frame continues. After the commit is emitted, same-context re-entry starts a new live frame.
 4. While annotation mode is active, pane content replacement and user navigation are blocked; there is no visibility switch until the user taps **Done**.
 5. After **Done**, any user navigation or explicit content replacement/clear (`content.set` / `content.clear`) is a normal context switch. The provider finalizes the current open frame before applying that switch, then opens/resumes the next context as needed.
 
@@ -3213,7 +3218,7 @@ This tool is deprecated and removed in the capture frame model. Frame images are
 
 Remove specific annotation strokes from a screen's drawing overlay by stroke ID. Write.
 
-**Note (dual-channel frame model):** In the dual-channel model, rendered strokes persist until the provider explicitly removes them or content changes under the normal content rules. The underlying context frame may remain open and continue on later same-context re-entry (§13.2). Closed frames in the queue are immutable records and cannot be modified via this tool. `surf_ace_annotations_remove` only affects strokes currently rendered in the live annotation overlay. For most OpenClaw workflows, this tool is used to remove strokes from in-progress interaction (e.g., erasing a scratch-out gesture mid-session). Post-finalization frame handling is done at OpenClaw interpretation time (dedupe/ignore/act), not by mutating closed frames.
+**Note (dual-channel frame model):** In the dual-channel model, rendered strokes persist until the provider explicitly removes them or content changes under the normal content rules. The underlying context frame remains open on same-context re-entry only until `event.annotation_committed` is emitted (§13.2). Closed frames in the queue are immutable records and cannot be modified via this tool. `surf_ace_annotations_remove` only affects strokes currently rendered in the live annotation overlay. For most OpenClaw workflows, this tool is used to remove strokes from in-progress interaction (e.g., erasing a scratch-out gesture mid-session). Post-finalization frame handling is done at OpenClaw interpretation time (dedupe/ignore/act), not by mutating closed frames.
 
 **Params:**
 ```
@@ -3649,9 +3654,9 @@ In v2, the wire `DrawingFlushEvent` payload may optionally be extended with `scr
 
 **Question:** If a user annotates the top of a long webpage, scrolls down, and annotates the bottom — how does the provider produce a meaningful image for OpenClaw?
 
-**Decision:** Multi-scroll behavior is handled by the dual-channel context model. Because annotation mode locks the viewport (see §15.6 "While IN annotation mode"), scrolling cannot occur while actively drawing. If a user annotates at scroll position A, exits annotation mode, scrolls, and re-enters annotation in the **same context**, strokes append to the same context frame (not a new context frame). If annotation resumes only after a true context switch (e.g., different URL/content context and annotation starts there), the previous context frame is finalized and the new context gets its own frame.
+**Decision:** Multi-scroll behavior is handled by the dual-channel context model. Because annotation mode locks the viewport (see §15.6 "While IN annotation mode"), scrolling cannot occur while actively drawing. If a user annotates at scroll position A and re-enters the **same context before `event.annotation_committed` is emitted**, strokes append to the same context frame. Once the explicit commit is emitted, later same-context annotation starts a new frame; a true context switch also finalizes the previous frame and creates one for the new context when annotation starts there.
 
-OpenClaw may therefore receive either one evolving context frame (same context, multiple annotation sessions) or multiple finalized frames (annotation across distinct contexts). `scrollOffset` at frame open remains the reference anchor for mapping to document-space.
+OpenClaw may therefore receive one evolving context frame for multiple same-context sessions before commit, or multiple finalized frames after commit or across distinct contexts. `scrollOffset` at frame open remains the reference anchor for mapping to document-space.
 
 ---
 
@@ -3663,7 +3668,7 @@ OpenClaw may therefore receive either one evolving context frame (same context, 
 
 **Status:** Partially addressed by the capture frame model — full resolution requires on-device gesture classification (A.4).
 
-**With dual-channel context frames:** Bracket strokes and other multi-stroke semantic gestures can be accumulated into one finalized context frame (even across multiple same-context annotation sessions). OpenClaw receives the frame stroke set plus viewport screenshot, reducing partial-geometry ambiguity.
+**With dual-channel context frames:** Bracket strokes and other multi-stroke semantic gestures can be accumulated into one finalized context frame across same-context annotation sessions only while the frame remains uncommitted. OpenClaw receives the frame stroke set plus viewport screenshot, reducing partial-geometry ambiguity.
 
 However, geometry-based inference of the "between" region still requires understanding that the strokes form brackets and that the intent is spatial span between them. This is the unresolved part. On-device classification (A.4) applied per finalized frame remains the most promising path: the surface classifies gesture intent for the frame stroke set before (or at) finalization and includes a `semanticHints` field. Design deferred to v2.
 
@@ -3684,7 +3689,7 @@ However, geometry-based inference of the "between" region still requires underst
 - What is the fallback when on-device model is unavailable or below confidence threshold?
 - Does classification happen per-stroke, per-flush, or after a settling window?
 
-**With context-keyed frames:** On-device classification applies naturally **per finalized frame**. At frame finalization time (context-switch boundary, or explicit `content.set`/`content.clear` per A.8), the surface has the complete stroke set for that finalized unit. This is the ideal classification boundary: the model sees full gesture context before delivery. Classification at flush time (mid-session live deltas) would see partial stroke sets and is not recommended. A v2 `semanticHints` field in the frame structure is the right integration point.
+**With context-keyed frames:** On-device classification applies naturally **per finalized frame**. At frame finalization time (explicit `event.annotation_committed`, context-switch boundary, or explicit `content.set`/`content.clear` per A.8), the surface has the complete stroke set for that finalized unit. This is the ideal classification boundary: the model sees full gesture context before delivery. Classification at flush time (mid-session live deltas) would see partial stroke sets and is not recommended. A v2 `semanticHints` field in the frame structure is the right integration point.
 
 **Status:** Unresolved. Needs design session. The dual-channel frame model provides the right unit of analysis — classify at frame finalization, not at live-delta flush time.
 
@@ -3775,12 +3780,13 @@ In v2+, restore-on-revisit will require a new wire operation (e.g. `content.rest
 Rules:
 1. Live channel remains authoritative for in-context work-in-progress while annotation mode is active.
 2. Closed-frame queue exists to preserve settled annotation sessions and older contexts until `surf_ace_read` consumes them.
-3. Same-context annotation re-entry starts a new live frame after the prior session has been explicitly committed.
-4. Frame finalization occurs on one of:
+3. Same-context re-entry before the explicit commit continues the existing live frame.
+4. Once the prior session has been explicitly committed, same-context re-entry starts a new live frame.
+5. Frame finalization occurs on one of:
    - explicit `event.annotation_committed` from the surface,
    - context switch (different URL/content context with annotation starting there),
    - explicit content replacement/clear (`content.set`/`content.clear`).
-5. Timeout-based finalization is not product truth. If a provider keeps a timer temporarily for backward compatibility with older surfaces, it MUST be fallback-only and MUST NOT override an explicit settle signal.
+6. Timeout-based finalization is not product truth. If a provider keeps a timer temporarily for backward compatibility with older surfaces, it MUST be fallback-only and MUST NOT override an explicit settle signal.
 
 Transport note: `event.drawing_flush` cadence remains independent. Flush events carry live stroke deltas during annotation mode; `event.annotation_committed` closes the session.
 
