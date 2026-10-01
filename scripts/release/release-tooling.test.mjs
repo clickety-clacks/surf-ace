@@ -1201,6 +1201,26 @@ test("Tightbeam v0.2.4 binds the fleet-pane candidate, six hosted assets, and to
   });
 });
 
+test("v0.2.3 migration fixture creates lease IDs accepted by the allocator schema", async () => {
+  const fixture = await fs.readFile(path.join(repository, "scripts/release/tightbeam-state-smoke-fixture.ts"), "utf8");
+  const allocatorSql = await fs.readFile(path.join(repository, "packages/allocator/sql/001_allocator.sql"), "utf8");
+  const legacySql = await fs.readFile(path.join(repository, "scripts/release/fixtures/001_allocator_v023.sql"), "utf8");
+
+  for (const schema of [allocatorSql, legacySql]) {
+    assert.match(schema, /lease_id ~ '\^lease_\[A-Za-z0-9_-\]\{22\}\$'/);
+  }
+  assert.match(fixture, /const leaseId = `lease_\$\{randomBytes\(16\)\.toString\("base64url"\)\}`;/);
+});
+
+test("Linux packaged client smoke opts into software rendering on virtual displays", async () => {
+  const fixture = await fs.readFile(path.join(repository, "scripts/release/tightbeam-state-smoke-fixture.ts"), "utf8");
+  const clientLauncher = fixture.slice(
+    fixture.indexOf("async function startPackagedElectronClient("),
+    fixture.indexOf("async function startCluster("),
+  );
+  assert.match(clientLauncher, /launchElectron\([\s\S]*?diagnosticLogPath,\s*process\.platform === "linux"\s*,?\s*\)/);
+});
+
 test("Linux fresh-install fixture binds its identity gate to the release candidate", async () => {
   const fixture = await fs.readFile(path.join(repository, "scripts/release/tightbeam-state-smoke-fixture.ts"), "utf8");
   const operations = await fs.readFile(path.join(repository, "docs/release/tightbeam-linux-operations.md"), "utf8");

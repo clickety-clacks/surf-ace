@@ -194,6 +194,7 @@ async function startPackagedElectronClient(
       undefined,
       registryEndpoint,
       diagnosticLogPath,
+      process.platform === "linux",
     );
     started = launch.started;
     const endpoint = `ws://127.0.0.1:${port}/ws`;
