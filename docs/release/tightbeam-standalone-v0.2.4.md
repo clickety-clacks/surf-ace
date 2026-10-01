@@ -94,6 +94,13 @@ an older release participant or claims an iPad IPA.
 No old-version participant is part of the v0.2.4 smoke qualification.
 Historical old-version results remain archived as diagnostic evidence only.
 
+**Known nonblocking specification gap (contrast):** DESIGN §15.1 specifies
+pane-label gray at 30% opacity, while §15.2 requires WCAG AA contrast across
+content backgrounds. This unresolved conflict is pending Mike's ruling and is
+recorded as a known v0.2.4 gap under the ship-with-gaps decision. This note does
+not change normative `DESIGN.md` text or the existing contrast conformance
+check.
+
 Publication is separately opt-in and unreachable until both smoke jobs,
 receipts, attestations, and exact-file checks succeed. This specification does
 not create tags, dispatch workflows, publish assets, install fleet software,

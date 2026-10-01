@@ -2815,6 +2815,7 @@ test("v0.2.4 standalone specification and release gates bind the product and all
   assert.match(specification, /Product source: proposed tag/);
   assert.match(specification, /3250929111ff2999f5a3fedfbfc3ae417df05357/);
   assert.match(specification, /No old-version participant/);
+  assert.match(specification, /Known nonblocking specification gap \(contrast\)[\s\S]*?§15\.1[\s\S]*?30% opacity[\s\S]*?§15\.2[\s\S]*?WCAG AA[\s\S]*?pending Mike's ruling[\s\S]*?does\s+not change normative `DESIGN\.md` text or the existing contrast conformance\s+check/);
   assert.match(specification, /surf-ace-release-tooling-tightbeam-v0\.2\.4/);
   assert.match(specification, /surf-ace-tightbeam-v0\.2\.4/);
   assert.match(specification, /copied byte-for-byte from the pinned tooling checkout/);
