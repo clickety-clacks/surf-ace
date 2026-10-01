@@ -38,6 +38,7 @@ export type AllocatorDiagnostics = {
   leaseMode: "writer";
   lifecycle: "active" | "destroyed";
   nextOrdinalFence: number;
+  nextPaneOrdinalFence: number;
   primaryHeadHash: string;
   primaryHeadSeq: number;
   serveStatus: string;
@@ -59,19 +60,18 @@ export class AllocatorServer {
     if (!value || typeof value.clientId !== "string" || !/^[a-f0-9]{64}$/.test(value.clientId) ||
         !Array.isArray(value.surfaces)) throw new Error("invalid_registration");
     const clientId = value.clientId;
-    const surfaces = value.surfaces as Array<{ surfaceId: string; panes: Array<{ paneId: string; paneLabel: number }> }>;
+    const surfaces = value.surfaces as Array<{ surfaceId: string; panes: Array<{ paneId: string; paneLabel: number; paneLineageId: string }> }>;
     const ids = new Set<string>();
     for (const surface of surfaces) {
       if (!surface || typeof surface.surfaceId !== "string" || !/^sf_[A-Za-z0-9._:-]{3,64}$/.test(surface.surfaceId) ||
           ids.has(surface.surfaceId) || !Array.isArray(surface.panes)) throw new Error("invalid_surface");
       ids.add(surface.surfaceId);
       const paneIds = new Set<string>();
-      const labels = new Set<number>();
       for (const pane of surface.panes) {
-        if (!pane || typeof pane.paneId !== "string" || !pane.paneId || paneIds.has(pane.paneId) ||
-            !Number.isInteger(pane.paneLabel) || pane.paneLabel < 1 || labels.has(pane.paneLabel)) throw new Error("invalid_pane");
+        if (!pane || typeof pane.paneId !== "string" || !/^[A-Za-z0-9._:-]{1,64}$/.test(pane.paneId) ||
+            typeof pane.paneLineageId !== "string" || !/^pl_[A-Za-z0-9._:-]{3,128}$/.test(pane.paneLineageId) ||
+            paneIds.has(pane.paneId)) throw new Error("invalid_pane");
         paneIds.add(pane.paneId);
-        labels.add(pane.paneLabel);
       }
     }
     const state = await this.custody.readAcceptedState();
@@ -89,18 +89,37 @@ export class AllocatorServer {
       const assignment = await this.authority.claim({
         ...identity, surfaceId: "sf_" + hash(JSON.stringify([clientId, surface.surfaceId])),
       });
+      const panes = [];
+      for (const pane of surface.panes) {
+        const paneLabel = await this.custody.claimPane(clientId, surface.surfaceId, pane.paneId, pane.paneLineageId);
+        panes.push({ paneId: pane.paneId, paneLineageId: pane.paneLineageId,
+          paneLabel, paneAddress: assignment.windowLabel + paneLabel });
+      }
       registered.push({
         surfaceId: surface.surfaceId,
         windowLabel: assignment.windowLabel,
-        panes: surface.panes.map((pane) => ({
-          paneId: pane.paneId, paneLabel: pane.paneLabel,
-          paneAddress: assignment.windowLabel + pane.paneLabel,
-        })),
+        panes,
       });
     }
     const result = { clientId, surfaces: registered };
     this.registeredClients.set(clientId, result);
     return result;
+  }
+
+  private async claimPane(payload: unknown): Promise<{ paneLabel: number }> {
+    const value = payload as { clientId?: unknown; surfaceId?: unknown; paneId?: unknown; paneLineageId?: unknown };
+    if (!value || typeof value.clientId !== "string" || !/^[a-f0-9]{64}$/.test(value.clientId) ||
+        typeof value.surfaceId !== "string" || !/^sf_[A-Za-z0-9._:-]{3,64}$/.test(value.surfaceId) ||
+        typeof value.paneId !== "string" || !/^[A-Za-z0-9._:-]{1,64}$/.test(value.paneId) ||
+        typeof value.paneLineageId !== "string" || !/^pl_[A-Za-z0-9._:-]{3,128}$/.test(value.paneLineageId)) {
+      throw new Error("invalid_pane_claim");
+    }
+    const registered = this.registeredClients.get(value.clientId) as
+      | { surfaces: Array<{ surfaceId: string }> } | undefined;
+    if (!registered?.surfaces.some((surface) => surface.surfaceId === value.surfaceId)) {
+      throw new Error("surface_not_registered");
+    }
+    return { paneLabel: await this.custody.claimPane(value.clientId, value.surfaceId, value.paneId, value.paneLineageId) };
   }
 
   private constructor(
@@ -171,6 +190,7 @@ export class AllocatorServer {
       leaseMode: "writer",
       lifecycle: state.lifecycle,
       nextOrdinalFence: state.nextOrdinalFence,
+      nextPaneOrdinalFence: state.nextPaneOrdinalFence,
       primaryHeadHash: state.headHash,
       primaryHeadSeq: state.headSeq,
       serveStatus: this.authority.serveStatus,
@@ -216,7 +236,7 @@ export class AllocatorServer {
       return;
     }
     const registration = raw as { v?: unknown; type?: unknown; id?: unknown; op?: unknown; payload?: unknown };
-    if (registration && (registration.op === "client.register" || registration.op === "fleet.topology")) {
+    if (registration && (registration.op === "client.register" || registration.op === "pane.claim" || registration.op === "fleet.topology")) {
       const run = this.registrationTail.then(async () => {
         if (registration.v !== 1 || registration.type !== "request" || typeof registration.id !== "string" || !registration.id) {
           socket.close(1008, "invalid_envelope");
@@ -225,7 +245,9 @@ export class AllocatorServer {
         try {
           const payload = registration.op === "client.register"
             ? await this.registerClient(registration.payload)
-            : { clients: [...this.registeredClients.values()] };
+            : registration.op === "pane.claim"
+              ? await this.claimPane(registration.payload)
+              : { clients: [...this.registeredClients.values()] };
           if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({
             v: 1, type: "response", id: registration.id, op: registration.op, ok: true, payload, sentAt: Date.now(),
           }));

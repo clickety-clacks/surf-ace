@@ -85,6 +85,23 @@ test("validateEnvelopeType accepts weighted topology change events", () => {
   assert.deepEqual(result, { ok: true });
 });
 
+test("validateEnvelopeType accepts an unnumbered pane lifecycle event", () => {
+  const result = validateEnvelopeType("event.pane_created", {
+    eventId: "ev_unnumbered_pane",
+    op: "event.pane_created",
+    payload: {
+      fromSplit: false,
+      paneId: 2,
+      paneLabel: null,
+      surfaceId: "sf_1",
+    },
+    sentAt: Date.now(),
+    type: "event",
+    v: 1,
+  });
+  assert.deepEqual(result, { ok: true });
+});
+
 test("validateEnvelopeType accepts file reload source metadata on content.set", () => {
   const result = validateEnvelopeType("content.set", {
     id: "req_reload_source",

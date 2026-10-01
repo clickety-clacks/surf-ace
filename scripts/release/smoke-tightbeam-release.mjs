@@ -431,6 +431,27 @@ export function validateTightbeamFreshInstallState(stateSequence) {
   requireFreshInstallPhase(stateSequence.afterRestart, "fresh_install_after_restart", expected);
   const before = stateSequence.initial;
   const after = stateSequence.afterRestart;
+  const fleet = stateSequence.fleetPaneUniqueness;
+  if (!fleet || fleet.firstClientId === fleet.secondClientId ||
+      fleet.firstSurfaceId === fleet.secondSurfaceId ||
+      fleet.firstClientId !== before.registeredClientId ||
+      fleet.firstSurfaceId !== before.surfaceId ||
+      fleet.firstPaneNumber !== before.paneLabel ||
+      !Number.isSafeInteger(fleet.secondPaneNumber) || fleet.secondPaneNumber < 1 ||
+      fleet.secondPaneNumber === fleet.firstPaneNumber ||
+      fleet.sharedRegistryEndpoint !== before.registryEndpoint) {
+    throw new Error("fresh_install_fleet_pane_uniqueness_unverified");
+  }
+  const migration = stateSequence.migrationEvidence;
+  if (!migration || !/^[a-f0-9]{64}$/.test(migration.backupSha256 ?? "") ||
+      !/^[a-f0-9]{64}$/.test(migration.headHashBefore ?? "") ||
+      migration.headHashAfter !== migration.headHashBefore ||
+      migration.restoredHeadHash !== migration.headHashBefore ||
+      !Number.isSafeInteger(migration.headSeqBefore) || migration.headSeqBefore < 1 ||
+      migration.headSeqAfter !== migration.headSeqBefore ||
+      migration.writerCanClaim !== true || migration.witnessSynchronized !== true) {
+    throw new Error("fresh_install_v023_migration_unverified");
+  }
   for (const field of ["clientIdentity", "registrationIdentity", "surfaceId", "paneId", "windowLabel", "paneLabel", "databaseIdentity"]) {
     if (after[field] !== before[field]) throw new Error(`fresh_install_${field === "clientIdentity" ? "client_identity" : field}_changed`);
   }

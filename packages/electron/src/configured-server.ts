@@ -25,10 +25,22 @@ export class ConfiguredServerRegistration {
     const url = new URL(address);
     if (url.protocol !== "ws:" && url.protocol !== "wss:") throw new Error("server address must use ws or wss");
     this.wire = new PublicControllerWireClient(url.toString(), requestTimeoutMs);
+    this.wire.onClose(() => this.core.clearRegistryPaneConfirmations());
   }
 
   onClose(listener: () => void): () => void {
     return this.wire.onClose(listener);
+  }
+
+  async claimPaneLabel(surfaceId: string, paneId: number, paneLineageId: string): Promise<number> {
+    if (this.stopped || !this.wire.isOpen()) throw new Error("allocator_unavailable");
+    const response = await this.wire.request("pane.claim", {
+      clientId: this.clientId, surfaceId, paneId: String(paneId), paneLineageId,
+    });
+    if (!response.ok) throw new Error(response.error?.message ?? "pane_allocation_failed");
+    const label = (response.payload as { paneLabel?: unknown })?.paneLabel;
+    if (!Number.isSafeInteger(label) || Number(label) < 1) throw new Error("invalid_pane_assignment");
+    return Number(label);
   }
 
   async synchronize(): Promise<void> {
@@ -42,21 +54,33 @@ export class ConfiguredServerRegistration {
           surfaceId: surface.surfaceId,
           panes: [...surface.panes.values()].map((pane) => ({
             paneId: String(pane.paneId), paneLabel: pane.paneLabel,
+            paneLineageId: pane.paneLineageId,
           })),
         })),
       });
       if (!response.ok) throw new Error(response.error?.message ?? "registration_failed");
-      const payload = response.payload as { clientId: string; surfaces: Array<{ surfaceId: string; windowLabel: string }> };
-      if (payload.clientId !== this.clientId || !Array.isArray(payload.surfaces)) throw new Error("invalid_registration_response");
+      const payload = response.payload as { clientId: string; surfaces: Array<{
+        surfaceId: string; windowLabel: string;
+        panes: Array<{ paneId: string; paneLineageId: string; paneLabel: number }>;
+      }> };
+      const expectedSurfaceIds = new Set(this.core.listSurfaces().map((surface) => surface.surfaceId));
+      if (payload.clientId !== this.clientId || !Array.isArray(payload.surfaces) ||
+          payload.surfaces.length !== expectedSurfaceIds.size ||
+          payload.surfaces.some((surface) => !expectedSurfaceIds.delete(surface.surfaceId)) ||
+          expectedSurfaceIds.size !== 0) throw new Error("invalid_registration_response");
       await this.core.locklessAuthority.transactionAsync(() =>
         this.core.transactionAsync(async () => {
           this.core.applyWindowLabels(payload.surfaces);
+          this.core.applyRegistryPaneLabels(payload.surfaces);
           await this.persist();
         }),
       );
+      this.core.confirmRegistryPaneLabels(payload.surfaces);
       if (!this.wire.isOpen()) throw new Error("controller_wire_closed");
     });
-    this.pending = run.catch(() => undefined);
+    this.pending = run.catch(() => {
+      this.core.clearRegistryPaneConfirmations();
+    });
     return run;
   }
 
@@ -70,6 +94,7 @@ export class ConfiguredServerRegistration {
 
   async stop(): Promise<void> {
     this.stopped = true;
+    this.core.clearRegistryPaneConfirmations();
     clearTimeout(this.timer);
     this.wire.abort();
     await this.pending;

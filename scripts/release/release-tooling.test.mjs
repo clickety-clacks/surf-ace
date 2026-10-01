@@ -1221,6 +1221,7 @@ test("Tightbeam Linux stage contains only the standalone CLI, callable server cl
     "packages/electron/dist/central-server.cjs": "module.exports={startCentralServer(){}};",
     "packages/electron/dist/schema.json": "{}\n",
     "packages/allocator/sql/001_allocator.sql": "-- schema\n",
+    "packages/allocator/sql/002_fleet_panes.sql": "-- migration\n",
   };
   for (const [relative, contents] of Object.entries(files)) {
     const file = path.join(source, relative);
@@ -1922,6 +1923,20 @@ test("fresh-install Linux qualification requires direct current content, wrong-s
     expectedVersion: TIGHTBEAM.version,
     initial: phase(),
     afterRestart: phase(),
+    fleetPaneUniqueness: {
+      firstClientId: registrationIdentity,
+      firstPaneNumber: 1,
+      firstSurfaceId: "sf_fresh",
+      secondClientId: `5678abcd${"b".repeat(56)}`,
+      secondPaneNumber: 2,
+      secondSurfaceId: "sf_second",
+      sharedRegistryEndpoint: registryEndpoint,
+    },
+    migrationEvidence: {
+      backupSha256: "a".repeat(64), headHashBefore: "b".repeat(64),
+      headHashAfter: "b".repeat(64), restoredHeadHash: "b".repeat(64),
+      headSeqBefore: 1, headSeqAfter: 1, writerCanClaim: true, witnessSynchronized: true,
+    },
     wrongSurfaceRejection: {
       directClientEndpoint,
       expectedSurfaceId: "sf_fresh",
@@ -2092,6 +2107,20 @@ test("Linux fresh-install acceptance is based on direct current-content evidence
     expectedVersion: TIGHTBEAM.version,
     initial: phase(contentId),
     afterRestart: phase(contentId),
+    fleetPaneUniqueness: {
+      firstClientId: `1234abcd${"a".repeat(56)}`,
+      firstPaneNumber: 1,
+      firstSurfaceId: "sf_fresh",
+      secondClientId: `5678abcd${"b".repeat(56)}`,
+      secondPaneNumber: 2,
+      secondSurfaceId: "sf_second",
+      sharedRegistryEndpoint: "ws://127.0.0.1:19999/ws",
+    },
+    migrationEvidence: {
+      backupSha256: "a".repeat(64), headHashBefore: "b".repeat(64),
+      headHashAfter: "b".repeat(64), restoredHeadHash: "b".repeat(64),
+      headSeqBefore: 1, headSeqAfter: 1, writerCanClaim: true, witnessSynchronized: true,
+    },
     wrongSurfaceRejection: {
       directClientEndpoint: "ws://127.0.0.1:19001/ws",
       expectedSurfaceId: "sf_fresh",
@@ -2193,6 +2222,20 @@ test("Linux fresh-install state driver binds candidate-only inputs and packaged 
     expectedScreenshotColors: ["246bce", "d93636"],
     initial: phase(initialEndpoint),
     afterRestart: phase(initialEndpoint),
+    fleetPaneUniqueness: {
+      firstClientId: registrationIdentity,
+      firstPaneNumber: 1,
+      firstSurfaceId: "sf_fresh",
+      secondClientId: `5678abcd${"b".repeat(56)}`,
+      secondPaneNumber: 2,
+      secondSurfaceId: "sf_second",
+      sharedRegistryEndpoint: "ws://127.0.0.1:19999/ws",
+    },
+    migrationEvidence: {
+      backupSha256: "a".repeat(64), headHashBefore: "b".repeat(64),
+      headHashAfter: "b".repeat(64), restoredHeadHash: "b".repeat(64),
+      headSeqBefore: 1, headSeqAfter: 1, writerCanClaim: true, witnessSynchronized: true,
+    },
     wrongSurfaceRejection: {
       directClientEndpoint: initialEndpoint,
       endpoint: initialEndpoint,

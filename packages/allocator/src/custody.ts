@@ -63,6 +63,8 @@ export type AcceptedState = {
     windowLabel: string;
   }>;
   nextOrdinalFence: number;
+  nextPaneOrdinalFence: number;
+  paneMappings: Array<{ clientId: string; surfaceId: string; paneId: string; lineageId: string; paneLabel: number }>;
   stateVersion: number;
   transactions: Array<{
     authorityId: string;
@@ -94,7 +96,7 @@ export type ReserveResult = {
 
 export type RestoreSnapshot = Pick<
   AcceptedState,
-  "allocatorId" | "authorityOwners" | "custodyRevision" | "fleetId" | "headHash" | "headSeq" | "mappings" | "nextOrdinalFence" | "stateVersion" | "transactions"
+  "allocatorId" | "authorityOwners" | "custodyRevision" | "fleetId" | "headHash" | "headSeq" | "mappings" | "nextOrdinalFence" | "nextPaneOrdinalFence" | "paneMappings" | "stateVersion" | "transactions"
 >;
 
 export type RestoreReady = {
@@ -390,6 +392,21 @@ export class PostgresCustodyAdapter<M extends LeaseMode> {
       surfaceId: row.surface_id,
       windowLabel: row.window_label,
     };
+  }
+
+  async claimPane(
+    this: PostgresCustodyAdapter<"writer">,
+    clientId: string,
+    surfaceId: string,
+    paneId: string,
+    lineageId: string,
+  ): Promise<number> {
+    this.assertMode("writer");
+    const result = await this.mutate("claim_pane", async () => await this.primary.query<{ pane_label: number | string }>(
+      "SELECT surf_ace_allocator.claim_pane($1, $2, $3, $4, $5, $6, $7) AS pane_label",
+      [this.config.fleetId, this.token.leaseGeneration, this.token.leaseId, clientId, surfaceId, paneId, lineageId],
+    ));
+    return integer(requiredRow(result.rows[0], "claim_pane").pane_label);
   }
 
   async burn(this: PostgresCustodyAdapter<"writer">, transactionId: string): Promise<void> {
@@ -725,6 +742,26 @@ function validateAcceptedState(state: AcceptedState, config: PostgresCustodyConf
       `unsupported state version ${String(state.stateVersion)}`,
       state.allocatorId,
     );
+  }
+  if (!Number.isSafeInteger(state.nextPaneOrdinalFence) || state.nextPaneOrdinalFence < 1 ||
+      !Array.isArray(state.paneMappings)) {
+    throw new AllocatorError("allocator_state_corrupt", "pane allocator fence or mappings are invalid");
+  }
+  const paneKeys = new Set<string>();
+  const paneLabels = new Set<number>();
+  for (const pane of state.paneMappings) {
+    const key = `${pane.clientId}\0${pane.surfaceId}\0${pane.lineageId}`;
+    if (!/^[a-f0-9]{64}$/.test(pane.clientId) ||
+        !/^sf_[A-Za-z0-9._:-]{3,64}$/.test(pane.surfaceId) ||
+        !/^[A-Za-z0-9._:-]{1,64}$/.test(pane.paneId) ||
+        !/^pl_[A-Za-z0-9._:-]{3,128}$/.test(pane.lineageId) ||
+        !Number.isSafeInteger(pane.paneLabel) || pane.paneLabel < 1 ||
+        pane.paneLabel >= state.nextPaneOrdinalFence ||
+        paneKeys.has(key) || paneLabels.has(pane.paneLabel)) {
+      throw new AllocatorError("allocator_state_corrupt", "pane assignments violate uniqueness or fence invariants");
+    }
+    paneKeys.add(key);
+    paneLabels.add(pane.paneLabel);
   }
   const ownerByAuthority = new Map(state.authorityOwners.map((owner) => [owner.authorityId, owner.ownerAnchorId]));
   const ordinals = new Set<number>();

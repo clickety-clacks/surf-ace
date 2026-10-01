@@ -132,6 +132,7 @@ type SocketMeta = {
 export type SurfaceWsServerOptions = {
   bindAddress?: string;
   capturePaneImage: (surfaceId: string, paneId: number) => Promise<string | null>;
+  claimPaneLabel?: (surfaceId: string, paneId: number, paneLineageId: string) => Promise<number>;
   core: SurfaceCore;
   endpointName: string;
   hostName: string;
@@ -239,6 +240,7 @@ export class SurfaceWsServer {
   private readonly bindAddress: string;
   private readonly compositorSocketPath: string | null;
   private readonly core: SurfaceCore;
+  private readonly claimPaneLabel: (surfaceId: string, paneId: number, paneLineageId: string) => Promise<number>;
   private readonly endpointName: string;
   private readonly hostName: string;
   private readonly getOverlayDiagnostics?: (surfaceId: string) => Record<string, unknown> | null;
@@ -278,6 +280,7 @@ export class SurfaceWsServer {
       ? resolveCompositorControlSocketPath()
       : options.compositorSocketPath;
     this.core = options.core;
+    this.claimPaneLabel = options.claimPaneLabel ?? (async () => { throw new Error("allocator_unavailable"); });
     this.endpointName = options.endpointName;
     this.getOverlayDiagnostics = options.getOverlayDiagnostics;
     this.getRuntimeAppBinding = options.getRuntimeAppBinding;
@@ -905,7 +908,7 @@ export class SurfaceWsServer {
           payload: {
             fromSplit: event.fromSplit,
             paneId: event.paneId,
-            paneLabel: event.paneLabel,
+            paneLabel: this.core.visiblePaneLabel(event.surfaceId, event.paneId),
             parentPaneId: event.parentPaneId,
             surfaceId: event.surfaceId,
           },
@@ -942,7 +945,7 @@ export class SurfaceWsServer {
         });
         return;
       case "topology-changed": {
-        const topology = this.core.topologyState(event.surfaceId);
+        const topology = this.core.publicTopologyState(event.surfaceId);
         await this.ingestLocklessSurfaceConsumable(
           event.surfaceId,
           "topology",
@@ -1348,7 +1351,7 @@ export class SurfaceWsServer {
           );
         });
       }
-    } else if (request.op === "pair.request") {
+    } else if (request.op === "pair.request" || request.op === "topology.apply") {
       response = (await dispatch()).response;
     } else if (request.op === "surfaces.list") {
       response = await this.core.locklessAuthority.transactionAsync(() =>
@@ -1985,7 +1988,7 @@ export class SurfaceWsServer {
         surfaces: this.core.listSurfaces().map((surface) => ({
           name: surface.name,
           surfaceId: surface.surfaceId,
-          topology: this.core.topologyState(surface.surfaceId),
+          topology: this.core.publicTopologyState(surface.surfaceId),
           viewport: this.core.viewport(surface.surfaceId),
         })),
       });
@@ -2019,7 +2022,7 @@ export class SurfaceWsServer {
       return locklessSuccess(request, {
         ...this.core.panesList(targetSurfaceId),
         ...(nativeCompositorStatus ? { nativeCompositorStatus } : {}),
-        topology: this.core.topologyState(targetSurfaceId),
+        topology: this.core.publicTopologyState(targetSurfaceId),
       });
     }
     if (
@@ -2250,7 +2253,7 @@ export class SurfaceWsServer {
             state: this.core.pairState(surface.surfaceId),
             surfaceId: surface.surfaceId,
             surfaceSetRevision,
-            topology: this.core.topologyState(surface.surfaceId),
+            topology: this.core.publicTopologyState(surface.surfaceId),
             viewport: this.core.viewport(surface.surfaceId),
           };
       });
@@ -2347,7 +2350,7 @@ export class SurfaceWsServer {
               state: this.core.pairState(surface.surfaceId),
               surfaceId: surface.surfaceId,
               surfaceSetRevision,
-              topology: this.core.topologyState(surface.surfaceId),
+              topology: this.core.publicTopologyState(surface.surfaceId),
             };
         });
         this.core.markLocklessAuthorityChanged(result.surfaceId);
@@ -2517,8 +2520,7 @@ export class SurfaceWsServer {
     }
 
     if (request.op === "pane.split") {
-      const result = await this.runSurfaceMutation(surfaceId, () =>
-        this.core.transaction(() => {
+      const result = await this.runSurfaceMutation(surfaceId, async () => {
         const rollbackSurface =
           this.core.captureSurfaceMutationRollback(surfaceId);
         const rollbackRecord =
@@ -2538,33 +2540,33 @@ export class SurfaceWsServer {
           );
           const newPaneIds: number[] = [];
           const newPaneLabels: number[] = [];
+          const newPaneLineageIds: string[] = [];
           const usedIds = new Set(
             [
               ...topology.panes.map((pane) => Number(pane.paneId)),
               ...this.core.locklessAuthority.retainedPaneIds(surfaceId),
             ],
           );
-          const usedLabels = new Set(
-            topology.panes.map((pane) => pane.paneLabel),
-          );
           for (let index = 1; index < request.payload.count; index += 1) {
-            const identity = this.core.locklessAuthority.allocatePaneIdentity(
-              usedIds,
-              usedLabels,
-            );
+            const identity = this.core.locklessAuthority.allocatePaneIdentity(usedIds);
             usedIds.add(identity.paneId);
-            usedLabels.add(identity.paneLabel);
             newPaneIds.push(identity.paneId);
-            newPaneLabels.push(identity.paneLabel);
+            const lineageId = `pl_${randomUUID().replaceAll("-", "")}`;
+            newPaneLineageIds.push(lineageId);
+            newPaneLabels.push(await this.claimPaneLabel(surfaceId, identity.paneId, lineageId));
           }
-          const panes = this.core.paneSplit(surfaceId, {
+          const panes = this.core.transaction(() => this.core.paneSplit(surfaceId, {
             count: request.payload.count,
             direction: request.payload.direction,
             newPaneIds,
             newPaneLabels,
+            newPaneLineageIds,
             paneId: request.payload.paneId,
-          });
+          }));
           this.assertLocklessRecoverableCapacity(surfaceId, rollbackRecord);
+          this.core.confirmRegistryPaneLabels([{ surfaceId, panes: newPaneIds.map((paneId, index) => ({
+            paneId: String(paneId), paneLabel: newPaneLabels[index]!,
+          })) }]);
           return {
             ...panes,
             topologyRevision: Number(
@@ -2575,8 +2577,7 @@ export class SurfaceWsServer {
           rollbackSurface();
           throw error;
         }
-        }),
-      );
+      });
       for (const pane of result.panes) {
         this.core.locklessAuthority.ensureScope(
           locklessPaneScopeId(surfaceId, Number(pane.paneId)),
@@ -2741,7 +2742,7 @@ export class SurfaceWsServer {
     request: Extract<LocklessRequest, { op: "topology.apply" }>,
   ): Promise<LocklessTopologyRealizeResult> {
     const surfaceId = request.payload.surfaceId;
-    return await this.runLifecycleTransaction(() => {
+    return await this.runLifecycleTransactionAsync(async () => {
       const current = this.core.topologyState(surfaceId);
       this.core.locklessAuthority.assertTopologyRevision(
         request.payload.expectedTopologyRevision,
@@ -2753,8 +2754,7 @@ export class SurfaceWsServer {
       );
       const retained = this.core.locklessAuthority.retainedPaneIds(surfaceId);
       const usedIds = new Set([...existing.keys(), ...retained]);
-      const usedLabels = new Set(current.panes.map((pane) => pane.paneLabel));
-      const created = new Map<number, { name: string | null; paneLabel: number }>();
+      const created = new Map<number, { name: string | null; paneLabel: number; paneLineageId: string }>();
       const materialize = (value: unknown): TopologyApplyRequest["payload"]["layout"] => {
         if (!value || typeof value !== "object") {
           throw new SurfaceCoreError(
@@ -2792,15 +2792,12 @@ export class SurfaceWsServer {
                 : {}),
             };
           }
-          const identity = this.core.locklessAuthority.allocatePaneIdentity(
-            usedIds,
-            usedLabels,
-          );
+          const identity = this.core.locklessAuthority.allocatePaneIdentity(usedIds);
           usedIds.add(identity.paneId);
-          usedLabels.add(identity.paneLabel);
           created.set(identity.paneId, {
             name: typeof node.name === "string" ? node.name : null,
-            paneLabel: identity.paneLabel,
+            paneLabel: 0,
+            paneLineageId: `pl_${randomUUID().replaceAll("-", "")}`,
           });
           return {
             paneId:
@@ -2888,6 +2885,9 @@ export class SurfaceWsServer {
         existing.size,
         resultingIds.size,
       );
+      for (const [paneId, entry] of created) {
+        entry.paneLabel = await this.claimPaneLabel(surfaceId, paneId, entry.paneLineageId);
+      }
       const panes = [...resultingIds].map((paneId) => {
         const prior = existing.get(paneId);
         const added = created.get(paneId);
@@ -2910,8 +2910,11 @@ export class SurfaceWsServer {
               topologyRevision:
                 (request.payload.expectedTopologyRevision + 1) as never,
               windowLabel: current.windowLabel,
-            });
+            }, new Map([...created].map(([paneId, entry]) => [paneId, entry.paneLineageId])));
             this.assertLocklessRecoverableCapacity(surfaceId, beforeRecord);
+            this.core.confirmRegistryPaneLabels([{ surfaceId, panes: [...created].map(([paneId, entry]) => ({
+              paneId: String(paneId), paneLabel: entry.paneLabel,
+            })) }]);
             const destroyedPaneTombstones = [];
             for (const payload of removedPanePayloads) {
               const tombstone =
@@ -3278,6 +3281,28 @@ export class SurfaceWsServer {
     }
   }
 
+  private async runLifecycleTransactionAsync<T>(
+    operation: () => Promise<T>,
+    surfaceId: string,
+  ): Promise<T> {
+    const previous = this.lifecycleMutationQueue;
+    let releaseQueue = (): void => {};
+    const current = new Promise<void>((resolve) => { releaseQueue = resolve; });
+    const queued = previous.catch(() => undefined).then(() => current);
+    this.lifecycleMutationQueue = queued;
+    await previous.catch(() => undefined);
+    try {
+      return await this.runSurfaceMutation(surfaceId, () =>
+        this.core.transactionAsync(() =>
+          this.core.locklessAuthority.transactionAsync(operation),
+        ),
+      );
+    } finally {
+      releaseQueue();
+      if (this.lifecycleMutationQueue === queued) this.lifecycleMutationQueue = Promise.resolve();
+    }
+  }
+
   private assertLocklessRecoverableCapacity(
     surfaceId: string,
     before: ReturnType<SurfaceCore["captureSurfaceTombstonePayload"]>,
@@ -3461,12 +3486,14 @@ export class SurfaceWsServer {
 
   private async handleTopologyApply(socket: WebSocket, request: TopologyApplyRequest): Promise<Response> {
     const surfaceId = this.requirePairedSurfaceId(socket);
+    if (request.payload.panes.some((pane) => "paneLabel" in pane)) {
+      throw new SurfaceCoreError("invalid_payload", "topology.apply cannot supply a pane label");
+    }
     persistentServerDiagnostic(
       "info",
       "topology_apply_receive",
       {
         pane_ids: request.payload.panes.map((pane) => Number(pane.paneId)).join(","),
-        pane_labels: request.payload.panes.map((pane) => pane.paneLabel).join(","),
         payload: diagnosticJson(request.payload),
         request_id: request.id,
         surface_id: surfaceId,
@@ -3508,8 +3535,25 @@ export class SurfaceWsServer {
       );
     }
     const payload = await this.runProviderWindowLabelMutation(() => this.runSurfaceMutation(surfaceId, async () => {
+      const livePanes = this.core.getSurface(surfaceId).panes;
+      const newPaneLineages = new Map<number, string>();
+      const authoritativePanes = [];
+      for (const pane of request.payload.panes) {
+        const paneId = Number(pane.paneId);
+        if (!Number.isSafeInteger(paneId) || paneId < 1) {
+          throw new SurfaceCoreError("invalid_payload", "topology.apply paneId must be a positive integer");
+        }
+        const existing = livePanes.get(paneId);
+        const lineageId = existing?.paneLineageId ?? `pl_${randomUUID().replaceAll("-", "")}`;
+        if (!existing) newPaneLineages.set(paneId, lineageId);
+        authoritativePanes.push({
+          ...pane,
+          paneLabel: await this.claimPaneLabel(surfaceId, paneId, lineageId),
+        });
+      }
+      const authoritativePayload = { ...request.payload, panes: authoritativePanes };
       const previousWindowLabel = this.core.surfaceWindowLabel(surfaceId);
-      const removedNativePaneIds = this.core.nativeHostedPaneIdsForTopologyApply(surfaceId, request.payload);
+      const removedNativePaneIds = this.core.nativeHostedPaneIdsForTopologyApply(surfaceId, authoritativePayload);
       const retainedPaneIds = new Set(request.payload.panes.map((pane) => Number(pane.paneId)));
       const retainedNativePaneIds = this.core.panesList(surfaceId).panes
         .filter((pane) => pane.externalNative && retainedPaneIds.has(Number(pane.paneId)))
@@ -3519,7 +3563,10 @@ export class SurfaceWsServer {
         ? this.core.projectCurrentNativePaneGeometry(surfaceId, retainedNativePaneIds)
         : null;
       try {
-        const result = this.core.topologyApply(surfaceId, request.payload);
+        const result = this.core.topologyApply(surfaceId, authoritativePayload, newPaneLineages);
+        this.core.confirmRegistryPaneLabels([{ surfaceId, panes: result.panes.map((pane) => ({
+          paneId: String(pane.paneId), paneLineageId: pane.paneLineageId, paneLabel: pane.paneLabel,
+        })) }]);
         await this.waitForResolvedPaneGeometry(
           surfaceId,
           result.panes.map((pane) => Number(pane.paneId)),

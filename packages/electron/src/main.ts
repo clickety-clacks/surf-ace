@@ -208,6 +208,10 @@ async function createAndStartServer(coreValue: SurfaceCore): Promise<{ port: num
     const candidate = new SurfaceWsServer({
       bindAddress: BIND_ADDRESS,
       capturePaneImage,
+      claimPaneLabel: async (surfaceId, paneId, paneLineageId) => {
+        if (!configuredRegistration) throw new Error("allocator_unavailable");
+        return await configuredRegistration.claimPaneLabel(surfaceId, paneId, paneLineageId);
+      },
       core: coreValue,
       endpointName: endpointName(),
       hostName: shortHostName(),

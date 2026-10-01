@@ -72,6 +72,9 @@ import {
 import { cloneWindowPlacement, type WindowPlacement } from "./window-placement.js";
 
 type ContentPayload = ContentSetRequest["payload"]["content"];
+type AuthoritativeTopologyPayload = Omit<TopologyApplyRequest["payload"], "panes"> & {
+  panes: Array<TopologyApplyRequest["payload"]["panes"][number] & { paneLabel: number }>;
+};
 type ContentDisplay = ContentSetRequest["payload"]["display"];
 type BrowserUrlPayload = { url: string };
 type RenderableContentType = ContentType | "browser_url";
@@ -638,6 +641,7 @@ export class SurfaceCore {
    */
   private readonly inFlightAdmissionSequences = new Set<number>();
   private readonly surfaces = new Map<string, SurfaceState>();
+  private readonly confirmedPaneLabels = new Map<string, { pane: PaneState; label: number }>();
   private readonly listeners = new Set<(event: CoreEvent) => void>();
   private pendingEvents: CoreEvent[] | null = null;
   private readonly logger: { warn?: (message: string) => void };
@@ -1223,8 +1227,6 @@ export class SurfaceCore {
     this.locklessAuthority.assertRetainedTombstoneTransition("admission");
     const surface = this.getSurface(surfaceId);
     const rollback = serializeSurface(surface);
-    const usedLabels = new Set<number>();
-    let nextLabel = 1;
     try {
       if (admissionAttemptSequence !== undefined) {
         this.advanceSurfaceAdmissionAttempt(
@@ -1240,11 +1242,11 @@ export class SurfaceCore {
         bootstrapPane &&
         isPristineProviderBootstrapPane(bootstrapPane, true)
       ) {
-        const identity = this.locklessAuthority.allocatePaneIdentity([], []);
+        const identity = this.locklessAuthority.allocatePaneIdentity([]);
         this.ensureInitialPane(
           surface,
           identity.paneId,
-          identity.paneLabel,
+          0,
         );
       }
       if (!isValidWindowLabel(surface.windowLabel)) {
@@ -1260,14 +1262,6 @@ export class SurfaceCore {
           candidate = alphabeticLabel(++ordinal);
         }
         surface.windowLabel = candidate;
-      }
-      for (const paneId of surface.paneOrder) {
-        const pane = surface.panes.get(paneId)!;
-        if (pane.paneLabel <= 0 || usedLabels.has(pane.paneLabel)) {
-          while (usedLabels.has(nextLabel)) nextLabel += 1;
-          pane.paneLabel = nextLabel;
-        }
-        usedLabels.add(pane.paneLabel);
       }
       const prospective = serializeSurface(surface);
       const surfaceBase = ({
@@ -1546,16 +1540,19 @@ export class SurfaceCore {
           drawings: structuredClone(current.annotations),
           externalNative: pane.externalNative,
           flushInFlight: pane.flushInFlight,
-          label: pane.paneLabel > 0 ? String(pane.paneLabel) : "",
+          label: this.isRegistryPaneConfirmed(surface.surfaceId, paneId, pane)
+            ? String(pane.paneLabel) : "",
           name: pane.name,
           ownerName: provenanceDisplayName(current.display),
           paneId,
-          displayId: visiblePaneAddress(surface.windowLabel, pane.paneLabel),
+          displayId: this.isRegistryPaneConfirmed(surface.surfaceId, paneId, pane)
+            ? visiblePaneAddress(surface.windowLabel, pane.paneLabel) : "",
           provenanceName: provenanceDisplayName(current.display),
           provenance: current.provenance
             ? structuredClone(current.provenance)
             : null,
-          visibleAddress: visiblePaneAddress(surface.windowLabel, pane.paneLabel),
+          visibleAddress: this.isRegistryPaneConfirmed(surface.surfaceId, paneId, pane)
+            ? visiblePaneAddress(surface.windowLabel, pane.paneLabel) : "",
           showDone: pane.annotating,
           toast: pane.toast,
         };
@@ -1791,7 +1788,7 @@ export class SurfaceCore {
             ? { nativeWindowGroup: pane.nativeWindowGroup }
             : {}),
           paneId: pane.paneId as PaneId,
-          paneLabel: pane.paneLabel,
+          paneLabel: this.isRegistryPaneConfirmed(surfaceId, paneId, pane) ? pane.paneLabel : null,
           paneLineageId: pane.paneLineageId,
           viewport: structuredClone(geometry.protocolViewport.viewport),
         };
@@ -2142,7 +2139,6 @@ export class SurfaceCore {
 
   nativeHostedPaneIdsForTopologyApply(surfaceId: string, payload: TopologyApplyRequest["payload"]): number[] {
     const surface = this.getSurface(surfaceId);
-    assertSingleSurfacePaneLabelPayload(payload.panes);
     const retainedPaneIds = new Set(payload.panes.map((pane) => Number(pane.paneId)));
     return [...surface.panes.values()]
       .filter((pane) => pane.externalNative)
@@ -2280,7 +2276,7 @@ export class SurfaceCore {
           currentRevision: current.revision as Revision,
           ...(currentTarget ? { currentTarget } : {}),
           paneId: pane.paneId as PaneId,
-          paneLabel: pane.paneLabel,
+          paneLabel: this.isRegistryPaneConfirmed(surfaceId, paneId, pane) ? pane.paneLabel : null,
           paneLineageId: pane.paneLineageId,
         };
       }),
@@ -2288,7 +2284,7 @@ export class SurfaceCore {
     };
   }
 
-  topologyState(surfaceId: string): TopologyApplyRequest["payload"] {
+  topologyState(surfaceId: string): AuthoritativeTopologyPayload {
     const surface = this.getSurface(surfaceId);
     return {
       layout: surfaceLayoutToTopologyLayout(collapseLayout(surface.layout)),
@@ -2303,6 +2299,28 @@ export class SurfaceCore {
       topologyRevision: surface.topologyRevision as TopologyRevision,
       windowLabel: surface.windowLabel,
     };
+  }
+
+  publicTopologyState(surfaceId: string) {
+    const topology = this.topologyState(surfaceId);
+    const surface = this.getSurface(surfaceId);
+    return {
+      ...topology,
+      panes: topology.panes.map((entry) => {
+        const pane = surface.panes.get(Number(entry.paneId))!;
+        return {
+          ...entry,
+          paneLabel: this.isRegistryPaneConfirmed(surfaceId, pane.paneId, pane)
+            ? pane.paneLabel : null,
+        };
+      }),
+    };
+  }
+
+  visiblePaneLabel(surfaceId: string, paneId: number): number | null {
+    const pane = this.getSurface(surfaceId).panes.get(paneId);
+    return pane && this.isRegistryPaneConfirmed(surfaceId, paneId, pane)
+      ? pane.paneLabel : null;
   }
 
   applyWindowLabelOnly(surfaceId: string, windowLabel: string): void {
@@ -2336,6 +2354,79 @@ export class SurfaceCore {
         this.emit({ surfaceId, type: "surface-changed" });
       }
     });
+  }
+
+  applyRegistryPaneLabels(assignments: Array<{
+    surfaceId: string;
+    panes: Array<{ paneId: string; paneLineageId: string; paneLabel: number }>;
+  }>): void {
+    const proposed = new Map<string, number>();
+    const labels = new Set<number>();
+    for (const assignment of assignments) {
+      const surface = this.getSurface(assignment.surfaceId);
+      if (assignment.panes.length !== surface.panes.size) {
+        throw new SurfaceCoreError("invalid_payload", "Registry omitted a live pane");
+      }
+      for (const pane of assignment.panes) {
+        const paneId = Number(pane.paneId);
+        const key = `${assignment.surfaceId}\0${paneId}`;
+        if (!Number.isSafeInteger(paneId) || !surface.panes.has(paneId) ||
+            surface.panes.get(paneId)?.paneLineageId !== pane.paneLineageId ||
+            !Number.isSafeInteger(pane.paneLabel) || pane.paneLabel < 1 ||
+            proposed.has(key) || labels.has(pane.paneLabel)) {
+          throw new SurfaceCoreError("invalid_payload", "Invalid or duplicate registry pane assignment");
+        }
+        proposed.set(key, pane.paneLabel);
+        labels.add(pane.paneLabel);
+      }
+    }
+    this.transaction(() => {
+      for (const [key, paneLabel] of proposed) {
+        const [surfaceId, paneIdText] = key.split("\0");
+        this.getSurface(surfaceId!).panes.get(Number(paneIdText))!.paneLabel = paneLabel;
+        this.emit({ surfaceId: surfaceId!, type: "surface-changed" });
+      }
+    });
+  }
+
+  confirmRegistryPaneLabels(assignments: Array<{
+    surfaceId: string;
+    panes: Array<{ paneId: string; paneLineageId?: string; paneLabel: number }>;
+  }>): void {
+    for (const [key, confirmation] of this.confirmedPaneLabels) {
+      const [surfaceId, paneIdText] = key.split("\0");
+      if (!surfaceId || this.surfaces.get(surfaceId)?.panes.get(Number(paneIdText)) !== confirmation.pane) {
+        this.confirmedPaneLabels.delete(key);
+      }
+    }
+    for (const assignment of assignments) {
+      for (const pane of assignment.panes) {
+        const paneId = Number(pane.paneId);
+        const material = this.getSurface(assignment.surfaceId).panes.get(paneId);
+        if (!material || !Number.isSafeInteger(pane.paneLabel) || pane.paneLabel < 1 ||
+            material.paneLabel !== pane.paneLabel ||
+            (pane.paneLineageId && material.paneLineageId !== pane.paneLineageId)) {
+          throw new SurfaceCoreError("invalid_payload", "Registry pane confirmation changed before projection");
+        }
+        this.confirmedPaneLabels.set(`${assignment.surfaceId}\0${paneId}`, {
+          pane: material, label: pane.paneLabel,
+        });
+      }
+      this.emit({ surfaceId: assignment.surfaceId, type: "surface-changed" });
+    }
+  }
+
+  clearRegistryPaneConfirmations(): void {
+    if (this.confirmedPaneLabels.size === 0) return;
+    this.confirmedPaneLabels.clear();
+    for (const surface of this.surfaces.values()) {
+      this.emit({ surfaceId: surface.surfaceId, type: "surface-changed" });
+    }
+  }
+
+  private isRegistryPaneConfirmed(surfaceId: string, paneId: number, pane: PaneState): boolean {
+    const confirmed = this.confirmedPaneLabels.get(`${surfaceId}\0${paneId}`);
+    return confirmed?.pane === pane && confirmed.label === pane.paneLabel;
   }
 
   assertProviderWindowLabelAvailable(surfaceId: string, windowLabel: string): void {
@@ -2404,13 +2495,14 @@ export class SurfaceCore {
 
   topologyApply(
     surfaceId: string,
-    payload: TopologyApplyRequest["payload"],
+    payload: AuthoritativeTopologyPayload,
+    newPaneLineageIds?: Map<number, string>,
   ): TopologyApplyResponse["payload"] {
     const surface = this.getSurface(surfaceId);
     assertValidWindowLabel(payload.windowLabel);
     this.assertWindowLabelAvailable(surfaceId, payload.windowLabel);
     assertSingleSurfacePaneLabelPayload(payload.panes);
-    const paneStateById = new Map<number, TopologyApplyRequest["payload"]["panes"][number]>();
+    const paneStateById = new Map<number, AuthoritativeTopologyPayload["panes"][number]>();
     for (const pane of payload.panes) {
       paneStateById.set(Number(pane.paneId), pane);
     }
@@ -2424,7 +2516,9 @@ export class SurfaceCore {
     for (const paneId of activePaneIds) {
       const summary = paneStateById.get(paneId)!;
       const existingPane = existingPanes.get(paneId);
-      const pane = existingPane ?? createPaneState(paneId, summary.paneLabel, this.now());
+      const pane = existingPane ?? createPaneState(
+        paneId, summary.paneLabel, this.now(), newPaneLineageIds?.get(paneId),
+      );
       pane.paneLabel = summary.paneLabel;
       pane.name = summary.name;
       nextPanes.set(paneId, pane);
@@ -2761,7 +2855,7 @@ export class SurfaceCore {
 
   paneSplit(
     surfaceId: string,
-    payload: { count: number; direction: "horizontal" | "vertical"; newPaneIds: number[]; newPaneLabels: number[]; paneId: number },
+    payload: { count: number; direction: "horizontal" | "vertical"; newPaneIds: number[]; newPaneLabels: number[]; newPaneLineageIds?: string[]; paneId: number },
   ): { panes: PaneSplitState[] } {
     const surface = this.getSurface(surfaceId);
     const sourcePane = this.expectPane(surfaceId, payload.paneId);
@@ -2785,7 +2879,12 @@ export class SurfaceCore {
       }
     }
 
-    const newPanes = newPaneIds.map((paneId, index) => createPaneState(paneId, newPaneLabels[index]!, this.now()));
+    if (payload.newPaneLineageIds && payload.newPaneLineageIds.length !== newPaneIds.length) {
+      throw new SurfaceCoreError("invalid_payload", "pane.split lineage count mismatch");
+    }
+    const newPanes = newPaneIds.map((paneId, index) => createPaneState(
+      paneId, newPaneLabels[index]!, this.now(), payload.newPaneLineageIds?.[index],
+    ));
     for (const pane of newPanes) {
       surface.panes.set(pane.paneId, pane);
       surface.paneOrder.push(pane.paneId);
@@ -3040,7 +3139,7 @@ export class SurfaceCore {
   ): { paneId: number; paneLabel: number; topologyRevision: number } {
     const surface = this.getSurface(surfaceId);
     this.expectPane(surfaceId, anchorPaneId);
-    let payload = structuredClone(tombstonePayload);
+    const payload = structuredClone(tombstonePayload);
     if (surface.panes.has(payload.pane.paneId)) {
       throw new SurfaceCoreError(
         "invalid_operation",
@@ -3052,12 +3151,10 @@ export class SurfaceCore {
         (pane) => pane.paneLabel === payload.pane.paneLabel,
       )
     ) {
-      const usedLabels = new Set(
-        [...surface.panes.values()].map((pane) => pane.paneLabel),
+      throw new SurfaceCoreError(
+        "invalid_operation",
+        "Restored pane label conflicts with a live pane",
       );
-      let nextLabel = 1;
-      while (usedLabels.has(nextLabel)) nextLabel += 1;
-      payload.pane.paneLabel = nextLabel;
     }
     const serialized = serializeSurface(surface);
     const restoredSurface = deserializeSurface(
@@ -3745,7 +3842,7 @@ type PaneSplitState = {
   paneLabel: number;
 };
 
-function createPaneState(paneId: number, paneLabel: number, now: number): PaneState {
+function createPaneState(paneId: number, paneLabel: number, now: number, paneLineageId?: string): PaneState {
   return {
     annotating: false,
     annotationFrameOpen: false,
@@ -3774,7 +3871,7 @@ function createPaneState(paneId: number, paneLabel: number, now: number): PaneSt
     nativeWindowGroup: null,
     paneId,
     paneLabel,
-    paneLineageId: `pl_${randomUUID().replaceAll("-", "")}`,
+    paneLineageId: paneLineageId ?? `pl_${randomUUID().replaceAll("-", "")}`,
     pendingAnnotationCommit: false,
     snapshot: {
       bounds: null,
@@ -3850,7 +3947,7 @@ function deserializeSurface(record: PersistentSurfaceRecord, now: number): Surfa
     }
     const pane = createPaneState(
       paneRecord.paneId,
-      Number.isInteger(paneRecord.paneLabel) ? paneRecord.paneLabel : paneRecord.paneId,
+      Number.isInteger(paneRecord.paneLabel) && paneRecord.paneLabel > 0 ? paneRecord.paneLabel : 0,
       now,
     );
     pane.annotating = Boolean(paneRecord.annotating);

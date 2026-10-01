@@ -140,7 +140,9 @@ enum SurfAceLocklessTopologyOperations {
         paneId: Int64,
         count: Int64,
         direction: String,
-        expectedTopologyRevision: Int64
+        expectedTopologyRevision: Int64,
+        assignedPaneLabels: [Int64: Int64]? = nil,
+        assignedPaneLineages: [Int64: String]? = nil
     ) throws -> SurfAceLocklessPaneSplitResult {
         try atomically(&state) { candidate in
             guard count >= 2, isDirection(direction) else { throw Error.invalidTopology("pane_split") }
@@ -156,14 +158,24 @@ enum SurfAceLocklessTopologyOperations {
             var newPaneLabels: [Int64] = []
             for _ in 1..<count {
                 let identity = allocatePaneIdentity(surface: &surface)
-                let pane = emptyPane(surfaceId: surfaceId, paneId: identity.id, paneLabel: identity.label)
-                surface.panes[String(identity.id)] = pane
-                candidate.scopes[paneScopeId(surfaceId, identity.id)] = emptyScope(
-                    id: paneScopeId(surfaceId, identity.id), kind: "pane", controllers: candidate.controllers
+                let label: Int64
+                if let assignedPaneLabels {
+                    guard let assigned = assignedPaneLabels[identity], assigned > 0 else {
+                        throw Error.invalidTopology("allocator_pane_assignment_missing")
+                    }
+                    label = assigned
+                } else {
+                    throw Error.invalidTopology("allocator_pane_assignment_missing")
+                }
+                let pane = emptyPane(surfaceId: surfaceId, paneId: identity, paneLabel: label,
+                    paneLineageId: assignedPaneLineages?[identity])
+                surface.panes[String(identity)] = pane
+                candidate.scopes[paneScopeId(surfaceId, identity)] = emptyScope(
+                    id: paneScopeId(surfaceId, identity), kind: "pane", controllers: candidate.controllers
                 )
-                newPaneIds.append(identity.id)
-                newPaneLabels.append(identity.label)
-                children.append(.object(["paneId": .integer(identity.id), "type": .string("pane")]))
+                newPaneIds.append(identity)
+                newPaneLabels.append(label)
+                children.append(.object(["paneId": .integer(identity), "type": .string("pane")]))
             }
             let replacement: SurfAceLocklessJSON = .object([
                 "children": .array(children), "direction": .string(direction), "type": .string("split"),
@@ -265,15 +277,14 @@ enum SurfAceLocklessTopologyOperations {
             guard let index = surface.paneTombstones.firstIndex(where: { $0.tombstoneId == tombstoneId }) else {
                 throw Error.tombstoneNotFound(tombstoneId)
             }
-            var tombstone = surface.paneTombstones[index]
+            let tombstone = surface.paneTombstones[index]
             guard surface.panes[String(tombstone.pane.paneId)] == nil else {
                 throw Error.invalidAuthorityState("restored_pane_identity_live")
             }
-            if surface.panes.values.contains(where: { $0.paneLabel == tombstone.pane.paneLabel }) {
-                tombstone.pane.paneLabel = allocatePaneLabel(surface: &surface)
-            } else {
-                surface.nextPaneLabel = max(surface.nextPaneLabel, tombstone.pane.paneLabel + 1)
+            guard !surface.panes.values.contains(where: { $0.paneLabel == tombstone.pane.paneLabel }) else {
+                throw Error.invalidAuthorityState("restored_pane_label_conflict")
             }
+            surface.nextPaneLabel = max(surface.nextPaneLabel, tombstone.pane.paneLabel + 1)
             let replacement: SurfAceLocklessJSON = .object([
                 "children": .array([
                     .object(["paneId": .integer(anchorPaneId), "type": .string("pane")]),
@@ -304,14 +315,18 @@ enum SurfAceLocklessTopologyOperations {
         targetPaneId: Int64?,
         desired: SurfAceLocklessJSON,
         allowDestroyPaneIds: [Int64],
-        expectedTopologyRevision: Int64
+        expectedTopologyRevision: Int64,
+        assignedPaneLabels: [Int64: Int64]? = nil,
+        assignedPaneLineages: [Int64: String]? = nil
     ) throws -> SurfAceLocklessTopologyApplyResult {
         try atomically(&state) { candidate in
             var surface = try liveSurface(candidate, surfaceId)
             try assertTopology(expectedTopologyRevision, surface)
             let existingIds = Set(surface.panes.values.map(\.paneId))
             var created: [Int64: SurfAceLocklessPaneMaterial] = [:]
-            let realizedDesired = try realizeDesired(desired, surfaceId: surfaceId, surface: &surface, created: &created)
+            let realizedDesired = try realizeDesired(desired, surfaceId: surfaceId, surface: &surface,
+                created: &created, assignedPaneLabels: assignedPaneLabels,
+                assignedPaneLineages: assignedPaneLineages)
             let realized: SurfAceLocklessJSON
             if let targetPaneId {
                 guard existingIds.contains(targetPaneId),
@@ -387,11 +402,11 @@ enum SurfAceLocklessTopologyOperations {
             try assertPaneCreation(current: 0, prospective: 1, limits: candidate.limits)
             let surfaceId = allocateSurfaceId(&candidate)
             let windowLabel = allocateWindowLabel(&candidate)
-            let pane = emptyPane(surfaceId: surfaceId, paneId: 1, paneLabel: 1)
+            let pane = emptyPane(surfaceId: surfaceId, paneId: 1, paneLabel: 0)
             let surface = SurfAceLocklessSurfaceMaterial(
                 name: "Surf Ace \(windowLabel.uppercased())",
                 nativeRestoreMaterial: .object(["placement": placement ?? .null]),
-                nextPaneId: 2, nextPaneLabel: 2, paneTombstones: [], panes: ["1": pane], sceneKeys: [],
+                nextPaneId: 2, nextPaneLabel: 1, paneTombstones: [], panes: ["1": pane], sceneKeys: [],
                 surfaceId: surfaceId, surfaceRevision: 1,
                 topology: .object(["paneId": .integer(1), "type": .string("pane")]),
                 topologyRevision: 0, windowLabel: windowLabel
@@ -717,8 +732,9 @@ private extension SurfAceLocklessTopologyOperations {
         return overflow ? .max : sum
     }
 
-    static func emptyPane(surfaceId: String, paneId: Int64, paneLabel: Int64) -> SurfAceLocklessPaneMaterial {
-        let lineage = "pl_\(surfaceId)_\(paneId)"
+    static func emptyPane(surfaceId: String, paneId: Int64, paneLabel: Int64,
+                          paneLineageId: String? = nil) -> SurfAceLocklessPaneMaterial {
+        let lineage = paneLineageId ?? "pl_\(surfaceId)_\(paneId)"
         let entry = SurfAceLocklessHistoryEntry(
             annotations: .object(["drawingData": .string(""), "strokesById": .object([:])]),
             content: .object(["interactive": .bool(true), "scrollable": .bool(true)]),
@@ -738,17 +754,12 @@ private extension SurfAceLocklessTopologyOperations {
         return .init(cursors: cursors, liveFrames: [:], nextSequence: 1, records: [], scopeId: id, scopeKind: kind)
     }
 
-    static func allocatePaneIdentity(surface: inout SurfAceLocklessSurfaceMaterial) -> (id: Int64, label: Int64) {
+    static func allocatePaneIdentity(surface: inout SurfAceLocklessSurfaceMaterial) -> Int64 {
         let retainedIds = Set(surface.paneTombstones.map(\.pane.paneId))
         let liveIds = Set(surface.panes.values.map(\.paneId))
         while retainedIds.contains(surface.nextPaneId) || liveIds.contains(surface.nextPaneId) { surface.nextPaneId += 1 }
         let id = surface.nextPaneId; surface.nextPaneId += 1
-        return (id, allocatePaneLabel(surface: &surface))
-    }
-    static func allocatePaneLabel(surface: inout SurfAceLocklessSurfaceMaterial) -> Int64 {
-        let used = Set(surface.panes.values.map(\.paneLabel))
-        while used.contains(surface.nextPaneLabel) { surface.nextPaneLabel += 1 }
-        let label = surface.nextPaneLabel; surface.nextPaneLabel += 1; return label
+        return id
     }
     static func allocateSurfaceId(_ state: inout SurfAceLocklessAuthorityState) -> String {
         let retained = Set(state.surfaceTombstones.map(\.surface.surfaceId))
@@ -802,7 +813,9 @@ private extension SurfAceLocklessTopologyOperations {
         _ node: SurfAceLocklessJSON,
         surfaceId: String,
         surface: inout SurfAceLocklessSurfaceMaterial,
-        created: inout [Int64: SurfAceLocklessPaneMaterial]
+        created: inout [Int64: SurfAceLocklessPaneMaterial],
+        assignedPaneLabels: [Int64: Int64]? = nil,
+        assignedPaneLineages: [Int64: String]? = nil
     ) throws -> SurfAceLocklessJSON {
         guard case .object(let object) = node, case .string(let type) = object["type"] else {
             throw Error.invalidTopology("desired_node")
@@ -813,17 +826,29 @@ private extension SurfAceLocklessTopologyOperations {
                 return .object(["paneId": .integer(explicitId), "type": .string("pane")])
             }
             let identity = allocatePaneIdentity(surface: &surface)
-            var pane = emptyPane(surfaceId: surfaceId, paneId: identity.id, paneLabel: identity.label)
+            let label: Int64
+            if let assignedPaneLabels {
+                guard let assigned = assignedPaneLabels[identity], assigned > 0 else {
+                    throw Error.invalidTopology("allocator_pane_assignment_missing")
+                }
+                label = assigned
+            } else {
+                throw Error.invalidTopology("allocator_pane_assignment_missing")
+            }
+            var pane = emptyPane(surfaceId: surfaceId, paneId: identity, paneLabel: label,
+                paneLineageId: assignedPaneLineages?[identity])
             if case .string(let name) = object["name"] { pane.name = name }
-            created[identity.id] = pane
-            return .object(["paneId": .integer(identity.id), "type": .string("pane")])
+            created[identity] = pane
+            return .object(["paneId": .integer(identity), "type": .string("pane")])
         }
         guard type == "split", case .string(let direction) = object["direction"], isDirection(direction),
               case .array(let children) = object["children"], children.count >= 2 else {
             throw Error.invalidTopology("desired_split")
         }
         return .object([
-            "children": .array(try children.map { try realizeDesired($0, surfaceId: surfaceId, surface: &surface, created: &created) }),
+            "children": .array(try children.map { try realizeDesired($0, surfaceId: surfaceId,
+                surface: &surface, created: &created, assignedPaneLabels: assignedPaneLabels,
+                assignedPaneLineages: assignedPaneLineages) }),
             "direction": .string(direction), "type": .string("split"),
         ])
     }

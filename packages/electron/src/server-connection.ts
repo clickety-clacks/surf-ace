@@ -34,6 +34,11 @@ export class ServerConnection {
     }
   }
 
+  async claimPaneLabel(surfaceId: string, paneId: number, paneLineageId: string): Promise<number> {
+    if (this.status !== "connected" || !this.selected) throw new Error("allocator_unavailable");
+    return await this.selected.claimPaneLabel(surfaceId, paneId, paneLineageId);
+  }
+
   synchronize(): Promise<void> {
     const run = this.pending.then(async () => {
       if (this.stopped) return;

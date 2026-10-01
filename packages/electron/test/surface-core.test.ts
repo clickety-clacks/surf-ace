@@ -3802,3 +3802,30 @@ test("window label sets validate before mutation and publish only final labels",
   assert.deepEqual([core.getSurface(first.surfaceId).windowLabel, core.getSurface(second.surfaceId).windowLabel], ["b", "a"]);
   assert.equal(seen.length, 2);
 });
+
+test("pane number projections require exact registry confirmation", () => {
+  const core = new SurfaceCore({ persistentState: { primarySurfaceId: null, version: 1 } });
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  const pane = [...surface.panes.values()][0]!;
+  const assignment = { surfaceId: surface.surfaceId, panes: [{
+    paneId: String(pane.paneId), paneLineageId: pane.paneLineageId, paneLabel: 97,
+  }] };
+
+  assert.equal(core.panesList(surface.surfaceId).panes[0]?.paneLabel, null);
+  assert.equal(core.pairState(surface.surfaceId).panes[0]?.paneLabel, null);
+  assert.equal(core.publicTopologyState(surface.surfaceId).panes[0]?.paneLabel, null);
+  assert.throws(() => core.confirmRegistryPaneLabels([{ ...assignment, panes: [{
+    ...assignment.panes[0]!, paneLabel: 0,
+  }] }]), /confirmation changed/);
+
+  core.applyRegistryPaneLabels([assignment]);
+  core.confirmRegistryPaneLabels([assignment]);
+  assert.equal(core.panesList(surface.surfaceId).panes[0]?.paneLabel, 97);
+  assert.equal(core.pairState(surface.surfaceId).panes[0]?.paneLabel, 97);
+  assert.equal(core.publicTopologyState(surface.surfaceId).panes[0]?.paneLabel, 97);
+
+  core.clearRegistryPaneConfirmations();
+  assert.equal(core.panesList(surface.surfaceId).panes[0]?.paneLabel, null);
+  assert.equal(core.pairState(surface.surfaceId).panes[0]?.paneLabel, null);
+  assert.equal(core.publicTopologyState(surface.surfaceId).panes[0]?.paneLabel, null);
+});

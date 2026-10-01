@@ -589,12 +589,18 @@ export type TopologyPaneState = {
   name: string | null;
 };
 
+export type TopologyPaneRequestState = Omit<TopologyPaneState, "paneLabel">;
+
+export type VisibleTopologyPaneState = Omit<TopologyPaneState, "paneLabel"> & {
+  paneLabel: number | null;
+};
+
 export type TopologyApplyRequest = RequestBase<"topology.apply"> & {
   payload: {
     topologyRevision: TopologyRevision;
     windowLabel: string;
     layout: TopologyLayoutNode;
-    panes: TopologyPaneState[];
+    panes: TopologyPaneRequestState[];
   };
 };
 
@@ -768,7 +774,7 @@ export type PanesListResponse = ResponseBase<"panes.list"> & {
     nativeCompositorStatus?: NativePaneCompositorRuntimeStatus;
     panes: Array<{
       paneId: PaneId;
-      paneLabel: number;
+      paneLabel: number | null;
       paneLineageId?: string;
       name: string | null;
       activeContentId: ContentId | null;
@@ -1020,7 +1026,7 @@ export type TopologyChangedEvent = EventBase<"event.topology_changed"> & {
     surfaceId: SurfaceId;
     topologyRevision: TopologyRevision;
     layout: TopologyLayoutNode;
-    panes: TopologyPaneState[];
+    panes: VisibleTopologyPaneState[];
   };
 };
 
@@ -1034,7 +1040,7 @@ export type PaneCreatedEvent = EventBase<"event.pane_created"> & {
   payload: {
     surfaceId: SurfaceId;
     paneId: PaneId;
-    paneLabel: number;
+    paneLabel: number | null;
     parentPaneId?: PaneId | null;
     fromSplit: boolean;
   };
