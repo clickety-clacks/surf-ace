@@ -1100,6 +1100,13 @@ final class SurfAceRuntime {
         guard let pane = pane(surfaceId: surfaceId, paneId: paneId) else { return }
         activateKeyboardPane(surfaceId: surfaceId, paneId: paneId)
         let wasEnabled = pane.annotationMode
+        if enabled && !wasEnabled {
+            // Same-context re-entry before the commit event is emitted keeps
+            // the current frame open. Once drainPendingAnnotationCommit has
+            // cleared this flag and sent the event, later re-entry starts the
+            // next frame.
+            pane.pendingAnnotationCommit = false
+        }
         pane.annotationMode = enabled
         pane.fingerDrawEnabled = enabled && fingerDrawEnabled
         pane.bridge?.setInteraction(annotationMode: pane.annotationMode, fingerDrawEnabled: pane.fingerDrawEnabled)
@@ -1267,6 +1274,12 @@ final class SurfAceRuntime {
             }
             try projectLocklessAuthorityState(await adapter.snapshot())
             guard let projectedPane = self.pane(surfaceId: surfaceId, paneId: paneId) else { return }
+            if enabled && !wasEnabled {
+                // Cancel only a not-yet-emitted commit. After the event has
+                // been emitted, pendingAnnotationCommit is already false and
+                // this transition begins a new frame.
+                projectedPane.pendingAnnotationCommit = false
+            }
             activateKeyboardPane(surfaceId: surfaceId, paneId: paneId)
             projectedPane.fingerDrawEnabled = enabled && fingerDrawEnabled
             projectedPane.bridge?.setInteraction(

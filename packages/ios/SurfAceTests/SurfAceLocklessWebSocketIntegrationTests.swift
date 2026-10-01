@@ -4,6 +4,161 @@ import XCTest
 
 @MainActor
 final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
+    func testAnnotationFrameReentryUsesTheExplicitCommitBoundary() async throws {
+        let identifier = UUID().uuidString
+        let suiteName = "SurfAceAnnotationCommitReentry-\(identifier)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        let stateURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(suiteName).json")
+        let flushGate = SurfAceAnnotationFlushSendGate()
+        addTeardownBlock {
+            defaults.removePersistentDomain(forName: suiteName)
+            try? FileManager.default.removeItem(at: stateURL)
+        }
+
+        let runtime = SurfAceRuntime(
+            userDefaults: defaults,
+            locklessStateURL: stateURL,
+            outboundSendPreparation: { text, priority in
+                await flushGate.prepareSend(text: text, priority: priority)
+            }
+        )
+        await runtime.start()
+        addTeardownBlock { await runtime.stop() }
+        let port = try XCTUnwrap(UInt16(exactly: runtime.serverPort))
+        let registeredSurface = await runtime.registerSurfaceForScene(
+            sceneKey: "annotation-commit-reentry"
+        )
+        let surface = try XCTUnwrap(registeredSurface)
+        let pane = try XCTUnwrap(surface.panes.first)
+        let socket = socket(port: port)
+        socket.resume()
+        try await send(socket, op: "surfaces.list", id: "annotation-discovery", payload: [:])
+        _ = try await receive(socket, matchingId: "annotation-discovery")
+        let pairResponse = try await pair(
+            socket,
+            id: "annotation-pair",
+            controllerId: "annotation-controller",
+            surfaceId: surface.surfaceId
+        )
+        XCTAssertEqual(pairResponse["ok"] as? Bool, true)
+        try await send(socket, op: "content.set", id: "annotation-content", payload: [
+            "content": ["html": "<main>same annotation context</main>"],
+            "contentId": "annotation-content-id",
+            "contentType": "html",
+            "friendlyChatName": "Annotation Commit Test",
+            "paneId": pane.paneId,
+            "surfaceId": surface.surfaceId,
+        ])
+        _ = try await receive(socket, matchingId: "annotation-content")
+
+        runtime.setAnnotationMode(
+            surfaceId: surface.surfaceId,
+            paneId: pane.paneId,
+            enabled: true,
+            fingerDrawEnabled: false
+        )
+        for _ in 0..<100 where !pane.annotationMode { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertTrue(pane.annotationMode)
+        queueAnnotationTestStroke("before-reentry", on: pane)
+
+        runtime.setAnnotationMode(
+            surfaceId: surface.surfaceId,
+            paneId: pane.paneId,
+            enabled: false,
+            fingerDrawEnabled: false
+        )
+        for _ in 0..<100 where !pane.isDrawingFlushSending { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertTrue(pane.isDrawingFlushSending)
+        let flushWasHeld = await flushGate.waitUntilHeld()
+        XCTAssertTrue(flushWasHeld)
+        XCTAssertTrue(pane.pendingAnnotationCommit)
+        XCTAssertTrue(pane.isDrawingFlushSending)
+
+        // Re-enter while the final drawing flush is held and before the
+        // explicit commit event can be emitted. This must keep the same frame.
+        runtime.setAnnotationMode(
+            surfaceId: surface.surfaceId,
+            paneId: pane.paneId,
+            enabled: true,
+            fingerDrawEnabled: false
+        )
+        for _ in 0..<100 where !pane.annotationMode {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertTrue(pane.annotationMode)
+        XCTAssertFalse(pane.pendingAnnotationCommit)
+        await flushGate.release()
+
+        let firstFlush = try await receive(socket, matchingOp: "event.drawing_flush")
+        XCTAssertEqual(payload(firstFlush)["contentId"] as? String, "annotation-content-id")
+        XCTAssertEqual(
+            ((payload(firstFlush)["strokes"] as? [[String: Any]])?.first?["strokeId"] as? String),
+            "before-reentry"
+        )
+
+        // A later same-context session continues the pre-commit frame. Its
+        // flush must arrive before the first explicit commit event.
+        queueAnnotationTestStroke("after-reentry", on: pane)
+        runtime.setAnnotationMode(
+            surfaceId: surface.surfaceId,
+            paneId: pane.paneId,
+            enabled: false,
+            fingerDrawEnabled: false
+        )
+        var precedingSecondFlush: [String] = []
+        var secondFlush: [String: Any]?
+        for _ in 0..<20 {
+            let event = try await receiveNext(socket)
+            let eventPayload = payload(event)
+            let strokeIds = (eventPayload["strokes"] as? [[String: Any]])?.compactMap {
+                $0["strokeId"] as? String
+            } ?? []
+            if event["op"] as? String == "event.drawing_flush",
+               strokeIds.contains("after-reentry") {
+                secondFlush = event
+                break
+            }
+            precedingSecondFlush.append(event["op"] as? String ?? "")
+        }
+        XCTAssertNotNil(secondFlush, "the resumed frame must flush its later stroke")
+        XCTAssertFalse(
+            precedingSecondFlush.contains("event.annotation_committed"),
+            "same-context re-entry before commit must not seal the frame"
+        )
+        let firstCommit = try await receive(socket, matchingOp: "event.annotation_committed")
+        XCTAssertEqual(payload(firstCommit)["contentId"] as? String, "annotation-content-id")
+
+        // After the explicit event, a new same-context session has its own
+        // commit boundary and must emit a fresh flush/commit pair.
+        runtime.setAnnotationMode(
+            surfaceId: surface.surfaceId,
+            paneId: pane.paneId,
+            enabled: true,
+            fingerDrawEnabled: false
+        )
+        for _ in 0..<100 where !pane.annotationMode {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertTrue(pane.annotationMode)
+        queueAnnotationTestStroke("after-commit", on: pane)
+        runtime.setAnnotationMode(
+            surfaceId: surface.surfaceId,
+            paneId: pane.paneId,
+            enabled: false,
+            fingerDrawEnabled: false
+        )
+        let thirdFlush = try await receive(socket, matchingOp: "event.drawing_flush")
+        XCTAssertEqual(
+            (payload(thirdFlush)["strokes"] as? [[String: Any]])?.first?["strokeId"] as? String,
+            "after-commit"
+        )
+        let secondCommit = try await receive(socket, matchingOp: "event.annotation_committed")
+        XCTAssertEqual(payload(secondCommit)["contentId"] as? String, "annotation-content-id")
+        socket.cancel(with: .normalClosure, reason: nil)
+    }
+
     func testResumeBarrierCannotRegisterInsideAnActiveDeliveryTurn() async throws {
         let suiteName = "SurfAceLocklessDeliveryGateTests-\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
@@ -569,25 +724,7 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         matchingOp: String? = nil
     ) async throws -> [String: Any] {
         for _ in 0..<20 {
-            let message = try await withThrowingTaskGroup(
-                of: URLSessionWebSocketTask.Message.self
-            ) { group in
-                group.addTask { try await socket.receive() }
-                group.addTask {
-                    try await Task.sleep(for: .seconds(5))
-                    throw SurfAceLocklessIntegrationError.messageTimeout
-                }
-                let first = try await group.next()!
-                group.cancelAll()
-                return first
-            }
-            let data: Data
-            switch message {
-            case .string(let text): data = Data(text.utf8)
-            case .data(let bytes): data = bytes
-            @unknown default: continue
-            }
-            guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+            let object = try await receiveNext(socket)
             if let matchingId, object["id"] as? String != matchingId { continue }
             if let matchingOp, object["op"] as? String != matchingOp { continue }
             return object
@@ -596,8 +733,56 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         return [:]
     }
 
+    private func receiveNext(_ socket: URLSessionWebSocketTask) async throws -> [String: Any] {
+        for _ in 0..<20 {
+            let message = try await withThrowingTaskGroup(
+                of: URLSessionWebSocketTask.Message.self
+            ) { group in
+                group.addTask { try await socket.receive() }
+                group.addTask {
+                    try await Task.sleep(for: .seconds(5))
+                    throw SurfAceLocklessIntegrationError.messageTimeout
+                }
+                do {
+                    let first = try await group.next()!
+                    group.cancelAll()
+                    return first
+                } catch {
+                    socket.cancel(with: .goingAway, reason: nil)
+                    group.cancelAll()
+                    throw error
+                }
+            }
+            let data: Data
+            switch message {
+            case .string(let text): data = Data(text.utf8)
+            case .data(let bytes): data = bytes
+            @unknown default: continue
+            }
+            if let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                return object
+            }
+        }
+        throw SurfAceLocklessIntegrationError.messageTimeout
+    }
+
     private func payload(_ response: [String: Any]) -> [String: Any] {
         response["payload"] as? [String: Any] ?? [:]
+    }
+
+    private func annotationTestStroke(_ strokeId: String) -> SurfAceStroke {
+        SurfAceStroke(
+            strokeId: strokeId,
+            points: [SurfAceStrokePoint(x: 10, y: 20, pressure: 1, timestamp: 100)],
+            tool: "finger"
+        )
+    }
+
+    private func queueAnnotationTestStroke(_ strokeId: String, on pane: SurfAcePaneModel) {
+        let stroke = annotationTestStroke(strokeId)
+        pane.pendingFlushStrokes = [stroke]
+        pane.firstPendingStrokeAt = stroke.points.first?.timestamp
+        pane.lastPendingStrokeAt = stroke.points.last?.timestamp
     }
 
 }
@@ -658,6 +843,37 @@ private actor SurfAceLocklessPairResponseSendGate {
         await withCheckedContinuation { continuation in
             heldWaiters.append(continuation)
         }
+    }
+
+    func release() async {
+        await releaseGate.open()
+    }
+}
+
+private actor SurfAceAnnotationFlushSendGate {
+    private var held = false
+    private var heldWaiters: [CheckedContinuation<Void, Never>] = []
+    private let releaseGate = SurfAceLocklessTestGate()
+
+    func prepareSend(text: String, priority: SurfAceOutboundSender.Priority) async {
+        guard priority == .event,
+              let data = text.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              object["op"] as? String == "event.drawing_flush",
+              !held else { return }
+        held = true
+        let waiters = heldWaiters
+        heldWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        await releaseGate.wait()
+    }
+
+    func waitUntilHeld() async -> Bool {
+        for _ in 0..<100 {
+            if held { return true }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return held
     }
 
     func release() async {
