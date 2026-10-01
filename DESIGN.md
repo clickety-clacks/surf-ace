@@ -3452,9 +3452,13 @@ Connection state MUST be expressed only through the window ID outline/text in th
 
 This section is a consolidated copy/reference index of existing UI/UX mentions elsewhere in the document; it does not supersede the original normative or contextual locations.
 
+**Decision record (Mike, 2026-10-01):** fleet-wide pane-number allocation and always-visible window/pane identity are restored and remain normative. The audit's other reviewed changes remain as-is and authorized: annotation mode retains its current Done-only control; Windows remains unsupported; screenshot capture does not return visible text; app-window open/close remains Spatial-only for now; internal pane IDs remain per-surface; OpenClaw-era items retain their current scope; label opacity and the single-pane iOS focus outline remain cosmetic/current behavior; and the larger history, lockless, and controller redesigns remain unchanged. None of those kept items is restored or broadened by this ruling.
+
+Every named invariant in this index, including later single-invariant index entries, MUST have a build-failing conformance check in the release-gated Electron or iOS test suites. `scripts/release/release-tooling.test.mjs` verifies that the index and its test-coverage map stay in one-to-one agreement and that each mapped test is present in a suite executed by the release workflow.
+
 - **Window Letter Labels** — "Window labels (a, b, c…) are allocated by the single fleet-wide label allocator and are unique across the entire fleet; a client that cannot obtain one displays no label." Source: §3.1.1 core invariant
 - **Pane Name Authority** — "Pane names are optional extension-assigned metadata. They do not replace `paneLabel` as the visible identity token." Source: §3.1.1
-- **Pane Label Authority** — "Pane labels are client-assigned visible numeric identifiers distinct from internal `paneId`." Source: §3.1.1
+- **Pane Label Authority** — "Pane numbers are allocated durably by the fleet registry, unique across every Surf Ace in the fleet, and never reused; until allocator confirmation a pane displays no number and never substitutes a client-local guess." Source: §3.1.1 core invariant
 - **Prominent Surface Labels** — "Window label and pane label render together as an always-visible bottom-right identity overlay in each pane." Source: §3.1.1 / §15.1
 - **Displayed Content Persistence** — "The surface renders content and keeps it displayed until OpenClaw explicitly changes it." Source: §1
 - **Visible Back/Forward Behavior** — "The newly targeted content becomes front/visible immediately in that pane." Source: §6.1.1
@@ -3469,10 +3473,10 @@ This section is a consolidated copy/reference index of existing UI/UX mentions e
 - **Connecting State UI** — "Connecting / reconnecting — yellow window ID outline/text." Source: §4.5 / §15.7
 - **Disconnected State UI** — "Disconnected — red window ID outline/text." Source: §4.5 / §15.7
 - **Window Label Placement** — "Window label precedes pane number in the bottom-right identity overlay." Source: §15.1
-- **Window Label Visibility** — "Always visible as the window box preceding each pane number; never hidden by pointer/touch movement, content, connection state, or annotation mode." Source: §15.1
+- **Window Label Visibility** — "Always visible as the window box preceding each confirmed pane number; never hidden by pointer movement, touch interaction, hover, content, connection state, or annotation mode." Source: §15.1
 - **Primary Addressing Handle** — "The window label is the primary addressing handle. It MUST be visible when the surface is at rest." Source: §15.1
 - **Pane Label Placement** — "Large floating translucent overlay in the bottom-right of the pane content area." Source: §15.1
-- **Pane Label Visibility** — "Always visible as plain translucent bottom-right overlay text; never hidden by pointer/touch movement." Source: §15.1
+- **Pane Label Visibility** — "Every allocator-confirmed pane number is always visible as plain translucent bottom-right overlay text; it is never hidden by pointer movement, touch interaction, hover, content, connection state, or annotation mode. An unconfirmed pane shows no number." Source: §15.1
 - **Pencil Auto Entry** — "Pencil contact with the screen MUST automatically enter annotation mode." Source: §15.1
 - **Drawing Input Button (👆)** — "A single drawing-input button MUST be present in the pane control bar at all times." Source: §15.1
 - **Done Exit Control** — "While annotation mode is active, a Done button MUST be visible in the annotation pill." Source: §15.1 / §15.3
