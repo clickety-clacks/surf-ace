@@ -267,7 +267,8 @@ enum SurfAceLocklessTopologyOperations {
         tombstoneId: String,
         anchorPaneId: Int64,
         direction: String,
-        expectedTopologyRevision: Int64
+        expectedTopologyRevision: Int64,
+        assignedPaneLabel: Int64
     ) throws -> SurfAceLocklessPaneRestoreResult {
         try atomically(&state) { candidate in
             guard isDirection(direction) else { throw Error.invalidTopology("pane_restore_direction") }
@@ -277,7 +278,11 @@ enum SurfAceLocklessTopologyOperations {
             guard let index = surface.paneTombstones.firstIndex(where: { $0.tombstoneId == tombstoneId }) else {
                 throw Error.tombstoneNotFound(tombstoneId)
             }
-            let tombstone = surface.paneTombstones[index]
+            guard assignedPaneLabel > 0 else {
+                throw Error.invalidTopology("allocator_pane_assignment_missing")
+            }
+            var tombstone = surface.paneTombstones[index]
+            tombstone.pane.paneLabel = assignedPaneLabel
             guard surface.panes[String(tombstone.pane.paneId)] == nil else {
                 throw Error.invalidAuthorityState("restored_pane_identity_live")
             }

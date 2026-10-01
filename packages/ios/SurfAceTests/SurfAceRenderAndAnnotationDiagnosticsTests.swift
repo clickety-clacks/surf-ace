@@ -1186,7 +1186,7 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         let surfaceId = surface.surfaceId
         let adapter = try runtime.locklessAuthorityForLocalMutation()
         let split = try await adapter.commitLocalMutation(operation: "testing.pane.split") { state, _ in
-            let result = try SurfAceLocklessTopologyOperations.paneSplit(
+            let result = try TestRegistryTopology.paneSplit(
                 state: &state,
                 surfaceId: surfaceId,
                 paneId: 1,

@@ -217,7 +217,7 @@ final class SurfAceLocklessAuthorityTests: XCTestCase {
             recordId: "retained", recordClass: .content, payload: .string("retained")
         )
         state.scopes[firstSurfaceScopeId]?.cursors["controller-live"]?.cursor = 2
-        let split = try SurfAceLocklessTopologyOperations.paneSplit(
+        let split = try TestRegistryTopology.paneSplit(
             state: &state, surfaceId: firstSurface, paneId: 1, count: 2,
             direction: "horizontal", expectedTopologyRevision: 0
         )
@@ -428,7 +428,7 @@ extension SurfAceLocklessAuthorityTests {
             let opened = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
                 state: &state, expectedSurfaceSetRevision: state.surfaceSetRevision
             )
-            _ = try SurfAceLocklessTopologyOperations.paneSplit(
+            _ = try TestRegistryTopology.paneSplit(
                 state: &state, surfaceId: opened.surface.surfaceId, paneId: 1, count: 3,
                 direction: "horizontal", expectedTopologyRevision: 0
             )
@@ -461,7 +461,7 @@ extension SurfAceLocklessAuthorityTests {
         let opened = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
             state: &state, expectedSurfaceSetRevision: 0
         )
-        let split = try SurfAceLocklessTopologyOperations.paneSplit(
+        let split = try TestRegistryTopology.paneSplit(
             state: &state, surfaceId: opened.surface.surfaceId, paneId: 1, count: 3,
             direction: "horizontal", expectedTopologyRevision: 0
         )
@@ -473,7 +473,7 @@ extension SurfAceLocklessAuthorityTests {
             state: &state, surfaceId: opened.surface.surfaceId,
             paneId: split.newPaneIds[1], expectedTopologyRevision: 2
         )
-        _ = try SurfAceLocklessTopologyOperations.paneSplit(
+        _ = try TestRegistryTopology.paneSplit(
             state: &state, surfaceId: opened.surface.surfaceId, paneId: 1, count: 3,
             direction: "vertical", expectedTopologyRevision: 3
         )

@@ -900,7 +900,7 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
         let gate = SurfAceTargetAdmissionTestGate(operationRequestId: "operation-pane-close")
         let fixture = try makeFixture(
             configure: { state in
-                _ = try SurfAceLocklessTopologyOperations.paneSplit(
+                _ = try TestRegistryTopology.paneSplit(
                     state: &state,
                     surfaceId: "sf_1",
                     paneId: 1,

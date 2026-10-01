@@ -802,6 +802,9 @@ final class SurfAceRuntime {
         direction: String
     ) async throws -> Int {
         let adapter = try locklessAuthorityForLocalMutation()
+        let paneClaim = try await claimRestoredPaneLabel(
+            surfaceId: surfaceId, tombstoneId: tombstoneId, adapter: adapter
+        )
         let commit = try await commitLocalMutation(adapter: adapter, operation: "local.pane.restore") { state, sequence in
             guard let surface = state.liveSurfaces[surfaceId] else {
                 throw SurfAceLocklessTopologyOperationError.surfaceNotFound(surfaceId)
@@ -812,7 +815,8 @@ final class SurfAceRuntime {
                 tombstoneId: tombstoneId,
                 anchorPaneId: Int64(anchorPaneId),
                 direction: direction,
-                expectedTopologyRevision: surface.topologyRevision
+                expectedTopologyRevision: surface.topologyRevision,
+                assignedPaneLabel: paneClaim.label
             )
             return .object([
                 "commitSequence": .integer(sequence),
@@ -827,6 +831,7 @@ final class SurfAceRuntime {
               case .integer(let paneId) = result["paneId"] else {
             throw SurfAceLocklessAuthorityError.invalidState("local_pane_restore_result")
         }
+        confirmedPaneLabels["\(surfaceId):\(paneClaim.lineageId)"] = paneClaim.label
         try projectLocklessAuthorityState(await adapter.snapshot())
         await fanoutLocklessCommittedEvent(
             op: "event.pane_created",
@@ -2767,6 +2772,22 @@ final class SurfAceRuntime {
         return (labels, lineages)
     }
 
+    private func claimRestoredPaneLabel(
+        surfaceId: String, tombstoneId: String,
+        adapter: SurfAceLocklessRuntimeAdapter
+    ) async throws -> (paneId: Int64, lineageId: String, label: Int64) {
+        let snapshot = await adapter.snapshot()
+        guard let pane = snapshot.liveSurfaces[surfaceId]?.paneTombstones
+            .first(where: { $0.tombstoneId == tombstoneId })?.pane,
+              let registration = centralRegistration else {
+            throw SurfAceRegistrationError.noServer
+        }
+        let label = try await registration.claimPaneLabel(
+            surfaceId: surfaceId, paneId: pane.paneId, paneLineageId: pane.paneLineageId
+        )
+        return (pane.paneId, pane.paneLineageId, label)
+    }
+
     private func handleLocklessTopologyMutation(
         op: String,
         id: String,
@@ -2869,6 +2890,9 @@ final class SurfAceRuntime {
                       let expected = Self.int64(payload["expectedTopologyRevision"]) else {
                     throw SurfAceLocklessRuntimeAdapterError.invalidAdmission
                 }
+                let paneClaim = try await claimRestoredPaneLabel(
+                    surfaceId: surfaceId, tombstoneId: tombstoneId, adapter: adapter
+                )
                 committed = try await adapter.commitMutation(
                     connectionToken: connectionUUID, requestId: id, operation: op,
                     consumableScopeId: Self.locklessSurfaceScopeId(surfaceId),
@@ -2877,7 +2901,8 @@ final class SurfAceRuntime {
                     let result = try SurfAceLocklessTopologyOperations.paneRestore(
                         state: &state, surfaceId: surfaceId, tombstoneId: tombstoneId,
                         anchorPaneId: anchorPaneId, direction: direction,
-                        expectedTopologyRevision: expected
+                        expectedTopologyRevision: expected,
+                        assignedPaneLabel: paneClaim.label
                     )
                     return .object([
                         "operationReceipt": Self.locklessReceiptJSON(requestId: id, sequence: sequence),
@@ -2888,6 +2913,7 @@ final class SurfAceRuntime {
                         "topologyRevision": .integer(result.topologyRevision),
                     ])
                 }
+                confirmedAfterCommit["\(surfaceId):\(paneClaim.lineageId)"] = paneClaim.label
             case "topology.apply":
                 guard let surfaceId = payload["surfaceId"] as? String,
                       let expected = Self.int64(payload["expectedTopologyRevision"]),

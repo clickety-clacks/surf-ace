@@ -1,6 +1,84 @@
 import XCTest
 @testable import SurfAce
 
+// Unit fixtures inject the registry result explicitly. Production operations
+// reject a split, topology creation, or restore without an allocator claim.
+enum TestRegistryTopology {
+    private static func nextLabel(_ state: SurfAceLocklessAuthorityState) -> Int64 {
+        let labels = state.liveSurfaces.values.flatMap { surface in
+            surface.panes.values.map(\.paneLabel) + surface.paneTombstones.map(\.pane.paneLabel)
+        }
+        return (labels.max() ?? 0) + 1
+    }
+
+    private static func identities(
+        _ state: SurfAceLocklessAuthorityState, surfaceId: String, count: Int
+    ) -> (labels: [Int64: Int64], lineages: [Int64: String]) {
+        guard let surface = state.liveSurfaces[surfaceId] else { return ([:], [:]) }
+        let occupied = Set(surface.panes.values.map(\.paneId))
+            .union(surface.paneTombstones.map(\.pane.paneId))
+        var nextId = surface.nextPaneId
+        var nextNumber = nextLabel(state)
+        var labels: [Int64: Int64] = [:]
+        var lineages: [Int64: String] = [:]
+        for _ in 0..<max(0, count) {
+            while occupied.contains(nextId) || labels[nextId] != nil { nextId += 1 }
+            labels[nextId] = nextNumber
+            lineages[nextId] = "pl_test_\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))"
+            nextId += 1
+            nextNumber += 1
+        }
+        return (labels, lineages)
+    }
+
+    private static func newPaneCount(_ node: SurfAceLocklessJSON) -> Int {
+        guard case .object(let object) = node else { return 0 }
+        if case .some(.string("pane")) = object["type"] { return object["paneId"] == nil ? 1 : 0 }
+        guard case .array(let children) = object["children"] else { return 0 }
+        return children.reduce(0) { $0 + newPaneCount($1) }
+    }
+
+    static func paneSplit(
+        state: inout SurfAceLocklessAuthorityState, surfaceId: String, paneId: Int64,
+        count: Int64, direction: String, expectedTopologyRevision: Int64
+    ) throws -> SurfAceLocklessPaneSplitResult {
+        let claim = identities(state, surfaceId: surfaceId, count: Int(max(0, count - 1)))
+        return try SurfAceLocklessTopologyOperations.paneSplit(
+            state: &state, surfaceId: surfaceId, paneId: paneId, count: count,
+            direction: direction, expectedTopologyRevision: expectedTopologyRevision,
+            assignedPaneLabels: claim.labels, assignedPaneLineages: claim.lineages
+        )
+    }
+
+    static func topologyApply(
+        state: inout SurfAceLocklessAuthorityState, surfaceId: String,
+        targetPaneId: Int64?, desired: SurfAceLocklessJSON,
+        allowDestroyPaneIds: [Int64], expectedTopologyRevision: Int64
+    ) throws -> SurfAceLocklessTopologyApplyResult {
+        let claim = identities(state, surfaceId: surfaceId, count: newPaneCount(desired))
+        return try SurfAceLocklessTopologyOperations.topologyApply(
+            state: &state, surfaceId: surfaceId, targetPaneId: targetPaneId,
+            desired: desired, allowDestroyPaneIds: allowDestroyPaneIds,
+            expectedTopologyRevision: expectedTopologyRevision,
+            assignedPaneLabels: claim.labels, assignedPaneLineages: claim.lineages
+        )
+    }
+
+    static func paneRestore(
+        state: inout SurfAceLocklessAuthorityState, surfaceId: String,
+        tombstoneId: String, anchorPaneId: Int64, direction: String,
+        expectedTopologyRevision: Int64
+    ) throws -> SurfAceLocklessPaneRestoreResult {
+        let assigned = nextLabel(state)
+        return try SurfAceLocklessTopologyOperations.paneRestore(
+            state: &state, surfaceId: surfaceId, tombstoneId: tombstoneId,
+            anchorPaneId: anchorPaneId, direction: direction,
+            expectedTopologyRevision: expectedTopologyRevision,
+            assignedPaneLabel: assigned
+        )
+    }
+}
+
 final class SurfAceLocklessTopologyOperationsTests: XCTestCase {
     func testGlobalLabelsValidateWholeSetAndPreservePaneHistory() throws {
         var state = try SurfAceLocklessAuthorityState.empty()
@@ -40,7 +118,7 @@ final class SurfAceLocklessTopologyOperationsTests: XCTestCase {
             state: &state, expectedSurfaceSetRevision: 0
         )
 
-        let split = try SurfAceLocklessTopologyOperations.paneSplit(
+        let split = try TestRegistryTopology.paneSplit(
             state: &state, surfaceId: opened.surface.surfaceId, paneId: 1, count: 2,
             direction: "horizontal", expectedTopologyRevision: 0
         )
@@ -64,7 +142,7 @@ final class SurfAceLocklessTopologyOperationsTests: XCTestCase {
         let surfaceId = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
             state: &state, expectedSurfaceSetRevision: 0
         ).surface.surfaceId
-        let split = try SurfAceLocklessTopologyOperations.paneSplit(
+        let split = try TestRegistryTopology.paneSplit(
             state: &state, surfaceId: surfaceId, paneId: 1, count: 2,
             direction: "horizontal", expectedTopologyRevision: 0
         )
@@ -75,7 +153,7 @@ final class SurfAceLocklessTopologyOperationsTests: XCTestCase {
         )
         state.liveSurfaces[surfaceId]?.panes["1"]?.paneLabel = original.paneLabel
 
-        let restored = try SurfAceLocklessTopologyOperations.paneRestore(
+        let restored = try TestRegistryTopology.paneRestore(
             state: &state, surfaceId: surfaceId, tombstoneId: close.tombstoneId,
             anchorPaneId: 1, direction: "vertical", expectedTopologyRevision: 2
         )
@@ -112,7 +190,7 @@ final class SurfAceLocklessTopologyOperationsTests: XCTestCase {
             ]),
             "direction": .string("horizontal"), "type": .string("split"),
         ])
-        let result = try SurfAceLocklessTopologyOperations.topologyApply(
+        let result = try TestRegistryTopology.topologyApply(
             state: &state, surfaceId: surfaceId, targetPaneId: nil, desired: desired,
             allowDestroyPaneIds: [], expectedTopologyRevision: 0
         )
@@ -121,7 +199,7 @@ final class SurfAceLocklessTopologyOperationsTests: XCTestCase {
         XCTAssertEqual(result.topologyRevision, 1)
 
         let before = state
-        XCTAssertThrowsError(try SurfAceLocklessTopologyOperations.topologyApply(
+        XCTAssertThrowsError(try TestRegistryTopology.topologyApply(
             state: &state, surfaceId: surfaceId, targetPaneId: nil,
             desired: .object(["paneId": .integer(1), "type": .string("pane")]),
             allowDestroyPaneIds: [], expectedTopologyRevision: 1
@@ -138,7 +216,7 @@ final class SurfAceLocklessTopologyOperationsTests: XCTestCase {
         let surfaceId = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
             state: &state, expectedSurfaceSetRevision: 0
         ).surface.surfaceId
-        let split = try SurfAceLocklessTopologyOperations.paneSplit(
+        let split = try TestRegistryTopology.paneSplit(
             state: &state, surfaceId: surfaceId, paneId: 1, count: 3,
             direction: "horizontal", expectedTopologyRevision: 0
         )
@@ -159,7 +237,7 @@ final class SurfAceLocklessTopologyOperationsTests: XCTestCase {
             state: &state, expectedSurfaceSetRevision: 0, placement: .object(["display": .string("main")])
         )
         let surfaceId = opened.surface.surfaceId
-        _ = try SurfAceLocklessTopologyOperations.paneSplit(
+        _ = try TestRegistryTopology.paneSplit(
             state: &state, surfaceId: surfaceId, paneId: 1, count: 2,
             direction: "horizontal", expectedTopologyRevision: 0
         )
@@ -223,7 +301,7 @@ private extension SurfAceLocklessTopologyOperationsTests {
             scope.scopeId = "pane:sf%5F1:1"
             state.scopes[scope.scopeId] = scope
         }
-        _ = try SurfAceLocklessTopologyOperations.paneSplit(
+        _ = try TestRegistryTopology.paneSplit(
             state: &state, surfaceId: "sf_1", paneId: 1, count: 2,
             direction: "horizontal", expectedTopologyRevision: 0
         )
@@ -408,11 +486,11 @@ extension SurfAceLocklessTopologyOperationsTests {
         let closePane = try SurfAceLocklessTopologyOperations.paneClose(
             state: &state, surfaceId: "sf_1", paneId: 2, expectedTopologyRevision: 1
         )
-        _ = try SurfAceLocklessTopologyOperations.paneSplit(
+        _ = try TestRegistryTopology.paneSplit(
             state: &state, surfaceId: "sf_1", paneId: 1, count: 2,
             direction: "horizontal", expectedTopologyRevision: 2
         )
-        _ = try SurfAceLocklessTopologyOperations.paneRestore(
+        _ = try TestRegistryTopology.paneRestore(
             state: &state, surfaceId: "sf_1", tombstoneId: closePane.tombstoneId,
             anchorPaneId: 1, direction: "vertical", expectedTopologyRevision: 3
         )
@@ -434,7 +512,7 @@ extension SurfAceLocklessTopologyOperationsTests {
             expectedSurfaceSetRevision: 2
         )
         XCTAssertEqual(restoredState.liveSurfaces["sf_1"]?.panes.count, 3)
-        XCTAssertThrowsError(try SurfAceLocklessTopologyOperations.paneSplit(
+        XCTAssertThrowsError(try TestRegistryTopology.paneSplit(
             state: &restoredState, surfaceId: "sf_1", paneId: 1, count: 2,
             direction: "horizontal", expectedTopologyRevision: 4
         )) { error in
@@ -455,7 +533,7 @@ extension SurfAceLocklessTopologyOperationsTests {
         let closed = try SurfAceLocklessTopologyOperations.paneClose(
             state: &state, surfaceId: surfaceId, paneId: 2, expectedTopologyRevision: 1
         )
-        _ = try SurfAceLocklessTopologyOperations.paneRestore(
+        _ = try TestRegistryTopology.paneRestore(
             state: &state, surfaceId: surfaceId, tombstoneId: closed.tombstoneId,
             anchorPaneId: 1, direction: "vertical", expectedTopologyRevision: 2
         )
@@ -498,12 +576,12 @@ extension SurfAceLocklessTopologyOperationsTests {
         let close = try SurfAceLocklessTopologyOperations.paneClose(
             state: &state, surfaceId: "sf_1", paneId: 2, expectedTopologyRevision: 1
         )
-        _ = try SurfAceLocklessTopologyOperations.paneSplit(
+        _ = try TestRegistryTopology.paneSplit(
             state: &state, surfaceId: "sf_1", paneId: 1, count: 2,
             direction: "horizontal", expectedTopologyRevision: 2
         )
         XCTAssertEqual(state.liveSurfaces["sf_1"]?.panes.count, 2)
-        let restored = try SurfAceLocklessTopologyOperations.paneRestore(
+        let restored = try TestRegistryTopology.paneRestore(
             state: &state, surfaceId: "sf_1", tombstoneId: close.tombstoneId,
             anchorPaneId: 1, direction: "vertical", expectedTopologyRevision: 3
         )
@@ -627,13 +705,13 @@ extension SurfAceLocklessTopologyOperationsTests {
         let id = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
             state: &state, expectedSurfaceSetRevision: 0
         ).surface.surfaceId
-        let filled = try SurfAceLocklessTopologyOperations.paneSplit(
+        let filled = try TestRegistryTopology.paneSplit(
             state: &state, surfaceId: id, paneId: 1, count: 3,
             direction: "horizontal", expectedTopologyRevision: 0
         )
         XCTAssertEqual(state.liveSurfaces[id]?.panes.count, 3)
         let beforeRefusal = state
-        XCTAssertThrowsError(try SurfAceLocklessTopologyOperations.paneSplit(
+        XCTAssertThrowsError(try TestRegistryTopology.paneSplit(
             state: &state, surfaceId: id, paneId: 1, count: 2,
             direction: "vertical", expectedTopologyRevision: 1
         )) { error in
@@ -647,22 +725,22 @@ extension SurfAceLocklessTopologyOperationsTests {
         let second = try SurfAceLocklessTopologyOperations.paneClose(
             state: &state, surfaceId: id, paneId: filled.newPaneIds[1], expectedTopologyRevision: 2
         )
-        _ = try SurfAceLocklessTopologyOperations.paneSplit(
+        _ = try TestRegistryTopology.paneSplit(
             state: &state, surfaceId: id, paneId: 1, count: 3,
             direction: "vertical", expectedTopologyRevision: 3
         )
         XCTAssertEqual((state.liveSurfaces[id]?.panes.count ?? 0) + (state.liveSurfaces[id]?.paneTombstones.count ?? 0), 5)
-        _ = try SurfAceLocklessTopologyOperations.paneRestore(
+        _ = try TestRegistryTopology.paneRestore(
             state: &state, surfaceId: id, tombstoneId: first.tombstoneId,
             anchorPaneId: 1, direction: "horizontal", expectedTopologyRevision: 4
         )
-        _ = try SurfAceLocklessTopologyOperations.paneRestore(
+        _ = try TestRegistryTopology.paneRestore(
             state: &state, surfaceId: id, tombstoneId: second.tombstoneId,
             anchorPaneId: 1, direction: "vertical", expectedTopologyRevision: 5
         )
         XCTAssertEqual(state.liveSurfaces[id]?.panes.count, 5)
         XCTAssertEqual(state.liveSurfaces[id]?.paneTombstones.count, 0)
-        XCTAssertThrowsError(try SurfAceLocklessTopologyOperations.paneSplit(
+        XCTAssertThrowsError(try TestRegistryTopology.paneSplit(
             state: &state, surfaceId: id, paneId: 1, count: 2,
             direction: "horizontal", expectedTopologyRevision: 6
         ))
@@ -673,7 +751,7 @@ extension SurfAceLocklessTopologyOperationsTests {
         let id = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
             state: &state, expectedSurfaceSetRevision: 0
         ).surface.surfaceId
-        let split = try SurfAceLocklessTopologyOperations.paneSplit(
+        let split = try TestRegistryTopology.paneSplit(
             state: &state, surfaceId: id, paneId: 1, count: 2,
             direction: "horizontal", expectedTopologyRevision: 0
         )
@@ -681,17 +759,17 @@ extension SurfAceLocklessTopologyOperationsTests {
             state: &state, surfaceId: id, paneId: split.newPaneIds[0], expectedTopologyRevision: 1
         )
         let retained = state.liveSurfaces[id]?.paneTombstones
-        XCTAssertThrowsError(try SurfAceLocklessTopologyOperations.paneRestore(
+        XCTAssertThrowsError(try TestRegistryTopology.paneRestore(
             state: &state, surfaceId: id, tombstoneId: close.tombstoneId,
             anchorPaneId: 1, direction: "vertical", expectedTopologyRevision: 1
         ))
         XCTAssertEqual(state.liveSurfaces[id]?.paneTombstones, retained)
-        XCTAssertThrowsError(try SurfAceLocklessTopologyOperations.paneRestore(
+        XCTAssertThrowsError(try TestRegistryTopology.paneRestore(
             state: &state, surfaceId: id, tombstoneId: close.tombstoneId,
             anchorPaneId: 999, direction: "diagonal", expectedTopologyRevision: 2
         ))
         XCTAssertEqual(state.liveSurfaces[id]?.paneTombstones, retained)
-        XCTAssertEqual(try SurfAceLocklessTopologyOperations.paneRestore(
+        XCTAssertEqual(try TestRegistryTopology.paneRestore(
             state: &state, surfaceId: id, tombstoneId: close.tombstoneId,
             anchorPaneId: 1, direction: "vertical", expectedTopologyRevision: 2
         ).paneId, split.newPaneIds[0])
@@ -722,12 +800,12 @@ extension SurfAceLocklessTopologyOperationsTests {
         let id = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
             state: &state, expectedSurfaceSetRevision: 0
         ).surface.surfaceId
-        _ = try SurfAceLocklessTopologyOperations.paneSplit(
+        _ = try TestRegistryTopology.paneSplit(
             state: &state, surfaceId: id, paneId: 1, count: 2,
             direction: "horizontal", expectedTopologyRevision: 0
         )
         let before = state
-        XCTAssertThrowsError(try SurfAceLocklessTopologyOperations.paneSplit(
+        XCTAssertThrowsError(try TestRegistryTopology.paneSplit(
             state: &state, surfaceId: id, paneId: 1, count: 3,
             direction: "vertical", expectedTopologyRevision: 0
         )) { error in
@@ -745,7 +823,7 @@ extension SurfAceLocklessTopologyOperationsTests {
         let id = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
             state: &state, expectedSurfaceSetRevision: 0
         ).surface.surfaceId
-        let split = try SurfAceLocklessTopologyOperations.paneSplit(
+        let split = try TestRegistryTopology.paneSplit(
             state: &state, surfaceId: id, paneId: 1, count: 2,
             direction: "horizontal", expectedTopologyRevision: 0
         )
@@ -755,7 +833,7 @@ extension SurfAceLocklessTopologyOperationsTests {
             state: &state, surfaceId: id, paneId: second, name: "two", expectedTopologyRevision: 1
         )
         XCTAssertEqual(renamed.topologyRevision, 2)
-        let applied = try SurfAceLocklessTopologyOperations.topologyApply(
+        let applied = try TestRegistryTopology.topologyApply(
             state: &state, surfaceId: id, targetPaneId: nil,
             desired: split.topology, allowDestroyPaneIds: [], expectedTopologyRevision: 2
         )
@@ -763,7 +841,7 @@ extension SurfAceLocklessTopologyOperationsTests {
         let closed = try SurfAceLocklessTopologyOperations.paneClose(
             state: &state, surfaceId: id, paneId: second, expectedTopologyRevision: 3
         )
-        let restored = try SurfAceLocklessTopologyOperations.paneRestore(
+        let restored = try TestRegistryTopology.paneRestore(
             state: &state, surfaceId: id, tombstoneId: closed.tombstoneId,
             anchorPaneId: 1, direction: "vertical", expectedTopologyRevision: 4
         )
@@ -779,7 +857,7 @@ extension SurfAceLocklessTopologyOperationsTests {
             ).surface.surfaceId
             var result: [[Int64]] = []
             for (index, _) in order.enumerated() {
-                result.append(try SurfAceLocklessTopologyOperations.paneSplit(
+                result.append(try TestRegistryTopology.paneSplit(
                     state: &state, surfaceId: id, paneId: 1, count: 2,
                     direction: index.isMultiple(of: 2) ? "horizontal" : "vertical",
                     expectedTopologyRevision: Int64(index)

@@ -19,6 +19,16 @@ import {
 } from "../src/lockless-client-authority.js";
 import { LocklessAuthorityError } from "../src/lockless-client-authority.js";
 
+function confirmFixturePaneLabels(core: SurfaceCore): void {
+  core.confirmRegistryPaneLabels(core.listSurfaces().map((surface) => ({
+    surfaceId: surface.surfaceId,
+    panes: [...surface.panes.values()].filter((pane) => pane.paneLabel > 0).map((pane) => ({
+      paneId: String(pane.paneId), paneLineageId: pane.paneLineageId,
+      paneLabel: pane.paneLabel,
+    })),
+  })));
+}
+
 function applyProviderBootstrap(
   core: SurfaceCore,
   surfaceId: string,
@@ -30,6 +40,7 @@ function applyProviderBootstrap(
     initialPaneLabel: initialPaneId,
     windowLabel,
   });
+  confirmFixturePaneLabels(core);
   return core.getRendererWindowState(surfaceId).panes[0]!.paneId;
 }
 
@@ -573,6 +584,7 @@ test("surface core persists and restores multiple live windows with pane content
   const persistentState = core.getPersistentState();
   const restoredCore = new SurfaceCore({ persistentState });
   const restoredSurfaces = restoredCore.restorePersistedSurfaces("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  confirmFixturePaneLabels(restoredCore);
 
   assert.deepEqual(
     restoredSurfaces.map((surface) => restoredCore.getRendererWindowState(surface.surfaceId).panes.length),
@@ -1050,6 +1062,7 @@ test("surface core renders the visible pane label separately from paneId", () =>
     initialPaneLabel: 41,
     windowLabel: "a",
   });
+  confirmFixturePaneLabels(core);
 
   const windowState = core.getRendererWindowState(surface.surfaceId);
   assert.equal(windowState.panes[0]?.paneId, 7);
@@ -1079,6 +1092,7 @@ test("surface core projects window and pane labels as the visible pane address",
     initialPaneLabel: 16,
     windowLabel: "e",
   });
+  confirmFixturePaneLabels(core);
 
   const pane = core.getRendererWindowState(surface.surfaceId).panes[0];
   assert.equal(core.getRendererWindowState(surface.surfaceId).windowLabel, "e");
@@ -1109,6 +1123,7 @@ test("same pane id, different initial pane label - Electron bootstrap enforces p
     initialPaneLabel: 41,
     windowLabel: "a",
   });
+  confirmFixturePaneLabels(core);
 
   const windowState = core.getRendererWindowState(surface.surfaceId);
   assert.equal(windowState.panes[0]?.paneId, 7);
@@ -2241,6 +2256,7 @@ test("surface core topology.apply reuses existing pane content and replaces prov
     topologyRevision: 3 as never,
     windowLabel: "a",
   });
+  confirmFixturePaneLabels(core);
 
   assert.equal(applied.topologyRevision, 3);
   assert.deepEqual(applied.panes.map((pane) => [pane.paneId, pane.paneLabel, pane.name]), [
@@ -2365,6 +2381,7 @@ test("surface core lets fresh provider bootstrap replace stale local window labe
     initialPaneLabel: 7,
     windowLabel: "b",
   });
+  confirmFixturePaneLabels(core);
 
   const windowState = core.getRendererWindowState(surface.surfaceId);
   assert.equal(windowState.windowLabel, "b");
@@ -2406,6 +2423,7 @@ test("surface core commits topology.apply provider window relabels atomically", 
     topologyRevision: 4 as never,
     windowLabel: "b",
   }));
+  confirmFixturePaneLabels(core);
 
   const acceptedWindowState = core.getRendererWindowState(surface.surfaceId);
   assert.equal(acceptedWindowState.windowLabel, "b");

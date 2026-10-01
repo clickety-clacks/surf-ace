@@ -2673,12 +2673,12 @@ export class SurfaceWsServer {
 
     if (request.op === "pane.restore") {
       const result = await this.runSurfaceMutation(surfaceId, () =>
-        this.core.transaction(() => {
+        this.core.transactionAsync(async () => {
         const rollbackSurface =
           this.core.captureSurfaceMutationRollback(surfaceId);
         const topology = this.core.topologyState(surfaceId);
         try {
-          return this.core.locklessAuthority.transaction(() => {
+          return await this.core.locklessAuthority.transactionAsync(async () => {
             this.core.locklessAuthority.assertTopologyRevision(
               request.payload.expectedTopologyRevision,
               Number(topology.topologyRevision),
@@ -2688,14 +2688,24 @@ export class SurfaceWsServer {
               request.payload.tombstoneId,
               "pane",
             );
-            return this.core.restorePaneTombstone(
+            const restoredPayload = structuredClone(tombstone.payload as ReturnType<
+              SurfaceCore["capturePaneTombstonePayload"]
+            >);
+            const pane = restoredPayload.pane;
+            pane.paneLabel = await this.claimPaneLabel(
+              surfaceId, pane.paneId, pane.paneLineageId,
+            );
+            const restored = this.core.restorePaneTombstone(
               surfaceId,
-              tombstone.payload as ReturnType<
-                SurfaceCore["capturePaneTombstonePayload"]
-              >,
+              restoredPayload,
               request.payload.anchorPaneId,
               request.payload.direction,
             );
+            this.core.confirmRegistryPaneLabels([{ surfaceId, panes: [{
+              paneId: String(pane.paneId), paneLineageId: pane.paneLineageId,
+              paneLabel: pane.paneLabel,
+            }] }]);
+            return restored;
           });
         } catch (error) {
           rollbackSurface();
