@@ -43,9 +43,9 @@ import {
 } from "./index.js";
 
 const execFile = promisify(execFileCallback);
-const postgresBin = process.platform === "darwin"
+const postgresBin = process.env.SURF_ACE_TEST_POSTGRES_BIN ?? (process.platform === "darwin"
   ? "/opt/homebrew/opt/postgresql@16/bin"
-  : "/usr/lib/postgresql/16/bin";
+  : "/usr/lib/postgresql/16/bin");
 const { Client } = pg;
 
 type TestCluster = {
