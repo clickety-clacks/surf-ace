@@ -513,6 +513,61 @@ test("scope snapshots use first-unread cursors and include current live frames",
   );
 });
 
+test("annotation re-entry before commit continues the live frame and after commit opens a new one", () => {
+  const target = authority();
+  admit(target, "controller-a");
+  const scopeId = "pane:surface-a:1";
+  const frameId = "annotation:content-a";
+  const beforeCommitPayload = {
+    contentId: "content-a",
+    strokes: ["stroke-before", "stroke-after-reentry-before-commit"],
+  };
+
+  target.updateLiveFrame({
+    frameId,
+    payload: { contentId: "content-a", strokes: ["stroke-before"] },
+    scopeId,
+    triggerOperation: "drawing.before_commit",
+  });
+  target.updateLiveFrame({
+    frameId,
+    payload: beforeCommitPayload,
+    scopeId,
+    triggerOperation: "drawing.reentry_before_commit",
+  });
+
+  const liveBeforeCommit = target.exportState().scopes[scopeId]?.liveFrames[frameId];
+  assert.deepEqual(liveBeforeCommit?.payload, beforeCommitPayload);
+  assert.equal(target.exportState().scopes[scopeId]?.records.length, 0);
+
+  const committed = target.finalizeLiveFrame(
+    scopeId,
+    frameId,
+    "renderer.annotation_finalized",
+  );
+  assert.ok(committed);
+  assert.deepEqual(committed.payload, beforeCommitPayload);
+  assert.equal(target.exportState().scopes[scopeId]?.liveFrames[frameId], undefined);
+
+  const afterCommitPayload = {
+    contentId: "content-a",
+    strokes: ["stroke-after-commit"],
+  };
+  target.updateLiveFrame({
+    frameId,
+    payload: afterCommitPayload,
+    scopeId,
+    triggerOperation: "drawing.reentry_after_commit",
+  });
+
+  const snapshot = target.scopeSnapshot("controller-a", scopeId);
+  const sealedFrame = snapshot.records.find((record) => record.recordId === committed.recordId);
+  const reopenedFrame = snapshot.records.find((record) => record.recordId === frameId);
+  assert.deepEqual(sealedFrame?.payload, beforeCommitPayload);
+  assert.deepEqual(reopenedFrame?.payload, afterCommitPayload);
+  assert.notEqual(sealedFrame?.sequence, reopenedFrame?.sequence);
+});
+
 test("latest-wins records coalesce and tombstones reclaim oldest sequence", () => {
   const target = authority();
   const events: Array<Record<string, unknown>> = [];

@@ -110,6 +110,11 @@ const DESIGN_INVARIANT_CHECKS = [
   ["Disconnected State UI", [{ suite: "ios", file: "packages/ios/SurfAceTests/SurfAceCentralRegistrationTests.swift", marker: "func testEmptyStartupNeverPublishesConnected" }]],
   ["Window Label Placement", [{ suite: "electron", file: "packages/electron/test/renderer-sizing.test.ts", marker: "test(\"renderer fits pane identity labels inside pane bounds for native and renderer panes\"" }]],
   ["Window Label Visibility", [{ suite: "electron", file: "packages/electron/test/renderer-ui-projection.test.ts", marker: "test(\"an assigned window label remains visible while a pane awaits its registry number\"" }]],
+  ["Annotation Frame Commit Re-entry", [
+    { suite: "electron", file: "packages/electron/test/lockless-client-authority.test.ts", marker: "test(\"annotation re-entry before commit continues the live frame and after commit opens a new one\"" },
+    { suite: "ios", file: "packages/ios/SurfAceTests/SurfAceLocklessConsumableOperationsTests.swift", marker: "func testAnnotationReentryContinuesBeforeCommitAndOpensANewFrameAfterCommit" },
+  ]],
+  ["Native Minimum OS", [{ suite: "release-tooling", file: "scripts/release/release-tooling.test.mjs", marker: "test(\"native minimum OS follows the newest-released-major rule\"" }]],
   ["Primary Addressing Handle", [{ suite: "ios", file: "packages/ios/SurfAceTests/SurfAceSurfaceTopologyPersistenceTests.swift", marker: "func testPaneChromeIdentityUsesGlobalPaneTokenAndWindowLabelOnly" }]],
   ["Pane Label Placement", [{ suite: "electron", file: "packages/electron/test/overlay-rects.test.ts", marker: "test(\"pane label overlay region uses tight combined label affordance bounds\"" }]],
   ["Pane Label Visibility", [{ suite: "electron", file: "packages/electron/test/renderer-ui-projection.test.ts", marker: "test(\"pointer and touch activity have no rule that hides assigned identity labels\"" }]],
@@ -132,14 +137,10 @@ const DESIGN_INVARIANT_CHECKS = [
   ["Annotation Interaction Suspension", [{ suite: "ios", file: "packages/ios/SurfAceTests/SurfAceLocklessContentOperationsTests.swift", marker: "func testAnnotationGuardAndExactPaneCapacityRejectWithoutMutation" }]],
   ["Annotation Visibility Lock", [{ suite: "ios", file: "packages/ios/SurfAceTests/SurfAceBrowserURLTargetApplyTests.swift", marker: "func testHTMLNavigationEventIsRejectedWhileAnnotationModeIsActive" }]],
   ["Post-Done Context Switch", [{ suite: "ios", file: "packages/ios/SurfAceTests/SurfAceRenderAndAnnotationDiagnosticsTests.swift", marker: "func testDoneExitsAnnotationModeAndClearsRenderedAndStoredMarks" }]],
-  ["Native Overlay Visual Distinction Gap", [{ suite: "electron", file: "packages/electron/test/renderer-ui-projection.test.ts", marker: "test(\"open native-overlay markups and future widgets remain design gaps, not shipped controls\"" }]],
   ["Viewport Overlay Positioning (iOS)", [{ suite: "ios", file: "packages/ios/SurfAceTests/SurfAceSurfaceTopologyPersistenceTests.swift", marker: "func testPaneViewportPayloadUsesSwiftUIResolvedSnapshotIncludingSplitSpacing" }]],
   ["Viewport Overlay Positioning (Electron)", [{ suite: "electron", file: "packages/electron/test/native-pane-bridge.test.ts", marker: "test(\"native pane bridge derives native overlay rectangles from pane geometry\"" }]],
   ["No Explicit Browsing Modes", [{ suite: "electron", file: "packages/electron/test/renderer-ui-projection.test.ts", marker: "test(\"the surface has no explicit browsing-mode selector and treats browser content as pane content\"" }]],
   ["UI-Only Mode Distinction", [{ suite: "electron", file: "packages/electron/test/renderer-ui-projection.test.ts", marker: "test(\"the surface has no explicit browsing-mode selector and treats browser content as pane content\"" }]],
-  ["Canvas Presentation", [{ suite: "electron", file: "packages/electron/test/surface-core.test.ts", marker: "test(\"surface core rejects video and canvas content types with unsupported_content_type\"" }]],
-  ["Native Overlay Model Markup Goal", [{ suite: "electron", file: "packages/electron/test/renderer-ui-projection.test.ts", marker: "test(\"open native-overlay markups and future widgets remain design gaps, not shipped controls\"" }]],
-  ["Future Interactive Affordances", [{ suite: "electron", file: "packages/electron/test/renderer-ui-projection.test.ts", marker: "test(\"open native-overlay markups and future widgets remain design gaps, not shipped controls\"" }]],
   ["Entry-Bound Composite Provenance", [
     { suite: "electron", file: "packages/electron/test/renderer-sizing.test.ts", marker: "test(\"renderer chrome keeps entry-bound composite provenance in navigation chrome\"" },
     { suite: "ios", file: "packages/ios/SurfAceTests/SurfAceRenderAndAnnotationDiagnosticsTests.swift", marker: "func testACPROV02CompositeIsCapturedByVisibleEntryAcrossNavigation" },
@@ -1127,7 +1128,7 @@ test("tagless qualification leaves release build and manifest-smoke tag admissio
   assert.match(freshInstallMain, /fresh_install_wrong_surface_changed_valid_target/);
 });
 
-test("DESIGN UI index has a release-executed check for every named invariant", async () => {
+test("DESIGN UI index classifies every named invariant as release-checked or an explicit gap", async () => {
   const design = await fs.readFile(path.join(repository, "DESIGN.md"), "utf8");
   const workflow = await fs.readFile(path.join(repository, ".github/workflows/release-tightbeam.yml"), "utf8");
   const electronPackage = JSON.parse(await fs.readFile(path.join(repository, "packages/electron/package.json"), "utf8"));
@@ -1138,9 +1139,29 @@ test("DESIGN UI index has a release-executed check for every named invariant", a
   const allIndexBlocks = `${index}\n${design.slice(separateIndexStart)}`;
   const indexNames = [...allIndexBlocks.matchAll(/^- \*\*(.+?)\*\* —/gm)].map((match) => match[1]);
   const coveredNames = DESIGN_INVARIANT_CHECKS.map(([name]) => name);
+  const gapSectionStart = index.indexOf("**Known coverage gaps (non-blocking for v0.2.4; follow-up releases):**");
+  assert.ok(gapSectionStart >= 0, "missing versioned, non-blocking coverage gap list");
+  const gapSection = index.slice(gapSectionStart);
+  const knownGapNames = [...gapSection.matchAll(/^- `([^`]+)`:/gm)].map((match) => match[1]);
 
-  assert.deepEqual(coveredNames.sort(), [...indexNames].sort());
+  assert.deepEqual([...coveredNames, ...knownGapNames].sort(), [...indexNames].sort());
+  assert.equal(new Set([...coveredNames, ...knownGapNames]).size, indexNames.length, "every invariant must be classified exactly once");
   assert.equal(new Set(coveredNames).size, coveredNames.length, "every index row needs exactly one mapping");
+  for (const required of [
+    "Window Letter Labels",
+    "Pane Label Authority",
+    "Prominent Surface Labels",
+    "Window Label Visibility",
+    "Pane Label Visibility",
+    "Annotation Frame Commit Re-entry",
+    "Native Minimum OS",
+  ]) assert.ok(coveredNames.includes(required), `${required}: v0.2.4 release gate must retain a positive check`);
+  assert.deepEqual(knownGapNames.sort(), [
+    "Canvas Presentation",
+    "Future Interactive Affordances",
+    "Native Overlay Model Markup Goal",
+    "Native Overlay Visual Distinction Gap",
+  ].sort());
   assert.match(electronPackage.scripts.test, /dist\/test\/\*\.test\.js/);
   assert.ok(TIGHTBEAM_TEST_COMMANDS.some((command) => command.includes("@surf-ace/electron test")));
   assert.ok(TIGHTBEAM_TEST_COMMANDS.some((command) => command.startsWith("xcodebuild test ")));
@@ -1160,12 +1181,43 @@ test("DESIGN UI index has a release-executed check for every named invariant", a
       if (check.suite === "electron") assert.match(check.file, /^packages\/electron\/test\//);
       if (check.suite === "ios") assert.match(check.file, /^packages\/ios\/SurfAceTests\//);
       if (check.suite === "release-smoke") assert.match(check.file, /^scripts\/release\/tightbeam-state-smoke-fixture\.ts$/);
+      if (check.suite === "release-tooling") assert.equal(check.file, "scripts/release/release-tooling.test.mjs");
     }
   }
   const linuxSmoke = workflowRunScript(workflow, "Run PostgreSQL-backed server, packaged CLI, and Linux client acceptance");
   assert.match(linuxSmoke, /smoke-tightbeam-release\.mjs/);
   const smokeRunner = await fs.readFile(path.join(repository, "scripts/release/smoke-tightbeam-release.mjs"), "utf8");
   assert.match(smokeRunner, /tightbeam-state-smoke-fixture\.ts/);
+});
+
+test("native minimum OS follows the newest-released-major rule", async () => {
+  const projectYml = await fs.readFile(path.join(repository, "packages/ios/project.yml"), "utf8");
+  const projectPbx = await fs.readFile(path.join(repository, "packages/ios/SurfAce.xcodeproj/project.pbxproj"), "utf8");
+  const releaseCommands = TIGHTBEAM_TEST_COMMANDS.filter((command) => command.startsWith("xcodebuild test "));
+
+  assert.match(projectYml, /iOS: "27\.0"/);
+  assert.match(projectYml, /macOS: "14\.0"/);
+  assert.match(projectYml, /visionOS: "27\.0"/);
+  assert.match(projectPbx, /IPHONEOS_DEPLOYMENT_TARGET = 27\.0;/);
+  assert.match(projectPbx, /XROS_DEPLOYMENT_TARGET = 27\.0;/);
+  assert.match(projectPbx, /MACOSX_DEPLOYMENT_TARGET = 14\.0;/);
+  assert.equal((projectPbx.match(/IPHONEOS_DEPLOYMENT_TARGET = 27\.0;/g) ?? []).length, 2);
+  assert.equal((projectPbx.match(/XROS_DEPLOYMENT_TARGET = 27\.0;/g) ?? []).length, 2);
+  assert.equal(releaseCommands.length, 1, "release tooling must run the native simulator suite");
+  assert.match(releaseCommands[0], /-destination 'platform=iOS Simulator,[^']*OS=27\.0'/);
+});
+
+test("standalone v0.2.4 release gate excludes retired OpenClaw-only package checks", async () => {
+  const design = await fs.readFile(path.join(repository, "DESIGN.md"), "utf8");
+  const workflow = await fs.readFile(path.join(repository, ".github/workflows/release-tightbeam.yml"), "utf8");
+  const build = await fs.readFile(path.join(repository, "scripts/release/build-tightbeam-release.mjs"), "utf8");
+  const smoke = await fs.readFile(path.join(repository, "scripts/release/smoke-tightbeam-release.mjs"), "utf8");
+
+  assert.match(design, /September 27, 2026 OpenClaw retirement ruling removes OpenClaw-only extension\/provider packaging, compatibility, and release checks from this standalone gate/);
+  for (const [label, contents] of [["workflow", workflow], ["builder", build], ["smoke", smoke]]) {
+    assert.doesNotMatch(contents, /openclaw|clawline|extensions\/surf-ace/i, `${label} must remain standalone-only`);
+  }
+  assert.ok(TIGHTBEAM_TEST_COMMANDS.every((command) => !/openclaw|clawline|extensions\//i.test(command)));
 });
 
 test("Mike's Oct 1 spec decision records restored labels and the explicitly kept audit scope", async () => {
@@ -1188,6 +1240,23 @@ test("Mike's Oct 1 spec decision records restored labels and the explicitly kept
   ]) {
     assert.ok(record.includes(requirement), `decision record omits ${requirement}`);
   }
+});
+
+test("Mike's Oct 1 addendum records annotation commit re-entry and native OS 27", async () => {
+  const design = await fs.readFile(path.join(repository, "DESIGN.md"), "utf8");
+  const addendumStart = design.indexOf("**Decision record (Mike, 2026-10-01, addendum):**");
+  assert.ok(addendumStart >= 0, "missing named annotation/OS-floor decision addendum");
+  const addendumEnd = design.indexOf("\n", addendumStart);
+  const addendum = design.slice(addendumStart, addendumEnd);
+  for (const text of [
+    "Same-context annotation re-entry continues the live frame until explicit `event.annotation_committed`",
+    "after that event seals the frame, re-entry opens a new live frame",
+    "Native iOS/iPadOS and visionOS minimum deployment targets",
+    "major version 27",
+  ]) assert.ok(addendum.includes(text), `decision addendum omits ${text}`);
+  assert.match(design, /#### Annotation Context Frame Model \(Context-Keyed, Commit-Delimited\)/);
+  assert.match(design, /After the commit boundary, that frame is sealed and a later same-context annotation opens a new live frame\./);
+  assert.match(design, /### A\.8 Frame Lifecycle[\s\S]*Once `event\.annotation_committed` seals it, same-context re-entry opens a new live frame/);
 });
 
 test("Linux packaged acceptance allocates pane numbers uniquely across two clients on one registry", async () => {

@@ -224,6 +224,61 @@ final class SurfAceLocklessConsumableOperationsTests: XCTestCase {
         XCTAssertEqual(current.lastRetainedSequence, 6)
     }
 
+    func testAnnotationReentryContinuesBeforeCommitAndOpensANewFrameAfterCommit() throws {
+        var state = try authority(controllerIds: ["controller-a"])
+        let scopeId = "pane:surface-a:1"
+        let frameId = "annotation:content-a"
+        let beforeCommit = SurfAceLocklessJSON.object([
+            "contentId": .string("content-a"),
+            "strokes": .array([.string("stroke-before"), .string("stroke-after-reentry-before-commit")]),
+        ])
+
+        _ = try SurfAceLocklessConsumableOperations.updateLiveFrame(
+            in: &state,
+            scopeId: scopeId,
+            frameId: frameId,
+            payload: .object([
+                "contentId": .string("content-a"),
+                "strokes": .array([.string("stroke-before")]),
+            ])
+        )
+        _ = try SurfAceLocklessConsumableOperations.updateLiveFrame(
+            in: &state,
+            scopeId: scopeId,
+            frameId: frameId,
+            payload: beforeCommit
+        )
+
+        var current = try snapshot(state, "controller-a")
+        XCTAssertEqual(current.records.map(\.recordId), [frameId])
+        XCTAssertEqual(current.records.last?.payload, beforeCommit)
+
+        let committed = try SurfAceLocklessConsumableOperations.finalizeLiveFrame(
+            in: &state,
+            scopeId: scopeId,
+            frameId: frameId,
+            recordId: "closed-frame"
+        )
+        XCTAssertEqual(committed?.record.payload, beforeCommit)
+
+        let afterCommit = SurfAceLocklessJSON.object([
+            "contentId": .string("content-a"),
+            "strokes": .array([.string("stroke-after-commit")]),
+        ])
+        _ = try SurfAceLocklessConsumableOperations.updateLiveFrame(
+            in: &state,
+            scopeId: scopeId,
+            frameId: frameId,
+            payload: afterCommit
+        )
+
+        current = try snapshot(state, "controller-a")
+        XCTAssertEqual(current.records.map(\.recordId), ["closed-frame", frameId])
+        XCTAssertEqual(current.records[0].payload, beforeCommit)
+        XCTAssertEqual(current.records[1].payload, afterCommit)
+        XCTAssertNotEqual(current.records[0].sequence, current.records[1].sequence)
+    }
+
     func testDeltaIsControllerLocalAndAdmissionStartsAtCurrentTail() throws {
         var state = try authority(controllerIds: ["controller-a"])
         _ = try append(&state, id: "tap-1", recordClass: .tap)
