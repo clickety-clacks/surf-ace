@@ -3456,7 +3456,7 @@ This section is a consolidated copy/reference index of existing UI/UX mentions e
 
 **Decision record (Mike, 2026-10-01):** the fleet-wide pane-number allocation and always-visible window/pane identity requirements below are restored and remain normative. All other changes reviewed in the specification-weakening audit remain as-is and authorized; this correction does not reopen or alter them.
 
-Every named invariant in this index, including later single-invariant index entries, MUST have a build-failing conformance check in the release-gated Electron or iOS test suites. `scripts/release/release-tooling.test.mjs` verifies that the index and its test-coverage map stay in one-to-one agreement and that each mapped test is present in a suite executed by the release workflow.
+Every named invariant in this index, including later single-invariant index entries, MUST have a build-failing conformance check in the release-gated Electron or iOS test suites, or in a packaged-release acceptance check when it depends on the registry, real clients, or rendered output. `scripts/release/release-tooling.test.mjs` verifies that the index and its test-coverage map stay in one-to-one agreement and that each mapped check is present in a suite or packaged acceptance path executed by the release workflow.
 
 - **Window Letter Labels** — "Window labels (a, b, c…) are allocated by the single fleet-wide label allocator and are unique across the entire fleet; a client that cannot obtain one displays no label." Source: §3.1.1 core invariant
 - **Pane Name Authority** — "Pane names are optional extension-assigned metadata. They do not replace `paneLabel` as the visible identity token." Source: §3.1.1
