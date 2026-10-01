@@ -723,6 +723,26 @@ test("configured server registers two stable clients and deduplicates reconnect"
     assert.equal((await allocator.diagnostics()).nextOrdinalFence, before.nextOrdinalFence);
     await Promise.all([reconnect.synchronize(), clients[1].synchronize()]);
     assert.deepEqual(await topology(), first);
+    const recycledPaneId = "recycled-pane-id";
+    const claim = async (lineage: string) => {
+      const response = await reader!.request("pane.claim", {
+        clientId: fixtures[0].clientId,
+        surfaceId: fixtures[0].surface.surfaceId,
+        paneId: recycledPaneId,
+        paneLineageId: lineage,
+      });
+      assert.equal(response.ok, true);
+      const label = (response.payload as { paneLabel: number }).paneLabel;
+      assert.ok(Number.isSafeInteger(label) && label > 0);
+      return label;
+    };
+    const firstLineageLabel = await claim("pl_first-lifetime");
+    assert.equal(await claim("pl_first-lifetime"), firstLineageLabel,
+      "reconnect must reuse the same durable pane claim");
+    const secondLineageLabel = await claim("pl_second-lifetime");
+    assert.ok(secondLineageLabel > firstLineageLabel,
+      "a reused paneId with new lineage must receive a fresh fleet ordinal");
+    assert.equal(await claim("pl_second-lifetime"), secondLineageLabel);
     const rejected = await reader.request("client.register", { clientId: "", surfaces: [] });
     assert.equal(rejected.ok, false);
     assert.deepEqual(await topology(), first);
