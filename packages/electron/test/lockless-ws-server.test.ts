@@ -30,6 +30,8 @@ import {
 import { SurfaceWsServer } from "../src/ws-server.js";
 
 let nextPort = 25901;
+let nextTestRegistryPaneLabel = 100_000;
+const claimTestRegistryPaneLabel = async (): Promise<number> => nextTestRegistryPaneLabel++;
 
 function authorityVectorUrl(): URL {
   const candidates = [
@@ -1105,6 +1107,7 @@ test("canonical target-admission cases execute Electron authority semantics", as
     const port = nextPort++;
     const server = new SurfaceWsServer({
       capturePaneImage: async () => null,
+      claimPaneLabel: claimTestRegistryPaneLabel,
       compositorSocketPath: null,
       core,
       endpointName: "Surf Ace",
@@ -1261,6 +1264,7 @@ test("AC-TOPO-04: split rename resize close restore and realization share stable
   const port = nextPort++;
   const server = new SurfaceWsServer({
     capturePaneImage: async () => null,
+    claimPaneLabel: claimTestRegistryPaneLabel,
     compositorSocketPath: null,
     core,
     endpointName: "Surf Ace",
@@ -2227,6 +2231,7 @@ test("queued topology mutation invalidates a later target before FIFO admission"
   const port = nextPort++;
   const server = new SurfaceWsServer({
     capturePaneImage: async () => null,
+    claimPaneLabel: claimTestRegistryPaneLabel,
     compositorSocketPath: null,
     core,
     endpointName: "Surf Ace",
@@ -2978,6 +2983,7 @@ test("AC-SURF-02: complete surface close persists a tombstone before zero-live s
   const firstPort = nextPort++;
   const firstServer = new SurfaceWsServer({
     capturePaneImage: async () => null,
+    claimPaneLabel: claimTestRegistryPaneLabel,
     compositorSocketPath: null,
     core,
     endpointName: "Surf Ace",
@@ -3087,6 +3093,7 @@ test("AC-SURF-02: complete surface close persists a tombstone before zero-live s
   const secondPort = nextPort++;
   const secondServer = new SurfaceWsServer({
     capturePaneImage: async () => null,
+    claimPaneLabel: claimTestRegistryPaneLabel,
     compositorSocketPath: null,
     core: restarted,
     endpointName: "Surf Ace",
@@ -3407,6 +3414,7 @@ test("a saturated terminal ledger still admits push, capture, close and cleanup"
   const port = nextPort++;
   const server = new SurfaceWsServer({
     capturePaneImage: async () => "cG5n",
+    claimPaneLabel: claimTestRegistryPaneLabel,
     compositorSocketPath: null,
     core,
     endpointName: "Surf Ace",
