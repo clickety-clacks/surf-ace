@@ -1,5 +1,5 @@
 import { execFile as execFileCallback, spawn } from "node:child_process";
-import { createHash, createPublicKey, randomUUID } from "node:crypto";
+import { createHash, createPublicKey, randomBytes, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import { createRequire } from "node:module";
 import net from "node:net";
@@ -1002,7 +1002,7 @@ async function packagedV023MigrationSmoke(options: Options) {
     const recovery = new Client({ connectionString: cluster.config.recoveryUrl });
     await recovery.connect();
     try {
-      const leaseId = `lease_${randomUUID().replaceAll("-", "")}`;
+      const leaseId = `lease_${randomBytes(16).toString("base64url")}`;
       const generationId = `generation_${randomUUID().replaceAll("-", "")}`;
       await recovery.query(
         "SELECT pg_advisory_lock(key1, key2) FROM surf_ace_allocator.advisory_keys($1)",
