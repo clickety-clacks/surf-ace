@@ -2512,6 +2512,30 @@ test("surface core rejects pane.split with duplicate pane labels inside one surf
   assert.deepEqual(windowState.panes.map((pane) => pane.label), ["7"]);
 });
 
+test("surface core keeps an allocator-unavailable pane unnumbered and hidden", () => {
+  const core = new SurfaceCore({
+    persistentState: {
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  const paneId = applyProviderBootstrap(core, surface.surfaceId, 7);
+
+  core.paneSplit(surface.surfaceId, {
+    count: 2,
+    direction: "horizontal",
+    newPaneIds: [9],
+    newPaneLabels: [0],
+    newPaneLineageIds: ["pl_unassigned_test"],
+    paneId,
+  });
+
+  assert.equal(core.getSurface(surface.surfaceId).panes.get(9)?.paneLabel, 0);
+  assert.equal(core.panesList(surface.surfaceId).panes.find((pane) => pane.paneId === 9)?.paneLabel, null);
+  assert.equal(core.publicTopologyState(surface.surfaceId).panes.find((pane) => pane.paneId === 9)?.paneLabel, null);
+});
+
 test("surface core emits history navigation after back/forward", () => {
   const core = new SurfaceCore({
     persistentState: {

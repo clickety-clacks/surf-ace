@@ -3147,6 +3147,7 @@ export class SurfaceCore {
       );
     }
     if (
+      payload.pane.paneLabel > 0 &&
       [...surface.panes.values()].some(
         (pane) => pane.paneLabel === payload.pane.paneLabel,
       )
@@ -4046,9 +4047,10 @@ function deserializeSurface(record: PersistentSurfaceRecord, now: number): Surfa
 function assertSingleSurfacePaneLabelPayload(panes: Array<{ paneLabel: number }>): void {
   const usedPaneLabels = new Set<number>();
   for (const pane of panes) {
-    if (!Number.isInteger(pane.paneLabel) || pane.paneLabel <= 0) {
-      throw new SurfaceCoreError("invalid_payload", "paneLabel must be a positive integer");
+    if (!Number.isSafeInteger(pane.paneLabel) || pane.paneLabel < 0) {
+      throw new SurfaceCoreError("invalid_payload", "paneLabel must be a non-negative safe integer");
     }
+    if (pane.paneLabel === 0) continue;
     if (usedPaneLabels.has(pane.paneLabel)) {
       throw new SurfaceCoreError("invalid_payload", `Duplicate paneLabel in surface payload: ${pane.paneLabel}`);
     }

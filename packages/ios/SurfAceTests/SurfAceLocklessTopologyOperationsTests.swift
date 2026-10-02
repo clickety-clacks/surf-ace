@@ -1,8 +1,8 @@
 import XCTest
 @testable import SurfAce
 
-// Unit fixtures inject the registry result explicitly. Production operations
-// reject a split, topology creation, or restore without an allocator claim.
+// Unit fixtures inject registry results when a scenario needs assigned labels.
+// Production operations may commit panes unnumbered until registry authority returns.
 enum TestRegistryTopology {
     private static func nextLabel(_ state: SurfAceLocklessAuthorityState) -> Int64 {
         let labels = state.liveSurfaces.values.flatMap { surface in
@@ -207,6 +207,56 @@ final class SurfAceLocklessTopologyOperationsTests: XCTestCase {
             XCTAssertEqual(error as? SurfAceLocklessTopologyOperationError, .invalidTopology("destroy_not_allowed"))
         }
         XCTAssertEqual(state, before)
+    }
+
+    func testPaneSplitTopologyApplyAndRestoreRemainUnnumberedUntilRegistryRecovery() throws {
+        var state = try SurfAceLocklessAuthorityState.empty()
+        let surfaceId = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
+            state: &state, expectedSurfaceSetRevision: 0
+        ).surface.surfaceId
+        let splitLineage = "pl_unavailable_split"
+
+        let split = try SurfAceLocklessTopologyOperations.paneSplit(
+            state: &state, surfaceId: surfaceId, paneId: 1, count: 2,
+            direction: "horizontal", expectedTopologyRevision: 0,
+            assignedPaneLabels: [:], assignedPaneLineages: [2: splitLineage]
+        )
+        let splitPaneId = try XCTUnwrap(split.newPaneIds.first)
+        XCTAssertEqual(split.newPaneLabels, [0])
+        XCTAssertEqual(state.liveSurfaces[surfaceId]?.panes[String(splitPaneId)]?.paneLabel, 0)
+        XCTAssertEqual(state.liveSurfaces[surfaceId]?.panes[String(splitPaneId)]?.paneLineageId, splitLineage)
+
+        let closed = try SurfAceLocklessTopologyOperations.paneClose(
+            state: &state, surfaceId: surfaceId, paneId: splitPaneId,
+            expectedTopologyRevision: split.topologyRevision
+        )
+        let restored = try SurfAceLocklessTopologyOperations.paneRestore(
+            state: &state, surfaceId: surfaceId, tombstoneId: closed.tombstoneId,
+            anchorPaneId: 1, direction: "vertical",
+            expectedTopologyRevision: closed.topologyRevision,
+            assignedPaneLabel: 0
+        )
+        XCTAssertEqual(restored.paneLabel, 0)
+        XCTAssertEqual(state.liveSurfaces[surfaceId]?.panes[String(splitPaneId)]?.paneLineageId, splitLineage)
+
+        let topologyLineage = "pl_unavailable_topology"
+        let applied = try SurfAceLocklessTopologyOperations.topologyApply(
+            state: &state, surfaceId: surfaceId, targetPaneId: nil,
+            desired: .object([
+                "children": .array([
+                    .object(["paneId": .integer(1), "type": .string("pane")]),
+                    .object(["paneId": .integer(splitPaneId), "type": .string("pane")]),
+                    .object(["type": .string("pane")]),
+                ]),
+                "direction": .string("horizontal"), "type": .string("split"),
+            ]),
+            allowDestroyPaneIds: [], expectedTopologyRevision: restored.topologyRevision,
+            assignedPaneLabels: [:], assignedPaneLineages: [3: topologyLineage]
+        )
+        let topologyPaneId = try XCTUnwrap(applied.createdPaneIds.first)
+        XCTAssertEqual(state.liveSurfaces[surfaceId]?.panes[String(topologyPaneId)]?.paneLabel, 0)
+        XCTAssertEqual(state.liveSurfaces[surfaceId]?.panes[String(topologyPaneId)]?.paneLineageId, topologyLineage)
+        XCTAssertEqual(state.liveSurfaces[surfaceId]?.nextPaneLabel, 1)
     }
 
     func testSharedTombstonePoolReclaimsOldestClosedSequence() throws {
@@ -537,7 +587,14 @@ extension SurfAceLocklessTopologyOperationsTests {
             state: &state, surfaceId: surfaceId, tombstoneId: closed.tombstoneId,
             anchorPaneId: 1, direction: "vertical", expectedTopologyRevision: 2
         )
-        XCTAssertEqual(state.liveSurfaces[surfaceId]?.panes["2"], original.liveSurfaces[surfaceId]?.panes["2"])
+        let restoredPane = try XCTUnwrap(state.liveSurfaces[surfaceId]?.panes["2"])
+        let originalPane = try XCTUnwrap(original.liveSurfaces[surfaceId]?.panes["2"])
+        XCTAssertEqual(restoredPane.paneId, originalPane.paneId)
+        XCTAssertEqual(restoredPane.paneLineageId, originalPane.paneLineageId)
+        XCTAssertGreaterThan(restoredPane.paneLabel, originalPane.paneLabel)
+        var originalWithFreshRegistryLabel = originalPane
+        originalWithFreshRegistryLabel.paneLabel = restoredPane.paneLabel
+        XCTAssertEqual(restoredPane, originalWithFreshRegistryLabel)
 
         let baseBytes = try SurfAceLocklessTopologyOperations.surfaceBaseBytes(
             try XCTUnwrap(state.liveSurfaces[surfaceId])
@@ -547,7 +604,7 @@ extension SurfAceLocklessTopologyOperationsTests {
         var tooSmall = state
         tooSmall.limits.maxSurfaceRecoverableBaseBytes = baseBytes - 1
         XCTAssertThrowsError(try tooSmall.validate())
-        XCTAssertEqual(state.liveSurfaces[surfaceId]?.panes["2"], original.liveSurfaces[surfaceId]?.panes["2"])
+        XCTAssertEqual(state.liveSurfaces[surfaceId]?.panes["2"], originalWithFreshRegistryLabel)
     }
 
     func testACCLOSE01CloseAtomicallyPreservesMixedHistoryProvenanceAnnotationsAndUnreadCursors() throws {

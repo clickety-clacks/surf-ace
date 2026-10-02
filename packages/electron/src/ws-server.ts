@@ -2553,7 +2553,9 @@ export class SurfaceWsServer {
             newPaneIds.push(identity.paneId);
             const lineageId = `pl_${randomUUID().replaceAll("-", "")}`;
             newPaneLineageIds.push(lineageId);
-            newPaneLabels.push(await this.claimPaneLabel(surfaceId, identity.paneId, lineageId));
+            newPaneLabels.push(await claimPaneLabelOrUnnumbered(
+              this.claimPaneLabel, surfaceId, identity.paneId, lineageId,
+            ));
           }
           const panes = this.core.transaction(() => this.core.paneSplit(surfaceId, {
             count: request.payload.count,
@@ -2564,9 +2566,13 @@ export class SurfaceWsServer {
             paneId: request.payload.paneId,
           }));
           this.assertLocklessRecoverableCapacity(surfaceId, rollbackRecord);
-          this.core.confirmRegistryPaneLabels([{ surfaceId, panes: newPaneIds.map((paneId, index) => ({
-            paneId: String(paneId), paneLabel: newPaneLabels[index]!,
-          })) }]);
+          const numberedPanes = newPaneIds.flatMap((paneId, index) => {
+            const paneLabel = newPaneLabels[index]!;
+            return paneLabel > 0 ? [{ paneId: String(paneId), paneLabel }] : [];
+          });
+          if (numberedPanes.length > 0) {
+            this.core.confirmRegistryPaneLabels([{ surfaceId, panes: numberedPanes }]);
+          }
           return {
             ...panes,
             topologyRevision: Number(
@@ -2698,8 +2704,8 @@ export class SurfaceWsServer {
           // Claim before mutating the retained ledger so allocator failure leaves
           // the tombstone intact. The authority work queue held by this request
           // prevents a competing restore/reclaim while the claim is in flight.
-          pane.paneLabel = await this.claimPaneLabel(
-            surfaceId, pane.paneId, pane.paneLineageId,
+          pane.paneLabel = await claimPaneLabelOrUnnumbered(
+            this.claimPaneLabel, surfaceId, pane.paneId, pane.paneLineageId,
           );
           return this.core.locklessAuthority.transaction(() => {
             this.core.locklessAuthority.restoreTombstone(
@@ -2712,10 +2718,12 @@ export class SurfaceWsServer {
               request.payload.anchorPaneId,
               request.payload.direction,
             );
-            this.core.confirmRegistryPaneLabels([{ surfaceId, panes: [{
-              paneId: String(pane.paneId), paneLineageId: pane.paneLineageId,
-              paneLabel: pane.paneLabel,
-            }] }]);
+            if (pane.paneLabel > 0) {
+              this.core.confirmRegistryPaneLabels([{ surfaceId, panes: [{
+                paneId: String(pane.paneId), paneLineageId: pane.paneLineageId,
+                paneLabel: pane.paneLabel,
+              }] }]);
+            }
             return restored;
           });
         } catch (error) {
@@ -2906,7 +2914,9 @@ export class SurfaceWsServer {
         resultingIds.size,
       );
       for (const [paneId, entry] of created) {
-        entry.paneLabel = await this.claimPaneLabel(surfaceId, paneId, entry.paneLineageId);
+        entry.paneLabel = await claimPaneLabelOrUnnumbered(
+          this.claimPaneLabel, surfaceId, paneId, entry.paneLineageId,
+        );
       }
       const panes = [...resultingIds].map((paneId) => {
         const prior = existing.get(paneId);
@@ -2933,9 +2943,14 @@ export class SurfaceWsServer {
               windowLabel: current.windowLabel,
             }, new Map([...created].map(([paneId, entry]) => [paneId, entry.paneLineageId])));
           this.assertLocklessRecoverableCapacity(surfaceId, beforeRecord);
-          this.core.confirmRegistryPaneLabels([{ surfaceId, panes: [...created].map(([paneId, entry]) => ({
-              paneId: String(paneId), paneLabel: entry.paneLabel,
-            })) }]);
+          const numberedPanes = [...created].flatMap(([paneId, entry]) =>
+            entry.paneLabel > 0
+              ? [{ paneId: String(paneId), paneLabel: entry.paneLabel }]
+              : [],
+          );
+          if (numberedPanes.length > 0) {
+            this.core.confirmRegistryPaneLabels([{ surfaceId, panes: numberedPanes }]);
+          }
           const destroyedPaneTombstones = [];
           for (const payload of removedPanePayloads) {
             const tombstone = this.core.locklessAuthority.createTombstone({
@@ -3569,7 +3584,11 @@ export class SurfaceWsServer {
         if (!existing) newPaneLineages.set(paneId, lineageId);
         authoritativePanes.push({
           ...pane,
-          paneLabel: await this.claimPaneLabel(surfaceId, paneId, lineageId),
+          paneLabel: existing
+            ? existing.paneLabel
+            : await claimPaneLabelOrUnnumbered(
+                this.claimPaneLabel, surfaceId, paneId, lineageId,
+              ),
         });
       }
       const authoritativePayload = { ...request.payload, panes: authoritativePanes };
@@ -3585,9 +3604,18 @@ export class SurfaceWsServer {
         : null;
       try {
         const result = this.core.topologyApply(surfaceId, authoritativePayload, newPaneLineages);
-        this.core.confirmRegistryPaneLabels([{ surfaceId, panes: result.panes.map((pane) => ({
-          paneId: String(pane.paneId), paneLineageId: pane.paneLineageId, paneLabel: pane.paneLabel,
-        })) }]);
+        const numberedPanes = result.panes.flatMap((pane) =>
+          pane.paneLabel > 0
+            ? [{
+                paneId: String(pane.paneId),
+                paneLineageId: pane.paneLineageId,
+                paneLabel: pane.paneLabel,
+              }]
+            : [],
+        );
+        if (numberedPanes.length > 0) {
+          this.core.confirmRegistryPaneLabels([{ surfaceId, panes: numberedPanes }]);
+        }
         await this.waitForResolvedPaneGeometry(
           surfaceId,
           result.panes.map((pane) => Number(pane.paneId)),
@@ -4717,11 +4745,38 @@ export class SurfaceWsServer {
 
   private async handlePaneSplit(socket: WebSocket, request: PaneSplitRequest): Promise<Response> {
     const surfaceId = this.requirePairedSurfaceId(socket);
+    if (
+      request.payload.count < 2 ||
+      request.payload.newPaneIds.length !== request.payload.count - 1 ||
+      request.payload.newPaneLabels.length !== request.payload.count - 1
+    ) {
+      throw new SurfaceCoreError("invalid_payload", "pane.split count/newPaneIds/newPaneLabels mismatch");
+    }
+    const paneIds = request.payload.newPaneIds.map(Number);
+    if (paneIds.some((paneId) => !Number.isSafeInteger(paneId) || paneId < 1) ||
+        new Set(paneIds).size !== paneIds.length) {
+      throw new SurfaceCoreError("invalid_payload", "pane.split newPaneIds must be unique positive integers");
+    }
+    const newPaneLineageIds = request.payload.newPaneIds.map(() =>
+      `pl_${randomUUID().replaceAll("-", "")}`,
+    );
+    const newPaneLabels: number[] = [];
+    for (let index = 0; index < request.payload.newPaneIds.length; index += 1) {
+      newPaneLabels.push(await claimPaneLabelOrUnnumbered(
+        this.claimPaneLabel,
+        surfaceId,
+        paneIds[index]!,
+        newPaneLineageIds[index]!,
+      ));
+    }
     const splitPayload = {
       count: request.payload.count,
       direction: request.payload.direction,
-      newPaneIds: request.payload.newPaneIds.map(Number),
-      newPaneLabels: request.payload.newPaneLabels.map(Number),
+      newPaneIds: paneIds,
+      // The caller's visible labels are compatibility input only; allocator
+      // authority supplies every committed label, or zero when unavailable.
+      newPaneLabels,
+      newPaneLineageIds,
       paneId: Number(request.payload.paneId),
     };
     const payload = await this.runSurfaceMutation(surfaceId, async () => {
@@ -4732,6 +4787,16 @@ export class SurfaceWsServer {
         : null;
       try {
         const result = this.core.paneSplit(surfaceId, splitPayload);
+        const numberedPanes = result.panes.flatMap((pane) =>
+          pane.paneLabel > 0
+            ? [{ paneId: String(pane.paneId), paneLineageId: newPaneLineageIds[
+                splitPayload.newPaneIds.indexOf(pane.paneId)
+              ], paneLabel: pane.paneLabel }]
+            : [],
+        );
+        if (numberedPanes.length > 0) {
+          this.core.confirmRegistryPaneLabels([{ surfaceId, panes: numberedPanes }]);
+        }
         await this.waitForResolvedPaneGeometry(
           surfaceId,
           result.panes.map((pane) => Number(pane.paneId)),
@@ -5923,4 +5988,54 @@ function contentBitmask(contentTypes: string[]): number {
     video: 1 << 5,
   };
   return contentTypes.reduce((mask, type) => mask | (bits[type] ?? 0), 0);
+}
+
+const PANE_ALLOCATOR_TRANSPORT_FAILURES = new Set([
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "EHOSTDOWN",
+  "EHOSTUNREACH",
+  "ENETDOWN",
+  "ENETUNREACH",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "EPIPE",
+  "ETIMEDOUT",
+]);
+
+function isPaneAllocatorUnavailable(error: unknown, seen = new Set<unknown>()): boolean {
+  if (!error || seen.has(error)) return false;
+  seen.add(error);
+  if (error instanceof Error && (
+    error.message === "allocator_unavailable" ||
+    error.message === "controller_wire_not_connected" ||
+    error.message === "controller_wire_closed" ||
+    error.message === "controller_wire_timeout:pane.claim"
+  )) return true;
+  if (typeof error !== "object") return false;
+  const record = error as { cause?: unknown; code?: unknown; message?: unknown };
+  const code = typeof record.code === "string" ? record.code : "";
+  const message = typeof record.message === "string" ? record.message : "";
+  if (PANE_ALLOCATOR_TRANSPORT_FAILURES.has(code) ||
+      [...PANE_ALLOCATOR_TRANSPORT_FAILURES].some((candidate) =>
+        new RegExp(`\\b${candidate}\\b`).test(message))) return true;
+  return isPaneAllocatorUnavailable(record.cause, seen);
+}
+
+async function claimPaneLabelOrUnnumbered(
+  claim: NonNullable<SurfaceWsServerOptions["claimPaneLabel"]>,
+  surfaceId: string,
+  paneId: number,
+  paneLineageId: string,
+): Promise<number> {
+  try {
+    const label = await claim(surfaceId, paneId, paneLineageId);
+    if (!Number.isSafeInteger(label) || label < 1) {
+      throw new Error("invalid_pane_assignment");
+    }
+    return label;
+  } catch (error) {
+    if (isPaneAllocatorUnavailable(error)) return 0;
+    throw error;
+  }
 }

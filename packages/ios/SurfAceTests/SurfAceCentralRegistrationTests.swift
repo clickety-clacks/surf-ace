@@ -11,11 +11,31 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         var closed = false
         var clients: [String] = []
         var label = "z"
+        var assignsPaneLabels = false
+        var registeredSurfaces: [SurfAceRegistrationSurface] = []
+        var nextPaneLabel: Int64 = 700
         func register(clientId: String, surfaces: [SurfAceRegistrationSurface]) async throws -> [SurfAceRegistrationAssignment] {
             clients.append(clientId)
+            registeredSurfaces = surfaces
             if let error { throw error }
             if fails { throw SurfAceRegistrationError.noServer }
-            return surfaces.map { SurfAceRegistrationAssignment(surfaceId: $0.surfaceId, windowLabel: label) }
+            return surfaces.map { surface in
+                let panes: [SurfAceRegistrationSurface.Pane]
+                if assignsPaneLabels {
+                    panes = surface.panes.map { pane in
+                    defer { nextPaneLabel += 1 }
+                    return SurfAceRegistrationSurface.Pane(
+                        paneId: pane.paneId, paneLineageId: pane.paneLineageId,
+                        paneLabel: nextPaneLabel
+                    )
+                    }
+                } else {
+                    panes = []
+                }
+                return SurfAceRegistrationAssignment(
+                    surfaceId: surface.surfaceId, windowLabel: label, panes: panes
+                )
+            }
         }
         func close() { closed = true }
     }
@@ -457,6 +477,39 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
             XCTAssertEqual(applied, code == .cannotFindHost)
             registration.stop()
         }
+    }
+
+    func testClientRegisterRecoversUnnumberedPanesByTheirExistingLineage() async throws {
+        let transport = Transport()
+        transport.assignsPaneLabels = true
+        let lineages = ["pl_split_after_outage", "pl_restore_after_outage", "pl_topology_after_outage"]
+        let surfaces = [SurfAceRegistrationSurface(
+            surfaceId: "sf_recovery",
+            panes: lineages.enumerated().map { index, lineage in
+                .init(paneId: String(index + 2), paneLineageId: lineage, paneLabel: 0)
+            }
+        )]
+        var recovered: [String: Int64] = [:]
+        let registration = SurfAceCentralRegistration(
+            clientId: String(repeating: "c", count: 64),
+            configured: URL(string: "ws://allocator.example:19430/"),
+            discover: { [] },
+            makeTransport: { _ in transport },
+            snapshot: { surfaces },
+            apply: { assignments, expected in
+                XCTAssertEqual(expected, surfaces)
+                let panes = try XCTUnwrap(assignments.first?.panes)
+                recovered = Dictionary(uniqueKeysWithValues: panes.map { ($0.paneLineageId, $0.paneLabel) })
+            }
+        )
+        try await registration.synchronize()
+
+        XCTAssertEqual(transport.registeredSurfaces, surfaces)
+        XCTAssertEqual(Set(transport.registeredSurfaces.flatMap(\.panes).map(\.paneLabel)), [0])
+        XCTAssertEqual(Set(recovered.keys), Set(lineages))
+        XCTAssertTrue(recovered.values.allSatisfy { $0 > 0 })
+        XCTAssertEqual(Set(recovered.values).count, lineages.count)
+        registration.stop()
     }
 
     func testPersistenceFailureDoesNotPublishAssignmentAndReloadKeepsLabels() async throws {

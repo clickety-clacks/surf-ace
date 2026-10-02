@@ -158,15 +158,8 @@ enum SurfAceLocklessTopologyOperations {
             var newPaneLabels: [Int64] = []
             for _ in 1..<count {
                 let identity = allocatePaneIdentity(surface: &surface)
-                let label: Int64
-                if let assignedPaneLabels {
-                    guard let assigned = assignedPaneLabels[identity], assigned > 0 else {
-                        throw Error.invalidTopology("allocator_pane_assignment_missing")
-                    }
-                    label = assigned
-                } else {
-                    throw Error.invalidTopology("allocator_pane_assignment_missing")
-                }
+                let label = assignedPaneLabels?[identity] ?? 0
+                guard label >= 0 else { throw Error.invalidTopology("allocator_pane_assignment_invalid") }
                 let pane = emptyPane(surfaceId: surfaceId, paneId: identity, paneLabel: label,
                     paneLineageId: assignedPaneLineages?[identity])
                 surface.panes[String(identity)] = pane
@@ -278,18 +271,20 @@ enum SurfAceLocklessTopologyOperations {
             guard let index = surface.paneTombstones.firstIndex(where: { $0.tombstoneId == tombstoneId }) else {
                 throw Error.tombstoneNotFound(tombstoneId)
             }
-            guard assignedPaneLabel > 0 else {
-                throw Error.invalidTopology("allocator_pane_assignment_missing")
+            guard assignedPaneLabel >= 0 else {
+                throw Error.invalidTopology("allocator_pane_assignment_invalid")
             }
             var tombstone = surface.paneTombstones[index]
             tombstone.pane.paneLabel = assignedPaneLabel
             guard surface.panes[String(tombstone.pane.paneId)] == nil else {
                 throw Error.invalidAuthorityState("restored_pane_identity_live")
             }
-            guard !surface.panes.values.contains(where: { $0.paneLabel == tombstone.pane.paneLabel }) else {
+            guard assignedPaneLabel == 0 || !surface.panes.values.contains(where: { $0.paneLabel == assignedPaneLabel }) else {
                 throw Error.invalidAuthorityState("restored_pane_label_conflict")
             }
-            surface.nextPaneLabel = max(surface.nextPaneLabel, tombstone.pane.paneLabel + 1)
+            if assignedPaneLabel > 0 {
+                surface.nextPaneLabel = max(surface.nextPaneLabel, assignedPaneLabel + 1)
+            }
             let replacement: SurfAceLocklessJSON = .object([
                 "children": .array([
                     .object(["paneId": .integer(anchorPaneId), "type": .string("pane")]),
@@ -831,15 +826,8 @@ private extension SurfAceLocklessTopologyOperations {
                 return .object(["paneId": .integer(explicitId), "type": .string("pane")])
             }
             let identity = allocatePaneIdentity(surface: &surface)
-            let label: Int64
-            if let assignedPaneLabels {
-                guard let assigned = assignedPaneLabels[identity], assigned > 0 else {
-                    throw Error.invalidTopology("allocator_pane_assignment_missing")
-                }
-                label = assigned
-            } else {
-                throw Error.invalidTopology("allocator_pane_assignment_missing")
-            }
+            let label = assignedPaneLabels?[identity] ?? 0
+            guard label >= 0 else { throw Error.invalidTopology("allocator_pane_assignment_invalid") }
             var pane = emptyPane(surfaceId: surfaceId, paneId: identity, paneLabel: label,
                 paneLineageId: assignedPaneLineages?[identity])
             if case .string(let name) = object["name"] { pane.name = name }

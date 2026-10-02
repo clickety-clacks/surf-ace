@@ -316,7 +316,8 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         runtime.project(topology: topology, onto: surface)
         XCTAssertEqual(bridge.renderCallEntries.count, 1)
         XCTAssertEqual(surface.windowLabel, "b")
-        XCTAssertEqual(pane.paneLabel, 2)
+        // Persisted labels remain hidden until this runtime has exact registry confirmation.
+        XCTAssertEqual(pane.paneLabel, 0)
 
         topology.panes[0].currentEntry = purple
         topology.panes[0].backStack = []
