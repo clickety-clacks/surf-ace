@@ -15,7 +15,7 @@ export const TOOLCHAINS = Object.freeze({
 });
 
 export const TIGHTBEAM = Object.freeze({
-  candidateCommit: "1a0154f8e7c35424836870cd058534c831b70cf3",
+  candidateCommit: "aa05d4e617bde0a5fcf2788b228d4eedd5a523d8",
   sourceTag: "surf-ace-tightbeam-v0.2.4",
   version: "0.2.4",
   toolingTag: TIGHTBEAM_TOOLING_TAG,
