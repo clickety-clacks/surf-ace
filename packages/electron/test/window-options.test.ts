@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import test from "node:test";
 
 import {
+  shouldDisableGpuForSoftwareCapture,
   surfaceWindowCaptureMode,
   surfaceWindowLoadQuery,
   surfaceWindowOptions,
@@ -84,6 +85,27 @@ test("Linux GPU fallback keeps a non-compositor window offscreen for capture", (
     offscreen: false,
     showAfterReady: true,
   });
+});
+
+test("Linux software-capture fallback honors the Electron disable-gpu launch switch", async () => {
+  assert.equal(shouldDisableGpuForSoftwareCapture({
+    commandLineHasDisableGpu: true,
+    envValue: undefined,
+  }), true);
+  assert.equal(shouldDisableGpuForSoftwareCapture({
+    commandLineHasDisableGpu: false,
+    envValue: "1",
+  }), true);
+  assert.equal(shouldDisableGpuForSoftwareCapture({
+    commandLineHasDisableGpu: false,
+    envValue: "false",
+  }), false);
+  assert.equal(shouldDisableGpuForSoftwareCapture({
+    commandLineHasDisableGpu: false,
+    envValue: undefined,
+  }), false);
+
+  assert.match(await mainSource(), /commandLineHasDisableGpu:\s*app\.commandLine\.hasSwitch\("disable-gpu"\)/);
 });
 
 test("surface window load query flags compositor hosting before first paint", () => {

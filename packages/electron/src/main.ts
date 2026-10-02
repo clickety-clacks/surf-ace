@@ -69,7 +69,12 @@ import {
 import { isAddressInUse, isPortBoundOnIpv6Any } from "./port-selection.js";
 import { SurfaceWsServer } from "./ws-server.js";
 import { restoreWindowPlacement, type WindowPlacement } from "./window-placement.js";
-import { surfaceWindowCaptureMode, surfaceWindowLoadQuery, surfaceWindowOptions } from "./window-options.js";
+import {
+  shouldDisableGpuForSoftwareCapture,
+  surfaceWindowCaptureMode,
+  surfaceWindowLoadQuery,
+  surfaceWindowOptions,
+} from "./window-options.js";
 
 const DEFAULT_WS_PORT = 19001;
 const WS_PORT = Number(process.env.SURF_ACE_PORT ?? DEFAULT_WS_PORT);
@@ -123,14 +128,18 @@ function restoredSurfaceDiagnosticSummary(): string {
 }
 
 function gpuDisableRequested(): boolean {
-  const value = process.env.SURF_ACE_DISABLE_GPU?.trim().toLowerCase();
-  return value === "1" || value === "true" || value === "yes";
+  return shouldDisableGpuForSoftwareCapture({
+    commandLineHasDisableGpu: app.commandLine.hasSwitch("disable-gpu"),
+    envValue: process.env.SURF_ACE_DISABLE_GPU,
+  });
 }
 
-// Prefer GPU compositing by default. Set SURF_ACE_DISABLE_GPU=1 only on hosts that
-// reproduce the original GPU-process crash path.
+// Keep Chromium's explicit --disable-gpu request and the software/offscreen window
+// path in sync. The environment override remains available for non-CLI launchers.
 if (gpuDisableRequested()) {
-  app.commandLine.appendSwitch("disable-gpu");
+  if (!app.commandLine.hasSwitch("disable-gpu")) {
+    app.commandLine.appendSwitch("disable-gpu");
+  }
   clientInfo("gpu_disable_requested");
 }
 
