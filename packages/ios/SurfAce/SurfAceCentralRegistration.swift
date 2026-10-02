@@ -34,12 +34,13 @@ struct SurfAceRegistrationAssignment: Codable, Equatable, Sendable {
 
 enum SurfAceRegistrationError: Error {
     case invalidResponse
+    case paneClaimRejected
     case noServer
     case stopped
     case topologyChanged
 }
 
-private enum SurfAceRegistrationWire {
+enum SurfAceRegistrationWire {
     struct PaneClaimRequest: Encodable {
         struct Payload: Encodable {
             let clientId: String
@@ -101,8 +102,11 @@ private enum SurfAceRegistrationWire {
 
     static func paneClaimLabel(from data: Data, requestId: String) throws -> Int64 {
         let response = try JSONDecoder().decode(PaneClaimResponse.self, from: data)
-        guard response.id == requestId, response.op == "pane.claim", response.ok,
-              let label = response.payload?.paneLabel, label > 0 else {
+        guard response.id == requestId, response.op == "pane.claim" else {
+            throw SurfAceRegistrationError.invalidResponse
+        }
+        guard response.ok else { throw SurfAceRegistrationError.paneClaimRejected }
+        guard let label = response.payload?.paneLabel, label > 0 else {
             throw SurfAceRegistrationError.invalidResponse
         }
         return label

@@ -39,10 +39,14 @@ private func surfAceDiagnosticFields(_ fields: [(String, CustomStringConvertible
     }.joined(separator: " ")
 }
 
-private func isPaneAllocatorUnavailable(_ error: Error) -> Bool {
-    if let registrationError = error as? SurfAceRegistrationError,
-       case .noServer = registrationError {
-        return true
+func isPaneAllocatorUnavailable(_ error: Error) -> Bool {
+    if let registrationError = error as? SurfAceRegistrationError {
+        switch registrationError {
+        case .noServer, .paneClaimRejected:
+            return true
+        default:
+            break
+        }
     }
     guard let urlError = error as? URLError else { return false }
     switch urlError.code {

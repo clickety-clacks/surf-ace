@@ -5990,38 +5990,6 @@ function contentBitmask(contentTypes: string[]): number {
   return contentTypes.reduce((mask, type) => mask | (bits[type] ?? 0), 0);
 }
 
-const PANE_ALLOCATOR_TRANSPORT_FAILURES = new Set([
-  "ECONNREFUSED",
-  "ECONNRESET",
-  "EHOSTDOWN",
-  "EHOSTUNREACH",
-  "ENETDOWN",
-  "ENETUNREACH",
-  "ENOTFOUND",
-  "EAI_AGAIN",
-  "EPIPE",
-  "ETIMEDOUT",
-]);
-
-function isPaneAllocatorUnavailable(error: unknown, seen = new Set<unknown>()): boolean {
-  if (!error || seen.has(error)) return false;
-  seen.add(error);
-  if (error instanceof Error && (
-    error.message === "allocator_unavailable" ||
-    error.message === "controller_wire_not_connected" ||
-    error.message === "controller_wire_closed" ||
-    error.message === "controller_wire_timeout:pane.claim"
-  )) return true;
-  if (typeof error !== "object") return false;
-  const record = error as { cause?: unknown; code?: unknown; message?: unknown };
-  const code = typeof record.code === "string" ? record.code : "";
-  const message = typeof record.message === "string" ? record.message : "";
-  if (PANE_ALLOCATOR_TRANSPORT_FAILURES.has(code) ||
-      [...PANE_ALLOCATOR_TRANSPORT_FAILURES].some((candidate) =>
-        new RegExp(`\\b${candidate}\\b`).test(message))) return true;
-  return isPaneAllocatorUnavailable(record.cause, seen);
-}
-
 async function claimPaneLabelOrUnnumbered(
   claim: NonNullable<SurfaceWsServerOptions["claimPaneLabel"]>,
   surfaceId: string,
@@ -6030,12 +5998,11 @@ async function claimPaneLabelOrUnnumbered(
 ): Promise<number> {
   try {
     const label = await claim(surfaceId, paneId, paneLineageId);
-    if (!Number.isSafeInteger(label) || label < 1) {
-      throw new Error("invalid_pane_assignment");
-    }
-    return label;
-  } catch (error) {
-    if (isPaneAllocatorUnavailable(error)) return 0;
-    throw error;
+    return Number.isSafeInteger(label) && label > 0 ? label : 0;
+  } catch {
+    // Any failed claim leaves fleet authority unconfirmed. The local topology
+    // operation may still commit the pane, but it must remain unnumbered until
+    // a later client.register supplies an authoritative lineage assignment.
+    return 0;
   }
 }

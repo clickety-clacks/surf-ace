@@ -1716,7 +1716,7 @@ test("AC-TOPO-04: split rename resize close restore and realization share stable
   }
 });
 
-test("new panes stay unnumbered when the allocator is unavailable and recover by lineage on client.register", async () => {
+test("new panes stay unnumbered when the registry rejects a pane claim and recover by lineage on client.register", async () => {
   const core = new SurfaceCore();
   const surface = core.ensurePrimarySurface("Surf Ace", {
     height: 800,
@@ -1727,7 +1727,7 @@ test("new panes stay unnumbered when the allocator is unavailable and recover by
   const port = nextPort++;
   const server = new SurfaceWsServer({
     capturePaneImage: async () => null,
-    claimPaneLabel: async () => { throw new Error("allocator_unavailable"); },
+    claimPaneLabel: async () => { throw new Error("surface_not_registered"); },
     compositorSocketPath: null,
     core,
     endpointName: "Surf Ace",

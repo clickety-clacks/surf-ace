@@ -512,6 +512,27 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         registration.stop()
     }
 
+    func testPaneClaimOkFalseIsDistinguishedAsAnUnconfirmedAssignment() throws {
+        let response = Data(#"{"id":"claim-rejected","op":"pane.claim","ok":false,"payload":null}"#.utf8)
+
+        XCTAssertThrowsError(try SurfAceRegistrationWire.paneClaimLabel(
+            from: response, requestId: "claim-rejected"
+        )) { error in
+            XCTAssertEqual(String(describing: error), "paneClaimRejected")
+            XCTAssertTrue(isPaneAllocatorUnavailable(error))
+        }
+
+        XCTAssertFalse(isPaneAllocatorUnavailable(SurfAceRegistrationError.stopped))
+        XCTAssertFalse(isPaneAllocatorUnavailable(SurfAceRegistrationError.topologyChanged))
+
+        let malformedSuccess = Data(#"{"id":"claim-malformed","op":"pane.claim","ok":true,"payload":{}}"#.utf8)
+        XCTAssertThrowsError(try SurfAceRegistrationWire.paneClaimLabel(
+            from: malformedSuccess, requestId: "claim-malformed"
+        )) { error in
+            XCTAssertFalse(isPaneAllocatorUnavailable(error))
+        }
+    }
+
     func testPersistenceFailureDoesNotPublishAssignmentAndReloadKeepsLabels() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("registration-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
