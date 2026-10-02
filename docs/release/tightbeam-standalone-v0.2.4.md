@@ -7,7 +7,7 @@ moving branch.
 ## Immutable identity
 
 - Product source: proposed tag `surf-ace-tightbeam-v0.2.4` at product commit
-  `aa5b6c5305328162c3e41e48e21df860ad010b28`.
+  `eddb6fa2237d43a75f8166faa1daf2d3d600e668`.
 - Product version: `0.2.4`.
 - Tooling: proposed tag `surf-ace-release-tooling-tightbeam-v0.2.4` at the
   exact reviewed tooling commit.
