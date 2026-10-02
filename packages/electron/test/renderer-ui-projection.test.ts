@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import test from "node:test";
 
 import { parseHTML } from "linkedom";
@@ -10,6 +12,10 @@ import {
   projectContentScaleIndicator,
   toggleContentScalePopup,
 } from "../src/renderer/ui-projection.js";
+
+const rendererSourcePath = resolve(process.cwd(), "src/renderer/renderer.ts");
+const rendererStylesPath = resolve(process.cwd(), "src/renderer/styles.css");
+const repositoryDesignPath = resolve(process.cwd(), "../..", "DESIGN.md");
 
 function connectionChromeFixture() {
   const { document } = parseHTML(`
@@ -26,7 +32,7 @@ function connectionChromeFixture() {
   return { disconnectedGlyph, labelWrap, paneLabel, windowLabel };
 }
 
-test("connection chrome transitions render mutually exclusive identity and disconnected SVG states", () => {
+test("assigned identity labels remain visible across connection states", () => {
   const chrome = connectionChromeFixture();
 
   projectConnectionChrome(chrome, "connected", true, true);
@@ -36,18 +42,18 @@ test("connection chrome transitions render mutually exclusive identity and disco
   assert.equal(chrome.labelWrap.hasAttribute("hidden"), false);
 
   projectConnectionChrome(chrome, "connecting", true, true);
-  assert.equal(chrome.windowLabel.hasAttribute("hidden"), true);
-  assert.equal(chrome.paneLabel.hasAttribute("hidden"), true);
-  assert.equal(chrome.disconnectedGlyph.hasAttribute("hidden"), false);
-  assert.equal(chrome.disconnectedGlyph.classList.contains("is-connecting"), true);
+  assert.equal(chrome.windowLabel.hasAttribute("hidden"), false);
+  assert.equal(chrome.paneLabel.hasAttribute("hidden"), false);
+  assert.equal(chrome.disconnectedGlyph.hasAttribute("hidden"), true);
+  assert.equal(chrome.disconnectedGlyph.classList.contains("is-connecting"), false);
   assert.equal(chrome.disconnectedGlyph.classList.contains("is-disconnected"), false);
 
   projectConnectionChrome(chrome, "disconnected", true, true);
-  assert.equal(chrome.windowLabel.hasAttribute("hidden"), true);
-  assert.equal(chrome.paneLabel.hasAttribute("hidden"), true);
-  assert.equal(chrome.disconnectedGlyph.hasAttribute("hidden"), false);
+  assert.equal(chrome.windowLabel.hasAttribute("hidden"), false);
+  assert.equal(chrome.paneLabel.hasAttribute("hidden"), false);
+  assert.equal(chrome.disconnectedGlyph.hasAttribute("hidden"), true);
   assert.equal(chrome.disconnectedGlyph.classList.contains("is-connecting"), false);
-  assert.equal(chrome.disconnectedGlyph.classList.contains("is-disconnected"), true);
+  assert.equal(chrome.disconnectedGlyph.classList.contains("is-disconnected"), false);
 
   projectConnectionChrome(chrome, "connected", true, true);
   assert.equal(chrome.windowLabel.hasAttribute("hidden"), false);
@@ -55,7 +61,29 @@ test("connection chrome transitions render mutually exclusive identity and disco
   assert.equal(chrome.disconnectedGlyph.hasAttribute("hidden"), true);
 });
 
-test("same-client panes can render connected and disconnected chrome without mixing either target", () => {
+test("an assigned window label remains visible while a pane awaits its registry number", () => {
+  const chrome = connectionChromeFixture();
+
+  projectConnectionChrome(chrome, "disconnected", false, true);
+
+  assert.equal(chrome.windowLabel.hasAttribute("hidden"), false);
+  assert.equal(chrome.paneLabel.hasAttribute("hidden"), true);
+  assert.equal(chrome.labelWrap.hasAttribute("hidden"), false);
+  assert.equal(chrome.disconnectedGlyph.hasAttribute("hidden"), true);
+});
+
+test("identity labels are absent only when neither registry label is assigned", () => {
+  const chrome = connectionChromeFixture();
+
+  projectConnectionChrome(chrome, "disconnected", false, false);
+
+  assert.equal(chrome.windowLabel.hasAttribute("hidden"), true);
+  assert.equal(chrome.paneLabel.hasAttribute("hidden"), true);
+  assert.equal(chrome.labelWrap.hasAttribute("hidden"), true);
+  assert.equal(chrome.disconnectedGlyph.hasAttribute("hidden"), true);
+});
+
+test("same-client panes keep assigned identities while connection state changes", () => {
   const connected = connectionChromeFixture();
   const disconnected = connectionChromeFixture();
 
@@ -76,11 +104,23 @@ test("same-client panes can render connected and disconnected chrome without mix
       paneHidden: disconnected.paneLabel.hasAttribute("hidden"),
       windowHidden: disconnected.windowLabel.hasAttribute("hidden"),
     },
-    { glyphHidden: false, paneHidden: true, windowHidden: true },
+    { glyphHidden: true, paneHidden: false, windowHidden: false },
   );
 });
 
-test("every non-push-capable renderer state projects glyph-only chrome through the shared DOM path", () => {
+test("pointer and touch activity have no rule that hides assigned identity labels", () => {
+  const styles = readFileSync(rendererStylesPath, "utf8");
+  assert.match(styles, /\.pane-label\s*\{[^}]*pointer-events:\s*none;/);
+  const identityRules = [...styles.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+    .filter(([, selector]) => /\.pane-label(?:__window|__number)?/.test(selector!));
+  for (const [rule, selector, declarations] of identityRules) {
+    if (/:hover|:active|:focus|pointer|touch|connection-(?:connected|connecting|disconnected)|annotation/i.test(selector!)) {
+      assert.doesNotMatch(declarations!, /(?:display\s*:\s*none|visibility\s*:\s*hidden|opacity\s*:\s*0(?:\D|$))/i, rule!);
+    }
+  }
+});
+
+test("every non-push-capable renderer state keeps assigned identity labels", () => {
   const cases = [
     ["connecting", "connecting"],
     ["gave-up", "disconnected"],
@@ -93,10 +133,70 @@ test("every non-push-capable renderer state projects glyph-only chrome through t
   for (const [source, connectionBar] of cases) {
     const chrome = connectionChromeFixture();
     projectConnectionChrome(chrome, connectionBar, true, true);
-    assert.equal(chrome.windowLabel.hasAttribute("hidden"), true, `${source}: window identity`);
-    assert.equal(chrome.paneLabel.hasAttribute("hidden"), true, `${source}: pane identity`);
-    assert.equal(chrome.disconnectedGlyph.hasAttribute("hidden"), false, `${source}: glyph`);
+    assert.equal(chrome.windowLabel.hasAttribute("hidden"), false, `${source}: window identity`);
+    assert.equal(chrome.paneLabel.hasAttribute("hidden"), false, `${source}: pane identity`);
+    assert.equal(chrome.disconnectedGlyph.hasAttribute("hidden"), true, `${source}: glyph`);
   }
+});
+
+test("history controls expose no depth counters", () => {
+  const renderer = readFileSync(rendererSourcePath, "utf8");
+  const styles = readFileSync(rendererStylesPath, "utf8");
+
+  assert.match(renderer, /navigation-pill/);
+  assert.doesNotMatch(`${renderer}\n${styles}`, /history(?:Depth|Count|Counter|_depth|_count)|\.history-counter\b/i);
+});
+
+test("drawing input, navigation, and Done controls keep their two-pill contract", () => {
+  const renderer = readFileSync(rendererSourcePath, "utf8");
+
+  assert.match(renderer, /navigationPill\.className = "control-pill navigation-pill"/);
+  assert.match(renderer, /annotationPill\.className = "control-pill annotation-pill"/);
+  assert.match(renderer, /createIconButton\("pen-line", "Sketch", "annotate"\)/);
+  assert.match(renderer, /createButton\("Done", "done"\)/);
+  assert.match(renderer, /if \(pane\.showDone\)\s*\{[\s\S]*?createButton\("Done", "done"\)/);
+});
+
+test("disabled history controls stay disabled without a hover affordance", () => {
+  const renderer = readFileSync(rendererSourcePath, "utf8");
+  const styles = readFileSync(rendererStylesPath, "utf8");
+
+  assert.match(renderer, /back\.disabled = !canGoBack/);
+  assert.match(renderer, /forward\.disabled = !canGoForward/);
+  assert.match(styles, /\.control-button:disabled\s*\{[^}]*opacity:\s*0\.4/);
+  assert.doesNotMatch(styles, /\.control-button:disabled:hover\s*\{/);
+});
+
+test("drawing flush animation follows the in-flight bit and ends with the flush", () => {
+  const renderer = readFileSync(rendererSourcePath, "utf8");
+  const styles = readFileSync(rendererStylesPath, "utf8");
+
+  assert.match(renderer, /flush-in-flight", pane\.flushInFlight\)/);
+  assert.match(styles, /\.pane-shell\.annotating\.flush-in-flight\s*\{\s*animation:\s*flush-pulse/);
+  assert.match(styles, /@keyframes flush-pulse/);
+});
+
+test("open native-overlay markups and future widgets remain design gaps, not shipped controls", () => {
+  const design = readFileSync(repositoryDesignPath, "utf8");
+  const source = readFileSync(rendererSourcePath, "utf8");
+  const mainSpecStart = design.indexOf("## 15.");
+  const openTopicsStart = design.indexOf("## Open Topics\n", mainSpecStart);
+  const openTopicsEnd = design.indexOf("\n## 16.", openTopicsStart);
+  const openTopics = design.slice(openTopicsStart, openTopicsEnd);
+
+  assert.match(design, /\*\*Native Overlay Visual Distinction Gap\*\*/);
+  assert.match(design, /\*\*Native Overlay Model Markup Goal\*\*/);
+  assert.match(design, /\*\*Future Interactive Affordances\*\*/);
+  assert.match(openTopics, /### OT-1: Model-Side Markup \(Provider-Originated Strokes\)/);
+  assert.doesNotMatch(source, /modelMarkup|providerMarkup|modelStroke|model-markup|model-stroke/);
+});
+
+test("the surface has no explicit browsing-mode selector and treats browser content as pane content", () => {
+  const renderer = readFileSync(rendererSourcePath, "utf8");
+  const styles = readFileSync(rendererStylesPath, "utf8");
+
+  assert.match(renderer, /browser_url/);
+  assert.doesNotMatch(`${renderer}\n${styles}`, /browsing-mode|browser-mode-selector|browsingMode|browserMode/);
 });
 
 test("font-size indicator projects current pane scale through repeated changes, rebuild, and reset", () => {

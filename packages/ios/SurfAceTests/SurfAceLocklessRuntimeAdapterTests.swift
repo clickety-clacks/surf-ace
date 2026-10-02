@@ -96,6 +96,43 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
         XCTAssertEqual(try fixture.store.load()?.sequences.nextCommitSequence, 2)
     }
 
+    func testRegistrationAssignsUnnumberedPaneByItsExistingLineage() async throws {
+        let lineage = "pl_registration_recovery"
+        let fixture = try makeFixture { state in
+            let split = try SurfAceLocklessTopologyOperations.paneSplit(
+                state: &state, surfaceId: "sf_1", paneId: 1, count: 2,
+                direction: "horizontal", expectedTopologyRevision: 0,
+                assignedPaneLabels: [:], assignedPaneLineages: [2: lineage]
+            )
+            XCTAssertEqual(split.newPaneLabels, [0])
+        }
+        let before = await fixture.adapter.snapshot()
+        let expected = SurfAceRegistrationSurface.snapshot(before)
+        XCTAssertEqual(before.liveSurfaces["sf_1"]?.panes["2"]?.paneLabel, 0)
+        XCTAssertEqual(before.liveSurfaces["sf_1"]?.panes["2"]?.paneLineageId, lineage)
+
+        var nextLabel: Int64 = 1200
+        let assignments = expected.map { surface in
+            SurfAceRegistrationAssignment(
+                surfaceId: surface.surfaceId,
+                windowLabel: "z",
+                panes: surface.panes.map { pane in
+                    defer { nextLabel += 1 }
+                    return .init(
+                        paneId: pane.paneId,
+                        paneLineageId: pane.paneLineageId,
+                        paneLabel: nextLabel
+                    )
+                }
+            )
+        }
+        let recovered = try await fixture.adapter.applyRegistrationLabels(
+            assignments, expectedSurfaces: expected
+        )
+        XCTAssertEqual(recovered.liveSurfaces["sf_1"]?.panes["2"]?.paneLabel, 1201)
+        XCTAssertEqual(recovered.liveSurfaces["sf_1"]?.panes["2"]?.paneLineageId, lineage)
+    }
+
     func testAdmissionRejectsDuplicateLiveIdentityThenResumesDormantBundle() async throws {
         let fixture = try makeFixture()
         let adapter = fixture.adapter
@@ -900,7 +937,7 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
         let gate = SurfAceTargetAdmissionTestGate(operationRequestId: "operation-pane-close")
         let fixture = try makeFixture(
             configure: { state in
-                _ = try SurfAceLocklessTopologyOperations.paneSplit(
+                _ = try TestRegistryTopology.paneSplit(
                     state: &state,
                     surfaceId: "sf_1",
                     paneId: 1,

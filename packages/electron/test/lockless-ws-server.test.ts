@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { cp, mkdtemp, rm } from "node:fs/promises";
-import { createServer } from "node:net";
+import { createServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import WebSocket from "ws";
+import WebSocket, { WebSocketServer } from "ws";
 
 import {
   LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPTS,
@@ -28,8 +28,34 @@ import {
   writePersistentStateFile,
 } from "../src/persistent-state-file.js";
 import { SurfaceWsServer } from "../src/ws-server.js";
+import { ConfiguredServerRegistration } from "../src/configured-server.js";
 
 let nextPort = 25901;
+let nextTestRegistryPaneLabel = 100_000;
+const claimTestRegistryPaneLabel = async (): Promise<number> => nextTestRegistryPaneLabel++;
+
+function initializeRegistryBootstrapPanes(core: SurfaceCore): void {
+  const assignments = core.listSurfaces().map(({ surfaceId }, surfaceIndex) => {
+    const paneLabel = nextTestRegistryPaneLabel++;
+    core.resetProviderBootstrapTopology(surfaceId, {
+      initialPaneId: 1,
+      initialPaneLabel: paneLabel,
+      windowLabel: String.fromCharCode(97 + surfaceIndex),
+    });
+    return {
+      surfaceId,
+      panes: core.panesList(surfaceId).panes.map((pane) => ({
+        paneId: String(pane.paneId),
+        paneLineageId: pane.paneLineageId,
+        paneLabel,
+      })),
+    };
+  });
+  if (assignments.length > 0) {
+    core.applyRegistryPaneLabels(assignments);
+    core.confirmRegistryPaneLabels(assignments);
+  }
+}
 
 function authorityVectorUrl(): URL {
   const candidates = [
@@ -1102,9 +1128,11 @@ test("canonical target-admission cases execute Electron authority semantics", as
       scale: 2,
       width: 1200,
     });
+    initializeRegistryBootstrapPanes(core);
     const port = nextPort++;
     const server = new SurfaceWsServer({
       capturePaneImage: async () => null,
+      claimPaneLabel: claimTestRegistryPaneLabel,
       compositorSocketPath: null,
       core,
       endpointName: "Surf Ace",
@@ -1258,9 +1286,11 @@ test("AC-TOPO-04: split rename resize close restore and realization share stable
     scale: 2,
     width: 1200,
   });
+  initializeRegistryBootstrapPanes(core);
   const port = nextPort++;
   const server = new SurfaceWsServer({
     capturePaneImage: async () => null,
+    claimPaneLabel: claimTestRegistryPaneLabel,
     compositorSocketPath: null,
     core,
     endpointName: "Surf Ace",
@@ -1682,6 +1712,144 @@ test("AC-TOPO-04: split rename resize close restore and realization share stable
   } finally {
     first.close();
     second.close();
+    await server.stop();
+  }
+});
+
+test("new panes stay unnumbered when the registry rejects a pane claim and recover by lineage on client.register", async () => {
+  const core = new SurfaceCore();
+  const surface = core.ensurePrimarySurface("Surf Ace", {
+    height: 800,
+    scale: 2,
+    width: 1200,
+  });
+  initializeRegistryBootstrapPanes(core);
+  const port = nextPort++;
+  const server = new SurfaceWsServer({
+    capturePaneImage: async () => null,
+    claimPaneLabel: async () => { throw new Error("surface_not_registered"); },
+    compositorSocketPath: null,
+    core,
+    endpointName: "Surf Ace",
+    hostName: "localhost",
+    port,
+    viewport: () => ({ height: 800, scale: 2, width: 1200 }),
+  });
+  await server.start();
+  const controller = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+  const registry = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  await new Promise<void>((resolve) => registry.once("listening", resolve));
+  const registryAddress = `ws://127.0.0.1:${(registry.address() as AddressInfo).port}/`;
+  const clientRegistration = new ConfiguredServerRegistration(
+    registryAddress, "allocator-recovery-client", core, async () => {}, () => {}, 500,
+  );
+  try {
+    assert.equal((await pair(controller, "allocator-recovery-controller", surface.surfaceId)).ok, true);
+
+    const base = (await request(controller, "panes.list", { surfaceId: surface.surfaceId })).payload;
+    const split = await request(controller, "pane.split", {
+      count: 2,
+      direction: "horizontal",
+      expectedTopologyRevision: base.topology.topologyRevision,
+      paneId: Number(base.panes[0].paneId),
+      surfaceId: surface.surfaceId,
+    });
+    assert.equal(split.ok, true, JSON.stringify(split));
+    let panes = (await request(controller, "panes.list", { surfaceId: surface.surfaceId })).payload.panes;
+    const splitPane = panes.find((pane: any) => pane.paneId !== base.panes[0].paneId);
+    assert.ok(splitPane?.paneLineageId);
+    assert.equal(splitPane.paneLabel, null);
+
+    const topology = await request(controller, "topology.apply", {
+      allowDestroyPaneIds: [],
+      desired: {
+        children: [
+          { paneId: Number(base.panes[0].paneId), type: "pane" },
+          { paneId: Number(splitPane.paneId), type: "pane" },
+          { name: "Unnumbered until registry recovery", type: "pane" },
+        ],
+        direction: "horizontal",
+        type: "split",
+      },
+      expectedTopologyRevision: split.payload.topologyRevision,
+      surfaceId: surface.surfaceId,
+      target: { root: true },
+    });
+    assert.equal(topology.ok, true, JSON.stringify(topology));
+    panes = (await request(controller, "panes.list", { surfaceId: surface.surfaceId })).payload.panes;
+    const topologyPane = panes.find((pane: any) => ![base.panes[0].paneId, splitPane.paneId].includes(pane.paneId));
+    assert.ok(topologyPane?.paneLineageId);
+    assert.equal(topologyPane.paneLabel, null);
+
+    const closed = await request(controller, "pane.close", {
+      expectedTopologyRevision: topology.payload.topologyRevision,
+      paneId: Number(topologyPane.paneId),
+      surfaceId: surface.surfaceId,
+    });
+    assert.equal(closed.ok, true, JSON.stringify(closed));
+    const restored = await request(controller, "pane.restore", {
+      anchorPaneId: Number(base.panes[0].paneId),
+      direction: "vertical",
+      expectedTopologyRevision: closed.payload.topologyRevision,
+      surfaceId: surface.surfaceId,
+      tombstoneId: closed.payload.tombstoneId,
+    });
+    assert.equal(restored.ok, true, JSON.stringify(restored));
+    panes = (await request(controller, "panes.list", { surfaceId: surface.surfaceId })).payload.panes;
+    const restoredPane = panes.find((pane: any) => pane.paneId === topologyPane.paneId);
+    assert.equal(restoredPane.paneLineageId, topologyPane.paneLineageId);
+    assert.equal(restoredPane.paneLabel, null);
+
+    const unnumberedLineages = new Set(
+      panes.filter((pane: any) => pane.paneLabel === null).map((pane: any) => pane.paneLineageId),
+    );
+    assert.ok(unnumberedLineages.has(splitPane.paneLineageId));
+    assert.ok(unnumberedLineages.has(restoredPane.paneLineageId));
+    const registrationRequestPromise = new Promise<{ socket: WebSocket; message: any }>((resolve) => {
+      registry.once("connection", (socket) => {
+        socket.once("message", (raw) => resolve({ socket, message: JSON.parse(String(raw)) }));
+      });
+    });
+    const synchronize = clientRegistration.synchronize();
+    const { socket: registrationSocket, message: registrationRequest } = await registrationRequestPromise;
+    assert.equal(registrationRequest.op, "client.register");
+    const registrationPanes = registrationRequest.payload.surfaces[0].panes;
+    assert.deepEqual(
+      new Set(registrationPanes.filter((pane: any) => pane.paneLabel === 0).map((pane: any) => pane.paneLineageId)),
+      unnumberedLineages,
+    );
+    const labelsByLineage = new Map<string, number>();
+    let nextLabel = 900;
+    for (const pane of registrationPanes) labelsByLineage.set(pane.paneLineageId, nextLabel++);
+    registrationSocket.send(JSON.stringify({
+      id: registrationRequest.id,
+      ok: true,
+      op: "client.register",
+      payload: {
+        clientId: registrationRequest.payload.clientId,
+        surfaces: registrationRequest.payload.surfaces.map((entry: any) => ({
+          surfaceId: entry.surfaceId,
+          windowLabel: "a",
+          panes: entry.panes.map((pane: any) => ({
+            ...pane,
+            paneLabel: labelsByLineage.get(pane.paneLineageId),
+          })),
+        })),
+      },
+      type: "response",
+      v: 1,
+    }));
+    await synchronize;
+    const recovered = core.panesList(surface.surfaceId).panes;
+    for (const pane of recovered) {
+      assert.equal(pane.paneLabel, labelsByLineage.get(pane.paneLineageId));
+    }
+    assert.equal(new Set(recovered.map((pane) => pane.paneLabel)).size, recovered.length);
+  } finally {
+    await clientRegistration.stop();
+    controller.close();
+    for (const socket of registry.clients) socket.terminate();
+    await new Promise<void>((resolve) => registry.close(() => resolve()));
     await server.stop();
   }
 });
@@ -2214,6 +2382,7 @@ test("queued topology mutation invalidates a later target before FIFO admission"
     scale: 2,
     width: 1200,
   });
+  initializeRegistryBootstrapPanes(core);
   let gatePersistence = false;
   let persistenceBlocked = false;
   let releasePersistence = (): void => {};
@@ -2227,6 +2396,7 @@ test("queued topology mutation invalidates a later target before FIFO admission"
   const port = nextPort++;
   const server = new SurfaceWsServer({
     capturePaneImage: async () => null,
+    claimPaneLabel: claimTestRegistryPaneLabel,
     compositorSocketPath: null,
     core,
     endpointName: "Surf Ace",
@@ -2975,9 +3145,11 @@ test("AC-SURF-02: complete surface close persists a tombstone before zero-live s
     scale: 2,
     width: 1200,
   });
+  initializeRegistryBootstrapPanes(core);
   const firstPort = nextPort++;
   const firstServer = new SurfaceWsServer({
     capturePaneImage: async () => null,
+    claimPaneLabel: claimTestRegistryPaneLabel,
     compositorSocketPath: null,
     core,
     endpointName: "Surf Ace",
@@ -3087,6 +3259,7 @@ test("AC-SURF-02: complete surface close persists a tombstone before zero-live s
   const secondPort = nextPort++;
   const secondServer = new SurfaceWsServer({
     capturePaneImage: async () => null,
+    claimPaneLabel: claimTestRegistryPaneLabel,
     compositorSocketPath: null,
     core: restarted,
     endpointName: "Surf Ace",
@@ -3401,12 +3574,14 @@ test("a saturated terminal ledger still admits push, capture, close and cleanup"
     scale: 2,
     width: 1200,
   });
+  initializeRegistryBootstrapPanes(core);
   const seeded = seedFullTerminalLedger(core);
   assert.equal(seeded, LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPTS);
 
   const port = nextPort++;
   const server = new SurfaceWsServer({
     capturePaneImage: async () => "cG5n",
+    claimPaneLabel: claimTestRegistryPaneLabel,
     compositorSocketPath: null,
     core,
     endpointName: "Surf Ace",

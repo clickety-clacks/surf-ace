@@ -43,9 +43,9 @@ import {
 } from "./index.js";
 
 const execFile = promisify(execFileCallback);
-const postgresBin = process.platform === "darwin"
+const postgresBin = process.env.SURF_ACE_TEST_POSTGRES_BIN ?? (process.platform === "darwin"
   ? "/opt/homebrew/opt/postgresql@16/bin"
-  : "/usr/lib/postgresql/16/bin";
+  : "/usr/lib/postgresql/16/bin");
 const { Client } = pg;
 
 type TestCluster = {
@@ -699,7 +699,11 @@ test("configured server registers two stable clients and deduplicates reconnect"
     };
     const first = await topology();
     assert.equal(first.clients.length, 2);
-    assert.deepEqual(first.clients.flatMap((client) => client.surfaces.map((surface) => surface.panes[0].paneAddress)).sort(), ["a1", "b1", "c1"]);
+    const firstPaneNumbers = first.clients.flatMap((client) => client.surfaces.flatMap((surface) =>
+      surface.panes.map((pane) => Number(pane.paneAddress.slice(surface.windowLabel.length)))));
+    assert.equal(firstPaneNumbers.length, 3);
+    assert.equal(new Set(firstPaneNumbers).size, firstPaneNumbers.length,
+      "two clients connected to one registry must never display the same pane number");
     for (const fixture of fixtures) {
       const stored = JSON.parse(await readFile(join(fixture.stateDir, "state.json"), "utf8"));
       for (const surface of stored.surfaces) assert.equal(surface.windowLabel, fixture.core.getSurface(surface.surfaceId).windowLabel);
@@ -719,6 +723,26 @@ test("configured server registers two stable clients and deduplicates reconnect"
     assert.equal((await allocator.diagnostics()).nextOrdinalFence, before.nextOrdinalFence);
     await Promise.all([reconnect.synchronize(), clients[1].synchronize()]);
     assert.deepEqual(await topology(), first);
+    const recycledPaneId = "recycled-pane-id";
+    const claim = async (lineage: string) => {
+      const response = await reader!.request("pane.claim", {
+        clientId: fixtures[0].clientId,
+        surfaceId: fixtures[0].surface.surfaceId,
+        paneId: recycledPaneId,
+        paneLineageId: lineage,
+      });
+      assert.equal(response.ok, true);
+      const label = (response.payload as { paneLabel: number }).paneLabel;
+      assert.ok(Number.isSafeInteger(label) && label > 0);
+      return label;
+    };
+    const firstLineageLabel = await claim("pl_first-lifetime");
+    assert.equal(await claim("pl_first-lifetime"), firstLineageLabel,
+      "reconnect must reuse the same durable pane claim");
+    const secondLineageLabel = await claim("pl_second-lifetime");
+    assert.ok(secondLineageLabel > firstLineageLabel,
+      "a reused paneId with new lineage must receive a fresh fleet ordinal");
+    assert.equal(await claim("pl_second-lifetime"), secondLineageLabel);
     const rejected = await reader.request("client.register", { clientId: "", surfaces: [] });
     assert.equal(rejected.ok, false);
     assert.deepEqual(await topology(), first);
@@ -815,7 +839,11 @@ test("configured-first server Bonjour fallback registers and persists clients", 
     };
     const first = await topology();
     assert.equal(first.clients.length, 2);
-    assert.deepEqual(first.clients.flatMap((client) => client.surfaces.map((surface) => surface.panes[0].paneAddress)).sort(), ["a1", "b1", "c1"]);
+    const firstPaneNumbers = first.clients.flatMap((client) => client.surfaces.flatMap((surface) =>
+      surface.panes.map((pane) => Number(pane.paneAddress.slice(surface.windowLabel.length)))));
+    assert.equal(firstPaneNumbers.length, 3);
+    assert.equal(new Set(firstPaneNumbers).size, firstPaneNumbers.length,
+      "discovered and configured clients must have fleet-unique pane numbers");
     for (const fixture of fixtures) {
       const stored = JSON.parse(await readFile(join(fixture.stateDir, "state.json"), "utf8"));
       for (const surface of stored.surfaces) assert.equal(surface.windowLabel, fixture.core.getSurface(surface.surfaceId).windowLabel);
@@ -923,7 +951,39 @@ test("configured-first server Bonjour fallback registers and persists clients", 
   }
 });
 
-async function startCluster(): Promise<TestCluster> {
+test("v0.2.3 custody migrates without changing its witnessed head", { timeout: 180_000 }, async () => {
+  const cluster = await startCluster("v0.2.3");
+  try {
+    await adminQuery(cluster.adminUrl, `
+      BEGIN;
+      SET ROLE surf_ace_allocator_owner;
+      INSERT INTO surf_ace_allocator.fleet_tombstones(fleet_id, first_allocator_id)
+        VALUES ('fleet-test', 'alloc_migration-test');
+      INSERT INTO surf_ace_allocator.fleets(fleet_id, allocator_id, state_version, accepted_generation_id)
+        VALUES ('fleet-test', 'alloc_migration-test', 1, 'generation_existing');
+      SELECT * FROM surf_ace_allocator.append_event('fleet-test', jsonb_build_object(
+        'allocatorId', 'alloc_migration-test', 'fleetId', 'fleet-test',
+        'generationId', 'generation_existing', 'stateVersion', 1, 'type', 'initialized'));
+      RESET ROLE;
+      COMMIT;
+    `);
+    const before = await scalar(cluster.adminUrl,
+      "SELECT head_seq::text || ':' || encode(head_hash, 'hex') FROM surf_ace_allocator.fleets WHERE fleet_id = 'fleet-test'");
+    const migration = await readFile(new URL("../sql/002_fleet_panes.sql", import.meta.url), "utf8");
+    await adminQuery(cluster.adminUrl, migration);
+    await adminQuery(cluster.adminUrl, migration);
+    const after = await scalar(cluster.adminUrl,
+      "SELECT head_seq::text || ':' || encode(head_hash, 'hex') FROM surf_ace_allocator.fleets WHERE fleet_id = 'fleet-test'");
+    assert.equal(after, before);
+    const state = await scalar(cluster.adminUrl,
+      "SELECT surf_ace_allocator.read_accepted_state('fleet-test')->>'nextPaneOrdinalFence'");
+    assert.equal(state, "1");
+  } finally {
+    await cluster.stop();
+  }
+});
+
+async function startCluster(schemaVersion: "current" | "v0.2.3" = "current"): Promise<TestCluster> {
   const root = await mkdtemp(join(process.cwd(), ".allocator-pg-"));
   const primaryData = join(root, "primary");
   const witnessData = join(root, "witness");
@@ -946,7 +1006,12 @@ fsync = on
   await pgCtl(primaryData, ["-l", primaryLog, "start"]);
   const adminUrl = `postgresql://postgres@127.0.0.1:${primaryPort}/postgres`;
   try {
-    await PostgresCustodyAdapter.installSchema(adminUrl);
+    if (schemaVersion === "v0.2.3") {
+      const { stdout } = await execFile("git", ["show", "b59c07f:packages/allocator/sql/001_allocator.sql"]);
+      await adminQuery(adminUrl, stdout);
+    } else {
+      await PostgresCustodyAdapter.installSchema(adminUrl);
+    }
     await adminQuery(adminUrl, `
       CREATE ROLE allocator_writer LOGIN IN ROLE surf_ace_allocator_writer;
       CREATE ROLE allocator_recovery LOGIN IN ROLE surf_ace_allocator_recovery;
@@ -1122,6 +1187,8 @@ function restoreSnapshot(state: AcceptedState): RestoreSnapshot {
     headSeq: state.headSeq,
     mappings: state.mappings.map((mapping) => ({ ...mapping })),
     nextOrdinalFence: state.nextOrdinalFence,
+    nextPaneOrdinalFence: state.nextPaneOrdinalFence,
+    paneMappings: state.paneMappings.map((mapping) => ({ ...mapping })),
     stateVersion: state.stateVersion,
     transactions: state.transactions.map((transaction) => ({ ...transaction })),
   };

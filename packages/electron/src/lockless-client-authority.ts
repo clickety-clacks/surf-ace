@@ -1769,15 +1769,11 @@ export class LocklessClientAuthority {
 
   allocatePaneIdentity(
     usedPaneIds: Iterable<number>,
-    usedPaneLabels: Iterable<number>,
-  ): { paneId: number; paneLabel: number } {
+  ): { paneId: number } {
     const ids = new Set(usedPaneIds);
-    const labels = new Set(usedPaneLabels);
     let paneId = 1;
-    let paneLabel = 1;
     while (ids.has(paneId)) paneId += 1;
-    while (labels.has(paneLabel)) paneLabel += 1;
-    return { paneId, paneLabel };
+    return { paneId };
   }
 
   auditAccepted(

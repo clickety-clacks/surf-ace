@@ -1,7 +1,7 @@
 # Surf Ace standalone Linux server operations
 
-This v0.2.3 runbook applies only to product commit
-`66d2b693533b1e6f4d5fb60079695e3010731286` and PostgreSQL 16. It assumes a
+This v0.2.4 runbook applies only to product commit
+`aa5b6c5305328162c3e41e48e21df860ad010b28` and PostgreSQL 16. It assumes a
 single configured allocator fleet, one server process at a time, and an
 already-provisioned PostgreSQL primary with its configured synchronous witness.
 The archive never installs a service or provisions, upgrades, or changes a host.
@@ -61,13 +61,25 @@ current/no-loss reads.
 
 ## Schema and upgrade boundary
 
-The only schema shipped by v0.2.3 is
-`schemas/allocator/001_allocator.sql`. It initializes an empty PostgreSQL 16
-database; it is not an in-place upgrade script. The server does not auto-migrate
-or accept an unknown schema version. Do not rerun it over an existing fleet or
-apply a different migration to a serving database. Any future schema change
-needs its own versioned migration, compatibility check, backup, and staged
-restore qualification before it can be used with this product commit.
+For an empty PostgreSQL 16 fleet, initialize with
+`schemas/allocator/001_allocator.sql`. For an existing v0.2.3 fleet, v0.2.4
+ships `schemas/allocator/002_fleet_panes.sql`. It adds the separate monotonic
+pane counter and journal-backed claim function without changing the existing
+journal head. The server does not auto-migrate. Stop the allocator and verify
+the writer lease is released before applying 002. The migration refuses an
+active lease, an in-progress restore, or an unsupported state version.
+
+Before touching the serving database, capture a PostgreSQL base backup and a
+schema/data `pg_dump` in a restricted run directory. Restore the backup into
+a disposable staging cluster with its own witness and apply 002 there first;
+verify the pre- and post-migration head sequence/hash are identical, the
+accepted-state pane fence starts at 1, pane claims advance it, and restart and
+restore do not reuse a number. Run the two-client smoke against that staging
+allocator. After production migration, preserve the backup until the v0.2.4
+qualification settles. If migration fails before commit, PostgreSQL rolls it
+back atomically. If a later rollback is required, stop the writer and restore
+the verified pre-migration base backup into a new cluster; never drop the pane
+column or rewind the live counter in place.
 
 ## Backup, staged restore, validation, and rollback
 

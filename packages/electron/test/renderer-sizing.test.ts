@@ -35,7 +35,7 @@ async function preloadSource(): Promise<string> {
 }
 
 
-test("disconnected pane chrome replaces window and pane IDs with the wifi-off glyph", async () => {
+test("connection state preserves assigned pane and window labels in the identity chrome", async () => {
   const source = await rendererSource();
   const styles = await rendererStyles();
   const updateIndex = source.indexOf("function updatePane");
@@ -44,7 +44,9 @@ test("disconnected pane chrome replaces window and pane IDs with the wifi-off gl
   assert.ok(updateIndex > -1);
   assert.match(updateSource, /projectConnectionChrome\(/);
   assert.doesNotMatch(updateSource, /disconnectedGlyph\.hidden/);
-  assert.match(updateSource, /const showsIdentity = connectionBar === "connected"/);
+  assert.match(updateSource, /pane\.label \? `pane \$\{visibleAddress\}` : null/);
+  assert.match(updateSource, /const connectionDescription = connectionBar === "connected" \? null : connectionBar/);
+  assert.doesNotMatch(updateSource, /Surf Ace disconnected/);
   assert.match(source, /let latestChromeKey: string \| null = null/);
   assert.match(source, /function chromeKey\(state: RendererWindowState\): string/);
   assert.match(source, /const chromeStateChanged = latestChromeKey !== nextChromeKey/);

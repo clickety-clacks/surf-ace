@@ -79,14 +79,20 @@ async function centralFixture() {
   });
   return {
     server, requests, port, address: `ws://127.0.0.1:${port}/`,
-    reply(index: number, ok = true) {
+    reply(index: number, ok = true, assignPaneLabels = true) {
       const { socket, message } = requests[index]!;
       assert.equal(message.op, "client.register");
       socket.send(JSON.stringify({
         type: "response", id: message.id, op: message.op, ok,
         payload: { clientId: message.payload.clientId,
           surfaces: message.payload.surfaces.map((surface: any, i: number) => ({
-            surfaceId: surface.surfaceId, windowLabel: String.fromCharCode(97 + i),
+            surfaceId: surface.surfaceId,
+            windowLabel: String.fromCharCode(97 + i),
+            ...(assignPaneLabels ? {
+              panes: (surface.panes ?? []).map((pane: any, paneIndex: number) => ({
+                ...pane, paneLabel: 700 + i * 100 + paneIndex,
+              })),
+            } : {}),
           })) },
         ...(!ok ? { error: { message: "registration_rejected" } } : {}),
       }));
@@ -97,6 +103,38 @@ async function centralFixture() {
     },
   };
 }
+
+test("confirmed fleet pane labels remain visible through a transient central disconnect", async () => {
+  const central = await centralFixture();
+  const core = new SurfaceCore();
+  const surface = core.ensurePrimarySurface("Registry label", { width: 800, height: 600, scale: 1 });
+  core.admitSurfaceToLockless(surface.surfaceId);
+  const registration = new ConfiguredServerRegistration(
+    central.address, "registry-label-client", core, async () => {}, () => {}, 500,
+  );
+  try {
+    const connecting = registration.synchronize();
+    await until(() => central.requests.length === 1);
+    central.reply(0, true, true);
+    await connecting;
+
+    const assigned = core.panesList(surface.surfaceId).panes[0]?.paneLabel;
+    assert.equal(assigned, 700);
+
+    const closed = new Promise<void>((resolve) => central.requests[0]!.socket.once("close", resolve));
+    central.requests[0]!.socket.terminate();
+    await closed;
+
+    assert.equal(core.panesList(surface.surfaceId).panes[0]?.paneLabel, assigned);
+    assert.equal(core.publicTopologyState(surface.surfaceId).panes[0]?.paneLabel, assigned);
+    await registration.stop();
+    assert.equal(core.panesList(surface.surfaceId).panes[0]?.paneLabel, assigned);
+    assert.equal(core.publicTopologyState(surface.surfaceId).panes[0]?.paneLabel, assigned);
+  } finally {
+    await registration.stop();
+    await central.close();
+  }
+});
 
 test("central status waits for registration and persistence; loss, retry and reconnect preserve panes", async () => {
   const central = await centralFixture();
@@ -112,7 +150,6 @@ test("central status waits for registration and persistence; loss, retry and rec
     });
   }
   core.navigateHistory(surface.surfaceId, paneId, "back");
-  const panes = structuredClone(core.getRendererWindowState(surface.surfaceId).panes);
   const persisted = deferred();
   const persistStarted = deferred();
   let blockPersistence = true;
@@ -134,7 +171,8 @@ test("central status waits for registration and persistence; loss, retry and rec
     await first;
     assert.equal(state().connectionBar, "connected");
     assert.equal(state().windowLabel, "a");
-    assert.deepEqual(state().panes, panes);
+    assert.equal(state().panes[0]?.label, "700");
+    const registeredPanes = structuredClone(state().panes);
     central.requests[0]!.socket.terminate();
     await until(() => state().connectionBar === "disconnected");
     const reconnect = connection.synchronize();
@@ -143,8 +181,22 @@ test("central status waits for registration and persistence; loss, retry and rec
     central.reply(1);
     await reconnect;
     assert.equal(state().connectionBar, "connected");
-    assert.deepEqual(central.requests[1]!.message.payload, central.requests[0]!.message.payload);
-    assert.deepEqual(state().panes, panes);
+    assert.deepEqual(
+      central.requests[1]!.message.payload.surfaces.map((registered: any) => ({
+        surfaceId: registered.surfaceId,
+        panes: registered.panes.map((pane: any) => ({
+          paneId: pane.paneId, paneLabel: pane.paneLabel, paneLineageId: pane.paneLineageId,
+        })),
+      })),
+      [{
+        surfaceId: surface.surfaceId,
+        panes: [{
+          paneId: String(paneId), paneLabel: 700,
+          paneLineageId: central.requests[0]!.message.payload.surfaces[0]!.panes[0]!.paneLineageId,
+        }],
+      }],
+    );
+    assert.deepEqual(state().panes, registeredPanes);
     core.navigateHistory(surface.surfaceId, paneId, "forward");
     assert.equal(state().panes[0]!.content.contentId, "ct_status_1");
     core.navigateHistory(surface.surfaceId, paneId, "back");

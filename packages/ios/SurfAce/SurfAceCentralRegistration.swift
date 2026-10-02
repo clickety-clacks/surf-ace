@@ -5,6 +5,7 @@ import Network
 struct SurfAceRegistrationSurface: Codable, Equatable, Sendable {
     struct Pane: Codable, Equatable, Sendable {
         let paneId: String
+        let paneLineageId: String
         let paneLabel: Int64
     }
     let surfaceId: String
@@ -13,7 +14,7 @@ struct SurfAceRegistrationSurface: Codable, Equatable, Sendable {
     static func snapshot(_ state: SurfAceLocklessAuthorityState) -> [Self] {
         state.liveSurfaces.values.sorted { $0.surfaceId < $1.surfaceId }.map { surface in
             Self(surfaceId: surface.surfaceId, panes: surface.panes.values.sorted { $0.paneId < $1.paneId }.map {
-                Pane(paneId: String($0.paneId), paneLabel: $0.paneLabel)
+                Pane(paneId: String($0.paneId), paneLineageId: $0.paneLineageId, paneLabel: $0.paneLabel)
             })
         }
     }
@@ -22,16 +23,46 @@ struct SurfAceRegistrationSurface: Codable, Equatable, Sendable {
 struct SurfAceRegistrationAssignment: Codable, Equatable, Sendable {
     let surfaceId: String
     let windowLabel: String
+    let panes: [SurfAceRegistrationSurface.Pane]
+
+    init(surfaceId: String, windowLabel: String, panes: [SurfAceRegistrationSurface.Pane] = []) {
+        self.surfaceId = surfaceId
+        self.windowLabel = windowLabel
+        self.panes = panes
+    }
 }
 
 enum SurfAceRegistrationError: Error {
     case invalidResponse
+    case paneClaimRejected
     case noServer
     case stopped
     case topologyChanged
 }
 
-private enum SurfAceRegistrationWire {
+enum SurfAceRegistrationWire {
+    struct PaneClaimRequest: Encodable {
+        struct Payload: Encodable {
+            let clientId: String
+            let surfaceId: String
+            let paneId: String
+            let paneLineageId: String
+        }
+        let id: String
+        let op = "pane.claim"
+        let type = "request"
+        let v = 1
+        let sentAt = Int64(Date().timeIntervalSince1970 * 1000)
+        let payload: Payload
+    }
+
+    struct PaneClaimResponse: Decodable {
+        struct Payload: Decodable { let paneLabel: Int64 }
+        let id: String
+        let op: String
+        let ok: Bool
+        let payload: Payload?
+    }
     struct Payload: Codable {
         let clientId: String
         let surfaces: [SurfAceRegistrationSurface]
@@ -59,6 +90,26 @@ private enum SurfAceRegistrationWire {
 
     static func requestData(clientId: String, surfaces: [SurfAceRegistrationSurface], id: String) throws -> Data {
         try JSONEncoder().encode(Request(id: id, payload: Payload(clientId: clientId, surfaces: surfaces)))
+    }
+
+    static func paneClaimData(clientId: String, surfaceId: String, paneId: Int64,
+                              paneLineageId: String, id: String) throws -> Data {
+        try JSONEncoder().encode(PaneClaimRequest(
+            id: id, payload: .init(clientId: clientId, surfaceId: surfaceId,
+                                  paneId: String(paneId), paneLineageId: paneLineageId)
+        ))
+    }
+
+    static func paneClaimLabel(from data: Data, requestId: String) throws -> Int64 {
+        let response = try JSONDecoder().decode(PaneClaimResponse.self, from: data)
+        guard response.id == requestId, response.op == "pane.claim" else {
+            throw SurfAceRegistrationError.invalidResponse
+        }
+        guard response.ok else { throw SurfAceRegistrationError.paneClaimRejected }
+        guard let label = response.payload?.paneLabel, label > 0 else {
+            throw SurfAceRegistrationError.invalidResponse
+        }
+        return label
     }
 
     static func assignments(
@@ -114,7 +165,14 @@ enum SurfAceRegistrationEndpoint {
 @MainActor
 protocol SurfAceRegistrationTransport: AnyObject {
     func register(clientId: String, surfaces: [SurfAceRegistrationSurface]) async throws -> [SurfAceRegistrationAssignment]
+    func claimPaneLabel(clientId: String, surfaceId: String, paneId: Int64, paneLineageId: String) async throws -> Int64
     func close()
+}
+
+extension SurfAceRegistrationTransport {
+    func claimPaneLabel(clientId: String, surfaceId: String, paneId: Int64, paneLineageId: String) async throws -> Int64 {
+        throw SurfAceRegistrationError.noServer
+    }
 }
 
 @MainActor
@@ -148,6 +206,22 @@ final class SurfAceRegistrationWebSocket: SurfAceRegistrationTransport {
         @unknown default: throw SurfAceRegistrationError.invalidResponse
         }
         return try SurfAceRegistrationWire.assignments(from: data, requestId: id, clientId: clientId, surfaces: surfaces)
+    }
+
+    func claimPaneLabel(clientId: String, surfaceId: String, paneId: Int64, paneLineageId: String) async throws -> Int64 {
+        let id = "rq_" + UUID().uuidString.replacingOccurrences(of: "-", with: "")
+        try await socket.send(.data(SurfAceRegistrationWire.paneClaimData(
+            clientId: clientId, surfaceId: surfaceId, paneId: paneId,
+            paneLineageId: paneLineageId, id: id
+        )))
+        let message = try await socket.receive()
+        let data: Data
+        switch message {
+        case .data(let value): data = value
+        case .string(let value): data = Data(value.utf8)
+        @unknown default: throw SurfAceRegistrationError.invalidResponse
+        }
+        return try SurfAceRegistrationWire.paneClaimLabel(from: data, requestId: id)
     }
 
     func close() {
@@ -208,6 +282,21 @@ final class SurfAceLocalNumericRegistrationWebSocket: SurfAceRegistrationTranspo
             try await send(data)
             let response = try await receive()
             return try SurfAceRegistrationWire.assignments(from: response, requestId: id, clientId: clientId, surfaces: surfaces)
+        } catch {
+            close()
+            throw error
+        }
+    }
+
+    func claimPaneLabel(clientId: String, surfaceId: String, paneId: Int64, paneLineageId: String) async throws -> Int64 {
+        do {
+            try await connectIfNeeded()
+            let id = "rq_" + UUID().uuidString.replacingOccurrences(of: "-", with: "")
+            try await send(SurfAceRegistrationWire.paneClaimData(
+                clientId: clientId, surfaceId: surfaceId, paneId: paneId,
+                paneLineageId: paneLineageId, id: id
+            ))
+            return try SurfAceRegistrationWire.paneClaimLabel(from: await receive(), requestId: id)
         } catch {
             close()
             throw error
@@ -387,6 +476,19 @@ final class SurfAceCentralRegistration {
             }
         }
         throw SurfAceRegistrationError.noServer
+    }
+
+    func claimPaneLabel(surfaceId: String, paneId: Int64, paneLineageId: String) async throws -> Int64 {
+        guard !stopped, let selected, status == .connected else {
+            throw SurfAceRegistrationError.noServer
+        }
+        // Use a separate socket so a periodic registration response cannot be
+        // consumed by this claim while either request is suspended.
+        let transport = makeTransport(selected.url)
+        defer { transport.close() }
+        return try await transport.claimPaneLabel(
+            clientId: clientId, surfaceId: surfaceId, paneId: paneId, paneLineageId: paneLineageId
+        )
     }
 
     private func attempt(_ url: URL, surfaces: [SurfAceRegistrationSurface]) async throws -> Bool {

@@ -53,7 +53,6 @@ CREATE TABLE surf_ace_allocator.fleets (
   accepted_generation_id text NOT NULL,
   custody_revision bigint NOT NULL DEFAULT 0 CHECK (custody_revision >= 0),
   next_ordinal_fence bigint NOT NULL DEFAULT 0 CHECK (next_ordinal_fence >= 0),
-  next_pane_ordinal_fence bigint NOT NULL DEFAULT 1 CHECK (next_pane_ordinal_fence > 0),
   head_seq bigint NOT NULL DEFAULT 0 CHECK (head_seq >= 0),
   head_hash bytea NOT NULL DEFAULT decode(repeat('00', 32), 'hex') CHECK (octet_length(head_hash) = 32),
   lease_generation bigint NOT NULL DEFAULT 0 CHECK (lease_generation >= 0),
@@ -609,62 +608,6 @@ BEGIN
 END
 $function$;
 
-CREATE FUNCTION surf_ace_allocator.claim_pane(
-  p_fleet_id text, p_generation bigint, p_lease_id text,
-  p_client_id text, p_surface_id text, p_pane_id text, p_lineage_id text
-)
-RETURNS bigint
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = pg_catalog, surf_ace_allocator
-AS $function$
-DECLARE
-  fleet surf_ace_allocator.fleets%ROWTYPE;
-  existing_label bigint;
-  label bigint;
-BEGIN
-  PERFORM surf_ace_allocator.assert_role('surf_ace_allocator_writer');
-  PERFORM surf_ace_allocator.assert_token(p_fleet_id, p_generation, p_lease_id, 'writer');
-  IF p_client_id !~ '^[a-f0-9]{64}$'
-     OR p_surface_id !~ '^sf_[A-Za-z0-9._:-]{3,64}$'
-     OR p_pane_id !~ '^[A-Za-z0-9._:-]{1,64}$'
-     OR p_lineage_id !~ '^pl_[A-Za-z0-9._:-]{3,128}$' THEN
-    RAISE EXCEPTION 'invalid pane identity' USING ERRCODE = '22023';
-  END IF;
-  SELECT * INTO STRICT fleet FROM surf_ace_allocator.fleets
-    WHERE fleet_id = p_fleet_id FOR UPDATE;
-  IF fleet.lifecycle <> 'active' THEN
-    RAISE EXCEPTION 'fleet is not active' USING ERRCODE = '55000';
-  END IF;
-  SELECT (event->>'paneLabel')::bigint INTO existing_label
-    FROM surf_ace_allocator.custody_journal
-    WHERE fleet_id = p_fleet_id AND event->>'type' = 'pane-claimed'
-      AND event->>'clientId' = p_client_id
-      AND event->>'surfaceId' = p_surface_id
-      AND event->>'lineageId' = p_lineage_id
-    LIMIT 1;
-  IF FOUND THEN RETURN existing_label; END IF;
-  label := fleet.next_pane_ordinal_fence;
-  IF label > 9007199254740991 THEN
-    RAISE EXCEPTION 'pane ordinal exceeds safe integer range' USING ERRCODE = '22003';
-  END IF;
-  UPDATE surf_ace_allocator.fleets
-    SET next_pane_ordinal_fence = next_pane_ordinal_fence + 1
-    WHERE fleet_id = p_fleet_id;
-  PERFORM * FROM surf_ace_allocator.append_event(p_fleet_id, jsonb_build_object(
-    'allocatorId', fleet.allocator_id,
-    'clientId', p_client_id,
-    'fleetId', p_fleet_id,
-    'paneId', p_pane_id,
-    'lineageId', p_lineage_id,
-    'paneLabel', label,
-    'surfaceId', p_surface_id,
-    'type', 'pane-claimed'
-  ));
-  RETURN label;
-END
-$function$;
-
 CREATE FUNCTION surf_ace_allocator.burn_reservation(
   p_fleet_id text, p_generation bigint, p_lease_id text, p_transaction_id text
 )
@@ -735,16 +678,6 @@ AS $function$
     'acceptedGenerationId', f.accepted_generation_id,
     'custodyRevision', f.custody_revision,
     'nextOrdinalFence', f.next_ordinal_fence,
-    'nextPaneOrdinalFence', f.next_pane_ordinal_fence,
-    'paneMappings', coalesce((
-      SELECT jsonb_agg(jsonb_build_object(
-        'clientId', j.event->>'clientId', 'surfaceId', j.event->>'surfaceId',
-        'paneId', j.event->>'paneId', 'lineageId', j.event->>'lineageId',
-        'paneLabel', (j.event->>'paneLabel')::bigint
-      ) ORDER BY (j.event->>'paneLabel')::bigint)
-      FROM surf_ace_allocator.custody_journal j
-      WHERE j.fleet_id = f.fleet_id AND j.event->>'type' = 'pane-claimed'
-    ), '[]'::jsonb),
     'headSeq', f.head_seq,
     'headHash', encode(f.head_hash, 'hex'),
     'leaseGeneration', f.lease_generation,
@@ -887,22 +820,6 @@ AS $function$
       ELSE (SELECT encode(j.head_hash, 'hex') FROM surf_ace_allocator.custody_journal j
         WHERE j.fleet_id = p_fleet_id AND j.head_seq = p_head_seq) END,
     'nextOrdinalFence', coalesce((SELECT max(t.ordinal) + 1 FROM transactions t), 0),
-    'nextPaneOrdinalFence', coalesce((
-      SELECT max((j.event->>'paneLabel')::bigint) + 1
-      FROM surf_ace_allocator.custody_journal j
-      WHERE j.fleet_id = p_fleet_id AND j.head_seq <= p_head_seq
-        AND j.event->>'type' = 'pane-claimed'
-    ), 1),
-    'paneMappings', coalesce((
-      SELECT jsonb_agg(jsonb_build_object(
-        'clientId', j.event->>'clientId', 'surfaceId', j.event->>'surfaceId',
-        'paneId', j.event->>'paneId', 'lineageId', j.event->>'lineageId',
-        'paneLabel', (j.event->>'paneLabel')::bigint
-      ) ORDER BY (j.event->>'paneLabel')::bigint)
-      FROM surf_ace_allocator.custody_journal j
-      WHERE j.fleet_id = p_fleet_id AND j.head_seq <= p_head_seq
-        AND j.event->>'type' = 'pane-claimed'
-    ), '[]'::jsonb),
     'authorityOwners', coalesce((SELECT jsonb_agg(jsonb_build_object(
       'authorityId', o.authority_id, 'ownerAnchorId', o.owner_anchor_id
     ) ORDER BY o.authority_id) FROM owners o), '[]'::jsonb),
@@ -994,7 +911,7 @@ BEGIN
   IF jsonb_typeof(restore.source_snapshot) IS DISTINCT FROM 'object'
      OR restore.source_snapshot - ARRAY[
        'allocatorId', 'authorityOwners', 'custodyRevision', 'fleetId', 'headHash', 'headSeq',
-       'mappings', 'nextOrdinalFence', 'nextPaneOrdinalFence', 'paneMappings', 'stateVersion', 'transactions'
+       'mappings', 'nextOrdinalFence', 'stateVersion', 'transactions'
      ]::text[] <> '{}'::jsonb
      OR restore.source_snapshot->>'fleetId' IS DISTINCT FROM fleet.fleet_id
      OR restore.source_snapshot->>'allocatorId' IS DISTINCT FROM fleet.allocator_id
@@ -1002,7 +919,6 @@ BEGIN
      OR (restore.source_snapshot->>'custodyRevision')::bigint IS DISTINCT FROM restore.snapshot_revision
      OR jsonb_typeof(restore.source_snapshot->'authorityOwners') IS DISTINCT FROM 'array'
      OR jsonb_typeof(restore.source_snapshot->'mappings') IS DISTINCT FROM 'array'
-     OR jsonb_typeof(restore.source_snapshot->'paneMappings') IS DISTINCT FROM 'array'
      OR jsonb_typeof(restore.source_snapshot->'transactions') IS DISTINCT FROM 'array' THEN
     RAISE EXCEPTION 'restore snapshot shape or identity mismatch' USING ERRCODE = '55000';
   END IF;
@@ -1027,9 +943,6 @@ BEGIN
   IF restore.source_snapshot->>'headHash' IS DISTINCT FROM snapshot_projection->>'headHash'
      OR (restore.source_snapshot->>'nextOrdinalFence')::bigint
        IS DISTINCT FROM (snapshot_projection->>'nextOrdinalFence')::bigint
-     OR (restore.source_snapshot->>'nextPaneOrdinalFence')::bigint
-       IS DISTINCT FROM (snapshot_projection->>'nextPaneOrdinalFence')::bigint
-     OR restore.source_snapshot->'paneMappings' IS DISTINCT FROM snapshot_projection->'paneMappings'
      OR restore.source_snapshot->'authorityOwners' IS DISTINCT FROM snapshot_projection->'authorityOwners'
      OR restore.source_snapshot->'transactions' IS DISTINCT FROM snapshot_projection->'transactions'
      OR snapshot_mappings IS DISTINCT FROM snapshot_projection->'mappings' THEN
@@ -1111,8 +1024,7 @@ BEGIN
   END IF;
   UPDATE surf_ace_allocator.fleets SET
     accepted_generation_id = restore.generation_id,
-    next_ordinal_fence = restore.computed_fence,
-    next_pane_ordinal_fence = (surf_ace_allocator.journal_projection(p_fleet_id, restore.base_head_seq)->>'nextPaneOrdinalFence')::bigint
+    next_ordinal_fence = restore.computed_fence
   WHERE fleet_id = p_fleet_id;
   UPDATE surf_ace_allocator.restore_generations SET state = 'activated'
     WHERE generation_id = restore.generation_id;
@@ -1169,7 +1081,6 @@ GRANT EXECUTE ON FUNCTION surf_ace_allocator.release_lease(text, bigint, text, t
 GRANT EXECUTE ON FUNCTION surf_ace_allocator.bind_authority(text, bigint, text, text, text) TO surf_ace_allocator_writer;
 GRANT EXECUTE ON FUNCTION surf_ace_allocator.reserve_ordinal(text, bigint, text, text, text, text, text) TO surf_ace_allocator_writer;
 GRANT EXECUTE ON FUNCTION surf_ace_allocator.commit_mapping(text, bigint, text, text) TO surf_ace_allocator_writer;
-GRANT EXECUTE ON FUNCTION surf_ace_allocator.claim_pane(text, bigint, text, text, text, text, text) TO surf_ace_allocator_writer;
 GRANT EXECUTE ON FUNCTION surf_ace_allocator.burn_reservation(text, bigint, text, text) TO surf_ace_allocator_writer;
 GRANT EXECUTE ON FUNCTION surf_ace_allocator.query_transaction(text) TO
   surf_ace_allocator_writer, surf_ace_allocator_recovery;

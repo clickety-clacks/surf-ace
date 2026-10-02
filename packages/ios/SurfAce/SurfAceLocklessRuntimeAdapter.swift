@@ -387,6 +387,31 @@ actor SurfAceLocklessRuntimeAdapter {
             try SurfAceLocklessTopologyOperations.applyWindowLabels(
                 state: &state, assignments: assignments.map { ($0.surfaceId, $0.windowLabel) }
             )
+            var usedPaneLabels = Set<Int64>()
+            for assignment in assignments {
+                guard var surface = state.liveSurfaces[assignment.surfaceId],
+                      assignment.panes.count == surface.panes.count else {
+                    throw SurfAceRegistrationError.invalidResponse
+                }
+                var seenPaneIds = Set<String>()
+                for paneAssignment in assignment.panes {
+                    guard let paneId = Int64(paneAssignment.paneId),
+                          seenPaneIds.insert(paneAssignment.paneId).inserted,
+                          paneAssignment.paneLabel > 0,
+                          !usedPaneLabels.contains(paneAssignment.paneLabel),
+                          var pane = surface.panes[paneAssignment.paneId],
+                          pane.paneId == paneId,
+                          pane.paneLineageId == paneAssignment.paneLineageId else {
+                        throw SurfAceRegistrationError.invalidResponse
+                    }
+                    usedPaneLabels.insert(paneAssignment.paneLabel)
+                    pane.paneLabel = paneAssignment.paneLabel
+                    surface.panes[paneAssignment.paneId] = pane
+                }
+                surface.nextPaneLabel = max(surface.nextPaneLabel,
+                    (assignment.panes.map(\.paneLabel).max() ?? 0) + 1)
+                state.liveSurfaces[assignment.surfaceId] = surface
+            }
             return state
         }
     }

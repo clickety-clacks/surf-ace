@@ -1179,7 +1179,7 @@ final class SurfAcePaneModel {
     init(paneId: Int, paneLineageId: String = "pl_\(UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased())", paneLabel: Int? = nil, name: String? = nil) {
         self.paneId = paneId
         self.paneLineageId = paneLineageId
-        self.paneLabel = paneLabel ?? paneId
+        self.paneLabel = paneLabel ?? 0
         self.name = name
         self.paneInstanceId = UUID().uuidString
         self.backStack = []
@@ -1187,7 +1187,7 @@ final class SurfAcePaneModel {
         self.forwardStack = []
     }
 
-    var labelText: String { "\(paneLabel)" }
+    var labelText: String { paneLabel > 0 ? "\(paneLabel)" : "" }
     func displayId(windowLabel: String) -> String {
         labelText
     }
@@ -1333,7 +1333,7 @@ final class SurfAceSurfaceModel {
         self.surfaceId = surfaceId
         self.windowLabel = windowLabel
         self.name = name
-        let initialPane = SurfAcePaneModel(paneId: 1, paneLabel: 1)
+        let initialPane = SurfAcePaneModel(paneId: 1, paneLabel: 0)
         self.panesById = [initialPane.paneId: initialPane]
         self.paneLayout = .leaf(initialPane.paneId)
         self.activeKeyboardPaneId = initialPane.paneId

@@ -1,5 +1,5 @@
 import { execFile as execFileCallback, spawn } from "node:child_process";
-import { createHash, createPublicKey } from "node:crypto";
+import { createHash, createPublicKey, randomBytes, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import { createRequire } from "node:module";
 import net from "node:net";
@@ -992,11 +992,96 @@ function summarizeFreshInstallPhase(options: {
   };
 }
 
+async function packagedV023MigrationSmoke(options: Options) {
+  const baselineSchema = path.join(options.productSourceDir, "scripts/release/fixtures/001_allocator_v023.sql");
+  const migration = path.join(options.candidateRoot, "schemas/allocator/002_fleet_panes.sql");
+  const cluster = await startCluster(path.join(options.stateRoot, "v023-migration-primary"), baselineSchema, false);
+  const backup = path.join(options.stateRoot, "v023-pre-migration.dump");
+  let stage: Cluster | undefined;
+  try {
+    const recovery = new Client({ connectionString: cluster.config.recoveryUrl });
+    await recovery.connect();
+    try {
+      const leaseId = `lease_${randomBytes(16).toString("base64url")}`;
+      const generationId = `generation_${randomUUID().replaceAll("-", "")}`;
+      await recovery.query(
+        "SELECT pg_advisory_lock(key1, key2) FROM surf_ace_allocator.advisory_keys($1)",
+        [cluster.config.fleetId],
+      );
+      await recovery.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
+      await recovery.query("SET LOCAL synchronous_commit = 'remote_apply'");
+      await recovery.query("SELECT * FROM surf_ace_allocator.initialize_fleet($1, $2, $3, $4)",
+        [cluster.config.fleetId, "alloc_release-smoke", generationId, leaseId]);
+      await recovery.query("COMMIT");
+      await recovery.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
+      await recovery.query("SET LOCAL synchronous_commit = 'remote_apply'");
+      await recovery.query("SELECT surf_ace_allocator.release_lease($1, $2, $3, $4)",
+        [cluster.config.fleetId, 1, leaseId, "recovery"]);
+      await recovery.query("COMMIT");
+    } finally {
+      await recovery.end();
+    }
+    const before = await allocatorDiagnostics(cluster.adminUrl, cluster.config.fleetId);
+    if (before.primaryHeadSeq < 1) throw new Error("v023_migration_fixture_not_populated");
+    await command(path.join(cluster.postgresBin, "pg_dump"), [
+      "--format=custom", "--file", backup, cluster.adminUrl,
+    ]);
+    const backupBytes = await fs.readFile(backup);
+    const backupList = (await command(path.join(cluster.postgresBin, "pg_restore"), ["--list", backup])).stdout;
+    if (backupBytes.length < 1 || !hasRequiredAllocatorBackupObjects(backupList)) {
+      throw new Error("v023_migration_backup_unverified");
+    }
+    await command(path.join(cluster.postgresBin, "psql"), [cluster.adminUrl, "-v", "ON_ERROR_STOP=1", "-f", migration]);
+    await command(path.join(cluster.postgresBin, "psql"), [cluster.adminUrl, "-v", "ON_ERROR_STOP=1", "-f", migration]);
+    const after = await allocatorDiagnostics(cluster.adminUrl, cluster.config.fleetId);
+    if (after.primaryHeadSeq !== before.primaryHeadSeq ||
+        after.primaryHeadHash !== before.primaryHeadHash ||
+        after.nextOrdinalFence !== before.nextOrdinalFence ||
+        after.assignmentCount !== before.assignmentCount) {
+      throw new Error("v023_migration_changed_accepted_journal_head");
+    }
+    const contract = await postgresQuery(cluster.adminUrl, `
+      SELECT next_pane_ordinal_fence::text AS "paneFence",
+        has_function_privilege('allocator_writer',
+          'surf_ace_allocator.claim_pane(text,bigint,text,text,text,text,text)', 'EXECUTE') AS "writerCanClaim",
+        (surf_ace_allocator.read_accepted_state(fleet_id) ? 'paneMappings') AS "stateHasPanes"
+      FROM surf_ace_allocator.fleets WHERE fleet_id = $1
+    `, [cluster.config.fleetId]) as Array<{ paneFence: string; writerCanClaim: boolean; stateHasPanes: boolean }>;
+    if (contract[0]?.paneFence !== "1" || contract[0]?.writerCanClaim !== true ||
+        contract[0]?.stateHasPanes !== true) {
+      throw new Error("v023_migration_pane_custody_contract_invalid");
+    }
+    stage = await startCluster(path.join(options.stateRoot, "v023-backup-restore"), baselineSchema, false);
+    await command(path.join(stage.postgresBin, "pg_restore"), [
+      "--clean", "--if-exists", "--exit-on-error", "--dbname", stage.adminUrl, backup,
+    ]);
+    const restored = await allocatorDiagnostics(stage.adminUrl, cluster.config.fleetId);
+    if (restored.primaryHeadSeq !== before.primaryHeadSeq ||
+        restored.primaryHeadHash !== before.primaryHeadHash) {
+      throw new Error("v023_migration_backup_restore_head_mismatch");
+    }
+    return {
+      backupSha256: createHash("sha256").update(backupBytes).digest("hex"),
+      headHashBefore: before.primaryHeadHash,
+      headHashAfter: after.primaryHeadHash,
+      headSeqBefore: before.primaryHeadSeq,
+      headSeqAfter: after.primaryHeadSeq,
+      restoredHeadHash: restored.primaryHeadHash,
+      writerCanClaim: true,
+      witnessSynchronized: true,
+    };
+  } finally {
+    if (stage) await stage.stop();
+    await cluster.stop();
+  }
+}
+
 async function freshInstallMain(options: Options) {
   if (options.candidateCommit !== TIGHTBEAM.candidateCommit || options.expectedVersion !== TIGHTBEAM.version) {
     throw new Error("fresh_install_participant_identity_binding_invalid");
   }
   await fs.mkdir(options.stateRoot, { recursive: true, mode: 0o700 });
+  const migrationEvidence = await packagedV023MigrationSmoke(options);
   const clusterRoot = path.join(options.stateRoot, "postgres");
   const cluster = await startCluster(clusterRoot, path.join(options.candidateRoot, "schemas/allocator/001_allocator.sql"));
   const cliStateRoot = path.join(options.stateRoot, "cli");
@@ -1011,6 +1096,7 @@ async function freshInstallMain(options: Options) {
   };
   let registryProcess: Awaited<ReturnType<typeof startPackagedServer>> | undefined;
   let app: Awaited<ReturnType<typeof startPackagedElectronClient>> | undefined;
+  let secondApp: Awaited<ReturnType<typeof startPackagedElectronClient>> | undefined;
   let clusterStopped = false;
   let clientStopped = false;
   let registryStopped = false;
@@ -1027,6 +1113,15 @@ async function freshInstallMain(options: Options) {
       registryEndpoint,
       path.join(options.stateRoot, "fresh-install.client-flight-recorder.log"),
       "fresh-install",
+      options.expectedVersion,
+    );
+    secondApp = await startPackagedElectronClient(
+      options.candidateElectron,
+      path.join(options.stateRoot, "second-client-home"),
+      await freePort(),
+      registryEndpoint,
+      path.join(options.stateRoot, "fresh-install.second-client-flight-recorder.log"),
+      "fresh-install-second-client",
       options.expectedVersion,
     );
     if (app.endpoint === registryEndpoint) throw new Error("fresh_install_registry_and_client_endpoints_collide");
@@ -1050,8 +1145,39 @@ async function freshInstallMain(options: Options) {
     if (!Number.isSafeInteger(paneId) || paneId < 1) throw new Error("fresh_install_source_pane_missing");
     const electronClientId = clientId(app.identity.publicKeyPem);
     const registration = await waitForRegisteredSurface(registryEndpoint, electronClientId, surfaceId, "fresh-install");
-    if (!matchesRegisteredDirectTarget(electronClientId, registration, listed)) {
+    const secondList = await cli(options.cliBinary, path.join(options.stateRoot, "second-cli"), "list", {}, secondApp.endpoint);
+    const secondSurface = listedSurface(secondList);
+    const secondClientId = clientId(secondApp.identity.publicKeyPem);
+    if (secondClientId === electronClientId || secondSurface.surfaceId === surfaceId) {
+      throw new Error("fresh_install_two_clients_not_distinct");
+    }
+    const secondRegistration = await waitForRegisteredSurface(
+      registryEndpoint, secondClientId, secondSurface.surfaceId, "fresh-install-second-client",
+    );
+    const confirmedFirstList = await cli(options.cliBinary, cliStateRoot, "list", {}, app.endpoint);
+    const confirmedSecondList = await cli(options.cliBinary, path.join(options.stateRoot, "second-cli"), "list", {}, secondApp.endpoint);
+    const firstVisible = listedSurface(confirmedFirstList, surfaceId);
+    const secondVisible = listedSurface(confirmedSecondList, secondSurface.surfaceId);
+    const firstPaneNumber = Number(firstVisible.topology.panes[0]?.paneLabel);
+    const secondPaneNumber = Number(secondVisible.topology.panes[0]?.paneLabel);
+    if (!Number.isSafeInteger(firstPaneNumber) || firstPaneNumber < 1 ||
+        !Number.isSafeInteger(secondPaneNumber) || secondPaneNumber < 1 ||
+        firstPaneNumber === secondPaneNumber ||
+        Number(registration.surface.panes[0]?.paneLabel) !== firstPaneNumber ||
+        Number(secondRegistration.surface.panes[0]?.paneLabel) !== secondPaneNumber) {
+      throw new Error("fresh_install_fleet_pane_numbers_not_unique_or_unconfirmed");
+    }
+    const fleetPaneUniqueness = {
+      firstClientId: electronClientId, firstPaneNumber, firstSurfaceId: surfaceId,
+      secondClientId, secondPaneNumber, secondSurfaceId: secondSurface.surfaceId,
+      secondDirectClientEndpoint: secondApp.endpoint,
+      sharedRegistryEndpoint: registryEndpoint,
+    };
+    if (!matchesRegisteredDirectTarget(electronClientId, registration, firstVisible)) {
       throw new Error("fresh_install_direct_client_registry_target_mismatch");
+    }
+    if (!matchesRegisteredDirectTarget(secondClientId, secondRegistration, secondVisible)) {
+      throw new Error("fresh_install_second_direct_client_registry_target_mismatch");
     }
     const diagnosticsAfterRegistration = await allocatorDiagnostics(cluster.adminUrl, cluster.config.fleetId);
     if (diagnosticsAfterRegistration.assignmentCount < diagnosticsBeforeRegistration.assignmentCount ||
@@ -1113,7 +1239,7 @@ async function freshInstallMain(options: Options) {
       app,
       databaseIdentity: cluster.databaseIdentity,
       diagnosticsAfterRegistration,
-      directList,
+      directList: confirmedFirstList,
       read: afterWrongSurfaceRead,
       registration,
       registryEndpoint,
@@ -1160,6 +1286,17 @@ async function freshInstallMain(options: Options) {
       surfaceId,
       "fresh-install-after-restart",
     );
+    const secondRegistrationAfterRestart = await waitForRegisteredSurface(
+      registryEndpoint, secondClientId, secondSurface.surfaceId, "fresh-install-second-client-after-restart",
+    );
+    const secondListAfterRestart = await cli(
+      options.cliBinary, path.join(options.stateRoot, "second-cli"), "list", {}, secondApp.endpoint,
+    );
+    const secondVisibleAfterRestart = listedSurface(secondListAfterRestart, secondSurface.surfaceId);
+    if (Number(secondVisibleAfterRestart.topology.panes[0]?.paneLabel) !== secondPaneNumber ||
+        Number(secondRegistrationAfterRestart.surface.panes[0]?.paneLabel) !== secondPaneNumber) {
+      throw new Error("fresh_install_second_client_pane_number_changed_after_restart");
+    }
     const listAfterRestart = await cli(options.cliBinary, cliStateRoot, "list", {}, app.endpoint);
     const listedAfterRestart = listedSurface(listAfterRestart, surfaceId);
     if (!matchesRegisteredDirectTarget(electronClientId, registrationAfterRestart, listedAfterRestart)) {
@@ -1200,6 +1337,8 @@ async function freshInstallMain(options: Options) {
 
     await app.stop();
     app = undefined;
+    await secondApp.stop();
+    secondApp = undefined;
     clientStopped = true;
     const registryStop = await registryProcess.stop();
     registryProcess = undefined;
@@ -1240,6 +1379,8 @@ async function freshInstallMain(options: Options) {
       expectedVersion: options.expectedVersion,
       displayReady,
       initial,
+      fleetPaneUniqueness,
+      migrationEvidence,
       mode: "fresh-install",
       postgresRestart: postgresEvidence,
       rawCliEvidenceBase64: rawCliEvidence.toString("base64"),
@@ -1260,6 +1401,7 @@ async function freshInstallMain(options: Options) {
     throw error;
   } finally {
     if (app) await app.stop().catch(() => undefined);
+    if (secondApp) await secondApp.stop().catch(() => undefined);
     if (registryProcess) await registryProcess.stop().catch(() => undefined);
     if (!clusterStopped) {
       await cluster.stop();

@@ -3235,8 +3235,7 @@
                     "$ref": "#/$defs/PaneId"
                   },
                   "paneLabel": {
-                    "type": "integer",
-                    "minimum": 1
+                    "oneOf": [{ "type": "integer", "minimum": 1 }, { "type": "null" }]
                   },
                   "paneLineageId": {
                     "type": "string",
@@ -3747,8 +3746,7 @@
           "$ref": "#/$defs/PaneId"
         },
         "paneLabel": {
-          "type": "integer",
-          "minimum": 1
+          "oneOf": [{ "type": "integer", "minimum": 1 }, { "type": "null" }]
         },
         "name": {
           "oneOf": [
@@ -3863,8 +3861,7 @@
               "$ref": "#/$defs/PaneId"
             },
             "paneLabel": {
-              "type": "integer",
-              "minimum": 1
+              "oneOf": [{ "type": "integer", "minimum": 1 }, { "type": "null" }]
             },
             "parentPaneId": {
               "oneOf": [

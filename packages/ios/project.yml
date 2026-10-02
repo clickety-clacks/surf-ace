@@ -2,9 +2,9 @@ name: SurfAce
 options:
   createIntermediateGroups: true
   deploymentTarget:
-    iOS: "26.0"
+    iOS: "27.0"
     macOS: "14.0"
-    visionOS: "26.0"
+    visionOS: "27.0"
 settings:
   base:
     SWIFT_VERSION: 6.0

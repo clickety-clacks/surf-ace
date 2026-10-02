@@ -205,9 +205,40 @@ function decodeRawCliEvidence(base64, expectedBytes, expectedSha256, name) {
     }
     return event;
   });
-  const stateRoots = new Set(events.map((event) => event.args[event.args.indexOf("--state-root") + 1]));
-  if (stateRoots.size !== 1) throw new Error(`${name}_raw_cli_state_root_changed`);
   return { base64, byteLength: bytes.byteLength, events, sha256: expectedSha256 };
+}
+
+export function assertLinuxFreshInstallCliStateRoots(events, bindings) {
+  const invalid = () => { throw new Error("linux_fresh_install_cli_state_root_not_bound"); };
+  const firstEndpoint = bindings?.firstEndpoint;
+  const secondEndpoint = bindings?.secondEndpoint;
+  const firstStateRoot = bindings?.firstStateRoot;
+  const secondStateRoot = bindings?.secondStateRoot;
+  if (!Array.isArray(events) || typeof firstEndpoint !== "string" || !firstEndpoint.endsWith("/ws") ||
+      typeof secondEndpoint !== "string" || !secondEndpoint.endsWith("/ws") || firstEndpoint === secondEndpoint ||
+      typeof firstStateRoot !== "string" || !path.isAbsolute(firstStateRoot) ||
+      typeof secondStateRoot !== "string" || !path.isAbsolute(secondStateRoot) ||
+      path.resolve(firstStateRoot) === path.resolve(secondStateRoot)) invalid();
+
+  const expectedRoots = new Map([
+    [firstEndpoint, path.resolve(firstStateRoot)],
+    [secondEndpoint, path.resolve(secondStateRoot)],
+  ]);
+  const observedEndpoints = new Set();
+  const observedRoots = new Set();
+  for (const event of events) {
+    const stateRootIndex = event?.args?.indexOf("--state-root") ?? -1;
+    const stateRoot = event?.args?.[stateRootIndex + 1];
+    if (stateRootIndex < 0 || typeof stateRoot !== "string" || !path.isAbsolute(stateRoot)) invalid();
+    const endpoint = event.endpoint;
+    const expectedRoot = endpoint === null ? expectedRoots.get(firstEndpoint) : expectedRoots.get(endpoint);
+    if (!expectedRoot || path.resolve(stateRoot) !== expectedRoot) invalid();
+    observedRoots.add(path.resolve(stateRoot));
+    if (endpoint !== null) observedEndpoints.add(endpoint);
+  }
+  if (observedRoots.size !== 2 || observedEndpoints.size !== 2 ||
+      !observedEndpoints.has(firstEndpoint) || !observedEndpoints.has(secondEndpoint)) invalid();
+  return { clientCount: 2, stateRoots: [...observedRoots].sort() };
 }
 
 async function readRawCliEvidence(evidencePath, name, required = true) {
@@ -262,15 +293,17 @@ function requireElectronRawCliCoverage(channel, endpoint, stateRoot, expected, r
 
 function requireLinuxFreshInstallRawCliCoverage(stateSequence, rawCliEvidence) {
   if (!rawCliEvidence) throw new Error("linux_fresh_install_raw_cli_evidence_missing");
+  const fleet = stateSequence.fleetPaneUniqueness;
   const endpoints = new Set([
     stateSequence.initial?.directClientEndpoint,
     stateSequence.afterRestart?.directClientEndpoint,
+    fleet?.secondDirectClientEndpoint,
   ]);
   const registryEndpoints = new Set([
     stateSequence.initial?.registryEndpoint,
     stateSequence.afterRestart?.registryEndpoint,
   ]);
-  if (endpoints.size !== 1 || endpoints.has(undefined) || registryEndpoints.has(undefined) ||
+  if (endpoints.size !== 2 || endpoints.has(undefined) || registryEndpoints.has(undefined) ||
       [...registryEndpoints].some((endpoint) => endpoints.has(endpoint))) {
     throw new Error("linux_fresh_install_endpoint_bindings_invalid");
   }
@@ -283,6 +316,12 @@ function requireLinuxFreshInstallRawCliCoverage(stateSequence, rawCliEvidence) {
       throw new Error("linux_fresh_install_cli_endpoint_not_bound_client");
     }
   }
+  const secondListEvent = rawCliEvidence.events.find((event) => {
+    if (event.command !== "list" || event.status !== 0 || event.endpoint !== fleet.secondDirectClientEndpoint) return false;
+    const result = event.output?.result?.payload ?? event.output?.result;
+    return result?.surfaces?.some((surface) => surface.surfaceId === fleet.secondSurfaceId) === true;
+  });
+  if (!secondListEvent) throw new Error("linux_fresh_install_second_direct_list_missing");
   const initial = stateSequence.initial;
   const afterRestart = stateSequence.afterRestart;
   const expectedScope = `pane:${encodeURIComponent(initial.surfaceId)}:${initial.paneId}`;
@@ -431,6 +470,30 @@ export function validateTightbeamFreshInstallState(stateSequence) {
   requireFreshInstallPhase(stateSequence.afterRestart, "fresh_install_after_restart", expected);
   const before = stateSequence.initial;
   const after = stateSequence.afterRestart;
+  const fleet = stateSequence.fleetPaneUniqueness;
+  if (!fleet || fleet.firstClientId === fleet.secondClientId ||
+      fleet.firstSurfaceId === fleet.secondSurfaceId ||
+      fleet.firstClientId !== before.registeredClientId ||
+      fleet.firstSurfaceId !== before.surfaceId ||
+      fleet.firstPaneNumber !== before.paneLabel ||
+      !Number.isSafeInteger(fleet.secondPaneNumber) || fleet.secondPaneNumber < 1 ||
+      fleet.secondPaneNumber === fleet.firstPaneNumber ||
+      fleet.sharedRegistryEndpoint !== before.registryEndpoint ||
+      typeof fleet.secondDirectClientEndpoint !== "string" || !fleet.secondDirectClientEndpoint.endsWith("/ws") ||
+      fleet.secondDirectClientEndpoint === before.directClientEndpoint ||
+      fleet.secondDirectClientEndpoint === before.registryEndpoint) {
+    throw new Error("fresh_install_fleet_pane_uniqueness_unverified");
+  }
+  const migration = stateSequence.migrationEvidence;
+  if (!migration || !/^[a-f0-9]{64}$/.test(migration.backupSha256 ?? "") ||
+      !/^[a-f0-9]{64}$/.test(migration.headHashBefore ?? "") ||
+      migration.headHashAfter !== migration.headHashBefore ||
+      migration.restoredHeadHash !== migration.headHashBefore ||
+      !Number.isSafeInteger(migration.headSeqBefore) || migration.headSeqBefore < 1 ||
+      migration.headSeqAfter !== migration.headSeqBefore ||
+      migration.writerCanClaim !== true || migration.witnessSynchronized !== true) {
+    throw new Error("fresh_install_v023_migration_unverified");
+  }
   for (const field of ["clientIdentity", "registrationIdentity", "surfaceId", "paneId", "windowLabel", "paneLabel", "databaseIdentity"]) {
     if (after[field] !== before[field]) throw new Error(`fresh_install_${field === "clientIdentity" ? "client_identity" : field}_changed`);
   }
@@ -585,11 +648,13 @@ export async function runLinuxFreshInstallStateDriver(options, execute = run) {
     stateSequence.rawCliEvidenceSha256,
     "linux_fresh_install",
   );
-  const expectedStateRoot = path.join(path.resolve(options.stateRoot), "cli");
-  if (rawCliEvidence.events.some((event) =>
-    path.resolve(event.args[event.args.indexOf("--state-root") + 1]) !== expectedStateRoot)) {
-    throw new Error("linux_fresh_install_cli_state_root_not_bound");
-  }
+  const expectedStateRoot = path.resolve(options.stateRoot);
+  assertLinuxFreshInstallCliStateRoots(rawCliEvidence.events, {
+    firstEndpoint: stateSequence.initial.directClientEndpoint,
+    firstStateRoot: path.join(expectedStateRoot, "cli"),
+    secondEndpoint: stateSequence.fleetPaneUniqueness.secondDirectClientEndpoint,
+    secondStateRoot: path.join(expectedStateRoot, "second-cli"),
+  });
   requireLinuxFreshInstallRawCliCoverage(stateSequence, rawCliEvidence);
   const wrong = stateSequence.wrongSurfaceRejection;
   if (!wrong?.request || wrong.request.surfaceId !== wrong.requestedSurfaceId ||

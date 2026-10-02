@@ -8,17 +8,15 @@ export type ConnectionChromeElements = {
 
 export function projectConnectionChrome(
   elements: ConnectionChromeElements,
-  connectionBar: ConnectionBarState,
+  _connectionBar: ConnectionBarState,
   hasPaneLabel: boolean,
   hasWindowLabel: boolean,
 ): void {
-  const showsIdentity = connectionBar === "connected";
-  elements.windowLabel.toggleAttribute("hidden", !showsIdentity || !hasWindowLabel);
-  elements.paneLabel.toggleAttribute("hidden", !showsIdentity);
-  elements.disconnectedGlyph.toggleAttribute("hidden", showsIdentity);
-  elements.disconnectedGlyph.classList.toggle("is-connecting", connectionBar === "connecting");
-  elements.disconnectedGlyph.classList.toggle("is-disconnected", connectionBar === "disconnected");
-  elements.paneLabel.parentElement?.toggleAttribute("hidden", showsIdentity && !hasPaneLabel);
+  // Connection status changes the window-label color, never whether an assigned identity is shown.
+  elements.windowLabel.toggleAttribute("hidden", !hasWindowLabel);
+  elements.paneLabel.toggleAttribute("hidden", !hasPaneLabel);
+  elements.disconnectedGlyph.toggleAttribute("hidden", true);
+  elements.paneLabel.parentElement?.toggleAttribute("hidden", !hasPaneLabel && !hasWindowLabel);
 }
 
 export function contentScalePercentage(scale: number): string {

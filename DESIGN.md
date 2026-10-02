@@ -101,7 +101,7 @@ Before the protocol details, these terms are used consistently throughout this s
 
 **Pane** — a rendering scope nested inside a surface window. Each pane has a stable internal identity (`paneId`) and a separate stable visible identity (`paneLabel`).
 
-**Pane label** — the client-assigned user-visible identifier for a pane (`1`, `2`, `3`, ...). `paneLabel` is distinct from `paneId` and is a secondary key for the live Surf Ace topology. Pane labels are scoped to one surface/window; `windowLabel + paneLabel` is the user-visible coordinate. The OpenClaw/user-facing pane token is the pane's `displayId` / `paneAddress`, which is derived from the window label plus pane label.
+**Pane label** — the fleet-allocator-assigned user-visible number for a pane (`1`, `2`, `3`, ...). `paneLabel` is distinct from the client-assigned internal `paneId`. A pane number is unique across every Surf Ace in the fleet and is never reused. `windowLabel + paneLabel` remains a convenient user-visible coordinate, not the source of pane-number uniqueness.
 
 **Endpoint** — the app/device WS host:port advertised via mDNS. One endpoint may host multiple surfaces (windows).
 
@@ -127,7 +127,7 @@ These are normative, settled statements about Surf Ace behavior. Implementations
 2. **Lockless client-local authority.** A client advertising the required T1770 lockless capability admits multiple controllers concurrently. No provider, controller, product, chat, or identity owns a client, surface, window, pane, history entry, unread record, tombstone, mutation, or restore right. Every surface mutation traverses one client-owned ordered seam and all admission, ordering, validation, capacity, retention, close, restore, and reclamation rules are identity-independent. A client without the capability is not admitted.
 3. **Content persistence through connection changes.** Connection state MUST NOT affect displayed content or mutate client truth. Content changes only through an accepted explicit content operation.
 4. **Reads are local-only projections.** Ordinary OpenClaw reads use the controller's bounded local projection and never synchronously contact a surface. The client remains authoritative for bounded consumable scopes, per-controller cursor floors, pending truth, and structured gaps; a local read durably queues an idempotent acknowledgement. OpenClaw's connection job delivers it in the background; `surf-ace` delivers it during the next explicit networked CLI invocation for any standalone caller.
-5. **Panes are always present.** Every surface window has one or more panes at all times. There are no separate "single-pane mode" and "multi-pane mode" — pane routing is always active. Each pane has a stable internal `paneId` and a stable visible `paneLabel`. OpenClaw resolves human references through `surf_ace_list` using `windowLabel` / `paneLabel`, then targets the pane explicitly by `paneId`. Keyboard focus is a local input affordance only; it does not create default-pane routing or default-pane resolution.
+5. **Panes are always present.** Every surface window has one or more panes at all times. There are no separate "single-pane mode" and "multi-pane mode" — pane routing is always active. Each pane has a stable internal `paneId`. Its visible `paneLabel`, when present, is allocated durably by the fleet registry, unique across every Surf Ace in the fleet, and never reused. Without allocator confirmation the pane shows no number. OpenClaw resolves human references through `surf_ace_list` using `windowLabel` / `paneLabel`, then targets the pane explicitly by `paneId`. Keyboard focus is a local input affordance only; it does not create default-pane routing or default-pane resolution.
 6. **One visible entry with shared history.** Each pane shows one entry at a time. Every accepted push creates a distinct client-identified entry, becomes visible, and moves the previously visible entry into the shared retained pool. Back and Forward use one cross-controller 20-entry non-visible LRU pool; controller identity never creates replacement-in-place, quota, pinning, priority, or eviction preference.
 7. **Connection-context identity.** The adapter supplies its asserted stable controller instance ID at admission and the client binds operations to that admitted socket context. OpenClaw does not pass controller/session identity on individual operation payloads, and friendly provenance is never authentication.
 8. **Always-on event streaming.** Once paired, the surface emits events continuously. There is no subscribe/unsubscribe API — event streaming is always on while connected.
@@ -135,7 +135,7 @@ These are normative, settled statements about Surf Ace behavior. Implementations
 10. **Client-allocated content revisions.** Accepted append-style content operations traverse the client mutation seam; the client allocates the next content revision and a new history-entry ID atomically. Controllers do not submit authoritative content revisions or history-owner tokens.
 11. **Annotation reads are pane-scoped at the OpenClaw boundary.** `surf_ace_read` and related OpenClaw-facing operations target a pane only. Surfaces/providers may keep any additional history restore state internally, but OpenClaw does not pass or track history identifiers.
 12. **Lifecycle events are always-on.** Surface lifecycle events (`event.surface_appeared`, `event.surface_removed`, `event.surface_resumed`) and pane lifecycle events (`event.pane_created`, `event.pane_removed`, `event.pane_renamed`) are never profile-gated. Lockless committed content/history/topology/lifecycle events fan out to every admitted controller for the affected surface; cursor-specific availability/overflow signals target only the affected controller without conferring authority.
-13. **Platform target floor policy.** Surf Ace targets the newest released OS major version as the minimum deployment target (current decision: iOS/iPadOS 26 and macOS 26 for native surface builds).
+13. **Platform target floor policy.** Surf Ace targets the newest released OS major version as the minimum deployment target (current decision: iOS/iPadOS 27 and visionOS 27; any native macOS surface target uses macOS 27).
 14. **Portable extension packaging.** Surf Ace MUST remain buildable as a standalone OpenClaw extension bundle without requiring Clawline as a dependency or core patches. Provider startup, provider deployment, and persistent Surf Ace launchd/auto-start installation require explicit validated host configuration. Each operation fails before mutation when its configuration is absent, malformed, or excludes the current destination.
 
 ## 3. Transport and Discovery
@@ -218,11 +218,11 @@ Naming system:
    Allocation is NOT client-local; see the core invariant above.
 2. `windowLabel` is a visible coordinate for users and diagnostics, not durable target authority. The client may preserve it across ordinary reconnect and recoverable close/restore when still valid and unassigned. Otherwise restore allocates a new unique live label without changing surface identity or preserved state.
 3. **Pane IDs** are allocated by the **client-local authority**. They are stable internal routing identifiers. Controllers target existing stable IDs or submit pane-creating intent; they do not preallocate new pane IDs.
-4. **Pane labels** are allocated, validated, persisted, and uniquely projected by the **client-local authority**. The OpenClaw/user-facing pane token is the `displayId` / `paneAddress`, derived from `windowLabel + paneLabel`. `paneLabel` alone is not durable target authority and is not fleet-unique on its own; fleet uniqueness of the user-facing token comes from the fleet-unique `windowLabel` it is paired with, per the core invariant above. A pane label is unique within its window, and the window label is unique across the fleet, so the pair is unique across the fleet. The client enforces unique live `windowLabel + paneLabel` coordinates and repairs invalid persisted state before lockless admission without matching or partitioning by controller identity.
+4. **Pane labels** are allocated and durably persisted by the single fleet-wide allocator, which also allocates window letters. Every visible pane number is unique across every Surf Ace in the fleet and is never reused. The client validates and projects only allocator-confirmed pane numbers. A pane without an allocator-confirmed number displays no number; it never substitutes a client-local guess. `paneLabel` is a visible coordinate, not durable target authority. `displayId` / `paneAddress` may combine the window letter and pane number for user-facing references.
 5. **Pane names** are assigned by the extension via `pane.rename`. There is no user-facing rename UI. Pane names are optional metadata and MUST NOT replace `paneLabel` as the visible identity or addressing token.
-6. The client is the sole authority on topology and visible labeling. Controllers submit intent against stable IDs and expected revisions; the client validates, allocates, commits, and emits lifecycle events.
-7. When a pane is split, the controller specifies the target, count, and layout intent. After the stale-revision and pane-creation capacity checks, the client allocates each new `paneId` and `paneLabel`, commits atomically, and emits `event.pane_created`.
-8. **Initial surface state:** A newly opened surface starts with one client-allocated window identity and one client-allocated pane identity/label, subject to pane-creation admission. OpenClaw MUST call `surf_ace_list` before any pane-scoped operation and MUST accept a valid post-restore live pane count above `maxPanesPerSurface`.
+6. The client is the sole authority on topology and internal pane IDs. The fleet registry is the sole authority on visible window letters and pane numbers. Controllers submit intent against stable IDs and expected revisions; the client validates and commits topology and emits lifecycle events only with allocator-confirmed visible labels.
+7. When a pane is split, the controller specifies the target, count, and layout intent. After the stale-revision and pane-creation capacity checks, the client allocates each new `paneId` and obtains each new `paneLabel` from the fleet registry, commits atomically, and emits `event.pane_created`. Without allocator confirmation, a new pane displays no number.
+8. **Initial surface state:** A newly opened surface starts with one client-allocated internal pane identity. The fleet registry allocates its window letter and pane number. Until confirmed, the surface displays no unassigned letter or number. OpenClaw MUST call `surf_ace_list` before any pane-scoped operation and MUST accept a valid post-restore live pane count above `maxPanesPerSurface`.
 9. Labels are displayed on the surface — window identity immediately precedes the pane label as a bottom-right floating overlay within each pane. The window identity is uppercase text inside a rounded-rectangle outline, followed by the plain pane number, e.g. an outlined `A` box next to `12`. See §15.1 for visibility rules.
 
 
@@ -876,7 +876,7 @@ The schema below defines every v1 application message type over WS.
       "minimum": 1
     },
     "PaneLabel": {
-      "description": "Visible pane label assigned by the client-local authority. Distinct from internal paneId and used for human-facing pane identity.",
+      "description": "Fleet-unique visible pane number assigned by the fleet registry. Distinct from client-local internal paneId.",
       "type": "integer",
       "minimum": 1
     },
@@ -2585,9 +2585,14 @@ OpenClaw reads from this local projection only; no ordinary `surf_ace_read` call
 
 ---
 
-#### Annotation Context Frame Model (Context-Keyed, Not Session-Keyed)
+#### Annotation Context Frame Model (Context-Keyed Until Explicit Commit)
 
-Annotation data is keyed by **context**, not by annotation session.
+Annotation data is keyed by **context** while its live frame remains open. A
+pause/re-entry before an explicit commit continues that frame; once
+`event.annotation_committed` is emitted, the frame is sealed and later
+annotation in the same context starts a new live frame. Mike's Oct 1 v0.2.4
+ruling makes this commit event—not a timeout or a context change—the boundary
+between same-context frames.
 
 A context key is:
 - OpenClaw-pushed content: active `contentId`
@@ -2598,14 +2603,14 @@ A context key is:
 1. Scroll alone does **not** create a new context frame.
 2. Navigation/content change alone does **not** create a frame.
 3. A new frame is created only when annotation actually occurs in that context.
-4. Re-entering annotation mode in the same context appends to the same mutable context frame.
+4. Re-entering annotation mode in the same context before explicit commit appends to the same mutable context frame; after `event.annotation_committed`, re-entry opens a new live frame.
 
 Current content readback is separate from annotation frames. A content push updates the local current content snapshot, but does not create a live annotation frame or a closed annotation frame by itself.
 
 **Lifecycle (dual-channel semantics):**
 1. On first stroke in a context with no open frame, the client creates/opens the bounded mutable live-frame record.
 2. While annotating in that context, `event.drawing_flush` strokes coalesce deterministically by stable stroke ID into that client record and are projected through ordered deltas.
-3. Exiting annotation mode via **Done** does **not** force frame finalization by itself; it only pauses live writes. Re-entry in the same context resumes appending to the same frame.
+3. Exiting annotation mode via **Done** pauses live writes and requests `event.annotation_committed` after pending `event.drawing_flush` delivery. If the user re-enters the same context before that commit is emitted, the pending commit is canceled and the open frame continues. After the commit is emitted, same-context re-entry starts a new live frame.
 4. While annotation mode is active, pane content replacement and user navigation are blocked; there is no visibility switch until the user taps **Done**.
 5. After **Done**, any user navigation or explicit content replacement/clear (`content.set` / `content.clear`) is a normal context switch. The provider finalizes the current open frame before applying that switch, then opens/resumes the next context as needed.
 
@@ -3213,7 +3218,7 @@ This tool is deprecated and removed in the capture frame model. Frame images are
 
 Remove specific annotation strokes from a screen's drawing overlay by stroke ID. Write.
 
-**Note (dual-channel frame model):** In the dual-channel model, rendered strokes persist until the provider explicitly removes them or content changes under the normal content rules. The underlying context frame may remain open and continue on later same-context re-entry (§13.2). Closed frames in the queue are immutable records and cannot be modified via this tool. `surf_ace_annotations_remove` only affects strokes currently rendered in the live annotation overlay. For most OpenClaw workflows, this tool is used to remove strokes from in-progress interaction (e.g., erasing a scratch-out gesture mid-session). Post-finalization frame handling is done at OpenClaw interpretation time (dedupe/ignore/act), not by mutating closed frames.
+**Note (dual-channel frame model):** In the dual-channel model, rendered strokes persist until the provider explicitly removes them or content changes under the normal content rules. The underlying context frame remains open on same-context re-entry only until `event.annotation_committed` is emitted (§13.2). Closed frames in the queue are immutable records and cannot be modified via this tool. `surf_ace_annotations_remove` only affects strokes currently rendered in the live annotation overlay. For most OpenClaw workflows, this tool is used to remove strokes from in-progress interaction (e.g., erasing a scratch-out gesture mid-session). Post-finalization frame handling is done at OpenClaw interpretation time (dedupe/ignore/act), not by mutating closed frames.
 
 **Params:**
 ```
@@ -3296,7 +3301,7 @@ Each window is assigned a short alphabetic identifier using an auto-incrementing
 
 The window label is the primary visible addressing handle within the current `surf_ace_list` result. It MUST be visible when the surface is at rest so that a user can tell OpenClaw "move content to window b" without ambiguity, but OpenClaw/provider targeting authority still comes from the run-admitted `surfaceId`/`paneId` tuple rather than from the label alone.
 
-Each pane is assigned by the client-local authority a stable visible numeric `paneLabel` distinct from its internal `paneId`. `paneLabel` is the user-facing pane identifier and live-topology secondary key within the authoritative live projection; it is not durable target authority. Controllers adopt the client-assigned label. Optional pane names do not replace it. The pane label MUST be:
+Each pane obtains a stable visible numeric `paneLabel` from the fleet registry, distinct from its client-assigned internal `paneId`. Every displayed number is unique across the fleet and never reused. When allocator confirmation is unavailable the pane shows no number. `paneLabel` is the user-facing pane identifier and live-topology secondary key within the authoritative live projection; it is not durable target authority. Controllers adopt the registry-assigned label. Optional pane names do not replace it. When present, the pane label MUST be:
 - Displayed as plain overlay text with no pill, background, or border.
 - Displayed in the bottom-right of the pane content area, very bold, with height equal to 1/4 of the pane's shortest dimension. Electron and iOS MUST both derive this from the resolved pane rectangle, not from total window height or width.
 - Rendered in Rajdhani Bold, with visually consistent heavy weight across Electron and iOS.
@@ -3452,9 +3457,13 @@ Connection state MUST be expressed only through the window ID outline/text in th
 
 This section is a consolidated copy/reference index of existing UI/UX mentions elsewhere in the document; it does not supersede the original normative or contextual locations.
 
+**Decision record (Mike, 2026-10-01):** fleet-wide pane-number allocation and always-visible window/pane identity are restored and remain normative. The audit's other reviewed changes remain as-is and authorized: annotation mode retains its current Done-only control; Windows remains unsupported; screenshot capture does not return visible text; app-window open/close remains Spatial-only for now; internal pane IDs remain per-surface; OpenClaw-era items retain their current scope; label opacity and the single-pane iOS focus outline remain cosmetic/current behavior; and the larger history, lockless, and controller redesigns remain unchanged. None of those kept items is restored or broadened by this ruling.
+
+Every named invariant in this index, including later single-invariant index entries, MUST have a build-failing conformance check in the release-gated Electron or iOS test suites. `scripts/release/release-tooling.test.mjs` verifies that the index and its test-coverage map stay in one-to-one agreement and that each mapped test is present in a suite executed by the release workflow.
+
 - **Window Letter Labels** — "Window labels (a, b, c…) are allocated by the single fleet-wide label allocator and are unique across the entire fleet; a client that cannot obtain one displays no label." Source: §3.1.1 core invariant
 - **Pane Name Authority** — "Pane names are optional extension-assigned metadata. They do not replace `paneLabel` as the visible identity token." Source: §3.1.1
-- **Pane Label Authority** — "Pane labels are client-assigned visible numeric identifiers distinct from internal `paneId`." Source: §3.1.1
+- **Pane Label Authority** — "Pane numbers are allocated durably by the fleet registry, unique across every Surf Ace in the fleet, and never reused; until allocator confirmation a pane displays no number and never substitutes a client-local guess." Source: §3.1.1 core invariant
 - **Prominent Surface Labels** — "Window label and pane label render together as an always-visible bottom-right identity overlay in each pane." Source: §3.1.1 / §15.1
 - **Displayed Content Persistence** — "The surface renders content and keeps it displayed until OpenClaw explicitly changes it." Source: §1
 - **Visible Back/Forward Behavior** — "The newly targeted content becomes front/visible immediately in that pane." Source: §6.1.1
@@ -3469,10 +3478,10 @@ This section is a consolidated copy/reference index of existing UI/UX mentions e
 - **Connecting State UI** — "Connecting / reconnecting — yellow window ID outline/text." Source: §4.5 / §15.7
 - **Disconnected State UI** — "Disconnected — red window ID outline/text." Source: §4.5 / §15.7
 - **Window Label Placement** — "Window label precedes pane number in the bottom-right identity overlay." Source: §15.1
-- **Window Label Visibility** — "Always visible as the window box preceding each pane number; never hidden by pointer/touch movement, content, connection state, or annotation mode." Source: §15.1
+- **Window Label Visibility** — "Always visible as the window box preceding each confirmed pane number; never hidden by pointer movement, touch interaction, hover, content, connection state, or annotation mode." Source: §15.1
 - **Primary Addressing Handle** — "The window label is the primary addressing handle. It MUST be visible when the surface is at rest." Source: §15.1
 - **Pane Label Placement** — "Large floating translucent overlay in the bottom-right of the pane content area." Source: §15.1
-- **Pane Label Visibility** — "Always visible as plain translucent bottom-right overlay text; never hidden by pointer/touch movement." Source: §15.1
+- **Pane Label Visibility** — "Every allocator-confirmed pane number is always visible as plain translucent bottom-right overlay text; it is never hidden by pointer movement, touch interaction, hover, content, connection state, or annotation mode. An unconfirmed pane shows no number." Source: §15.1
 - **Pencil Auto Entry** — "Pencil contact with the screen MUST automatically enter annotation mode." Source: §15.1
 - **Drawing Input Button (👆)** — "A single drawing-input button MUST be present in the pane control bar at all times." Source: §15.1
 - **Done Exit Control** — "While annotation mode is active, a Done button MUST be visible in the annotation pill." Source: §15.1 / §15.3
@@ -3645,9 +3654,9 @@ In v2, the wire `DrawingFlushEvent` payload may optionally be extended with `scr
 
 **Question:** If a user annotates the top of a long webpage, scrolls down, and annotates the bottom — how does the provider produce a meaningful image for OpenClaw?
 
-**Decision:** Multi-scroll behavior is handled by the dual-channel context model. Because annotation mode locks the viewport (see §15.6 "While IN annotation mode"), scrolling cannot occur while actively drawing. If a user annotates at scroll position A, exits annotation mode, scrolls, and re-enters annotation in the **same context**, strokes append to the same context frame (not a new context frame). If annotation resumes only after a true context switch (e.g., different URL/content context and annotation starts there), the previous context frame is finalized and the new context gets its own frame.
+**Decision:** Multi-scroll behavior is handled by the dual-channel context model. Because annotation mode locks the viewport (see §15.6 "While IN annotation mode"), scrolling cannot occur while actively drawing. If a user annotates at scroll position A and re-enters the **same context before `event.annotation_committed` is emitted**, strokes append to the same context frame. Once the explicit commit is emitted, later same-context annotation starts a new frame; a true context switch also finalizes the previous frame and creates one for the new context when annotation starts there.
 
-OpenClaw may therefore receive either one evolving context frame (same context, multiple annotation sessions) or multiple finalized frames (annotation across distinct contexts). `scrollOffset` at frame open remains the reference anchor for mapping to document-space.
+OpenClaw may therefore receive one evolving context frame for multiple same-context sessions before commit, or multiple finalized frames after commit or across distinct contexts. `scrollOffset` at frame open remains the reference anchor for mapping to document-space.
 
 ---
 
@@ -3659,7 +3668,7 @@ OpenClaw may therefore receive either one evolving context frame (same context, 
 
 **Status:** Partially addressed by the capture frame model — full resolution requires on-device gesture classification (A.4).
 
-**With dual-channel context frames:** Bracket strokes and other multi-stroke semantic gestures can be accumulated into one finalized context frame (even across multiple same-context annotation sessions). OpenClaw receives the frame stroke set plus viewport screenshot, reducing partial-geometry ambiguity.
+**With dual-channel context frames:** Bracket strokes and other multi-stroke semantic gestures can be accumulated into one finalized context frame across same-context annotation sessions only while the frame remains uncommitted. OpenClaw receives the frame stroke set plus viewport screenshot, reducing partial-geometry ambiguity.
 
 However, geometry-based inference of the "between" region still requires understanding that the strokes form brackets and that the intent is spatial span between them. This is the unresolved part. On-device classification (A.4) applied per finalized frame remains the most promising path: the surface classifies gesture intent for the frame stroke set before (or at) finalization and includes a `semanticHints` field. Design deferred to v2.
 
@@ -3680,7 +3689,7 @@ However, geometry-based inference of the "between" region still requires underst
 - What is the fallback when on-device model is unavailable or below confidence threshold?
 - Does classification happen per-stroke, per-flush, or after a settling window?
 
-**With context-keyed frames:** On-device classification applies naturally **per finalized frame**. At frame finalization time (context-switch boundary, or explicit `content.set`/`content.clear` per A.8), the surface has the complete stroke set for that finalized unit. This is the ideal classification boundary: the model sees full gesture context before delivery. Classification at flush time (mid-session live deltas) would see partial stroke sets and is not recommended. A v2 `semanticHints` field in the frame structure is the right integration point.
+**With context-keyed frames:** On-device classification applies naturally **per finalized frame**. At frame finalization time (explicit `event.annotation_committed`, context-switch boundary, or explicit `content.set`/`content.clear` per A.8), the surface has the complete stroke set for that finalized unit. This is the ideal classification boundary: the model sees full gesture context before delivery. Classification at flush time (mid-session live deltas) would see partial stroke sets and is not recommended. A v2 `semanticHints` field in the frame structure is the right integration point.
 
 **Status:** Unresolved. Needs design session. The dual-channel frame model provides the right unit of analysis — classify at frame finalization, not at live-delta flush time.
 
@@ -3771,12 +3780,13 @@ In v2+, restore-on-revisit will require a new wire operation (e.g. `content.rest
 Rules:
 1. Live channel remains authoritative for in-context work-in-progress while annotation mode is active.
 2. Closed-frame queue exists to preserve settled annotation sessions and older contexts until `surf_ace_read` consumes them.
-3. Same-context annotation re-entry starts a new live frame after the prior session has been explicitly committed.
-4. Frame finalization occurs on one of:
+3. Same-context re-entry before the explicit commit continues the existing live frame.
+4. Once the prior session has been explicitly committed, same-context re-entry starts a new live frame.
+5. Frame finalization occurs on one of:
    - explicit `event.annotation_committed` from the surface,
    - context switch (different URL/content context with annotation starting there),
    - explicit content replacement/clear (`content.set`/`content.clear`).
-5. Timeout-based finalization is not product truth. If a provider keeps a timer temporarily for backward compatibility with older surfaces, it MUST be fallback-only and MUST NOT override an explicit settle signal.
+6. Timeout-based finalization is not product truth. If a provider keeps a timer temporarily for backward compatibility with older surfaces, it MUST be fallback-only and MUST NOT override an explicit settle signal.
 
 Transport note: `event.drawing_flush` cadence remains independent. Flush events carry live stroke deltas during annotation mode; `event.annotation_committed` closes the session.
 

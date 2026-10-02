@@ -237,7 +237,7 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         runtime.updateCentralRegistrationStatus(.disconnected)
         XCTAssertEqual(surface.connectionBarState, .disconnected)
         XCTAssertEqual(later.connectionBarState, .disconnected)
-        XCTAssertFalse(surfAcePaneChromeShowsIdentityLabels(connectionState: surface.connectionBarState))
+        XCTAssertTrue(surfAcePaneChromeShowsIdentityLabels(connectionState: surface.connectionBarState))
         XCTAssertEqual(surface.windowLabel, "a")
         XCTAssertEqual(pane.paneLabel, 1)
         XCTAssertEqual(pane.currentCompositeProvenance().plainLabel, provenance)
@@ -316,7 +316,8 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         runtime.project(topology: topology, onto: surface)
         XCTAssertEqual(bridge.renderCallEntries.count, 1)
         XCTAssertEqual(surface.windowLabel, "b")
-        XCTAssertEqual(pane.paneLabel, 2)
+        // Persisted labels remain hidden until this runtime has exact registry confirmation.
+        XCTAssertEqual(pane.paneLabel, 0)
 
         topology.panes[0].currentEntry = purple
         topology.panes[0].backStack = []
@@ -1186,7 +1187,7 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         let surfaceId = surface.surfaceId
         let adapter = try runtime.locklessAuthorityForLocalMutation()
         let split = try await adapter.commitLocalMutation(operation: "testing.pane.split") { state, _ in
-            let result = try SurfAceLocklessTopologyOperations.paneSplit(
+            let result = try TestRegistryTopology.paneSplit(
                 state: &state,
                 surfaceId: surfaceId,
                 paneId: 1,

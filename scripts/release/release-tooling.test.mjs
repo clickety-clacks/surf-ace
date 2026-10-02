@@ -85,6 +85,91 @@ const screenshotPixelFixtureHtml = [
   "</style><div class=left></div><div class=right></div>",
 ].join("");
 
+const DESIGN_INVARIANT_CHECKS = [
+  ["Window Letter Labels", [{ suite: "ios", file: "packages/ios/SurfAceTests/SurfAceCentralRegistrationTests.swift", marker: "func testProductionAllocatorAssignsDistinctLabelsAndRetainsIdentityOnReconnect" }]],
+  ["Pane Name Authority", [{ suite: "electron", file: "packages/electron/test/surface-core.test.ts", marker: "test(\"surface core renders the visible pane label separately from paneId\"" }]],
+  ["Pane Label Authority", [
+    { suite: "electron", file: "packages/electron/test/surface-core.test.ts", marker: "test(\"pane number projections require exact registry confirmation\"" },
+    { suite: "release-smoke", file: "scripts/release/tightbeam-state-smoke-fixture.ts", marker: "fresh_install_fleet_pane_numbers_not_unique_or_unconfirmed" },
+  ]],
+  ["Prominent Surface Labels", [
+    { suite: "electron", file: "packages/electron/test/renderer-ui-projection.test.ts", marker: "test(\"assigned identity labels remain visible across connection states\"" },
+    { suite: "ios", file: "packages/ios/SurfAceTests/SurfAceToolbarThemeTests.swift", marker: "func testPaneIdentityChromeKeepsAssignedLabelsAcrossConnectionStates" },
+  ]],
+  ["Displayed Content Persistence", [{ suite: "ios", file: "packages/ios/SurfAceTests/SurfAceSurfaceTopologyPersistenceTests.swift", marker: "func testRegisterSurfaceRestoresPersistedPaneContentHistoryAndTargetStateAfterRelaunch" }]],
+  ["Visible Back/Forward Behavior", [{ suite: "electron", file: "packages/electron/test/surface-core.test.ts", marker: "test(\"surface core emits history navigation after back/forward\"" }]],
+  ["History Navigation Controls", [{ suite: "electron", file: "packages/electron/test/renderer-sizing.test.ts", marker: "test(\"keyboard shortcuts route pane navigation and focused pane scroll intents\"" }]],
+  ["Floating History Controls", [{ suite: "electron", file: "packages/electron/test/renderer-dom-integration.test.ts", marker: "test(\"renderer DOM integrates authoritative connection states and live scale controls\"" }]],
+  ["Disabled History Controls", [{ suite: "electron", file: "packages/electron/test/renderer-ui-projection.test.ts", marker: "test(\"disabled history controls stay disabled without a hover affordance\"" }]],
+  ["No History Counters", [{ suite: "electron", file: "packages/electron/test/renderer-ui-projection.test.ts", marker: "test(\"history controls expose no depth counters\"" }]],
+  ["Degraded Restore Safety", [{ suite: "electron", file: "packages/electron/test/surface-core.test.ts", marker: "test(\"surface core rejects persisted surfaces with partially restorable pane topology\"" }]],
+  ["Restore Failure UI", [{ suite: "ios", file: "packages/ios/SurfAceTests/SurfAceBrowserURLTargetApplyTests.swift", marker: "func testBrowserURLTargetApplyRecordsFailedNavigationEvidence" }]],
+  ["Connection State Indicator", [{ suite: "electron", file: "packages/electron/test/renderer-ui-projection.test.ts", marker: "test(\"assigned identity labels remain visible across connection states\"" }]],
+  ["Connected State UI", [{ suite: "ios", file: "packages/ios/SurfAceTests/SurfAceCentralRegistrationTests.swift", marker: "func testCentralStatusTracksRegistrationPersistenceLossRetryAndStop" }]],
+  ["Connecting State UI", [{ suite: "ios", file: "packages/ios/SurfAceTests/SurfAceCentralRegistrationTests.swift", marker: "func testCentralStatusTracksRegistrationPersistenceLossRetryAndStop" }]],
+  ["Disconnected State UI", [{ suite: "ios", file: "packages/ios/SurfAceTests/SurfAceCentralRegistrationTests.swift", marker: "func testEmptyStartupNeverPublishesConnected" }]],
+  ["Window Label Placement", [{ suite: "electron", file: "packages/electron/test/renderer-sizing.test.ts", marker: "test(\"renderer fits pane identity labels inside pane bounds for native and renderer panes\"" }]],
+  ["Window Label Visibility", [{ suite: "electron", file: "packages/electron/test/renderer-ui-projection.test.ts", marker: "test(\"an assigned window label remains visible while a pane awaits its registry number\"" }]],
+  ["Primary Addressing Handle", [{ suite: "ios", file: "packages/ios/SurfAceTests/SurfAceSurfaceTopologyPersistenceTests.swift", marker: "func testPaneChromeIdentityUsesGlobalPaneTokenAndWindowLabelOnly" }]],
+  ["Pane Label Placement", [{ suite: "electron", file: "packages/electron/test/overlay-rects.test.ts", marker: "test(\"pane label overlay region uses tight combined label affordance bounds\"" }]],
+  ["Pane Label Visibility", [{ suite: "electron", file: "packages/electron/test/renderer-ui-projection.test.ts", marker: "test(\"pointer and touch activity have no rule that hides assigned identity labels\"" }]],
+  ["Pencil Auto Entry", [{ suite: "ios", file: "packages/ios/SurfAceTests/SurfAceRenderAndAnnotationDiagnosticsTests.swift", marker: "func testPencilContactTransitionsAnnotationModeBeforeStroke" }]],
+  ["Drawing Input Button (👆)", [{ suite: "electron", file: "packages/electron/test/renderer-ui-projection.test.ts", marker: "test(\"drawing input, navigation, and Done controls keep their two-pill contract\"" }]],
+  ["Done Exit Control", [{ suite: "ios", file: "packages/ios/SurfAceTests/SurfAceRenderAndAnnotationDiagnosticsTests.swift", marker: "func testDoneExitsAnnotationModeAndClearsRenderedAndStoredMarks" }]],
+  ["Annotation Mode Visual State", [{ suite: "ios", file: "packages/ios/SurfAceTests/SurfAceRenderAndAnnotationDiagnosticsTests.swift", marker: "func testAnnotationBorderIsDrivenByAnnotationMode" }]],
+  ["Two-Pill Control Rule", [{ suite: "electron", file: "packages/electron/test/renderer-ui-projection.test.ts", marker: "test(\"drawing input, navigation, and Done controls keep their two-pill contract\"" }]],
+  ["Keyboard Focus Affordance", [{ suite: "ios", file: "packages/ios/SurfAceTests/SurfAceSurfaceTopologyPersistenceTests.swift", marker: "func testKeyboardFocusOutlineShowsOnlyForActivePaneWhenMultiplePanesExist" }]],
+  ["Explicit Pane Routing", [{ suite: "electron", file: "packages/electron/test/surface-core.test.ts", marker: "test(\"surface core projects one authoritative pane focus and emits only real focus changes\"" }]],
+  ["Accessibility Touch Targets", [{ suite: "electron", file: "packages/electron/test/renderer-sizing.test.ts", marker: "test(\"toolbar chrome shrinks visually while button hit targets stay at least 44px\"" }]],
+  ["Electron Shortcut Defaults", [{ suite: "electron", file: "packages/electron/test/renderer-sizing.test.ts", marker: "test(\"keyboard shortcuts route pane navigation and focused pane scroll intents\"" }]],
+  ["Unsupported Content Empty State", [{ suite: "ios", file: "packages/ios/SurfAceTests/SurfAceRenderAndAnnotationDiagnosticsTests.swift", marker: "func testVisibleEmptyEntryTracksPushedBrowserAndClearedStates" }]],
+  ["Blocked Attempt Toast", [{ suite: "ios", file: "packages/ios/SurfAceTests/SurfAceBrowserURLTargetApplyTests.swift", marker: "func testHTMLNavigationEventIsRejectedWhileAnnotationModeIsActive" }]],
+  ["Flush Indicator", [{ suite: "electron", file: "packages/electron/test/renderer-ui-projection.test.ts", marker: "test(\"drawing flush animation follows the in-flight bit and ends with the flush\"" }]],
+  ["Flush Indicator Completion Rule", [{ suite: "electron", file: "packages/electron/test/renderer-ui-projection.test.ts", marker: "test(\"drawing flush animation follows the in-flight bit and ends with the flush\"" }]],
+  ["Content Area Fill", [{ suite: "ios", file: "packages/ios/SurfAceTests/SurfAceRenderAndAnnotationDiagnosticsTests.swift", marker: "func testRootContentFillIgnoresBottomSafeAreaButKeepsTopStatusBarSafeArea" }]],
+  ["Normal Interaction Affordances", [{ suite: "electron", file: "packages/electron/test/renderer-sizing.test.ts", marker: "test(\"renderer applies keyboard scroll intents to regular and browser-hosted pane content\"" }]],
+  ["Annotation Interaction Suspension", [{ suite: "ios", file: "packages/ios/SurfAceTests/SurfAceLocklessContentOperationsTests.swift", marker: "func testAnnotationGuardAndExactPaneCapacityRejectWithoutMutation" }]],
+  ["Annotation Visibility Lock", [{ suite: "ios", file: "packages/ios/SurfAceTests/SurfAceBrowserURLTargetApplyTests.swift", marker: "func testHTMLNavigationEventIsRejectedWhileAnnotationModeIsActive" }]],
+  ["Post-Done Context Switch", [
+    { suite: "ios", file: "packages/ios/SurfAceTests/SurfAceRenderAndAnnotationDiagnosticsTests.swift", marker: "func testDoneExitsAnnotationModeAndClearsRenderedAndStoredMarks" },
+    { suite: "ios", file: "packages/ios/SurfAceTests/SurfAceLocklessWebSocketIntegrationTests.swift", marker: "func testAnnotationFrameReentryUsesTheExplicitCommitBoundary" },
+  ]],
+  ["Viewport Overlay Positioning (iOS)", [{ suite: "ios", file: "packages/ios/SurfAceTests/SurfAceSurfaceTopologyPersistenceTests.swift", marker: "func testPaneViewportPayloadUsesSwiftUIResolvedSnapshotIncludingSplitSpacing" }]],
+  ["Viewport Overlay Positioning (Electron)", [{ suite: "electron", file: "packages/electron/test/native-pane-bridge.test.ts", marker: "test(\"native pane bridge derives native overlay rectangles from pane geometry\"" }]],
+  ["No Explicit Browsing Modes", [{ suite: "electron", file: "packages/electron/test/renderer-ui-projection.test.ts", marker: "test(\"the surface has no explicit browsing-mode selector and treats browser content as pane content\"" }]],
+  ["UI-Only Mode Distinction", [{ suite: "electron", file: "packages/electron/test/renderer-ui-projection.test.ts", marker: "test(\"the surface has no explicit browsing-mode selector and treats browser content as pane content\"" }]],
+  ["Entry-Bound Composite Provenance", [
+    { suite: "electron", file: "packages/electron/test/renderer-sizing.test.ts", marker: "test(\"renderer chrome keeps entry-bound composite provenance in navigation chrome\"" },
+    { suite: "ios", file: "packages/ios/SurfAceTests/SurfAceRenderAndAnnotationDiagnosticsTests.swift", marker: "func testACPROV02CompositeIsCapturedByVisibleEntryAcrossNavigation" },
+  ]],
+];
+
+// Mike's v0.2.4 ship-with-gaps ruling keeps these index rows visible without
+// turning unresolved or future work into a release blocker. The existing
+// contrast test remains in its suite; it does not settle the opacity conflict.
+const DESIGN_INVARIANT_KNOWN_GAPS = [
+  ["Accessibility Contrast", {
+    status: "blocked",
+    reason: "§15.1 pane-label opacity and §15.2 WCAG AA contrast are in conflict pending Mike's ruling.",
+  }],
+  ["Canvas Presentation", {
+    status: "pending",
+    reason: "The current release does not implement the future blank-or-gridded canvas presentation.",
+  }],
+  ["Native Overlay Visual Distinction Gap", {
+    status: "pending",
+    reason: "The native-overlay visual distinction protocol remains an open-topic follow-up.",
+  }],
+  ["Native Overlay Model Markup Goal", {
+    status: "pending",
+    reason: "Model-side native-overlay markup rendering remains future work.",
+  }],
+  ["Future Interactive Affordances", {
+    status: "pending",
+    reason: "Interactive native-overlay widgets remain future work.",
+  }],
+];
+
 test("capture screenshot evidence decodes the expected pixels and rejects a different image", () => {
   const evidence = screenshotFixtureImage(screenshotFixturePng, ["#d93636", "246bce"]);
   assert.equal(evidence.width, 8);
@@ -415,12 +500,12 @@ test("Tightbeam macOS smoke plans one exact candidate profile", async (t) => {
   assert.equal(plan[0].identityFile, path.join(electronLaunchConfig(plan[0].home, plan[0].port).userDataDir, "surface-identity.json"));
 });
 
-test("smoke participant identity gate binds server, CLI, and client to exact v0.2.3 package bytes", () => {
+test("smoke participant identity gate binds server, CLI, and client to exact v0.2.4 package bytes", () => {
   const valid = smokeParticipantIdentities("linux");
   assert.deepEqual(assertTightbeamSmokeParticipantIdentities(valid, "linux").map(({ participant, version }) => ({ participant, version })), [
-    { participant: "server", version: "0.2.3" },
-    { participant: "cli", version: "0.2.3" },
-    { participant: "client", version: "0.2.3" },
+    { participant: "server", version: "0.2.4" },
+    { participant: "cli", version: "0.2.4" },
+    { participant: "client", version: "0.2.4" },
   ]);
   for (const participant of ["server", "cli", "client"]) {
     const mismatched = valid.map((identity) => identity.participant === participant
@@ -444,7 +529,7 @@ test("smoke hashes each actual server, CLI, and client archive before participan
   const assetNames = TIGHTBEAM.assets.slice(0, 3);
   const assetPaths = Object.fromEntries(await Promise.all(roles.map(async (role, index) => {
     const assetPath = path.join(root, assetNames[index]);
-    await fs.writeFile(assetPath, `v0.2.3-${role}`);
+    await fs.writeFile(assetPath, `v0.2.4-${role}`);
     return [role, assetPath];
   })));
   const details = await Promise.all(roles.map(async (role, index) => {
@@ -569,7 +654,7 @@ test("Electron smoke checks the running app version before any CLI request", asy
     },
     stateRoot: path.join(root, "cli-state"),
     waitForEndpoint: async () => undefined,
-  }), /tightbeam_client_app_version_mismatch:0\.1\.0:0\.2\.3/);
+  }), /tightbeam_client_app_version_mismatch:0\.1\.0:0\.2\.4/);
   assert.equal(cliCalls, 0);
 });
 
@@ -1066,17 +1151,113 @@ test("tagless qualification leaves release build and manifest-smoke tag admissio
   assert.match(freshInstallMain, /fresh_install_wrong_surface_changed_valid_target/);
 });
 
-test("Tightbeam v0.2.3 binds the landed screenshot-only candidate, six hosted assets, and tooling identity", () => {
-  assert.equal(TIGHTBEAM_TOOLING_TAG, "surf-ace-release-tooling-tightbeam-v0.2.3");
+test("DESIGN UI index separates release checks from nonblocking known gaps", async () => {
+  const design = await fs.readFile(path.join(repository, "DESIGN.md"), "utf8");
+  const workflow = await fs.readFile(path.join(repository, ".github/workflows/release-tightbeam.yml"), "utf8");
+  const electronPackage = JSON.parse(await fs.readFile(path.join(repository, "packages/electron/package.json"), "utf8"));
+  const indexStart = design.indexOf("## UI/UX Invariants Index");
+  const indexEnd = design.lastIndexOf("## Open Topics");
+  const index = design.slice(indexStart, indexEnd);
+  const separateIndexStart = design.lastIndexOf("**Invariant index entry:**");
+  const allIndexBlocks = `${index}\n${design.slice(separateIndexStart)}`;
+  const indexNames = [...allIndexBlocks.matchAll(/^- \*\*(.+?)\*\* —/gm)].map((match) => match[1]);
+  const coveredNames = DESIGN_INVARIANT_CHECKS.map(([name]) => name);
+  const knownGapNames = DESIGN_INVARIANT_KNOWN_GAPS.map(([name]) => name);
+  const classifiedNames = [...coveredNames, ...knownGapNames];
+
+  assert.deepEqual(classifiedNames.sort(), [...indexNames].sort());
+  assert.equal(new Set(classifiedNames).size, classifiedNames.length, "every index row needs exactly one covered-or-gap classification");
+  for (const [name, gap] of DESIGN_INVARIANT_KNOWN_GAPS) {
+    assert.ok(["pending", "blocked"].includes(gap.status), `${name}: invalid known-gap status`);
+    assert.ok(typeof gap.reason === "string" && gap.reason.trim(), `${name}: known-gap reason missing`);
+  }
+  assert.match(electronPackage.scripts.test, /dist\/test\/\*\.test\.js/);
+  assert.ok(TIGHTBEAM_TEST_COMMANDS.some((command) => command.includes("@surf-ace/electron test")));
+  assert.ok(TIGHTBEAM_TEST_COMMANDS.some((command) => command.startsWith("xcodebuild test ")));
+  assert.match(workflow, /pnpm --dir source --filter @surf-ace\/electron test/);
+  assert.match(workflow, /xcodebuild test/);
+
+  const contentByFile = new Map();
+  for (const [name, checks] of DESIGN_INVARIANT_CHECKS) {
+    assert.ok(checks.length > 0, `${name}: missing conformance test`);
+    for (const check of checks) {
+      let contents = contentByFile.get(check.file);
+      if (contents === undefined) {
+        contents = await fs.readFile(path.join(repository, check.file), "utf8");
+        contentByFile.set(check.file, contents);
+      }
+      assert.ok(contents.includes(check.marker), `${name}: missing mapped ${check.suite} check ${check.marker}`);
+      if (check.suite === "electron") assert.match(check.file, /^packages\/electron\/test\//);
+      if (check.suite === "ios") assert.match(check.file, /^packages\/ios\/SurfAceTests\//);
+      if (check.suite === "release-smoke") assert.match(check.file, /^scripts\/release\/tightbeam-state-smoke-fixture\.ts$/);
+    }
+  }
+  const linuxSmoke = workflowRunScript(workflow, "Run PostgreSQL-backed server, packaged CLI, and Linux client acceptance");
+  assert.match(linuxSmoke, /smoke-tightbeam-release\.mjs/);
+  const smokeRunner = await fs.readFile(path.join(repository, "scripts/release/smoke-tightbeam-release.mjs"), "utf8");
+  assert.match(smokeRunner, /tightbeam-state-smoke-fixture\.ts/);
+});
+
+test("Linux packaged acceptance allocates pane numbers uniquely across two clients on one registry", async () => {
+  const fixture = await fs.readFile(path.join(repository, "scripts/release/tightbeam-state-smoke-fixture.ts"), "utf8");
+  const freshInstallMain = fixture.slice(fixture.indexOf("async function freshInstallMain"), fixture.indexOf("async function main()"));
+
+  assert.equal((freshInstallMain.match(/await startPackagedElectronClient\(/g) ?? []).length, 2);
+  assert.match(freshInstallMain, /registryEndpoint[\s\S]*registryEndpoint/);
+  assert.match(freshInstallMain, /fresh_install_two_clients_not_distinct/);
+  assert.match(freshInstallMain, /firstPaneNumber === secondPaneNumber/);
+  assert.match(freshInstallMain, /fresh_install_fleet_pane_numbers_not_unique_or_unconfirmed/);
+  assert.match(freshInstallMain, /matchesRegisteredDirectTarget\(secondClientId, secondRegistration, secondVisible\)/);
+  assert.match(freshInstallMain, /secondDirectClientEndpoint: secondApp\.endpoint/);
+  assert.match(freshInstallMain, /Number\(registration\.surface\.panes\[0\]\?\.paneLabel\) !== firstPaneNumber/);
+  assert.match(freshInstallMain, /Number\(secondRegistration\.surface\.panes\[0\]\?\.paneLabel\) !== secondPaneNumber/);
+});
+
+test("Linux fresh-install raw CLI evidence binds two isolated roots to their client endpoints", async () => {
+  const { assertLinuxFreshInstallCliStateRoots } = await import("./smoke-tightbeam-release.mjs");
+  const firstEndpoint = "ws://127.0.0.1:19001/ws";
+  const secondEndpoint = "ws://127.0.0.1:19002/ws";
+  const firstStateRoot = "/fixture/state/cli";
+  const secondStateRoot = "/fixture/state/second-cli";
+  const event = (stateRoot, endpoint, command = "list") => {
+    const args = ["--state-root", stateRoot];
+    if (endpoint) args.push("--endpoint", endpoint, "--product-label", "Surf Ace release smoke");
+    args.push(command, "--input-json", "{}");
+    return { args, endpoint };
+  };
+  const bindings = { firstEndpoint, firstStateRoot, secondEndpoint, secondStateRoot };
+
+  assert.doesNotThrow(() => assertLinuxFreshInstallCliStateRoots([
+    event(firstStateRoot, firstEndpoint),
+    event(secondStateRoot, secondEndpoint),
+    event(firstStateRoot, null, "read"),
+  ], bindings));
+  assert.throws(() => assertLinuxFreshInstallCliStateRoots([
+    event(firstStateRoot, firstEndpoint),
+    event(firstStateRoot, secondEndpoint),
+  ], bindings), /linux_fresh_install_cli_state_root_not_bound/);
+  assert.throws(() => assertLinuxFreshInstallCliStateRoots([
+    event(firstStateRoot, firstEndpoint),
+    event(secondStateRoot, secondEndpoint),
+    event(secondStateRoot, null, "read"),
+  ], bindings), /linux_fresh_install_cli_state_root_not_bound/);
+  assert.throws(() => assertLinuxFreshInstallCliStateRoots([
+    event(firstStateRoot, firstEndpoint),
+    event(secondStateRoot, "ws://127.0.0.1:19003/ws"),
+  ], bindings), /linux_fresh_install_cli_state_root_not_bound/);
+});
+
+test("Tightbeam v0.2.4 binds the landed screenshot-only candidate, six hosted assets, and tooling identity", () => {
+  assert.equal(TIGHTBEAM_TOOLING_TAG, "surf-ace-release-tooling-tightbeam-v0.2.4");
   assert.deepEqual(TIGHTBEAM, {
-    candidateCommit: "66d2b693533b1e6f4d5fb60079695e3010731286",
-    sourceTag: "surf-ace-tightbeam-v0.2.3", version: "0.2.3", toolingTag: TIGHTBEAM_TOOLING_TAG,
-    assets: ["surf-ace-tightbeam-server-linux-x86_64-v0.2.3.tar.gz","surf-ace-tightbeam-cli-linux-x86_64-v0.2.3.tar.gz","surf-ace-tightbeam-electron-linux-x86_64-v0.2.3.zip","surf-ace-tightbeam-cli-macos-arm64-v0.2.3.tar.gz","surf-ace-tightbeam-electron-macos-arm64-v0.2.3.zip",TIGHTBEAM_SKILL_ASSET],
-    manifest: "surf-ace-tightbeam-v0.2.3-manifest.json", checksums: "SHA256SUMS",
+    candidateCommit: "aa5b6c5305328162c3e41e48e21df860ad010b28",
+    sourceTag: "surf-ace-tightbeam-v0.2.4", version: "0.2.4", toolingTag: TIGHTBEAM_TOOLING_TAG,
+    assets: ["surf-ace-tightbeam-server-linux-x86_64-v0.2.4.tar.gz","surf-ace-tightbeam-cli-linux-x86_64-v0.2.4.tar.gz","surf-ace-tightbeam-electron-linux-x86_64-v0.2.4.zip","surf-ace-tightbeam-cli-macos-arm64-v0.2.4.tar.gz","surf-ace-tightbeam-electron-macos-arm64-v0.2.4.zip",TIGHTBEAM_SKILL_ASSET],
+    manifest: "surf-ace-tightbeam-v0.2.4-manifest.json", checksums: "SHA256SUMS",
   });
-  assert.equal(TIGHTBEAM_SKILL_ASSET, "surf-ace-tightbeam-skill-v0.2.3.md");
+  assert.equal(TIGHTBEAM_SKILL_ASSET, "surf-ace-tightbeam-skill-v0.2.4.md");
   assert.equal(TIGHTBEAM.assets.length, 6);
-  assert.equal(TIGHTBEAM.sourceTag, "surf-ace-tightbeam-v0.2.3");
+  assert.equal(TIGHTBEAM.sourceTag, "surf-ace-tightbeam-v0.2.4");
   assert.equal(TOOLCHAINS.macosRunner, "xcode-27");
   assert.equal(TOOLCHAINS.xcode, "27.0");
   assert.deepEqual(TIGHTBEAM_ROUTING, {
@@ -1092,8 +1273,8 @@ test("Linux fresh-install fixture binds its identity gate to the release candida
 
   assert.match(fixture, /import \{ TIGHTBEAM \} from "\.\/tightbeam-release-config\.mjs";/);
   assert.match(fixture, /options\.candidateCommit !== TIGHTBEAM\.candidateCommit \|\| options\.expectedVersion !== TIGHTBEAM\.version/);
-  assert.equal(TIGHTBEAM.candidateCommit, "66d2b693533b1e6f4d5fb60079695e3010731286");
-  assert.match(operations, /applies only to product commit\s+`66d2b693533b1e6f4d5fb60079695e3010731286`/);
+  assert.equal(TIGHTBEAM.candidateCommit, "aa5b6c5305328162c3e41e48e21df860ad010b28");
+  assert.match(operations, /applies only to product commit\s+`aa5b6c5305328162c3e41e48e21df860ad010b28`/);
   for (const source of [fixture, operations]) {
     assert.doesNotMatch(source, /44421f305516ff3b8b305bc2df24c0f4c40b65c0/);
   }
@@ -1175,7 +1356,7 @@ test("Tightbeam manifest assembles the six hosted assets including the exact ski
   }), /public_file_set_mismatch/);
 });
 
-test("v0.2.3 packages the skill from the tooling identity, not the product checkout", async (t) => {
+test("v0.2.4 packages the skill from the tooling identity, not the product checkout", async (t) => {
   const outputDir = await temporary(t);
   const toolingSkillDir = await temporary(t);
   const productSkillDir = await temporary(t);
@@ -1221,6 +1402,7 @@ test("Tightbeam Linux stage contains only the standalone CLI, callable server cl
     "packages/electron/dist/central-server.cjs": "module.exports={startCentralServer(){}};",
     "packages/electron/dist/schema.json": "{}\n",
     "packages/allocator/sql/001_allocator.sql": "-- schema\n",
+    "packages/allocator/sql/002_fleet_panes.sql": "-- migration\n",
   };
   for (const [relative, contents] of Object.entries(files)) {
     const file = path.join(source, relative);
@@ -1825,7 +2007,7 @@ test("Tightbeam Linux acceptance uses packaged behavior, not transient acknowled
   assert.match(fixture, /const registryStop = await registryProcess\.stop\(\)/);
   assert.match(smoke, /function requireLinuxFreshInstallRawCliCoverage/);
   assert.match(smoke, /matchesFreshInstallCurrentContent\(result\?\.currentContentRecord/);
-  assert.match(fixture, /matchesRegisteredDirectTarget\(electronClientId, registration, listed\)/);
+  assert.match(fixture, /matchesRegisteredDirectTarget\(electronClientId, registration, firstVisible\)/);
   assert.match(fixture, /await verifyDisplayReady\(\)/);
   assert.doesNotMatch(fixture, /function semanticState\(/);
   assert.doesNotMatch(fixture, /runPhase\("(?:baseline|candidate|rollback)"/);
@@ -1922,6 +2104,21 @@ test("fresh-install Linux qualification requires direct current content, wrong-s
     expectedVersion: TIGHTBEAM.version,
     initial: phase(),
     afterRestart: phase(),
+    fleetPaneUniqueness: {
+      firstClientId: registrationIdentity,
+      firstPaneNumber: 1,
+      firstSurfaceId: "sf_fresh",
+      secondClientId: `5678abcd${"b".repeat(56)}`,
+      secondPaneNumber: 2,
+      secondSurfaceId: "sf_second",
+      secondDirectClientEndpoint: "ws://127.0.0.1:19002/ws",
+      sharedRegistryEndpoint: registryEndpoint,
+    },
+    migrationEvidence: {
+      backupSha256: "a".repeat(64), headHashBefore: "b".repeat(64),
+      headHashAfter: "b".repeat(64), restoredHeadHash: "b".repeat(64),
+      headSeqBefore: 1, headSeqAfter: 1, writerCanClaim: true, witnessSynchronized: true,
+    },
     wrongSurfaceRejection: {
       directClientEndpoint,
       expectedSurfaceId: "sf_fresh",
@@ -2092,6 +2289,21 @@ test("Linux fresh-install acceptance is based on direct current-content evidence
     expectedVersion: TIGHTBEAM.version,
     initial: phase(contentId),
     afterRestart: phase(contentId),
+    fleetPaneUniqueness: {
+      firstClientId: `1234abcd${"a".repeat(56)}`,
+      firstPaneNumber: 1,
+      firstSurfaceId: "sf_fresh",
+      secondClientId: `5678abcd${"b".repeat(56)}`,
+      secondPaneNumber: 2,
+      secondSurfaceId: "sf_second",
+      secondDirectClientEndpoint: "ws://127.0.0.1:19002/ws",
+      sharedRegistryEndpoint: "ws://127.0.0.1:19999/ws",
+    },
+    migrationEvidence: {
+      backupSha256: "a".repeat(64), headHashBefore: "b".repeat(64),
+      headHashAfter: "b".repeat(64), restoredHeadHash: "b".repeat(64),
+      headSeqBefore: 1, headSeqAfter: 1, writerCanClaim: true, witnessSynchronized: true,
+    },
     wrongSurfaceRejection: {
       directClientEndpoint: "ws://127.0.0.1:19001/ws",
       expectedSurfaceId: "sf_fresh",
@@ -2142,6 +2354,7 @@ test("Linux fresh-install state driver binds candidate-only inputs and packaged 
   await fs.mkdir(path.dirname(tsxLoader), { recursive: true });
   await fs.writeFile(tsxLoader, "export {};\n");
   const initialEndpoint = "ws://127.0.0.1:19001/ws";
+  const secondEndpoint = "ws://127.0.0.1:19002/ws";
   const contentId = "linux-fresh-install-content";
   const screenshotPixelEvidence = screenshotFixtureImage(screenshotFixturePng, ["246bce", "d93636"]);
   const clientIdentity = "1234abcd";
@@ -2193,6 +2406,21 @@ test("Linux fresh-install state driver binds candidate-only inputs and packaged 
     expectedScreenshotColors: ["246bce", "d93636"],
     initial: phase(initialEndpoint),
     afterRestart: phase(initialEndpoint),
+    fleetPaneUniqueness: {
+      firstClientId: registrationIdentity,
+      firstPaneNumber: 1,
+      firstSurfaceId: "sf_fresh",
+      secondClientId: `5678abcd${"b".repeat(56)}`,
+      secondPaneNumber: 2,
+      secondSurfaceId: "sf_second",
+      secondDirectClientEndpoint: secondEndpoint,
+      sharedRegistryEndpoint: "ws://127.0.0.1:19999/ws",
+    },
+    migrationEvidence: {
+      backupSha256: "a".repeat(64), headHashBefore: "b".repeat(64),
+      headHashAfter: "b".repeat(64), restoredHeadHash: "b".repeat(64),
+      headSeqBefore: 1, headSeqAfter: 1, writerCanClaim: true, witnessSynchronized: true,
+    },
     wrongSurfaceRejection: {
       directClientEndpoint: initialEndpoint,
       endpoint: initialEndpoint,
@@ -2236,7 +2464,8 @@ test("Linux fresh-install state driver binds candidate-only inputs and packaged 
   const events = [];
   const record = (command, input, endpoint, response = {}) => {
     const inputJson = JSON.stringify(input);
-    const args = ["--state-root", path.join(stateRoot, "cli")];
+    const cliRoot = endpoint === secondEndpoint ? "second-cli" : "cli";
+    const args = ["--state-root", path.join(stateRoot, cliRoot)];
     if (endpoint) args.push("--endpoint", endpoint, "--product-label", "Surf Ace release smoke");
     args.push(command, "--input-json", inputJson);
     const output = { command, controllerInstanceId: "ctl_fresh", ok: true, result: { ok: true, ...response } };
@@ -2246,6 +2475,7 @@ test("Linux fresh-install state driver binds candidate-only inputs and packaged 
       stderr: "", output, stdout });
   };
   const listed = { surfaces: [{ surfaceId: "sf_fresh", topology: { panes: [{ paneId: 1 }] } }] };
+  const secondListed = { surfaces: [{ surfaceId: "sf_second", topology: { panes: [{ paneId: 2 }] } }] };
   const capture = { contentId, image: screenshotFixturePng, paneId: 1, surfaceId: null };
   const read = {
     cacheStatus: "current",
@@ -2263,6 +2493,7 @@ test("Linux fresh-install state driver binds candidate-only inputs and packaged 
     scopeId: "pane:sf_fresh:1",
   };
   record("list", {}, initialEndpoint, listed);
+  record("list", {}, secondEndpoint, secondListed);
   record("push", { content: { html: screenshotPixelFixtureHtml }, contentId, paneId: 1, surfaceId: "sf_fresh" }, initialEndpoint);
   record("capture-pane", { paneId: 1, surfaceId: "sf_fresh" }, initialEndpoint, capture);
   record("read", { scopeId: "pane:sf_fresh:1" }, null, read);
@@ -2322,9 +2553,9 @@ test("Linux fresh-install state driver binds candidate-only inputs and packaged 
   assert.equal(calls, 1);
   assert.equal(result.mode, "fresh-install");
   assert.equal(result.status, "passed");
-  assert.equal(result.rawCliEvidence.events.length, 10);
+  assert.equal(result.rawCliEvidence.events.length, 11);
   assert.equal(result.rawCliEvidence.events.at(-1).command, "read");
-  const unacceptedPushEvents = events.map((event, index) => index === 1
+  const unacceptedPushEvents = events.map((event) => event.command === "push" && event.status === 0
     ? { ...event, output: { ...event.output, ok: false }, stdout: JSON.stringify({ ...event.output, ok: false }) }
     : event);
   const unacceptedPushBytes = Buffer.from(`${unacceptedPushEvents.map((event) => JSON.stringify(event)).join("\n")}\n`);
@@ -2337,11 +2568,10 @@ test("Linux fresh-install state driver binds candidate-only inputs and packaged 
   await assert.rejects(runLinuxFreshInstallStateDriver(options, async () => {
     await fs.writeFile(output, JSON.stringify(unacceptedPushSequence));
   }), /linux_fresh_install_raw_cli_stdout_result_mismatch/);
-  const invalidEvents = [...events.map((event) => ({ ...event }))];
-  invalidEvents[4] = {
-    ...invalidEvents[4],
-    expectedRejection: { ...invalidEvents[4].expectedRejection, code: "accepted" },
-  };
+  const invalidEvents = events.map((event) => event.expectedRejection ? {
+    ...event,
+    expectedRejection: { ...event.expectedRejection, code: "accepted" },
+  } : { ...event });
   const invalidRawBytes = Buffer.from(`${invalidEvents.map((event) => JSON.stringify(event)).join("\n")}\n`);
   const invalidSequence = {
     ...stateSequence,
@@ -2494,25 +2724,25 @@ test("Linux smoke fixture starts through the product TSX loader and rejects reti
 });
 
 
-test("v0.2.3 standalone specification and release gates bind the product and all public assets", async () => {
-  const specification = await fs.readFile(path.join(repository, "docs/release/tightbeam-standalone-v0.2.3.md"), "utf8");
+test("v0.2.4 standalone specification and release gates bind the product and all public assets", async () => {
+  const specification = await fs.readFile(path.join(repository, "docs/release/tightbeam-standalone-v0.2.4.md"), "utf8");
   const readme = await fs.readFile(path.join(repository, "README.md"), "utf8");
   const skill = await fs.readFile(path.join(repository, "integrations/tightbeam/skills/surf-ace/SKILL.md"), "utf8");
   const workflowPath = path.join(repository, ".github/workflows/release-tightbeam.yml");
   const workflow = await fs.readFile(workflowPath, "utf8");
   assert.match(specification, /Product source: proposed tag/);
-  assert.match(specification, /66d2b693533b1e6f4d5fb60079695e3010731286/);
+  assert.match(specification, /aa5b6c5305328162c3e41e48e21df860ad010b28/);
   assert.match(specification, /No old-version participant/);
-  assert.match(specification, /surf-ace-release-tooling-tightbeam-v0\.2\.3/);
-  assert.match(specification, /surf-ace-tightbeam-v0\.2\.3/);
+  assert.match(specification, /surf-ace-release-tooling-tightbeam-v0\.2\.4/);
+  assert.match(specification, /surf-ace-tightbeam-v0\.2\.4/);
   assert.match(specification, /copied byte-for-byte from the pinned tooling checkout/);
   for (const name of TIGHTBEAM_PUBLIC_FILES) assert.ok(specification.includes(name));
   assert.match(specification, /custom-format backup/);
   assert.match(specification, /restores only into a\s+separate staged cluster/);
   assert.match(specification, /packaged CLI connects\s+directly to the selected client's/);
   assert.match(specification, /Publication is separately opt-in/);
-  assert.match(readme, /surf-ace-tightbeam-skill-v0\.2\.3\.md/);
-  assert.match(readme, /The v0\.2\.3 release contains six versioned assets/);
+  assert.match(readme, /surf-ace-tightbeam-skill-v0\.2\.4\.md/);
+  assert.match(readme, /The v0\.2\.4 release contains six versioned assets/);
   assert.match(readme, /register\s+the verified Markdown file/);
   assert.match(readme, /sha256sum -c SHA256SUMS/);
   assert.match(readme, /bare `surf-ace` command/);
@@ -2523,7 +2753,7 @@ test("v0.2.3 standalone specification and release gates bind the product and all
   assert.match(readme, /do not use `surf-ace --version`/);
   assert.match(readme, /server archive\s+includes `docs\/OPERATIONS\.md`/);
   assert.match(readme, /## Install and run/);
-  assert.match(skill, /surf-ace-tightbeam-skill-v0\.2\.3\.md/);
+  assert.match(skill, /surf-ace-tightbeam-skill-v0\.2\.4\.md/);
   assert.match(skill, /register the verified Markdown content/);
   assert.doesNotMatch(`${readme}\n${skill}`, /\b(?:Racter|Plumbus|Shrdlu|Gibson|Eezo)\b|\/Users\/mike\/|\b100\.64\.\d{1,3}\.\d{1,3}\b/i);
   assert.match(workflow, /^on:\n  workflow_dispatch:/m);
@@ -2531,9 +2761,9 @@ test("v0.2.3 standalone specification and release gates bind the product and all
   for (const match of workflow.matchAll(/^\s*uses:\s*([^\s]+)$/gm)) assert.match(match[1], /@[0-9a-f]{40}$/);
   assert.match(workflow, /run_smoke:[\s\S]*?default: false/);
   assert.match(workflow, /publish_release:[\s\S]*?default: false/);
-  assert.match(workflow, /PRODUCT_COMMIT: 66d2b693533b1e6f4d5fb60079695e3010731286/);
-  assert.match(workflow, /PRODUCT_TAG: surf-ace-tightbeam-v0\.2\.3/);
-  assert.match(workflow, /TOOLING_TAG: surf-ace-release-tooling-tightbeam-v0\.2\.3/);
+  assert.match(workflow, /PRODUCT_COMMIT: aa5b6c5305328162c3e41e48e21df860ad010b28/);
+  assert.match(workflow, /PRODUCT_TAG: surf-ace-tightbeam-v0\.2\.4/);
+  assert.match(workflow, /TOOLING_TAG: surf-ace-release-tooling-tightbeam-v0\.2\.4/);
   assert.match(workflow, /GITHUB_EVENT_NAME/);
   assert.match(workflow, /GITHUB_REF_TYPE/);
   assert.match(workflow, /node tooling\/scripts\/release\/build-tightbeam-release\.mjs/);
@@ -2599,7 +2829,7 @@ test("v0.2.3 standalone specification and release gates bind the product and all
   const assembleStart = workflow.indexOf("  assemble:\n", compareStart);
   const compareJob = workflow.slice(compareStart, assembleStart);
   for (const name of TIGHTBEAM.assets) assert.ok(compareJob.includes(name));
-  assert.match(compareJob, /surf-ace-tightbeam-skill-v0\.2\.3\.md/);
+  assert.match(compareJob, /surf-ace-tightbeam-skill-v0\.2\.4\.md/);
   assert.match(workflow, /needs: \[assemble, smoke-linux, smoke-macos\]/);
   for (const command of [
     "cargo build --manifest-path source/packages/cli/Cargo.toml",
@@ -2612,17 +2842,17 @@ test("v0.2.3 standalone specification and release gates bind the product and all
   assert.ok(TIGHTBEAM_TEST_COMMANDS.some((command) => command.startsWith("xcodebuild test ")));
 });
 
-test("v0.2.3 release smoke gates bind only matching candidate participants", async () => {
+test("v0.2.4 release smoke gates bind only matching candidate participants", async () => {
   const workflow = await fs.readFile(path.join(repository, ".github/workflows/release-tightbeam.yml"), "utf8");
   const smoke = await fs.readFile(path.join(repository, "scripts/release/smoke-tightbeam-release.mjs"), "utf8");
   const fixture = await fs.readFile(path.join(repository, "scripts/release/tightbeam-state-smoke-fixture.ts"), "utf8");
-  const specification = await fs.readFile(path.join(repository, "docs/release/tightbeam-standalone-v0.2.3.md"), "utf8");
+  const specification = await fs.readFile(path.join(repository, "docs/release/tightbeam-standalone-v0.2.4.md"), "utf8");
 
   assert.equal(Object.hasOwn(TIGHTBEAM, "baselineCommit"), false);
   for (const input of [workflow, smoke]) assert.doesNotMatch(input, /cf91ef1baab26d6045fac5300487c29d0ddf332d/);
   assert.doesNotMatch(workflow, /build-smoke-baseline|BASELINE_(?:BACKEND|ELECTRON)|baseline-(?:commit|electron|root)/i);
   assert.doesNotMatch(smoke, /SURF_ACE_TIGHTBEAM_BASELINE|function smokeLinux\(|runLinuxStateDriver|validateTightbeamStateSequence/);
-  assert.match(workflow, /--candidate-commit 66d2b693533b1e6f4d5fb60079695e3010731286/);
+  assert.match(workflow, /--candidate-commit aa5b6c5305328162c3e41e48e21df860ad010b28/);
   assert.match(smoke, /tightbeam-\$\{channel\}-v023-candidate-write/);
   assert.match(smoke, /inspectScreenshotPixels\(visible\.capture\.image, expectedScreenshotColors\)/);
   assert.doesNotMatch(`${smoke}\n${fixture}`, /includeImage/);
