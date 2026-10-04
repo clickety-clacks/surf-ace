@@ -7,7 +7,8 @@ use crate::wire::{DirectWire, Envelope, WebSocketWire, WireFailure, WireResponse
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use tungstenite::client::{uri_mode, IntoClientRequest};
 use uuid::Uuid;
 
 const LOCKLESS_CAPABILITY: &str = "surf-ace.lockless-multi-controller.v1";
@@ -18,7 +19,8 @@ const RECEIPT_CAPABILITY: &str = "operation-receipt-replay-v1";
 pub struct CliOutput {
     pub ok: bool,
     pub command: String,
-    pub controller_instance_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub controller_instance_id: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub reconciliations: Vec<Value>,
     pub result: Value,
@@ -29,6 +31,15 @@ pub fn execute(invocation: Invocation) -> Result<CliOutput, CliError> {
         .command
         .validate(&invocation.input)
         .map_err(CliError::Input)?;
+    validate_invocation_route(&invocation)?;
+    if invocation.command == crate::command::Command::FleetList {
+        let registry = invocation
+            .registry
+            .as_deref()
+            .expect("fleet-list route validation requires registry");
+        let mut wire = WebSocketWire::connect_direct(registry).map_err(CliError::Wire)?;
+        return execute_fleet_list_with_wire(&mut wire);
+    }
     if invocation.command.is_local() {
         return execute_local(invocation);
     }
@@ -61,6 +72,10 @@ pub fn execute_with_wire(
         .command
         .validate(&invocation.input)
         .map_err(CliError::Input)?;
+    validate_invocation_route(&invocation)?;
+    if invocation.command == crate::command::Command::FleetList {
+        return execute_fleet_list_with_wire(wire);
+    }
     if invocation.command.is_local() {
         return Err(CliError::Input("read_must_use_local_path".into()));
     }
@@ -68,6 +83,184 @@ pub fn execute_with_wire(
     let mut root =
         LockedStateRoot::open(&invocation.state_root, invocation.projection_capacity_bytes)?;
     execute_locked(invocation, &mut root, wire, surface_id.as_deref())
+}
+
+fn validate_invocation_route(invocation: &Invocation) -> Result<(), CliError> {
+    if invocation.endpoint.is_some() && invocation.registry.is_some() {
+        return Err(CliError::Input("ambiguous_endpoint_registry".into()));
+    }
+    if invocation.command == crate::command::Command::FleetList {
+        if invocation.endpoint.is_some() {
+            return Err(CliError::Input("fleet_list_rejects_endpoint".into()));
+        }
+        if invocation.product_label.is_some() {
+            return Err(CliError::Input("fleet_list_rejects_product_label".into()));
+        }
+        let registry = invocation
+            .registry
+            .as_deref()
+            .ok_or_else(|| CliError::Input("missing_registry".into()))?;
+        let request = registry
+            .into_client_request()
+            .map_err(|_| CliError::Input("invalid_registry".into()))?;
+        uri_mode(request.uri()).map_err(|_| CliError::Input("invalid_registry".into()))?;
+        return Ok(());
+    }
+    if invocation.registry.is_some() {
+        return Err(CliError::Input("registry_only_for_fleet_list".into()));
+    }
+    Ok(())
+}
+
+fn execute_fleet_list_with_wire(wire: &mut dyn DirectWire) -> Result<CliOutput, CliError> {
+    let request_id = format!("rq_{}", Uuid::new_v4().simple());
+    let mut sent = || Ok(());
+    let response = wire
+        .request(&request_id, "fleet.topology", json!({}), &mut sent)
+        .map_err(CliError::Wire)
+        .and_then(|response| {
+            if response.response.id.as_deref() != Some(request_id.as_str())
+                || response.response.op != "fleet.topology"
+                || response.response.envelope_type != "response"
+                || response.response.v != 1
+            {
+                return Err(CliError::Protocol("invalid_fleet_topology_envelope".into()));
+            }
+            if response.response.ok != Some(true) {
+                if response.response.ok == Some(false) {
+                    let code = response
+                        .response
+                        .error
+                        .as_ref()
+                        .and_then(|error| error.get("code"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown");
+                    return Err(CliError::Rejected {
+                        operation: "fleet.topology".into(),
+                        code: code.into(),
+                    });
+                }
+                return Err(CliError::Protocol("invalid_fleet_topology_envelope".into()));
+            }
+            let payload = successful_payload(&response.response, "fleet.topology")?;
+            let payload = Value::Object(payload.clone());
+            validate_fleet_topology_payload(&payload)?;
+            Ok(payload)
+        });
+    let close = wire.close();
+    let result = match response {
+        Ok(result) => {
+            close.map_err(CliError::Wire)?;
+            result
+        }
+        Err(error) => {
+            let _ = close;
+            return Err(error);
+        }
+    };
+    Ok(CliOutput {
+        ok: true,
+        command: crate::command::Command::FleetList.name().into(),
+        controller_instance_id: None,
+        reconciliations: vec![],
+        result,
+    })
+}
+
+fn validate_fleet_topology_payload(payload: &Value) -> Result<(), CliError> {
+    let clients = payload
+        .get("clients")
+        .and_then(Value::as_array)
+        .ok_or_else(|| CliError::Protocol("invalid_fleet_topology_clients".into()))?;
+    let mut client_ids = BTreeSet::new();
+    for client in clients {
+        let client_id = client
+            .get("clientId")
+            .and_then(Value::as_str)
+            .filter(|value| {
+                value.len() == 64
+                    && value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            })
+            .ok_or_else(|| CliError::Protocol("invalid_fleet_topology_client_id".into()))?;
+        if !client_ids.insert(client_id.to_owned()) {
+            return Err(CliError::Protocol(
+                "duplicate_fleet_topology_client_id".into(),
+            ));
+        }
+        let surfaces = client
+            .get("surfaces")
+            .and_then(Value::as_array)
+            .ok_or_else(|| CliError::Protocol("invalid_fleet_topology_surfaces".into()))?;
+        let mut surface_ids = BTreeSet::new();
+        for surface in surfaces {
+            let surface_id = surface
+                .get("surfaceId")
+                .and_then(Value::as_str)
+                .filter(|value| valid_registered_surface_id(value))
+                .ok_or_else(|| CliError::Protocol("invalid_fleet_topology_surface_id".into()))?;
+            if !surface_ids.insert(surface_id.to_owned()) {
+                return Err(CliError::Protocol(
+                    "duplicate_fleet_topology_surface_id".into(),
+                ));
+            }
+            let window_label = surface
+                .get("windowLabel")
+                .and_then(Value::as_str)
+                .filter(|value| {
+                    !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_lowercase())
+                })
+                .ok_or_else(|| CliError::Protocol("invalid_fleet_topology_window_label".into()))?;
+            let panes = surface
+                .get("panes")
+                .and_then(Value::as_array)
+                .ok_or_else(|| CliError::Protocol("invalid_fleet_topology_panes".into()))?;
+            let mut pane_ids = BTreeSet::new();
+            let mut pane_labels = BTreeSet::new();
+            for pane in panes {
+                let pane_id = pane
+                    .get("paneId")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| CliError::Protocol("invalid_fleet_topology_pane_id".into()))?;
+                let pane_label = pane
+                    .get("paneLabel")
+                    .and_then(Value::as_u64)
+                    .filter(|value| *value > 0)
+                    .ok_or_else(|| {
+                        CliError::Protocol("invalid_fleet_topology_pane_label".into())
+                    })?;
+                let pane_address =
+                    pane.get("paneAddress")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            CliError::Protocol("invalid_fleet_topology_pane_address".into())
+                        })?;
+                if pane_address != format!("{window_label}{pane_label}") {
+                    return Err(CliError::Protocol(
+                        "inconsistent_fleet_topology_pane_address".into(),
+                    ));
+                }
+                if !pane_ids.insert(pane_id.to_owned()) || !pane_labels.insert(pane_label) {
+                    return Err(CliError::Protocol(
+                        "duplicate_fleet_topology_pane_identity".into(),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn valid_registered_surface_id(value: &str) -> bool {
+    let Some(suffix) = value.strip_prefix("sf_") else {
+        return false;
+    };
+    (3..=64).contains(&suffix.len())
+        && suffix
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte))
 }
 
 fn execute_locked(
@@ -185,7 +378,7 @@ fn execute_locked(
     Ok(CliOutput {
         ok: true,
         command: invocation.command.name().into(),
-        controller_instance_id: controller_id,
+        controller_instance_id: Some(controller_id),
         reconciliations,
         result,
     })
@@ -271,7 +464,7 @@ fn execute_local(invocation: Invocation) -> Result<CliOutput, CliError> {
     Ok(CliOutput {
         ok: true,
         command: invocation.command.name().into(),
-        controller_instance_id: controller_id,
+        controller_instance_id: Some(controller_id),
         reconciliations: vec![],
         result,
     })

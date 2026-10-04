@@ -60,11 +60,30 @@ the runtime check completed before CLI operations. Do not infer the server or
 CLI version from command output; identify those archives through their
 versioned names, manifest, and checksum.
 
+## Discover registered clients, then select a client
+
+For registry-known inventory, query the registry explicitly before choosing a
+client:
+
+```sh
+"$CLI" --state-root "$STATE_ROOT" \
+  --registry "ws://<registry-host>:<port>" fleet-list
+```
+
+`fleet-list` reports only the registry's current registered-client and
+surface/pane identity snapshot, including the assigned labels. It does not
+report endpoint addresses, reachability, or live application health. An empty
+`clients` array means the registry returned an empty inventory; an invalid or
+unavailable registry is an error. Do not combine `--registry` and
+`--endpoint`, and do not treat a registered client as proof that it is online.
+Always pass the registry URL explicitly; the CLI does not infer one from
+configuration or environment variables.
+
 ## Select a client and endpoint
 
 Electron clients register their surfaces with the standalone registry. They
 can discover that registry on the local network or use an explicit registry
-WebSocket URL in `SURF_ACE_SERVER`. Use the registry or your deployment's
+WebSocket URL in `SURF_ACE_SERVER`. Use `fleet-list` or your deployment's
 client inventory to identify the intended client and surface. Networked CLI
 operations still connect directly to that client's WebSocket `/ws` endpoint,
 not to the registry. If your inventory does not provide the client's direct
