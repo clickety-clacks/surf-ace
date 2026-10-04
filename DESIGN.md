@@ -19,7 +19,7 @@ Surf Ace is a standalone display and annotation system that turns any screen run
 2. **Content display.** OpenClaw pushes content to surfaces in the following types: `html`, `image`, `pdf`, `terminal`, `markdown`. `video` and `canvas` remain optional wire-level content types for forward compatibility, but OpenClaw drawing workflows do not depend on them because draw-capable HTML/SVG content already works through normal content updates. The surface renders content and keeps it displayed until OpenClaw explicitly changes it.
 3. **User annotation.** Users draw and annotate on displayed content using a stylus (iPad) or input device (Electron). Annotation strokes are captured and reported to OpenClaw.
 4. **OpenClaw interpretation.** OpenClaw reads user annotations and interprets them — identifying point-outs, markup gestures, written content, and spatial relationships to the displayed material.
-5. **Zero-config discovery.** Surfaces advertise themselves via Bonjour/mDNS (`_surf-ace._tcp`). No manual setup, pairing codes, or configuration is required.
+5. **Zero-config discovery with optional registry selection.** Surfaces continue advertising themselves via Bonjour/mDNS (`_surf-ace._tcp`); no manual setup or pairing code is required for discovery. iOS/iPadOS also permits an optional persisted registry URL for normal app launches. Its precedence and fallback behavior are defined in §3.1.2, and it does not replace Bonjour surface discovery.
 6. **Multi-surface and multi-pane.** OpenClaw can manage multiple surfaces simultaneously. Each surface has a stable identity and independent state. Within a surface, windows can be split into multiple panes, each with independent content and annotation context. OpenClaw can target content and read annotations at the pane level.
 7. **Standalone app.** Surf Ace is its own binary on each platform. It is not a plugin, extension, or embedded view inside another application.
 
@@ -244,7 +244,15 @@ TXT keys used by WS protocol:
 Connection URL derivation:
 1. Resolve host/port from SRV/A/AAAA.
 2. Use path from TXT `ws` (default `/ws` if missing).
-3. v1 scheme is always `ws` (WSS is out of scope in v1).
+3. Bonjour-derived v1 endpoints always use `ws`; WSS service discovery is out of scope. Explicitly configured registry URLs are governed separately by §3.1.2.
+
+### 3.1.2 Configured registry selection (Mike ruling d41613d1-09f7-48ac-9b73-47925fe94201, 2026-10-04)
+
+The existing Bonjour/mDNS surface discovery and advertisement remain unchanged. On iOS/iPadOS, the installed app may persist one operator-selected registry URL so ordinary launches and registration retries can reach the fleet registry without a one-off process environment. The setting selects the existing registry; it does not introduce a listener, bridge, proxy, or relay, and does not change surface discovery.
+
+Effective registry selection is ordered: a nonempty `SURF_ACE_SERVER` development/test environment override takes precedence and is process-scoped; otherwise use the saved URL when it is a valid absolute `ws://` or `wss://` URL; otherwise use the existing Bonjour-discovery path. The environment override is never written into the saved setting. If the selected configured URL cannot be reached, the app reports that route failure and continues through the existing Bonjour fallback; it never presents the failed configured route as a successful registry connection.
+
+Settings edits are validated before persistence. An invalid edit is rejected without replacing or erasing a previously valid saved URL. Explicitly clearing the setting removes the saved URL and returns selection to Bonjour discovery. When the effective registry route changes or is cleared, in-flight attempts and any registration/visible labels obtained from the previous route are invalidated; stale responses from that route cannot restore them. Until the selected registry confirms registration and allocator assignments, the client displays no guessed fleet labels. Route changes preserve client identity, pane identities, displayed content, and annotations.
 
 ### 3.2 Surface WS Endpoint
 
