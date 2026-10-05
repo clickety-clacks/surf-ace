@@ -141,7 +141,7 @@ function isolatedPublisherCommandMatches(command: string, params: {
   const identityKey = params.identityKey ?? "pk";
   const identityValue = (params.identityValue ?? params.publicKeyFingerprint ?? "").trim().toLowerCase();
   if (!identityValue) return false;
-  const expectedIdentityArg = `${identityKey}=${identityValue}`;
+  const expectedIdentityArg = `${identityKey}=${identityValue}`.toLowerCase();
   return txtArgs.some((arg) => arg.trim().toLowerCase() === expectedIdentityArg);
 }
 

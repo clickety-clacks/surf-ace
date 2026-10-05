@@ -2,11 +2,8 @@ import { randomUUID } from "node:crypto";
 
 import { AllocatorServer, type AllocatorServerConfig } from "../../allocator/src/server.js";
 import { BonjourAdvertiser } from "./bonjour-advertiser.js";
+import { centralServerAdvertisement } from "./central-server-advertisement.js";
 import { CentralServerDiscoveryHealth } from "./central-server-health.js";
-
-export function centralServerAdvertisement(name: string, serverId: string): Record<string, string> {
-  return { role: "server", v: "1", ws: "/ws", name, serverId };
-}
 
 // Central serving bootstrap: the existing custody-backed listener advertises
 // itself, while clients browse and register over that listener.

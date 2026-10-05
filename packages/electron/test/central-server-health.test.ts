@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { WebSocketServer } from "ws";
 
-import { centralServerAdvertisement } from "../src/central-server.js";
+import { centralServerAdvertisement } from "../src/central-server-advertisement.js";
 import {
   CentralServerDiscoveryHealth,
   CentralServerHealthError,
