@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 
 import WebSocket from "ws";
@@ -16,6 +17,8 @@ export type CentralServerHealthState = {
 };
 
 export type ServerHealthOptions = {
+  expectedHost?: string;
+  resolveTargetAddresses?: (host: string) => Promise<string[]>;
   requestTopology?: (endpoint: string, timeoutMs: number) => Promise<unknown>;
   serverId?: string;
   timeoutMs?: number;
@@ -60,7 +63,12 @@ function normalizeHost(value: unknown): string {
     throw new CentralServerHealthError("advertised_target_invalid");
   }
   const normalized = host.toLowerCase();
-  if (normalized === "localhost" || normalized.endsWith(".localhost") || !isUsableAddress(host)) {
+  if (normalized === "localhost" || normalized.endsWith(".localhost")) {
+    throw new CentralServerHealthError("advertised_target_unusable");
+  }
+  if (!isUsableAddress(host)) {
+    if (isLoopbackAddress(host)) throw new CentralServerHealthError("advertised_target_loopback");
+    if (isLinkLocalAddress(host)) throw new CentralServerHealthError("advertised_target_link_local");
     throw new CentralServerHealthError("advertised_target_unusable");
   }
   return host;
@@ -81,6 +89,30 @@ function isUsableAddress(host: string): boolean {
       !normalized.startsWith("fe80:") && !normalized.startsWith("ff");
   }
   return true;
+}
+
+function isLoopbackAddress(host: string): boolean {
+  const address = host.replace(/^\[|\]$/g, "").split("%", 1)[0] ?? host;
+  const family = isIP(address);
+  if (family === 4) return Number(address.split(".")[0]) === 127;
+  if (family === 6 && address.toLowerCase().startsWith("::ffff:")) {
+    return isLoopbackAddress(address.slice(7));
+  }
+  return family === 6 && (address === "::1" || address.toLowerCase() === "0:0:0:0:0:0:0:1");
+}
+
+function isLinkLocalAddress(host: string): boolean {
+  const address = host.replace(/^\[|\]$/g, "").split("%", 1)[0] ?? host;
+  const family = isIP(address);
+  return family === 4
+    ? Number(address.split(".")[0]) === 169 && Number(address.split(".")[1]) === 254
+    : family === 6 && address.toLowerCase().startsWith("fe80:");
+}
+
+function advertisedTargetResolutionError(address: string): string {
+  if (isLoopbackAddress(address)) return `advertised_target_loopback_resolution:${address}`;
+  if (isLinkLocalAddress(address)) return `advertised_target_link_local_resolution:${address}`;
+  return `advertised_target_unusable_resolution:${address}`;
 }
 
 function usableTransportAddresses(service: BonjourResolvedService): string[] {
@@ -113,6 +145,31 @@ function recordEndpoint(service: BonjourResolvedService, listenerPort: number, s
     throw new CentralServerHealthError(`advertised_port_mismatch:${service.port}:listener:${listenerPort}`);
   }
   return { host: normalizeHost(service.host), port: service.port, path: txt.ws };
+}
+
+async function resolveSrvTarget(
+  host: string,
+  timeoutMs: number,
+  resolver?: (target: string) => Promise<string[]>,
+): Promise<string[]> {
+  const resolution = resolver
+    ? resolver(host)
+    : (() => {
+      const address = host.replace(/^\[|\]$/g, "").split("%", 1)[0] ?? host;
+      if (isIP(address) !== 0) return Promise.resolve([address]);
+      return lookup(host, { all: true, verbatim: true }).then((records) => records.map(({ address: resolvedAddress }) => resolvedAddress));
+    })();
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      resolution,
+      new Promise<string[]>((_, reject) => {
+        timer = setTimeout(() => reject(new CentralServerHealthError("srv_target_resolution_timeout", true)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 export async function requestFleetTopology(endpoint: string, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<unknown> {
@@ -213,37 +270,92 @@ export async function checkPublishedServerRecord(
     throw new CentralServerHealthError("listener_port_invalid");
   }
   const { host, port, path } = recordEndpoint(service, listenerPort, options.serverId);
+  if (options.expectedHost && normalizeHost(options.expectedHost).toLowerCase() !== host.toLowerCase()) {
+    throw new CentralServerHealthError(`advertised_host_mismatch:${host}:expected:${options.expectedHost}`);
+  }
   const request = options.requestTopology ?? requestFleetTopology;
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const endpoint = websocketUrl(host, port, path);
+  const recordAddresses = usableTransportAddresses(service);
+  let targetAddresses: string[];
+  let targetResolutionError: unknown;
   try {
-    await request(endpoint, timeoutMs);
-    return { endpoint, transport: "srv-target" };
+    targetAddresses = await resolveSrvTarget(host, timeoutMs, options.resolveTargetAddresses);
   } catch (error) {
-    if (!isDnsFailure(error)) throw error;
-    const addresses = usableTransportAddresses(service);
-    if (addresses.length === 0) {
-      throw new CentralServerHealthError(`srv_target_resolution_failed:${errorCode(error)}`, true, { cause: error });
+    if (!isDnsFailure(error)) {
+      throw new CentralServerHealthError(`srv_target_resolution_failed:${errorCode(error)}`, false, { cause: error });
     }
-    let lastError: unknown = error;
-    for (const address of addresses) {
-      const addressEndpoint = websocketUrl(address, port, path);
+    targetResolutionError = error;
+    targetAddresses = [];
+  }
+
+  if (targetAddresses.length > 0) {
+    // Check the resolver result before opening a socket so a local /etc/hosts loopback alias cannot look healthy.
+    const loopback = targetAddresses.find(isLoopbackAddress);
+    if (loopback) throw new CentralServerHealthError(advertisedTargetResolutionError(loopback));
+    const resolvedUsableAddresses = targetAddresses.filter(isUsableAddress);
+    if (resolvedUsableAddresses.length === 0) {
+      throw new CentralServerHealthError(advertisedTargetResolutionError(targetAddresses[0] ?? host));
+    }
+    if (recordAddresses.length > 0 && !resolvedUsableAddresses.some((address) => recordAddresses.includes(address))) {
+      throw new CentralServerHealthError(`advertised_target_address_mismatch:${resolvedUsableAddresses.join(",")}`);
+    }
+    let lastError: unknown;
+    for (const address of resolvedUsableAddresses) {
       try {
-        await request(addressEndpoint, timeoutMs);
-        return { endpoint: addressEndpoint, transport: "dns-sd-address" };
-      } catch (fallbackError) {
-        lastError = fallbackError;
-        if (!isDnsFailure(fallbackError)) {
-          throw new CentralServerHealthError(
-            `dns_sd_address_unreachable:${address}:${errorCode(fallbackError)}`,
-            false,
-            { cause: fallbackError },
-          );
-        }
+        await request(websocketUrl(address, port, path), timeoutMs);
+        return { endpoint: websocketUrl(address, port, path), transport: "srv-target" };
+      } catch (error) {
+        lastError = error;
+        if (isDnsFailure(error)) break;
       }
     }
-    throw new CentralServerHealthError(`dns_sd_addresses_unresolvable:${errorCode(lastError)}`, true, { cause: lastError });
+    if (lastError && !isDnsFailure(lastError)) throw lastError;
+    if (lastError) {
+      targetAddresses = [];
+    } else {
+      throw new CentralServerHealthError("advertised_target_resolution_empty");
+    }
   }
+
+  if (targetAddresses.length === 0 && recordAddresses.length === 0) {
+    const rawRecordAddresses = Array.isArray(service.addresses) ? service.addresses : [];
+    const loopbackRecordAddress = rawRecordAddresses.find(isLoopbackAddress);
+    if (loopbackRecordAddress) {
+      throw new CentralServerHealthError(advertisedTargetResolutionError(loopbackRecordAddress));
+    }
+    const linkLocalRecordAddress = rawRecordAddresses.find(isLinkLocalAddress);
+    if (linkLocalRecordAddress && rawRecordAddresses.every((address) => !isUsableAddress(address))) {
+      throw new CentralServerHealthError(advertisedTargetResolutionError(linkLocalRecordAddress));
+    }
+    throw new CentralServerHealthError(
+      `srv_target_resolution_failed:${errorCode(targetResolutionError ?? "no_usable_dns_sd_addresses")}`,
+      true,
+      { cause: targetResolutionError },
+    );
+  }
+  // DNS-SD's resolved A/AAAA records are the contract fallback when the SRV name itself cannot resolve.
+  let lastFallbackError: unknown;
+  for (const address of recordAddresses) {
+    const addressEndpoint = websocketUrl(address, port, path);
+    try {
+      await request(addressEndpoint, timeoutMs);
+      return { endpoint: addressEndpoint, transport: "dns-sd-address" };
+    } catch (fallbackError) {
+      lastFallbackError = fallbackError;
+      if (!isDnsFailure(fallbackError)) {
+        throw new CentralServerHealthError(
+          `dns_sd_address_unreachable:${address}:${errorCode(fallbackError)}`,
+          false,
+          { cause: fallbackError },
+        );
+      }
+    }
+  }
+  throw new CentralServerHealthError(
+    `dns_sd_addresses_unresolvable:${errorCode(lastFallbackError ?? "srv_target_unresolved")}`,
+    true,
+    { cause: lastFallbackError },
+  );
 }
 
 export class CentralServerDiscoveryHealth {

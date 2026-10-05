@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { WebSocketServer } from "ws";
 
-import { centralServerAdvertisement } from "../src/central-server-advertisement.js";
+import { centralServerAdvertisement, centralServerAdvertisedHost } from "../src/central-server-advertisement.js";
 import {
   CentralServerDiscoveryHealth,
   CentralServerHealthError,
@@ -38,20 +38,86 @@ test("central server publishes the server role, v1 protocol, and the served WebS
   });
 });
 
-test("server self-check uses the Bonjour SRV target, listener port, and advertised path", async () => {
+test("central server derives an explicit SRV target from its listener", () => {
+  assert.equal(centralServerAdvertisedHost("0.0.0.0", "racter"), "racter.local");
+  assert.equal(centralServerAdvertisedHost("::", "racter.local."), "racter.local");
+  assert.equal(centralServerAdvertisedHost("0:0:0:0:0:0:0:0", "racter"), "racter.local");
+  assert.equal(centralServerAdvertisedHost("192.168.50.93", "racter"), "192.168.50.93");
+});
+
+test("server self-check uses the Bonjour SRV target's resolved address, listener port, and advertised path", async () => {
   const attempted: string[] = [];
-  const result = await checkPublishedServerRecord(record(), LISTENER_PORT, {
+  const result = await checkPublishedServerRecord(record({ addresses: ["192.0.2.18"] }), LISTENER_PORT, {
+    expectedHost: "registry.local",
+    resolveTargetAddresses: async () => ["192.0.2.18"],
     requestTopology: async (endpoint) => {
       attempted.push(endpoint);
       return { clients: [] };
     },
   });
 
-  assert.deepEqual(attempted, ["ws://registry.local:19001/ws"]);
+  assert.deepEqual(attempted, ["ws://192.0.2.18:19001/ws"]);
   assert.deepEqual(result, {
-    endpoint: "ws://registry.local:19001/ws",
+    endpoint: "ws://192.0.2.18:19001/ws",
     transport: "srv-target",
   });
+});
+
+test("server self-check rejects an SRV target that resolves only through loopback", async () => {
+  const attempted: string[] = [];
+  await assert.rejects(
+    checkPublishedServerRecord(record({ host: "racter", addresses: ["192.0.2.18"] }), LISTENER_PORT, {
+      resolveTargetAddresses: async () => ["127.0.1.1"],
+      requestTopology: async (endpoint) => {
+        attempted.push(endpoint);
+        return { clients: [] };
+      },
+    }),
+    (error: unknown) => error instanceof CentralServerHealthError &&
+      error.code === "advertised_target_loopback_resolution:127.0.1.1",
+  );
+  assert.deepEqual(attempted, []);
+});
+
+test("server self-check rejects DNS-SD targets that resolve only to link-local addresses", async () => {
+  await assert.rejects(
+    checkPublishedServerRecord(record({ addresses: ["fe80::1"] }), LISTENER_PORT, {
+      resolveTargetAddresses: async () => {
+        throw Object.assign(new Error("lookup failed"), { code: "ENOTFOUND" });
+      },
+      requestTopology: async () => ({ clients: [] }),
+    }),
+    (error: unknown) => error instanceof CentralServerHealthError &&
+      error.code === "advertised_target_link_local_resolution:fe80::1",
+  );
+});
+
+test("server self-check rejects an SRV target that disagrees with its DNS-SD addresses", async () => {
+  let attempted = false;
+  await assert.rejects(
+    checkPublishedServerRecord(record({ addresses: ["192.0.2.19"] }), LISTENER_PORT, {
+      resolveTargetAddresses: async () => ["192.0.2.18"],
+      requestTopology: async () => {
+        attempted = true;
+        return { clients: [] };
+      },
+    }),
+    (error: unknown) => error instanceof CentralServerHealthError &&
+      error.code === "advertised_target_address_mismatch:192.0.2.18",
+  );
+  assert.equal(attempted, false);
+});
+
+test("server self-check rejects a published host that differs from the listener-derived target", async () => {
+  await assert.rejects(
+    checkPublishedServerRecord(record({ host: "other.local" }), LISTENER_PORT, {
+      expectedHost: "registry.local",
+      resolveTargetAddresses: async () => ["192.0.2.18"],
+      requestTopology: async () => ({ clients: [] }),
+    }),
+    (error: unknown) => error instanceof CentralServerHealthError &&
+      error.code === "advertised_host_mismatch:other.local:expected:registry.local",
+  );
 });
 
 test("server self-check rejects wrong TXT identity, path, listener port, and wildcard host", async () => {
@@ -62,6 +128,7 @@ test("server self-check rejects wrong TXT identity, path, listener port, and wil
     { record: record({ txt: { role: "server", v: "1", ws: "/ws", serverId: "another-instance" } }), code: "advertised_server_id_mismatch" },
     { record: record({ port: LISTENER_PORT + 1 }), code: `advertised_port_mismatch:${LISTENER_PORT + 1}:listener:${LISTENER_PORT}` },
     { record: record({ host: "0.0.0.0" }), code: "advertised_target_unusable" },
+    { record: record({ host: "127.0.0.1" }), code: "advertised_target_loopback" },
   ];
 
   for (const entry of cases) {
@@ -78,16 +145,16 @@ test("server self-check rejects wrong TXT identity, path, listener port, and wil
 test("DNS-SD transport addresses are used only after SRV target resolution fails", async () => {
   const attempted: string[] = [];
   const result = await checkPublishedServerRecord(record({ addresses: ["192.0.2.18", "127.0.0.1", "fe80::1"] }), LISTENER_PORT, {
+    resolveTargetAddresses: async () => {
+      throw Object.assign(new Error("lookup failed"), { code: "ENOTFOUND" });
+    },
     requestTopology: async (endpoint) => {
       attempted.push(endpoint);
-      if (endpoint.includes("registry.local")) {
-        throw new CentralServerHealthError("websocket_connect_failed:ENOTFOUND", true);
-      }
       return { clients: [] };
     },
   });
 
-  assert.deepEqual(attempted, ["ws://registry.local:19001/ws", "ws://192.0.2.18:19001/ws"]);
+  assert.deepEqual(attempted, ["ws://192.0.2.18:19001/ws"]);
   assert.deepEqual(result, {
     endpoint: "ws://192.0.2.18:19001/ws",
     transport: "dns-sd-address",
@@ -97,6 +164,7 @@ test("DNS-SD transport addresses are used only after SRV target resolution fails
 test("a reachable wrong host and a failed topology handshake remain unhealthy", async () => {
   await assert.rejects(
     checkPublishedServerRecord(record({ host: "wrong.registry.local" }), LISTENER_PORT, {
+      resolveTargetAddresses: async () => ["192.0.2.18"],
       requestTopology: async () => {
         throw new CentralServerHealthError("websocket_connect_failed:ECONNREFUSED");
       },
@@ -106,6 +174,7 @@ test("a reachable wrong host and a failed topology handshake remain unhealthy", 
 
   let rejectTopology = true;
   const health = new CentralServerDiscoveryHealth(LISTENER_PORT, "server-instance-1", {
+    resolveTargetAddresses: async () => ["192.0.2.18"],
     requestTopology: async () => {
       if (rejectTopology) throw new CentralServerHealthError("fleet_topology_rejected:registry_unavailable");
       return { clients: [] };
@@ -121,7 +190,7 @@ test("a reachable wrong host and a failed topology handshake remain unhealthy", 
     rejectTopology = false;
     await health.observe(record());
     assert.equal(health.snapshot().status, "healthy");
-    assert.equal(health.snapshot().endpoint, "ws://registry.local:19001/ws");
+    assert.equal(health.snapshot().endpoint, "ws://192.0.2.18:19001/ws");
     assert.deepEqual(states, ["starting", "unhealthy", "healthy"]);
   } finally {
     unsubscribe();

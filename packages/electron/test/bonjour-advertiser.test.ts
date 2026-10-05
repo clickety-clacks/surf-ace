@@ -26,6 +26,7 @@ class FakeBonjour {
   private readonly discoveredServices: Array<Array<string | FakeDiscoveredService>>;
   readonly publishNames: string[] = [];
   readonly publishOptions: Array<{
+    host?: string;
     name: string;
     port: number;
     probe?: boolean;
@@ -70,6 +71,7 @@ class FakeBonjour {
   }
 
   publish(options: {
+    host?: string;
     name: string;
     port: number;
     probe?: boolean;
@@ -211,7 +213,26 @@ test("bonjour advertiser uses the default binding on macOS", () => {
 
 test("bonjour advertiser uses the isolated publisher on macOS", () => {
   assert.equal(__test.useIsolatedBonjourPublisherByDefault("darwin"), true);
+  assert.equal(__test.useIsolatedBonjourPublisherByDefault("darwin", true), false);
   assert.equal(__test.useIsolatedBonjourPublisherByDefault("linux"), false);
+});
+
+test("bonjour advertiser forwards an explicit listener-derived SRV target", async () => {
+  const bonjour = new FakeBonjour();
+  const advertiser = new BonjourAdvertiser({
+    bonjour,
+    host: "registry.local",
+    name: "Surf Ace Server",
+    platform: "darwin",
+    port: 19001,
+    txtProvider: () => ({ role: "server", v: "1", ws: "/ws", serverId: "server-instance-1" }),
+  });
+
+  advertiser.start();
+  await new Promise((resolve) => setTimeout(resolve, 50));
+
+  assert.equal(bonjour.publishOptions[0]?.host, "registry.local");
+  await advertiser.stop();
 });
 
 test("bonjour advertiser uses the default binding on non-macOS hosts", () => {

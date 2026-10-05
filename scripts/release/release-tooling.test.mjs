@@ -1151,6 +1151,17 @@ test("tagless qualification leaves release build and manifest-smoke tag admissio
   assert.match(freshInstallMain, /fresh_install_wrong_surface_changed_valid_target/);
 });
 
+test("packaged registry release smokes bind a discovery-reachable listener", async () => {
+  const fixture = await fs.readFile(path.join(repository, "scripts/release/tightbeam-state-smoke-fixture.ts"), "utf8");
+  const stagedServer = fixture.slice(fixture.indexOf("const serverConfig = {"), fixture.indexOf("const launcher =", fixture.indexOf("const serverConfig = {")));
+  const freshInstallServer = fixture.slice(fixture.indexOf("const registryConfig = {"), fixture.indexOf("let registryProcess", fixture.indexOf("const registryConfig = {")));
+
+  assert.match(stagedServer, /listenHost:\s*"0\.0\.0\.0"/);
+  assert.match(freshInstallServer, /listenHost:\s*"0\.0\.0\.0"/);
+  assert.doesNotMatch(stagedServer, /listenHost:\s*"127\.0\.0\.1"/);
+  assert.doesNotMatch(freshInstallServer, /listenHost:\s*"127\.0\.0\.1"/);
+});
+
 test("DESIGN UI index separates release checks from nonblocking known gaps", async () => {
   const design = await fs.readFile(path.join(repository, "DESIGN.md"), "utf8");
   const workflow = await fs.readFile(path.join(repository, ".github/workflows/release-tightbeam.yml"), "utf8");
