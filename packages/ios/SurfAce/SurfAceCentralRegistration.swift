@@ -566,7 +566,7 @@ final class SurfAceCentralRegistration {
                     _ = try await attempt(configured, surfaces: surfaces, failures: failures)
                 }
                 return
-            } catch error {
+            } catch {
                 selected.transport.close()
                 self.selected = nil
                 setStatus(.disconnected)
