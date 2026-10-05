@@ -217,7 +217,7 @@ test("configured rejection falls back through Bonjour and absent central stays d
   const discovery = emptyDiscovery();
   let advertised = true;
   discovery.getSnapshot = () => advertised ? [{
-    host: "127.0.0.1", port: fallback.port, wsPath: "/", role: "server",
+    host: "127.0.0.1", port: fallback.port, wsPath: "/ws", protocolVersion: 1, role: "server",
   }] : [];
   const connection = new ServerConnection({
     configuredAddress: configured.address, core, clientId: "fallback-client",
@@ -309,7 +309,6 @@ test("underlying registration failure stays visible and logged until discovery r
   const central = await centralFixture();
   const core = new SurfaceCore();
   const surface = core.ensurePrimarySurface("Retry diagnostic", { width: 800, height: 600, scale: 1 });
-  const initial = core.getRendererWindowState(surface.surfaceId);
   const logs: string[] = [];
   const discovery = emptyDiscovery();
   discovery.getSnapshot = () => [{
@@ -325,33 +324,46 @@ test("underlying registration failure stays visible and logged until discovery r
   try {
     const first = connection.synchronize();
     await until(() => central.requests.length === 1);
-    central.reply(0, false);
-    await assert.rejects(first, /registration_rejected/);
+    central.reply(0, true);
+    await first;
+    const registered = core.getRendererWindowState(surface.surfaceId);
+    assert.equal(registered.windowLabel, "a");
+    assert.equal(registered.panes[0]?.label, "700");
+    const paneLineageId = central.requests[0]!.message.payload.surfaces[0]!.panes[0]!.paneLineageId;
+
+    const retry = connection.synchronize();
+    await until(() => central.requests.length === 2);
+    central.reply(1, false);
+    await until(() => central.requests.length === 3);
+    central.reply(2, false);
+    await assert.rejects(retry, /registration_rejected/);
     await until(() => core.getRendererWindowState(surface.surfaceId).connectionBar === "disconnected");
 
     const failed = core.getRendererWindowState(surface.surfaceId);
     assert.match(failed.connectionError ?? "", /registration_rejected/);
     assert.ok(logs.some((line) => /registration_rejected/.test(line)));
-    assert.equal(failed.surfaceId, initial.surfaceId);
-    assert.equal(failed.panes[0]?.paneId, initial.panes[0]?.paneId);
-    assert.equal(failed.panes[0]?.label, initial.panes[0]?.label);
+    assert.equal(failed.surfaceId, registered.surfaceId);
+    assert.equal(failed.windowLabel, registered.windowLabel);
+    assert.equal(failed.panes[0]?.paneId, registered.panes[0]?.paneId);
+    assert.equal(failed.panes[0]?.label, registered.panes[0]?.label);
 
-    const retry = connection.synchronize();
-    await until(() => central.requests.length === 2);
-    central.reply(1, true);
-    await retry;
+    const recovery = connection.synchronize();
+    await until(() => central.requests.length === 4);
+    central.reply(3, true);
+    await recovery;
 
     const connected = core.getRendererWindowState(surface.surfaceId);
     assert.equal(connected.connectionBar, "connected");
     assert.equal(connected.connectionError, undefined);
     assert.equal(connected.windowLabel, "a");
     assert.equal(connected.panes[0]?.label, "700");
-    assert.equal(central.requests[0]!.message.payload.clientId, "stable-retry-client");
-    assert.equal(central.requests[1]!.message.payload.clientId, "stable-retry-client");
-    assert.equal(
-      central.requests[1]!.message.payload.surfaces[0]!.panes[0]!.paneLineageId,
-      central.requests[0]!.message.payload.surfaces[0]!.panes[0]!.paneLineageId,
-    );
+    assert.equal(connected.surfaceId, registered.surfaceId);
+    assert.equal(connected.panes[0]?.paneId, registered.panes[0]?.paneId);
+    assert.equal(connected.panes[0]?.label, registered.panes[0]?.label);
+    for (const request of central.requests) {
+      assert.equal(request.message.payload.clientId, "stable-retry-client");
+      assert.equal(request.message.payload.surfaces[0]!.panes[0]!.paneLineageId, paneLineageId);
+    }
   } finally {
     await connection.stop();
     await central.close();
