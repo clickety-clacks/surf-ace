@@ -67,6 +67,7 @@ test("server self-check rejects wrong TXT identity, path, listener port, and wil
   for (const entry of cases) {
     await assert.rejects(
       checkPublishedServerRecord(entry.record, LISTENER_PORT, {
+        serverId: "server-instance-1",
         requestTopology: async () => ({ clients: [] }),
       }),
       (error: unknown) => error instanceof CentralServerHealthError && error.code === entry.code,
