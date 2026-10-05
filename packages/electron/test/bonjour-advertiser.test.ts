@@ -14,7 +14,9 @@ class FakeService extends EventEmitter {
 }
 
 type FakeDiscoveredService = {
+  addresses?: string[];
   event?: "txt-update" | "up";
+  host?: string;
   name: string;
   port?: number;
   txt?: Record<string, unknown>;
@@ -125,6 +127,31 @@ test("bonjour advertiser republishes with a suffixed name after a name conflict"
 
   assert.deepEqual(bonjour.publishNames, ["provider-a Surf Ace", "provider-a Surf Ace (2)"]);
   assert.equal(bonjour.findCalls, 1);
+  await advertiser.stop();
+});
+
+test("bonjour advertiser forwards the browsed SRV target and transport addresses", async () => {
+  const resolvedService = {
+    addresses: ["192.0.2.18", "100.64.0.18"],
+    host: "registry.local.",
+    name: "Surf Ace Server",
+    port: 19001,
+    txt: { role: "server", v: "1", ws: "/ws", serverId: "server-instance-1" },
+  };
+  const bonjour = new FakeBonjour([[resolvedService]]);
+  const observations: Array<{ service: unknown; error?: string }> = [];
+  const advertiser = new BonjourAdvertiser({
+    bonjour,
+    name: "Surf Ace Server",
+    onSelfDiscovery: (result) => observations.push(result),
+    port: 19001,
+    txtProvider: () => ({ role: "server", v: "1", ws: "/ws", serverId: "server-instance-1" }),
+  });
+
+  advertiser.start();
+  await (advertiser as unknown as { verifyPublishedService(): Promise<void> }).verifyPublishedService();
+
+  assert.deepEqual(observations, [{ service: resolvedService }]);
   await advertiser.stop();
 });
 
@@ -382,10 +409,12 @@ test("bonjour advertiser handles missing dns-sd isolated publisher without crash
   const originalWarn = console.warn;
   const child = new FakeChildProcess();
   const fakeSpawn: typeof spawn = (() => child) as never;
+  const observations: Array<{ error?: string; service: unknown }> = [];
   const advertiser = new BonjourAdvertiser({
     bonjour: new FakeBonjour(),
     isolatedPublisherSpawn: fakeSpawn,
     name: "provider-a Surf Ace",
+    onSelfDiscovery: (result) => observations.push(result),
     port: 18791,
     txtProvider: () => ({ pk: "sf_test" }),
   });
@@ -404,6 +433,26 @@ test("bonjour advertiser handles missing dns-sd isolated publisher without crash
   }
 
   assert.match(warnings.join("\n"), /\[surf-ace:bonjour\] event=publish_isolated_error .*error=ENOENT/);
+  assert.deepEqual(observations, [{ error: "bonjour_publish_failed:ENOENT", service: null }]);
+});
+
+test("bonjour advertiser reports a synchronous isolated publisher spawn failure", async () => {
+  const observations: Array<{ error?: string; service: unknown }> = [];
+  const advertiser = new BonjourAdvertiser({
+    bonjour: new FakeBonjour(),
+    isolatedPublisherSpawn: (() => { throw Object.assign(new Error("dns-sd unavailable"), { code: "ENOENT" }); }) as never,
+    name: "Surf Ace Server",
+    onSelfDiscovery: (result) => observations.push(result),
+    port: 19001,
+    txtProvider: () => ({ role: "server", serverId: "server-instance-1", v: "1", ws: "/ws" }),
+  });
+
+  await (advertiser as unknown as {
+    publishWithIsolatedPublisher(name: string): Promise<void>;
+  }).publishWithIsolatedPublisher("Surf Ace Server");
+  await advertiser.stop();
+
+  assert.deepEqual(observations, [{ error: "bonjour_publish_failed:ENOENT", service: null }]);
 });
 
 test("bonjour advertiser keeps isolated publisher alive when self-discovery is blind", async () => {
@@ -478,6 +527,28 @@ test("bonjour advertiser does not reap the current isolated publisher child", as
   }).cleanupOrphanedIsolatedPublishers("workstation-a Surf Ace (workstation-a)");
 
   assert.deepEqual(killedPids, []);
+});
+
+test("bonjour advertiser cleans only an orphaned server publisher with the same instance id", async () => {
+  const killedPids: number[] = [];
+  const advertiser = new BonjourAdvertiser({
+    bonjour: new FakeBonjour(),
+    isolatedPublisherKill: (pid) => killedPids.push(pid),
+    isolatedPublisherProcessList: async () => [
+      "301 1 dns-sd -R Surf Ace Server _surf-ace._tcp local. 19001 role=server serverId=server-instance-1 v=1 ws=/ws",
+      "302 1 dns-sd -R Surf Ace Server _surf-ace._tcp local. 19001 role=server serverId=another-instance v=1 ws=/ws",
+    ].join("\n"),
+    name: "Surf Ace Server",
+    platform: "darwin",
+    port: 19001,
+    txtProvider: () => ({ role: "server", serverId: "server-instance-1", v: "1", ws: "/ws" }),
+  });
+
+  await (advertiser as unknown as {
+    cleanupOrphanedIsolatedPublishers(name: string): Promise<void>;
+  }).cleanupOrphanedIsolatedPublishers("Surf Ace Server");
+
+  assert.deepEqual(killedPids, [301]);
 });
 
 test("bonjour advertiser isolated publisher matcher requires same service name port and fingerprint", () => {

@@ -3,6 +3,7 @@
 
 const fs = require("node:fs/promises");
 const path = require("node:path");
+const { randomUUID } = require("node:crypto");
 
 const configKeys = ["custody", "hostLockPath", "listenHost", "listenPort", "name"];
 const custodyKeys = [
@@ -114,10 +115,9 @@ function healthUrl(endpoint) {
     throw publicError("health_endpoint_invalid");
   }
   if (!["ws:", "wss:"].includes(url.protocol) || !url.hostname || url.username || url.password ||
-      url.search || url.hash || !["", "/", "/ws"].includes(url.pathname)) {
+      url.search || url.hash || url.pathname !== "/ws") {
     throw publicError("health_endpoint_invalid");
   }
-  url.pathname = "/ws";
   return url;
 }
 
@@ -172,6 +172,8 @@ async function checkHealth(endpoint, timeoutMs = 5000) {
   return new Promise((resolve, reject) => {
     let settled = false;
     let opened = false;
+    let phase = "connect";
+    const id = `rq_server_health_${randomUUID()}`;
     const socket = new WebSocketClient(url);
     let timer;
     const finish = (error, result) => {
@@ -186,15 +188,66 @@ async function checkHealth(endpoint, timeoutMs = 5000) {
       resolve(result);
       try { socket.close(1000, "health_probe"); } catch { /* Connection may already be closing. */ }
     };
+    const failureReason = (error) => typeof error?.code === "string" ? error.code
+      : typeof error?.message === "string" ? error.message : "unknown";
     socket.addEventListener("open", () => {
       opened = true;
-      finish(null, { endpoint: url.origin, status: "healthy", transport: "websocket-open" });
+      phase = "topology";
+      try {
+        socket.send(JSON.stringify({
+          id,
+          op: "fleet.topology",
+          payload: {},
+          sentAt: Date.now(),
+          type: "request",
+          v: 1,
+        }));
+      } catch (error) {
+        finish(publicError(`health_fleet_topology_send_failed:${failureReason(error)}`));
+      }
     }, { once: true });
-    socket.addEventListener("error", () => finish(publicError("health_check_unavailable")), { once: true });
-    socket.addEventListener("close", () => {
-      if (!opened) finish(publicError("health_check_unavailable"));
+    socket.addEventListener("message", (event) => {
+      let response;
+      try {
+        if (typeof event.data !== "string") throw new Error("response_not_text");
+        response = JSON.parse(event.data);
+      } catch (error) {
+        finish(publicError(`health_fleet_topology_response_invalid:${failureReason(error)}`));
+        return;
+      }
+      if (!isPlainObject(response) || response.id !== id || response.op !== "fleet.topology" ||
+          response.type !== "response" || response.v !== 1) {
+        finish(publicError("health_fleet_topology_response_mismatch"));
+        return;
+      }
+      if (response.ok !== true) {
+        const reason = isPlainObject(response.error) && typeof response.error.code === "string"
+          ? response.error.code
+          : isPlainObject(response.error) && typeof response.error.message === "string"
+            ? response.error.message : "request_rejected";
+        finish(publicError(`health_fleet_topology_rejected:${reason}`));
+        return;
+      }
+      if (!isPlainObject(response.payload) || !Array.isArray(response.payload.clients)) {
+        finish(publicError("health_fleet_topology_payload_invalid"));
+        return;
+      }
+      finish(null, { endpoint: url.origin, status: "healthy", transport: "fleet.topology" });
+    });
+    socket.addEventListener("error", (event) => {
+      const reason = failureReason(event.error);
+      const prefix = phase === "connect" ? "health_websocket_connect_failed" : "health_fleet_topology_transport_failed";
+      finish(publicError(`${prefix}:${reason}`));
     }, { once: true });
-    timer = setTimeout(() => finish(publicError("health_check_timeout")), timeoutMs);
+    socket.addEventListener("close", (event) => {
+      if (settled) return;
+      const reason = event.reason ? `:${event.reason}` : "";
+      finish(publicError(opened
+        ? `health_fleet_topology_closed:${event.code}${reason}`
+        : `health_websocket_closed_before_open:${event.code}${reason}`));
+    }, { once: true });
+    timer = setTimeout(() => finish(publicError(phase === "connect"
+      ? "health_websocket_connect_timeout" : "health_fleet_topology_timeout")), timeoutMs);
   });
 }
 
@@ -235,22 +288,39 @@ async function startForeground(config, options = {}) {
   } catch {
     throw publicError("server_start_failed");
   }
-  const address = service.server.address;
-  const endpoint = `${address.url}/ws`;
   const write = options.write ?? ((line) => process.stdout.write(`${line}\n`));
-  write(JSON.stringify({ event: "ready", host: address.host, pid: process.pid, port: address.port, endpoint }));
+  let readyWritten = false;
+  const stopHealthSubscription = service.health.subscribe((health) => {
+    if (readyWritten || health.status !== "healthy" || typeof health.endpoint !== "string") return;
+    let endpoint;
+    try {
+      endpoint = healthUrl(health.endpoint);
+    } catch {
+      return;
+    }
+    readyWritten = true;
+    const port = endpoint.port ? Number(endpoint.port) : endpoint.protocol === "wss:" ? 443 : 80;
+    write(JSON.stringify({
+      event: "ready",
+      host: endpoint.hostname,
+      pid: process.pid,
+      port,
+      endpoint: health.endpoint,
+    }));
+  });
   const signalSource = options.signalSource ?? process;
   return new Promise((resolve, reject) => {
     let closing = false;
     const close = async (signal) => {
       if (closing) return;
       closing = true;
+      stopHealthSubscription();
       signalSource.removeListener("SIGTERM", onTerm);
       signalSource.removeListener("SIGINT", onInt);
       try {
         await service.close();
         write(JSON.stringify({ event: "stopped", pid: process.pid, signal, status: "clean" }));
-        resolve({ endpoint, status: "stopped" });
+        resolve({ endpoint: service.health.snapshot().endpoint, status: "stopped" });
       } catch {
         reject(publicError("server_shutdown_failed"));
       }
