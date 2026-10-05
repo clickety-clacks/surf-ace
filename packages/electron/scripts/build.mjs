@@ -75,6 +75,7 @@ await build({
     path.join(rootDir, "test", "runtime-identity.test.ts"),
     path.join(rootDir, "test", "surface-core.test.ts"),
     path.join(rootDir, "test", "server-connection.test.ts"),
+    path.join(rootDir, "test", "surf-ace-discovery.test.ts"),
     path.join(rootDir, "test", "autostart-host-guard.test.ts"),
     path.join(rootDir, "test", "webauthn-support.test.ts"),
     path.join(rootDir, "test", "window-options.test.ts"),
