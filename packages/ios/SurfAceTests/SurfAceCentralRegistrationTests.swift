@@ -1,4 +1,5 @@
 import CryptoKit
+import Darwin
 import Foundation
 import XCTest
 @testable import SurfAce
@@ -52,11 +53,19 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         var resolveTimeout: TimeInterval?
         var stopped = false
         var resolvedHost = "racter."
-        var resolvedPath = "/"
+        var resolvedPath = "/ws"
+        var resolvedVersion = "1"
+        var resolvedRole = "server"
+        var resolvedAddresses: [Data] = []
 
         override var hostName: String? { resolvedHost }
+        override var addresses: [Data]? { resolvedAddresses }
         override func txtRecordData() -> Data? {
-            NetService.data(fromTXTRecord: ["role": Data("server".utf8), "ws": Data(resolvedPath.utf8)])
+            NetService.data(fromTXTRecord: [
+                "role": Data(resolvedRole.utf8),
+                "v": Data(resolvedVersion.utf8),
+                "ws": Data(resolvedPath.utf8),
+            ])
         }
         override func resolve(withTimeout timeout: TimeInterval) { resolveTimeout = timeout }
         override func stop() { stopped = true }
@@ -213,21 +222,93 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         discovery.netServiceDidResolveAddress(current)
 
         let secondURLs = await second.value
-        XCTAssertEqual(secondURLs, [URL(string: "ws://racter:43867/")!])
+        XCTAssertEqual(secondURLs, [URL(string: "ws://racter:43867/ws")!])
         discovery.netServiceDidResolveAddress(current)
         XCTAssertTrue(current.stopped)
     }
 
     func testDiscoveredLocalHostNormalizationMatchesConfiguredRacterURL() throws {
         let discovered = try XCTUnwrap(
-            SurfAceCentralDiscovery.localTransportURL(host: "racter.", port: 43867, path: "/")
+            SurfAceCentralDiscovery.localTransportURL(host: "racter.", port: 43867, path: "/ws")
         )
-        XCTAssertEqual(discovered, URL(string: "ws://racter:43867/"))
+        XCTAssertEqual(discovered, URL(string: "ws://racter:43867/ws"))
 
         let discoveredLocal = try XCTUnwrap(
             SurfAceCentralDiscovery.localTransportURL(host: "racter.local.", port: 43867, path: "/socket")
         )
         XCTAssertEqual(discoveredLocal, URL(string: "ws://racter.local:43867/socket"))
+    }
+
+    func testDiscoveryRequiresExactServerVersionAndWebSocketPath() async {
+        for (name, version, path) in [("wrong-path", "1", "/"), ("wrong-version", "2", "/ws")] {
+            let browser = DiscoveryBrowser(), clock = DiscoveryClock()
+            let discovery = SurfAceCentralDiscovery(makeBrowser: { browser }, sleep: { try await clock.sleep($0) })
+            let invalid = discoveryService(name: name)
+            invalid.resolvedVersion = version
+            invalid.resolvedPath = path
+            let result = Task { await discovery.discover() }
+            await until { browser.started }
+            discovery.netServiceBrowser(browser, didFind: invalid, moreComing: false)
+            discovery.netServiceDidResolveAddress(invalid)
+            clock.permits += 1
+
+            let urls = await result.value
+            XCTAssertTrue(urls.isEmpty)
+            XCTAssertTrue(discovery.lastError?.contains("expected role=server v=1 ws=/ws") == true)
+        }
+    }
+
+    func testDiscoveryRejectsWildcardSrvTargetsAsClientDestinations() async {
+        let browser = DiscoveryBrowser(), clock = DiscoveryClock()
+        let discovery = SurfAceCentralDiscovery(makeBrowser: { browser }, sleep: { try await clock.sleep($0) })
+        let wildcard = discoveryService(name: "wildcard", host: "0.0.0.0.")
+        let result = Task { await discovery.discover() }
+        await until { browser.started }
+        discovery.netServiceBrowser(browser, didFind: wildcard, moreComing: false)
+        discovery.netServiceDidResolveAddress(wildcard)
+        clock.permits += 1
+
+        let urls = await result.value
+        XCTAssertTrue(urls.isEmpty)
+        XCTAssertTrue(discovery.lastError?.contains("wildcard address, not a client destination") == true)
+    }
+
+    func testDiscoveryRetainsBrowseFailureDetails() async {
+        let browser = DiscoveryBrowser(), clock = DiscoveryClock()
+        let discovery = SurfAceCentralDiscovery(makeBrowser: { browser }, sleep: { try await clock.sleep($0) })
+        let result = Task { await discovery.discover() }
+        await until { browser.started }
+        discovery.netServiceBrowser(browser, didNotSearch: [NetService.errorCode: NSNumber(value: -65563)])
+        clock.permits += 1
+
+        let urls = await result.value
+        XCTAssertTrue(urls.isEmpty)
+        XCTAssertTrue(discovery.lastError?.contains("Bonjour browse failed") == true)
+        XCTAssertTrue(discovery.lastError?.contains("-65563") == true)
+    }
+
+    func testDiscoveryRetainsSrvTargetPortAndDnsSdTransportAddressAfterTargetResolutionFailure() async throws {
+        let browser = DiscoveryBrowser(), clock = DiscoveryClock()
+        let discovery = SurfAceCentralDiscovery(makeBrowser: { browser }, sleep: { try await clock.sleep($0) })
+        let service = discoveryService(name: "target-unresolved", host: "registry.local.")
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = in_port_t(43867).bigEndian
+        XCTAssertEqual("192.0.2.15".withCString { inet_pton(AF_INET, $0, &address.sin_addr) }, 1)
+        service.resolvedAddresses = withUnsafeBytes(of: &address) { [Data($0)] }
+
+        let result = Task { await discovery.discover() }
+        await until { browser.started }
+        discovery.netServiceBrowser(browser, didFind: service, moreComing: false)
+        discovery.netService(service, didNotResolve: [NetService.errorCode: NSNumber(value: -2)])
+        clock.permits += 1
+
+        let target = try XCTUnwrap(URL(string: "ws://registry.local:43867/ws"))
+        let urls = await result.value
+        XCTAssertEqual(urls, [target])
+        XCTAssertEqual(discovery.transportURLs(for: target), [URL(string: "ws://192.0.2.15:43867/ws")!])
+        XCTAssertTrue(discovery.lastError?.contains("could not resolve SRV target") == true)
     }
 
     func testConfiguredLocalNumericEndpointUsesNarrowTransportPolicy() throws {
@@ -455,6 +536,46 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         XCTAssertEqual(attempts.count, count)
     }
 
+    func testUnderlyingRegistrationFailurePersistsAcrossRetryAndClearsOnRecovery() async throws {
+        let endpoint = URL(string: "ws://registry.local:9002/ws")!
+        let transport = Transport()
+        transport.error = URLError(.cannotFindHost)
+        let surfaces = [SurfAceRegistrationSurface(
+            surfaceId: "sf_retry",
+            panes: [.init(paneId: "1", paneLineageId: "stable-lineage", paneLabel: 12)]
+        )]
+        var visibleErrors: [String?] = []
+        var logErrors: [String] = []
+        let registration = SurfAceCentralRegistration(
+            clientId: "stable-client-identity",
+            configured: nil,
+            discover: { [endpoint] },
+            makeTransport: { _ in transport },
+            snapshot: { surfaces },
+            apply: { _, _ in },
+            onError: { logErrors.append(($0 as? LocalizedError)?.errorDescription ?? $0.localizedDescription) },
+            onConnectionError: { visibleErrors.append($0) }
+        )
+
+        for _ in 0..<2 {
+            do { try await registration.synchronize(); XCTFail("hostname failure succeeded") } catch { }
+            XCTAssertTrue(registration.lastError?.contains("registry.local:9002/ws") == true)
+            XCTAssertTrue(registration.lastError?.contains("cannot find host") == true || registration.lastError?.contains("hostname") == true)
+            XCTAssertEqual(registration.status, .disconnected)
+        }
+        XCTAssertTrue(visibleErrors.contains { $0?.contains("registry.local:9002/ws") == true })
+        XCTAssertTrue(logErrors.contains { $0.contains("cannotFindHost") || $0.localizedCaseInsensitiveContains("hostname") })
+        XCTAssertEqual(transport.clients, ["stable-client-identity", "stable-client-identity"])
+
+        transport.error = nil
+        try await registration.synchronize()
+        XCTAssertEqual(registration.status, .connected)
+        XCTAssertNil(registration.lastError)
+        XCTAssertEqual(visibleErrors.last!, nil)
+        XCTAssertEqual(transport.registeredSurfaces, surfaces)
+        registration.stop()
+    }
+
     func testNumericDiscoveryFallbackRequiresHostnameResolutionFailure() async throws {
         let hostname = URL(string: "ws://server.local:9001/")!
         let numeric = URL(string: "ws://192.0.2.1:9001/")!
@@ -518,7 +639,12 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         XCTAssertThrowsError(try SurfAceRegistrationWire.paneClaimLabel(
             from: response, requestId: "claim-rejected"
         )) { error in
-            XCTAssertEqual(String(describing: error), "paneClaimRejected")
+            guard case let SurfAceRegistrationError.paneClaimRejected(code, message) = error else {
+                XCTFail("server rejection was not retained")
+                return
+            }
+            XCTAssertNil(code)
+            XCTAssertNil(message)
             XCTAssertTrue(isPaneAllocatorUnavailable(error))
         }
 
@@ -529,7 +655,25 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         XCTAssertThrowsError(try SurfAceRegistrationWire.paneClaimLabel(
             from: malformedSuccess, requestId: "claim-malformed"
         )) { error in
-            XCTAssertFalse(isPaneAllocatorUnavailable(error))
+        XCTAssertFalse(isPaneAllocatorUnavailable(error))
+        }
+    }
+
+    func testRegistrationProtocolRejectionPreservesServerErrorDetails() throws {
+        let response = Data(#"{"id":"register-rejected","op":"client.register","ok":false,"payload":null,"error":{"code":"registration_denied","message":"client signature rejected"}}"#.utf8)
+        XCTAssertThrowsError(try SurfAceRegistrationWire.assignments(
+            from: response,
+            requestId: "register-rejected",
+            clientId: "stable-client",
+            surfaces: []
+        )) { error in
+            guard case let SurfAceRegistrationError.serverRejected(code, message) = error else {
+                XCTFail("server protocol error was not retained")
+                return
+            }
+            XCTAssertEqual(code, "registration_denied")
+            XCTAssertEqual(message, "client signature rejected")
+            XCTAssertTrue(isPaneAllocatorUnavailable(error))
         }
     }
 

@@ -34,13 +34,64 @@ struct SurfAceRegistrationAssignment: Codable, Equatable, Sendable {
 
 enum SurfAceRegistrationError: Error {
     case invalidResponse
-    case paneClaimRejected
+    case paneClaimRejected(code: String?, message: String?)
+    case serverRejected(code: String?, message: String?)
     case noServer
     case stopped
     case topologyChanged
 }
 
+struct SurfAceCentralRegistrationFailure: Error, LocalizedError {
+    let phase: String
+    let endpoint: String?
+    let underlying: String
+
+    var errorDescription: String? {
+        let endpointDetail = endpoint.map { " endpoint=\($0)" } ?? ""
+        return "central_registration_failed phase=\(phase)\(endpointDetail): \(underlying)"
+    }
+}
+
+private func surfAceRegistrationErrorDescription(_ error: Error) -> String {
+    if let registrationError = error as? SurfAceRegistrationError {
+        switch registrationError {
+        case .invalidResponse: return "protocol_invalid_response"
+        case .paneClaimRejected(let code, let message):
+            return "pane_claim_rejected code=\(code ?? "missing") message=\(message ?? "missing")"
+        case .serverRejected(let code, let message):
+            return "server_rejected code=\(code ?? "missing") message=\(message ?? "missing")"
+        case .noServer: return "no_surf_ace_server"
+        case .stopped: return "registration_stopped"
+        case .topologyChanged: return "registration_topology_changed"
+        }
+    }
+    if let urlError = error as? URLError {
+        return "\(urlError.code): \(urlError.localizedDescription)"
+    }
+    if let localized = error as? LocalizedError, let description = localized.errorDescription {
+        return description
+    }
+    let value = error as NSError
+    return "\(String(describing: error)) \(value.domain)(\(value.code)): \(error.localizedDescription)"
+}
+
+private func surfAceRegistrationEndpointLabel(_ url: URL) -> String {
+    guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+        return "\(url.scheme ?? "ws")://\(url.host ?? "unknown")"
+    }
+    components.user = nil
+    components.password = nil
+    components.query = nil
+    components.fragment = nil
+    return components.string ?? "\(url.scheme ?? "ws")://\(url.host ?? "unknown")"
+}
+
 enum SurfAceRegistrationWire {
+    struct ErrorPayload: Decodable {
+        let code: String?
+        let message: String?
+    }
+
     struct PaneClaimRequest: Encodable {
         struct Payload: Encodable {
             let clientId: String
@@ -62,6 +113,7 @@ enum SurfAceRegistrationWire {
         let op: String
         let ok: Bool
         let payload: Payload?
+        let error: ErrorPayload?
     }
     struct Payload: Codable {
         let clientId: String
@@ -86,6 +138,7 @@ enum SurfAceRegistrationWire {
         let op: String
         let ok: Bool
         let payload: Payload?
+        let error: ErrorPayload?
     }
 
     static func requestData(clientId: String, surfaces: [SurfAceRegistrationSurface], id: String) throws -> Data {
@@ -105,7 +158,12 @@ enum SurfAceRegistrationWire {
         guard response.id == requestId, response.op == "pane.claim" else {
             throw SurfAceRegistrationError.invalidResponse
         }
-        guard response.ok else { throw SurfAceRegistrationError.paneClaimRejected }
+        guard response.ok else {
+            throw SurfAceRegistrationError.paneClaimRejected(
+                code: response.error?.code,
+                message: response.error?.message
+            )
+        }
         guard let label = response.payload?.paneLabel, label > 0 else {
             throw SurfAceRegistrationError.invalidResponse
         }
@@ -119,8 +177,16 @@ enum SurfAceRegistrationWire {
         surfaces: [SurfAceRegistrationSurface]
     ) throws -> [SurfAceRegistrationAssignment] {
         let response = try JSONDecoder().decode(Response.self, from: data)
-        guard response.id == requestId, response.op == "client.register", response.ok,
-              let payload = response.payload, payload.clientId == clientId,
+        guard response.id == requestId, response.op == "client.register" else {
+            throw SurfAceRegistrationError.invalidResponse
+        }
+        guard response.ok else {
+            throw SurfAceRegistrationError.serverRejected(
+                code: response.error?.code,
+                message: response.error?.message
+            )
+        }
+        guard let payload = response.payload, payload.clientId == clientId,
               payload.surfaces.count == surfaces.count,
               Set(payload.surfaces.map(\.surfaceId)) == Set(surfaces.map(\.surfaceId)) else {
             throw SurfAceRegistrationError.invalidResponse
@@ -398,11 +464,17 @@ enum SurfAceCentralRegistrationStatus: Equatable {
 
 @MainActor
 final class SurfAceCentralRegistration {
+    @MainActor
+    private final class FailureCollector {
+        var values: [String] = []
+    }
+
     typealias Snapshot = @MainActor () async throws -> [SurfAceRegistrationSurface]
     typealias Apply = @MainActor ([SurfAceRegistrationAssignment], [SurfAceRegistrationSurface]) async throws -> Void
     private let clientId: String
     private let configured: URL?
     private let discover: @MainActor () async -> [URL]
+    private let discoveryError: @MainActor () -> String?
     private let makeTransport: @MainActor (URL) -> any SurfAceRegistrationTransport
     private let transportFallbacks: @MainActor (URL) -> [URL]
     private var resolutionFailed = false
@@ -413,6 +485,9 @@ final class SurfAceCentralRegistration {
     private var loop: Task<Void, Never>?
     private var stopped = false
     private let onStatusChange: @MainActor (SurfAceCentralRegistrationStatus) -> Void
+    private let onConnectionError: @MainActor (String?) -> Void
+    private(set) var lastError: String?
+    private var lastReportedError: String?
     private(set) var status: SurfAceCentralRegistrationStatus = .disconnected
 
     private func setStatus(_ next: SurfAceCentralRegistrationStatus) {
@@ -421,22 +496,52 @@ final class SurfAceCentralRegistration {
         onStatusChange(next)
     }
 
+    private func setLastError(_ message: String?) {
+        guard lastError != message else { return }
+        lastError = message
+        onConnectionError(message)
+    }
+
+    private func reportFailure(
+        phase: String,
+        endpoint: URL?,
+        underlying: String,
+        showInStatus: Bool
+    ) -> SurfAceCentralRegistrationFailure {
+        let failure = SurfAceCentralRegistrationFailure(
+            phase: phase,
+            endpoint: endpoint.map(surfAceRegistrationEndpointLabel),
+            underlying: underlying
+        )
+        let message = failure.errorDescription ?? underlying
+        if lastReportedError != message {
+            lastReportedError = message
+            onError(failure)
+        }
+        if showInStatus { setLastError(message) }
+        return failure
+    }
+
     init(clientId: String, configured: URL?,
          discover: @escaping @MainActor () async -> [URL],
+         discoveryError: @escaping @MainActor () -> String? = { nil },
          makeTransport: @escaping @MainActor (URL) -> any SurfAceRegistrationTransport = { SurfAceRegistrationTransportFactory.make(url: $0) },
          transportFallbacks: @escaping @MainActor (URL) -> [URL] = { _ in [] },
          snapshot: @escaping Snapshot, apply: @escaping Apply,
          onError: @escaping @MainActor (Error) -> Void = { _ in },
-         onStatusChange: @escaping @MainActor (SurfAceCentralRegistrationStatus) -> Void = { _ in }) {
+         onStatusChange: @escaping @MainActor (SurfAceCentralRegistrationStatus) -> Void = { _ in },
+         onConnectionError: @escaping @MainActor (String?) -> Void = { _ in }) {
         self.clientId = clientId
         self.configured = configured
         self.discover = discover
+        self.discoveryError = discoveryError
         self.makeTransport = makeTransport
         self.transportFallbacks = transportFallbacks
         self.snapshot = snapshot
         self.apply = apply
         self.onError = onError
         self.onStatusChange = onStatusChange
+        self.onConnectionError = onConnectionError
     }
 
     func synchronize() async throws {
@@ -447,35 +552,73 @@ final class SurfAceCentralRegistration {
         guard !stopped else { throw SurfAceRegistrationError.stopped }
         // Empty startup is not a registration of an invented display identity.
         guard !surfaces.isEmpty else { return }
+        let failures = FailureCollector()
         if let selected {
             do {
                 let assignments = try await selected.transport.register(clientId: clientId, surfaces: surfaces)
                 guard !stopped else { throw SurfAceRegistrationError.stopped }
                 try await apply(assignments, surfaces)
                 guard !stopped else { throw SurfAceRegistrationError.stopped }
+                setLastError(nil)
+                lastReportedError = nil
                 setStatus(.connected)
                 if let configured, selected.url != configured {
-                    _ = try await attempt(configured, surfaces: surfaces)
+                    _ = try await attempt(configured, surfaces: surfaces, failures: failures)
                 }
                 return
-            } catch {
+            } catch error {
                 selected.transport.close()
                 self.selected = nil
                 setStatus(.disconnected)
                 if stopped { throw SurfAceRegistrationError.stopped }
+                failures.values.append(reportFailure(
+                    phase: "reconnect",
+                    endpoint: selected.url,
+                    underlying: surfAceRegistrationErrorDescription(error),
+                    showInStatus: true
+                ).errorDescription ?? "reconnect failed")
             }
         }
-        if let configured, try await attempt(configured, surfaces: surfaces) { return }
+        if let configured, try await attempt(configured, surfaces: surfaces, failures: failures) { return }
         if selected == nil { setStatus(.connecting) }
-        for url in await discover() {
-            if try await attempt(url, surfaces: surfaces) { return }
+        let discovered = await discover()
+        if let reason = discoveryError() {
+            failures.values.append(reportFailure(
+                phase: "discovery",
+                endpoint: nil,
+                underlying: reason,
+                showInStatus: true
+            ).errorDescription ?? reason)
+        } else if discovered.isEmpty {
+            let reason = "Bonjour found no _surf-ace._tcp service with role=server v=1 ws=/ws"
+            failures.values.append(reportFailure(
+                phase: "discovery",
+                endpoint: nil,
+                underlying: reason,
+                showInStatus: true
+            ).errorDescription ?? reason)
+        }
+        for url in discovered {
+            if try await attempt(url, surfaces: surfaces, failures: failures) { return }
             if resolutionFailed {
                 for address in transportFallbacks(url) {
-                    if try await attempt(address, surfaces: surfaces) { return }
+                    if try await attempt(address, surfaces: surfaces, failures: failures, phase: "transport_address_fallback") { return }
                 }
             }
         }
-        throw SurfAceRegistrationError.noServer
+        let failure = SurfAceCentralRegistrationFailure(
+            phase: "retry",
+            endpoint: nil,
+            underlying: failures.values.isEmpty
+                ? "Bonjour found no _surf-ace._tcp service with role=server v=1 ws=/ws"
+                : failures.values.joined(separator: "; ")
+        )
+        setLastError(failure.errorDescription)
+        if lastReportedError != failure.errorDescription {
+            lastReportedError = failure.errorDescription
+            onError(failure)
+        }
+        throw failure
     }
 
     func claimPaneLabel(surfaceId: String, paneId: Int64, paneLineageId: String) async throws -> Int64 {
@@ -491,7 +634,12 @@ final class SurfAceCentralRegistration {
         )
     }
 
-    private func attempt(_ url: URL, surfaces: [SurfAceRegistrationSurface]) async throws -> Bool {
+    private func attempt(
+        _ url: URL,
+        surfaces: [SurfAceRegistrationSurface],
+        failures: FailureCollector,
+        phase: String = "registration"
+    ) async throws -> Bool {
         guard !stopped else { throw SurfAceRegistrationError.stopped }
         guard url.scheme == "ws" || url.scheme == "wss" else { return false }
         resolutionFailed = false
@@ -504,6 +652,8 @@ final class SurfAceCentralRegistration {
             guard !stopped else { throw SurfAceRegistrationError.stopped }
             selected?.transport.close()
             selected = (url, candidate)
+            setLastError(nil)
+            lastReportedError = nil
             setStatus(.connected)
             return true
         } catch {
@@ -511,7 +661,13 @@ final class SurfAceCentralRegistration {
             resolutionFailed = transportError?.code == .cannotFindHost || transportError?.code == .dnsLookupFailed
             candidate.close()
             if selected == nil { setStatus(.disconnected) }
-            onError(error)
+            let failure = reportFailure(
+                phase: phase,
+                endpoint: url,
+                underlying: surfAceRegistrationErrorDescription(error),
+                showInStatus: selected == nil
+            )
+            failures.values.append(failure.errorDescription ?? surfAceRegistrationErrorDescription(error))
             if stopped { throw SurfAceRegistrationError.stopped }
             return false
         }
@@ -521,7 +677,13 @@ final class SurfAceCentralRegistration {
         guard loop == nil, !stopped else { return }
         loop = Task { [weak self] in
             while let self, !self.stopped {
-                do { try await self.synchronize() } catch { self.onError(error) }
+                do { try await self.synchronize() } catch {
+                    let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                    if self.lastReportedError != message {
+                        self.lastReportedError = message
+                        self.onError(error)
+                    }
+                }
                 do { try await Task.sleep(for: .seconds(2)) } catch { return }
             }
         }
@@ -547,6 +709,7 @@ final class SurfAceCentralDiscovery: NSObject, @preconcurrency NetServiceBrowser
     private var urls: [String: URL] = [:]
     private var addresses: [URL: [URL]] = [:]
     private var runningGeneration: UInt64?
+    private(set) var lastError: String?
 
     init(makeBrowser: @escaping @MainActor () -> NetServiceBrowser = { NetServiceBrowser() },
          sleep: @escaping @MainActor (Duration) async throws -> Void = { try await Task.sleep(for: $0) }) {
@@ -561,6 +724,7 @@ final class SurfAceCentralDiscovery: NSObject, @preconcurrency NetServiceBrowser
         guard runningGeneration == nil, !Task.isCancelled else { return [] }
         let generation = lifecycle.beginBrowsing()
         runningGeneration = generation
+        lastError = nil
         addresses.removeAll()
         urls.removeAll()
         let browser = makeBrowser()
@@ -594,6 +758,9 @@ final class SurfAceCentralDiscovery: NSObject, @preconcurrency NetServiceBrowser
         }
         finishServices(generation: generation)
         let result = urls.sorted { $0.key < $1.key }.map(\.value)
+        if result.isEmpty && lastError == nil {
+            lastError = "Bonjour found no _surf-ace._tcp service with role=server v=1 ws=/ws"
+        }
         urls.removeAll()
         if runningGeneration == generation { runningGeneration = nil }
         return result
@@ -621,25 +788,7 @@ final class SurfAceCentralDiscovery: NSObject, @preconcurrency NetServiceBrowser
             sender.stop()
             sender.delegate = nil
         }
-        guard let data = sender.txtRecordData(), let host = sender.hostName, sender.port > 0 else { return }
-        let txt = NetService.dictionary(fromTXTRecord: data)
-        guard txt["role"].flatMap({ String(data: $0, encoding: .utf8) }) == "server" else { return }
-        let path = txt["ws"].flatMap { String(data: $0, encoding: .utf8) } ?? "/"
-        if let url = Self.localTransportURL(host: host, port: sender.port, path: path) {
-            urls[sender.name] = url
-            addresses[url] = (sender.addresses ?? []).compactMap { data in
-                var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-                let result = data.withUnsafeBytes { bytes -> Int32 in
-                    guard let base = bytes.baseAddress, bytes.count >= MemoryLayout<sockaddr>.size else { return -1 }
-                    return getnameinfo(base.assumingMemoryBound(to: sockaddr.self), socklen_t(bytes.count),
-                        &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST)
-                }
-                guard result == 0 else { return nil }
-                guard var transport = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return nil }
-                transport.host = String(cString: host)
-                return transport.url
-            }
-        }
+        storeCandidate(from: sender)
     }
 
     func netService(_ sender: NetService, didNotResolve errorDict: [String: NSNumber]) {
@@ -647,18 +796,74 @@ final class SurfAceCentralDiscovery: NSObject, @preconcurrency NetServiceBrowser
         guard let owned = services[identifier],
               lifecycle.resolutionFailed(sender, generation: owned.generation) else { return }
         services.removeValue(forKey: identifier)
+        lastError = "Bonjour could not resolve SRV target for \(sender.name): \(diagnosticFields(errorDict))"
+        // NetService can provide numeric DNS-SD addresses even when its target
+        // hostname lookup fails. Keep the SRV target as the primary URL and
+        // let registration try these addresses only after a hostname error.
+        storeCandidate(from: sender)
         sender.stop()
         sender.delegate = nil
     }
 
     func netServiceBrowser(_ browser: NetServiceBrowser, didNotSearch errorDict: [String: NSNumber]) {
         guard let activeBrowser, activeBrowser.browser === browser else { return }
+        lastError = "Bonjour browse failed: \(diagnosticFields(errorDict))"
         closeIntake(browser: browser, generation: activeBrowser.generation)
         lifecycle.cancel(generation: activeBrowser.generation)
     }
 
     static func localTransportURL(host: String, port: Int, path: String) -> URL? {
         SurfAceCentralDiscoveryLifecycle.localTransportURL(host: host, port: port, path: path)
+    }
+
+    private func storeCandidate(from sender: NetService) {
+        guard let data = sender.txtRecordData() else {
+            lastError = "Bonjour service \(sender.name) has no TXT record"
+            return
+        }
+        let txt = NetService.dictionary(fromTXTRecord: data)
+        let role = txt["role"].flatMap { String(data: $0, encoding: .utf8) }
+        guard role == "server" else { return }
+        let version = txt["v"].flatMap { String(data: $0, encoding: .utf8) } ?? "missing"
+        let path = txt["ws"].flatMap { String(data: $0, encoding: .utf8) } ?? "missing"
+        guard version == "1", path == "/ws" else {
+            lastError = "Bonjour service \(sender.name) rejected: expected role=server v=1 ws=/ws, received v=\(version) ws=\(path)"
+            return
+        }
+        guard let host = sender.hostName, sender.port > 0 else {
+            lastError = "Bonjour service \(sender.name) has no resolved SRV target and port"
+            return
+        }
+        let normalizedHost = (host.hasSuffix(".") ? String(host.dropLast()) : host).lowercased()
+        guard normalizedHost != "0.0.0.0", normalizedHost != "::", normalizedHost != "0:0:0:0:0:0:0:0" else {
+            lastError = "Bonjour service \(sender.name) rejected: SRV target \(host) is a wildcard address, not a client destination"
+            return
+        }
+        guard let url = Self.localTransportURL(host: host, port: sender.port, path: path) else {
+            lastError = "Bonjour service \(sender.name) has an invalid SRV target, port, or ws path"
+            return
+        }
+        urls[sender.name] = url
+        addresses[url] = numericTransportURLs(from: sender.addresses ?? [], basedOn: url)
+    }
+
+    private func numericTransportURLs(from addresses: [Data], basedOn url: URL) -> [URL] {
+        addresses.compactMap { data in
+            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            let result = data.withUnsafeBytes { bytes -> Int32 in
+                guard let base = bytes.baseAddress, bytes.count >= MemoryLayout<sockaddr>.size else { return -1 }
+                return getnameinfo(base.assumingMemoryBound(to: sockaddr.self), socklen_t(bytes.count),
+                    &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST)
+            }
+            guard result == 0 else { return nil }
+            guard var transport = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return nil }
+            transport.host = String(cString: host)
+            return transport.url
+        }
+    }
+
+    private func diagnosticFields(_ fields: [String: NSNumber]) -> String {
+        fields.keys.sorted().map { "\($0)=\(fields[$0] ?? 0)" }.joined(separator: ",")
     }
 
     private func closeIntake(browser: NetServiceBrowser, generation: UInt64) {

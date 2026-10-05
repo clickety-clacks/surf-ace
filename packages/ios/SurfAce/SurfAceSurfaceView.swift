@@ -388,9 +388,54 @@ private struct SurfAceWindowView: View {
                     .onChange(of: proxy.size) { _, newSize in
                         runtime.updateViewport(surfaceId: surface.surfaceId, size: newSize, scale: displayScale)
                     }
+
+                if let message = surface.centralConnectionError {
+                    SurfAceCentralConnectionBanner(message: message, state: surface.connectionBarState)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                        .padding(.horizontal, 16)
+                        .padding(.top, 14)
+                        .allowsHitTesting(false)
+                }
             }
         }
         .focusedSceneValue(\.surfAceCommandTargetSurfaceId, surface.surfaceId)
+    }
+}
+
+private struct SurfAceCentralConnectionBanner: View {
+    let message: String
+    let state: SurfAceConnectionBarState
+
+    private var title: LocalizedStringResource {
+        switch state {
+        case .connecting: "Registry reconnecting"
+        case .connected: "Registry connection recovered"
+        case .disconnected: "Registry disconnected"
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(title)
+                .font(.callout.weight(.semibold))
+            ScrollView(.vertical) {
+                Text(message)
+                    .font(.caption)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+            }
+            .frame(maxHeight: 120)
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .frame(maxWidth: 560, alignment: .leading)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(Color.orange.opacity(0.72), lineWidth: 1)
+        }
+        .accessibilityElement(children: .combine)
     }
 }
 

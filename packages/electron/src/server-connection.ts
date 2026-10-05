@@ -1,18 +1,53 @@
 import {
   createBonjourSurfAceDiscoveryService,
+  type SurfAceDiscoveryEndpoint,
   type SurfAceDiscoveryService,
 } from "./surf-ace-discovery.js";
 import { ConfiguredServerRegistration } from "./configured-server.js";
 import type { SurfaceCore } from "./surface-core.js";
 
+type SelectedRegistration = {
+  address: string;
+  configured: boolean;
+  registration: ConfiguredServerRegistration;
+};
+
+function describeError(error: unknown): string {
+  if (!(error instanceof Error)) return String(error);
+  const code = "code" in error && typeof error.code === "string" ? ` (${error.code})` : "";
+  return `${error.name}${code}: ${error.message}`;
+}
+
+function endpointAddress(endpoint: SurfAceDiscoveryEndpoint): string {
+  const unwrappedHost = endpoint.host.replace(/^\[(.*)\]$/, "$1");
+  const host = unwrappedHost.includes(":") ? `[${unwrappedHost}]` : unwrappedHost;
+  return `ws://${host}:${endpoint.port}${endpoint.wsPath}`;
+}
+
+function isServerContract(endpoint: SurfAceDiscoveryEndpoint): boolean {
+  return endpoint.role === "server" && endpoint.protocolVersion === 1 && endpoint.wsPath === "/ws";
+}
+
+function isUnspecifiedAddress(host: string): boolean {
+  const normalized = host.toLowerCase().replace(/^\[(.*)\]$/, "$1").replace(/\.$/, "");
+  return normalized === "0.0.0.0" || normalized === "::" || normalized === "0:0:0:0:0:0:0:0";
+}
+
+function isHostnameResolutionFailure(error: unknown): boolean {
+  if (typeof error !== "object" || error === null || !("code" in error)) return false;
+  const code = (error as NodeJS.ErrnoException).code;
+  return code === "ENOTFOUND" || code === "EAI_AGAIN";
+}
+
 export class ServerConnection {
-  private selected: ConfiguredServerRegistration | null = null;
-  private selectedConfigured = false;
+  private selected: SelectedRegistration | null = null;
   private status: "connected" | "connecting" | "disconnected" = "disconnected";
   private timer: ReturnType<typeof setTimeout> | undefined;
   private stopped = false;
   private browsing = false;
   private pending: Promise<void> = Promise.resolve();
+  private lastFailure: string | null = null;
+  private lastReportedFailure: string | null = null;
   private readonly discovery: SurfAceDiscoveryService;
 
   constructor(private readonly options: {
@@ -30,22 +65,41 @@ export class ServerConnection {
   private setStatus(status: "connected" | "connecting" | "disconnected"): void {
     this.status = status;
     for (const surface of this.options.core.listSurfaces()) {
-      this.options.core.setConnectionBar(surface.surfaceId, status);
+      this.options.core.setConnectionBar(surface.surfaceId, status, this.lastFailure);
     }
+  }
+
+  private reportFailure(message: string, visible: boolean, failures: string[]): void {
+    failures.push(message);
+    if (visible && !this.selected) {
+      this.lastFailure = message;
+      this.setStatus("connecting");
+    }
+    if (this.lastReportedFailure !== message) {
+      this.lastReportedFailure = message;
+      this.options.onError?.(new Error(message));
+    }
+  }
+
+  private clearFailure(): void {
+    this.lastFailure = null;
+    this.lastReportedFailure = null;
   }
 
   async claimPaneLabel(surfaceId: string, paneId: number, paneLineageId: string): Promise<number> {
     if (this.status !== "connected" || !this.selected) throw new Error("allocator_unavailable");
-    return await this.selected.claimPaneLabel(surfaceId, paneId, paneLineageId);
+    return await this.selected.registration.claimPaneLabel(surfaceId, paneId, paneLineageId);
   }
 
   synchronize(): Promise<void> {
     const run = this.pending.then(async () => {
       if (this.stopped) return;
       if (!this.selected || this.status !== "connected") this.setStatus("connecting");
-      let resolutionFailed = false;
-      const tryAddress = async (address: string, configured = false): Promise<boolean> => {
-        resolutionFailed = false;
+      const failures: string[] = [];
+      let addressResolutionFailed = false;
+
+      const tryAddress = async (address: string, configured = false, context = "configured registry"): Promise<boolean> => {
+        addressResolutionFailed = false;
         let candidate: ConfiguredServerRegistration | null = null;
         try {
           candidate = new ConfiguredServerRegistration(
@@ -53,41 +107,48 @@ export class ServerConnection {
             this.options.onError, this.options.requestTimeoutMs ?? 2000,
           );
           candidate.onClose(() => {
-            if (this.selected === candidate) this.setStatus("disconnected");
+            if (this.selected?.registration === candidate) {
+              this.setStatus("disconnected");
+            }
           });
           await candidate.synchronize();
           if (this.stopped) { await candidate.stop(); return false; }
           const previous = this.selected;
-          this.selected = candidate;
-          this.selectedConfigured = configured;
+          this.selected = { address, configured, registration: candidate };
+          this.clearFailure();
           this.setStatus("connected");
-          await previous?.stop();
+          await previous?.registration.stop();
           return true;
         } catch (error) {
-          const code = (error as NodeJS.ErrnoException)?.code;
-          resolutionFailed = code === "ENOTFOUND" || code === "EAI_AGAIN";
+          addressResolutionFailed = isHostnameResolutionFailure(error);
           await candidate?.stop();
+          this.reportFailure(`${context} ${address} failed: ${describeError(error)}`, !this.selected, failures);
           return false;
         }
       };
+
       if (this.selected) {
+        const current = this.selected;
         try {
-          await this.selected.synchronize();
+          await current.registration.synchronize();
           if (this.stopped) return;
+          this.clearFailure();
           this.setStatus("connected");
-        } catch {
-          await this.selected.stop();
+        } catch (error) {
+          await current.registration.stop();
           this.selected = null;
+          this.reportFailure(`registry ${current.address} reconnect failed: ${describeError(error)}`, true, failures);
           this.setStatus("connecting");
         }
         if (this.selected) {
-          if (!this.selectedConfigured && this.options.configuredAddress) {
-            await tryAddress(this.options.configuredAddress, true);
+          if (!this.selected.configured && this.options.configuredAddress) {
+            await tryAddress(this.options.configuredAddress, true, "configured registry recovery");
           }
           return;
         }
       }
-      if (this.options.configuredAddress && await tryAddress(this.options.configuredAddress, true)) {
+
+      if (this.options.configuredAddress && await tryAddress(this.options.configuredAddress)) {
         if (this.browsing) {
           await this.discovery.stop();
           this.browsing = false;
@@ -95,33 +156,85 @@ export class ServerConnection {
         return;
       }
       if (this.stopped) return;
-      if (!this.browsing) {
-        this.browsing = true;
-        await this.discovery.start();
-      } else {
-        await this.discovery.refreshNow();
-      }
-      for (const endpoint of this.discovery.getSnapshot()) {
-        if (endpoint.role !== "server") continue;
-        const host = endpoint.host.includes(":") ? `[${endpoint.host}]` : endpoint.host;
-        let connected = await tryAddress(`ws://${host}:${endpoint.port}${endpoint.wsPath}`);
-        if (!connected && resolutionFailed) {
-          for (const address of endpoint.transportAddresses ?? []) {
-            const transportHost = address.includes(":") ? `[${address}]` : address;
-            if (await tryAddress(`ws://${transportHost}:${endpoint.port}${endpoint.wsPath}`)) {
-              connected = true;
-              break;
-            }
-          }
+
+      try {
+        if (!this.browsing) {
+          await this.discovery.start();
+          this.browsing = true;
+        } else {
+          await this.discovery.refreshNow();
         }
-        if (connected) {
+      } catch (error) {
+        this.browsing = false;
+        this.reportFailure(`DNS-SD browse failed: ${describeError(error)}`, true, failures);
+      }
+
+      const endpoints = this.discovery.getSnapshot();
+      const servers: SurfAceDiscoveryEndpoint[] = [];
+      for (const endpoint of endpoints) {
+        if (endpoint.role !== "server") continue;
+        if (!isServerContract(endpoint)) {
+          this.reportFailure(
+            `DNS-SD service ${endpoint.instanceName} rejected: expected role=server v=1 ws=/ws, received role=${endpoint.role ?? "missing"} v=${endpoint.protocolVersion} ws=${endpoint.wsPath || "missing"}`,
+            true,
+            failures,
+          );
+          continue;
+        }
+        if (isUnspecifiedAddress(endpoint.host)) {
+          this.reportFailure(
+            `DNS-SD service ${endpoint.instanceName} rejected: SRV target ${endpoint.host} is a wildcard address, not a client destination`,
+            true,
+            failures,
+          );
+          continue;
+        }
+        servers.push(endpoint);
+      }
+
+      const discoveryError = this.discovery.getLastError?.();
+      if (discoveryError) {
+        this.reportFailure(`DNS-SD discovery failed: ${discoveryError}`, true, failures);
+      }
+      if (servers.length === 0) {
+        if (!discoveryError && endpoints.length === 0) {
+          this.reportFailure("DNS-SD browse found no _surf-ace._tcp service with role=server v=1 ws=/ws", true, failures);
+        } else if (!discoveryError && !endpoints.some((endpoint) => endpoint.role === "server")) {
+          this.reportFailure("DNS-SD browse found no service with role=server", true, failures);
+        }
+      }
+
+      for (const endpoint of servers) {
+        const address = endpointAddress(endpoint);
+        if (await tryAddress(address, false, `discovered registry ${endpoint.instanceName}`)) {
           await this.discovery.stop();
           this.browsing = false;
           return;
         }
+        if (addressResolutionFailed) {
+          for (const transportAddress of endpoint.transportAddresses ?? []) {
+            const unwrappedHost = transportAddress.replace(/^\[(.*)\]$/, "$1");
+            const host = unwrappedHost.includes(":") ? `[${unwrappedHost}]` : unwrappedHost;
+            const fallbackAddress = `ws://${host}:${endpoint.port}${endpoint.wsPath}`;
+            if (await tryAddress(fallbackAddress, false, `DNS-SD transport address for ${endpoint.instanceName}`)) {
+              await this.discovery.stop();
+              this.browsing = false;
+              return;
+            }
+          }
+        }
       }
+
+      const message = failures.length > 0
+        ? `no_surf_ace_server: ${failures.join("; ")}`
+        : "no_surf_ace_server: no valid _surf-ace._tcp role=server v=1 ws=/ws advertisement";
+      this.lastFailure = message;
       this.setStatus("disconnected");
-      throw new Error("no_surf_ace_server");
+      if (this.lastReportedFailure !== message) {
+        this.lastReportedFailure = message;
+        this.options.onError?.(new Error(message));
+      }
+      throw new Error(message);
     });
     this.pending = run.catch(() => { if (!this.selected) this.setStatus("disconnected"); });
     return run;
@@ -129,7 +242,13 @@ export class ServerConnection {
 
   start(): void {
     const tick = async () => {
-      try { await this.synchronize(); } catch (error) { this.options.onError?.(error); }
+      try { await this.synchronize(); } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (this.lastReportedFailure !== message) {
+          this.lastReportedFailure = message;
+          this.options.onError?.(error);
+        }
+      }
       if (!this.stopped) this.timer = setTimeout(() => void tick(), 2000);
     };
     void tick();
@@ -139,7 +258,8 @@ export class ServerConnection {
     this.stopped = true;
     clearTimeout(this.timer);
     await this.pending;
-    await this.selected?.stop();
+    await this.selected?.registration.stop();
+    this.selected = null;
     await this.discovery.stop();
     this.setStatus("disconnected");
   }

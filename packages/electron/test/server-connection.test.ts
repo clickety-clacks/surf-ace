@@ -19,8 +19,8 @@ test("Bonjour transport fallback is limited to hostname resolution failures", as
       };
       ConfiguredServerRegistration.prototype.stop = async () => {};
       const endpoint = {
-        host: "stable.local", endpointId: "stable.local:19430/#stable", port: 19430,
-        wsPath: "/", role: "server", transportAddresses: ["192.0.2.10"],
+        host: "stable.local", endpointId: "stable.local:19430/ws#stable", port: 19430,
+        wsPath: "/ws", protocolVersion: 1, role: "server", transportAddresses: ["192.0.2.10"],
       } as any;
       const connection = new ServerConnection({
         clientId: "fixture", core: new SurfaceCore(), persist: async () => {},
@@ -35,10 +35,10 @@ test("Bonjour transport fallback is limited to hostname resolution failures", as
         await connection.synchronize();
       }
       assert.deepEqual(attempted, code === "ENOTFOUND" || code === "EAI_AGAIN"
-        ? ["ws://stable.local:19430/", "ws://192.0.2.10:19430/"]
-        : ["ws://stable.local:19430/"]);
+        ? ["ws://stable.local:19430/ws", "ws://192.0.2.10:19430/ws"]
+        : ["ws://stable.local:19430/ws"]);
       assert.equal(endpoint.host, "stable.local");
-      assert.equal(endpoint.endpointId, "stable.local:19430/#stable");
+      assert.equal(endpoint.endpointId, "stable.local:19430/ws#stable");
       await connection.stop();
     }
   } finally {
@@ -257,6 +257,104 @@ test("configured rejection falls back through Bonjour and absent central stays d
     await connection.stop();
     await configured.close();
     if (fallback.server.address()) await fallback.close();
+  }
+});
+
+test("discovery rejects an advertisement outside the v1 /ws contract", async () => {
+  const original = ConfiguredServerRegistration.prototype.synchronize;
+  const originalStop = ConfiguredServerRegistration.prototype.stop;
+  const attempted: string[] = [];
+  try {
+    ConfiguredServerRegistration.prototype.synchronize = async function () {
+      attempted.push((this as any).wire.url as string);
+      throw new Error("invalid advertisement was contacted");
+    };
+    ConfiguredServerRegistration.prototype.stop = async () => {};
+    const core = new SurfaceCore();
+    const surface = core.ensurePrimarySurface("Invalid advertisement", { width: 800, height: 600, scale: 1 });
+    const discovery = emptyDiscovery();
+    discovery.getSnapshot = () => [
+      {
+        host: "server.local", port: 19001, wsPath: "/", protocolVersion: 1,
+        role: "server", instanceName: "wrong-path",
+      },
+      {
+        host: "server.local", port: 19002, wsPath: "/ws", protocolVersion: 0,
+        role: "server", instanceName: "wrong-version",
+      },
+      {
+        host: "0.0.0.0", port: 19003, wsPath: "/ws", protocolVersion: 1,
+        role: "server", instanceName: "wildcard-target",
+      },
+    ] as any;
+    const connection = new ServerConnection({
+      clientId: "stable-client", core, discovery, persist: async () => {},
+    });
+
+    await assert.rejects(connection.synchronize(), /expected role=server v=1 ws=\/ws/);
+    const state = core.getRendererWindowState(surface.surfaceId);
+    assert.equal(state.connectionBar, "disconnected");
+    assert.match(state.connectionError ?? "", /ws=\//);
+    assert.match(state.connectionError ?? "", /v=0/);
+    assert.match(state.connectionError ?? "", /wildcard address/);
+    assert.deepEqual(attempted, []);
+    await connection.stop();
+  } finally {
+    ConfiguredServerRegistration.prototype.synchronize = original;
+    ConfiguredServerRegistration.prototype.stop = originalStop;
+  }
+});
+
+test("underlying registration failure stays visible and logged until discovery reconnects", async () => {
+  const central = await centralFixture();
+  const core = new SurfaceCore();
+  const surface = core.ensurePrimarySurface("Retry diagnostic", { width: 800, height: 600, scale: 1 });
+  const initial = core.getRendererWindowState(surface.surfaceId);
+  const logs: string[] = [];
+  const discovery = emptyDiscovery();
+  discovery.getSnapshot = () => [{
+    host: "127.0.0.1", port: central.port, wsPath: "/ws", protocolVersion: 1,
+    role: "server", instanceName: "test registry", transportAddresses: ["127.0.0.1"],
+  } as any];
+  const connection = new ServerConnection({
+    clientId: "stable-retry-client", core, discovery, persist: async () => {},
+    requestTimeoutMs: 500,
+    onError: (error) => logs.push(error instanceof Error ? error.message : String(error)),
+  });
+
+  try {
+    const first = connection.synchronize();
+    await until(() => central.requests.length === 1);
+    central.reply(0, false);
+    await assert.rejects(first, /registration_rejected/);
+    await until(() => core.getRendererWindowState(surface.surfaceId).connectionBar === "disconnected");
+
+    const failed = core.getRendererWindowState(surface.surfaceId);
+    assert.match(failed.connectionError ?? "", /registration_rejected/);
+    assert.ok(logs.some((line) => /registration_rejected/.test(line)));
+    assert.equal(failed.surfaceId, initial.surfaceId);
+    assert.equal(failed.panes[0]?.paneId, initial.panes[0]?.paneId);
+    assert.equal(failed.panes[0]?.label, initial.panes[0]?.label);
+
+    const retry = connection.synchronize();
+    await until(() => central.requests.length === 2);
+    central.reply(1, true);
+    await retry;
+
+    const connected = core.getRendererWindowState(surface.surfaceId);
+    assert.equal(connected.connectionBar, "connected");
+    assert.equal(connected.connectionError, undefined);
+    assert.equal(connected.windowLabel, "a");
+    assert.equal(connected.panes[0]?.label, "700");
+    assert.equal(central.requests[0]!.message.payload.clientId, "stable-retry-client");
+    assert.equal(central.requests[1]!.message.payload.clientId, "stable-retry-client");
+    assert.equal(
+      central.requests[1]!.message.payload.surfaces[0]!.panes[0]!.paneLineageId,
+      central.requests[0]!.message.payload.surfaces[0]!.panes[0]!.paneLineageId,
+    );
+  } finally {
+    await connection.stop();
+    await central.close();
   }
 });
 
