@@ -672,7 +672,7 @@ async function startPackagedServer(launcher: string, config: unknown, root: stri
     throw new Error(`${label}_packaged_server_ready_binding_invalid`);
   }
   const health = JSON.parse((await command(process.execPath, [launcher, "health", "--endpoint", ready.endpoint])).stdout);
-  if (health.event !== "health" || health.status !== "healthy" || health.transport !== "websocket-open") {
+  if (health.event !== "health" || health.status !== "healthy" || health.transport !== "fleet.topology") {
     child.kill("SIGTERM");
     await closePromise;
     throw new Error(`${label}_packaged_server_health_failed`);
