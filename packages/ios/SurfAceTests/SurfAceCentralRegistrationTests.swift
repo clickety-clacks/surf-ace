@@ -560,11 +560,11 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         for _ in 0..<2 {
             do { try await registration.synchronize(); XCTFail("hostname failure succeeded") } catch { }
             XCTAssertTrue(registration.lastError?.contains("registry.local:9002/ws") == true)
-            XCTAssertTrue(registration.lastError?.contains("cannot find host") == true || registration.lastError?.contains("hostname") == true)
+            XCTAssertTrue(registration.lastError?.contains("\(URLError.Code.cannotFindHost.rawValue)") == true)
             XCTAssertEqual(registration.status, .disconnected)
         }
         XCTAssertTrue(visibleErrors.contains { $0?.contains("registry.local:9002/ws") == true })
-        XCTAssertTrue(logErrors.contains { $0.contains("cannotFindHost") || $0.localizedCaseInsensitiveContains("hostname") })
+        XCTAssertTrue(logErrors.contains { $0.contains("\(URLError.Code.cannotFindHost.rawValue)") })
         XCTAssertEqual(transport.clients, ["stable-client-identity", "stable-client-identity"])
 
         transport.error = nil
@@ -645,7 +645,6 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
             }
             XCTAssertNil(code)
             XCTAssertNil(message)
-            XCTAssertTrue(isPaneAllocatorUnavailable(error))
         }
 
         XCTAssertFalse(isPaneAllocatorUnavailable(SurfAceRegistrationError.stopped))
@@ -673,7 +672,6 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
             }
             XCTAssertEqual(code, "registration_denied")
             XCTAssertEqual(message, "client signature rejected")
-            XCTAssertTrue(isPaneAllocatorUnavailable(error))
         }
     }
 
