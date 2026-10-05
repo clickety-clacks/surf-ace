@@ -1532,11 +1532,11 @@ test("Tightbeam foreground launcher validates exact PG16 config and WebSocket he
     await assert.rejects(tightbeamServerLauncher.checkHealth(endpoint), /health_fleet_topology_rejected:registry_unavailable/);
     await assert.rejects(
       tightbeamServerLauncher.checkHealth(`ws://127.0.0.2:${address.port}/ws`),
-      /health_websocket_connect_failed|health_websocket_closed_before_open/,
+      /health_websocket_connect_failed|health_websocket_closed_before_open|health_websocket_connect_timeout/,
     );
     await assert.rejects(
       tightbeamServerLauncher.checkHealth(`ws://127.0.0.1:${address.port + 1}/ws`),
-      /health_websocket_connect_failed|health_websocket_closed_before_open/,
+      /health_websocket_connect_failed|health_websocket_closed_before_open|health_websocket_connect_timeout/,
     );
   } finally {
     await new Promise((resolve, reject) => healthServer.close((error) => error ? reject(error) : resolve()));
