@@ -139,6 +139,21 @@ test("serviceToEndpoint prefers stable service hostname over stale numeric addre
   assert.equal(endpoint?.endpointId, "workstation-a.local:19001/ws#b0ddd36d");
 });
 
+test("serviceToEndpoint keeps the resolved SRV target and does not invent TXT contract fields", () => {
+  const resolvedTarget = __test.serviceToEndpoint({
+    addresses: ["192.0.2.44"],
+    host: "192.0.2.19.",
+    name: "central",
+    port: 23456,
+    txt: { role: "server" },
+  } as any, () => 1234);
+  assert.equal(resolvedTarget?.host, "192.0.2.19");
+  assert.equal(resolvedTarget?.port, 23456);
+  assert.equal(resolvedTarget?.protocolVersion, 0);
+  assert.equal(resolvedTarget?.wsPath, "");
+  assert.deepEqual(resolvedTarget?.transportAddresses, ["192.0.2.44"]);
+});
+
 test("refreshNow clears stale endpoints when a full refresh returns no advertisements", async () => {
   const discovery = new __test.BonjourSurfAceDiscoveryService({
     logger: {},

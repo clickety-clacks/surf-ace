@@ -68,6 +68,26 @@ body.compositor-hosted .pane-shell {
   width: 100%;
 }
 
+.connection-status-banner {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  z-index: 60;
+  width: max-content;
+  max-width: calc(100% - 24px);
+  max-height: 30vh;
+  overflow: auto;
+  padding: 8px 12px;
+  transform: translateX(-50%);
+  border: 1px solid rgba(245, 158, 11, 0.62);
+  border-radius: 8px;
+  background: rgba(20, 18, 13, 0.94);
+  color: #fff4d6;
+  font: 500 13px/1.35 ui-sans-serif, system-ui, sans-serif;
+  overflow-wrap: anywhere;
+  pointer-events: none;
+}
+
 .layout-root {
   height: 100%;
   width: 100%;

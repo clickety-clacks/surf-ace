@@ -4,7 +4,6 @@ import { spawn } from "node:child_process";
 import type { SurfaceViewport } from "../../protocol/src/index.js";
 
 const SURF_ACE_SERVICE_TYPE = "surf-ace";
-const DEFAULT_WS_PATH = "/ws";
 const DEFAULT_REFRESH_INTERVAL_MS = 5_000;
 const DEFAULT_REFRESH_TIMEOUT_MS = 1_500;
 type BonjourConstructor = typeof import("bonjour-service").Bonjour;
@@ -40,6 +39,7 @@ export type SurfAceDiscoveryEndpoint = {
 
 export interface SurfAceDiscoveryService {
   getSnapshot(): SurfAceDiscoveryEndpoint[];
+  getLastError?(): string | null;
   refreshNow(): Promise<void>;
   start(): Promise<void>;
   stop(): Promise<void>;
@@ -75,21 +75,13 @@ function parseIntSafe(value: string | undefined, fallback: number): number {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
-function normalizeWsPath(value: string | undefined): string {
-  const trimmed = value?.trim();
-  if (!trimmed) {
-    return DEFAULT_WS_PATH;
-  }
-  return trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
+function advertisedWsPath(value: string | undefined): string {
+  return value?.trim() ?? "";
 }
 
 function txtStr(txt: Record<string, unknown>, key: string): string | undefined {
   const v = txt[key];
   return typeof v === "string" ? v : undefined;
-}
-
-function isIpv4Address(address: string): boolean {
-  return /^\d{1,3}(?:\.\d{1,3}){3}$/.test(address.trim());
 }
 
 function isLinkLocalIpv6Address(address: string): boolean {
@@ -131,7 +123,7 @@ function endpointFromResolvedService(params: {
   txt: Record<string, string>;
 }): SurfAceDiscoveryEndpoint {
   const host = params.host.replace(/\.$/, "").trim();
-  const wsPath = normalizeWsPath(params.txt.ws);
+  const wsPath = advertisedWsPath(params.txt.ws);
   const serviceDiscriminator = encodeURIComponent(
     (params.txt.pk?.trim().toLowerCase() || params.instanceName).trim(),
   );
@@ -148,7 +140,7 @@ function endpointFromResolvedService(params: {
     lastSeenAt: params.now(),
     name: params.txt.name?.trim() || params.instanceName,
     port: params.port,
-    protocolVersion: parseIntSafe(params.txt.v, 1),
+    protocolVersion: params.txt.v === "1" ? 1 : 0,
     viewport: {
       height: parseIntSafe(params.txt.h, 0),
       scale: parseIntSafe(params.txt.s, 1),
@@ -257,16 +249,6 @@ function parseDnsSdLookupOutput(
 
 function resolveServiceHost(service: Service): string | null {
   const host = rawServiceHost(service);
-  if (host && !isIpv4Address(host)) {
-    return host;
-  }
-
-  const resolvedAddresses = (service.addresses ?? []).map((address) => address.trim()).filter(Boolean);
-  const ipv4Address = resolvedAddresses.find(isIpv4Address);
-  if (ipv4Address) {
-    return ipv4Address;
-  }
-
   return host || null;
 }
 
@@ -276,7 +258,7 @@ function serviceToEndpoint(
 ): SurfAceDiscoveryEndpoint | null {
   const txt = (service.txt ?? {}) as Record<string, unknown>;
   const host = resolveServiceHost(service);
-  if (!host) {
+  if (!host || !Number.isInteger(service.port) || service.port < 1 || service.port > 65_535) {
     return null;
   }
   const endpoint = endpointFromResolvedService({
@@ -308,6 +290,7 @@ class BonjourSurfAceDiscoveryService implements SurfAceDiscoveryService {
   private readonly timeoutMs: number;
   private readonly listeners = new Set<(endpoints: SurfAceDiscoveryEndpoint[]) => void>();
   private readonly snapshot = new Map<string, SurfAceDiscoveryEndpoint>();
+  private lastError: string | null = null;
   private started = false;
   private bonjour: BonjourInstance | null = null;
   private browser: Browser | null = null;
@@ -327,6 +310,10 @@ class BonjourSurfAceDiscoveryService implements SurfAceDiscoveryService {
 
   getSnapshot(): SurfAceDiscoveryEndpoint[] {
     return [...this.snapshot.values()];
+  }
+
+  getLastError(): string | null {
+    return this.lastError;
   }
 
   subscribe(listener: (endpoints: SurfAceDiscoveryEndpoint[]) => void): () => void {
@@ -389,7 +376,18 @@ class BonjourSurfAceDiscoveryService implements SurfAceDiscoveryService {
       }),
     );
     this.browser?.update();
-    const refreshedEndpoints = await this.queryCurrentEndpoints();
+    let refreshedEndpoints: SurfAceDiscoveryEndpoint[];
+    try {
+      refreshedEndpoints = await this.queryCurrentEndpoints();
+    } catch (error) {
+      this.lastError = error instanceof Error ? error.message : String(error);
+      throw error;
+    }
+    if (refreshedEndpoints.length === 0 && !this.lastError) {
+      this.lastError = "DNS-SD resolved no _surf-ace._tcp services";
+    } else if (refreshedEndpoints.length > 0) {
+      this.lastError = null;
+    }
     this.logger.debug?.(
       discoveryDiagnostic("refresh_complete", {
         resolved_count: refreshedEndpoints.length,
@@ -634,6 +632,7 @@ class BonjourSurfAceDiscoveryService implements SurfAceDiscoveryService {
       }
       return resolved;
     } catch (error) {
+      this.lastError = error instanceof Error ? error.message : String(error);
       this.logger.warn?.(
         discoveryDiagnostic("dns_sd_failed", {
           error: error instanceof Error ? error.message : String(error),

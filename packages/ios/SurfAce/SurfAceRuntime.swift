@@ -42,7 +42,7 @@ private func surfAceDiagnosticFields(_ fields: [(String, CustomStringConvertible
 func isPaneAllocatorUnavailable(_ error: Error) -> Bool {
     if let registrationError = error as? SurfAceRegistrationError {
         switch registrationError {
-        case .noServer, .paneClaimRejected:
+        case .noServer, .paneClaimRejected(_, _):
             return true
         default:
             break
@@ -359,12 +359,15 @@ final class SurfAceRuntime {
     @ObservationIgnored private let locklessDeliveryWaitObserver: (@Sendable () -> Void)?
     @ObservationIgnored private var identity: SurfAceIdentity?
     @ObservationIgnored private var centralRegistration: SurfAceCentralRegistration?
+    @ObservationIgnored private var centralConnectionError: String?
     @ObservationIgnored private var confirmedPaneLabels: [String: Int64] = [:]
     private var centralConnectionState: SurfAceConnectionBarState = .disconnected
 
     func updateCentralRegistrationStatus(_ status: SurfAceCentralRegistrationStatus) {
         switch status {
-        case .connected: centralConnectionState = .connected
+        case .connected:
+            centralConnectionState = .connected
+            updateCentralRegistrationError(nil)
         case .connecting: centralConnectionState = .connecting
         case .disconnected: centralConnectionState = .disconnected
         }
@@ -373,6 +376,13 @@ final class SurfAceRuntime {
         // registry replaces their topology; unconfirmed panes remain unlabeled.
         for surface in surfaces {
             surface.connectionBarState = centralConnectionState
+        }
+    }
+
+    func updateCentralRegistrationError(_ error: String?) {
+        centralConnectionError = error
+        for surface in surfaces {
+            surface.centralConnectionError = error
         }
     }
     @ObservationIgnored private var isStarted = false
@@ -520,6 +530,7 @@ final class SurfAceRuntime {
         let registration = SurfAceCentralRegistration(
             clientId: identity.clientId, configured: address.flatMap(URL.init(string:)),
             discover: { await discovery.discover() },
+            discoveryError: { discovery.lastError },
             transportFallbacks: { discovery.transportURLs(for: $0) },
             snapshot: { [weak self] in
                 guard let self else { throw SurfAceRegistrationError.stopped }
@@ -538,10 +549,16 @@ final class SurfAceRuntime {
                 try self.projectLocklessAuthorityState(state)
             },
             onError: { error in
-                surfAceServerRuntimeLog("event=central_registration_failed error=\(String(describing: error))")
+                let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                surfAceServerRuntimeLog(
+                    "event=central_registration_failed \(surfAceDiagnosticFields([("error", message)]))"
+                )
             },
             onStatusChange: { [weak self] status in
                 self?.updateCentralRegistrationStatus(status)
+            },
+            onConnectionError: { [weak self] error in
+                self?.updateCentralRegistrationError(error)
             }
         )
         centralRegistration = registration
@@ -607,6 +624,7 @@ final class SurfAceRuntime {
         let persistedContentCount = persistedSurfaceTopologies[surfaceId]?.panes.filter { $0.currentEntry?.contentId != nil }.count ?? 0
         ensureActiveKeyboardPane(surface: surface)
         surface.connectionBarState = centralConnectionState
+        surface.centralConnectionError = centralConnectionError
         surfaceById[surfaceId] = surface
         surfaceIdBySceneKey[sceneKey] = surfaceId
         surfaces.append(surface)
@@ -952,6 +970,7 @@ final class SurfAceRuntime {
             )
             topology.apply(to: surface)
             surface.connectionBarState = centralConnectionState
+            surface.centralConnectionError = centralConnectionError
             ensureActiveKeyboardPane(surface: surface)
             surfaceById[surfaceId] = surface
             surfaceIdBySceneKey[connectedSceneKey] = surfaceId
