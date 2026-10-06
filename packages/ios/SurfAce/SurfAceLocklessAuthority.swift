@@ -64,6 +64,8 @@ struct SurfAceLocklessCapacityLimits: Codable, Equatable, Sendable {
     var maxDormantControllerBytes: Int64
     var maxPendingOperationReceiptsPerController: Int64
     var maxPendingOperationReceiptBytesPerController: Int64
+    var maxAnnotationPublisherStateBytesPerSurface: Int64?
+    var maxAnnotationPublisherRecordsPerSurface: Int64?
 
     static let production = SurfAceLocklessCapacityLimits(
         version: 1,
@@ -84,7 +86,9 @@ struct SurfAceLocklessCapacityLimits: Codable, Equatable, Sendable {
         maxDormantControllerEntries: 12,
         maxDormantControllerBytes: 64 * 1_024 * 1_024,
         maxPendingOperationReceiptsPerController: 128,
-        maxPendingOperationReceiptBytesPerController: 8 * 1_024 * 1_024
+        maxPendingOperationReceiptBytesPerController: 8 * 1_024 * 1_024,
+        maxAnnotationPublisherStateBytesPerSurface: nil,
+        maxAnnotationPublisherRecordsPerSurface: nil
     )
 
     var recoverableSurfaceMinimumBytes: Int64 {
@@ -94,6 +98,7 @@ struct SurfAceLocklessCapacityLimits: Codable, Equatable, Sendable {
         return maxSurfaceRecoverableBaseBytes
             + maxSurfaceConsumableBytes
             + maxAdmittedControllerEntries * maxConsumableCursorStateBytesPerScope
+            + (maxAnnotationPublisherStateBytesPerSurface ?? 0)
             + (maxPanesPerSurface + maxRetainedTombstones) * paneEnvelope
     }
 
@@ -121,6 +126,16 @@ struct SurfAceLocklessCapacityLimits: Codable, Equatable, Sendable {
         ]
         if let field = fields.first(where: { $0.1 <= 0 })?.0 {
             throw SurfAceLocklessAuthorityError.invalidLimit(field)
+        }
+        if let bytes = maxAnnotationPublisherStateBytesPerSurface,
+           let records = maxAnnotationPublisherRecordsPerSurface {
+            guard bytes >= 2 * 8_192 + 1_024,
+                  bytes <= Int64(SurfAceAnnotationOutbox.maximumBytes),
+                  records >= 2, records <= Int64(SurfAceAnnotationOutbox.maximumRecords) else {
+                throw SurfAceLocklessAuthorityError.invalidLimit("annotation_publisher")
+            }
+        } else if maxAnnotationPublisherStateBytesPerSurface != nil || maxAnnotationPublisherRecordsPerSurface != nil {
+            throw SurfAceLocklessAuthorityError.invalidLimit("annotation_publisher")
         }
         guard maxPaneAnnotationRestoreBytes <= maxPaneRecoverableStateBytes else {
             throw SurfAceLocklessAuthorityError.invalidLimit("annotation_exceeds_pane")
@@ -380,6 +395,7 @@ struct SurfAceLocklessClientSequences: Codable, Equatable, Sendable {
 }
 
 struct SurfAceLocklessAuthorityState: Codable, Equatable, Sendable {
+    var annotationPublisher: SurfAceAnnotationOutbox?
     var capability: String
     var controllers: [String: SurfAceLocklessControllerBundle]
     var generation: Int64
@@ -399,6 +415,7 @@ struct SurfAceLocklessAuthorityState: Codable, Equatable, Sendable {
     static func empty(limits: SurfAceLocklessCapacityLimits = .production) throws -> Self {
         try limits.validate()
         return SurfAceLocklessAuthorityState(
+            annotationPublisher: nil,
             capability: surfAceLocklessCapability,
             controllers: [:],
             generation: 0,
@@ -428,6 +445,17 @@ struct SurfAceLocklessAuthorityState: Codable, Equatable, Sendable {
             throw SurfAceLocklessAuthorityError.unsupportedVersion
         }
         try limits.validate()
+        if let annotationPublisher {
+            guard let maxBytes = limits.maxAnnotationPublisherStateBytesPerSurface,
+                  let maxRecords = limits.maxAnnotationPublisherRecordsPerSurface else {
+                throw SurfAceLocklessAuthorityError.invalidState("annotation_publisher_limits")
+            }
+            try annotationPublisher.validate(maxBytes: Int(maxBytes), maxRecords: Int(maxRecords))
+            let retained = Set(liveSurfaces.keys).union(surfaceTombstones.map { $0.surface.surfaceId })
+            guard Set(annotationPublisher.surfaces.keys).isSubset(of: retained) else {
+                throw SurfAceLocklessAuthorityError.invalidState("annotation_publisher_surfaces")
+            }
+        }
         let allSequences = [
             sequences.nextClosedSequence,
             sequences.nextCommitSequence,
