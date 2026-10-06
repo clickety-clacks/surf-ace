@@ -1201,7 +1201,7 @@ actor SurfAceLocklessRuntimeAdapter {
             state.annotationPublisher = publisher
             if let index = state.surfaceTombstones.firstIndex(where: { $0.surface.surfaceId == surfaceId }) {
                 let tombstone = state.surfaceTombstones[index]
-                state.surfaceTombstones[index].bytes = try SurfAceLocklessTopologyOperations.surfaceTombstoneBytes(
+                state.surfaceTombstones[index].bytes = try SurfAceLocklessTopologyOperations.restoredSurfaceTombstoneBytes(
                     closedSequence: tombstone.closedSequence, scopes: tombstone.scopes,
                     surface: tombstone.surface, tombstoneId: tombstone.tombstoneId,
                     annotationPartitionBytes: publisher.partitionBytes(surfaceId: surfaceId)

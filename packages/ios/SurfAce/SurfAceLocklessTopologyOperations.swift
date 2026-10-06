@@ -507,13 +507,15 @@ enum SurfAceLocklessTopologyOperations {
         closedSequence: Int64,
         scopes: [String: SurfAceLocklessConsumableScope],
         surface: SurfAceLocklessSurfaceMaterial,
-        tombstoneId: String
+        tombstoneId: String,
+        annotationPartitionBytes: Int64 = 0
     ) throws -> Int64 {
         try surfaceTombstoneBytes(
             closedSequence: closedSequence,
             scopes: scopes,
             surface: surface,
-            tombstoneId: tombstoneId
+            tombstoneId: tombstoneId,
+            annotationPartitionBytes: annotationPartitionBytes
         )
     }
 
