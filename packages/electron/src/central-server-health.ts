@@ -392,9 +392,9 @@ export async function checkPublishedServerRecord(
           addressFamily(address) !== 0 && !isLoopbackAddress(address),
         );
         if (unservedAddress) {
-          // A successful lookup on an unserved family is a broken advertised
-          // endpoint, not a DNS failure. Clients try the SRV hostname first
-          // and only use transport addresses when hostname resolution fails.
+          // A successful lookup of the published SRV target that returns only
+          // an unserved family is still a broken service record. DNS-SD numeric
+          // addresses are probed separately below; they cannot make this SRV target valid.
           throw new CentralServerHealthError(`advertised_target_family_unserved:${unservedAddress}`);
         }
         const invalidAddress = targetAddresses.find((address) => addressFamily(address) === 0);
