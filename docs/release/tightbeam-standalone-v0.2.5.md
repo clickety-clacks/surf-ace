@@ -9,7 +9,7 @@ moving branch.
 - Product source: proposed tag `surf-ace-tightbeam-v0.2.5-r2` at product commit
   `a719c3c394168f772afedd332404c9ee9f71b208`.
 - Product version: `0.2.5`.
-- Tooling: proposed tag `surf-ace-release-tooling-tightbeam-v0.2.5-r8` at the
+- Tooling: proposed tag `surf-ace-release-tooling-tightbeam-v0.2.5-r9` at the
   exact reviewed tooling commit.
 - Node `24.3.0`, pnpm `10.15.1`, Rust `1.89.0`, PostgreSQL `16`, Linux
   `rust:1.89.0-bookworm`, and Xcode `27.0` on `xcode-27` are recorded in the
