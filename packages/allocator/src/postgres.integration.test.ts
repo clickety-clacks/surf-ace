@@ -6,7 +6,7 @@ import { appendFile, mkdtemp, readFile, rm } from "node:fs/promises";
 import { createServer, createConnection, type Socket } from "node:net";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { execFile as execFileCallback } from "node:child_process";
+import { execFile as execFileCallback, spawn } from "node:child_process";
 import test from "node:test";
 
 import pg from "pg";
@@ -1105,6 +1105,87 @@ test("annotation migration and append survive duplicate retry without allocating
       await restarted.close();
     }
   } finally {
+    await cluster.stop();
+  }
+});
+
+test("annotation native CLI watch, ack, resume and retire use the PostgreSQL journal", {
+  timeout: 180_000, skip: !process.env.SURF_ACE_TEST_CLI_BIN,
+}, async () => {
+  const binary = process.env.SURF_ACE_TEST_CLI_BIN!;
+  const cluster = await startCluster();
+  const stateRoot = await mkdtemp(join(cluster.root, "annotation-cli-"));
+  const children: ReturnType<typeof spawn>[] = [];
+  try {
+    const recovery = await PostgresCustodyAdapter.initializeAbsentFleet(cluster.config, "alloc_annotation-cli");
+    await recovery.release();
+    await adminQuery(cluster.adminUrl,
+      await readFile(new URL("../sql/003_annotation_journal.sql", import.meta.url), "utf8"));
+    const writer = await PostgresCustodyAdapter.acquireWriter(cluster.config);
+    try {
+      await new AnnotationJournal(writer).ingest({
+        protocolVersion: 1, clientId: "client-cli", sourceEpoch: "a".repeat(32),
+        surfaceId: "sf_cli", paneId: 1, frameId: "fr_cli", sourceSequence: "1",
+        sourceEventId: "event-cli", kind: "live_delta", contentId: "content-cli",
+        revision: 1, contentType: "html",
+        viewport: { scrollOffset: { x: 0, y: 0 }, visibleRect: { x: 0, y: 0, width: 10, height: 10 },
+          contentSize: { width: 10, height: 10 }, zoomLevel: 1 },
+        sourceTimestamp: "2026-10-06T21:00:00Z", payload: { strokes: [{ strokeId: "s1" }] },
+      });
+    } finally {
+      await writer.release();
+    }
+    const server = await AllocatorServer.start(serverConfig(cluster));
+    try {
+      const args = ["--registry", server.address.url, "--state-root", stateRoot,
+        "annotations"];
+      const stream = (action: "watch" | "resume", count: number) => {
+        const child = spawn(binary, [...args, action, "--consumer-id", "cli-consumer"],
+          { stdio: ["ignore", "pipe", "pipe"] });
+        children.push(child);
+        const lines: Array<Record<string, any>> = [];
+        let buffered = "";
+        let errors = "";
+        const ready = new Promise<typeof lines>((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error(`CLI ${action} timed out: ${errors}`)), 10_000);
+          child.stderr.on("data", (chunk) => { errors += String(chunk); });
+          child.on("error", (error) => { clearTimeout(timer); reject(error); });
+          child.on("exit", (code) => {
+            if (lines.length < count) { clearTimeout(timer); reject(new Error(`CLI ${action} exited ${code}: ${errors}`)); }
+          });
+          child.stdout.on("data", (chunk) => {
+            buffered += String(chunk);
+            for (let newline = buffered.indexOf("\n"); newline >= 0; newline = buffered.indexOf("\n")) {
+              const line = buffered.slice(0, newline);
+              buffered = buffered.slice(newline + 1);
+              lines.push(JSON.parse(line));
+              if (lines.length === count) { clearTimeout(timer); resolve(lines); }
+            }
+          });
+        });
+        return { child, ready };
+      };
+      const watched = stream("watch", 2);
+      const delivered = await watched.ready;
+      assert.equal(delivered[0]?.type, "annotation.subscription");
+      assert.equal(delivered[1]?.op, "annotation.record");
+      const cursor = delivered[1]?.payload?.serverCursor;
+      assert.match(cursor, /^ann1:[0-9a-f]{32}:1$/);
+      const acknowledged = await execFile(binary,
+        [...args, "ack", "--consumer-id", "cli-consumer", "--cursor", cursor]);
+      assert.equal(JSON.parse(acknowledged.stdout).ackCursor, cursor);
+      const resumed = stream("resume", 1);
+      const resumedLines = await resumed.ready;
+      assert.equal(resumedLines[0]?.ackCursor, cursor);
+      const retired = await execFile(binary, [...args, "retire", "--consumer-id", "cli-consumer",
+        "--expect-ack", cursor, "--discard-unacknowledged"]);
+      assert.equal(JSON.parse(retired.stdout).type, "annotation.consumer_retired");
+    } finally {
+      for (const child of children) child.kill();
+      await server.close();
+    }
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true });
     await cluster.stop();
   }
 });
