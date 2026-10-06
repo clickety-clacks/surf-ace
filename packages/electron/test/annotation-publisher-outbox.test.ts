@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { AnnotationPublisherOutbox } from "../src/annotation-publisher-outbox.js";
+import { AnnotationPublisherOutbox, ANNOTATION_PUBLISHER_MAX_BYTES } from "../src/annotation-publisher-outbox.js";
 import { SurfaceCore } from "../src/surface-core.js";
+import { locklessRecoverableSurfaceMinimumBytes } from "../../protocol/src/lockless.js";
 
 const clientId = "c".repeat(64);
 const surfaceId = "sf_annotation-test";
@@ -58,6 +59,23 @@ test("publisher partition survives the Electron surface state serialization boun
     core.annotationPublisher!.head(surfaceId)!.canonical);
   assert.throws(() => new SurfaceCore({ annotationClientId: "another-client", persistentState: persisted }),
     /invalid persisted annotation publisher state/);
+});
+
+test("configured publisher reserves its full partition before lockless admission", () => {
+  const legacy = new SurfaceCore().getPersistentState();
+  const core = new SurfaceCore({ annotationClientId: clientId, persistentState: legacy });
+  const limits = core.locklessAuthority.limits;
+  assert.equal(limits.maxAnnotationPublisherStateBytesPerSurface, ANNOTATION_PUBLISHER_MAX_BYTES);
+  assert.ok(limits.maxRecoverableSurfaceBytes >= locklessRecoverableSurfaceMinimumBytes(limits));
+  assert.ok(limits.maxRecoverableSurfaceBytes <= limits.maxRetainedTombstoneBytes);
+  assert.equal(new SurfaceCore({ annotationClientId: clientId,
+    persistentState: core.getPersistentState() }).locklessAuthority.limits.maxRecoverableSurfaceBytes,
+  limits.maxRecoverableSurfaceBytes);
+
+  const tooSmall = structuredClone(legacy);
+  tooSmall.lockless!.limits.maxRetainedTombstoneBytes = 640 * 1024 * 1024;
+  assert.throws(() => new SurfaceCore({ annotationClientId: clientId, persistentState: tooSmall }),
+    /invalid_lockless_limit:surface_exceeds_tombstone_pool/);
 });
 
 test("frame identity survives restart until explicit close and unavailable events become a sticky gap", () => {

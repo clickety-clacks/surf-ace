@@ -64,13 +64,14 @@ import {
   validLocklessRequestId,
   validLocklessSurfaceAdmissionAttempt,
   validLocklessSurfaceId,
+  locklessRecoverableSurfaceMinimumBytes,
   type LocklessContentCommit,
   type LocklessContentPush,
   type LocklessEntryProvenance,
   type LocklessSurfaceAdmissionAttempt,
 } from "../../protocol/src/lockless.js";
 import { cloneWindowPlacement, type WindowPlacement } from "./window-placement.js";
-import { AnnotationPublisherOutbox, type PersistentAnnotationPublisher } from "./annotation-publisher-outbox.js";
+import { AnnotationPublisherOutbox, ANNOTATION_PUBLISHER_MAX_BYTES, type PersistentAnnotationPublisher } from "./annotation-publisher-outbox.js";
 
 type ContentPayload = ContentSetRequest["payload"]["content"];
 type AuthoritativeTopologyPayload = Omit<TopologyApplyRequest["payload"], "panes"> & {
@@ -698,6 +699,20 @@ export class SurfaceCore {
       this.now,
       options?.clientIdentity ?? null,
     );
+    if (this.annotationPublisher) {
+      const limits = this.locklessAuthority.limits;
+      const withPublisher = {
+        ...limits,
+        maxAnnotationPublisherStateBytesPerSurface: ANNOTATION_PUBLISHER_MAX_BYTES,
+      };
+      this.locklessAuthority.configureLimits({
+        ...withPublisher,
+        maxRecoverableSurfaceBytes: Math.max(
+          limits.maxRecoverableSurfaceBytes,
+          locklessRecoverableSurfaceMinimumBytes(withPublisher),
+        ),
+      });
+    }
   }
 
   subscribe(listener: (event: CoreEvent) => void): () => void {

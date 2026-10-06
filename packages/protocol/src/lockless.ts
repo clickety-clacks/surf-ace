@@ -54,6 +54,7 @@ export type LocklessCapacityLimits = {
   version: 1;
   maxPanesPerSurface: number;
   maxSurfaceRecoverableBaseBytes: number;
+  maxAnnotationPublisherStateBytesPerSurface?: number;
   maxPaneRecoverableStateBytes: number;
   maxPaneAnnotationRestoreBytes: number;
   maxRetainedTombstones: number;
@@ -603,6 +604,7 @@ export function locklessRecoverableSurfaceMinimumBytes(
       limits.maxConsumableCursorStateBytesPerScope;
   return (
     limits.maxSurfaceRecoverableBaseBytes +
+    (limits.maxAnnotationPublisherStateBytesPerSurface ?? 0) +
     limits.maxSurfaceConsumableBytes +
     limits.maxAdmittedControllerEntries *
       limits.maxConsumableCursorStateBytesPerScope +
@@ -620,6 +622,9 @@ export function assertLocklessCapacityLimits(
     if (!Number.isSafeInteger(value) || value <= 0) {
       throw new Error(`invalid_lockless_limit:${name}`);
     }
+  }
+  if ((limits.maxAnnotationPublisherStateBytesPerSurface ?? 0) > 67_108_864) {
+    throw new Error("invalid_lockless_limit:annotation_publisher_state");
   }
   if (
     limits.maxPaneAnnotationRestoreBytes >
