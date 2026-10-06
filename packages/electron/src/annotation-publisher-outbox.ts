@@ -65,6 +65,17 @@ export class AnnotationPublisherOutbox {
 
   snapshot(): PersistentAnnotationPublisher { return structuredClone(this.state); }
 
+  pendingSurfaceIds(): string[] {
+    return Object.entries(this.state.surfaces)
+      .filter(([, surface]) => surface.fifo.length > 0 || surface.trailingGap !== null)
+      .map(([surfaceId]) => surfaceId);
+  }
+
+  needsSeal(surfaceId: string): boolean {
+    const surface = this.state.surfaces[surfaceId];
+    return !!surface?.trailingGap && !surface.fifo.some((entry) => entry.kind === "gap");
+  }
+
   restore(state: PersistentAnnotationPublisher): void {
     const previous = this.state;
     this.state = structuredClone(state);

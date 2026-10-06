@@ -68,6 +68,7 @@ import {
 } from "./runtime-identity.js";
 import { isAddressInUse, isPortBoundOnIpv6Any } from "./port-selection.js";
 import { SurfaceWsServer } from "./ws-server.js";
+import { AnnotationRegistryPublisher } from "./annotation-registry-publisher.js";
 import { restoreWindowPlacement, type WindowPlacement } from "./window-placement.js";
 import { shouldDisableGpuForSoftwareCapture, surfaceWindowCaptureMode, surfaceWindowLoadQuery, surfaceWindowOptions } from "./window-options.js";
 
@@ -178,6 +179,7 @@ const nativeOverlaySnapshots = new Map<string, {
 const singleInstanceLock = app.requestSingleInstanceLock();
 let advertiser: BonjourAdvertiser | null = null;
 let configuredRegistration: ServerConnection | null = null;
+let annotationRegistryPublisher: AnnotationRegistryPublisher | null = null;
 let advertiserTxtRefreshTimer: NodeJS.Timeout | null = null;
 let core: SurfaceCore;
 let distDir = "";
@@ -1820,6 +1822,13 @@ async function boot(): Promise<void> {
     onError: (error) => clientWarn("server_registration_failed", errorDiagnosticFields(error)),
   });
   configuredRegistration.start();
+  if (configuredAddress && core.annotationPublisher) {
+    annotationRegistryPublisher = new AnnotationRegistryPublisher(
+      configuredAddress, core, persistState,
+      (error) => clientWarn("annotation_publisher_failed", errorDiagnosticFields(error)),
+    );
+    annotationRegistryPublisher.start();
+  }
 
   const surfacesToOpen = core.listSurfaces();
   for (const surface of surfacesToOpen) {
@@ -1870,6 +1879,7 @@ if (!singleInstanceLock) {
       [...windows.keys()].map((surfaceId) => releaseNativePaneInstancesForSurface(surfaceId, "app quit")),
     );
     await configuredRegistration?.stop();
+    await annotationRegistryPublisher?.stop();
     await advertiser?.stop();
     await server.stop();
   });
