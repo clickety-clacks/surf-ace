@@ -30,7 +30,7 @@ env:
   RUST_VERSION: 1.89.0
   LINUX_RUST_TARGET: x86_64-unknown-linux-gnu
   MACOS_RUST_TARGET: aarch64-apple-darwin
-  TOOLING_TAG: surf-ace-release-tooling-tightbeam-v0.2.5-r2
+  TOOLING_TAG: surf-ace-release-tooling-tightbeam-v0.2.5-r3
 
 jobs:
   guard:
@@ -205,6 +205,7 @@ jobs:
             -scheme SurfAce \
             -configuration Release \
             ENABLE_TESTABILITY=YES \
+            -parallel-testing-enabled NO \
             -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M5),OS=27.0'
           guard
       - name: Build standalone macOS CLI and Electron assets
