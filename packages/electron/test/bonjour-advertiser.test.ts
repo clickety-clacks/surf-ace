@@ -26,6 +26,7 @@ class FakeBonjour {
   private readonly discoveredServices: Array<Array<string | FakeDiscoveredService>>;
   readonly publishNames: string[] = [];
   readonly publishOptions: Array<{
+    disableIPv6?: boolean;
     host?: string;
     name: string;
     port: number;
@@ -71,6 +72,7 @@ class FakeBonjour {
   }
 
   publish(options: {
+    disableIPv6?: boolean;
     host?: string;
     name: string;
     port: number;
@@ -221,6 +223,7 @@ test("bonjour advertiser forwards an explicit listener-derived SRV target", asyn
   const bonjour = new FakeBonjour();
   const advertiser = new BonjourAdvertiser({
     bonjour,
+    disableIPv6: true,
     host: "registry.local",
     name: "Surf Ace Server",
     platform: "darwin",
@@ -232,6 +235,7 @@ test("bonjour advertiser forwards an explicit listener-derived SRV target", asyn
   await new Promise((resolve) => setTimeout(resolve, 50));
 
   assert.equal(bonjour.publishOptions[0]?.host, "registry.local");
+  assert.equal(bonjour.publishOptions[0]?.disableIPv6, true);
   await advertiser.stop();
 });
 

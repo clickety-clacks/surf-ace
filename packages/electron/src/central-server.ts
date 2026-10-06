@@ -2,7 +2,11 @@ import { randomUUID } from "node:crypto";
 
 import { AllocatorServer, type AllocatorServerConfig } from "../../allocator/src/server.js";
 import { BonjourAdvertiser } from "./bonjour-advertiser.js";
-import { centralServerAdvertisement, centralServerAdvertisedHost } from "./central-server-advertisement.js";
+import {
+  centralServerAdvertisement,
+  centralServerAdvertisedHost,
+  centralServerBonjourDisableIPv6,
+} from "./central-server-advertisement.js";
 import { CentralServerDiscoveryHealth } from "./central-server-health.js";
 
 // Central serving bootstrap: the existing custody-backed listener advertises
@@ -15,6 +19,7 @@ export async function startCentralServer(config: AllocatorServerConfig, name = "
     expectedHost: advertisedHost,
   });
   const advertiser = new BonjourAdvertiser({
+    disableIPv6: centralServerBonjourDisableIPv6(config.listenHost),
     host: advertisedHost,
     name, port: server.address.port,
     onSelfDiscovery: ({ error, service }) => {

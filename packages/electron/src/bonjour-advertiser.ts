@@ -38,6 +38,7 @@ type BonjourClient = {
     listener?: (service: BonjourResolvedService) => void,
   ): BonjourBrowser;
   publish(options: {
+    disableIPv6?: boolean;
     host?: string;
     name: string;
     port: number;
@@ -159,6 +160,7 @@ export class BonjourAdvertiser {
   private readonly onSelfDiscovery: ((result: BonjourSelfDiscoveryResult) => void) | undefined;
   private readonly platform: NodeJS.Platform;
   private readonly port: number;
+  private readonly disableIPv6: boolean;
   private readonly host: string | undefined;
   private readonly txtProvider: () => Record<string, string>;
   private readonly useIsolatedPublisherByDefault: boolean;
@@ -180,6 +182,7 @@ export class BonjourAdvertiser {
     isolatedPublisherKill?: IsolatedPublisherKill;
     isolatedPublisherProcessList?: IsolatedPublisherProcessList;
     isolatedPublisherSpawn?: typeof spawn;
+    disableIPv6?: boolean;
     host?: string;
     name: string;
     onSelfDiscovery?: (result: BonjourSelfDiscoveryResult) => void;
@@ -197,6 +200,7 @@ export class BonjourAdvertiser {
     this.onSelfDiscovery = options.onSelfDiscovery;
     this.platform = options.platform ?? process.platform;
     this.port = options.port;
+    this.disableIPv6 = options.disableIPv6 ?? false;
     this.host = options.host;
     this.serviceName = options.name;
     this.txtProvider = options.txtProvider;
@@ -320,6 +324,7 @@ export class BonjourAdvertiser {
       let service: Service;
       try {
         service = binding.client.publish({
+          ...(this.disableIPv6 ? { disableIPv6: true } : {}),
           ...(this.host ? { host: this.host } : {}),
           name,
           port: this.port,
@@ -448,6 +453,7 @@ export class BonjourAdvertiser {
       }
       if (
         !this.isolatedPublisher &&
+        !this.host &&
         this.visibilityFailures >= BonjourAdvertiser.VISIBILITY_FAILURES_BEFORE_ISOLATION
       ) {
         await this.switchToIsolatedPublisher();

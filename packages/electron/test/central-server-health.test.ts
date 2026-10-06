@@ -1,8 +1,13 @@
 import assert from "node:assert/strict";
+import os from "node:os";
 import test from "node:test";
 import { WebSocketServer } from "ws";
 
-import { centralServerAdvertisement, centralServerAdvertisedHost } from "../src/central-server-advertisement.js";
+import {
+  centralServerAdvertisement,
+  centralServerAdvertisedHost,
+  centralServerBonjourDisableIPv6,
+} from "../src/central-server-advertisement.js";
 import {
   CentralServerDiscoveryHealth,
   CentralServerHealthError,
@@ -43,6 +48,9 @@ test("central server derives an explicit SRV target from its listener", () => {
   assert.equal(centralServerAdvertisedHost("::", "racter.local."), "racter.local");
   assert.equal(centralServerAdvertisedHost("0:0:0:0:0:0:0:0", "racter"), "racter.local");
   assert.equal(centralServerAdvertisedHost("192.168.50.93", "racter"), "192.168.50.93");
+  assert.equal(centralServerBonjourDisableIPv6("0.0.0.0"), true);
+  assert.equal(centralServerBonjourDisableIPv6("192.168.50.93"), true);
+  assert.equal(centralServerBonjourDisableIPv6("::"), false);
 });
 
 test("server self-check uses the Bonjour SRV target's resolved address, listener port, and advertised path", async () => {
@@ -79,17 +87,40 @@ test("server self-check rejects an SRV target that resolves only through loopbac
   assert.deepEqual(attempted, []);
 });
 
-test("server self-check rejects DNS-SD targets that resolve only to link-local addresses", async () => {
+test("server self-check rejects a link-local target without a matching local interface scope", async () => {
   await assert.rejects(
     checkPublishedServerRecord(record({ addresses: ["fe80::1"] }), LISTENER_PORT, {
       resolveTargetAddresses: async () => {
         throw Object.assign(new Error("lookup failed"), { code: "ENOTFOUND" });
       },
       requestTopology: async () => ({ clients: [] }),
+      networkInterfaces: {},
     }),
     (error: unknown) => error instanceof CentralServerHealthError &&
-      error.code === "advertised_target_link_local_resolution:fe80::1",
+      error.code === "advertised_target_link_local_scope_unavailable:fe80::1",
   );
+});
+
+test("a scoped link-local DNS-SD target is checked through that published address", async () => {
+  const endpointAttempts: string[] = [];
+  const networkInterfaces = {
+    veth0: [{ address: "fe80::1234", family: "IPv6", internal: false, scopeid: 7 }],
+  } as ReturnType<typeof os.networkInterfaces>;
+  const result = await checkPublishedServerRecord(record({ addresses: ["fe80::1234"] }), LISTENER_PORT, {
+    expectedHost: "registry.local",
+    resolveTargetAddresses: async () => ["fe80::1234"],
+    requestTopology: async (endpoint) => {
+      endpointAttempts.push(endpoint);
+      return { clients: [] };
+    },
+    networkInterfaces,
+  });
+
+  assert.deepEqual(endpointAttempts, ["ws://[fe80::1234%257]:19001/ws"]);
+  assert.deepEqual(result, {
+    endpoint: "ws://[fe80::1234%257]:19001/ws",
+    transport: "srv-target",
+  });
 });
 
 test("server self-check rejects an SRV target that disagrees with its DNS-SD addresses", async () => {
@@ -106,6 +137,25 @@ test("server self-check rejects an SRV target that disagrees with its DNS-SD add
       error.code === "advertised_target_address_mismatch:192.0.2.18",
   );
   assert.equal(attempted, false);
+});
+
+test("server self-check rejects a published address when any DNS-SD endpoint fails the handshake", async () => {
+  const attempted: string[] = [];
+  await assert.rejects(
+    checkPublishedServerRecord(record({ addresses: ["192.0.2.18", "192.0.2.19"] }), LISTENER_PORT, {
+      resolveTargetAddresses: async () => ["192.0.2.18", "192.0.2.19"],
+      requestTopology: async (endpoint) => {
+        attempted.push(endpoint);
+        if (endpoint.includes("192.0.2.19")) {
+          throw new CentralServerHealthError("websocket_connect_failed:ECONNREFUSED");
+        }
+        return { clients: [] };
+      },
+    }),
+    (error: unknown) => error instanceof CentralServerHealthError &&
+      error.code === "advertised_target_unreachable:192.0.2.19:websocket_connect_failed:ECONNREFUSED",
+  );
+  assert.deepEqual(attempted, ["ws://192.0.2.18:19001/ws", "ws://192.0.2.19:19001/ws"]);
 });
 
 test("server self-check rejects a published host that differs from the listener-derived target", async () => {
@@ -144,7 +194,7 @@ test("server self-check rejects wrong TXT identity, path, listener port, and wil
 
 test("DNS-SD transport addresses are used only after SRV target resolution fails", async () => {
   const attempted: string[] = [];
-  const result = await checkPublishedServerRecord(record({ addresses: ["192.0.2.18", "127.0.0.1", "fe80::1"] }), LISTENER_PORT, {
+  const result = await checkPublishedServerRecord(record({ addresses: ["192.0.2.18"] }), LISTENER_PORT, {
     resolveTargetAddresses: async () => {
       throw Object.assign(new Error("lookup failed"), { code: "ENOTFOUND" });
     },
@@ -159,6 +209,22 @@ test("DNS-SD transport addresses are used only after SRV target resolution fails
     endpoint: "ws://192.0.2.18:19001/ws",
     transport: "dns-sd-address",
   });
+});
+
+test("a published loopback DNS-SD address is rejected even when another address is usable", async () => {
+  let attempted = false;
+  await assert.rejects(
+    checkPublishedServerRecord(record({ addresses: ["192.0.2.18", "127.0.1.1"] }), LISTENER_PORT, {
+      resolveTargetAddresses: async () => ["192.0.2.18"],
+      requestTopology: async () => {
+        attempted = true;
+        return { clients: [] };
+      },
+    }),
+    (error: unknown) => error instanceof CentralServerHealthError &&
+      error.code === "advertised_record_loopback_address:127.0.1.1",
+  );
+  assert.equal(attempted, false);
 });
 
 test("a reachable wrong host and a failed topology handshake remain unhealthy", async () => {
@@ -230,6 +296,56 @@ test("the self-check performs a real fleet.topology WebSocket request and valida
     assert.deepEqual(received?.payload, {});
     assert.equal(received?.type, "request");
     assert.equal(received?.v, 1);
+  } finally {
+    for (const socket of server.clients) socket.terminate();
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
+test("the self-check performs fleet.topology over an isolated scoped IPv6 link-local endpoint", {
+  skip: process.env.SURF_ACE_TEST_LINK_LOCAL_INTERFACE !== "veth0",
+}, async () => {
+  const interfaceName = process.env.SURF_ACE_TEST_LINK_LOCAL_INTERFACE!;
+  const networkInterfaces = os.networkInterfaces();
+  const interfaceRecords = networkInterfaces[interfaceName] ?? [];
+  const interfaceAddress = interfaceRecords.find((entry) => entry.family === "IPv6" && entry.address.toLowerCase().startsWith("fe80:"));
+  assert.ok(interfaceAddress, `${interfaceName} has no IPv6 link-local address`);
+  const scope = interfaceAddress.scopeid && interfaceAddress.scopeid > 0 ? String(interfaceAddress.scopeid) : interfaceName;
+  const scopedAddress = `${interfaceAddress.address}%${scope}`;
+  const server = new WebSocketServer({ host: scopedAddress, path: "/ws", port: 0 });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.once("listening", resolve);
+  });
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  server.on("connection", (socket) => {
+    socket.on("message", (raw) => {
+      const request = JSON.parse(raw.toString()) as Record<string, unknown>;
+      socket.send(JSON.stringify({
+        id: request.id,
+        op: "fleet.topology",
+        payload: { clients: [] },
+        sentAt: Date.now(),
+        type: "response",
+        v: 1,
+        ok: true,
+      }));
+    });
+  });
+
+  try {
+    const checked = await checkPublishedServerRecord(record({
+      addresses: [interfaceAddress.address],
+      host: "link-local.registry.local",
+      port: address.port,
+    }), address.port, {
+      expectedHost: "link-local.registry.local",
+      networkInterfaces,
+      resolveTargetAddresses: async () => [interfaceAddress.address],
+    });
+    assert.equal(checked.transport, "srv-target");
+    assert.match(checked.endpoint, /^ws:\/\/\[fe80:.*%25(?:\d+|veth0)\]:\d+\/ws$/);
   } finally {
     for (const socket of server.clients) socket.terminate();
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
