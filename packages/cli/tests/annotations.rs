@@ -156,3 +156,75 @@ fn foreground_watcher_preserves_ack_written_by_separate_process() {
     assert_eq!(state["ackCursor"], format!("ann1:{EPOCH}:1"));
     assert_eq!(state["lastDeliveredCursor"], format!("ann1:{EPOCH}:2"));
 }
+
+#[test]
+fn history_gap_requires_explicit_gap_ack_before_confirmed_retirement() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let root = TempDir::new().unwrap();
+    let server = thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut watch_socket = accept(stream).unwrap();
+        hello(&mut watch_socket);
+        let watch = request(&mut watch_socket, "annotation.watch");
+        assert_eq!(watch["payload"]["fromCursor"], json!({"epoch":EPOCH,"sequence":"1"}));
+        respond(&mut watch_socket, &watch, json!({"consumerId":"gap-reader",
+            "leaseId":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","ackCursor":null,
+            "initialFromCursor":{"epoch":EPOCH,"sequence":"1"},
+            "availableFromCursor":{"epoch":EPOCH,"sequence":"2"},
+            "headCursor":{"epoch":EPOCH,"sequence":"2"},"historyCompleteSinceStart":false,
+            "limits":{"replayPolicy":{"targetAcknowledgedHistoryDays":30}}}));
+        watch_socket.send(Message::Text(json!({"v":1,"type":"event","op":"annotation.history_gap",
+            "eventId":"gap-event","sentAt":2,"payload":{"gapId":"gap-1",
+            "requestedCursor":{"epoch":EPOCH,"sequence":"1"},
+            "availableFromCursor":{"epoch":EPOCH,"sequence":"2"},
+            "throughCursor":{"epoch":EPOCH,"sequence":"1"},
+            "headCursor":{"epoch":EPOCH,"sequence":"2"},"reason":"cursor_expired"}}).to_string().into())).unwrap();
+        watch_socket.close(None).unwrap();
+
+        let (stream, _) = listener.accept().unwrap();
+        let mut ack_socket = accept(stream).unwrap();
+        hello(&mut ack_socket);
+        let ack = request(&mut ack_socket, "annotation.gap.ack");
+        assert_eq!(ack["payload"], json!({"consumerId":"gap-reader",
+            "leaseId":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","gapId":"gap-1"}));
+        respond(&mut ack_socket, &ack, json!({"ackCursor":{"epoch":EPOCH,"sequence":"1"},"gapId":"gap-1"}));
+
+        let (stream, _) = listener.accept().unwrap();
+        let mut retire_socket = accept(stream).unwrap();
+        hello(&mut retire_socket);
+        let retire = request(&mut retire_socket, "annotation.consumer.retire");
+        assert_eq!(retire["payload"], json!({"consumerId":"gap-reader",
+            "expectedAckCursor":{"epoch":EPOCH,"sequence":"1"},
+            "discardUnacknowledged":true}));
+        respond(&mut retire_socket, &retire, json!({"consumerId":"gap-reader","retired":true,
+            "expectedAckCursor":{"epoch":EPOCH,"sequence":"1"},
+            "discardedFromCursor":{"epoch":EPOCH,"sequence":"2"},
+            "discardedThroughCursor":{"epoch":EPOCH,"sequence":"2"}}));
+    });
+    let registry = format!("ws://{address}");
+    let state_root = root.path().to_str().unwrap();
+    let common = ["--registry", registry.as_str(), "--state-root", state_root, "annotations"];
+    let cursor = format!("ann1:{EPOCH}:1");
+    let watch = Command::new(env!("CARGO_BIN_EXE_surf-ace"))
+        .args(common).args(["watch", "--consumer-id", "gap-reader", "--from", cursor.as_str()])
+        .output().unwrap();
+    assert!(!watch.status.success());
+    let lines: Vec<Value> = String::from_utf8(watch.stdout).unwrap().lines()
+        .map(|line| serde_json::from_str(line).unwrap()).collect();
+    assert_eq!(lines[0]["historyCompleteSinceStart"], false);
+    assert_eq!(lines[1]["op"], "annotation.history_gap");
+    let ack = Command::new(env!("CARGO_BIN_EXE_surf-ace"))
+        .args(common).args(["ack", "--consumer-id", "gap-reader", "--gap-id", "gap-1"])
+        .output().unwrap();
+    assert!(ack.status.success(), "{}", String::from_utf8_lossy(&ack.stdout));
+    let ack_json: Value = serde_json::from_slice(&ack.stdout).unwrap();
+    assert_eq!(ack_json["ackCursor"], cursor);
+    let retire = Command::new(env!("CARGO_BIN_EXE_surf-ace"))
+        .args(common).args(["retire", "--consumer-id", "gap-reader", "--expect-ack",
+            cursor.as_str(), "--discard-unacknowledged"]).output().unwrap();
+    assert!(retire.status.success(), "{}", String::from_utf8_lossy(&retire.stdout));
+    let retired: Value = serde_json::from_slice(&retire.stdout).unwrap();
+    assert_eq!(retired["payload"]["retired"], true);
+    server.join().unwrap();
+}
