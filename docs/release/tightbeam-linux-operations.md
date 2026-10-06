@@ -1,7 +1,7 @@
 # Surf Ace standalone Linux server operations
 
-This v0.2.4 runbook applies only to product commit
-`eddb6fa2237d43a75f8166faa1daf2d3d600e668` and PostgreSQL 16. It assumes a
+This v0.2.5 runbook applies only to product commit
+`7878fda6181fd0c97175ca8282e4eb9120a8c039` and PostgreSQL 16. It assumes a
 single configured allocator fleet, one server process at a time, and an
 already-provisioned PostgreSQL primary with its configured synchronous witness.
 The archive never installs a service or provisions, upgrades, or changes a host.
@@ -47,6 +47,16 @@ the unit template explicitly places it in its owner-only runtime directory.
 Choose a run-owned writable directory and keep it private when using a custom
 `SURF_ACE_CLIENT_DIAGNOSTIC_LOG` override.
 
+The launcher emits `ready` only after the running server browses its own
+`_surf-ace._tcp` advertisement and completes a read-only `fleet.topology`
+exchange through every published transport address. Check the advertised
+`role=server`, `v=1`, `ws=/ws`, bound port and usable host from another
+supported client on the discovery network. A wildcard listen address is not a
+client destination. A direct WebSocket probe alone cannot establish that
+Bonjour discovery works. If readiness fails, retain the server's diagnostic
+error and correct the advertised route before rollout; do not conceal it with
+a manually configured client endpoint.
+
 Check that the registry WebSocket endpoint accepts a health handshake without
 registering a client or mutating allocator state:
 
@@ -62,12 +72,14 @@ current/no-loss reads.
 ## Schema and upgrade boundary
 
 For an empty PostgreSQL 16 fleet, initialize with
-`schemas/allocator/001_allocator.sql`. For an existing v0.2.3 fleet, v0.2.4
-ships `schemas/allocator/002_fleet_panes.sql`. It adds the separate monotonic
-pane counter and journal-backed claim function without changing the existing
-journal head. The server does not auto-migrate. Stop the allocator and verify
-the writer lease is released before applying 002. The migration refuses an
-active lease, an in-progress restore, or an unsupported state version.
+`schemas/allocator/001_allocator.sql`. The v0.2.4 release introduced
+`schemas/allocator/002_fleet_panes.sql` for v0.2.3 fleets. It adds the separate
+monotonic pane counter and journal-backed claim function without changing the
+existing journal head. An already migrated v0.2.4 fleet must retain its pane
+state; do not reapply 002. If upgrading directly from v0.2.3, stop the
+allocator and verify the writer lease is released before applying 002. The
+migration refuses an active lease, an in-progress restore, or an unsupported
+state version. The v0.2.5 server does not auto-migrate.
 
 Before touching the serving database, capture a PostgreSQL base backup and a
 schema/data `pg_dump` in a restricted run directory. Restore the backup into
@@ -75,7 +87,7 @@ a disposable staging cluster with its own witness and apply 002 there first;
 verify the pre- and post-migration head sequence/hash are identical, the
 accepted-state pane fence starts at 1, pane claims advance it, and restart and
 restore do not reuse a number. Run the two-client smoke against that staging
-allocator. After production migration, preserve the backup until the v0.2.4
+allocator. After production migration, preserve the backup until the v0.2.5
 qualification settles. If migration fails before commit, PostgreSQL rolls it
 back atomically. If a later rollback is required, stop the writer and restore
 the verified pre-migration base backup into a new cluster; never drop the pane
