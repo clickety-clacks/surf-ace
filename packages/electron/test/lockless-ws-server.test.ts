@@ -2175,23 +2175,11 @@ test("unknown persistence outcome preserves direct reads while fencing dependent
     assert.equal((await pair(socket, "tight-beam", surface.surfaceId)).ok, true);
     const panes = await request(socket, "panes.list", { surfaceId: surface.surfaceId });
     failPersistence = true;
-    const rejected = await request(socket, "target.apply", {
-        paneId: Number(panes.payload.panes[0].paneId),
-        requestId: "target-materialization-must-not-run",
-        restoreReason: "initial",
-        surfaceId: surface.surfaceId,
-        targetEpoch: 1,
-        targetHeader: {
-          payloadSchemaVersion: 1,
-          replaySemantics: "navigate",
-          requiredCapabilities: ["target.browser_url.v1"],
-          safeToLogFields: ["url"],
-          safetyClass: "network",
-          summary: "must fail stop",
-        },
-        targetId: "target-fail-stop",
-        targetKind: "browser_url",
-        targetPayload: { url: "https://example.com/" },
+    const rejected = await request(socket, "pane.rename", {
+      expectedTopologyRevision: core.pairState(surface.surfaceId).topologyRevision,
+      name: "Uncertain rename",
+      paneId: Number(panes.payload.panes[0].paneId),
+      surfaceId: surface.surfaceId,
     }, { id: "target-persistence-outcome-unknown" });
     assert.equal(rejected.ok, false);
     assert.match(rejected.error.message, /unknown|paused/i);
