@@ -9,6 +9,17 @@ export const ALLOCATOR_OPERATIONS = [
 ] as const;
 
 export const ALLOCATOR_ERROR_CODES = [
+  "annotation_invalid_request",
+  "annotation_context_image_invalid",
+  "annotation_record_too_large",
+  "annotation_protocol_unsupported",
+  "annotation_role_operation_invalid",
+  "annotation_source_event_conflict",
+  "annotation_source_sequence_conflict",
+  "annotation_source_gap_required",
+  "annotation_source_gap_invalid",
+  "annotation_ingest_capacity",
+  "annotation_journal_sequence_exhausted",
   "allocator_identity_mismatch",
   "allocator_state_corrupt",
   "allocator_state_unsupported_version",

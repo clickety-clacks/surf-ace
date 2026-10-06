@@ -20,6 +20,7 @@ import { writePersistentStateFile } from "../../electron/src/persistent-state-fi
 import { SURF_ACE_LOCKLESS_V1_CAPABILITY } from "../../protocol/src/lockless.js";
 import { SurfaceCore } from "../../electron/src/surface-core.js";
 import { SurfaceWsServer } from "../../electron/src/ws-server.js";
+import { AnnotationJournal } from "./annotation-journal.js";
 import { BonjourAdvertiser } from "../../electron/src/bonjour-advertiser.js";
 import {
   createBonjourSurfAceDiscoveryService,
@@ -978,6 +979,44 @@ test("v0.2.3 custody migrates without changing its witnessed head", { timeout: 1
     const state = await scalar(cluster.adminUrl,
       "SELECT surf_ace_allocator.read_accepted_state('fleet-test')->>'nextPaneOrdinalFence'");
     assert.equal(state, "1");
+  } finally {
+    await cluster.stop();
+  }
+});
+
+test("annotation migration and append survive duplicate retry without allocating a second cursor", { timeout: 180_000 }, async () => {
+  const cluster = await startCluster();
+  try {
+    const recovery = await PostgresCustodyAdapter.initializeAbsentFleet(cluster.config, "alloc_annotation-test");
+    await recovery.release();
+    const migration = await readFile(new URL("../sql/003_annotation_journal.sql", import.meta.url), "utf8");
+    await adminQuery(cluster.adminUrl, migration);
+    const writer = await PostgresCustodyAdapter.acquireWriter(cluster.config);
+    try {
+      const journal = new AnnotationJournal(writer);
+      const record = {
+        protocolVersion: 1, clientId: "client-A", sourceEpoch: "a".repeat(32),
+        surfaceId: "sf_A", paneId: 1, frameId: "fr_A", sourceSequence: "1",
+        sourceEventId: "event-A", kind: "live_delta", contentId: "content-A",
+        revision: 1, contentType: "html",
+        viewport: { scrollOffset: { x: 0, y: 0 }, visibleRect: { x: 0, y: 0, width: 10, height: 10 },
+          contentSize: { width: 10, height: 10 }, zoomLevel: 1 },
+        sourceTimestamp: "2026-10-06T21:00:00Z", payload: { strokes: [{ strokeId: "s1" }] },
+      };
+      const first = await journal.ingest(record);
+      const duplicate = await journal.ingest(record);
+      assert.deepEqual(duplicate.serverCursor, first.serverCursor);
+      assert.equal(duplicate.committedAt, first.committedAt);
+      assert.equal(duplicate.duplicate, true);
+      await assert.rejects(journal.ingest({ ...record, revision: 2 }),
+        (error) => error instanceof AllocatorError && error.code === "annotation_source_event_conflict");
+      const info = await writer.annotationInfo();
+      assert.equal(info.journalRecords, 1);
+      assert.equal(info.headSequence, "1");
+      assert.equal(info.firstRetainedSequence, "1");
+    } finally {
+      await writer.release();
+    }
   } finally {
     await cluster.stop();
   }

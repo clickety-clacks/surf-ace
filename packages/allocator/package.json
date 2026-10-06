@@ -16,6 +16,7 @@
     }
   },
   "dependencies": {
+    "@surf-ace/protocol": "workspace:*",
     "pg": "^8.16.3",
     "ws": "^8.18.0"
   },

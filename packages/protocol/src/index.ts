@@ -1128,3 +1128,4 @@ export * from "./messages.js";
 export * from "./schemas.js";
 export * from "./schemas-manifest.js";
 export * from "./lockless.js";
+export * from "./annotation.js";

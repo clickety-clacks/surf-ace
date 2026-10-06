@@ -4,6 +4,7 @@ import { createHash, randomBytes } from "node:crypto";
 import WebSocket, { WebSocketServer, type RawData } from "ws";
 
 import { WindowLabelAuthority } from "./authority.js";
+import { AnnotationJournal } from "./annotation-journal.js";
 import {
   AllocatorError,
   canonicalJson,
@@ -52,6 +53,7 @@ export type AllocatorDiagnostics = {
 
 export class AllocatorServer {
   private readonly startedAt = Date.now();
+  private readonly annotationRoles = new WeakMap<WebSocket, "publisher" | "consumer">();
   private readonly registeredClients = new Map<string, unknown>();
   private registrationTail: Promise<unknown> = Promise.resolve();
 
@@ -218,8 +220,16 @@ export class AllocatorServer {
 
   private accept(socket: WebSocket): void {
     const replay = new Map<string, { fingerprint: string; response: string }>();
+    let annotationTail: Promise<unknown> = Promise.resolve();
     socket.on("message", (data) => {
-      void this.handle(socket, data, replay);
+      // Annotation role and append order are connection state; process their
+      // messages serially so hello cannot race an immediately following ingest.
+      if (toText(data).includes('"annotation.')) {
+        annotationTail = annotationTail.then(() => this.handle(socket, data, replay));
+        void annotationTail.catch(() => socket.close(1011, "annotation_handler_failed"));
+      } else {
+        void this.handle(socket, data, replay);
+      }
     });
   }
 
@@ -236,6 +246,10 @@ export class AllocatorServer {
       return;
     }
     const registration = raw as { v?: unknown; type?: unknown; id?: unknown; op?: unknown; payload?: unknown };
+    if (typeof registration?.op === "string" && registration.op.startsWith("annotation.")) {
+      await this.handleAnnotation(socket, registration);
+      return;
+    }
     if (registration && (registration.op === "client.register" || registration.op === "pane.claim" || registration.op === "fleet.topology")) {
       const run = this.registrationTail.then(async () => {
         if (registration.v !== 1 || registration.type !== "request" || typeof registration.id !== "string" || !registration.id) {
@@ -313,6 +327,77 @@ export class AllocatorServer {
     replay.set(request.id, { fingerprint, response: encoded });
     if (replay.size > 1024) replay.delete(replay.keys().next().value!);
     if (socket.readyState === WebSocket.OPEN) socket.send(encoded);
+  }
+
+  private async handleAnnotation(socket: WebSocket, request: {
+    v?: unknown; type?: unknown; id?: unknown; op?: unknown; payload?: unknown;
+  }): Promise<void> {
+    const op = String(request.op);
+    if (request.v !== 1 || request.type !== "request" || typeof request.id !== "string" ||
+        request.id.length === 0 || !Number.isSafeInteger((request as { sentAt?: unknown }).sentAt) ||
+        Number((request as { sentAt?: unknown }).sentAt) < 0) {
+      socket.close(1008, "invalid_envelope");
+      return;
+    }
+    const reply = (ok: boolean, value: unknown): void => {
+      if (socket.readyState !== WebSocket.OPEN) return;
+      socket.send(JSON.stringify({ v: 1, type: "response", op, id: request.id,
+        ok, sentAt: Date.now(), [ok ? "payload" : "error"]: value }));
+    };
+    try {
+      if (op === "annotation.hello") {
+        if (this.annotationRoles.has(socket)) throw new AllocatorError("annotation_invalid_request", "hello already completed");
+        const payload = request.payload as Record<string, unknown>;
+        if (!payload || Object.keys(payload).sort().join(",") !== "protocolVersion,role" ||
+            payload.protocolVersion !== 1 || (payload.role !== "publisher" && payload.role !== "consumer")) {
+          throw new AllocatorError("annotation_invalid_request", "invalid annotation hello");
+        }
+        let info;
+        try { info = await this.custody.annotationInfo(); }
+        catch (error) {
+          if ((error as { code?: string }).code === "42883") {
+            throw new AllocatorError("annotation_protocol_unsupported", "annotation migration is not installed");
+          }
+          throw error;
+        }
+        const state = await this.custody.readAcceptedState();
+        this.annotationRoles.set(socket, payload.role);
+        reply(true, {
+          registryId: state.allocatorId,
+          journalEpoch: info.epoch,
+          availableFromCursor: info.firstRetainedSequence === null ? null : { epoch: info.epoch, sequence: info.firstRetainedSequence },
+          headCursor: info.headSequence === "0" ? null : { epoch: info.epoch, sequence: info.headSequence },
+          limits: { journalRecords: 100_000, journalAndSourceMetadataBytes: 1_073_741_824,
+            sourceMetadataRows: 1_000_000, consumerIds: 64, activeStreams: 32,
+            inFlightRecordsPerConsumer: 32, inFlightCanonicalBytesPerConsumer: 67_108_864,
+            maxRecordBytes: 16_777_216,
+            replayPolicy: { targetAcknowledgedHistoryDays: 30, pressureCompaction: true,
+              requireActualConsumerAcknowledgement: true } },
+          usage: { journalRecords: info.journalRecords, journalCanonicalBytes: info.journalCanonicalBytes,
+            sourceMetadataRows: info.sourceMetadataRows, sourceMetadataBytes: info.sourceMetadataBytes,
+            consumerSlots: info.consumerSlots, activeStreams: info.activeStreams },
+        });
+      } else if (op === "annotation.ingest" || op === "annotation.source_gap") {
+        if (this.annotationRoles.get(socket) !== "publisher") {
+          throw new AllocatorError("annotation_role_operation_invalid", "publisher hello is required");
+        }
+        const payload = request.payload as Record<string, unknown>;
+        if (!payload || Object.keys(payload).length !== 1 || !("record" in payload)) {
+          throw new AllocatorError("annotation_invalid_request", "expected one record");
+        }
+        const isGap = typeof payload.record === "object" && payload.record !== null &&
+          "reason" in payload.record;
+        if (isGap !== (op === "annotation.source_gap")) {
+          throw new AllocatorError("annotation_invalid_request", "record kind and operation differ");
+        }
+        reply(true, await new AnnotationJournal(this.custody).ingest(payload.record));
+      } else {
+        throw new AllocatorError("annotation_protocol_unsupported", "annotation operation is not implemented");
+      }
+    } catch (error) {
+      const failure = error instanceof AllocatorError ? error : asAllocatorError(error);
+      reply(false, { code: failure.code, message: failure.message });
+    }
   }
 }
 

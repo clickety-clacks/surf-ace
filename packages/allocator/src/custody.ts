@@ -40,6 +40,18 @@ export type HeadWitness = {
   witnessServerId: string;
 };
 
+export type AnnotationInfo = {
+  epoch: string;
+  headSequence: string;
+  firstRetainedSequence: string | null;
+  journalRecords: number;
+  journalCanonicalBytes: number;
+  sourceMetadataRows: number;
+  sourceMetadataBytes: number;
+  consumerSlots: number;
+  activeStreams: number;
+};
+
 export type AcceptedState = {
   acceptedGenerationId: string;
   allocatorId: string;
@@ -352,6 +364,46 @@ export class PostgresCustodyAdapter<M extends LeaseMode> {
     if (this.token.mode !== expected) {
       throw new AllocatorError("writer_fence_unavailable", `operation requires ${expected} mode`);
     }
+  }
+
+  async appendAnnotation(
+    this: PostgresCustodyAdapter<"writer">,
+    record: {
+      clientId: string; sourceEpoch: string; surfaceId: string;
+      sourceSequence: string; sourceEventId: string;
+      lostFromSequence?: string; kind: string;
+    },
+    canonicalBytes: Buffer,
+  ): Promise<{ serverEpoch: string; serverSequence: string; duplicate: boolean; committedAt: string }> {
+    this.assertMode("writer");
+    const result = await this.mutate("annotation_append", async () => await this.primary.query<{
+      server_epoch: string; server_sequence: string; duplicate: boolean; committed_at: Date;
+    }>(
+      "SELECT * FROM surf_ace_allocator.annotation_append($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
+      [this.config.fleetId, this.token.leaseGeneration, this.token.leaseId,
+        record.clientId, record.sourceEpoch, record.surfaceId, record.sourceSequence,
+        record.sourceEventId, record.lostFromSequence ?? null, record.kind, canonicalBytes],
+    ));
+    const row = result.rows[0];
+    if (!row) throw new AllocatorError("persistence_failed", "annotation append returned no cursor");
+    return {
+      serverEpoch: row.server_epoch,
+      serverSequence: String(row.server_sequence),
+      duplicate: row.duplicate,
+      committedAt: row.committed_at.toISOString(),
+    };
+  }
+
+  async annotationInfo(this: PostgresCustodyAdapter<"writer">): Promise<AnnotationInfo> {
+    this.assertMode("writer");
+    return await this.enqueuePrimary(async () => {
+      this.assertUsable();
+      const result = await this.primary.query<{ info: AnnotationInfo }>(
+        "SELECT surf_ace_allocator.annotation_info($1,$2,$3) AS info",
+        [this.config.fleetId, this.token.leaseGeneration, this.token.leaseId],
+      );
+      return result.rows[0]!.info;
+    });
   }
 
   async bindAuthority(this: PostgresCustodyAdapter<"writer">, authorityId: string, ownerAnchorId: string): Promise<void> {
@@ -856,8 +908,11 @@ function validateAcceptedState(state: AcceptedState, config: PostgresCustodyConf
 
 function mapDatabaseError(error: unknown): AllocatorError {
   if (error instanceof AllocatorError) return error;
+  const message = String((error as { message?: unknown })?.message ?? error);
+  if (isSqlState(error, "P0001") && /^(annotation_invalid_request|annotation_record_too_large|annotation_source_event_conflict|annotation_source_sequence_conflict|annotation_source_gap_required|annotation_source_gap_invalid|annotation_ingest_capacity|annotation_journal_sequence_exhausted)$/.test(message)) {
+    return new AllocatorError(message as AllocatorError["code"], message, undefined, error);
+  }
   if (isSqlState(error, "23505")) {
-    const message = String((error as { message?: unknown }).message ?? error);
     return new AllocatorError(
       message.includes("ownership") ? "authority_ownership_conflict" : "assignment_conflict",
       message,
