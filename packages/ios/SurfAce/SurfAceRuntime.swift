@@ -3578,7 +3578,11 @@ final class SurfAceRuntime {
                 .appendingPathComponent("lockless-authority-v1.json")
         }
         let store = SurfAceLocklessGenerationStore(stateURL: stateURL)
-        let adapter = try SurfAceLocklessRuntimeAdapter(store: store)
+        let configuredRegistry = ProcessInfo.processInfo.environment["SURF_ACE_SERVER"]
+            .flatMap(URL.init(string:))
+        let annotationClientId = configuredRegistry?.scheme == "ws" && configuredRegistry?.host != nil
+            ? identity?.clientId : nil
+        let adapter = try SurfAceLocklessRuntimeAdapter(store: store, annotationClientId: annotationClientId)
         locklessAdapter = adapter
         return adapter
     }

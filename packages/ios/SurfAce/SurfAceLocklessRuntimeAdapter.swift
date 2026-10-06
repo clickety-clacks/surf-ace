@@ -130,6 +130,7 @@ actor SurfAceLocklessRuntimeAdapter {
 
     init(
         store: SurfAceLocklessGenerationStore,
+        annotationClientId: String? = nil,
         targetIntentAdmissionPreparation: (@Sendable (String) async -> Void)? = nil
     ) throws {
         self.targetIntentAdmissionPreparation = targetIntentAdmissionPreparation
@@ -139,6 +140,29 @@ actor SurfAceLocklessRuntimeAdapter {
             state = loadedState
         } else {
             state = try SurfAceLocklessAuthorityState.empty()
+        }
+        var annotationMigrationChanged = false
+        if let annotationClientId {
+            if let existing = state.annotationPublisher {
+                guard existing.clientId == annotationClientId else {
+                    throw SurfAceLocklessAuthorityError.invalidState("annotation_client_identity")
+                }
+            } else {
+                var proposed = state.limits
+                if proposed.maxAnnotationPublisherStateBytesPerSurface == nil,
+                   proposed.maxAnnotationPublisherRecordsPerSurface == nil {
+                    if proposed == .production {
+                        proposed.maxRecoverableSurfaceBytes = 704 * 1_024 * 1_024
+                    }
+                    proposed.maxAnnotationPublisherStateBytesPerSurface = Int64(SurfAceAnnotationOutbox.maximumBytes)
+                    proposed.maxAnnotationPublisherRecordsPerSurface = Int64(SurfAceAnnotationOutbox.maximumRecords)
+                }
+                if (try? proposed.validate()) != nil {
+                    state.annotationPublisher = try SurfAceAnnotationOutbox(clientId: annotationClientId)
+                    state.limits = proposed
+                    annotationMigrationChanged = true
+                }
+            }
         }
         try Self.normalizeTopologies(in: &state)
         var restoredLiveController = false
@@ -151,7 +175,7 @@ actor SurfAceLocklessRuntimeAdapter {
         }
         let reclaimedRestoredController = try !SurfAceLocklessDormantRetention
             .enforceBounds(in: &state, trigger: "restored_state_enforcement").isEmpty
-        if restoredLiveController || reclaimedRestoredController || loadedState == nil {
+        if restoredLiveController || reclaimedRestoredController || annotationMigrationChanged || loadedState == nil {
             state.generation += 1
             try store.save(state)
         }

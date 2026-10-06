@@ -451,10 +451,8 @@ struct SurfAceLocklessAuthorityState: Codable, Equatable, Sendable {
                 throw SurfAceLocklessAuthorityError.invalidState("annotation_publisher_limits")
             }
             try annotationPublisher.validate(maxBytes: Int(maxBytes), maxRecords: Int(maxRecords))
-            let retained = Set(liveSurfaces.keys).union(surfaceTombstones.map { $0.surface.surfaceId })
-            guard Set(annotationPublisher.surfaces.keys).isSubset(of: retained) else {
-                throw SurfAceLocklessAuthorityError.invalidState("annotation_publisher_surfaces")
-            }
+            // Source records remain pending even if §4.8 later reclaims the
+            // surface tombstone; their acknowledgement is independent.
         }
         let allSequences = [
             sequences.nextClosedSequence,

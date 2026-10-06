@@ -69,4 +69,49 @@ final class SurfAceAnnotationOutboxTests: XCTestCase {
                                                 from: JSONEncoder().encode(state))
         XCTAssertEqual(restored.annotationPublisher, state.annotationPublisher)
     }
+
+    func testSurfaceCloseChargesPublisherPartitionAndRetainsItsSourceHistory() throws {
+        var limits = SurfAceLocklessCapacityLimits.production
+        limits.maxAnnotationPublisherStateBytesPerSurface = Int64(SurfAceAnnotationOutbox.maximumBytes)
+        limits.maxAnnotationPublisherRecordsPerSurface = Int64(SurfAceAnnotationOutbox.maximumRecords)
+        limits.maxRecoverableSurfaceBytes = 704 * 1_024 * 1_024
+        var state = try SurfAceLocklessAuthorityState.empty(limits: limits)
+        state.annotationPublisher = try SurfAceAnnotationOutbox(clientId: "client-1", sourceEpoch: sourceEpoch)
+        let opened = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
+            state: &state, expectedSurfaceSetRevision: state.surfaceSetRevision)
+        let surfaceId = opened.surface.surfaceId
+        _ = try state.annotationPublisher?.append(surfaceId: surfaceId, record: record())
+        let pending = try XCTUnwrap(state.annotationPublisher?.head(surfaceId: surfaceId))
+        let publisherBytes = try XCTUnwrap(state.annotationPublisher?.partitionBytes(surfaceId: surfaceId))
+        let topologyRevision = try XCTUnwrap(state.liveSurfaces[surfaceId]?.topologyRevision)
+        _ = try SurfAceLocklessTopologyOperations.surfaceWindowClose(
+            state: &state, surfaceId: surfaceId,
+            expectedSurfaceSetRevision: state.surfaceSetRevision,
+            expectedTopologyRevision: topologyRevision)
+        let tombstone = try XCTUnwrap(state.surfaceTombstones.first)
+        let base = try SurfAceLocklessTopologyOperations.restoredSurfaceTombstoneBytes(
+            closedSequence: tombstone.closedSequence, scopes: tombstone.scopes,
+            surface: tombstone.surface, tombstoneId: tombstone.tombstoneId)
+        XCTAssertEqual(tombstone.bytes, base + publisherBytes)
+        XCTAssertEqual(state.annotationPublisher?.surfaces[surfaceId]?.fifo.first, pending)
+        try state.validate()
+    }
+
+    func testConfiguredAdapterMigratesOldStateBeforeAdmissionAndKeepsEpochOnRestart() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SurfAceAnnotationMigration-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = SurfAceLocklessGenerationStore(stateURL: directory.appendingPathComponent("authority-v1.json"))
+        try store.save(SurfAceLocklessAuthorityState.empty())
+        let adapter = try SurfAceLocklessRuntimeAdapter(store: store, annotationClientId: "client-1")
+        let state = await adapter.snapshot()
+        XCTAssertEqual(state.annotationPublisher?.clientId, "client-1")
+        XCTAssertEqual(state.limits.maxAnnotationPublisherStateBytesPerSurface,
+                       Int64(SurfAceAnnotationOutbox.maximumBytes))
+        XCTAssertEqual(state.limits.maxRecoverableSurfaceBytes, 704 * 1_024 * 1_024)
+        let restarted = try SurfAceLocklessRuntimeAdapter(store: store, annotationClientId: "client-1")
+        let afterRestart = await restarted.snapshot()
+        XCTAssertEqual(afterRestart.annotationPublisher?.sourceEpoch,
+                       state.annotationPublisher?.sourceEpoch)
+    }
 }

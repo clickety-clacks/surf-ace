@@ -83,6 +83,20 @@ struct SurfAceAnnotationOutbox: Codable, Equatable, Sendable {
         }
     }
 
+    func partitionBytes(surfaceId: String) throws -> Int64 {
+        guard let surface = surfaces[surfaceId] else { return 0 }
+        struct Partition: Encodable {
+            let version: Int
+            let clientId: String
+            let sourceEpoch: String
+            let surface: SurfAceAnnotationSurfaceOutbox
+        }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return Int64(try encoder.encode(Partition(version: 1, clientId: clientId,
+                                                 sourceEpoch: sourceEpoch, surface: surface)).count)
+    }
+
     mutating func append(surfaceId: String, record: [String: Any],
                          maxBytes: Int = maximumBytes, maxRecords: Int = maximumRecords) throws -> String {
         try ensureSurface(surfaceId, maxBytes: maxBytes, maxRecords: maxRecords)
@@ -195,17 +209,7 @@ struct SurfAceAnnotationOutbox: Codable, Equatable, Sendable {
 
     private func fits(surfaceId: String, maxBytes: Int, maxRecords: Int) throws -> Bool {
         guard let surface = surfaces[surfaceId], surface.fifo.count <= maxRecords else { return false }
-        struct Partition: Encodable {
-            let version: Int
-            let clientId: String
-            let sourceEpoch: String
-            let surface: SurfAceAnnotationSurfaceOutbox
-        }
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys]
-        let bytes = try encoder.encode(Partition(version: 1, clientId: clientId,
-                                                 sourceEpoch: sourceEpoch, surface: surface)).count
-        return bytes + 2 * Self.gapSlotBytes <= maxBytes
+        return try partitionBytes(surfaceId: surfaceId) + Int64(2 * Self.gapSlotBytes) <= maxBytes
     }
 
     private static func canonical(_ value: [String: Any]) -> String? {
