@@ -3350,11 +3350,25 @@ test("AC-SURF-01: controller and local-user surface lifecycle share the persiste
     assert.equal(tombstone.annotationPublisherPartitionBytes, publisherBytes);
     const { bytes, ...material } = tombstone;
     assert.equal(bytes, Buffer.byteLength(JSON.stringify({ version: 1, ...material }), "utf8") + publisherBytes);
+    const sealed = core.annotationPublisher!.head(localOpened.surfaceId)!;
+    const sealedBytes = core.annotationPublisher!.partitionBytes(localOpened.surfaceId);
+    core.getPersistentState();
+    assert.equal(core.locklessAuthority.listTombstones("surface")
+      .find((entry) => entry.tombstoneId === localClosed.tombstoneId)?.annotationPublisherPartitionBytes,
+    sealedBytes);
+    core.annotationPublisher!.accepted(localOpened.surfaceId, sealed,
+      { epoch: "a".repeat(32), sequence: "1" });
+    const acceptedBytes = core.annotationPublisher!.partitionBytes(localOpened.surfaceId);
+    core.getPersistentState();
+    assert.equal(core.locklessAuthority.listTombstones("surface")
+      .find((entry) => entry.tombstoneId === localClosed.tombstoneId)?.annotationPublisherPartitionBytes,
+    acceptedBytes);
     const restarted = new SurfaceCore({ annotationClientId: "c".repeat(64),
       persistentState: core.getPersistentState() });
-    assert.equal(restarted.annotationPublisher!.partitionBytes(localOpened.surfaceId), publisherBytes);
+    assert.equal(restarted.annotationPublisher!.partitionBytes(localOpened.surfaceId), acceptedBytes);
     assert.equal(restarted.locklessAuthority.listTombstones("surface")
-      .find((entry) => entry.tombstoneId === localClosed.tombstoneId)?.bytes, bytes);
+      .find((entry) => entry.tombstoneId === localClosed.tombstoneId)?.annotationPublisherPartitionBytes,
+    acceptedBytes);
   } finally {
     lifecycle.close();
     await server.stop();

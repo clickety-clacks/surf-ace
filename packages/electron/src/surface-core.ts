@@ -713,6 +713,7 @@ export class SurfaceCore {
         ),
       });
     }
+    this.reconcileAnnotationTombstones();
   }
 
   subscribe(listener: (event: CoreEvent) => void): () => void {
@@ -770,6 +771,7 @@ export class SurfaceCore {
   }
 
   getPersistentState(): PersistentSurfaceState {
+    this.reconcileAnnotationTombstones();
     return {
       ...structuredClone(this.persistentState),
       ...(this.annotationPublisher ? { annotationPublisher: this.annotationPublisher.snapshot() } : {}),
@@ -778,6 +780,20 @@ export class SurfaceCore {
       nextAdmissionAttemptSequence: this.nextAdmissionAttemptSequence,
       surfaces: this.listSurfaces().map((surface) => serializeSurface(surface)),
     };
+  }
+
+  private reconcileAnnotationTombstones(): void {
+    const tombstones = this.locklessAuthority.listTombstones("surface");
+    if (!this.annotationPublisher && tombstones.some((entry) =>
+      (entry.annotationPublisherPartitionBytes ?? 0) > 0)) {
+      throw new TypeError("retained annotation publisher requires its source state");
+    }
+    for (const tombstone of tombstones) {
+      this.locklessAuthority.reconcileAnnotationPublisherPartition(
+        tombstone.tombstoneId,
+        this.annotationPublisher?.partitionBytes(tombstone.surfaceId) ?? 0,
+      );
+    }
   }
 
   /**

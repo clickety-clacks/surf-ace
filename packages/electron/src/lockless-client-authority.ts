@@ -1503,6 +1503,33 @@ export class LocklessClientAuthority {
       delete this.state.scopes[scopeId];
     }
     for (const { reason, tombstone: victim } of reclaimed) {
+      this.recordTombstoneReclamation(victim, reason);
+    }
+    return clone(tombstone);
+  }
+
+  reconcileAnnotationPublisherPartition(tombstoneId: string, publisherBytes: number): void {
+    if (!Number.isSafeInteger(publisherBytes) || publisherBytes < 0 ||
+        publisherBytes > (this.state.limits.maxAnnotationPublisherStateBytesPerSurface ?? 0)) {
+      throw new LocklessAuthorityError("internal_error", "Invalid annotation publisher tombstone charge");
+    }
+    const tombstone = this.state.tombstones.find((entry) =>
+      entry.tombstoneId === tombstoneId && entry.kind === "surface");
+    if (!tombstone || (tombstone.annotationPublisherPartitionBytes ?? 0) === publisherBytes) return;
+    if (publisherBytes > 0) tombstone.annotationPublisherPartitionBytes = publisherBytes;
+    else delete tombstone.annotationPublisherPartitionBytes;
+    refreshTombstoneBytes(tombstone);
+    while (this.state.tombstones.reduce((total, entry) => total + entry.bytes, 0) >
+           this.state.limits.maxRetainedTombstoneBytes) {
+      const victim = this.state.tombstones.shift();
+      if (!victim) throw new LocklessAuthorityError("internal_error", "Tombstone pool cannot be reconciled");
+      this.recordTombstoneReclamation(victim, "byte_capacity");
+    }
+  }
+
+  private recordTombstoneReclamation(
+    victim: PersistentTombstone, reason: "count_capacity" | "byte_capacity",
+  ): void {
       const nested = nestedTombstones(victim);
       const discardedRecords = tombstoneScopes(victim).flatMap(
         (scope) => this.scopeProjectionRecords(scope),
@@ -1571,8 +1598,6 @@ export class LocklessClientAuthority {
         unreadBytesDiscarded,
         unreadFrameCount,
       });
-    }
-    return clone(tombstone);
   }
 
   restoreTombstone(
