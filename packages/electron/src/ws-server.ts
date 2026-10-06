@@ -249,7 +249,7 @@ export class SurfaceWsServer {
   private readonly getRuntimeAppBinding?: () => Promise<RuntimeAppBindingDiagnostics | null> | RuntimeAppBindingDiagnostics | null;
   private readonly onNativeMaterialized?: (surfaceId: string, materialization: NativePaneMaterialization) => void;
   private readonly onNativeReleased?: (surfaceId: string, paneIds: string[]) => Promise<void> | void;
-  private readonly port: number;
+  private port: number;
   private readonly protocolVersion: number;
   private readonly persistLocklessState: () => Promise<void>;
   private readonly capturePaneImage: SurfaceWsServerOptions["capturePaneImage"];
@@ -318,10 +318,6 @@ export class SurfaceWsServer {
     this.wss = new WebSocketServer({ noServer: true });
 
     this.httpServer.on("upgrade", (request, socket, head) => {
-      if (this.persistenceOutcomeUnknown) {
-        socket.destroy();
-        return;
-      }
       if (request.url !== this.wsPath) {
         persistentServerDiagnostic(
           "warn",
@@ -407,7 +403,8 @@ export class SurfaceWsServer {
     });
   }
 
-  async start(): Promise<void> {
+  async start(port = this.port): Promise<void> {
+    this.port = port;
     persistentServerDiagnostic(
       "info",
       "server_bind_start",
@@ -419,8 +416,17 @@ export class SurfaceWsServer {
     );
     await this.resumeTargetApplyWorkItems();
     await new Promise<void>((resolve, reject) => {
-      this.httpServer.listen(this.port, this.bindAddress, () => resolve());
-      this.httpServer.once("error", reject);
+      const onError = (error: Error) => {
+        this.httpServer.off("listening", onListening);
+        reject(error);
+      };
+      const onListening = () => {
+        this.httpServer.off("error", onError);
+        resolve();
+      };
+      this.httpServer.once("error", onError);
+      this.httpServer.once("listening", onListening);
+      this.httpServer.listen(this.port, this.bindAddress);
     });
     this.ignoreInitialSurfaceEvents = false;
     this.nativePaneStatusPollingStopped = false;
@@ -473,26 +479,17 @@ export class SurfaceWsServer {
 
   failStopPersistence(error: PersistentStateOutcomeUnknownError): void {
     if (this.persistenceOutcomeUnknown) return;
-    // Set synchronously: this is what actually blocks every future admission
-    // and mutation attempt (checked at the top of the wrapped
-    // persistLocklessState, and independently by SurfaceCore's own
-    // admissionFailStop), so no candidate can proceed and no sequence can be
-    // reused regardless of when the sockets below actually close.
+    // Keep transport and read-only commands available. The uncertain selector
+    // still fences every operation that could require durable state.
     this.persistenceOutcomeUnknown = error;
     persistentServerDiagnostic("error", "persistence_outcome_unknown_fail_stop", {
       ...errorDiagnosticFields(error.cause),
     });
-    // Deferred to a macrotask so the request that TRIGGERED this fail-stop
-    // gets its bounded error response sent first. Closing synchronously here
-    // (the previous behavior) marks every socket, including the caller's own,
-    // as no longer OPEN before dispatch ever reaches the point of sending a
-    // reply, so `this.send` silently drops it and the caller times out
-    // instead of receiving an answer.
-    setImmediate(() => {
-      for (const socket of this.wss.clients) {
-        socket.close(1011, "persistence_outcome_unknown");
-      }
-    });
+  }
+
+  resumeAfterVerifiedPersistence(): void {
+    this.persistenceOutcomeUnknown = null;
+    persistentServerDiagnostic("info", "persistence_reconciled");
   }
 
   advertisedTxt(fingerprintPrefix: string): Record<string, string> {
@@ -808,6 +805,7 @@ export class SurfaceWsServer {
     surfaceSetRevision: number;
     tombstoneId: string;
   }> {
+    if (this.persistenceOutcomeUnknown) throw this.persistenceOutcomeUnknown;
     const result = await this.core.locklessAuthority.transactionAsync(async () => {
       const committed = await this.runLifecycleTransaction(() => {
         const record = this.core.captureSurfaceTombstonePayload(surfaceId);
@@ -839,6 +837,7 @@ export class SurfaceWsServer {
     surfaceId: string;
     surfaceSetRevision: number;
   }> {
+    if (this.persistenceOutcomeUnknown) throw this.persistenceOutcomeUnknown;
     const result = await this.core.locklessAuthority.transactionAsync(
       async () => {
         const committed = await this.runLifecycleTransaction(() => {
@@ -1168,6 +1167,21 @@ export class SurfaceWsServer {
       return;
     }
 
+    if (this.persistenceOutcomeUnknown && (
+      request.op === "pair.request" ||
+      request.op === "consumable.ack" ||
+      request.op === "operation.receipt.ack" ||
+      locklessOperationMutates(request.op)
+    )) {
+      await this.send(socket, JSON.stringify(errorResponse(
+        request.op,
+        request.id as never,
+        "internal_error",
+        "Local persistence is uncertain; this operation is paused pending reconciliation",
+      )));
+      return;
+    }
+
     if (request.op === "target.apply") {
       const session = this.locklessSessions.get(socket);
       if (session) {
@@ -1241,7 +1255,7 @@ export class SurfaceWsServer {
               request.op,
               request.id as never,
               "internal_error",
-              "Persistent state commit outcome is unknown; registry requires restart",
+              "Persistent state commit outcome is unknown; dependent operations are paused pending reconciliation",
             ),
           };
         }
@@ -1331,6 +1345,14 @@ export class SurfaceWsServer {
           }),
         );
       } catch (error) {
+        if (error instanceof PersistentStateOutcomeUnknownError) {
+          response = errorResponse(
+            request.op,
+            request.id as never,
+            "internal_error",
+            "Persistent state commit outcome is unknown; dependent operations are paused pending reconciliation",
+          );
+        } else {
         if (!(error instanceof LocklessAuthorityError)) throw error;
         response = await this.core.locklessAuthority.transactionAsync(async () => {
           this.core.locklessAuthority.auditRejected(
@@ -1350,6 +1372,7 @@ export class SurfaceWsServer {
             error.details,
           );
         });
+        }
       }
     } else if (request.op === "pair.request" || request.op === "topology.apply") {
       response = (await dispatch()).response;
@@ -1379,8 +1402,10 @@ export class SurfaceWsServer {
         return result.response;
       });
     }
-    meta.cache.set(request.id, { payloadHash, response });
-    trimCache(meta.cache);
+    if (!this.persistenceOutcomeUnknown) {
+      meta.cache.set(request.id, { payloadHash, response });
+      trimCache(meta.cache);
+    }
     await this.send(socket, JSON.stringify(response));
   }
 

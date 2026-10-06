@@ -2128,13 +2128,14 @@ test("target intent persistence completes before response and materialization ca
   }
 });
 
-test("unknown persistence outcome closes transport without a terminal answer and fail-stops later authority", async () => {
+test("unknown persistence outcome preserves direct reads while fencing dependent mutation", async () => {
   const core = new SurfaceCore();
   const surface = core.ensurePrimarySurface("Surf Ace", {
     height: 800,
     scale: 2,
     width: 1200,
   });
+  const other = core.createAdditionalSurface("Other", { height: 800, scale: 2, width: 1200 });
   let failPersistence = false;
   let materializationInvocations = 0;
   const targetApply = core.targetApply.bind(core);
@@ -2162,17 +2163,8 @@ test("unknown persistence outcome closes transport without a terminal answer and
   try {
     assert.equal((await pair(socket, "tight-beam", surface.surfaceId)).ok, true);
     const panes = await request(socket, "panes.list", { surfaceId: surface.surfaceId });
-    const requestId = "target-persistence-outcome-unknown";
-    const received: Record<string, any>[] = [];
-    socket.on("message", (raw) => received.push(JSON.parse(String(raw))));
-    const closed = new Promise<{ code: number; reason: string }>((resolve) => {
-      socket.once("close", (code, reason) => resolve({ code, reason: String(reason) }));
-    });
     failPersistence = true;
-    socket.send(JSON.stringify({
-      id: requestId,
-      op: "target.apply",
-      payload: {
+    const rejected = await request(socket, "target.apply", {
         paneId: Number(panes.payload.panes[0].paneId),
         requestId: "target-materialization-must-not-run",
         restoreReason: "initial",
@@ -2189,19 +2181,60 @@ test("unknown persistence outcome closes transport without a terminal answer and
         targetId: "target-fail-stop",
         targetKind: "browser_url",
         targetPayload: { url: "https://example.com/" },
-      },
-      sentAt: Date.now(),
-      type: "request",
-      v: 1,
-    }));
-    const close = await closed;
-    assert.equal(close.code, 1011);
-    assert.equal(close.reason, "persistence_outcome_unknown");
-    assert.equal(received.some((message) => message.id === requestId), false);
+    }, { id: "target-persistence-outcome-unknown" });
+    assert.equal(rejected.ok, false);
+    assert.match(rejected.error.message, /unknown|paused/i);
     assert.equal(materializationInvocations, 0);
-    await assert.rejects(connect(`ws://127.0.0.1:${port}${server.wsPath}`));
+    assert.equal((await request(socket, "panes.list", { surfaceId: surface.surfaceId })).ok, true);
+    const second = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+    try {
+      const listed = await request(second, "surfaces.list", {});
+      assert.equal(listed.ok, true);
+      assert(listed.payload.surfaces.some((item: { surfaceId: string }) => item.surfaceId === other.surfaceId));
+    } finally {
+      second.close();
+    }
   } finally {
     socket.close();
+    await server.stop();
+  }
+});
+
+test("listener bind failure can retry on the same server without changing restored surfaces", async () => {
+  const core = new SurfaceCore();
+  const first = core.ensurePrimarySurface("First", { height: 800, scale: 1, width: 1200 });
+  const second = core.createAdditionalSurface("Second", { height: 800, scale: 1, width: 1200 });
+  const before = core.getPersistentState();
+  const port = nextPort++;
+  const occupant = createServer();
+  await new Promise<void>((resolve) => occupant.listen(port, "127.0.0.1", resolve));
+  const server = new SurfaceWsServer({
+    bindAddress: "127.0.0.1",
+    capturePaneImage: async () => null,
+    compositorSocketPath: null,
+    core,
+    endpointName: "Surf Ace",
+    hostName: "localhost",
+    port,
+    viewport: () => ({ height: 800, scale: 1, width: 1200 }),
+  });
+  try {
+    await assert.rejects(server.start(), (error: NodeJS.ErrnoException) => error.code === "EADDRINUSE");
+    assert.deepEqual(core.getPersistentState(), before);
+    await new Promise<void>((resolve) => occupant.close(() => resolve()));
+    await server.start();
+    const socket = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+    try {
+      const listed = await request(socket, "surfaces.list", {});
+      assert.equal(listed.ok, true);
+      assert(listed.payload.surfaces.some((item: { surfaceId: string }) => item.surfaceId === first.surfaceId));
+      assert(listed.payload.surfaces.some((item: { surfaceId: string }) => item.surfaceId === second.surfaceId));
+      assert.deepEqual(core.getPersistentState(), before);
+    } finally {
+      socket.close();
+    }
+  } finally {
+    if (occupant.listening) await new Promise<void>((resolve) => occupant.close(() => resolve()));
     await server.stop();
   }
 });
@@ -4448,7 +4481,7 @@ test("real socket-path, two owners, ordering B (started first): mixed recovery r
 // the point of sending a response. Those earlier tests never exercised that
 // path at all. This one imports the real class.
 
-test("real-import unknown-outcome: pair.request gets exactly one bounded envelope, not a silent socket close", async () => {
+test("real-import unknown-outcome: pair.request gets a bounded envelope and read transport remains", async () => {
   const core = new SurfaceCore();
   const surface = core.ensurePrimarySurface("Surf Ace", {
     height: 800,
@@ -4471,11 +4504,6 @@ test("real-import unknown-outcome: pair.request gets exactly one bounded envelop
   });
   await server.start();
   const socket = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
-  // The server force-closes this socket once fail-stop's deferred sweep
-  // runs. That is an expected, not exceptional, part of this scenario, so a
-  // late 'error' event on the underlying transport must not crash the test
-  // as an unhandled EventEmitter error; the 'close' handler below is what
-  // actually records the outcome.
   socket.on("error", () => {});
   const envelopes: Record<string, any>[] = [];
   let closeCode: number | null = null;
@@ -4511,18 +4539,16 @@ test("real-import unknown-outcome: pair.request gets exactly one bounded envelop
     // Fail-stopped, and stays fail-stopped.
     assert.equal(core.isAdmissionFailStopped(), true);
 
-    // A NEW connection attempt while fail-stopped is refused outright at
-    // the transport layer (see the upgrade handler's own
-    // `if (this.persistenceOutcomeUnknown) { socket.destroy(); return; }`),
-    // which is a stronger and pre-existing "no candidate admission"
-    // guarantee than an application-level envelope would be. Confirming it
-    // here documents that behavior rather than fighting it: a bounded
-    // rejection at connect time is not the hang this card is about.
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    await assert.rejects(
-      connect(`ws://127.0.0.1:${port}${server.wsPath}`),
-      /socket hang up|ECONNRESET/,
-    );
+    const second = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+    try {
+      const listed = await request(second, "surfaces.list", {});
+      assert.equal(listed.ok, true);
+      const paused = await pair(second, "tight-beam", surface.surfaceId);
+      assert.equal(paused.ok, false);
+      assert.match(paused.error.message, /paused/i);
+    } finally {
+      second.close();
+    }
 
     // Exactly one envelope for the original request id.
     await new Promise((resolve) => setTimeout(resolve, 300));
