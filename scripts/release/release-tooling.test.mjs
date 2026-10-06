@@ -500,12 +500,12 @@ test("Tightbeam macOS smoke plans one exact candidate profile", async (t) => {
   assert.equal(plan[0].identityFile, path.join(electronLaunchConfig(plan[0].home, plan[0].port).userDataDir, "surface-identity.json"));
 });
 
-test("smoke participant identity gate binds server, CLI, and client to exact v0.2.4 package bytes", () => {
+test("smoke participant identity gate binds server, CLI, and client to exact v0.2.5 package bytes", () => {
   const valid = smokeParticipantIdentities("linux");
   assert.deepEqual(assertTightbeamSmokeParticipantIdentities(valid, "linux").map(({ participant, version }) => ({ participant, version })), [
-    { participant: "server", version: "0.2.4" },
-    { participant: "cli", version: "0.2.4" },
-    { participant: "client", version: "0.2.4" },
+    { participant: "server", version: "0.2.5" },
+    { participant: "cli", version: "0.2.5" },
+    { participant: "client", version: "0.2.5" },
   ]);
   for (const participant of ["server", "cli", "client"]) {
     const mismatched = valid.map((identity) => identity.participant === participant
@@ -654,7 +654,7 @@ test("Electron smoke checks the running app version before any CLI request", asy
     },
     stateRoot: path.join(root, "cli-state"),
     waitForEndpoint: async () => undefined,
-  }), /tightbeam_client_app_version_mismatch:0\.1\.0:0\.2\.4/);
+  }), /tightbeam_client_app_version_mismatch:0\.1\.0:0\.2\.5/);
   assert.equal(cliCalls, 0);
 });
 
