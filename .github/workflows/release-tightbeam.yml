@@ -30,7 +30,7 @@ env:
   RUST_VERSION: 1.89.0
   LINUX_RUST_TARGET: x86_64-unknown-linux-gnu
   MACOS_RUST_TARGET: aarch64-apple-darwin
-  TOOLING_TAG: surf-ace-release-tooling-tightbeam-v0.2.5-r7
+  TOOLING_TAG: surf-ace-release-tooling-tightbeam-v0.2.5-r8
 
 jobs:
   guard:

@@ -815,7 +815,7 @@ async function stagedPostgresRestore(options: {
       beforeProjectionSha256: stagedAfterService.projectionSha256,
       ok: stagedAfterHealth.projectionSha256 === stagedAfterService.projectionSha256 &&
         explicitHealth.event === "health" && explicitHealth.status === "healthy" &&
-        explicitHealth.transport === "websocket-open",
+        explicitHealth.transport === "fleet.topology",
     };
     await persistLifecycleEvidence();
     if (!lifecycleEvidence.checks.healthRead.ok) {
