@@ -2273,6 +2273,10 @@ test("fresh-install Linux qualification requires direct current content, wrong-s
 
   const validated = validateTightbeamFreshInstallState(evidence);
   assert.equal(validated.status, "passed");
+  assert.deepEqual(validated.registryReleaseWitnessEvents, {
+    beforeRestart: [],
+    afterRestart: ["release_witness_retry_required_commit_replay", "release_witness_recovered_verified"],
+  });
   assert.equal(validated.clientAppVersion, TIGHTBEAM.version);
   assert.equal(validated.clientAppVersionEvidenceSha256, "d".repeat(64));
   assert.throws(() => validateTightbeamFreshInstallState({
@@ -2680,6 +2684,7 @@ test("Linux fresh-install state driver binds candidate-only inputs and packaged 
   assert.equal(calls, 1);
   assert.equal(result.mode, "fresh-install");
   assert.equal(result.status, "passed");
+  assert.deepEqual(result.registryReleaseWitnessEvents, { beforeRestart: [], afterRestart: [] });
   assert.equal(result.rawCliEvidence.events.length, 11);
   assert.equal(result.rawCliEvidence.events.at(-1).command, "read");
   const unacceptedPushEvents = events.map((event) => event.command === "push" && event.status === 0

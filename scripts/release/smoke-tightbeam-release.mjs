@@ -565,6 +565,10 @@ export function validateTightbeamFreshInstallState(stateSequence) {
     contentId: expected.contentId,
     databaseIdentity: before.databaseIdentity,
     mode: "fresh-install",
+    registryReleaseWitnessEvents: {
+      beforeRestart: [...registryShutdown.releaseWitnessEventsBeforeRestart],
+      afterRestart: [...registryShutdown.releaseWitnessEventsAfterRestart],
+    },
     sourceCommit: stateSequence.sourceCommit,
     status: "passed",
     surfaceId: before.surfaceId,
@@ -803,8 +807,8 @@ export async function smokeLinuxFreshInstall(options) {
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`linux_fresh_install_failed:${message}:evidence_root:${root}`, { cause: error });
   } finally {
-    // A Red retains the isolated logs/state for diagnosis; successful runs return
-    // the validated raw CLI evidence and remove their disposable package/PG state.
+    // A Red retains isolated logs/state; successful runs return validated CLI and
+    // registry witness evidence before removing disposable package/PG state.
     if (passed) await removeIfExists(root);
   }
 }
