@@ -384,8 +384,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
             iproute2 libpq-dev postgresql-16 postgresql-client-16 util-linux \
-            tar unzip x11-utils xauth xvfb
-          for tool in ip unshare runuser xvfb-run Xvfb xauth xdpyinfo pg_config tar unzip; do
+            tar unzip x11-utils xauth xdotool xvfb
+          for tool in ip unshare runuser xvfb-run Xvfb xauth xdpyinfo xdotool pg_config tar unzip; do
             if ! command -v "${tool}" >/dev/null 2>&1; then
               echo "linux_smoke_required_tool_missing:${tool}" >&2
               exit 127

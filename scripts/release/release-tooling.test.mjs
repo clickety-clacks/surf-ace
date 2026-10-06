@@ -2879,10 +2879,10 @@ test("v0.2.5 standalone specification and release gates bind the product and all
   assert.ok(linuxBuildOrder.every((index) => index >= 0));
   assert.deepEqual([...linuxBuildOrder].sort((left, right) => left - right), linuxBuildOrder);
   const linuxSmokeHostDependencies = workflowRunScript(workflow, "Install Linux smoke host dependencies");
-  for (const packageName of ["iproute2", "libpq-dev", "postgresql-16", "postgresql-client-16", "util-linux", "tar", "unzip", "x11-utils", "xauth", "xvfb"]) {
+  for (const packageName of ["iproute2", "libpq-dev", "postgresql-16", "postgresql-client-16", "util-linux", "tar", "unzip", "x11-utils", "xauth", "xdotool", "xvfb"]) {
     assert.ok(linuxSmokeHostDependencies.includes(packageName), `missing Linux smoke host package ${packageName}`);
   }
-  assert.match(linuxSmokeHostDependencies, /for tool in ip unshare runuser xvfb-run Xvfb xauth xdpyinfo pg_config tar unzip; do/);
+  assert.match(linuxSmokeHostDependencies, /for tool in ip unshare runuser xvfb-run Xvfb xauth xdpyinfo xdotool pg_config tar unzip; do/);
   assert.match(linuxSmokeHostDependencies, /command -v "\$\{tool\}"/);
   assert.match(linuxSmokeHostDependencies, /for tool in initdb postgres pg_ctl psql pg_basebackup pg_dump pg_restore; do/);
   assert.match(linuxSmokeHostDependencies, /linux_smoke_required_postgres_tool_missing/);
