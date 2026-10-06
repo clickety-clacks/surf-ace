@@ -2,7 +2,11 @@ import { randomUUID } from "node:crypto";
 
 import { AllocatorServer, type AllocatorServerConfig } from "../../allocator/src/server.js";
 import { BonjourAdvertiser } from "./bonjour-advertiser.js";
-import { centralServerAdvertisement } from "./central-server-advertisement.js";
+import {
+  centralServerAdvertisement,
+  centralServerAdvertisedHost,
+  centralServerBonjourDisableIPv6,
+} from "./central-server-advertisement.js";
 import { CentralServerDiscoveryHealth } from "./central-server-health.js";
 
 // Central serving bootstrap: the existing custody-backed listener advertises
@@ -10,8 +14,13 @@ import { CentralServerDiscoveryHealth } from "./central-server-health.js";
 export async function startCentralServer(config: AllocatorServerConfig, name = "Surf Ace Server") {
   const server = await AllocatorServer.start(config);
   const serverId = randomUUID();
-  const health = new CentralServerDiscoveryHealth(server.address.port, serverId);
+  const advertisedHost = centralServerAdvertisedHost(config.listenHost);
+  const health = new CentralServerDiscoveryHealth(server.address.port, serverId, {
+    expectedHost: advertisedHost,
+  });
   const advertiser = new BonjourAdvertiser({
+    disableIPv6: centralServerBonjourDisableIPv6(config.listenHost),
+    host: advertisedHost,
     name, port: server.address.port,
     onSelfDiscovery: ({ error, service }) => {
       if (service) {

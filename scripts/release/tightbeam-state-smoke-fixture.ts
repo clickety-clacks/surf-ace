@@ -774,7 +774,7 @@ async function stagedPostgresRestore(options: {
     const serverConfig = {
       custody: stage.config,
       hostLockPath: path.join(recoveryRoot, "staging-server.lock"),
-      listenHost: "127.0.0.1",
+      listenHost: "0.0.0.0",
       listenPort: await freePort(),
       name: "Surf Ace PG16 staged restore smoke",
     };
@@ -1090,7 +1090,7 @@ async function freshInstallMain(options: Options) {
   const registryConfig = {
     custody: cluster.config,
     hostLockPath: path.join(cluster.root, "registry.lock"),
-    listenHost: "127.0.0.1",
+    listenHost: "0.0.0.0",
     listenPort: await freePort(),
     name: "Surf Ace Linux fresh-install qualification",
   };
