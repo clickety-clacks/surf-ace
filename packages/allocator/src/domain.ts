@@ -19,6 +19,7 @@ export const ALLOCATOR_ERROR_CODES = [
   "annotation_source_gap_required",
   "annotation_source_gap_invalid",
   "annotation_ingest_capacity",
+  "annotation_journal_unverified",
   "annotation_journal_sequence_exhausted",
   "annotation_consumer_capacity",
   "annotation_consumer_exists",

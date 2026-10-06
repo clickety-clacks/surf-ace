@@ -1023,6 +1023,8 @@ test("annotation migration and append survive duplicate retry without allocating
     const secondConsumer = await WireClient.connect(server.address.url);
     const gapConsumer = await WireClient.connect(server.address.url);
     const retireCaller = await WireClient.connect(server.address.url);
+    let priorLease = "";
+    let priorCursor: { epoch: string; sequence: string } = { epoch: "", sequence: "" };
     try {
       assert.equal((await publisher.request("annotation.hello", { protocolVersion: 1, role: "publisher" })).ok, true);
       assert.equal((await firstConsumer.request("annotation.hello", { protocolVersion: 1, role: "consumer" })).ok, true);
@@ -1033,9 +1035,11 @@ test("annotation migration and append survive duplicate retry without allocating
       assert.equal(secondOpen.ok, true);
       const firstLease = (firstOpen.payload as { leaseId: string }).leaseId;
       const secondLease = (secondOpen.payload as { leaseId: string }).leaseId;
+      priorLease = secondLease;
       const deliveredA = await firstConsumer.waitEvent("annotation.record");
       const deliveredB = await secondConsumer.waitEvent("annotation.record");
       const cursor = (deliveredA.payload as { serverCursor: { epoch: string; sequence: string } }).serverCursor;
+      priorCursor = cursor;
       assert.deepEqual((deliveredB.payload as { serverCursor: unknown }).serverCursor, cursor);
       const acked = await firstConsumer.request("annotation.ack", { consumerId: "first", leaseId: firstLease, throughCursor: cursor });
       assert.equal(acked.ok, true);
@@ -1082,6 +1086,22 @@ test("annotation migration and append survive duplicate retry without allocating
     } finally {
       await Promise.all([publisher.close(), firstConsumer.close(), secondConsumer.close(), gapConsumer.close(), retireCaller.close()]);
       await server.close();
+    }
+    const restarted = await AllocatorServer.start(serverConfig(cluster));
+    const resumed = await WireClient.connect(restarted.address.url);
+    try {
+      assert.equal((await resumed.request("annotation.hello", { protocolVersion: 1, role: "consumer" })).ok, true);
+      const stale = await resumed.request("annotation.ack", {
+        consumerId: "second", leaseId: priorLease, throughCursor: priorCursor,
+      });
+      assert.equal((stale.error as { code: string }).code, "annotation_consumer_lease_stale");
+      const opened = await resumed.request("annotation.resume", { consumerId: "second" });
+      assert.equal(opened.ok, true);
+      assert.notEqual((opened.payload as { leaseId: string }).leaseId, priorLease);
+      assert.deepEqual((opened.payload as { ackCursor: unknown }).ackCursor, priorCursor);
+    } finally {
+      await resumed.close();
+      await restarted.close();
     }
   } finally {
     await cluster.stop();
@@ -1136,6 +1156,10 @@ test("annotation compaction protects absent and unread consumers, then retains s
     } finally {
       await writer.release();
     }
+    await adminQuery(cluster.adminUrl, `UPDATE surf_ace_allocator.annotation_source_heads
+      SET accepted_through_sequence = 999 WHERE fleet_id = 'fleet-test'`);
+    await assert.rejects(AllocatorServer.start(serverConfig(cluster)),
+      (error) => error instanceof AllocatorError && error.code === "annotation_journal_unverified");
   } finally {
     await cluster.stop();
   }

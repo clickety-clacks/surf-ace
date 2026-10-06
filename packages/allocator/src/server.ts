@@ -156,6 +156,16 @@ export class AllocatorServer {
         const authority = new WindowLabelAuthority(custody);
         await authority.recoverPreparedTransactions();
         await custody.validateLease();
+        // Annotation state must be verified and old leases fenced before the
+        // listener can accept a hello. Older schemas remain direct-only.
+        let annotationInstalled = true;
+        try {
+          await custody.annotationInfo();
+        } catch (error) {
+          if ((error as { code?: string }).code !== "42883") throw error;
+          annotationInstalled = false;
+        }
+        if (annotationInstalled) await custody.verifyAnnotationStartup();
         const webSocketServer = new WebSocketServer({
           host: config.listenHost,
           port: config.listenPort,

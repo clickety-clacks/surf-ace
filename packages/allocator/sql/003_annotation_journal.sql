@@ -343,22 +343,10 @@ SET search_path = pg_catalog, surf_ace_allocator
 AS $function$
 DECLARE
   h surf_ace_allocator.annotation_journal_head%ROWTYPE;
-  actual_count bigint;
-  actual_bytes bigint;
-  actual_min bigint;
-  actual_max bigint;
 BEGIN
   PERFORM surf_ace_allocator.assert_role('surf_ace_allocator_writer');
   PERFORM surf_ace_allocator.assert_token(p_fleet_id, p_generation, p_lease_id, 'writer');
   SELECT * INTO STRICT h FROM surf_ace_allocator.annotation_journal_head WHERE fleet_id = p_fleet_id;
-  SELECT count(*), coalesce(sum(canonical_record_length), 0), min(sequence), max(sequence)
-    INTO actual_count, actual_bytes, actual_min, actual_max
-    FROM surf_ace_allocator.annotation_journal_records WHERE fleet_id = p_fleet_id;
-  IF actual_count <> h.retained_record_count OR actual_bytes <> h.retained_canonical_bytes
-     OR (actual_count > 0 AND (actual_min <> h.first_retained_sequence OR actual_max <> h.head_sequence))
-     OR (actual_count = 0 AND h.first_retained_sequence IS NOT NULL) THEN
-    RAISE EXCEPTION 'annotation_journal_unverified';
-  END IF;
   RETURN jsonb_build_object(
     'epoch', h.epoch, 'headSequence', h.head_sequence::text,
     'firstRetainedSequence', h.first_retained_sequence::text,
@@ -377,6 +365,137 @@ END
 $function$;
 
 GRANT EXECUTE ON FUNCTION surf_ace_allocator.annotation_info(text, bigint, text)
+  TO surf_ace_allocator_writer;
+
+-- Run once while acquiring the writer, before admitting annotation traffic.
+-- The head lock makes verification and old-lease fencing one indivisible barrier.
+CREATE FUNCTION surf_ace_allocator.annotation_verify_startup(
+  p_fleet_id text, p_generation bigint, p_lease_id text
+)
+RETURNS void
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = pg_catalog, surf_ace_allocator
+AS $function$
+DECLARE
+  h surf_ace_allocator.annotation_journal_head%ROWTYPE;
+  record_count bigint;
+  record_bytes bigint;
+  record_min bigint;
+  record_max bigint;
+  receipt_count bigint;
+  receipt_bytes bigint;
+  first_position bigint;
+  last_position bigint;
+  head_count bigint;
+  head_bytes bigint;
+BEGIN
+  PERFORM surf_ace_allocator.assert_role('surf_ace_allocator_writer');
+  PERFORM surf_ace_allocator.assert_token(p_fleet_id, p_generation, p_lease_id, 'writer');
+  SELECT * INTO STRICT h FROM surf_ace_allocator.annotation_journal_head
+    WHERE fleet_id = p_fleet_id FOR UPDATE;
+  SELECT count(*), coalesce(sum(canonical_record_length), 0), min(sequence), max(sequence)
+    INTO record_count, record_bytes, record_min, record_max
+    FROM surf_ace_allocator.annotation_journal_records WHERE fleet_id = p_fleet_id;
+  SELECT count(*), coalesce(sum(octet_length(convert_to(jsonb_build_object(
+      'v', 1, 'clientId', client_id, 'sourceEpoch', source_epoch,
+      'surfaceId', surface_id, 'sourceSequence', source_sequence::text,
+      'sourceEventId', source_event_id, 'lostFromSequence', lost_from_sequence::text,
+      'canonicalSha256', encode(canonical_sha256, 'hex'),
+      'canonicalLength', canonical_length, 'originalEpoch', original_epoch,
+      'originalSequence', original_sequence::text,
+      'committedAtMicros', (extract(epoch FROM committed_at) * 1000000)::bigint::text
+    )::text, 'utf8'))), 0)
+    INTO receipt_count, receipt_bytes
+    FROM surf_ace_allocator.annotation_source_receipts WHERE fleet_id = p_fleet_id;
+  SELECT count(*), coalesce(sum(octet_length(convert_to(jsonb_build_object(
+      'v', 1, 'clientId', client_id, 'sourceEpoch', source_epoch,
+      'surfaceId', surface_id,
+      'acceptedThroughSequence', accepted_through_sequence::text
+    )::text, 'utf8'))), 0)
+    INTO head_count, head_bytes
+    FROM surf_ace_allocator.annotation_source_heads WHERE fleet_id = p_fleet_id;
+  SELECT min(n), max(n) INTO first_position, last_position FROM (
+    SELECT original_sequence AS n FROM surf_ace_allocator.annotation_source_receipts WHERE fleet_id = p_fleet_id
+    UNION ALL
+    SELECT sequence FROM surf_ace_allocator.annotation_journal_records WHERE fleet_id = p_fleet_id
+  ) positions;
+  IF record_count <> h.retained_record_count OR record_bytes <> h.retained_canonical_bytes
+     OR (record_count > 0 AND (record_min <> h.first_retained_sequence OR record_max <> h.head_sequence))
+     OR (record_count = 0 AND h.first_retained_sequence IS NOT NULL)
+     OR receipt_count + record_count <> h.head_sequence
+     OR (h.head_sequence > 0 AND (first_position <> 1 OR last_position <> h.head_sequence))
+     OR receipt_count + head_count <> h.source_metadata_rows
+     OR receipt_bytes + head_bytes <> h.source_metadata_bytes
+     OR EXISTS (SELECT 1 FROM surf_ace_allocator.annotation_journal_records
+       WHERE fleet_id = p_fleet_id AND epoch <> h.epoch)
+     OR EXISTS (SELECT 1 FROM surf_ace_allocator.annotation_source_receipts
+       WHERE fleet_id = p_fleet_id AND original_epoch <> h.epoch)
+     OR EXISTS (SELECT 1 FROM (
+       SELECT original_sequence AS n FROM surf_ace_allocator.annotation_source_receipts WHERE fleet_id = p_fleet_id
+       UNION ALL
+       SELECT sequence FROM surf_ace_allocator.annotation_journal_records WHERE fleet_id = p_fleet_id
+     ) positions GROUP BY n HAVING count(*) <> 1)
+     OR EXISTS (SELECT 1 FROM (
+       SELECT client_id, source_epoch, source_event_id, surface_id, source_sequence,
+         lost_from_sequence, original_sequence AS server_sequence
+       FROM surf_ace_allocator.annotation_source_receipts WHERE fleet_id = p_fleet_id
+       UNION ALL
+       SELECT client_id, source_epoch, source_event_id, surface_id, source_sequence,
+         lost_from_sequence, sequence
+       FROM surf_ace_allocator.annotation_journal_records WHERE fleet_id = p_fleet_id
+     ) source_rows GROUP BY client_id, source_epoch, source_event_id HAVING count(*) <> 1)
+     OR EXISTS (SELECT 1 FROM (
+       SELECT client_id, source_epoch, surface_id, source_sequence
+       FROM surf_ace_allocator.annotation_source_receipts WHERE fleet_id = p_fleet_id
+       UNION ALL
+       SELECT client_id, source_epoch, surface_id, source_sequence
+       FROM surf_ace_allocator.annotation_journal_records WHERE fleet_id = p_fleet_id
+     ) source_rows GROUP BY client_id, source_epoch, surface_id, source_sequence HAVING count(*) <> 1)
+     OR EXISTS (WITH source_rows AS (
+       SELECT client_id, source_epoch, surface_id, source_sequence, lost_from_sequence
+       FROM surf_ace_allocator.annotation_source_receipts WHERE fleet_id = p_fleet_id
+       UNION ALL
+       SELECT client_id, source_epoch, surface_id, source_sequence, lost_from_sequence
+       FROM surf_ace_allocator.annotation_journal_records WHERE fleet_id = p_fleet_id
+     ), ordered AS (
+       SELECT *, lag(source_sequence, 1, 0::bigint) OVER
+         (PARTITION BY client_id, source_epoch, surface_id ORDER BY source_sequence) AS previous_sequence
+       FROM source_rows
+     ) SELECT 1 FROM ordered
+       WHERE coalesce(lost_from_sequence, source_sequence) <> previous_sequence + 1)
+     OR EXISTS (SELECT 1 FROM surf_ace_allocator.annotation_source_heads sh
+       WHERE sh.fleet_id = p_fleet_id AND sh.accepted_through_sequence <> (
+         SELECT max(source_sequence) FROM (
+           SELECT source_sequence FROM surf_ace_allocator.annotation_source_receipts r
+           WHERE r.fleet_id = sh.fleet_id AND r.client_id = sh.client_id
+             AND r.source_epoch = sh.source_epoch AND r.surface_id = sh.surface_id
+           UNION ALL
+           SELECT source_sequence FROM surf_ace_allocator.annotation_journal_records r
+           WHERE r.fleet_id = sh.fleet_id AND r.client_id = sh.client_id
+             AND r.source_epoch = sh.source_epoch AND r.surface_id = sh.surface_id
+         ) source_rows))
+     OR EXISTS (SELECT 1 FROM (
+       SELECT client_id, source_epoch, surface_id FROM surf_ace_allocator.annotation_source_receipts
+         WHERE fleet_id = p_fleet_id
+       UNION
+       SELECT client_id, source_epoch, surface_id FROM surf_ace_allocator.annotation_journal_records
+         WHERE fleet_id = p_fleet_id
+     ) source_keys WHERE NOT EXISTS (
+       SELECT 1 FROM surf_ace_allocator.annotation_source_heads sh
+       WHERE sh.fleet_id = p_fleet_id AND sh.client_id = source_keys.client_id
+         AND sh.source_epoch = source_keys.source_epoch AND sh.surface_id = source_keys.surface_id))
+  THEN
+    RAISE EXCEPTION 'annotation_journal_unverified';
+  END IF;
+  UPDATE surf_ace_allocator.annotation_consumers SET
+    lease_generation = lease_generation + 1,
+    current_lease_id = NULL,
+    lease_connected = false
+  WHERE fleet_id = p_fleet_id AND retired_at IS NULL;
+END
+$function$;
+
+GRANT EXECUTE ON FUNCTION surf_ace_allocator.annotation_verify_startup(text, bigint, text)
   TO surf_ace_allocator_writer;
 
 CREATE FUNCTION surf_ace_allocator.annotation_consumer_open(
