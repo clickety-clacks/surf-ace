@@ -178,7 +178,7 @@ async function verifyDisplayReady() {
 }
 
 async function soleVisibleClientWindowId(): Promise<string> {
-  const { stdout } = await command("xdotool", ["search", "--onlyvisible", "--name", "^Surf Ace$"]);
+  const { stdout } = await command("xdotool", ["search", "--onlyvisible", "--name", " Surf Ace$"]);
   const ids = stdout.trim().split(/\s+/).filter((id) => /^\d+$/.test(id));
   if (ids.length !== 1) throw new Error(`fresh_install_first_client_window_ambiguous:${ids.length}`);
   return ids[0];
