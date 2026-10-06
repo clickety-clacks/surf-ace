@@ -3350,6 +3350,11 @@ test("AC-SURF-01: controller and local-user surface lifecycle share the persiste
     assert.equal(tombstone.annotationPublisherPartitionBytes, publisherBytes);
     const { bytes, ...material } = tombstone;
     assert.equal(bytes, Buffer.byteLength(JSON.stringify({ version: 1, ...material }), "utf8") + publisherBytes);
+    const restarted = new SurfaceCore({ annotationClientId: "c".repeat(64),
+      persistentState: core.getPersistentState() });
+    assert.equal(restarted.annotationPublisher!.partitionBytes(localOpened.surfaceId), publisherBytes);
+    assert.equal(restarted.locklessAuthority.listTombstones("surface")
+      .find((entry) => entry.tombstoneId === localClosed.tombstoneId)?.bytes, bytes);
   } finally {
     lifecycle.close();
     await server.stop();
