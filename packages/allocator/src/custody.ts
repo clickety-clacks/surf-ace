@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 
 import pg, { type Client as PgClient, type QueryResultRow } from "pg";
@@ -112,7 +112,11 @@ export type AdapterTestHooks = {
 };
 
 export class PersistenceOutcomeUnknownError extends AllocatorError {
-  constructor(readonly operation: string, cause: unknown) {
+  constructor(
+    readonly operation: string,
+    cause: unknown,
+    readonly stage: "commit_ack" | "post_commit_verification" | "reconciliation" = "reconciliation",
+  ) {
     super(
       "persistence_outcome_unknown",
       `${operation} durability is unknown; query custody by idempotency identity`,
@@ -120,6 +124,38 @@ export class PersistenceOutcomeUnknownError extends AllocatorError {
       cause,
     );
     this.name = "PersistenceOutcomeUnknownError";
+  }
+}
+
+export function custodyUncertaintyDiagnostic(error: PersistenceOutcomeUnknownError): {
+  causeCode: string | null;
+  causeMessageSha256: string;
+  causeName: string;
+  operation: string;
+  stage: PersistenceOutcomeUnknownError["stage"];
+} {
+  const cause = error.cause;
+  const causeRecord = typeof cause === "object" && cause !== null
+    ? cause as { code?: unknown; message?: unknown; name?: unknown }
+    : null;
+  const token = (value: unknown): string | null =>
+    typeof value === "string" && /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(value) ? value : null;
+  return {
+    causeCode: token(causeRecord?.code),
+    causeMessageSha256: createHash("sha256")
+      .update(String(causeRecord?.message ?? cause ?? ""))
+      .digest("hex"),
+    causeName: token(causeRecord?.name) ?? "unknown",
+    operation: error.operation,
+    stage: error.stage,
+  };
+}
+
+function recordCustodyDiagnostic(event: string, fields: Record<string, unknown>): void {
+  try {
+    console.error(`[surf-ace:server] event=${event} ${JSON.stringify(fields)}`);
+  } catch {
+    // A diagnostic sink must not change a durable-write outcome.
   }
 }
 
@@ -334,9 +370,15 @@ export class PostgresCustodyAdapter<M extends LeaseMode> {
     } catch (error) {
       if (committed || error instanceof PersistenceOutcomeUnknownError) {
         this.validated = false;
-        throw error instanceof PersistenceOutcomeUnknownError
+        const unknown = error instanceof PersistenceOutcomeUnknownError
           ? error
-          : new PersistenceOutcomeUnknownError(operation, error);
+          : new PersistenceOutcomeUnknownError(operation, error, "post_commit_verification");
+        try {
+          recordCustodyDiagnostic("custody_outcome_unknown", custodyUncertaintyDiagnostic(unknown));
+        } catch {
+          // Neither diagnostic formatting nor output may change the unknown outcome.
+        }
+        throw unknown;
       }
       throw mapDatabaseError(error);
     }
@@ -412,11 +454,21 @@ export class PostgresCustodyAdapter<M extends LeaseMode> {
     lineageId: string,
   ): Promise<number> {
     this.assertMode("writer");
-    const result = await this.mutate("claim_pane", async () => await this.primary.query<{ pane_label: number | string }>(
-      "SELECT surf_ace_allocator.claim_pane($1, $2, $3, $4, $5, $6, $7) AS pane_label",
-      [this.config.fleetId, this.token.leaseGeneration, this.token.leaseId, clientId, surfaceId, paneId, lineageId],
-    ));
-    return integer(requiredRow(result.rows[0], "claim_pane").pane_label);
+    try {
+      const result = await this.mutate("claim_pane", async () => await this.primary.query<{ pane_label: number | string }>(
+        "SELECT surf_ace_allocator.claim_pane($1, $2, $3, $4, $5, $6, $7) AS pane_label",
+        [this.config.fleetId, this.token.leaseGeneration, this.token.leaseId, clientId, surfaceId, paneId, lineageId],
+      ));
+      return integer(requiredRow(result.rows[0], "claim_pane").pane_label);
+    } catch (error) {
+      if (error instanceof PersistenceOutcomeUnknownError) {
+        const identitySha256 = createHash("sha256")
+          .update(JSON.stringify([clientId, surfaceId, paneId, lineageId]))
+          .digest("hex");
+        recordCustodyDiagnostic("custody_claim_unknown", { identitySha256 });
+      }
+      throw error;
+    }
   }
 
   async burn(this: PostgresCustodyAdapter<"writer">, transactionId: string): Promise<void> {
@@ -636,7 +688,7 @@ async function transaction<T>(
         continue;
       }
       if (commitStarted) {
-        throw new PersistenceOutcomeUnknownError(operation, error);
+        throw new PersistenceOutcomeUnknownError(operation, error, "commit_ack");
       }
       throw error;
     }
