@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import test from "node:test";
 
 import {
+  shouldDisableGpuForSoftwareCapture,
   surfaceWindowCaptureMode,
   surfaceWindowLoadQuery,
   surfaceWindowOptions,
@@ -84,6 +85,12 @@ test("Linux GPU fallback keeps a non-compositor window offscreen for capture", (
     offscreen: false,
     showAfterReady: true,
   });
+});
+
+test("explicit disable-gpu launch selects software capture even without the environment override", () => {
+  assert.equal(shouldDisableGpuForSoftwareCapture({ commandLineHasDisableGpu: true }), true);
+  assert.equal(shouldDisableGpuForSoftwareCapture({ commandLineHasDisableGpu: false }), false);
+  assert.equal(shouldDisableGpuForSoftwareCapture({ commandLineHasDisableGpu: false, envValue: "1" }), true);
 });
 
 test("surface window load query flags compositor hosting before first paint", () => {

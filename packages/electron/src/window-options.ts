@@ -17,6 +17,14 @@ export type SurfaceWindowCaptureMode = {
   showAfterReady: boolean;
 };
 
+export function shouldDisableGpuForSoftwareCapture(params: {
+  commandLineHasDisableGpu: boolean;
+  envValue?: string;
+}): boolean {
+  const value = params.envValue?.trim().toLowerCase();
+  return params.commandLineHasDisableGpu || value === "1" || value === "true" || value === "yes";
+}
+
 export function surfaceWindowCaptureMode(params: {
   compositorSocketPath: string | null;
   gpuDisabled: boolean;
