@@ -1286,16 +1286,16 @@ test("Linux fresh-install raw CLI evidence binds two isolated roots to their cli
 });
 
 test("Tightbeam v0.2.5 binds the landed discovery-integrity candidate, six hosted assets, and tooling identity", () => {
-  assert.equal(TIGHTBEAM_TOOLING_TAG, "surf-ace-release-tooling-tightbeam-v0.2.5-r9");
+  assert.equal(TIGHTBEAM_TOOLING_TAG, "surf-ace-release-tooling-tightbeam-v0.2.5-r10");
   assert.deepEqual(TIGHTBEAM, {
-    candidateCommit: "a719c3c394168f772afedd332404c9ee9f71b208",
-    sourceTag: "surf-ace-tightbeam-v0.2.5-r2", version: "0.2.5", toolingTag: TIGHTBEAM_TOOLING_TAG,
+    candidateCommit: "a2f4122883fa875624f9e37d6f18dbeaef1d1072",
+    sourceTag: "surf-ace-tightbeam-v0.2.5-r3", version: "0.2.5", toolingTag: TIGHTBEAM_TOOLING_TAG,
     assets: ["surf-ace-tightbeam-server-linux-x86_64-v0.2.5.tar.gz","surf-ace-tightbeam-cli-linux-x86_64-v0.2.5.tar.gz","surf-ace-tightbeam-electron-linux-x86_64-v0.2.5.zip","surf-ace-tightbeam-cli-macos-arm64-v0.2.5.tar.gz","surf-ace-tightbeam-electron-macos-arm64-v0.2.5.zip",TIGHTBEAM_SKILL_ASSET],
     manifest: "surf-ace-tightbeam-v0.2.5-manifest.json", checksums: "SHA256SUMS",
   });
   assert.equal(TIGHTBEAM_SKILL_ASSET, "surf-ace-tightbeam-skill-v0.2.5.md");
   assert.equal(TIGHTBEAM.assets.length, 6);
-  assert.equal(TIGHTBEAM.sourceTag, "surf-ace-tightbeam-v0.2.5-r2");
+  assert.equal(TIGHTBEAM.sourceTag, "surf-ace-tightbeam-v0.2.5-r3");
   assert.equal(TOOLCHAINS.macosRunner, "xcode-27");
   assert.equal(TOOLCHAINS.xcode, "27.0");
   assert.deepEqual(TIGHTBEAM_ROUTING, {
@@ -1311,8 +1311,8 @@ test("Linux fresh-install fixture binds its identity gate to the release candida
 
   assert.match(fixture, /import \{ TIGHTBEAM \} from "\.\/tightbeam-release-config\.mjs";/);
   assert.match(fixture, /options\.candidateCommit !== TIGHTBEAM\.candidateCommit \|\| options\.expectedVersion !== TIGHTBEAM\.version/);
-  assert.equal(TIGHTBEAM.candidateCommit, "a719c3c394168f772afedd332404c9ee9f71b208");
-  assert.match(operations, /applies only to product commit\s+`a719c3c394168f772afedd332404c9ee9f71b208`/);
+  assert.equal(TIGHTBEAM.candidateCommit, "a2f4122883fa875624f9e37d6f18dbeaef1d1072");
+  assert.match(operations, /applies only to product commit\s+`a2f4122883fa875624f9e37d6f18dbeaef1d1072`/);
   for (const source of [fixture, operations]) {
     assert.doesNotMatch(source, /44421f305516ff3b8b305bc2df24c0f4c40b65c0/);
   }
@@ -2862,8 +2862,8 @@ test("v0.2.5 standalone specification and release gates bind the product and all
   const skill = await fs.readFile(path.join(repository, "integrations/tightbeam/skills/surf-ace/SKILL.md"), "utf8");
   const workflowPath = path.join(repository, ".github/workflows/release-tightbeam.yml");
   const workflow = await fs.readFile(workflowPath, "utf8");
-  assert.match(specification, /Product source: proposed tag/);
-  assert.match(specification, /a719c3c394168f772afedd332404c9ee9f71b208/);
+  assert.match(specification, /Product source: tag/);
+  assert.match(specification, /a2f4122883fa875624f9e37d6f18dbeaef1d1072/);
   assert.match(specification, /No old-version participant/);
   assert.match(specification, /surf-ace-release-tooling-tightbeam-v0\.2\.5/);
   assert.match(specification, /surf-ace-tightbeam-v0\.2\.5/);
@@ -2893,9 +2893,9 @@ test("v0.2.5 standalone specification and release gates bind the product and all
   for (const match of workflow.matchAll(/^\s*uses:\s*([^\s]+)$/gm)) assert.match(match[1], /@[0-9a-f]{40}$/);
   assert.match(workflow, /run_smoke:[\s\S]*?default: false/);
   assert.match(workflow, /publish_release:[\s\S]*?default: false/);
-  assert.match(workflow, /PRODUCT_COMMIT: a719c3c394168f772afedd332404c9ee9f71b208/);
-  assert.match(workflow, /PRODUCT_TAG: surf-ace-tightbeam-v0\.2\.5-r2/);
-  assert.match(workflow, /TOOLING_TAG: surf-ace-release-tooling-tightbeam-v0\.2\.5-r9/);
+  assert.match(workflow, /PRODUCT_COMMIT: a2f4122883fa875624f9e37d6f18dbeaef1d1072/);
+  assert.match(workflow, /PRODUCT_TAG: surf-ace-tightbeam-v0\.2\.5-r3/);
+  assert.match(workflow, /TOOLING_TAG: surf-ace-release-tooling-tightbeam-v0\.2\.5-r10/);
   assert.match(workflow, /GITHUB_EVENT_NAME/);
   assert.match(workflow, /GITHUB_REF_TYPE/);
   assert.match(workflow, /node tooling\/scripts\/release\/build-tightbeam-release\.mjs/);
@@ -2988,7 +2988,7 @@ test("v0.2.5 release smoke gates bind only matching candidate participants", asy
   for (const input of [workflow, smoke]) assert.doesNotMatch(input, /cf91ef1baab26d6045fac5300487c29d0ddf332d/);
   assert.doesNotMatch(workflow, /build-smoke-baseline|BASELINE_(?:BACKEND|ELECTRON)|baseline-(?:commit|electron|root)/i);
   assert.doesNotMatch(smoke, /SURF_ACE_TIGHTBEAM_BASELINE|function smokeLinux\(|runLinuxStateDriver|validateTightbeamStateSequence/);
-  assert.match(workflow, /--candidate-commit a719c3c394168f772afedd332404c9ee9f71b208/);
+  assert.match(workflow, /--candidate-commit a2f4122883fa875624f9e37d6f18dbeaef1d1072/);
   assert.match(smoke, /tightbeam-\$\{channel\}-v023-candidate-write/);
   assert.match(smoke, /inspectScreenshotPixels\(visible\.capture\.image, expectedScreenshotColors\)/);
   assert.doesNotMatch(`${smoke}\n${fixture}`, /includeImage/);
