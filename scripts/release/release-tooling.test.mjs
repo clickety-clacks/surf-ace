@@ -1261,7 +1261,7 @@ test("Linux fresh-install raw CLI evidence binds two isolated roots to their cli
 });
 
 test("Tightbeam v0.2.5 binds the landed discovery-integrity candidate, six hosted assets, and tooling identity", () => {
-  assert.equal(TIGHTBEAM_TOOLING_TAG, "surf-ace-release-tooling-tightbeam-v0.2.5-r3");
+  assert.equal(TIGHTBEAM_TOOLING_TAG, "surf-ace-release-tooling-tightbeam-v0.2.5-r4");
   assert.deepEqual(TIGHTBEAM, {
     candidateCommit: "7878fda6181fd0c97175ca8282e4eb9120a8c039",
     sourceTag: "surf-ace-tightbeam-v0.2.5", version: "0.2.5", toolingTag: TIGHTBEAM_TOOLING_TAG,
