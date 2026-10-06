@@ -428,6 +428,55 @@ fn emit(value: Value) -> Result<(), AnnotationError> {
     io::stdout().flush().map_err(AnnotationError::transport)
 }
 
+fn render_cursor_fields(payload: &mut Value, fields: &[&str]) -> Result<(), AnnotationError> {
+    for field in fields {
+        let value = payload
+            .get(*field)
+            .ok_or_else(|| AnnotationError::protocol(field))?;
+        if !value.is_null() {
+            let cursor = cursor_text(
+                value,
+                *field == "throughCursor" || *field == "expectedAckCursor",
+            )?;
+            payload[*field] = Value::String(cursor);
+        }
+    }
+    Ok(())
+}
+
+fn render_event(event: &Value) -> Result<Value, AnnotationError> {
+    let mut output = event.clone();
+    let op = event
+        .get("op")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AnnotationError::protocol("event.op"))?;
+    let payload = output
+        .get_mut("payload")
+        .ok_or_else(|| AnnotationError::protocol("event.payload"))?;
+    match op {
+        "annotation.record" => render_cursor_fields(payload, &["serverCursor"])?,
+        "annotation.history_gap" => render_cursor_fields(
+            payload,
+            &[
+                "requestedCursor",
+                "availableFromCursor",
+                "throughCursor",
+                "headCursor",
+            ],
+        )?,
+        "annotation.consumer_retired" => render_cursor_fields(
+            payload,
+            &[
+                "expectedAckCursor",
+                "discardedFromCursor",
+                "discardedThroughCursor",
+            ],
+        )?,
+        _ => {}
+    }
+    Ok(output)
+}
+
 fn open_state(invocation: &Invocation, response: &Value) -> Result<ListenerState, AnnotationError> {
     let lease_id = response
         .get("leaseId")
@@ -501,6 +550,7 @@ pub fn run(arguments: &[String]) -> Result<(), AnnotationError> {
             )?;
             loop {
                 let event = wire.event()?;
+                let output = render_event(&event)?;
                 let op = event
                     .get("op")
                     .and_then(Value::as_str)
@@ -545,7 +595,7 @@ pub fn run(arguments: &[String]) -> Result<(), AnnotationError> {
                 }
                 store.save(&stored)?;
                 drop(store);
-                emit(event)?;
+                emit(output)?;
                 if op == "annotation.lease_replaced" || op == "annotation.consumer_retired" {
                     return Ok(());
                 }
@@ -591,7 +641,9 @@ pub fn run(arguments: &[String]) -> Result<(), AnnotationError> {
                 state.retired = true;
                 store.save(&state)?;
             }
-            emit(json!({"type":"annotation.consumer_retired","payload":response}))
+            let output =
+                render_event(&json!({"op":"annotation.consumer_retired","payload":response}))?;
+            emit(json!({"type":"annotation.consumer_retired","payload":output["payload"]}))
         }
     }
 }

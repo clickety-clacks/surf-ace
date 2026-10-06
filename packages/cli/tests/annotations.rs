@@ -121,6 +121,10 @@ fn watch_persists_delivery_without_ack_then_explicit_ack_uses_same_lease() {
         30
     );
     assert_eq!(lines[1]["op"], "annotation.record");
+    assert_eq!(
+        lines[1]["payload"]["serverCursor"],
+        format!("ann1:{EPOCH}:1")
+    );
     assert!(lines[2]["error"]["code"]
         .as_str()
         .unwrap()
@@ -372,6 +376,10 @@ fn history_gap_requires_explicit_gap_ack_before_confirmed_retirement() {
         .collect();
     assert_eq!(lines[0]["historyCompleteSinceStart"], false);
     assert_eq!(lines[1]["op"], "annotation.history_gap");
+    assert_eq!(
+        lines[1]["payload"]["availableFromCursor"],
+        format!("ann1:{EPOCH}:2")
+    );
     let ack = Command::new(env!("CARGO_BIN_EXE_surf-ace"))
         .args(common)
         .args(["ack", "--consumer-id", "gap-reader", "--gap-id", "gap-1"])
@@ -403,5 +411,9 @@ fn history_gap_requires_explicit_gap_ack_before_confirmed_retirement() {
     );
     let retired: Value = serde_json::from_slice(&retire.stdout).unwrap();
     assert_eq!(retired["payload"]["retired"], true);
+    assert_eq!(
+        retired["payload"]["discardedThroughCursor"],
+        format!("ann1:{EPOCH}:2")
+    );
     server.join().unwrap();
 }
