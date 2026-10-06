@@ -519,6 +519,13 @@ export function validateTightbeamFreshInstallState(stateSequence) {
     throw new Error("fresh_install_postgres_restart_changed_projection");
   }
   const registryShutdown = restart.registryShutdown;
+  const witnessEvent = /^release_witness_(?:recovered_verified|(?:retry|exhausted)_(?:primary_version|primary_identity|primary_durability|primary_sync_config|sender_count|sender_slot|witness_endpoint|receiver_primary|receiver_sender_replay|required_commit_replay|other_fence))$/;
+  for (const field of ["releaseWitnessEventsBeforeRestart", "releaseWitnessEventsAfterRestart"]) {
+    if (!Array.isArray(registryShutdown?.[field]) ||
+        registryShutdown[field].some((event) => typeof event !== "string" || !witnessEvent.test(event))) {
+      throw new Error("fresh_install_registry_release_witness_evidence_invalid");
+    }
+  }
   if (!/^[a-f0-9]{64}$/.test(registryShutdown?.activeProjectionSha256 ?? "") ||
       !/^[a-f0-9]{64}$/.test(registryShutdown?.releasedProjectionSha256 ?? "") ||
       registryShutdown.activeProjectionSha256 === registryShutdown.releasedProjectionSha256 ||
@@ -558,6 +565,10 @@ export function validateTightbeamFreshInstallState(stateSequence) {
     contentId: expected.contentId,
     databaseIdentity: before.databaseIdentity,
     mode: "fresh-install",
+    registryReleaseWitnessEvents: {
+      beforeRestart: [...registryShutdown.releaseWitnessEventsBeforeRestart],
+      afterRestart: [...registryShutdown.releaseWitnessEventsAfterRestart],
+    },
     sourceCommit: stateSequence.sourceCommit,
     status: "passed",
     surfaceId: before.surfaceId,
@@ -796,8 +807,8 @@ export async function smokeLinuxFreshInstall(options) {
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`linux_fresh_install_failed:${message}:evidence_root:${root}`, { cause: error });
   } finally {
-    // A Red retains the isolated logs/state for diagnosis; successful runs return
-    // the validated raw CLI evidence and remove their disposable package/PG state.
+    // A Red retains isolated logs/state; successful runs return validated CLI and
+    // registry witness evidence before removing disposable package/PG state.
     if (passed) await removeIfExists(root);
   }
 }

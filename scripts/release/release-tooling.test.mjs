@@ -2246,6 +2246,8 @@ test("fresh-install Linux qualification requires direct current content, wrong-s
       registryShutdown: {
         activeProjectionSha256: "c".repeat(64),
         releasedProjectionSha256: projection,
+        releaseWitnessEventsBeforeRestart: [],
+        releaseWitnessEventsAfterRestart: ["release_witness_retry_required_commit_replay", "release_witness_recovered_verified"],
         continuity: {
           appendedRevisionHeads: 1,
           custodyRevisionDelta: 1,
@@ -2271,12 +2273,25 @@ test("fresh-install Linux qualification requires direct current content, wrong-s
 
   const validated = validateTightbeamFreshInstallState(evidence);
   assert.equal(validated.status, "passed");
+  assert.deepEqual(validated.registryReleaseWitnessEvents, {
+    beforeRestart: [],
+    afterRestart: ["release_witness_retry_required_commit_replay", "release_witness_recovered_verified"],
+  });
   assert.equal(validated.clientAppVersion, TIGHTBEAM.version);
   assert.equal(validated.clientAppVersionEvidenceSha256, "d".repeat(64));
   assert.throws(() => validateTightbeamFreshInstallState({
     ...evidence,
     postgresRestart: { ...evidence.postgresRestart, registryShutdown: undefined },
-  }), /fresh_install_registry_shutdown_projection_not_verified/);
+  }), /fresh_install_registry_release_witness_evidence_invalid/);
+  assert.throws(() => validateTightbeamFreshInstallState({
+    ...evidence,
+    postgresRestart: {
+      ...evidence.postgresRestart,
+      registryShutdown: { ...evidence.postgresRestart.registryShutdown,
+        releaseWitnessEventsAfterRestart: ["release_witness_retry_unclassified_secret"],
+      },
+    },
+  }), /fresh_install_registry_release_witness_evidence_invalid/);
   assert.throws(() => validateTightbeamFreshInstallState({
     ...evidence,
     initial: phase({ currentRead: { ...phase().currentRead, contentId: "other" } }),
@@ -2431,6 +2446,8 @@ test("Linux fresh-install acceptance is based on direct current-content evidence
       registryShutdown: {
         activeProjectionSha256: "c".repeat(64),
         releasedProjectionSha256: projection,
+        releaseWitnessEventsBeforeRestart: [],
+        releaseWitnessEventsAfterRestart: [],
         continuity: {
           appendedRevisionHeads: 1,
           custodyRevisionDelta: 1,
@@ -2551,6 +2568,8 @@ test("Linux fresh-install state driver binds candidate-only inputs and packaged 
       registryShutdown: {
         activeProjectionSha256: "c".repeat(64),
         releasedProjectionSha256: "b".repeat(64),
+        releaseWitnessEventsBeforeRestart: [],
+        releaseWitnessEventsAfterRestart: [],
         continuity: {
           appendedRevisionHeads: 1,
           custodyRevisionDelta: 1,
@@ -2665,6 +2684,7 @@ test("Linux fresh-install state driver binds candidate-only inputs and packaged 
   assert.equal(calls, 1);
   assert.equal(result.mode, "fresh-install");
   assert.equal(result.status, "passed");
+  assert.deepEqual(result.registryReleaseWitnessEvents, { beforeRestart: [], afterRestart: [] });
   assert.equal(result.rawCliEvidence.events.length, 11);
   assert.equal(result.rawCliEvidence.events.at(-1).command, "read");
   const unacceptedPushEvents = events.map((event) => event.command === "push" && event.status === 0

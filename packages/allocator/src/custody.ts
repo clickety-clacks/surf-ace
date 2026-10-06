@@ -322,7 +322,11 @@ export class PostgresCustodyAdapter<M extends LeaseMode> {
       const verifyWitness = async () => await readAndValidateWitness(this.config, this.primary, lsn);
       if (operation === "release_lease") {
         // The release is already committed. Recheck only the witness; never replay the mutation.
-        await verifyReleaseWitnessWithRetry(verifyWitness);
+        await verifyReleaseWitnessWithRetry(verifyWitness, undefined, (event, error) => {
+          const reason = error ? releaseWitnessFenceReason(error) : "verified";
+          // The packaged launcher accepts these fixed tokens; the release fixture retains them.
+          console.log(`[surf-ace:server] event=release_witness_${event}_${reason}`);
+        });
       } else {
         await verifyWitness();
       }
@@ -526,19 +530,49 @@ export class PostgresCustodyAdapter<M extends LeaseMode> {
 
 const RELEASE_WITNESS_RECHECK_DELAYS_MS = [100, 250, 500, 1_000, 2_000] as const;
 
+const RELEASE_WITNESS_FENCE_REASONS: Readonly<Record<string, string>> = {
+  "primary must run PostgreSQL 16.x": "primary_version",
+  "primary recovery mode or cluster system identifier is invalid": "primary_identity",
+  "primary must enable fsync and remote_apply": "primary_durability",
+  "synchronous_standby_names must be exactly FIRST 1 (surf_ace_witness)": "primary_sync_config",
+  "exactly one WAL sender may use the witness application name": "sender_count",
+  "the sole synchronous WAL sender is not bound to the configured physical slot": "sender_slot",
+  "witness URL is not the configured standby server and physical WAL receiver": "witness_endpoint",
+  "witness WAL receiver is connected to the wrong primary endpoint": "receiver_primary",
+  "witness endpoint replay position trails its bound primary WAL sender row": "receiver_sender_replay",
+  "bound witness has not replayed the required commit LSN": "required_commit_replay",
+};
+
+function releaseWitnessFenceReason(error: AllocatorError): string {
+  return RELEASE_WITNESS_FENCE_REASONS[error.message] ?? "other_fence";
+}
+
 export async function verifyReleaseWitnessWithRetry<T>(
   verify: () => Promise<T>,
   wait: (ms: number) => Promise<void> = async (ms) => await new Promise((resolve) => setTimeout(resolve, ms)),
+  report?: (event: "retry" | "recovered" | "exhausted", error?: AllocatorError) => void,
 ): Promise<T> {
   for (const delay of RELEASE_WITNESS_RECHECK_DELAYS_MS) {
     try {
-      return await verify();
+      const result = await verify();
+      if (delay !== RELEASE_WITNESS_RECHECK_DELAYS_MS[0]) report?.("recovered");
+      return result;
     } catch (error) {
       if (!(error instanceof AllocatorError) || error.code !== "writer_fence_unavailable") throw error;
+      report?.("retry", error);
       await wait(delay);
     }
   }
-  return await verify();
+  try {
+    const result = await verify();
+    report?.("recovered");
+    return result;
+  } catch (error) {
+    if (error instanceof AllocatorError && error.code === "writer_fence_unavailable") {
+      report?.("exhausted", error);
+    }
+    throw error;
+  }
 }
 
 export async function revokeWriter(
