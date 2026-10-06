@@ -29,11 +29,30 @@ type PendingGap = {
   sourceEventId: string;
   reason: GapReason;
 };
+export type AnnotationOpenFrame = {
+  frameId: string;
+  contextKey: string;
+  contentId: string;
+  url?: string;
+  scrollOffset: { x: number; y: number };
+  viewport: { width: number; height: number; scale: number };
+  openedAt: number;
+  updatedAt: number;
+  image: string;
+  strokes: Array<{
+    strokeId: string;
+    points: Array<{ x: number; y: number; pressure?: number }>;
+    bbox: { x: number; y: number; width: number; height: number };
+    startedAt: number;
+    endedAt: number;
+  }>;
+};
 export type AnnotationPublisherSurface = {
   acceptedCursor: AnnotationCursor | null;
   diagnostic: { code: string; sequence: string } | null;
   fifo: AnnotationPublisherEntry[];
   frames: Record<string, string>;
+  openFrames?: Record<string, AnnotationOpenFrame>;
   nextSequence: string;
   trailingGap: PendingGap | null;
 };
@@ -160,8 +179,49 @@ export class AnnotationPublisherOutbox {
     return frameId;
   }
 
+  /** The caller persists this before allowing the first point to render. */
+  openFrame(surfaceId: string, paneId: number, capture: Omit<AnnotationOpenFrame, "frameId" | "updatedAt" | "strokes">): AnnotationOpenFrame {
+    const surface = this.surface(surfaceId);
+    const key = String(paneId);
+    const existing = surface.openFrames?.[key];
+    if (existing) return structuredClone(existing);
+    const frameId = this.frameId(surfaceId, paneId);
+    const frame: AnnotationOpenFrame = {
+      ...structuredClone(capture), frameId, updatedAt: capture.openedAt, strokes: [],
+    };
+    surface.openFrames ??= {};
+    surface.openFrames[key] = frame;
+    if (!this.fits(surfaceId)) {
+      delete surface.openFrames[key];
+      throw new RangeError("annotation at-open frame exceeds publisher state capacity");
+    }
+    return structuredClone(frame);
+  }
+
+  openFrameFor(surfaceId: string, paneId: number): AnnotationOpenFrame | null {
+    const frame = this.state.surfaces[surfaceId]?.openFrames?.[String(paneId)];
+    return frame ? structuredClone(frame) : null;
+  }
+
+  appendFrameStroke(surfaceId: string, paneId: number, stroke: AnnotationOpenFrame["strokes"][number]): void {
+    const surface = this.surface(surfaceId);
+    const frame = surface.openFrames?.[String(paneId)];
+    if (!frame) throw new Error("annotation at-open frame is absent");
+    if (frame.strokes.some((entry) => entry.strokeId === stroke.strokeId)) return;
+    const previousUpdatedAt = frame.updatedAt;
+    frame.strokes.push(structuredClone(stroke));
+    frame.updatedAt = Math.max(frame.updatedAt, stroke.endedAt);
+    if (!this.fits(surfaceId)) {
+      frame.strokes.pop();
+      frame.updatedAt = previousUpdatedAt;
+      throw new RangeError("annotation frame strokes exceed publisher state capacity");
+    }
+  }
+
   closeFrame(surfaceId: string, paneId: number): void {
-    delete this.surface(surfaceId).frames[String(paneId)];
+    const surface = this.surface(surfaceId);
+    delete surface.frames[String(paneId)];
+    if (surface.openFrames) delete surface.openFrames[String(paneId)];
   }
 
   lose(surfaceId: string, code: string): string {
@@ -240,6 +300,10 @@ export class AnnotationPublisherOutbox {
       parseAnnotationSequence(surface.nextSequence);
       if (!surface.frames || typeof surface.frames !== "object" ||
           Object.values(surface.frames).some((id) => !/^fr_[0-9a-f]{32}$/.test(id)) ||
+          (surface.openFrames !== undefined && (typeof surface.openFrames !== "object" ||
+            Object.entries(surface.openFrames).some(([key, frame]) =>
+              surface.frames[key] !== frame.frameId || typeof frame.image !== "string" ||
+              !Array.isArray(frame.strokes)))) ||
           !Array.isArray(surface.fifo) || surface.fifo.length > this.maxRecords || !this.fits(surfaceId)) {
         throw new RangeError("persisted annotation publisher state exceeds capacity");
       }

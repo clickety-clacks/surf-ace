@@ -75,3 +75,30 @@ test("frame identity survives restart until explicit close and unavailable event
   restored.closeFrame(surfaceId, 1);
   assert.notEqual(restored.frameId(surfaceId, 1), firstFrame);
 });
+
+test("at-open image and viewport survive restart and cannot be replaced by a later capture", () => {
+  const outbox = new AnnotationPublisherOutbox(clientId);
+  const first = outbox.openFrame(surfaceId, 1, {
+    contextKey: "content-one", contentId: "content-one", image: "at-open-image",
+    openedAt: 100, scrollOffset: { x: 2, y: 3 },
+    viewport: { width: 640, height: 480, scale: 1 },
+  });
+  const restarted = new AnnotationPublisherOutbox(clientId, outbox.snapshot());
+  assert.deepEqual(restarted.openFrame(surfaceId, 1, {
+    contextKey: "different", contentId: "different", image: "later-image",
+    openedAt: 200, scrollOffset: { x: 0, y: 0 },
+    viewport: { width: 100, height: 100, scale: 2 },
+  }), first);
+  restarted.appendFrameStroke(surfaceId, 1, {
+    strokeId: "stroke-one", points: [{ x: 4, y: 5 }],
+    bbox: { x: 4, y: 5, width: 0, height: 0 }, startedAt: 110, endedAt: 120,
+  });
+  const committed = new AnnotationPublisherOutbox(clientId, restarted.snapshot()).openFrameFor(surfaceId, 1)!;
+  assert.equal(committed.image, "at-open-image");
+  assert.deepEqual(committed.scrollOffset, { x: 2, y: 3 });
+  assert.equal(committed.updatedAt, 120);
+  assert.equal(committed.strokes.length, 1);
+  restarted.closeFrame(surfaceId, 1);
+  assert.equal(restarted.openFrameFor(surfaceId, 1), null);
+  assert.notEqual(restarted.frameId(surfaceId, 1), first.frameId);
+});
