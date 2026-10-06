@@ -114,4 +114,31 @@ final class SurfAceAnnotationOutboxTests: XCTestCase {
         XCTAssertEqual(afterRestart.annotationPublisher?.sourceEpoch,
                        state.annotationPublisher?.sourceEpoch)
     }
+
+    func testTombstoneReclamationPreservesUnacceptedSourcePartition() throws {
+        var limits = SurfAceLocklessCapacityLimits.production
+        limits.maxRetainedTombstones = 1
+        limits.maxAnnotationPublisherStateBytesPerSurface = Int64(SurfAceAnnotationOutbox.maximumBytes)
+        limits.maxAnnotationPublisherRecordsPerSurface = Int64(SurfAceAnnotationOutbox.maximumRecords)
+        limits.maxRecoverableSurfaceBytes = 704 * 1_024 * 1_024
+        var state = try SurfAceLocklessAuthorityState.empty(limits: limits)
+        state.annotationPublisher = try SurfAceAnnotationOutbox(clientId: "client-1", sourceEpoch: sourceEpoch)
+        let first = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
+            state: &state, expectedSurfaceSetRevision: state.surfaceSetRevision)
+        _ = try state.annotationPublisher?.append(surfaceId: first.surface.surfaceId, record: record())
+        let pending = try XCTUnwrap(state.annotationPublisher?.head(surfaceId: first.surface.surfaceId))
+        _ = try SurfAceLocklessTopologyOperations.surfaceWindowClose(
+            state: &state, surfaceId: first.surface.surfaceId,
+            expectedSurfaceSetRevision: state.surfaceSetRevision,
+            expectedTopologyRevision: first.surface.topologyRevision)
+        let second = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
+            state: &state, expectedSurfaceSetRevision: state.surfaceSetRevision)
+        _ = try SurfAceLocklessTopologyOperations.surfaceWindowClose(
+            state: &state, surfaceId: second.surface.surfaceId,
+            expectedSurfaceSetRevision: state.surfaceSetRevision,
+            expectedTopologyRevision: second.surface.topologyRevision)
+        XCTAssertFalse(state.surfaceTombstones.contains { $0.surface.surfaceId == first.surface.surfaceId })
+        XCTAssertEqual(state.annotationPublisher?.surfaces[first.surface.surfaceId]?.fifo.first, pending)
+        try state.validate()
+    }
 }
