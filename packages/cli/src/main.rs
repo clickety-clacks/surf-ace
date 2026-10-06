@@ -6,12 +6,18 @@ use surf_ace_cli::{execute, Command, Invocation};
 
 fn main() {
     let arguments: Vec<String> = env::args().skip(1).collect();
-    if arguments.windows(2).any(|pair| pair[0] == "annotations" &&
-        matches!(pair[1].as_str(), "watch" | "resume" | "ack" | "retire")) {
+    if arguments.windows(2).any(|pair| {
+        pair[0] == "annotations"
+            && matches!(pair[1].as_str(), "watch" | "resume" | "ack" | "retire")
+    }) {
         if let Err(error) = surf_ace_cli::annotations::run(&arguments) {
-            println!("{}", serde_json::to_string(&json!({
-                "error": { "code": error.code, "details": error.details }, "ok": false,
-            })).expect("annotation CLI error is serializable"));
+            println!(
+                "{}",
+                serde_json::to_string(&json!({
+                    "error": { "code": error.code, "details": error.details }, "ok": false,
+                }))
+                .expect("annotation CLI error is serializable")
+            );
             std::process::exit(1);
         }
         return;
