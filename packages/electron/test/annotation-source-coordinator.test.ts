@@ -11,7 +11,9 @@ const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwA
 test("gated source flush precedes a self-contained at-open frame commit", async () => {
   const core = new SurfaceCore({ annotationClientId: clientId });
   const surface = core.ensurePrimarySurface("Surf Ace", viewport);
+  core.admitSurfaceToLockless(surface.surfaceId);
   const paneId = core.activePaneIds(surface.surfaceId)[0]!;
+  assert.ok(paneId > 0);
   core.locklessContentPush(surface.surfaceId, {
     content: { markdown: "annotation fixture" }, contentId: "content-one",
     contentType: "markdown", friendlyChatName: "Fixture", paneId,
