@@ -472,6 +472,19 @@ export class PostgresCustodyAdapter<M extends LeaseMode> {
     ));
   }
 
+  async ackAnnotationGap(
+    this: PostgresCustodyAdapter<"writer">, consumerId: string, consumerLeaseId: string,
+    through: { epoch: string; sequence: string },
+  ): Promise<{ epoch: string; sequence: string }> {
+    this.assertMode("writer");
+    const result = await this.mutate("annotation_consumer_gap_ack", async () => await this.primary.query<{
+      cursor: { epoch: string; sequence: string };
+    }>("SELECT surf_ace_allocator.annotation_consumer_gap_ack($1,$2,$3,$4,$5,$6,$7) AS cursor",
+      [this.config.fleetId, this.token.leaseGeneration, this.token.leaseId,
+        consumerId, consumerLeaseId, through.epoch, through.sequence]));
+    return result.rows[0]!.cursor;
+  }
+
   async bindAuthority(this: PostgresCustodyAdapter<"writer">, authorityId: string, ownerAnchorId: string): Promise<void> {
     this.assertMode("writer");
     await this.mutate("bind_authority", async () => await this.primary.query(
@@ -975,7 +988,7 @@ function validateAcceptedState(state: AcceptedState, config: PostgresCustodyConf
 function mapDatabaseError(error: unknown): AllocatorError {
   if (error instanceof AllocatorError) return error;
   const message = String((error as { message?: unknown })?.message ?? error);
-  if (isSqlState(error, "P0001") && /^(annotation_invalid_request|annotation_record_too_large|annotation_source_event_conflict|annotation_source_sequence_conflict|annotation_source_gap_required|annotation_source_gap_invalid|annotation_ingest_capacity|annotation_journal_sequence_exhausted|annotation_consumer_capacity|annotation_consumer_exists|annotation_consumer_not_found|annotation_consumer_lease_stale|annotation_cursor_invalid|annotation_ack_regression)$/.test(message)) {
+  if (isSqlState(error, "P0001") && /^(annotation_invalid_request|annotation_record_too_large|annotation_source_event_conflict|annotation_source_sequence_conflict|annotation_source_gap_required|annotation_source_gap_invalid|annotation_ingest_capacity|annotation_journal_sequence_exhausted|annotation_consumer_capacity|annotation_consumer_exists|annotation_consumer_not_found|annotation_consumer_lease_stale|annotation_cursor_invalid|annotation_ack_regression|annotation_gap_id_mismatch)$/.test(message)) {
     return new AllocatorError(message as AllocatorError["code"], message, undefined, error);
   }
   if (isSqlState(error, "23505")) {

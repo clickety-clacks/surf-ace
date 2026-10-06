@@ -1021,6 +1021,7 @@ test("annotation migration and append survive duplicate retry without allocating
     const publisher = await WireClient.connect(server.address.url);
     const firstConsumer = await WireClient.connect(server.address.url);
     const secondConsumer = await WireClient.connect(server.address.url);
+    const gapConsumer = await WireClient.connect(server.address.url);
     try {
       assert.equal((await publisher.request("annotation.hello", { protocolVersion: 1, role: "publisher" })).ok, true);
       assert.equal((await firstConsumer.request("annotation.hello", { protocolVersion: 1, role: "consumer" })).ok, true);
@@ -1045,8 +1046,26 @@ test("annotation migration and append survive duplicate retry without allocating
         consumerId: "second", leaseId: secondLease, throughCursor: cursor,
       });
       assert.equal(secondAck.ok, true);
+      assert.equal((await gapConsumer.request("annotation.hello", { protocolVersion: 1, role: "consumer" })).ok, true);
+      const gapOpen = await gapConsumer.request("annotation.watch", {
+        consumerId: "gap-consumer", fromCursor: { epoch: "f".repeat(32), sequence: "1" },
+      });
+      assert.equal(gapOpen.ok, true);
+      const gapLease = (gapOpen.payload as { leaseId: string }).leaseId;
+      const gap = await gapConsumer.waitEvent("annotation.history_gap");
+      assert.equal((gap.payload as { reason: string }).reason, "epoch_changed");
+      const wrongGap = await gapConsumer.request("annotation.gap.ack", {
+        consumerId: "gap-consumer", leaseId: gapLease, gapId: "0".repeat(32),
+      });
+      assert.equal((wrongGap.error as { code: string }).code, "annotation_gap_id_mismatch");
+      const gapAck = await gapConsumer.request("annotation.gap.ack", {
+        consumerId: "gap-consumer", leaseId: gapLease, gapId: (gap.payload as { gapId: string }).gapId,
+      });
+      assert.equal(gapAck.ok, true);
+      const afterGap = await gapConsumer.waitEvent("annotation.record");
+      assert.deepEqual((afterGap.payload as { serverCursor: unknown }).serverCursor, cursor);
     } finally {
-      await Promise.all([publisher.close(), firstConsumer.close(), secondConsumer.close()]);
+      await Promise.all([publisher.close(), firstConsumer.close(), secondConsumer.close(), gapConsumer.close()]);
       await server.close();
     }
   } finally {

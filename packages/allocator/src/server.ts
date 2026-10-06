@@ -60,6 +60,7 @@ type AnnotationLease = {
   nextSequence: bigint;
   acknowledged: bigint;
   delivered: Array<{ sequence: bigint; bytes: number }>;
+  gap: { gapId: string; throughCursor: { epoch: string; sequence: string } } | null;
   pumping: boolean;
   pumpRequested: boolean;
 };
@@ -448,7 +449,7 @@ export class AllocatorServer {
         const lease: AnnotationLease = { consumerId: payload.consumerId, leaseId: opened.leaseId,
           socket, epoch: opened.initialFromCursor.epoch, nextSequence: next,
           acknowledged: opened.ackCursor ? BigInt(opened.ackCursor.sequence) : next - 1n,
-          delivered: [], pumping: false, pumpRequested: false };
+          delivered: [], gap: null, pumping: false, pumpRequested: false };
         this.annotationLeases.set(payload.consumerId, lease);
         reply(true, { ...opened, limits: annotationLimits });
         void this.pumpAnnotation(lease);
@@ -468,6 +469,7 @@ export class AllocatorServer {
         if (!lease || lease.leaseId !== payload.leaseId) {
           throw new AllocatorError("annotation_consumer_lease_stale", "lease has been replaced");
         }
+        if (lease.gap) throw new AllocatorError("annotation_gap_ack_required", "history gap requires explicit acknowledgement");
         const sequence = BigInt(cursor.sequence);
         if (cursor.epoch !== lease.epoch || sequence > lease.acknowledged &&
             !lease.delivered.some((item) => item.sequence === sequence)) {
@@ -477,6 +479,32 @@ export class AllocatorServer {
         lease.acknowledged = sequence;
         lease.delivered = lease.delivered.filter((item) => item.sequence > sequence);
         reply(true, { ackCursor: acknowledged });
+        void this.pumpAnnotation(lease);
+      } else if (op === "annotation.gap.ack") {
+        if (this.annotationRoles.get(socket) !== "consumer") {
+          throw new AllocatorError("annotation_role_operation_invalid", "consumer hello is required");
+        }
+        const payload = request.payload as Record<string, unknown>;
+        if (!payload || Object.keys(payload).sort().join(",") !== "consumerId,gapId,leaseId" ||
+            typeof payload.consumerId !== "string" || typeof payload.leaseId !== "string" ||
+            typeof payload.gapId !== "string") {
+          throw new AllocatorError("annotation_invalid_request", "invalid gap acknowledgement");
+        }
+        const lease = this.annotationLeases.get(payload.consumerId);
+        if (!lease || lease.leaseId !== payload.leaseId) {
+          throw new AllocatorError("annotation_consumer_lease_stale", "lease has been replaced");
+        }
+        if (!lease.gap || lease.gap.gapId !== payload.gapId) {
+          throw new AllocatorError("annotation_gap_id_mismatch", "gap ID does not match current gap");
+        }
+        const through = lease.gap.throughCursor;
+        const position = await this.custody.ackAnnotationGap(payload.consumerId, payload.leaseId, through);
+        lease.epoch = through.epoch;
+        lease.acknowledged = BigInt(through.sequence);
+        lease.nextSequence = lease.acknowledged + 1n;
+        lease.delivered = [];
+        lease.gap = null;
+        reply(true, { ackCursor: position, gapId: payload.gapId });
         void this.pumpAnnotation(lease);
       } else {
         throw new AllocatorError("annotation_protocol_unsupported", "annotation operation is not implemented");
@@ -501,6 +529,24 @@ export class AllocatorServer {
       while (lease.pumpRequested && lease.socket?.readyState === WebSocket.OPEN &&
              this.annotationLeases.get(lease.consumerId) === lease) {
         lease.pumpRequested = false;
+        if (lease.gap) break;
+        const info = await this.custody.annotationInfo();
+        const floor = info.firstRetainedSequence === null ? BigInt(info.headSequence) + 1n
+          : BigInt(info.firstRetainedSequence);
+        if (lease.epoch !== info.epoch || lease.nextSequence < floor) {
+          const gapId = randomBytes(16).toString("hex");
+          const throughCursor = { epoch: info.epoch, sequence: (floor - 1n).toString() };
+          lease.gap = { gapId, throughCursor };
+          this.emitAnnotation(lease.socket, "annotation.history_gap", {
+            gapId, requestedCursor: { epoch: lease.epoch, sequence: lease.nextSequence.toString() },
+            availableFromCursor: info.firstRetainedSequence === null ? null :
+              { epoch: info.epoch, sequence: info.firstRetainedSequence },
+            throughCursor,
+            headCursor: info.headSequence === "0" ? null : { epoch: info.epoch, sequence: info.headSequence },
+            reason: lease.epoch === info.epoch ? "cursor_expired" : "epoch_changed",
+          });
+          break;
+        }
         while (lease.delivered.length < 32 && lease.socket?.readyState === WebSocket.OPEN) {
           const bytesInFlight = lease.delivered.reduce((sum, item) => sum + item.bytes, 0);
           const records = await this.custody.readAnnotationRecords(lease.nextSequence.toString(), 1);

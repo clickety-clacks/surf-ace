@@ -431,6 +431,44 @@ BEGIN
 END
 $function$;
 
+CREATE FUNCTION surf_ace_allocator.annotation_consumer_gap_ack(
+  p_fleet_id text, p_generation bigint, p_lease_id text,
+  p_consumer_id text, p_consumer_lease_id text,
+  p_gap_epoch text, p_gap_through_sequence bigint
+)
+RETURNS jsonb
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = pg_catalog, surf_ace_allocator
+AS $function$
+DECLARE
+  c surf_ace_allocator.annotation_consumers%ROWTYPE;
+  h surf_ace_allocator.annotation_journal_head%ROWTYPE;
+  expected_through bigint;
+BEGIN
+  PERFORM surf_ace_allocator.assert_role('surf_ace_allocator_writer');
+  PERFORM surf_ace_allocator.assert_token(p_fleet_id, p_generation, p_lease_id, 'writer');
+  SELECT * INTO STRICT h FROM surf_ace_allocator.annotation_journal_head
+    WHERE fleet_id = p_fleet_id FOR UPDATE;
+  SELECT * INTO c FROM surf_ace_allocator.annotation_consumers
+    WHERE fleet_id = p_fleet_id AND consumer_id = p_consumer_id FOR UPDATE;
+  IF NOT FOUND OR c.retired_at IS NOT NULL THEN RAISE EXCEPTION 'annotation_consumer_not_found'; END IF;
+  IF c.current_lease_id IS DISTINCT FROM p_consumer_lease_id THEN
+    RAISE EXCEPTION 'annotation_consumer_lease_stale';
+  END IF;
+  expected_through := coalesce(h.first_retained_sequence - 1, h.head_sequence);
+  IF p_gap_epoch <> h.epoch OR p_gap_through_sequence <> expected_through THEN
+    RAISE EXCEPTION 'annotation_gap_id_mismatch';
+  END IF;
+  IF c.ack_epoch = h.epoch AND c.ack_sequence > p_gap_through_sequence THEN
+    RAISE EXCEPTION 'annotation_ack_regression';
+  END IF;
+  UPDATE surf_ace_allocator.annotation_consumers
+    SET ack_epoch = p_gap_epoch, ack_sequence = p_gap_through_sequence
+    WHERE fleet_id = p_fleet_id AND consumer_id = p_consumer_id;
+  RETURN jsonb_build_object('epoch', p_gap_epoch, 'sequence', p_gap_through_sequence::text);
+END
+$function$;
+
 GRANT EXECUTE ON FUNCTION surf_ace_allocator.annotation_consumer_open(
   text, bigint, text, text, text, text, bigint
 ) TO surf_ace_allocator_writer;
@@ -442,6 +480,9 @@ GRANT EXECUTE ON FUNCTION surf_ace_allocator.annotation_consumer_ack(
 ) TO surf_ace_allocator_writer;
 GRANT EXECUTE ON FUNCTION surf_ace_allocator.annotation_consumer_disconnect(
   text, bigint, text, text, text
+) TO surf_ace_allocator_writer;
+GRANT EXECUTE ON FUNCTION surf_ace_allocator.annotation_consumer_gap_ack(
+  text, bigint, text, text, text, text, bigint
 ) TO surf_ace_allocator_writer;
 
 RESET ROLE;
