@@ -97,6 +97,18 @@ struct SurfAceAnnotationOutbox: Codable, Equatable, Sendable {
                                                  sourceEpoch: sourceEpoch, surface: surface)).count)
     }
 
+    func pendingSurfaceIds() -> [String] {
+        surfaces.keys.filter { surfaceId in
+            guard let surface = surfaces[surfaceId] else { return false }
+            return !surface.fifo.isEmpty || surface.trailingGap != nil
+        }.sorted()
+    }
+
+    func needsSeal(surfaceId: String) -> Bool {
+        guard let surface = surfaces[surfaceId] else { return false }
+        return surface.trailingGap != nil && !surface.fifo.contains { $0.kind == "gap" }
+    }
+
     mutating func append(surfaceId: String, record: [String: Any],
                          maxBytes: Int = maximumBytes, maxRecords: Int = maximumRecords) throws -> String {
         try ensureSurface(surfaceId, maxBytes: maxBytes, maxRecords: maxRecords)

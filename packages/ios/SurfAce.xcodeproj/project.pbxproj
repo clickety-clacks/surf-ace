@@ -9,6 +9,8 @@
 /* Begin PBXBuildFile section */
 		A70100000000000000000002 /* SurfAceAnnotationOutbox.swift in Sources */ = {isa = PBXBuildFile; fileRef = A70100000000000000000001 /* SurfAceAnnotationOutbox.swift */; };
 		A70100000000000000000003 /* SurfAceAnnotationOutbox.swift in Sources */ = {isa = PBXBuildFile; fileRef = A70100000000000000000001 /* SurfAceAnnotationOutbox.swift */; };
+		A70200000000000000000002 /* SurfAceAnnotationPublisher.swift in Sources */ = {isa = PBXBuildFile; fileRef = A70200000000000000000001 /* SurfAceAnnotationPublisher.swift */; };
+		A70200000000000000000003 /* SurfAceAnnotationPublisher.swift in Sources */ = {isa = PBXBuildFile; fileRef = A70200000000000000000001 /* SurfAceAnnotationPublisher.swift */; };
 		A70100000000000000000005 /* SurfAceAnnotationOutboxTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A70100000000000000000004 /* SurfAceAnnotationOutboxTests.swift */; };
 		EA7AE8370000000000000002 /* SurfAceReceiptReleaseTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA7AE8370000000000000001 /* SurfAceReceiptReleaseTests.swift */; };
 		0C3835F9F1C968FB6F328F10 /* SurfAceLocklessRuntimeAdapterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B26D67F1579A50644D8413D /* SurfAceLocklessRuntimeAdapterTests.swift */; };
@@ -86,6 +88,7 @@
 
 /* Begin PBXFileReference section */
 		A70100000000000000000001 /* SurfAceAnnotationOutbox.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceAnnotationOutbox.swift; sourceTree = "<group>"; };
+		A70200000000000000000001 /* SurfAceAnnotationPublisher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceAnnotationPublisher.swift; sourceTree = "<group>"; };
 		A70100000000000000000004 /* SurfAceAnnotationOutboxTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceAnnotationOutboxTests.swift; sourceTree = "<group>"; };
 		EA7AE8370000000000000001 /* SurfAceReceiptReleaseTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceReceiptReleaseTests.swift; sourceTree = "<group>"; };
 		025149E4561DFBB76E8917B7 /* SurfAceRenderAndAnnotationDiagnosticsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceRenderAndAnnotationDiagnosticsTests.swift; sourceTree = "<group>"; };
@@ -161,6 +164,7 @@
 				F2784DA9AA6EDF0F02BA9D4A /* SurfAceApp.swift */,
 				7492DB245E3F5CC7F5C167D7 /* SurfAceBonjourPublisher.swift */,
 				A70100000000000000000001 /* SurfAceAnnotationOutbox.swift */,
+				A70200000000000000000001 /* SurfAceAnnotationPublisher.swift */,
 				AAE8EE944BF4E02E52D2FF6A /* SurfAceHTTPServer.swift */,
 				314635F00EEBB824B28F7975 /* SurfAceIdentityStore.swift */,
 				EA2E76A17200000000000001 /* SurfAceCentralRegistration.swift */,
@@ -411,6 +415,7 @@
 				D3F94E7A626464718A5F683C /* SurfAceApp.swift in Sources */,
 				FF9BF16CA4591B19760A2246 /* SurfAceBonjourPublisher.swift in Sources */,
 				A70100000000000000000002 /* SurfAceAnnotationOutbox.swift in Sources */,
+				A70200000000000000000002 /* SurfAceAnnotationPublisher.swift in Sources */,
 				3B4E416E4A2D67F538AE5933 /* SurfAceHTTPServer.swift in Sources */,
 				69E4A6C95D32B537DECECA46 /* SurfAceIdentityStore.swift in Sources */,
 				EA2E76A17200000000000002 /* SurfAceCentralRegistration.swift in Sources */,
@@ -436,6 +441,7 @@
 				AB13C11EA76DDA755EEEED0A /* SurfAceApp.swift in Sources */,
 				7440C200D139A9CDEB4071DA /* SurfAceBonjourPublisher.swift in Sources */,
 				A70100000000000000000003 /* SurfAceAnnotationOutbox.swift in Sources */,
+				A70200000000000000000003 /* SurfAceAnnotationPublisher.swift in Sources */,
 				E2B2E9631F0835BD39E2B839 /* SurfAceHTTPServer.swift in Sources */,
 				D615F803FC49278657471A62 /* SurfAceIdentityStore.swift in Sources */,
 				EA2E76A17200000000000003 /* SurfAceCentralRegistration.swift in Sources */,
