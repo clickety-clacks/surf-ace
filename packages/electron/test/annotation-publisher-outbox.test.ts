@@ -78,6 +78,29 @@ test("configured publisher reserves its full partition before lockless admission
     /invalid_lockless_limit:surface_exceeds_tombstone_pool/);
 });
 
+test("tombstone reclamation retains an unaccepted publisher gap across restart", () => {
+  const core = new SurfaceCore({ annotationClientId: clientId });
+  const sourceSurface = "sf_source_history";
+  core.annotationPublisher!.lose(sourceSurface, "frame_image_unavailable");
+  const sourceBytes = core.annotationPublisher!.partitionBytes(sourceSurface);
+  core.locklessAuthority.configureLimits({
+    ...core.locklessAuthority.limits, maxRetainedTombstones: 1,
+  });
+  const sourceTombstone = core.locklessAuthority.createTombstone({
+    kind: "surface", surfaceId: sourceSurface, payload: { surface: sourceSurface },
+    annotationPublisherPartitionBytes: sourceBytes,
+  });
+  core.locklessAuthority.createTombstone({
+    kind: "surface", surfaceId: "sf_later_surface", payload: { surface: "later" },
+  });
+  assert.equal(core.locklessAuthority.listTombstones().some((entry) =>
+    entry.tombstoneId === sourceTombstone.tombstoneId), false);
+  const restored = new SurfaceCore({ annotationClientId: clientId,
+    persistentState: core.getPersistentState() });
+  assert.equal(restored.annotationPublisher!.partitionBytes(sourceSurface), sourceBytes);
+  assert.equal(restored.annotationPublisher!.head(sourceSurface)?.kind, "gap");
+});
+
 test("frame identity survives restart until explicit close and unavailable events become a sticky gap", () => {
   const outbox = new AnnotationPublisherOutbox(clientId);
   const firstFrame = outbox.frameId(surfaceId, 1);
