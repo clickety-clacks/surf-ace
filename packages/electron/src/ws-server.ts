@@ -1100,9 +1100,15 @@ export class SurfaceWsServer {
     if (!meta) return;
     const validation = validateLocklessEnvelope(request);
     if (!validation.ok) {
+      persistentServerDiagnostic("warn", "lockless_invalid_envelope", {
+        op: request.op,
+        reason: validation.reason,
+        request_id: request.id,
+      });
       const session = this.locklessSessions.get(socket);
       if (session && locklessOperationMutates(request.op)) {
-        await this.core.locklessAuthority.transactionAsync(async () => {
+        try {
+          await this.core.locklessAuthority.transactionAsync(async () => {
           this.core.locklessAuthority.auditRejected(
             request.id,
             request.op,
@@ -1112,7 +1118,15 @@ export class SurfaceWsServer {
           );
           this.core.markLocklessAuthorityChanged(session.surfaceId ?? undefined);
           await this.persistLocklessState();
-        });
+          });
+        } catch (error) {
+          if (!(error instanceof PersistentStateOutcomeUnknownError)) throw error;
+          await this.send(socket, JSON.stringify(errorResponse(
+            request.op, request.id as never, "internal_error",
+            "Persistent state commit outcome is unknown; dependent operations are paused pending reconciliation",
+          )));
+          return;
+        }
       }
       await this.send(
         socket,
