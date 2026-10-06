@@ -816,6 +816,7 @@ export class SurfaceWsServer {
             surfaceId,
           );
         const tombstone = this.core.locklessAuthority.createTombstone({
+          annotationPublisherPartitionBytes: this.core.annotationPublisher?.partitionBytes(surfaceId),
           kind: "surface",
           payload: { paneTombstones, surface: record },
           surfaceId,
@@ -2290,6 +2291,7 @@ export class SurfaceWsServer {
               );
             const tombstone =
               this.core.locklessAuthority.createTombstone({
+                annotationPublisherPartitionBytes: this.core.annotationPublisher?.partitionBytes(targetSurfaceId),
                 kind: "surface",
                 payload: { paneTombstones, surface: record },
                 surfaceId: targetSurfaceId,

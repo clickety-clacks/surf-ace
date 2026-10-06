@@ -89,6 +89,13 @@ export class AnnotationPublisherOutbox {
 
   snapshot(): PersistentAnnotationPublisher { return structuredClone(this.state); }
 
+  partitionBytes(surfaceId: string): number {
+    const surface = this.state.surfaces[surfaceId];
+    if (!surface) return 0;
+    return Buffer.byteLength(JSON.stringify({ version: 1, clientId: this.clientId,
+      sourceEpoch: this.state.sourceEpoch, ...surface }), "utf8");
+  }
+
   pendingSurfaceIds(): string[] {
     return Object.entries(this.state.surfaces)
       .filter(([, surface]) => surface.fifo.length > 0 || surface.trailingGap !== null)
@@ -128,9 +135,7 @@ export class AnnotationPublisherOutbox {
     const surface = this.state.surfaces[surfaceId];
     if (!surface || surface.fifo.length > this.maxRecords ||
         surface.fifo.some((entry) => Buffer.byteLength(entry.canonical, "utf8") > ANNOTATION_MAX_RECORD_BYTES)) return false;
-    return Buffer.byteLength(JSON.stringify({ version: 1, clientId: this.clientId,
-      sourceEpoch: this.state.sourceEpoch, ...surface }), "utf8") +
-      2 * GAP_SLOT_BYTES <= this.maxBytes;
+    return this.partitionBytes(surfaceId) + 2 * GAP_SLOT_BYTES <= this.maxBytes;
   }
 
   append(surfaceId: string, value: Omit<AnnotationSourceRecord, "protocolVersion" | "clientId" | "sourceEpoch" | "surfaceId" | "sourceSequence" | "sourceEventId">): string {

@@ -3305,7 +3305,7 @@ test("AC-SURF-02: complete surface close persists a tombstone before zero-live s
 });
 
 test("AC-SURF-01: controller and local-user surface lifecycle share the persisted client authority seam", async () => {
-  const core = new SurfaceCore();
+  const core = new SurfaceCore({ annotationClientId: "c".repeat(64) });
   core.ensurePrimarySurface("Surf Ace", {
     height: 800,
     scale: 2,
@@ -3340,14 +3340,16 @@ test("AC-SURF-01: controller and local-user surface lifecycle share the persiste
     const localOpened = await server.openSurfaceFromLocalUser();
     assert.equal(localOpened.surfaceSetRevision, opened.payload.surfaceSetRevision + 1);
     assert.equal(persistedRevision, localOpened.surfaceSetRevision);
+    core.annotationPublisher!.lose(localOpened.surfaceId, "frame_image_unavailable");
+    const publisherBytes = core.annotationPublisher!.partitionBytes(localOpened.surfaceId);
     const localClosed = await server.closeSurfaceFromLocalUser(localOpened.surfaceId);
     assert.equal(localClosed.surfaceSetRevision, localOpened.surfaceSetRevision + 1);
     assert.equal(persistedRevision, localClosed.surfaceSetRevision);
-    assert.equal(
-      core.locklessAuthority.listTombstones("surface")
-        .some((entry) => entry.tombstoneId === localClosed.tombstoneId),
-      true,
-    );
+    const tombstone = core.locklessAuthority.listTombstones("surface")
+      .find((entry) => entry.tombstoneId === localClosed.tombstoneId)!;
+    assert.equal(tombstone.annotationPublisherPartitionBytes, publisherBytes);
+    const { bytes, ...material } = tombstone;
+    assert.equal(bytes, Buffer.byteLength(JSON.stringify({ version: 1, ...material }), "utf8") + publisherBytes);
   } finally {
     lifecycle.close();
     await server.stop();
