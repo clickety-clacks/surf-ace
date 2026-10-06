@@ -37,6 +37,11 @@ CREATE TABLE surf_ace_allocator.annotation_journal_head (
   retained_canonical_bytes bigint NOT NULL DEFAULT 0 CHECK (retained_canonical_bytes >= 0),
   source_metadata_rows bigint NOT NULL DEFAULT 0 CHECK (source_metadata_rows >= 0),
   source_metadata_bytes bigint NOT NULL DEFAULT 0 CHECK (source_metadata_bytes >= 0),
+  max_journal_records bigint NOT NULL DEFAULT 100000 CHECK (max_journal_records BETWEEN 1 AND 100000),
+  max_journal_and_metadata_bytes bigint NOT NULL DEFAULT 1073741824
+    CHECK (max_journal_and_metadata_bytes BETWEEN 1 AND 1073741824),
+  max_source_metadata_rows bigint NOT NULL DEFAULT 1000000
+    CHECK (max_source_metadata_rows BETWEEN 1 AND 1000000),
   CHECK ((retained_record_count = 0 AND first_retained_sequence IS NULL)
     OR (retained_record_count = head_sequence - first_retained_sequence + 1))
 );
@@ -136,8 +141,8 @@ BEGIN
     WHERE fleet_id = p_fleet_id FOR UPDATE;
   LOOP
     IF h.retained_record_count = 0 THEN EXIT; END IF;
-    IF NOT p_maintenance AND h.retained_record_count < 100000 AND
-       h.retained_canonical_bytes + h.source_metadata_bytes + p_incoming_bytes <= 1073741824 THEN
+    IF NOT p_maintenance AND h.retained_record_count < h.max_journal_records AND
+       h.retained_canonical_bytes + h.source_metadata_bytes + p_incoming_bytes <= h.max_journal_and_metadata_bytes THEN
       EXIT;
     END IF;
     SELECT * INTO r FROM surf_ace_allocator.annotation_journal_records
@@ -169,9 +174,9 @@ BEGIN
       'originalEpoch', r.epoch, 'originalSequence', r.sequence::text,
       'committedAtMicros', (extract(epoch FROM r.committed_at) * 1000000)::bigint::text
     )::text, 'utf8'));
-    IF h.source_metadata_rows + 1 > 1000000 OR
+    IF h.source_metadata_rows + 1 > h.max_source_metadata_rows OR
        h.retained_canonical_bytes - r.canonical_record_length + h.source_metadata_bytes +
-         receipt_bytes > 1073741824 THEN
+         receipt_bytes > h.max_journal_and_metadata_bytes THEN
       EXIT;
     END IF;
     INSERT INTO surf_ace_allocator.annotation_source_receipts(
@@ -296,8 +301,8 @@ BEGIN
     WHERE fleet_id = p_fleet_id FOR UPDATE;
   new_metadata_rows := h.source_metadata_rows + CASE WHEN accepted = 0 THEN 1 ELSE 0 END;
   new_metadata_bytes := h.source_metadata_bytes - old_head_bytes + new_head_bytes;
-  IF h.retained_record_count >= 100000 OR new_metadata_rows > 1000000
-     OR h.retained_canonical_bytes + octet_length(p_canonical) + new_metadata_bytes > 1073741824 THEN
+  IF h.retained_record_count >= h.max_journal_records OR new_metadata_rows > h.max_source_metadata_rows
+     OR h.retained_canonical_bytes + octet_length(p_canonical) + new_metadata_bytes > h.max_journal_and_metadata_bytes THEN
     RAISE EXCEPTION 'annotation_ingest_capacity';
   END IF;
   INSERT INTO surf_ace_allocator.annotation_journal_records(
@@ -357,6 +362,9 @@ BEGIN
   RETURN jsonb_build_object(
     'epoch', h.epoch, 'headSequence', h.head_sequence::text,
     'firstRetainedSequence', h.first_retained_sequence::text,
+    'maxJournalRecords', h.max_journal_records,
+    'maxJournalAndMetadataBytes', h.max_journal_and_metadata_bytes,
+    'maxSourceMetadataRows', h.max_source_metadata_rows,
     'journalRecords', h.retained_record_count,
     'journalCanonicalBytes', h.retained_canonical_bytes,
     'sourceMetadataRows', h.source_metadata_rows,

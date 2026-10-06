@@ -17,7 +17,7 @@ import {
   type LabelClaimPayload,
   type LabelReconfirmPayload,
 } from "./domain.js";
-import { PostgresCustodyAdapter, type AdapterTestHooks, type PostgresCustodyConfig } from "./custody.js";
+import { PostgresCustodyAdapter, type AdapterTestHooks, type AnnotationInfo, type PostgresCustodyConfig } from "./custody.js";
 import { parseAllocatorRequest } from "./validation.js";
 
 export type AllocatorServerConfig = {
@@ -390,12 +390,7 @@ export class AllocatorServer {
           journalEpoch: info.epoch,
           availableFromCursor: info.firstRetainedSequence === null ? null : { epoch: info.epoch, sequence: info.firstRetainedSequence },
           headCursor: info.headSequence === "0" ? null : { epoch: info.epoch, sequence: info.headSequence },
-          limits: { journalRecords: 100_000, journalAndSourceMetadataBytes: 1_073_741_824,
-            sourceMetadataRows: 1_000_000, consumerIds: 64, activeStreams: 32,
-            inFlightRecordsPerConsumer: 32, inFlightCanonicalBytesPerConsumer: 67_108_864,
-            maxRecordBytes: 16_777_216,
-            replayPolicy: { targetAcknowledgedHistoryDays: 30, pressureCompaction: true,
-              requireActualConsumerAcknowledgement: true } },
+          limits: annotationLimits(info),
           usage: { journalRecords: info.journalRecords, journalCanonicalBytes: info.journalCanonicalBytes,
             sourceMetadataRows: info.sourceMetadataRows, sourceMetadataBytes: info.sourceMetadataBytes,
             consumerSlots: info.consumerSlots, activeStreams: info.activeStreams },
@@ -451,7 +446,7 @@ export class AllocatorServer {
           acknowledged: opened.ackCursor ? BigInt(opened.ackCursor.sequence) : next - 1n,
           delivered: [], gap: null, pumping: false, pumpRequested: false };
         this.annotationLeases.set(payload.consumerId, lease);
-        reply(true, { ...opened, limits: annotationLimits });
+        reply(true, { ...opened, limits: annotationLimits(await this.custody.annotationInfo()) });
         void this.pumpAnnotation(lease);
       } else if (op === "annotation.ack") {
         if (this.annotationRoles.get(socket) !== "consumer") {
@@ -596,14 +591,16 @@ export class AllocatorServer {
   }
 }
 
-const annotationLimits = {
-  journalRecords: 100_000, journalAndSourceMetadataBytes: 1_073_741_824,
-  sourceMetadataRows: 1_000_000, consumerIds: 64, activeStreams: 32,
+function annotationLimits(info: AnnotationInfo) {
+  return {
+  journalRecords: info.maxJournalRecords, journalAndSourceMetadataBytes: info.maxJournalAndMetadataBytes,
+  sourceMetadataRows: info.maxSourceMetadataRows, consumerIds: 64, activeStreams: 32,
   inFlightRecordsPerConsumer: 32, inFlightCanonicalBytesPerConsumer: 67_108_864,
   maxRecordBytes: 16_777_216,
   replayPolicy: { targetAcknowledgedHistoryDays: 30, pressureCompaction: true,
     requireActualConsumerAcknowledgement: true },
-};
+  };
+}
 
 class HostLock {
   private released = false;

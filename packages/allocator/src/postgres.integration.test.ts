@@ -1141,6 +1141,54 @@ test("annotation compaction protects absent and unread consumers, then retains s
   }
 });
 
+test("annotation pressure compacts only acknowledged history and refuses when receipt capacity is exhausted", { timeout: 180_000 }, async () => {
+  const cluster = await startCluster();
+  try {
+    const recovery = await PostgresCustodyAdapter.initializeAbsentFleet(cluster.config, "alloc_annotation-pressure");
+    await recovery.release();
+    await adminQuery(cluster.adminUrl,
+      await readFile(new URL("../sql/003_annotation_journal.sql", import.meta.url), "utf8"));
+    await adminQuery(cluster.adminUrl, `UPDATE surf_ace_allocator.annotation_journal_head
+      SET max_journal_records = 1 WHERE fleet_id = 'fleet-test'`);
+    const writer = await PostgresCustodyAdapter.acquireWriter(cluster.config);
+    try {
+      const journal = new AnnotationJournal(writer);
+      const firstRecord = { protocolVersion: 1, clientId: "pressure", sourceEpoch: "d".repeat(32),
+        surfaceId: "sf_pressure", sourceSequence: "1", sourceEventId: "one",
+        lostFromSequence: "1", lostThroughSequence: "1", reason: "source_retention_overflow" };
+      const secondRecord = { ...firstRecord, sourceSequence: "2", sourceEventId: "two",
+        lostFromSequence: "2", lostThroughSequence: "2" };
+      const first = await journal.ingest(firstRecord);
+      await assert.rejects(journal.ingest(secondRecord),
+        (error) => error instanceof AllocatorError && error.code === "annotation_ingest_capacity");
+      assert.equal((await writer.annotationInfo()).headSequence, "1");
+      const consumer = await writer.openAnnotationConsumer("pressure-consumer", "watch");
+      await assert.rejects(journal.ingest(secondRecord),
+        (error) => error instanceof AllocatorError && error.code === "annotation_ingest_capacity");
+      assert.equal((await writer.readAnnotationRecords("1", 1)).length, 1);
+      await writer.ackAnnotationConsumer("pressure-consumer", consumer.leaseId, first.serverCursor);
+      await adminQuery(cluster.adminUrl, `UPDATE surf_ace_allocator.annotation_journal_head
+        SET max_source_metadata_rows = 1 WHERE fleet_id = 'fleet-test'`);
+      await assert.rejects(journal.ingest(secondRecord),
+        (error) => error instanceof AllocatorError && error.code === "annotation_ingest_capacity");
+      assert.equal((await writer.annotationInfo()).journalRecords, 1, "receipt pressure cannot erase history");
+      await adminQuery(cluster.adminUrl, `UPDATE surf_ace_allocator.annotation_journal_head
+        SET max_source_metadata_rows = 1000000 WHERE fleet_id = 'fleet-test'`);
+      const second = await journal.ingest(secondRecord);
+      assert.equal(second.serverCursor.sequence, "2");
+      const info = await writer.annotationInfo();
+      assert.equal(info.journalRecords, 1);
+      assert.equal(info.firstRetainedSequence, "2");
+      assert.equal(info.sourceMetadataRows, 2);
+      assert.deepEqual((await journal.ingest(firstRecord)).serverCursor, first.serverCursor);
+    } finally {
+      await writer.release();
+    }
+  } finally {
+    await cluster.stop();
+  }
+});
+
 async function startCluster(schemaVersion: "current" | "v0.2.3" = "current"): Promise<TestCluster> {
   const root = await mkdtemp(join(process.cwd(), ".allocator-pg-"));
   const primaryData = join(root, "primary");

@@ -44,6 +44,9 @@ export type AnnotationInfo = {
   epoch: string;
   headSequence: string;
   firstRetainedSequence: string | null;
+  maxJournalRecords: number;
+  maxJournalAndMetadataBytes: number;
+  maxSourceMetadataRows: number;
   journalRecords: number;
   journalCanonicalBytes: number;
   sourceMetadataRows: number;
