@@ -41,6 +41,10 @@ test("gated source flush precedes a self-contained at-open frame commit", async 
   assert.equal(live.kind, "live_delta");
   assert.equal(live.frameId, open.frameId);
   assert.equal(live.payload.strokes[0].strokeId, "stroke-one");
+  const canceledDone = source.setAnnotating(surface.surfaceId, paneId, false);
+  await source.setAnnotating(surface.surfaceId, paneId, true);
+  await canceledDone;
+  assert.equal(core.annotationPublisher!.snapshot().surfaces[surface.surfaceId]!.fifo.length, 1);
   await source.setAnnotating(surface.surfaceId, paneId, false);
   const fifo = core.annotationPublisher!.snapshot().surfaces[surface.surfaceId]!.fifo;
   assert.equal(fifo.length, 2);
@@ -54,5 +58,37 @@ test("gated source flush precedes a self-contained at-open frame commit", async 
   assert.equal(core.annotationPublisher!.openFrameFor(surface.surfaceId, paneId), null);
   const restarted = new SurfaceCore({ annotationClientId: clientId, persistentState: durable });
   assert.equal(restarted.annotationPublisher!.snapshot().surfaces[surface.surfaceId]!.fifo.length, 2);
+  source.stop();
+});
+
+test("unavailable at-open image produces an ordered durable source gap", async () => {
+  const core = new SurfaceCore({ annotationClientId: clientId });
+  const surface = core.ensurePrimarySurface("Surf Ace", viewport);
+  core.admitSurfaceToLockless(surface.surfaceId);
+  const paneId = core.activePaneIds(surface.surfaceId)[0]!;
+  core.locklessContentPush(surface.surfaceId, {
+    content: { markdown: "annotation fixture" }, contentId: "content-one",
+    contentType: "markdown", friendlyChatName: "Fixture", paneId,
+  }, "Fixture");
+  let durable = core.getPersistentState();
+  const source = new AnnotationSourceCoordinator(core, async () => {
+    durable = core.getPersistentState();
+  }, () => {}, (error) => { throw error; });
+  await source.setAnnotating(surface.surfaceId, paneId, true);
+  core.annotationPublisher!.openFrame(surface.surfaceId, paneId, {
+    contentId: "content-one", contextKey: "content-one", image: "", failed: true,
+    openedAt: 100, scrollOffset: { x: 0, y: 0 }, viewport,
+  });
+  core.addStroke(surface.surfaceId, paneId, {
+    strokeId: "stroke-one" as never, tool: "mouse", points: [{ x: 1, y: 2, timestamp: 110 }],
+  });
+  await source.setAnnotating(surface.surfaceId, paneId, false);
+  const restored = new SurfaceCore({ annotationClientId: clientId, persistentState: durable });
+  const gap = restored.annotationPublisher!.head(surface.surfaceId)!;
+  assert.equal(gap.kind, "gap");
+  const record = JSON.parse(gap.canonical);
+  assert.equal(record.lostFromSequence, "1");
+  assert.equal(record.lostThroughSequence, "2");
+  assert.equal(record.reason, "source_retention_overflow");
   source.stop();
 });
