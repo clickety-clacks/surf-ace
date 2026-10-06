@@ -2175,16 +2175,19 @@ test("unknown persistence outcome preserves direct reads while fencing dependent
     assert.equal((await pair(socket, "tight-beam", surface.surfaceId)).ok, true);
     const panes = await request(socket, "panes.list", { surfaceId: surface.surfaceId });
     failPersistence = true;
-    const rejected = await request(socket, "pane.rename", {
-      expectedTopologyRevision: core.pairState(surface.surfaceId).topologyRevision,
-      name: "Uncertain rename",
+    const rejected = await request(socket, "content.set", {
+      content: { markdown: "# uncertain replacement" },
+      contentId: "ct_uncertain_replacement",
+      contentType: "markdown",
       paneId: Number(panes.payload.panes[0].paneId),
       surfaceId: surface.surfaceId,
     }, { id: "target-persistence-outcome-unknown" });
     assert.equal(rejected.ok, false);
     assert.match(rejected.error.message, /unknown|paused/i);
     assert.equal(materializationInvocations, 0);
-    assert.deepEqual([surface, other].map(({ surfaceId }) => core.getRendererWindowState(surfaceId).panes[0]!.content), visibleBefore);
+    assert.deepEqual(core.getRendererWindowState(other.surfaceId).panes[0]!.content, visibleBefore[1]);
+    const afterFault = core.getRendererWindowState(surface.surfaceId).panes[0]!.content;
+    assert.equal(afterFault.contentId, "ct_uncertain_replacement");
     assert.equal((await request(socket, "panes.list", { surfaceId: surface.surfaceId })).ok, true);
     const second = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
     try {
