@@ -2,6 +2,7 @@ use serde_json::{json, Value};
 use std::net::TcpListener;
 use std::process::Command;
 use std::thread;
+use std::time::Duration;
 use tempfile::TempDir;
 use tungstenite::{accept, Message, WebSocket};
 
@@ -86,4 +87,72 @@ fn watch_persists_delivery_without_ack_then_explicit_ack_uses_same_lease() {
     let output: Value = serde_json::from_slice(&ack.stdout).unwrap();
     assert_eq!(output["ackCursor"], format!("ann1:{EPOCH}:1"));
     server.join().unwrap();
+}
+
+#[test]
+fn foreground_watcher_preserves_ack_written_by_separate_process() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let root = TempDir::new().unwrap();
+    let server = thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut watch_socket = accept(stream).unwrap();
+        hello(&mut watch_socket);
+        let watch = request(&mut watch_socket, "annotation.watch");
+        respond(&mut watch_socket, &watch, json!({"consumerId":"reviewer",
+            "leaseId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","ackCursor":null,
+            "initialFromCursor":{"epoch":EPOCH,"sequence":"1"},
+            "availableFromCursor":null,"headCursor":null,"historyCompleteSinceStart":true,
+            "limits":{"replayPolicy":{"targetAcknowledgedHistoryDays":30}}}));
+        watch_socket.send(Message::Text(json!({"v":1,"type":"event","op":"annotation.record",
+            "eventId":"e1","sentAt":2,"payload":{"serverCursor":{"epoch":EPOCH,"sequence":"1"},
+            "record":{"kind":"live_delta"},"committedAt":2}}).to_string().into())).unwrap();
+        let (stream, _) = listener.accept().unwrap();
+        let mut ack_socket = accept(stream).unwrap();
+        hello(&mut ack_socket);
+        let ack = request(&mut ack_socket, "annotation.ack");
+        respond(&mut ack_socket, &ack, json!({"ackCursor":{"epoch":EPOCH,"sequence":"1"}}));
+        watch_socket.send(Message::Text(json!({"v":1,"type":"event","op":"annotation.record",
+            "eventId":"e2","sentAt":3,"payload":{"serverCursor":{"epoch":EPOCH,"sequence":"2"},
+            "record":{"kind":"live_delta"},"committedAt":3}}).to_string().into())).unwrap();
+        watch_socket.send(Message::Text(json!({"v":1,"type":"event","op":"annotation.lease_replaced",
+            "eventId":"e3","sentAt":4,"payload":{"consumerId":"reviewer",
+            "leaseId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}).to_string().into())).unwrap();
+    });
+    let registry = format!("ws://{address}");
+    let state_root = root.path().to_str().unwrap();
+    let common = ["--registry", registry.as_str(), "--state-root", state_root, "annotations"];
+    let child = Command::new(env!("CARGO_BIN_EXE_surf-ace"))
+        .args(common).args(["watch", "--consumer-id", "reviewer"]).spawn().unwrap();
+    let mut state_file = None;
+    for _ in 0..100 {
+        if let Ok(entries) = std::fs::read_dir(root.path().join("annotations")) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().is_some_and(|ext| ext == "json") {
+                    if let Ok(bytes) = std::fs::read(&path) {
+                        if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
+                            if value["lastDeliveredCursor"] == format!("ann1:{EPOCH}:1") {
+                                state_file = Some(path);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if state_file.is_some() { break; }
+        thread::sleep(Duration::from_millis(10));
+    }
+    let state_file = state_file.expect("first record persisted");
+    let ack = Command::new(env!("CARGO_BIN_EXE_surf-ace"))
+        .args(common).args(["ack", "--consumer-id", "reviewer", "--cursor",
+            &format!("ann1:{EPOCH}:1")]).output().unwrap();
+    assert!(ack.status.success(), "{}", String::from_utf8_lossy(&ack.stdout));
+    let status = child.wait_with_output().unwrap();
+    assert!(status.status.success());
+    server.join().unwrap();
+    let state: Value = serde_json::from_slice(&std::fs::read(state_file).unwrap()).unwrap();
+    assert_eq!(state["ackCursor"], format!("ann1:{EPOCH}:1"));
+    assert_eq!(state["lastDeliveredCursor"], format!("ann1:{EPOCH}:2"));
 }

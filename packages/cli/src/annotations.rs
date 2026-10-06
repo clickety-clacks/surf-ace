@@ -310,7 +310,8 @@ pub fn run(arguments: &[String]) -> Result<(), AnnotationError> {
             let mut payload = json!({"consumerId":invocation.consumer_id});
             if let Some(from) = &invocation.from { payload["fromCursor"] = from.clone(); }
             let response = wire.request(if invocation.action == Action::Watch { "annotation.watch" } else { "annotation.resume" }, payload)?;
-            let mut state = open_state(&invocation, &response)?;
+            let state = open_state(&invocation, &response)?;
+            let active_lease = state.lease_id.clone();
             StateStore::open(&invocation.state_root, &invocation.consumer_id)?.save(&state)?;
             let limits = response.get("limits").ok_or_else(|| AnnotationError::protocol("limits"))?;
             emit(json!({"type":"annotation.subscription","consumerId":state.consumer_id,
@@ -322,28 +323,27 @@ pub fn run(arguments: &[String]) -> Result<(), AnnotationError> {
                 let event = wire.event()?;
                 let op = event.get("op").and_then(Value::as_str).ok_or_else(|| AnnotationError::protocol("event.op"))?.to_owned();
                 let data = event.get("payload").ok_or_else(|| AnnotationError::protocol("event.payload"))?;
-                let active_lease = state.lease_id.clone();
-                match op.as_str() {
-                    "annotation.record" => {
-                        state.last_delivered_cursor = Some(cursor_text(data.get("serverCursor")
-                            .ok_or_else(|| AnnotationError::protocol("serverCursor"))?, false)?);
-                    }
-                    "annotation.history_gap" => {
-                        state.pending_gap_id = Some(data.get("gapId").and_then(Value::as_str)
-                            .ok_or_else(|| AnnotationError::protocol("gapId"))?.into());
-                    }
-                    "annotation.lease_replaced" | "annotation.consumer_retired" => {
-                        state.lease_id = None;
-                        if op == "annotation.consumer_retired" { state.retired = true; }
-                    }
-                    _ => return Err(AnnotationError::protocol("event.op")),
-                }
                 let store = StateStore::open(&invocation.state_root, &invocation.consumer_id)?;
-                let stored = store.load()?.ok_or_else(|| AnnotationError::protocol("listener-state"))?;
+                let mut stored = store.load()?.ok_or_else(|| AnnotationError::protocol("listener-state"))?;
                 if stored.lease_id != active_lease {
                     return Err(AnnotationError { code:"annotation_consumer_lease_stale".into(), details:json!({}) });
                 }
-                store.save(&state)?;
+                match op.as_str() {
+                    "annotation.record" => {
+                        stored.last_delivered_cursor = Some(cursor_text(data.get("serverCursor")
+                            .ok_or_else(|| AnnotationError::protocol("serverCursor"))?, false)?);
+                    }
+                    "annotation.history_gap" => {
+                        stored.pending_gap_id = Some(data.get("gapId").and_then(Value::as_str)
+                            .ok_or_else(|| AnnotationError::protocol("gapId"))?.into());
+                    }
+                    "annotation.lease_replaced" | "annotation.consumer_retired" => {
+                        stored.lease_id = None;
+                        if op == "annotation.consumer_retired" { stored.retired = true; }
+                    }
+                    _ => return Err(AnnotationError::protocol("event.op")),
+                }
+                store.save(&stored)?;
                 drop(store);
                 emit(event)?;
                 if op == "annotation.lease_replaced" || op == "annotation.consumer_retired" { return Ok(()); }
