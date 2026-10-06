@@ -97,7 +97,7 @@ Before the protocol details, these terms are used consistently throughout this s
 
 **Surface** — a render-target context addressable by stable identity. In v1 multi-window topology, each window is a distinct surface (`surfaceId`) even when hosted by one app instance/device endpoint.
 
-**Window label** — the client-assigned user-visible identifier for a surface window (`a`, `b`, `aa`, ...). `windowLabel` is distinct from `surfaceId`.
+**Window label** — the fleet-allocator-assigned user-visible identifier for a surface window (`a`, `b`, `aa`, ...). `windowLabel` is distinct from `surfaceId` and is `null` until confirmed.
 
 **Pane** — a rendering scope nested inside a surface window. Each pane has a stable internal identity (`paneId`) and a separate stable visible identity (`paneLabel`).
 
@@ -134,7 +134,7 @@ These are normative, settled statements about Surf Ace behavior. Implementations
 9. **Annotation mode locks the viewport.** When annotation mode is active, scroll is disabled and link following is disabled. The drawing layer captures all touch and stylus input until annotation mode exits.
 10. **Client-allocated content revisions.** Accepted append-style content operations traverse the client mutation seam; the client allocates the next content revision and a new history-entry ID atomically. Controllers do not submit authoritative content revisions or history-owner tokens.
 11. **Annotation reads are pane-scoped at the OpenClaw boundary.** `surf_ace_read` and related OpenClaw-facing operations target a pane only. Surfaces/providers may keep any additional history restore state internally, but OpenClaw does not pass or track history identifiers.
-12. **Lifecycle events are always-on.** Surface lifecycle events (`event.surface_appeared`, `event.surface_removed`, `event.surface_resumed`) and pane lifecycle events (`event.pane_created`, `event.pane_removed`, `event.pane_renamed`) are never profile-gated. Lockless committed content/history/topology/lifecycle events fan out to every admitted controller for the affected surface; cursor-specific availability/overflow signals target only the affected controller without conferring authority.
+12. **Lifecycle events are always-on.** Surface lifecycle events (`event.surface_appeared`, `event.surface_removed`, `event.surface_resumed`), pane lifecycle events (`event.pane_created`, `event.pane_removed`, `event.pane_renamed`), and registry label confirmation (`event.fleet_labels_confirmed`) are never profile-gated. Lockless committed content/history/topology/lifecycle events fan out to every admitted controller for the affected surface; cursor-specific availability/overflow signals target only the affected controller without conferring authority.
 13. **Platform target floor policy.** Surf Ace targets the newest released OS major version as the minimum deployment target (current decision: iOS/iPadOS 27 and visionOS 27; any native macOS surface target uses macOS 27).
 14. **Portable extension packaging.** Surf Ace MUST remain buildable as a standalone OpenClaw extension bundle without requiring Clawline as a dependency or core patches. Provider startup, provider deployment, and persistent Surf Ace launchd/auto-start installation require explicit validated host configuration. Each operation fails before mutation when its configuration is absent, malformed, or excludes the current destination.
 
@@ -218,13 +218,13 @@ Naming system:
 1. **Window labels** (a, b, c … z, aa, ab …) are allocated and persisted by the
    single fleet-wide label allocator, then validated and projected by the client.
    Allocation is NOT client-local; see the core invariant above.
-2. `windowLabel` is a visible coordinate for users and diagnostics, not durable target authority. The client may preserve it across ordinary reconnect and recoverable close/restore when still valid and unassigned. Otherwise restore allocates a new unique live label without changing surface identity or preserved state.
+2. `windowLabel` is a visible coordinate for users and diagnostics, not durable target authority. The client may preserve it across ordinary reconnect and recoverable close/restore when still valid and unassigned. Otherwise the registry allocates a new unique live label without changing surface identity or preserved state.
 3. **Pane IDs** are allocated by the **client-local authority**. They are stable internal routing identifiers. Controllers target existing stable IDs or submit pane-creating intent; they do not preallocate new pane IDs.
 4. **Pane labels** are allocated and durably persisted by the single fleet-wide allocator, which also allocates window letters. Every visible pane number is unique across every Surf Ace in the fleet and is never reused. The client validates and projects only allocator-confirmed pane numbers. A pane without an allocator-confirmed number displays no number; it never substitutes a client-local guess. `paneLabel` is a visible coordinate, not durable target authority. `displayId` / `paneAddress` may combine the window letter and pane number for user-facing references.
 5. **Pane names** are assigned by the extension via `pane.rename`. There is no user-facing rename UI. Pane names are optional metadata and MUST NOT replace `paneLabel` as the visible identity or addressing token.
-6. The client is the sole authority on topology and internal pane IDs. The fleet registry is the sole authority on visible window letters and pane numbers. Controllers submit intent against stable IDs and expected revisions; the client validates and commits client-local topology and emits lifecycle events after that local commit. Allocator confirmation is a distinct monotonic identity transition: a pending visible label is not a confirmed fleet-wide coordinate. Existing confirmed labels stay attached to their identities through disconnection and are never guessed, reassigned, or silently replaced.
+6. The client is the sole authority on topology and internal pane IDs. The fleet registry is the sole authority on visible window letters and pane numbers. Controllers submit intent against stable IDs and expected revisions; the client validates and commits client-local topology and emits lifecycle events after that local commit. Allocator confirmation is a distinct monotonic identity transition: a pending visible label is not a confirmed fleet-wide coordinate. Existing confirmed labels stay attached to their identities through disconnection and are never guessed, reassigned, or silently replaced. A pending `windowLabel` or `paneLabel` is represented as `null`, never as an empty string, zero, or a provisional fleet coordinate.
 7. When a pane is split, the controller specifies the target, count, and layout intent. After the stale-revision and pane-creation capacity checks, the client allocates each new `paneId` and commits the local split atomically. The registry may confirm each new `paneLabel` before or after that local commit; without confirmation, a new pane displays no number and remains usable by stable internal identity. Reconnection claims the same pane and lineage once, preserves its content, and rejects a conflicting pane ID for an already claimed lineage. Any operation requiring a confirmed fleet-wide coordinate reports a pending-label limitation rather than targeting another pane.
-8. **Initial surface state:** A newly opened surface starts with one client-allocated internal pane identity. The fleet registry allocates its window letter and pane number. Until confirmed, the surface displays no unassigned letter or number. OpenClaw MUST call `surf_ace_list` before any pane-scoped operation and MUST accept a valid post-restore live pane count above `maxPanesPerSurface`.
+8. **Initial surface state:** A newly opened surface starts with one client-allocated internal pane identity. The fleet registry allocates its window letter and pane number. Until confirmed, the surface displays a small pending-label indication but no unassigned letter or number. OpenClaw MUST call `surf_ace_list` before any pane-scoped operation and MUST accept a valid post-restore live pane count above `maxPanesPerSurface`.
 9. Labels are displayed on the surface — window identity immediately precedes the pane label as a bottom-right floating overlay within each pane. The window identity is uppercase text inside a rounded-rectangle outline, followed by the plain pane number, e.g. an outlined `A` box next to `12`. See §15.1 for visibility rules.
 
 
@@ -310,7 +310,7 @@ Pair timeout:
 2. If no `pair.response` arrives in 10s, provider closes socket and enters reconnect backoff.
 
 **Surface UI connectivity and capability status (required):**
-The surface MUST display connection state through the window ID outline/text color in the bottom-right identity overlay (§15.1). A compact adjacent, accessible detail affordance MAY show degraded registration, synchronization, direct endpoint, or persistence status without covering content. It distinguishes a usable display from unavailable shared services, labels pending/unsaved work honestly, stays stable across repeated failures, and clears on recovery. Full diagnostic detail appears only on deliberate inspection. Required connection-color behavior:
+The surface MUST display connection state through the window ID outline/text color in the bottom-right identity overlay (§15.1). When a shared service used by the surface is degraded, a compact adjacent, accessible capability status MUST distinguish usable display from unavailable registration, synchronization, direct endpoint, or persistence without covering content. It MUST label pending/unsaved work honestly, stay stable across repeated failures, and clear on recovery; full diagnostic detail appears only on deliberate inspection. If the window letter is pending, the bottom-right identity overlay retains a neutral placeholder outline without a fabricated letter and anchors the connection color, pending-label indication, and capability status there. Required connection-color behavior:
 - Connected — green window ID outline/text.
 - Connecting / reconnecting — yellow window ID outline/text.
 - Disconnected — red window ID outline/text.
@@ -544,7 +544,7 @@ Severe violation threshold:
 
 Rules:
 1. Provider MAY call `surfaces.list` immediately after WS connect.
-2. After lifecycle admission, the response contains client-authoritative live surfaces, retained surface tombstones, `surfaceSetRevision`, capability state, admission availability, and the bounded durable admission-attempt ledger. Pre-pair and surface-scoped discovery omit the ledger.
+2. After lifecycle admission, the response contains client-authoritative live surfaces with `windowLabel` (`null` while pending), retained surface tombstones, `surfaceSetRevision`, capability state, admission availability, and the bounded durable admission-attempt ledger. Pre-pair and surface-scoped discovery omit the ledger.
 3. `surfaces.list` is discovery-only and grants no pane/topology/lifecycle right.
 4. Any controller meeting lockless identity/capacity admission may send `pair.request`; a duplicate live ID or full all-live controller registry receives its distinct stable refusal.
 5. Full pane topology discovery follows admission via `panes.list`, and valid restored live pane counts above `maxPanesPerSurface` are reported without clamping.
@@ -577,7 +577,7 @@ Flow:
 `pair.response` success includes:
 1. `sessionId`.
 2. `resumed` boolean.
-3. Surface metadata (id/name/viewport/capabilities).
+3. Surface metadata (id/name/viewport/capabilities and `windowLabel`, `null` while pending).
 4. `eventConfig` (active event profile, active event list, and effective drawing flush config).
 5. Limits.
 6. Current pane state summary (`panes[]` with per-pane `paneId`, `paneLabel`, `currentContentId`, `currentRevision`, and `contentType`) plus current topology/surface revisions, bounded consumable snapshot/cursor/gap state, and retained lifecycle state required by negotiated lockless capability.
@@ -595,7 +595,7 @@ Requests that the paired Surf Ace Spatial app endpoint create a new top-level Su
 
 **Behavior:**
 1. On a platform advertising controller window lifecycle, any admitted controller may call `surface.window.open` under the same identity-independent rules as local open.
-2. The endpoint compares `expectedSurfaceSetRevision`, validates pane-creation and recoverable-state capacity, and atomically allocates the new surface/window and initial pane identities/labels before emitting `event.surface_appeared`.
+2. The endpoint compares `expectedSurfaceSetRevision`, validates pane-creation and recoverable-state capacity, and atomically allocates the new surface and initial pane IDs before emitting `event.surface_appeared`. Registry-confirmed labels may arrive before or after that local commit; pending labels are `null` in the event and snapshots.
 3. A platform may return `unsupported_operation` only when controller window lifecycle is not a product operation there.
 4. The request does not mutate pane topology inside an existing surface.
 
@@ -613,7 +613,7 @@ Requests that the paired Surf Ace Spatial app close the currently paired top-lev
 #### `panes.list`
 Returns current pane layout for the paired surface.
 
-**Response fields per pane:** `paneId`, `paneLabel`, `name` (extension-assigned or null), `activeContentId` (or null), `contentType` (or null), `viewport`.
+**Response fields per pane:** `paneId`, `paneLabel` (integer or `null` while pending), `name` (extension-assigned or null), `activeContentId` (or null), `contentType` (or null), `viewport`.
 
 The OpenClaw-facing `surf_ace_list` response exposes the client-owned `topologyRevision` and recursive `topology` tree. Agents plan intent operations against those fields rather than inferring structure from the flat pane list. A live count above `maxPanesPerSurface` after restore is valid state.
 
@@ -622,7 +622,7 @@ Splits an existing pane into N panes.
 
 **Request fields:** `paneId` (required — pane to split), `expectedTopologyRevision`, `count` (total pane count after split, including the source pane; min 2), and `direction` (`horizontal` | `vertical`).
 
-**Behavior:** The source pane retains its `paneId`, `paneLabel`, and content. In lockless mode the client checks the expected revision, computes `currentLivePaneCount - 1 + count`, returns `pane_capacity` without mutation when that exceeds the advertised admission cap, then performs exact recoverable-state byte checks. On success it allocates IDs/labels and emits `event.pane_created` after atomic commit.
+**Behavior:** The source pane retains its `paneId`, confirmed `paneLabel` if any, and content. In lockless mode the client checks the expected revision, computes `currentLivePaneCount - 1 + count`, returns `pane_capacity` without mutation when that exceeds the advertised admission cap, then performs exact recoverable-state byte checks. On success it allocates pane IDs, commits local topology and emits `event.pane_created`; labels may be confirmed separately before or after this commit.
 
 **Response fields:** `panes` — array of `{ paneId, paneLabel }` for all panes in the window after the split (including existing panes).
 
@@ -649,7 +649,8 @@ Recoverably closes a pane and removes it from the live layout.
 ---
 
 **Pane lifecycle events (surface → provider):**
-- `event.pane_created` — `{ surfaceId, paneId, paneLabel, parentPaneId (pane that was split, or null if created standalone), fromSplit: bool }`
+- `event.pane_created` — `{ surfaceId, paneId, paneLabel: integer | null, parentPaneId (pane that was split, or null if created standalone), fromSplit: bool }`
+- `event.fleet_labels_confirmed` — `{ surfaceId, windowLabel: string | null, panes: [{ paneId, paneLabel: integer | null }] }`; a full current label snapshot after each registry confirmation, keyed by stable IDs. The client emits it after committing the label state; `null` means still pending. On reconnect `surfaces.list`, `pair.response`, and `panes.list` provide current labels even if the event was missed.
 - `event.pane_removed` — `{ surfaceId, paneId, tombstoneId, recoverable: true, closedSequence }` in lockless mode
 - `event.pane_renamed` — `{ surfaceId, paneId, name }`
 
@@ -781,7 +782,8 @@ The direct surface stream is still always-on; expansions are negotiated at pair 
 | `event.consumable_available` | Targeted lockless control | Always | Client-authored pending/gap truth for one controller/scope; outside consumable payload logs. |
 | `event.consumable_overflow` | Targeted lockless control | Always | Structured sticky capacity loss for one controller/scope; outside consumable payload logs. |
 | `event.controller_retention_reclaimed` | Lockless lifecycle — **not profile-gated** | Always | Ordered notification that a dormant controller bundle was deterministically reclaimed. |
-| `event.pane_created` | Lifecycle — **not profile-gated** | Always | Emitted when a new pane is created (split or standalone). Always active regardless of `eventProfile`. Does NOT appear in `pair.response.eventConfig.activeEvents`. |
+| `event.pane_created` | Lifecycle — **not profile-gated** | Always | Emitted when a new pane is created (split or standalone), with `paneLabel: null` if pending. Always active regardless of `eventProfile`. Does NOT appear in `pair.response.eventConfig.activeEvents`. |
+| `event.fleet_labels_confirmed` | Label lifecycle — **not profile-gated** | Always | Emitted after a registry confirmation commits, with the complete current label snapshot keyed by stable surface/pane IDs. Does NOT appear in `pair.response.eventConfig.activeEvents`. Missed events are reconciled through list/pair snapshots after reconnect. |
 | `event.pane_removed` | Lifecycle — **not profile-gated** | Always | Emitted after recoverable pane-close tombstone commit in lockless mode, with tombstone/recoverability metadata. Always active regardless of `eventProfile`. |
 | `event.pane_renamed` | Lifecycle — **not profile-gated** | Always | Emitted when a pane name changes. Always active regardless of `eventProfile`. Does NOT appear in `activeEvents`. |
 | `event.scroll` | Context-rich but high-volume | No (`deep_plus_scroll` only) | Useful but not strictly required for minimum usefulness. |
@@ -927,7 +929,8 @@ The schema below defines every v1 application message type over WS.
 
     { "$ref": "#/$defs/PaneCreatedEvent" },
     { "$ref": "#/$defs/PaneRemovedEvent" },
-    { "$ref": "#/$defs/PaneRenamedEvent" }
+    { "$ref": "#/$defs/PaneRenamedEvent" },
+    { "$ref": "#/$defs/FleetLabelsConfirmedEvent" }
   ],
   "$defs": {
     "RequestId": {
@@ -972,9 +975,12 @@ The schema below defines every v1 application message type over WS.
       "minimum": 1
     },
     "PaneLabel": {
-      "description": "Fleet-unique visible pane number assigned by the fleet registry. Distinct from client-local internal paneId.",
-      "type": "integer",
-      "minimum": 1
+      "description": "Fleet-unique visible pane number assigned by the fleet registry, or null while confirmation is pending. Distinct from client-local internal paneId.",
+      "oneOf": [{ "type": "integer", "minimum": 1 }, { "type": "null" }]
+    },
+    "WindowLabel": {
+      "description": "Fleet-unique visible window letter assigned by the fleet registry, or null while confirmation is pending.",
+      "oneOf": [{ "type": "string", "pattern": "^[a-z]+$" }, { "type": "null" }]
     },
     "Revision": {
       "type": "integer",
@@ -1006,7 +1012,8 @@ The schema below defines every v1 application message type over WS.
         "event.snapshot_hint",
         "event.pane_created",
         "event.pane_removed",
-        "event.pane_renamed"
+        "event.pane_renamed",
+        "event.fleet_labels_confirmed"
       ]
     },
     "ProfileControlledEventType": {
@@ -1273,10 +1280,11 @@ The schema below defines every v1 application message type over WS.
               "items": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["surfaceId", "name", "viewport", "paired"],
+                "required": ["surfaceId", "name", "windowLabel", "viewport", "paired"],
                 "properties": {
                   "surfaceId": { "$ref": "#/$defs/SurfaceId" },
                   "name": { "type": "string" },
+                  "windowLabel": { "$ref": "#/$defs/WindowLabel" },
                   "viewport": { "$ref": "#/$defs/SurfaceViewport" },
                   "paired": { "type": "boolean", "description": "Deprecated discovery projection; admission is reported through negotiated capability/controller state." }
                 }
@@ -1599,6 +1607,7 @@ The schema below defines every v1 application message type over WS.
             "resumed",
             "surfaceId",
             "surfaceName",
+            "windowLabel",
             "viewport",
             "capabilities",
             "eventConfig",
@@ -1610,6 +1619,7 @@ The schema below defines every v1 application message type over WS.
             "resumed": { "type": "boolean" },
             "surfaceId": { "$ref": "#/$defs/SurfaceId" },
             "surfaceName": { "type": "string" },
+            "windowLabel": { "$ref": "#/$defs/WindowLabel" },
             "viewport": {
               "type": "object",
               "additionalProperties": false,
@@ -2102,10 +2112,11 @@ The schema below defines every v1 application message type over WS.
         "payload": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["surfaceId", "name", "viewport"],
+          "required": ["surfaceId", "name", "windowLabel", "viewport"],
           "properties": {
             "surfaceId": { "$ref": "#/$defs/SurfaceId" },
             "name": { "type": "string" },
+            "windowLabel": { "$ref": "#/$defs/WindowLabel" },
             "viewport": { "$ref": "#/$defs/SurfaceViewport" }
           }
         }
@@ -2533,6 +2544,40 @@ The schema below defines every v1 application message type over WS.
         }
       }
     },
+    "FleetLabelsConfirmedEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "op", "eventId", "sentAt", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "type": { "const": "event" },
+        "op": { "const": "event.fleet_labels_confirmed" },
+        "eventId": { "$ref": "#/$defs/EventId" },
+        "sentAt": { "$ref": "#/$defs/EpochMs" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["surfaceId", "windowLabel", "panes"],
+          "properties": {
+            "surfaceId": { "$ref": "#/$defs/SurfaceId" },
+            "windowLabel": { "$ref": "#/$defs/WindowLabel" },
+            "panes": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["paneId", "paneLabel"],
+                "properties": {
+                  "paneId": { "$ref": "#/$defs/PaneId" },
+                  "paneLabel": { "$ref": "#/$defs/PaneLabel" }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "PaneRenamedEvent": {
       "type": "object",
       "additionalProperties": false,
@@ -2902,7 +2947,7 @@ OpenClaw's tool surface has a strict read/write split:
 
 ### 14.3 OpenClaw Tool Surface
 
-OpenClaw interacts with surfaces through the tools defined in this section. All screen-scoped tools accept `fingerprint` (the window-surface stable identity, mapped from `surfaceId`) as the primary screen selector. `paneId` is **required** on all pane-scoped calls — OpenClaw resolves human references through `surf_ace_list` (`windowLabel` / `paneLabel`), then specifies the target pane explicitly by internal `paneId`. All pane-aware tool responses echo both the effective internal `paneId` and the visible `paneLabel`.
+OpenClaw interacts with surfaces through the tools defined in this section. All screen-scoped tools accept `fingerprint` (the window-surface stable identity, mapped from `surfaceId`) as the primary screen selector. `paneId` is **required** on all pane-scoped calls — OpenClaw resolves human references through `surf_ace_list` (`windowLabel` / `paneLabel`) when those labels are confirmed, then specifies the target pane explicitly by internal `paneId`. All pane-aware tool responses echo both the effective internal `paneId` and `paneLabel: integer | null`; all `windowLabel` result fields are `string | null`. `null` means allocator confirmation is pending and MUST NOT be treated as a confirmed coordinate. A caller already holding a stable fingerprint and pane ID may continue local pane operations during that pending period, but human-label resolution and label guards cannot use an unconfirmed label. On `event.fleet_labels_confirmed`, the provider updates its projection by stable IDs; after reconnect it refreshes `surfaces.list`, `pair.response`, and `panes.list` before exposing the latest labels through `surf_ace_list`.
 
 ---
 
@@ -2915,13 +2960,13 @@ Returns all known screens and their locally cached state. Read-only, local.
 **Returns:** array of screen records:
 ```
 fingerprint       string    Stable screen identity (window-scoped; mapped from `surfaceId`)
-windowLabel       string    Client-assigned visible window label (`a`, `b`, `aa`, ...)
+windowLabel       string|null    Fleet-confirmed visible window label (`a`, `b`, `aa`, ...), or null while pending
 name              string    Human-readable screen name
 connectionState   enum      "connected" | "connecting" | "unreachable"
 lastSeenAt        epochMs   When screen was last seen in mDNS or active
 viewport          object    { width, height, scale }
 panes             array     Full current pane topology: [{ paneId, name, activeContent, historySummary }]
-                          Each pane record also includes `paneLabel`, the visible human-facing pane identifier.
+                          Each pane record also includes `paneLabel: integer|null`, the confirmed visible identifier or null while pending.
                           activeContent: { contentId, contentType, revision } or null if idle
                           historySummary: { visibleContentId, backCount, forwardCount }
 pendingEvents     int       Count of buffered events not yet read by OpenClaw
@@ -2965,7 +3010,7 @@ sourcePath     string   Optional file path for file-backed content. When present
 ```
 fingerprint    string
 paneId         integer  Target pane
-paneLabel      integer  Visible label of the target pane
+paneLabel      integer|null  Visible label of the target pane, or null while pending
 contentId      string   Stable content payload ID assigned by provider (ct_<8hex>)
 revision       int      Revision after push
 ```
@@ -3016,7 +3061,7 @@ paneId         integer  Required.
 ```
 fingerprint    string
 paneId         integer
-paneLabel      integer
+paneLabel      integer|null
 revision       int      Revision after clear
 ```
 
@@ -3055,12 +3100,12 @@ count          integer  Required total pane count after split, including the sou
 direction      enum     "horizontal" | "vertical"
 ```
 
-**Behavior:** The controller sends split intent and `expectedTopologyRevision`. The client performs stale/capacity checks, allocates new internal `paneId` and visible `paneLabel` values, commits atomically, and returns the authoritative result.
+**Behavior:** The controller sends split intent and `expectedTopologyRevision`. The client performs stale/capacity checks, allocates new internal `paneId` values and commits local topology atomically. Registry labels may be confirmed separately; the result uses null for a pending label.
 
 **Returns:** array of pane records:
 ```
 paneId         integer  Effective pane id after the split. Includes the source pane and each newly created pane.
-paneLabel      integer  Visible pane label for that pane.
+paneLabel      integer|null  Visible pane label for that pane, or null while pending.
 ```
 
 **Errors:** `not_connected`, `screen_not_found`, `invalid_operation`
@@ -3088,7 +3133,7 @@ pane node:  { "type": "pane", "paneId"?: paneId, "name"?: string | null, "weight
 
 `weight` is an optional positive relative size within the parent split. User-driven client resizing emits `event.topology_changed` with the current weighted layout and bumped `topologyRevision`; providers adopt that visible layout so subsequent `surf_ace_list` output reports the reconciled pane geometry.
 
-**Behavior:** The controller submits intent with `expectedTopologyRevision`; the client verifies the revision at execution time, validates omitted-pane destruction intent and CAP bounds, allocates any new internal pane IDs/labels, and commits one atomic topology result. Existing identity is preserved only for desired leaves that keep an existing stable `paneId`, plus the non-root shorthand where `{ target: { paneId }, desired: { type: "pane" } }` preserves that target pane.
+**Behavior:** The controller submits intent with `expectedTopologyRevision`; the client verifies the revision at execution time, validates omitted-pane destruction intent and CAP bounds, allocates any new internal pane IDs, and commits one atomic topology result. Registry labels may remain pending. Existing identity is preserved only for desired leaves that keep an existing stable `paneId`, plus the non-root shorthand where `{ target: { paneId }, desired: { type: "pane" } }` preserves that target pane.
 
 **Returns:** `ok`, `target`, `topologyRevision`, current `topology`, current `panes`, `preservedPaneIds`, `createdPaneIds`, and `destroyedPaneIds`.
 
@@ -3151,7 +3196,7 @@ paneId         integer  Required pane to close.
 ```
 ok             bool     Always true on success.
 paneId         integer  Closed pane's internal id.
-paneLabel      integer  Closed pane's visible label at the moment it was closed.
+paneLabel      integer|null  Closed pane's visible label at the moment it was closed, or null if pending.
 ```
 
 **Errors:** `not_connected`, `screen_not_found`, `invalid_operation`
@@ -3180,7 +3225,7 @@ paneId         integer  Required.
 ```
 fingerprint       string
 paneId            integer  Effective pane read by the provider
-paneLabel         integer  Visible label for the pane returned by the provider
+paneLabel         integer|null  Visible label for the pane returned by the provider, or null if pending
 
 // Local current content readback
 contentSnapshot   object?  Current cached pane content, or null if none is locally cached.
@@ -3285,9 +3330,9 @@ paneId         string   Required opaque pane id from `surf_ace_list`
 capture: {
   bytesBase64       string?  Base64 PNG bytes, null when blocked/unavailable
   fingerprint       string
-  windowLabel       string
+  windowLabel       string|null
   paneId            string
-  paneLabel         integer
+  paneLabel         integer|null
   topologyRevision  integer
   visibleContentId  string?
   contentType       string?
@@ -3534,7 +3579,7 @@ These constraints are synchronized with annotation mode state and are lifted onl
 
 ### 15.7 Connection State Indicator
 
-Connection state MUST be expressed through the window ID outline/text in the bottom-right identity overlay. The app MUST NOT render a separate full-width bottom connection bar or strip, page-covering banner, repeated modal, or rapidly flickering status. A compact adjacent affordance MAY expose capability-specific degraded status and deliberately opened diagnostic detail without obscuring content. It MUST distinguish usable display from registration, synchronization, direct endpoint, and persistence readiness; it MUST clear the recovered limitation automatically.
+Connection state MUST be expressed through the window ID outline/text in the bottom-right identity overlay. The app MUST NOT render a separate full-width bottom connection bar or strip, page-covering banner, repeated modal, or rapidly flickering status. When registration, synchronization, direct endpoint, or persistence used by the surface is degraded, a compact adjacent accessible affordance MUST show the capability-specific limitation without obscuring content; full diagnostic detail appears only on deliberate inspection. It MUST distinguish usable display from those shared-service limitations, honestly show pending/unsaved work, and clear the recovered limitation automatically. While the window letter or pane number is unconfirmed, the same bottom-right identity area MUST show a small pending-label indication without a fabricated coordinate. A neutral placeholder window outline anchors connection color and status if no letter exists yet.
 
 **States and colors (Clawline design system tokens):**
 
@@ -3569,7 +3614,7 @@ Every named invariant in this index, including later single-invariant index entr
 - **No History Counters** — "v1 SHOULD NOT display history depth counters." Source: §6.1.1 / §15.3
 - **Degraded Restore Safety** — "The surface MUST still show that state's content payload when available, clear the overlay for safety." Source: §6.1.1
 - **Restore Failure UI** — "The surface SHOULD show a non-blocking toast plus a warning icon in the bottom controls." Source: §6.1.1 / §15.4
-- **Connection State Indicator** — "Connection state is expressed through the window ID outline/text color in the bottom-right identity overlay; compact adjacent capability status may be inspected without obscuring content." Source: §4.5 / §15.7
+- **Connection State Indicator** — "Connection state is expressed through the bottom-right window-ID outline/text color; capability-specific degraded status and pending-label indication are required adjacent to it without obscuring content, including before a letter is confirmed." Source: §4.5 / §15.7
 - **Connected State UI** — "Connected — green window ID outline/text." Source: §4.5 / §15.7
 - **Connecting State UI** — "Connecting / reconnecting — yellow window ID outline/text." Source: §4.5 / §15.7
 - **Disconnected State UI** — "Disconnected — red window ID outline/text." Source: §4.5 / §15.7
