@@ -42,6 +42,7 @@ export type AllocatorDiagnostics = {
   primaryHeadHash: string;
   primaryHeadSeq: number;
   serveStatus: string;
+  registrationReady: boolean;
   stateVersion: number;
   uptimeMs: number;
   witnessHeadHash: string;
@@ -194,6 +195,7 @@ export class AllocatorServer {
       primaryHeadHash: state.headHash,
       primaryHeadSeq: state.headSeq,
       serveStatus: this.authority.serveStatus,
+      registrationReady: this.custody.registrationReady && this.authority.serveStatus === "serving",
       stateVersion: state.stateVersion,
       uptimeMs: Date.now() - this.startedAt,
       witnessHeadHash: witness.headHash,
@@ -247,7 +249,10 @@ export class AllocatorServer {
             ? await this.registerClient(registration.payload)
             : registration.op === "pane.claim"
               ? await this.claimPane(registration.payload)
-              : { clients: [...this.registeredClients.values()] };
+              : {
+                clients: [...this.registeredClients.values()],
+                registrationReady: await this.authority.refreshReadiness(),
+              };
           if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({
             v: 1, type: "response", id: registration.id, op: registration.op, ok: true, payload, sentAt: Date.now(),
           }));

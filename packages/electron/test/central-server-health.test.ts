@@ -60,7 +60,7 @@ test("server self-check uses the Bonjour SRV target's resolved address, listener
     resolveTargetAddresses: async () => ["192.0.2.18"],
     requestTopology: async (endpoint) => {
       attempted.push(endpoint);
-      return { clients: [] };
+      return { clients: [], registrationReady: true };
     },
   });
 
@@ -71,6 +71,18 @@ test("server self-check uses the Bonjour SRV target's resolved address, listener
   });
 });
 
+test("a reachable topology endpoint is unhealthy while registration has no validated writer", async () => {
+  await assert.rejects(
+    checkPublishedServerRecord(record({ addresses: ["192.0.2.18"] }), LISTENER_PORT, {
+      expectedHost: "registry.local",
+      resolveTargetAddresses: async () => ["192.0.2.18"],
+      requestTopology: async () => ({ clients: [], registrationReady: false }),
+    }),
+    (error: unknown) => error instanceof CentralServerHealthError
+      && error.code.includes("registration_writer_unavailable"),
+  );
+});
+
 test("server self-check rejects an SRV target that resolves only through loopback", async () => {
   const attempted: string[] = [];
   await assert.rejects(
@@ -78,7 +90,7 @@ test("server self-check rejects an SRV target that resolves only through loopbac
       resolveTargetAddresses: async () => ["127.0.1.1"],
       requestTopology: async (endpoint) => {
         attempted.push(endpoint);
-        return { clients: [] };
+        return { clients: [], registrationReady: true };
       },
     }),
     (error: unknown) => error instanceof CentralServerHealthError &&
@@ -104,7 +116,7 @@ test("IPv4-only Bonjour records ignore macOS loopback aliases and unserved IPv6 
     ],
     requestTopology: async (endpoint) => {
       attempted.push(endpoint);
-      return { clients: [] };
+      return { clients: [], registrationReady: true };
     },
   });
 
@@ -122,7 +134,7 @@ test("a loopback-only IPv4 target stays unhealthy when only unserved IPv6 addres
       resolveTargetAddresses: async () => ["127.0.1.1", "::1", "fe80::1", "fd44:c7ed:abcd::8f5"],
       requestTopology: async (endpoint) => {
         attempted.push(endpoint);
-        return { clients: [] };
+        return { clients: [], registrationReady: true };
       },
     }),
     (error: unknown) => error instanceof CentralServerHealthError &&
@@ -141,7 +153,7 @@ test("an SRV target resolving only to an unserved family cannot pass by DNS-SD a
       resolveTargetAddresses: async () => ["2001:db8::18"],
       requestTopology: async (endpoint) => {
         attempted.push(endpoint);
-        return { clients: [] };
+        return { clients: [], registrationReady: true };
       },
     }),
     (error: unknown) => error instanceof CentralServerHealthError &&
@@ -157,7 +169,7 @@ test("an invalid non-address SRV resolution cannot pass by record-address fallba
       resolveTargetAddresses: async () => ["not-an-address"],
       requestTopology: async () => {
         attempted = true;
-        return { clients: [] };
+        return { clients: [], registrationReady: true };
       },
     }),
     (error: unknown) => error instanceof CentralServerHealthError &&
@@ -172,7 +184,7 @@ test("server self-check rejects a link-local target without a matching local int
       resolveTargetAddresses: async () => {
         throw Object.assign(new Error("lookup failed"), { code: "ENOTFOUND" });
       },
-      requestTopology: async () => ({ clients: [] }),
+      requestTopology: async () => ({ clients: [], registrationReady: true }),
       networkInterfaces: {},
     }),
     (error: unknown) => error instanceof CentralServerHealthError &&
@@ -190,7 +202,7 @@ test("a scoped IPv6 link-local target uses its SRV hostname so the OS can apply 
     resolveTargetAddresses: async () => ["fe80::1234"],
     requestTopology: async (endpoint) => {
       endpointAttempts.push(endpoint);
-      return { clients: [] };
+      return { clients: [], registrationReady: true };
     },
     networkInterfaces,
   });
@@ -209,7 +221,7 @@ test("server self-check rejects an SRV target that disagrees with its DNS-SD add
       resolveTargetAddresses: async () => ["192.0.2.18"],
       requestTopology: async () => {
         attempted = true;
-        return { clients: [] };
+        return { clients: [], registrationReady: true };
       },
     }),
     (error: unknown) => error instanceof CentralServerHealthError &&
@@ -227,7 +239,7 @@ test("multi-homed target stays healthy when its published LAN address handshakes
     resolveTargetAddresses: async () => ["100.92.53.87", "192.168.50.216"],
     requestTopology: async (endpoint) => {
       attempted.push(endpoint);
-      return { clients: [] };
+      return { clients: [], registrationReady: true };
     },
   });
 
@@ -248,7 +260,7 @@ test("server self-check rejects a published address when any DNS-SD endpoint fai
         if (endpoint.includes("192.0.2.19")) {
           throw new CentralServerHealthError("websocket_connect_failed:ECONNREFUSED");
         }
-        return { clients: [] };
+        return { clients: [], registrationReady: true };
       },
     }),
     (error: unknown) => error instanceof CentralServerHealthError &&
@@ -262,7 +274,7 @@ test("server self-check rejects a published host that differs from the listener-
     checkPublishedServerRecord(record({ host: "other.local" }), LISTENER_PORT, {
       expectedHost: "registry.local",
       resolveTargetAddresses: async () => ["192.0.2.18"],
-      requestTopology: async () => ({ clients: [] }),
+      requestTopology: async () => ({ clients: [], registrationReady: true }),
     }),
     (error: unknown) => error instanceof CentralServerHealthError &&
       error.code === "advertised_host_mismatch:other.local:expected:registry.local",
@@ -284,7 +296,7 @@ test("server self-check rejects wrong TXT identity, path, listener port, and wil
     await assert.rejects(
       checkPublishedServerRecord(entry.record, LISTENER_PORT, {
         serverId: "server-instance-1",
-        requestTopology: async () => ({ clients: [] }),
+        requestTopology: async () => ({ clients: [], registrationReady: true }),
       }),
       (error: unknown) => error instanceof CentralServerHealthError && error.code === entry.code,
     );
@@ -299,7 +311,7 @@ test("DNS-SD transport addresses are used only after SRV target resolution fails
     },
     requestTopology: async (endpoint) => {
       attempted.push(endpoint);
-      return { clients: [] };
+      return { clients: [], registrationReady: true };
     },
   });
 
@@ -317,7 +329,7 @@ test("a published loopback DNS-SD address is rejected even when another address 
       resolveTargetAddresses: async () => ["192.0.2.18"],
       requestTopology: async () => {
         attempted = true;
-        return { clients: [] };
+        return { clients: [], registrationReady: true };
       },
     }),
     (error: unknown) => error instanceof CentralServerHealthError &&
@@ -342,7 +354,7 @@ test("a reachable wrong host and a failed topology handshake remain unhealthy", 
     resolveTargetAddresses: async () => ["192.0.2.18"],
     requestTopology: async () => {
       if (rejectTopology) throw new CentralServerHealthError("fleet_topology_rejected:registry_unavailable");
-      return { clients: [] };
+      return { clients: [], registrationReady: true };
     },
   });
   const states: string[] = [];
@@ -379,7 +391,7 @@ test("the self-check performs a real fleet.topology WebSocket request and valida
       socket.send(JSON.stringify({
         id: request.id,
         op: "fleet.topology",
-        payload: { clients: [] },
+        payload: { clients: [], registrationReady: true },
         sentAt: Date.now(),
         type: "response",
         v: 1,
@@ -390,7 +402,7 @@ test("the self-check performs a real fleet.topology WebSocket request and valida
 
   try {
     const payload = await requestFleetTopology(`ws://127.0.0.1:${address.port}/ws`);
-    assert.deepEqual(payload, { clients: [] });
+    assert.deepEqual(payload, { clients: [], registrationReady: true });
     assert.equal(received?.op, "fleet.topology");
     assert.deepEqual(received?.payload, {});
     assert.equal(received?.type, "request");
@@ -422,7 +434,7 @@ test("the self-check performs fleet.topology over an isolated IPv4 link-local en
       socket.send(JSON.stringify({
         id: request.id,
         op: "fleet.topology",
-        payload: { clients: [] },
+        payload: { clients: [], registrationReady: true },
         sentAt: Date.now(),
         type: "response",
         v: 1,

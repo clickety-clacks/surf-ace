@@ -443,6 +443,68 @@ test("real PostgreSQL allocator authority", { timeout: 180_000 }, async (t) => {
       }
     });
 
+    await t.test("uncertain pane claim keeps one writer and recovers its exact label", async () => {
+      let injected = false;
+      const writer = await PostgresCustodyAdapter.acquireWriter(cluster.config, {
+        afterCommitBeforeWitness(operation) {
+          if (operation === "claim_pane" && !injected) {
+            injected = true;
+            throw new Error("cut-after-pane-commit");
+          }
+        },
+      });
+      const clientId = createHash("sha256").update("recovery-client").digest("hex");
+      const surfaceId = "sf_recovery-pane";
+      const paneId = "pane-1";
+      const lineageId = "pl_recovery-pane";
+      try {
+        const before = await writer.readAcceptedState();
+        await assert.rejects(writer.claimPane(clientId, surfaceId, paneId, lineageId),
+          (error) => error instanceof PersistenceOutcomeUnknownError);
+        assert.equal(writer.registrationReady, false);
+        await assert.rejects(PostgresCustodyAdapter.acquireWriter(cluster.config),
+          (error) => error instanceof AllocatorError && error.code === "writer_fence_unavailable");
+
+        const originalWitnessId = writer.config.witnessServerId;
+        writer.config.witnessServerId = "divergent-witness";
+        assert.equal(await writer.recoverWriter(), false);
+        assert.equal(writer.registrationReady, false);
+        writer.config.witnessServerId = originalWitnessId;
+        assert.equal(await writer.recoverWriter(), true);
+        const first = (await writer.readAcceptedState()).paneMappings.find((pane) => pane.lineageId === lineageId);
+        assert.ok(first);
+        assert.equal(first.paneId, paneId);
+        assert.equal(first.paneLabel, before.nextPaneOrdinalFence);
+        assert.equal(await writer.claimPane(clientId, surfaceId, paneId, lineageId), first.paneLabel);
+        await assert.rejects(writer.claimPane(clientId, surfaceId, "pane-2", lineageId),
+          (error) => error instanceof AllocatorError && error.code === "assignment_conflict");
+        const after = await writer.readAcceptedState();
+        assert.equal(after.nextPaneOrdinalFence, before.nextPaneOrdinalFence + 1);
+        assert.equal(after.paneMappings.filter((pane) => pane.lineageId === lineageId).length, 1);
+      } finally {
+        await writer.release();
+      }
+    });
+
+    await t.test("pre-commit pane failure leaves the held writer and fence usable", async () => {
+      const writer = await PostgresCustodyAdapter.acquireWriter(cluster.config, {
+        beforeMutation(operation) {
+          if (operation === "claim_pane") throw new Error("cut-before-pane-commit");
+        },
+      });
+      const clientId = createHash("sha256").update("precommit-client").digest("hex");
+      try {
+        const before = await writer.readAcceptedState();
+        await assert.rejects(writer.claimPane(clientId, "sf_precommit", "pane-1", "pl_precommit"),
+          (error) => error instanceof AllocatorError && error.code === "persistence_failed");
+        assert.equal(writer.registrationReady, true);
+        const after = await writer.readAcceptedState();
+        assert.equal(after.nextPaneOrdinalFence, before.nextPaneOrdinalFence);
+      } finally {
+        await writer.release();
+      }
+    });
+
     await t.test("unknown mapping commit resolves to the one durable assignment", async () => {
       let injected = false;
       const writer = await PostgresCustodyAdapter.acquireWriter(cluster.config, {
