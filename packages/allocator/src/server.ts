@@ -506,6 +506,32 @@ export class AllocatorServer {
         lease.gap = null;
         reply(true, { ackCursor: position, gapId: payload.gapId });
         void this.pumpAnnotation(lease);
+      } else if (op === "annotation.consumer.retire") {
+        if (this.annotationRoles.get(socket) !== "consumer") {
+          throw new AllocatorError("annotation_role_operation_invalid", "consumer hello is required");
+        }
+        const payload = request.payload as Record<string, unknown>;
+        if (!payload || Object.keys(payload).sort().join(",") !==
+            "consumerId,discardUnacknowledged,expectedAckCursor" ||
+            typeof payload.consumerId !== "string") {
+          throw new AllocatorError("annotation_invalid_request", "invalid retirement request");
+        }
+        let expected = null;
+        if (payload.expectedAckCursor !== null) {
+          try { expected = parseAnnotationCursor(payload.expectedAckCursor, true); }
+          catch { throw new AllocatorError("annotation_cursor_invalid", "invalid expected cursor"); }
+        }
+        const retired = await this.custody.retireAnnotationConsumer(
+          payload.consumerId, expected, payload.discardUnacknowledged === true);
+        reply(true, retired);
+        const lease = this.annotationLeases.get(payload.consumerId);
+        if (lease) {
+          this.annotationLeases.delete(payload.consumerId);
+          if (lease.socket?.readyState === WebSocket.OPEN) {
+            this.emitAnnotation(lease.socket, "annotation.consumer_retired", retired);
+            lease.socket.close(1000, "consumer_retired");
+          }
+        }
       } else {
         throw new AllocatorError("annotation_protocol_unsupported", "annotation operation is not implemented");
       }

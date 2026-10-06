@@ -29,6 +29,8 @@ export const ALLOCATOR_ERROR_CODES = [
   "annotation_ack_not_delivered",
   "annotation_gap_ack_required",
   "annotation_gap_id_mismatch",
+  "annotation_consumer_retire_confirmation_required",
+  "annotation_ack_cursor_mismatch",
   "allocator_identity_mismatch",
   "allocator_state_corrupt",
   "allocator_state_unsupported_version",

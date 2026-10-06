@@ -62,6 +62,14 @@ export type AnnotationConsumerOpen = {
   historyCompleteSinceStart: boolean;
 };
 
+export type AnnotationRetirement = {
+  consumerId: string;
+  retired: true;
+  expectedAckCursor: { epoch: string; sequence: string } | null;
+  discardedFromCursor: { epoch: string; sequence: string } | null;
+  discardedThroughCursor: { epoch: string; sequence: string } | null;
+};
+
 export type AcceptedState = {
   acceptedGenerationId: string;
   allocatorId: string;
@@ -483,6 +491,21 @@ export class PostgresCustodyAdapter<M extends LeaseMode> {
       [this.config.fleetId, this.token.leaseGeneration, this.token.leaseId,
         consumerId, consumerLeaseId, through.epoch, through.sequence]));
     return result.rows[0]!.cursor;
+  }
+
+  async retireAnnotationConsumer(
+    this: PostgresCustodyAdapter<"writer">, consumerId: string,
+    expectedAckCursor: { epoch: string; sequence: string } | null,
+    discardUnacknowledged: boolean,
+  ): Promise<AnnotationRetirement> {
+    this.assertMode("writer");
+    const result = await this.mutate("annotation_consumer_retire", async () => await this.primary.query<{
+      retired: AnnotationRetirement;
+    }>("SELECT surf_ace_allocator.annotation_consumer_retire($1,$2,$3,$4,$5,$6,$7) AS retired",
+      [this.config.fleetId, this.token.leaseGeneration, this.token.leaseId,
+        consumerId, expectedAckCursor?.epoch ?? null, expectedAckCursor?.sequence ?? null,
+        discardUnacknowledged]));
+    return result.rows[0]!.retired;
   }
 
   async bindAuthority(this: PostgresCustodyAdapter<"writer">, authorityId: string, ownerAnchorId: string): Promise<void> {
@@ -988,7 +1011,7 @@ function validateAcceptedState(state: AcceptedState, config: PostgresCustodyConf
 function mapDatabaseError(error: unknown): AllocatorError {
   if (error instanceof AllocatorError) return error;
   const message = String((error as { message?: unknown })?.message ?? error);
-  if (isSqlState(error, "P0001") && /^(annotation_invalid_request|annotation_record_too_large|annotation_source_event_conflict|annotation_source_sequence_conflict|annotation_source_gap_required|annotation_source_gap_invalid|annotation_ingest_capacity|annotation_journal_sequence_exhausted|annotation_consumer_capacity|annotation_consumer_exists|annotation_consumer_not_found|annotation_consumer_lease_stale|annotation_cursor_invalid|annotation_ack_regression|annotation_gap_id_mismatch)$/.test(message)) {
+  if (isSqlState(error, "P0001") && /^(annotation_invalid_request|annotation_record_too_large|annotation_source_event_conflict|annotation_source_sequence_conflict|annotation_source_gap_required|annotation_source_gap_invalid|annotation_ingest_capacity|annotation_journal_sequence_exhausted|annotation_consumer_capacity|annotation_consumer_exists|annotation_consumer_not_found|annotation_consumer_lease_stale|annotation_cursor_invalid|annotation_ack_regression|annotation_gap_id_mismatch|annotation_consumer_retire_confirmation_required|annotation_ack_cursor_mismatch)$/.test(message)) {
     return new AllocatorError(message as AllocatorError["code"], message, undefined, error);
   }
   if (isSqlState(error, "23505")) {

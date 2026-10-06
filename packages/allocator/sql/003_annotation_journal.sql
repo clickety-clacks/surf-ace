@@ -469,6 +469,71 @@ BEGIN
 END
 $function$;
 
+CREATE FUNCTION surf_ace_allocator.annotation_consumer_retire(
+  p_fleet_id text, p_generation bigint, p_lease_id text,
+  p_consumer_id text, p_expected_epoch text, p_expected_sequence bigint,
+  p_discard_unacknowledged boolean
+)
+RETURNS jsonb
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = pg_catalog, surf_ace_allocator
+AS $function$
+DECLARE
+  h surf_ace_allocator.annotation_journal_head%ROWTYPE;
+  c surf_ace_allocator.annotation_consumers%ROWTYPE;
+  expected jsonb;
+  discarded_from jsonb;
+  discarded_through jsonb;
+  first_unacknowledged bigint;
+BEGIN
+  PERFORM surf_ace_allocator.assert_role('surf_ace_allocator_writer');
+  PERFORM surf_ace_allocator.assert_token(p_fleet_id, p_generation, p_lease_id, 'writer');
+  IF p_discard_unacknowledged IS DISTINCT FROM true THEN
+    RAISE EXCEPTION 'annotation_consumer_retire_confirmation_required';
+  END IF;
+  IF (p_expected_epoch IS NULL) <> (p_expected_sequence IS NULL) THEN
+    RAISE EXCEPTION 'annotation_invalid_request';
+  END IF;
+  expected := CASE WHEN p_expected_epoch IS NULL THEN NULL ELSE
+    jsonb_build_object('epoch', p_expected_epoch, 'sequence', p_expected_sequence::text) END;
+  SELECT * INTO STRICT h FROM surf_ace_allocator.annotation_journal_head
+    WHERE fleet_id = p_fleet_id FOR UPDATE;
+  SELECT * INTO c FROM surf_ace_allocator.annotation_consumers
+    WHERE fleet_id = p_fleet_id AND consumer_id = p_consumer_id FOR UPDATE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'annotation_consumer_not_found'; END IF;
+  IF c.retired_at IS NOT NULL THEN
+    IF c.retired_expected_ack_cursor IS DISTINCT FROM expected THEN
+      RAISE EXCEPTION 'annotation_ack_cursor_mismatch';
+    END IF;
+    RETURN jsonb_build_object('consumerId', p_consumer_id, 'retired', true,
+      'expectedAckCursor', expected,
+      'discardedFromCursor', c.retired_discarded_from_cursor,
+      'discardedThroughCursor', c.retired_discarded_through_cursor);
+  END IF;
+  IF c.ack_epoch IS DISTINCT FROM p_expected_epoch
+     OR c.ack_sequence IS DISTINCT FROM p_expected_sequence THEN
+    RAISE EXCEPTION 'annotation_ack_cursor_mismatch';
+  END IF;
+  first_unacknowledged := CASE WHEN c.ack_epoch = h.epoch THEN c.ack_sequence + 1
+    WHEN c.ack_epoch IS NULL THEN c.initial_from_sequence ELSE 1 END;
+  IF h.head_sequence >= first_unacknowledged THEN
+    discarded_from := jsonb_build_object(
+      'epoch', CASE WHEN c.ack_epoch IS NULL THEN c.initial_from_epoch ELSE h.epoch END,
+      'sequence', first_unacknowledged::text);
+    discarded_through := jsonb_build_object('epoch', h.epoch, 'sequence', h.head_sequence::text);
+  END IF;
+  UPDATE surf_ace_allocator.annotation_consumers SET
+    retired_at = clock_timestamp(), current_lease_id = NULL, lease_connected = false,
+    retired_expected_ack_cursor = expected,
+    retired_discarded_from_cursor = discarded_from,
+    retired_discarded_through_cursor = discarded_through
+  WHERE fleet_id = p_fleet_id AND consumer_id = p_consumer_id;
+  RETURN jsonb_build_object('consumerId', p_consumer_id, 'retired', true,
+    'expectedAckCursor', expected,
+    'discardedFromCursor', discarded_from, 'discardedThroughCursor', discarded_through);
+END
+$function$;
+
 GRANT EXECUTE ON FUNCTION surf_ace_allocator.annotation_consumer_open(
   text, bigint, text, text, text, text, bigint
 ) TO surf_ace_allocator_writer;
@@ -483,6 +548,9 @@ GRANT EXECUTE ON FUNCTION surf_ace_allocator.annotation_consumer_disconnect(
 ) TO surf_ace_allocator_writer;
 GRANT EXECUTE ON FUNCTION surf_ace_allocator.annotation_consumer_gap_ack(
   text, bigint, text, text, text, text, bigint
+) TO surf_ace_allocator_writer;
+GRANT EXECUTE ON FUNCTION surf_ace_allocator.annotation_consumer_retire(
+  text, bigint, text, text, text, bigint, boolean
 ) TO surf_ace_allocator_writer;
 
 RESET ROLE;

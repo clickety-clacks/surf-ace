@@ -1022,6 +1022,7 @@ test("annotation migration and append survive duplicate retry without allocating
     const firstConsumer = await WireClient.connect(server.address.url);
     const secondConsumer = await WireClient.connect(server.address.url);
     const gapConsumer = await WireClient.connect(server.address.url);
+    const retireCaller = await WireClient.connect(server.address.url);
     try {
       assert.equal((await publisher.request("annotation.hello", { protocolVersion: 1, role: "publisher" })).ok, true);
       assert.equal((await firstConsumer.request("annotation.hello", { protocolVersion: 1, role: "consumer" })).ok, true);
@@ -1064,8 +1065,22 @@ test("annotation migration and append survive duplicate retry without allocating
       assert.equal(gapAck.ok, true);
       const afterGap = await gapConsumer.waitEvent("annotation.record");
       assert.deepEqual((afterGap.payload as { serverCursor: unknown }).serverCursor, cursor);
+      assert.equal((await retireCaller.request("annotation.hello", { protocolVersion: 1, role: "consumer" })).ok, true);
+      const retire = await retireCaller.request("annotation.consumer.retire", {
+        consumerId: "first", expectedAckCursor: cursor, discardUnacknowledged: true,
+      });
+      assert.equal(retire.ok, true);
+      assert.equal((retire.payload as { retired: boolean }).retired, true);
+      assert.equal((await firstConsumer.waitEvent("annotation.consumer_retired")).op, "annotation.consumer_retired");
+      assert.equal((await retireCaller.request("annotation.consumer.retire", {
+        consumerId: "first", expectedAckCursor: cursor, discardUnacknowledged: true,
+      })).ok, true);
+      const mismatchedRetire = await retireCaller.request("annotation.consumer.retire", {
+        consumerId: "first", expectedAckCursor: null, discardUnacknowledged: true,
+      });
+      assert.equal((mismatchedRetire.error as { code: string }).code, "annotation_ack_cursor_mismatch");
     } finally {
-      await Promise.all([publisher.close(), firstConsumer.close(), secondConsumer.close(), gapConsumer.close()]);
+      await Promise.all([publisher.close(), firstConsumer.close(), secondConsumer.close(), gapConsumer.close(), retireCaller.close()]);
       await server.close();
     }
   } finally {
