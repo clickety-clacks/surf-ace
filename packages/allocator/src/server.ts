@@ -194,7 +194,9 @@ export class AllocatorServer {
       nextPaneOrdinalFence: state.nextPaneOrdinalFence,
       primaryHeadHash: state.headHash,
       primaryHeadSeq: state.headSeq,
-      serveStatus: this.authority.serveStatus,
+      serveStatus: this.authority.serveStatus !== "serving"
+        ? this.authority.serveStatus
+        : this.custody.registrationReady ? "serving" : "writer-unvalidated",
       registrationReady: this.custody.registrationReady && this.authority.serveStatus === "serving",
       stateVersion: state.stateVersion,
       uptimeMs: Date.now() - this.startedAt,
