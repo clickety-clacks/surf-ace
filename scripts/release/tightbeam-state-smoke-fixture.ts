@@ -177,17 +177,6 @@ async function verifyDisplayReady() {
   };
 }
 
-async function soleVisibleClientWindowId(): Promise<string> {
-  const { stdout } = await command("xdotool", ["search", "--onlyvisible", "--name", " Surf Ace$"]);
-  const ids = stdout.trim().split(/\s+/).filter((id) => /^\d+$/.test(id));
-  if (ids.length !== 1) throw new Error(`fresh_install_first_client_window_ambiguous:${ids.length}`);
-  return ids[0];
-}
-
-async function raiseClientWindow(windowId: string) {
-  await command("xdotool", ["windowraise", windowId]);
-}
-
 async function startPackagedElectronClient(
   executable: string,
   home: string,
@@ -211,6 +200,12 @@ async function startPackagedElectronClient(
     const endpoint = `ws://127.0.0.1:${port}/ws`;
     await waitFor(() => directWebSocketReady(endpoint), `${label}_direct_client_endpoint`);
     const appVersionIdentity = await verifyClientAppVersion(diagnosticLogPath, expectedVersion);
+    if (process.platform === "linux") {
+      const diagnostic = await fs.readFile(diagnosticLogPath, "utf8");
+      if (!diagnostic.includes("[surf-ace:app] event=gpu_disable_requested")) {
+        throw new Error(`${label}_linux_software_capture_not_enabled`);
+      }
+    }
     const userData = electronLaunchConfig(home, port, registryEndpoint).userDataDir;
     const identityPath = path.join(userData, "surface-identity.json");
     const identity = JSON.parse(await fs.readFile(identityPath, "utf8"));
@@ -1122,14 +1117,9 @@ async function freshInstallMain(options: Options) {
   let clientStopped = false;
   let registryStopped = false;
   let lastCaptureImage: string | undefined;
-  let firstClientWindowId: string | undefined;
   const readVisiblePane = (endpoint: string, surfaceId: string, paneId: number) =>
     waitForScreenshotPixels(
-      async () => {
-        if (!firstClientWindowId) throw new Error("fresh_install_first_client_window_missing");
-        await raiseClientWindow(firstClientWindowId);
-        return await readPane(options.cliBinary, cliStateRoot, endpoint, surfaceId, paneId);
-      },
+      () => readPane(options.cliBinary, cliStateRoot, endpoint, surfaceId, paneId),
       (read) => inspectScreenshotPixels(resultPayload(read.captureOutput)?.image, expectedScreenshotColors),
       { onAttempt: (read) => { lastCaptureImage = resultPayload(read.captureOutput)?.image; } },
     );
@@ -1148,10 +1138,6 @@ async function freshInstallMain(options: Options) {
       "fresh-install",
       options.expectedVersion,
     );
-    await waitFor(async () => {
-      firstClientWindowId = await soleVisibleClientWindowId();
-      return true;
-    }, "fresh_install_first_client_window");
     secondApp = await startPackagedElectronClient(
       options.candidateElectron,
       path.join(options.stateRoot, "second-client-home"),
