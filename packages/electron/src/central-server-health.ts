@@ -397,11 +397,12 @@ export async function checkPublishedServerRecord(
           // address for the hostname fallback path.
           throw new CentralServerHealthError(`advertised_target_family_unserved:${unservedAddress}`);
         }
+        const invalidAddress = targetAddresses.find((address) => addressFamily(address) === 0);
+        if (invalidAddress) {
+          throw new CentralServerHealthError(`advertised_target_invalid_resolution:${invalidAddress}`);
+        }
+        throw new CentralServerHealthError("advertised_target_resolution_unusable");
       }
-
-      // DNS-SD transport addresses remain a fallback when the target cannot
-      // be resolved, or the resolver returns no address records.
-      targetAddresses = [];
     }
   }
 
