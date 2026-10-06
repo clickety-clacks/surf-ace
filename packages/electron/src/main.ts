@@ -1792,6 +1792,7 @@ async function boot(): Promise<void> {
 
   const persistentState = await loadPersistentState();
   const identity = await loadOrCreateIdentity(stateDir);
+  const configuredAddress = process.env.SURF_ACE_SERVER?.trim();
   identityFingerprint = identity.fingerprintPrefix;
   clientInfo("identity_loaded", {
     fingerprint: identityFingerprint,
@@ -1799,7 +1800,8 @@ async function boot(): Promise<void> {
   });
 
   core = new SurfaceCore({
-    annotationClientId: registrationClientId(identity.publicKeyPem),
+    annotationClientId: configuredAddress || persistentState?.annotationPublisher
+      ? registrationClientId(identity.publicKeyPem) : undefined,
     clientIdentity: identityFingerprint,
     persistentState,
   });
@@ -1866,7 +1868,6 @@ async function boot(): Promise<void> {
   installWebAuthnAccountSelection();
   await acknowledgeCompositorMainAppBinding();
 
-  const configuredAddress = process.env.SURF_ACE_SERVER?.trim();
   configuredRegistration = new ServerConnection({
     configuredAddress,
     clientId: registrationClientId(identity.publicKeyPem),
