@@ -1418,6 +1418,7 @@ export class SurfaceWsServer {
   ): Promise<void> {
     let converted: TargetApplyRequest | null = null;
     let response: Response;
+    let uncertain = false;
     try {
       response = await this.core.locklessAuthority.transactionPersisted(
         () => {
@@ -1478,6 +1479,15 @@ export class SurfaceWsServer {
         this.persistLocklessState,
       );
     } catch (error) {
+      if (error instanceof PersistentStateOutcomeUnknownError) {
+        uncertain = true;
+        response = errorResponse(
+          request.op,
+          request.id as never,
+          "internal_error",
+          "Persistent state commit outcome is unknown; dependent operations are paused pending reconciliation",
+        );
+      } else {
       if (
         !(error instanceof LocklessAuthorityError) &&
         !(error instanceof SurfaceCoreError)
@@ -1505,10 +1515,13 @@ export class SurfaceWsServer {
           error.details,
         );
       });
+      }
     }
-    this.core.markLocklessAuthorityChanged(request.payload.surfaceId);
-    meta.cache.set(request.id, { payloadHash, response });
-    trimCache(meta.cache);
+    if (!uncertain) {
+      this.core.markLocklessAuthorityChanged(request.payload.surfaceId);
+      meta.cache.set(request.id, { payloadHash, response });
+      trimCache(meta.cache);
+    }
     if (!response.ok) {
       await this.send(socket, JSON.stringify(response));
       return;
