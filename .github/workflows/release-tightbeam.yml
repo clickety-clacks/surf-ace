@@ -30,7 +30,7 @@ env:
   RUST_VERSION: 1.89.0
   LINUX_RUST_TARGET: x86_64-unknown-linux-gnu
   MACOS_RUST_TARGET: aarch64-apple-darwin
-  TOOLING_TAG: surf-ace-release-tooling-tightbeam-v0.2.5-r3
+  TOOLING_TAG: surf-ace-release-tooling-tightbeam-v0.2.5-r4
 
 jobs:
   guard:
@@ -457,6 +457,9 @@ jobs:
               if [[ -s linux-smoke.json ]]; then
                 cat linux-smoke.json >&2
               fi
+              mkdir -p linux-smoke-failure
+              find "$smoke_tmp" -type f \( -name 'fresh-install-state.json' -o -name 'fresh-install-state.json.capture.png' \) \
+                -exec cp {} linux-smoke-failure/ \;
               exit "${smoke_status}"
             }
           node tooling/scripts/release/write-smoke-receipt.mjs \
@@ -465,12 +468,14 @@ jobs:
             --files build/release/tightbeam/surf-ace-tightbeam-server-linux-x86_64-v0.2.5.tar.gz,build/release/tightbeam/surf-ace-tightbeam-cli-linux-x86_64-v0.2.5.tar.gz,build/release/tightbeam/surf-ace-tightbeam-electron-linux-x86_64-v0.2.5.zip,build/release/tightbeam/surf-ace-tightbeam-cli-macos-arm64-v0.2.5.tar.gz,build/release/tightbeam/surf-ace-tightbeam-electron-macos-arm64-v0.2.5.zip,build/release/tightbeam/surf-ace-tightbeam-skill-v0.2.5.md \
             --output linux-smoke-receipt.json
       - name: Retain Linux smoke result and receipt
+        if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: tightbeam-linux-smoke
           path: |
             linux-smoke.json
             linux-smoke-receipt.json
+            linux-smoke-failure/
           if-no-files-found: error
 
   smoke-macos:

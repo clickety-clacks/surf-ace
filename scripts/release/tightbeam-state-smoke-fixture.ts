@@ -194,6 +194,7 @@ async function startPackagedElectronClient(
       undefined,
       registryEndpoint,
       diagnosticLogPath,
+      true,
     );
     started = launch.started;
     const endpoint = `ws://127.0.0.1:${port}/ws`;
@@ -1109,6 +1110,7 @@ async function freshInstallMain(options: Options) {
   let clusterStopped = false;
   let clientStopped = false;
   let registryStopped = false;
+  let lastCaptureImage: string | undefined;
   try {
     registryProcess = await startPackagedServer(registryLauncher, registryConfig, cluster.root, "fresh-install-registry");
     const registryEndpoint = registryProcess.endpoint;
@@ -1215,6 +1217,7 @@ async function freshInstallMain(options: Options) {
     }
     const firstRead = await readPane(options.cliBinary, cliStateRoot, app.endpoint, surfaceId, paneId);
     const firstCapture = resultPayload(firstRead.captureOutput);
+    lastCaptureImage = firstCapture?.image;
     const firstRecord = resultPayload(firstRead.output)?.currentContentRecord;
     inspectScreenshotPixels(firstCapture?.image, expectedScreenshotColors);
     if (firstRead.surfaceId !== surfaceId || firstRead.paneId !== paneId ||
@@ -1236,6 +1239,7 @@ async function freshInstallMain(options: Options) {
     });
     const afterWrongSurfaceRead = await readPane(options.cliBinary, cliStateRoot, app.endpoint, surfaceId, paneId);
     const afterWrongCapture = resultPayload(afterWrongSurfaceRead.captureOutput);
+    lastCaptureImage = afterWrongCapture?.image;
     const afterWrongRecord = resultPayload(afterWrongSurfaceRead.output)?.currentContentRecord;
     inspectScreenshotPixels(afterWrongCapture?.image, expectedScreenshotColors);
     if (afterWrongSurfaceRead.surfaceId !== surfaceId || afterWrongSurfaceRead.paneId !== paneId ||
@@ -1319,6 +1323,7 @@ async function freshInstallMain(options: Options) {
     }
     const afterRestartRead = await readPane(options.cliBinary, cliStateRoot, app.endpoint, surfaceId, paneId);
     const resumedCapture = resultPayload(afterRestartRead.captureOutput);
+    lastCaptureImage = resumedCapture?.image;
     const resumedRecord = resultPayload(afterRestartRead.output)?.currentContentRecord;
     inspectScreenshotPixels(resumedCapture?.image, expectedScreenshotColors);
     if (afterRestartRead.surfaceId !== surfaceId || afterRestartRead.paneId !== paneId ||
@@ -1401,6 +1406,10 @@ async function freshInstallMain(options: Options) {
     };
     await fs.writeFile(options.output, `${JSON.stringify(stateSequence, null, 2)}\n`, { mode: 0o600 });
   } catch (error) {
+    if (typeof lastCaptureImage === "string" && /^[A-Za-z0-9+/]+={0,2}$/.test(lastCaptureImage)) {
+      await fs.writeFile(`${options.output}.capture.png`, Buffer.from(lastCaptureImage, "base64"), { mode: 0o600 })
+        .catch(() => undefined);
+    }
     await fs.writeFile(options.output, `${JSON.stringify({
       mode: "fresh-install",
       sourceCommit: options.candidateCommit,

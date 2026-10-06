@@ -412,6 +412,7 @@ test("Electron handshake binds smoke identity to an explicit userData launch pat
     assert.equal(electronLaunchConfig(home, 19101, null, undefined, "darwin").env.SURF_ACE_DISABLE_GPU, undefined);
     assert.equal(electronLaunchConfig(home, 19101, null, undefined, "darwin", true).env.SURF_ACE_DISABLE_GPU, "1");
     assert.equal(electronLaunchConfig(home, 19101, null, undefined, "linux").env.SURF_ACE_DISABLE_GPU, undefined);
+    assert.equal(electronLaunchConfig(home, 19101, null, undefined, "linux", true).env.SURF_ACE_DISABLE_GPU, "1");
     assert.equal(electronLaunchConfig(home, 19101, "ws://127.0.0.1:19301/ws").env.SURF_ACE_SERVER, "ws://127.0.0.1:19301/ws");
     assert.deepEqual(
       electronLaunchConfig(home, 19101, null, undefined, "linux").args,
@@ -1261,7 +1262,7 @@ test("Linux fresh-install raw CLI evidence binds two isolated roots to their cli
 });
 
 test("Tightbeam v0.2.5 binds the landed discovery-integrity candidate, six hosted assets, and tooling identity", () => {
-  assert.equal(TIGHTBEAM_TOOLING_TAG, "surf-ace-release-tooling-tightbeam-v0.2.5-r3");
+  assert.equal(TIGHTBEAM_TOOLING_TAG, "surf-ace-release-tooling-tightbeam-v0.2.5-r4");
   assert.deepEqual(TIGHTBEAM, {
     candidateCommit: "7878fda6181fd0c97175ca8282e4eb9120a8c039",
     sourceTag: "surf-ace-tightbeam-v0.2.5", version: "0.2.5", toolingTag: TIGHTBEAM_TOOLING_TAG,
