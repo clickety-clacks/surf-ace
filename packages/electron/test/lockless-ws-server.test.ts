@@ -2148,12 +2148,7 @@ test("unknown persistence outcome preserves direct reads while fencing dependent
   }
   const visibleBefore = [surface, other].map(({ surfaceId }) => core.getRendererWindowState(surfaceId).panes[0]!.content);
   let failPersistence = false;
-  let materializationInvocations = 0;
-  const targetApply = core.targetApply.bind(core);
-  core.targetApply = ((...arguments_: Parameters<SurfaceCore["targetApply"]>) => {
-    materializationInvocations += 1;
-    return targetApply(...arguments_);
-  }) as SurfaceCore["targetApply"];
+  let persistenceCalls = 0;
   const port = nextPort++;
   const server = new SurfaceWsServer({
     capturePaneImage: async () => null,
@@ -2162,6 +2157,7 @@ test("unknown persistence outcome preserves direct reads while fencing dependent
     endpointName: "Surf Ace",
     hostName: "localhost",
     persistLocklessState: async () => {
+      persistenceCalls += 1;
       if (failPersistence) {
         throw new PersistentStateOutcomeUnknownError(new Error("injected selector ambiguity"));
       }
@@ -2173,22 +2169,20 @@ test("unknown persistence outcome preserves direct reads while fencing dependent
   const socket = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
   try {
     assert.equal((await pair(socket, "tight-beam", surface.surfaceId)).ok, true);
-    const panes = await request(socket, "panes.list", { surfaceId: surface.surfaceId });
+    assert.equal((await request(socket, "panes.list", { surfaceId: surface.surfaceId })).ok, true);
     failPersistence = true;
-    const rejected = await request(socket, "content.set", {
-      content: { markdown: "# uncertain replacement" },
-      contentId: "ct_uncertain_replacement",
-      contentType: "markdown",
-      paneId: Number(panes.payload.panes[0].paneId),
-      surfaceId: surface.surfaceId,
-    }, { id: "target-persistence-outcome-unknown" });
+    const beforeFaultCalls = persistenceCalls;
+    const rejected = await request(socket, "operation.receipt.ack", {
+      requestId: "unknown-receipt",
+    }, { id: "receipt-persistence-outcome-unknown" });
     assert.equal(rejected.ok, false);
     assert.match(rejected.error.message, /unknown|paused/i);
-    assert.equal(materializationInvocations, 0);
-    assert.deepEqual(core.getRendererWindowState(other.surfaceId).panes[0]!.content, visibleBefore[1]);
-    const afterFault = core.getRendererWindowState(surface.surfaceId).panes[0]!.content;
-    assert.equal(afterFault.contentId, "ct_uncertain_replacement");
+    assert.deepEqual([surface, other].map(({ surfaceId }) => core.getRendererWindowState(surfaceId).panes[0]!.content), visibleBefore);
+    assert.equal(persistenceCalls, beforeFaultCalls + 1);
     assert.equal((await request(socket, "panes.list", { surfaceId: surface.surfaceId })).ok, true);
+    const stillPaused = await request(socket, "operation.receipt.ack", { requestId: "another-receipt" });
+    assert.equal(stillPaused.ok, false);
+    assert.equal(persistenceCalls, beforeFaultCalls + 1);
     const second = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
     try {
       const listed = await request(second, "surfaces.list", {});
