@@ -1,4 +1,4 @@
-name: Build standalone Surf Ace Tightbeam release
+name: Build standalone Surf Ace release
 
 on:
   workflow_dispatch:
@@ -27,6 +27,7 @@ env:
   POSTGRES_VERSION: "16"
   PRODUCT_COMMIT: 04a37d82e94d9cae7446841ccc03553a18397ff2
   PRODUCT_TAG: surf-ace-tightbeam-v0.2.5-r4
+  PRODUCT_VERSION: 0.2.5
   RUST_VERSION: 1.89.0
   LINUX_RUST_TARGET: x86_64-unknown-linux-gnu
   MACOS_RUST_TARGET: aarch64-apple-darwin
@@ -131,7 +132,7 @@ jobs:
             --output-dir build/release/tightbeam \
             --source-tag "${PRODUCT_TAG}" \
             --source-commit "${PRODUCT_COMMIT}" \
-            --version 0.2.5 \
+            --version "${PRODUCT_VERSION}" \
             --target "${LINUX_RUST_TARGET}"
       - name: Retain deterministic Linux assets and standalone skill
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -218,7 +219,7 @@ jobs:
             --output-dir build/release/tightbeam \
             --source-tag "${PRODUCT_TAG}" \
             --source-commit "${PRODUCT_COMMIT}" \
-            --version 0.2.5
+            --version "${PRODUCT_VERSION}"
       - name: Retain deterministic macOS assets
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -341,7 +342,7 @@ jobs:
             --output-dir build/release/tightbeam \
             --source-tag "${PRODUCT_TAG}" \
             --source-commit "${PRODUCT_COMMIT}" \
-            --version 0.2.5 \
+            --version "${PRODUCT_VERSION}" \
             --target "${LINUX_RUST_TARGET}"
       - name: Retain assembled release candidate
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -623,5 +624,5 @@ jobs:
             release/SHA256SUMS \
             --repo "${GITHUB_REPOSITORY}" \
             --verify-tag \
-            --title "Surf Ace Tightbeam v0.2.5" \
-            --notes "Linux smoke attestation: ${LINUX_ATTESTATION_URL}\nmacOS smoke attestation: ${MACOS_ATTESTATION_URL}"
+            --title "Surf Ace v${PRODUCT_VERSION}" \
+            --notes "Surf Ace v${PRODUCT_VERSION}. The published tag and asset names remain unchanged for download compatibility. Linux smoke attestation: ${LINUX_ATTESTATION_URL}\nmacOS smoke attestation: ${MACOS_ATTESTATION_URL}"

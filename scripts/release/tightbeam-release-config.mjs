@@ -1,6 +1,12 @@
-export const TIGHTBEAM_TOOLING_TAG = "surf-ace-release-tooling-tightbeam-v0.2.5-r11";
+import { publicReleaseNames } from "./public-release-names.mjs";
 
-export const TIGHTBEAM_SKILL_ASSET = "surf-ace-tightbeam-skill-v0.2.5.md";
+// v0.2.5's published tag and asset names are immutable legacy download identities.
+// New releases use the default Surf Ace names in publicReleaseNames.
+const RELEASE_NAMES = publicReleaseNames({ version: "0.2.5", sourceRevision: "r4", toolingRevision: "r11", legacy: true });
+
+export const TIGHTBEAM_TOOLING_TAG = RELEASE_NAMES.toolingTag;
+
+export const TIGHTBEAM_SKILL_ASSET = RELEASE_NAMES.skillAsset;
 
 export const TOOLCHAINS = Object.freeze({
   linuxContainer: "rust:1.89.0-bookworm@sha256:948f9b08a66e7fe01b03a98ef1c7568292e07ec2e4fe90d88c07bb14563c84ff",
@@ -16,19 +22,13 @@ export const TOOLCHAINS = Object.freeze({
 
 export const TIGHTBEAM = Object.freeze({
   candidateCommit: "04a37d82e94d9cae7446841ccc03553a18397ff2",
-  sourceTag: "surf-ace-tightbeam-v0.2.5-r4",
-  version: "0.2.5",
+  sourceTag: RELEASE_NAMES.sourceTag,
+  version: RELEASE_NAMES.version,
+  channel: RELEASE_NAMES.channel,
   toolingTag: TIGHTBEAM_TOOLING_TAG,
-  assets: [
-    "surf-ace-tightbeam-server-linux-x86_64-v0.2.5.tar.gz",
-    "surf-ace-tightbeam-cli-linux-x86_64-v0.2.5.tar.gz",
-    "surf-ace-tightbeam-electron-linux-x86_64-v0.2.5.zip",
-    "surf-ace-tightbeam-cli-macos-arm64-v0.2.5.tar.gz",
-    "surf-ace-tightbeam-electron-macos-arm64-v0.2.5.zip",
-    TIGHTBEAM_SKILL_ASSET,
-  ],
-  manifest: "surf-ace-tightbeam-v0.2.5-manifest.json",
-  checksums: "SHA256SUMS",
+  assets: RELEASE_NAMES.assets,
+  manifest: RELEASE_NAMES.manifest,
+  checksums: RELEASE_NAMES.checksums,
 });
 
 export const TIGHTBEAM_ROUTING = Object.freeze({
