@@ -457,6 +457,7 @@ test("real PostgreSQL allocator authority", { timeout: 180_000 }, async (t) => {
       const surfaceId = "sf_recovery-pane";
       const paneId = "pane-1";
       const lineageId = "pl_recovery-pane";
+      const originalWitnessId = writer.config.witnessServerId;
       try {
         const before = await writer.readAcceptedState();
         await assert.rejects(writer.claimPane(clientId, surfaceId, paneId, lineageId),
@@ -465,7 +466,6 @@ test("real PostgreSQL allocator authority", { timeout: 180_000 }, async (t) => {
         await assert.rejects(PostgresCustodyAdapter.acquireWriter(cluster.config),
           (error) => error instanceof AllocatorError && error.code === "writer_fence_unavailable");
 
-        const originalWitnessId = writer.config.witnessServerId;
         writer.config.witnessServerId = "divergent-witness";
         assert.equal(await writer.recoverWriter(), false);
         assert.equal(writer.registrationReady, false);
@@ -481,6 +481,32 @@ test("real PostgreSQL allocator authority", { timeout: 180_000 }, async (t) => {
         const after = await writer.readAcceptedState();
         assert.equal(after.nextPaneOrdinalFence, before.nextPaneOrdinalFence + 1);
         assert.equal(after.paneMappings.filter((pane) => pane.lineageId === lineageId).length, 1);
+      } finally {
+        writer.config.witnessServerId = originalWitnessId;
+        await writer.release();
+      }
+    });
+
+    await t.test("lost commit acknowledgment reconciles by the original pane identity", async () => {
+      let injected = false;
+      const writer = await PostgresCustodyAdapter.acquireWriter(cluster.config, {
+        afterCommitBeforeAck(operation) {
+          if (operation === "claim_pane" && !injected) {
+            injected = true;
+            throw new Error("lost-commit-ack");
+          }
+        },
+      });
+      const clientId = createHash("sha256").update("ack-client").digest("hex");
+      try {
+        const before = await writer.readAcceptedState();
+        await assert.rejects(writer.claimPane(clientId, "sf_ack", "pane-1", "pl_ack"),
+          (error) => error instanceof PersistenceOutcomeUnknownError && error.stage === "commit_ack");
+        assert.equal(writer.registrationReady, false);
+        assert.equal(await writer.recoverWriter(), true);
+        const label = await writer.claimPane(clientId, "sf_ack", "pane-1", "pl_ack");
+        assert.equal(label, before.nextPaneOrdinalFence);
+        assert.equal((await writer.readAcceptedState()).nextPaneOrdinalFence, label + 1);
       } finally {
         await writer.release();
       }
@@ -502,6 +528,44 @@ test("real PostgreSQL allocator authority", { timeout: 180_000 }, async (t) => {
         assert.equal(after.nextPaneOrdinalFence, before.nextPaneOrdinalFence);
       } finally {
         await writer.release();
+      }
+    });
+
+    await t.test("fleet topology reports registration readiness through an uncertain claim and recovery", async () => {
+      let injected = false;
+      server = await AllocatorServer.start(serverConfig(cluster), {
+        afterCommitBeforeWitness(operation) {
+          if (operation === "claim_pane" && !injected) {
+            injected = true;
+            throw new Error("lost-claim-reply");
+          }
+        },
+      });
+      const wire = await WireClient.connect(server.address.url);
+      const clientId = createHash("sha256").update("readiness-client").digest("hex");
+      const surfaceId = "sf_readiness";
+      const originalWitnessId = cluster.config.witnessServerId;
+      const claim = { clientId, surfaceId, paneId: "pane-1", paneLineageId: "pl_readiness" };
+      try {
+        assert.equal((await wire.request("client.register", { clientId, surfaces: [{ surfaceId, panes: [] }] })).ok, true);
+        assert.equal((await wire.request("fleet.topology", {})).payload?.registrationReady, true);
+        assert.equal((await wire.request("pane.claim", claim)).ok, false);
+        cluster.config.witnessServerId = "divergent-witness";
+        const degraded = await wire.request("fleet.topology", {});
+        assert.equal(degraded.ok, true);
+        assert.equal(degraded.payload?.registrationReady, false);
+        assert.equal((await server.diagnostics()).registrationReady, false);
+        cluster.config.witnessServerId = originalWitnessId;
+        assert.equal((await wire.request("fleet.topology", {})).payload?.registrationReady, true);
+        const recovered = await wire.request("pane.claim", claim);
+        assert.equal(recovered.ok, true);
+        const again = await wire.request("pane.claim", claim);
+        assert.equal(again.payload?.paneLabel, recovered.payload?.paneLabel);
+      } finally {
+        cluster.config.witnessServerId = originalWitnessId;
+        await wire.close();
+        await server.close();
+        server = null;
       }
     });
 

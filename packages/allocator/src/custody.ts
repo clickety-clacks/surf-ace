@@ -106,6 +106,7 @@ export type RestoreReady = {
 };
 
 export type AdapterTestHooks = {
+  afterCommitBeforeAck?: (operation: string) => Promise<void> | void;
   afterCommitBeforeWitness?: (operation: string) => Promise<void> | void;
   afterMutationBeforeCommit?: (operation: string, client: PgClient) => Promise<void> | void;
   beforeMutation?: (operation: string, client: PgClient) => Promise<void> | void;
@@ -745,6 +746,7 @@ async function transaction<T>(
       await hooks?.afterMutationBeforeCommit?.(operation, client);
       commitStarted = true;
       await client.query("COMMIT");
+      await hooks?.afterCommitBeforeAck?.(operation);
       return result;
     } catch (error) {
       if (!commitStarted) {
