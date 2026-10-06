@@ -1286,7 +1286,7 @@ test("Linux fresh-install raw CLI evidence binds two isolated roots to their cli
 });
 
 test("Tightbeam v0.2.5 binds the landed discovery-integrity candidate, six hosted assets, and tooling identity", () => {
-  assert.equal(TIGHTBEAM_TOOLING_TAG, "surf-ace-release-tooling-tightbeam-v0.2.5-r7");
+  assert.equal(TIGHTBEAM_TOOLING_TAG, "surf-ace-release-tooling-tightbeam-v0.2.5-r8");
   assert.deepEqual(TIGHTBEAM, {
     candidateCommit: "a719c3c394168f772afedd332404c9ee9f71b208",
     sourceTag: "surf-ace-tightbeam-v0.2.5-r2", version: "0.2.5", toolingTag: TIGHTBEAM_TOOLING_TAG,
@@ -1887,7 +1887,7 @@ function postgresRecoveryFixture(candidateContentId = "write-candidate-1", overr
       surfaceId: "sf_1",
     },
     stagedServer: {
-      health: { status: "healthy", transport: "websocket-open" },
+      health: { status: "healthy", transport: "fleet.topology" },
       lifecycle: { exitCode: 0, stopped: { signal: "SIGTERM", status: "clean" } },
     },
     ...overrides,
@@ -1908,7 +1908,7 @@ function postgresRestartFixture(overrides = {}) {
     lifecycle: { primary: lifecycle(101), witness: lifecycle(201) },
     projectionAfterSha256: "e".repeat(64),
     projectionBeforeSha256: "e".repeat(64),
-    registryHealth: { event: "health", status: "healthy", transport: "websocket-open" },
+    registryHealth: { event: "health", status: "healthy", transport: "fleet.topology" },
     status: "verified",
     witnessSynchronized: true,
     ...overrides,
@@ -2242,9 +2242,9 @@ test("fresh-install Linux qualification requires direct current content, wrong-s
         },
       },
       witnessSynchronized: true,
-      registryHealth: { event: "health", status: "healthy", transport: "websocket-open" },
+      registryHealth: { event: "health", status: "healthy", transport: "fleet.topology" },
       registryShutdownClean: true,
-      initialRegistryHealth: { event: "health", status: "healthy", transport: "websocket-open" },
+      initialRegistryHealth: { event: "health", status: "healthy", transport: "fleet.topology" },
       schema: { has_fleets: true, has_journal: true, has_read_state: true, has_journal_validator: true },
       lifecycle: {
         primary: { stopExitCode: 0, startExitCode: 0, pidBefore: 100, pidAfter: 101, stopStdout: "stopped", startStdout: "started" },
@@ -2427,9 +2427,9 @@ test("Linux fresh-install acceptance is based on direct current-content evidence
         },
       },
       witnessSynchronized: true,
-      registryHealth: { event: "health", status: "healthy", transport: "websocket-open" },
+      registryHealth: { event: "health", status: "healthy", transport: "fleet.topology" },
       registryShutdownClean: true,
-      initialRegistryHealth: { event: "health", status: "healthy", transport: "websocket-open" },
+      initialRegistryHealth: { event: "health", status: "healthy", transport: "fleet.topology" },
       schema: { has_fleets: true, has_journal: true, has_read_state: true, has_journal_validator: true },
       lifecycle: {
         primary: { stopExitCode: 0, startExitCode: 0, pidBefore: 100, pidAfter: 101, stopStdout: "stopped", startStdout: "started" },
@@ -2547,9 +2547,9 @@ test("Linux fresh-install state driver binds candidate-only inputs and packaged 
         },
       },
       witnessSynchronized: true,
-      registryHealth: { event: "health", status: "healthy", transport: "websocket-open" },
+      registryHealth: { event: "health", status: "healthy", transport: "fleet.topology" },
       registryShutdownClean: true,
-      initialRegistryHealth: { event: "health", status: "healthy", transport: "websocket-open" },
+      initialRegistryHealth: { event: "health", status: "healthy", transport: "fleet.topology" },
       schema: { has_fleets: true, has_journal: true, has_read_state: true, has_journal_validator: true },
       lifecycle: {
         primary: { stopExitCode: 0, startExitCode: 0, pidBefore: 100, pidAfter: 101, stopStdout: "stopped", startStdout: "started" },
@@ -2860,7 +2860,7 @@ test("v0.2.5 standalone specification and release gates bind the product and all
   assert.match(workflow, /publish_release:[\s\S]*?default: false/);
   assert.match(workflow, /PRODUCT_COMMIT: a719c3c394168f772afedd332404c9ee9f71b208/);
   assert.match(workflow, /PRODUCT_TAG: surf-ace-tightbeam-v0\.2\.5-r2/);
-  assert.match(workflow, /TOOLING_TAG: surf-ace-release-tooling-tightbeam-v0\.2\.5-r7/);
+  assert.match(workflow, /TOOLING_TAG: surf-ace-release-tooling-tightbeam-v0\.2\.5-r8/);
   assert.match(workflow, /GITHUB_EVENT_NAME/);
   assert.match(workflow, /GITHUB_REF_TYPE/);
   assert.match(workflow, /node tooling\/scripts\/release\/build-tightbeam-release\.mjs/);

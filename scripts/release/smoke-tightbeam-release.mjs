@@ -515,7 +515,7 @@ export function validateTightbeamFreshInstallState(stateSequence) {
       !/^[a-f0-9]{64}$/.test(restart.projectionBeforeSha256 ?? "") ||
       restart.witnessSynchronized !== true || restart.registryShutdownClean !== true ||
       restart.registryHealth?.event !== "health" || restart.registryHealth?.status !== "healthy" ||
-      restart.registryHealth?.transport !== "websocket-open") {
+      restart.registryHealth?.transport !== "fleet.topology") {
     throw new Error("fresh_install_postgres_restart_changed_projection");
   }
   const registryShutdown = restart.registryShutdown;
@@ -545,7 +545,7 @@ export function validateTightbeamFreshInstallState(stateSequence) {
     }
   }
   if (restart.initialRegistryHealth?.event !== "health" || restart.initialRegistryHealth?.status !== "healthy" ||
-      restart.initialRegistryHealth?.transport !== "websocket-open") {
+      restart.initialRegistryHealth?.transport !== "fleet.topology") {
     throw new Error("fresh_install_initial_registry_unhealthy");
   }
   if (stateSequence.cleanup?.clientStopped !== true || stateSequence.cleanup?.registryStopped !== true ||
