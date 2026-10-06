@@ -41,6 +41,8 @@ export type AnnotationOpenFrame = {
   updatedAt: number;
   image: string;
   failed?: true;
+  sourceStrokeCount?: number;
+  publishedStrokeCount?: number;
   strokes: Array<{
     strokeId: string;
     points: Array<{ x: number; y: number; pressure?: number }>;
@@ -190,6 +192,7 @@ export class AnnotationPublisherOutbox {
     const frameId = this.frameId(surfaceId, paneId);
     const frame: AnnotationOpenFrame = {
       ...structuredClone(capture), frameId, updatedAt: capture.openedAt, strokes: [],
+      sourceStrokeCount: 0, publishedStrokeCount: 0,
     };
     surface.openFrames ??= {};
     surface.openFrames[key] = frame;
@@ -223,7 +226,10 @@ export class AnnotationPublisherOutbox {
   /** Keep the direct-client stroke even if the bounded publisher copy is lost. */
   recordStroke(surfaceId: string, paneId: number, stroke: Stroke): void {
     const frame = this.state.surfaces[surfaceId]?.openFrames?.[String(paneId)];
-    if (!frame || frame.failed) return;
+    if (!frame) return;
+    if (!frame.failed && frame.strokes.some((entry) => entry.strokeId === stroke.strokeId)) return;
+    frame.sourceStrokeCount = (frame.sourceStrokeCount ?? frame.strokes.length) + 1;
+    if (frame.failed) return;
     try {
       if (stroke.points.length === 0) throw new RangeError("empty annotation stroke");
       const xs = stroke.points.map((point) => point.x);
@@ -247,6 +253,12 @@ export class AnnotationPublisherOutbox {
         sequence: this.state.surfaces[surfaceId]!.nextSequence,
       };
     }
+  }
+
+  markFramePublished(surfaceId: string, paneId: number): void {
+    const frame = this.state.surfaces[surfaceId]?.openFrames?.[String(paneId)];
+    if (!frame) return;
+    frame.publishedStrokeCount = frame.sourceStrokeCount ?? frame.strokes.length;
   }
 
   closeFrame(surfaceId: string, paneId: number): void {

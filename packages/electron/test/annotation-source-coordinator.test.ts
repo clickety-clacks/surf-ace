@@ -41,23 +41,32 @@ test("gated source flush precedes a self-contained at-open frame commit", async 
   assert.equal(live.kind, "live_delta");
   assert.equal(live.frameId, open.frameId);
   assert.equal(live.payload.strokes[0].strokeId, "stroke-one");
+  assert.equal(core.hasPendingDrawingFlush(surface.surfaceId, paneId), true,
+    "registry delivery must preserve the direct client's dirty stroke state");
+  core.addStroke(surface.surfaceId, paneId, {
+    strokeId: "stroke-two" as never, tool: "mouse", points: [{ x: 8, y: 9, timestamp: 130 }],
+  });
+  await source.flushPending(surface.surfaceId, paneId);
+  const secondLive = JSON.parse(core.annotationPublisher!.snapshot().surfaces[surface.surfaceId]!.fifo[1]!.canonical);
+  assert.deepEqual(secondLive.payload.strokes.map((stroke: { strokeId: string }) => stroke.strokeId), ["stroke-two"]);
   const canceledDone = source.setAnnotating(surface.surfaceId, paneId, false);
   await source.setAnnotating(surface.surfaceId, paneId, true);
   await canceledDone;
-  assert.equal(core.annotationPublisher!.snapshot().surfaces[surface.surfaceId]!.fifo.length, 1);
+  assert.equal(core.annotationPublisher!.snapshot().surfaces[surface.surfaceId]!.fifo.length, 2);
   await source.setAnnotating(surface.surfaceId, paneId, false);
   const fifo = core.annotationPublisher!.snapshot().surfaces[surface.surfaceId]!.fifo;
-  assert.equal(fifo.length, 2);
-  const commit = JSON.parse(fifo[1]!.canonical);
+  assert.equal(fifo.length, 3);
+  const commit = JSON.parse(fifo[2]!.canonical);
   assert.equal(commit.kind, "frame_commit");
   assert.equal(commit.frameId, open.frameId);
   assert.equal(commit.payload.frame.image, open.image);
   assert.deepEqual(commit.payload.frame.scrollOffset, { x: 4, y: 5 });
   assert.equal(commit.payload.frame.strokes[0].strokeId, "stroke-one");
-  assert.equal(notified, 2);
+  assert.equal(commit.payload.frame.strokes.length, 2);
+  assert.equal(notified, 3);
   assert.equal(core.annotationPublisher!.openFrameFor(surface.surfaceId, paneId), null);
   const restarted = new SurfaceCore({ annotationClientId: clientId, persistentState: durable });
-  assert.equal(restarted.annotationPublisher!.snapshot().surfaces[surface.surfaceId]!.fifo.length, 2);
+  assert.equal(restarted.annotationPublisher!.snapshot().surfaces[surface.surfaceId]!.fifo.length, 3);
   source.stop();
 });
 

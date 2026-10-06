@@ -54,11 +54,19 @@ export class AnnotationSourceCoordinator {
         if (!frame || frame.failed || !contentType || frame.contentId !== pane?.content.contentId) {
           outbox.lose(surfaceId, "annotation_frame_commit_unavailable");
         } else {
+          const closedFrame = {
+            frameId: frame.frameId, contextKey: frame.contextKey, contentId: frame.contentId,
+            ...(frame.url === undefined ? {} : { url: frame.url }),
+            scrollOffset: frame.scrollOffset, viewport: frame.viewport,
+            openedAt: frame.openedAt, updatedAt: frame.updatedAt,
+            image: frame.image, strokes: frame.strokes,
+          };
           outbox.append(surfaceId, {
             paneId, frameId: frame.frameId, kind: "frame_commit", contentId: frame.contentId,
             revision: pane!.content.revision, contentType, viewport: frame.viewport,
             sourceTimestamp: new Date().toISOString(),
-            payload: { frame, imageSha256: createHash("sha256").update(Buffer.from(frame.image, "base64")).digest("hex") },
+            payload: { frame: closedFrame,
+              imageSha256: createHash("sha256").update(Buffer.from(frame.image, "base64")).digest("hex") },
           });
         }
         appended = true;
@@ -77,23 +85,46 @@ export class AnnotationSourceCoordinator {
     if (!this.core.annotationPublisher) return;
     let appended = false;
     await this.core.transactionAsync(async () => {
+      const outbox = this.core.annotationPublisher!;
       const payload = this.core.buildDrawingFlush(surfaceId, paneId,
         { idleWindowMs: 8_000, maxIntervalMs: 30_000 }, reason);
-      if (!payload) return;
-      const outbox = this.core.annotationPublisher!;
       const pane = this.core.getRendererWindowState(surfaceId).panes.find((item) => item.paneId === paneId);
-      const frame = outbox.openFrameFor(surfaceId, paneId);
+      let frame = outbox.openFrameFor(surfaceId, paneId);
+      if (!frame && payload) {
+        // A failed at-open capture still needs a stable loss position across retries.
+        outbox.openFrame(surfaceId, paneId, {
+          contextKey: payload.contentId, contentId: payload.contentId, image: "", failed: true,
+          openedAt: payload.firstStrokeAt, scrollOffset: this.core.captureSnapshot(surfaceId, paneId).viewport.scrollOffset,
+          viewport: this.core.viewport(surfaceId),
+        });
+        for (const stroke of payload.strokes) outbox.recordStroke(surfaceId, paneId, stroke);
+        frame = outbox.openFrameFor(surfaceId, paneId);
+      }
+      if (!frame) return;
+      const pending = (frame.sourceStrokeCount ?? frame.strokes.length) - (frame.publishedStrokeCount ?? 0);
+      if (pending <= 0) return;
       const contentType = pane?.content.contentType === "browser_url" ? "html" : pane?.content.contentType;
-      if (!frame || frame.failed || frame.contentId !== payload.contentId || !contentType) {
+      if (!payload || frame.failed || frame.contentId !== payload.contentId || !contentType) {
         outbox.lose(surfaceId, "annotation_at_open_frame_unavailable");
       } else {
-        outbox.append(surfaceId, {
-          paneId, frameId: frame.frameId, kind: "live_delta", contentId: payload.contentId,
-          revision: payload.revision, contentType, viewport: this.core.captureSnapshot(surfaceId, paneId).viewport,
-          sourceTimestamp: new Date().toISOString(), payload,
-        });
+        const ids = new Set(frame.strokes.slice(frame.publishedStrokeCount ?? 0).map((stroke) => stroke.strokeId));
+        const strokes = payload.strokes.filter((stroke) => ids.has(stroke.strokeId));
+        if (strokes.length !== pending) {
+          outbox.lose(surfaceId, "annotation_source_strokes_unavailable");
+        } else {
+          const firstStrokeAt = strokes[0]!.points[0]!.timestamp;
+          const lastStroke = strokes[strokes.length - 1]!;
+          const lastStrokeAt = lastStroke.points[lastStroke.points.length - 1]!.timestamp;
+          outbox.append(surfaceId, {
+            paneId, frameId: frame.frameId, kind: "live_delta", contentId: payload.contentId,
+            revision: payload.revision, contentType, viewport: this.core.captureSnapshot(surfaceId, paneId).viewport,
+            sourceTimestamp: new Date().toISOString(), payload: { ...payload, strokes,
+              firstStrokeAt, lastStrokeAt, strokeCount: strokes.length,
+              pointsCount: strokes.reduce((count, stroke) => count + stroke.points.length, 0) },
+          });
+        }
       }
-      this.core.markDrawingFlushSent(surfaceId, paneId);
+      outbox.markFramePublished(surfaceId, paneId);
       await this.persist();
       appended = true;
     });
