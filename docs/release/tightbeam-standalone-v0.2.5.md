@@ -1,8 +1,17 @@
-# Surf Ace Tightbeam standalone release v0.2.5
+# Surf Ace standalone release v0.2.5
 
 This specification defines the standalone v0.2.5 release. Product and tooling
 inputs are independently pinned; build lanes do not resolve either input from a
 moving branch.
+
+The published v0.2.5 tag and asset names retain their legacy `tightbeam`
+segment for working download links and checksum provenance. Surf Ace is the
+product; its desktop apps, registry, and CLI have no Tightbeam dependency.
+For later releases, the public naming profile uses `surf-ace-v<version>-rN`
+product tags, `surf-ace-release-tooling-v<version>-rN` tooling tags, and
+`surf-ace-<component>-<platform>-v<version>` platform assets (plus
+`surf-ace-skill-v<version>.md` and `surf-ace-v<version>-manifest.json`). The v0.2.5 legacy profile
+is restricted to this already-published version.
 
 ## Immutable identity
 
@@ -29,7 +38,7 @@ The release contains six assets, one manifest, and `SHA256SUMS`:
 4. `surf-ace-tightbeam-cli-macos-arm64-v0.2.5.tar.gz` — macOS arm64 CLI.
 5. `surf-ace-tightbeam-electron-macos-arm64-v0.2.5.zip` — macOS arm64 desktop
    app.
-6. `surf-ace-tightbeam-skill-v0.2.5.md` — standalone Tightbeam skill source,
+6. `surf-ace-tightbeam-skill-v0.2.5.md` — optional Surf Ace skill for Tightbeam agents,
    copied byte-for-byte from the pinned tooling checkout.
 7. `surf-ace-tightbeam-v0.2.5-manifest.json` — release identities, toolchain,
    dependency inventory, and asset checksums.

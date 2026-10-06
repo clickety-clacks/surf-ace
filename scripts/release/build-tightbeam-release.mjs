@@ -412,7 +412,7 @@ export async function writeTightbeamManifest({ sourceDir, outputDir, toolingComm
       stateTranslation: false,
     },
     assets: assetDetails,
-    channel: "tightbeam-standalone",
+    channel: TIGHTBEAM.channel,
     checksums: Object.fromEntries(assetDetails.map(({ name, sha256: digest }) => [name, digest])),
     commands: { build: TIGHTBEAM_BUILD_COMMANDS, tests: TIGHTBEAM_TEST_COMMANDS },
     dependencyInventory: { cargo: cargoDependencies, node: nodeDependencies },
