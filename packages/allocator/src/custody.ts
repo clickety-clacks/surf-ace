@@ -319,7 +319,13 @@ export class PostgresCustodyAdapter<M extends LeaseMode> {
       committed = true;
       await this.hooks.afterCommitBeforeWitness?.(operation);
       const lsn = await currentWalLsn(this.primary);
-      await readAndValidateWitness(this.config, this.primary, lsn);
+      const verifyWitness = async () => await readAndValidateWitness(this.config, this.primary, lsn);
+      if (operation === "release_lease") {
+        // The release is already committed. Recheck only the witness; never replay the mutation.
+        await verifyReleaseWitnessWithRetry(verifyWitness);
+      } else {
+        await verifyWitness();
+      }
       return result;
     } catch (error) {
       if (committed || error instanceof PersistenceOutcomeUnknownError) {
@@ -516,6 +522,23 @@ export class PostgresCustodyAdapter<M extends LeaseMode> {
       return integer(requiredRow(result.rows[0], "revoke_writer").pid);
     });
   }
+}
+
+const RELEASE_WITNESS_RECHECK_DELAYS_MS = [100, 250, 500, 1_000, 2_000] as const;
+
+export async function verifyReleaseWitnessWithRetry<T>(
+  verify: () => Promise<T>,
+  wait: (ms: number) => Promise<void> = async (ms) => await new Promise((resolve) => setTimeout(resolve, ms)),
+): Promise<T> {
+  for (const delay of RELEASE_WITNESS_RECHECK_DELAYS_MS) {
+    try {
+      return await verify();
+    } catch (error) {
+      if (!(error instanceof AllocatorError) || error.code !== "writer_fence_unavailable") throw error;
+      await wait(delay);
+    }
+  }
+  return await verify();
 }
 
 export async function revokeWriter(
