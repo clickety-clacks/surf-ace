@@ -2278,7 +2278,16 @@ test("fresh-install Linux qualification requires direct current content, wrong-s
   assert.throws(() => validateTightbeamFreshInstallState({
     ...evidence,
     postgresRestart: { ...evidence.postgresRestart, registryShutdown: undefined },
-  }), /fresh_install_registry_shutdown_projection_not_verified/);
+  }), /fresh_install_registry_release_witness_evidence_invalid/);
+  assert.throws(() => validateTightbeamFreshInstallState({
+    ...evidence,
+    postgresRestart: {
+      ...evidence.postgresRestart,
+      registryShutdown: { ...evidence.postgresRestart.registryShutdown,
+        releaseWitnessEventsAfterRestart: ["release_witness_retry_unclassified_secret"],
+      },
+    },
+  }), /fresh_install_registry_release_witness_evidence_invalid/);
   assert.throws(() => validateTightbeamFreshInstallState({
     ...evidence,
     initial: phase({ currentRead: { ...phase().currentRead, contentId: "other" } }),
