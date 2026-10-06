@@ -1017,6 +1017,38 @@ test("annotation migration and append survive duplicate retry without allocating
     } finally {
       await writer.release();
     }
+    const server = await AllocatorServer.start(serverConfig(cluster));
+    const publisher = await WireClient.connect(server.address.url);
+    const firstConsumer = await WireClient.connect(server.address.url);
+    const secondConsumer = await WireClient.connect(server.address.url);
+    try {
+      assert.equal((await publisher.request("annotation.hello", { protocolVersion: 1, role: "publisher" })).ok, true);
+      assert.equal((await firstConsumer.request("annotation.hello", { protocolVersion: 1, role: "consumer" })).ok, true);
+      assert.equal((await secondConsumer.request("annotation.hello", { protocolVersion: 1, role: "consumer" })).ok, true);
+      const firstOpen = await firstConsumer.request("annotation.watch", { consumerId: "first" });
+      const secondOpen = await secondConsumer.request("annotation.watch", { consumerId: "second" });
+      assert.equal(firstOpen.ok, true);
+      assert.equal(secondOpen.ok, true);
+      const firstLease = (firstOpen.payload as { leaseId: string }).leaseId;
+      const secondLease = (secondOpen.payload as { leaseId: string }).leaseId;
+      const deliveredA = await firstConsumer.waitEvent("annotation.record");
+      const deliveredB = await secondConsumer.waitEvent("annotation.record");
+      const cursor = (deliveredA.payload as { serverCursor: { epoch: string; sequence: string } }).serverCursor;
+      assert.deepEqual((deliveredB.payload as { serverCursor: unknown }).serverCursor, cursor);
+      const acked = await firstConsumer.request("annotation.ack", { consumerId: "first", leaseId: firstLease, throughCursor: cursor });
+      assert.equal(acked.ok, true);
+      const wrongLease = await secondConsumer.request("annotation.ack", {
+        consumerId: "second", leaseId: firstLease, throughCursor: cursor,
+      });
+      assert.equal((wrongLease.error as { code: string }).code, "annotation_consumer_lease_stale");
+      const secondAck = await secondConsumer.request("annotation.ack", {
+        consumerId: "second", leaseId: secondLease, throughCursor: cursor,
+      });
+      assert.equal(secondAck.ok, true);
+    } finally {
+      await Promise.all([publisher.close(), firstConsumer.close(), secondConsumer.close()]);
+      await server.close();
+    }
   } finally {
     await cluster.stop();
   }
@@ -1168,6 +1200,8 @@ function serverConfig(cluster: TestCluster): AllocatorServerConfig {
 
 class WireClient {
   private counter = 0;
+  private readonly events: Array<Record<string, unknown>> = [];
+  private readonly eventWaiters: Array<{ op: string; resolve: (event: Record<string, unknown>) => void }> = [];
   private readonly pending = new Map<string, {
     reject: (error: Error) => void;
     resolve: (response: Record<string, unknown>) => void;
@@ -1176,6 +1210,12 @@ class WireClient {
   private constructor(private readonly socket: WebSocket) {
     socket.on("message", (data) => {
       const response = JSON.parse(data.toString()) as Record<string, unknown>;
+      if (response.type === "event") {
+        const waiterIndex = this.eventWaiters.findIndex((waiter) => waiter.op === response.op);
+        if (waiterIndex >= 0) this.eventWaiters.splice(waiterIndex, 1)[0]!.resolve(response);
+        else this.events.push(response);
+        return;
+      }
       const id = typeof response.id === "string" ? response.id : "";
       const pending = this.pending.get(id);
       if (!pending) return;
@@ -1205,6 +1245,15 @@ class WireClient {
     });
     this.socket.send(JSON.stringify({ id, op, payload, sentAt: Date.now(), type: "request", v: 1 }));
     return await response;
+  }
+
+  async waitEvent(op: string): Promise<Record<string, unknown>> {
+    const index = this.events.findIndex((event) => event.op === op);
+    if (index >= 0) return this.events.splice(index, 1)[0]!;
+    return await new Promise<Record<string, unknown>>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`event timeout: ${op}`)), 5000);
+      this.eventWaiters.push({ op, resolve: (event) => { clearTimeout(timer); resolve(event); } });
+    });
   }
 
   async close(): Promise<void> {

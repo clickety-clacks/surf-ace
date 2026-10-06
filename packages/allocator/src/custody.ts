@@ -52,6 +52,16 @@ export type AnnotationInfo = {
   activeStreams: number;
 };
 
+export type AnnotationConsumerOpen = {
+  consumerId: string;
+  leaseId: string;
+  ackCursor: { epoch: string; sequence: string } | null;
+  initialFromCursor: { epoch: string; sequence: string };
+  availableFromCursor: { epoch: string; sequence: string } | null;
+  headCursor: { epoch: string; sequence: string } | null;
+  historyCompleteSinceStart: boolean;
+};
+
 export type AcceptedState = {
   acceptedGenerationId: string;
   allocatorId: string;
@@ -405,6 +415,61 @@ export class PostgresCustodyAdapter<M extends LeaseMode> {
         ));
       return result.rows[0]!.info;
     });
+  }
+
+  async openAnnotationConsumer(
+    this: PostgresCustodyAdapter<"writer">,
+    consumerId: string, mode: "watch" | "resume",
+    from?: { epoch: string; sequence: string },
+  ): Promise<AnnotationConsumerOpen> {
+    this.assertMode("writer");
+    const result = await this.mutate("annotation_consumer_open", async () => await this.primary.query<{
+      opened: AnnotationConsumerOpen;
+    }>("SELECT surf_ace_allocator.annotation_consumer_open($1,$2,$3,$4,$5,$6,$7) AS opened",
+      [this.config.fleetId, this.token.leaseGeneration, this.token.leaseId,
+        consumerId, mode, from?.epoch ?? null, from?.sequence ?? null]));
+    return result.rows[0]!.opened;
+  }
+
+  async readAnnotationRecords(
+    this: PostgresCustodyAdapter<"writer">, fromSequence: string, limit: number,
+  ): Promise<Array<{ epoch: string; sequence: string; record: unknown; committedAt: string; bytes: number }>> {
+    this.assertMode("writer");
+    return await this.enqueuePrimary(async () => {
+      this.assertUsable();
+      const result = await transaction(this.primary, "annotation_read", undefined,
+        async () => await this.primary.query<{
+          epoch: string; sequence: string; canonical_record_bytes: Buffer;
+          canonical_record_length: number; committed_at: Date;
+        }>("SELECT * FROM surf_ace_allocator.annotation_read($1,$2,$3,$4,$5)",
+          [this.config.fleetId, this.token.leaseGeneration, this.token.leaseId, fromSequence, limit]));
+      return result.rows.map((row) => ({ epoch: row.epoch, sequence: String(row.sequence),
+        record: JSON.parse(row.canonical_record_bytes.toString("utf8")) as unknown,
+        committedAt: row.committed_at.toISOString(), bytes: row.canonical_record_length }));
+    });
+  }
+
+  async ackAnnotationConsumer(
+    this: PostgresCustodyAdapter<"writer">, consumerId: string, consumerLeaseId: string,
+    cursor: { epoch: string; sequence: string },
+  ): Promise<{ epoch: string; sequence: string }> {
+    this.assertMode("writer");
+    const result = await this.mutate("annotation_consumer_ack", async () => await this.primary.query<{
+      cursor: { epoch: string; sequence: string };
+    }>("SELECT surf_ace_allocator.annotation_consumer_ack($1,$2,$3,$4,$5,$6,$7) AS cursor",
+      [this.config.fleetId, this.token.leaseGeneration, this.token.leaseId,
+        consumerId, consumerLeaseId, cursor.epoch, cursor.sequence]));
+    return result.rows[0]!.cursor;
+  }
+
+  async disconnectAnnotationConsumer(
+    this: PostgresCustodyAdapter<"writer">, consumerId: string, consumerLeaseId: string,
+  ): Promise<void> {
+    this.assertMode("writer");
+    await this.mutate("annotation_consumer_disconnect", async () => await this.primary.query(
+      "SELECT surf_ace_allocator.annotation_consumer_disconnect($1,$2,$3,$4,$5)",
+      [this.config.fleetId, this.token.leaseGeneration, this.token.leaseId, consumerId, consumerLeaseId],
+    ));
   }
 
   async bindAuthority(this: PostgresCustodyAdapter<"writer">, authorityId: string, ownerAnchorId: string): Promise<void> {
@@ -910,7 +975,7 @@ function validateAcceptedState(state: AcceptedState, config: PostgresCustodyConf
 function mapDatabaseError(error: unknown): AllocatorError {
   if (error instanceof AllocatorError) return error;
   const message = String((error as { message?: unknown })?.message ?? error);
-  if (isSqlState(error, "P0001") && /^(annotation_invalid_request|annotation_record_too_large|annotation_source_event_conflict|annotation_source_sequence_conflict|annotation_source_gap_required|annotation_source_gap_invalid|annotation_ingest_capacity|annotation_journal_sequence_exhausted)$/.test(message)) {
+  if (isSqlState(error, "P0001") && /^(annotation_invalid_request|annotation_record_too_large|annotation_source_event_conflict|annotation_source_sequence_conflict|annotation_source_gap_required|annotation_source_gap_invalid|annotation_ingest_capacity|annotation_journal_sequence_exhausted|annotation_consumer_capacity|annotation_consumer_exists|annotation_consumer_not_found|annotation_consumer_lease_stale|annotation_cursor_invalid|annotation_ack_regression)$/.test(message)) {
     return new AllocatorError(message as AllocatorError["code"], message, undefined, error);
   }
   if (isSqlState(error, "23505")) {

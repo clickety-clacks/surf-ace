@@ -2,6 +2,7 @@ import { closeSync, fsyncSync, openSync, readFileSync, unlinkSync, writeSync } f
 import { createHash, randomBytes } from "node:crypto";
 
 import WebSocket, { WebSocketServer, type RawData } from "ws";
+import { parseAnnotationCursor } from "@surf-ace/protocol";
 
 import { WindowLabelAuthority } from "./authority.js";
 import { AnnotationJournal } from "./annotation-journal.js";
@@ -51,9 +52,22 @@ export type AllocatorDiagnostics = {
   witnessServerId: string;
 };
 
+type AnnotationLease = {
+  consumerId: string;
+  leaseId: string;
+  socket: WebSocket | null;
+  epoch: string;
+  nextSequence: bigint;
+  acknowledged: bigint;
+  delivered: Array<{ sequence: bigint; bytes: number }>;
+  pumping: boolean;
+  pumpRequested: boolean;
+};
+
 export class AllocatorServer {
   private readonly startedAt = Date.now();
   private readonly annotationRoles = new WeakMap<WebSocket, "publisher" | "consumer">();
+  private readonly annotationLeases = new Map<string, AnnotationLease>();
   private readonly registeredClients = new Map<string, unknown>();
   private registrationTail: Promise<unknown> = Promise.resolve();
 
@@ -231,6 +245,14 @@ export class AllocatorServer {
         void this.handle(socket, data, replay);
       }
     });
+    socket.on("close", () => {
+      for (const lease of this.annotationLeases.values()) {
+        if (lease.socket !== socket) continue;
+        lease.socket = null;
+        void this.custody.disconnectAnnotationConsumer(lease.consumerId, lease.leaseId)
+          .catch(() => undefined);
+      }
+    });
   }
 
   private async handle(
@@ -391,6 +413,71 @@ export class AllocatorServer {
           throw new AllocatorError("annotation_invalid_request", "record kind and operation differ");
         }
         reply(true, await new AnnotationJournal(this.custody).ingest(payload.record));
+        for (const lease of this.annotationLeases.values()) void this.pumpAnnotation(lease);
+      } else if (op === "annotation.watch" || op === "annotation.resume") {
+        if (this.annotationRoles.get(socket) !== "consumer") {
+          throw new AllocatorError("annotation_role_operation_invalid", "consumer hello is required");
+        }
+        const payload = request.payload as Record<string, unknown>;
+        const keys = Object.keys(payload ?? {}).sort().join(",");
+        if ((op === "annotation.watch" && keys !== "consumerId" && keys !== "consumerId,fromCursor") ||
+            (op === "annotation.resume" && keys !== "consumerId") ||
+            typeof payload.consumerId !== "string" || Buffer.byteLength(payload.consumerId, "utf8") < 1 ||
+            Buffer.byteLength(payload.consumerId, "utf8") > 128) {
+          throw new AllocatorError("annotation_invalid_request", "invalid consumer request");
+        }
+        let from;
+        if (payload.fromCursor !== undefined) {
+          try { from = parseAnnotationCursor(payload.fromCursor); }
+          catch { throw new AllocatorError("annotation_cursor_invalid", "invalid requested cursor"); }
+        }
+        const prior = this.annotationLeases.get(payload.consumerId);
+        if (op === "annotation.resume" && prior?.socket?.readyState === WebSocket.OPEN) {
+          this.emitAnnotation(prior.socket, "annotation.lease_replaced", { consumerId: payload.consumerId, leaseId: prior.leaseId });
+          await new Promise<void>((resolve) => {
+            prior.socket!.once("close", resolve);
+            prior.socket!.close(1000, "lease_replaced");
+            setTimeout(resolve, 1000);
+          });
+        }
+        const opened = await this.custody.openAnnotationConsumer(payload.consumerId,
+          op === "annotation.watch" ? "watch" : "resume", from);
+        const next = opened.ackCursor
+          ? BigInt(opened.ackCursor.sequence) + 1n
+          : BigInt(opened.initialFromCursor.sequence);
+        const lease: AnnotationLease = { consumerId: payload.consumerId, leaseId: opened.leaseId,
+          socket, epoch: opened.initialFromCursor.epoch, nextSequence: next,
+          acknowledged: opened.ackCursor ? BigInt(opened.ackCursor.sequence) : next - 1n,
+          delivered: [], pumping: false, pumpRequested: false };
+        this.annotationLeases.set(payload.consumerId, lease);
+        reply(true, { ...opened, limits: annotationLimits });
+        void this.pumpAnnotation(lease);
+      } else if (op === "annotation.ack") {
+        if (this.annotationRoles.get(socket) !== "consumer") {
+          throw new AllocatorError("annotation_role_operation_invalid", "consumer hello is required");
+        }
+        const payload = request.payload as Record<string, unknown>;
+        if (!payload || Object.keys(payload).sort().join(",") !== "consumerId,leaseId,throughCursor" ||
+            typeof payload.consumerId !== "string" || typeof payload.leaseId !== "string") {
+          throw new AllocatorError("annotation_invalid_request", "invalid acknowledgement");
+        }
+        let cursor;
+        try { cursor = parseAnnotationCursor(payload.throughCursor); }
+        catch { throw new AllocatorError("annotation_cursor_invalid", "invalid acknowledgement cursor"); }
+        const lease = this.annotationLeases.get(payload.consumerId);
+        if (!lease || lease.leaseId !== payload.leaseId) {
+          throw new AllocatorError("annotation_consumer_lease_stale", "lease has been replaced");
+        }
+        const sequence = BigInt(cursor.sequence);
+        if (cursor.epoch !== lease.epoch || sequence > lease.acknowledged &&
+            !lease.delivered.some((item) => item.sequence === sequence)) {
+          throw new AllocatorError("annotation_ack_not_delivered", "cursor was not delivered under this lease");
+        }
+        const acknowledged = await this.custody.ackAnnotationConsumer(payload.consumerId, payload.leaseId, cursor);
+        lease.acknowledged = sequence;
+        lease.delivered = lease.delivered.filter((item) => item.sequence > sequence);
+        reply(true, { ackCursor: acknowledged });
+        void this.pumpAnnotation(lease);
       } else {
         throw new AllocatorError("annotation_protocol_unsupported", "annotation operation is not implemented");
       }
@@ -399,7 +486,52 @@ export class AllocatorServer {
       reply(false, { code: failure.code, message: failure.message });
     }
   }
+
+  private emitAnnotation(socket: WebSocket, op: string, payload: unknown): void {
+    if (socket.readyState !== WebSocket.OPEN) return;
+    socket.send(JSON.stringify({ v: 1, type: "event", op,
+      eventId: randomBytes(16).toString("hex"), sentAt: Date.now(), payload }));
+  }
+
+  private async pumpAnnotation(lease: AnnotationLease): Promise<void> {
+    lease.pumpRequested = true;
+    if (lease.pumping) return;
+    lease.pumping = true;
+    try {
+      while (lease.pumpRequested && lease.socket?.readyState === WebSocket.OPEN &&
+             this.annotationLeases.get(lease.consumerId) === lease) {
+        lease.pumpRequested = false;
+        while (lease.delivered.length < 32 && lease.socket?.readyState === WebSocket.OPEN) {
+          const bytesInFlight = lease.delivered.reduce((sum, item) => sum + item.bytes, 0);
+          const records = await this.custody.readAnnotationRecords(lease.nextSequence.toString(), 1);
+          const record = records[0];
+          if (!record || record.epoch !== lease.epoch ||
+              bytesInFlight + record.bytes > 67_108_864) break;
+          this.emitAnnotation(lease.socket, "annotation.record", {
+            serverCursor: { epoch: record.epoch, sequence: record.sequence },
+            record: record.record, committedAt: record.committedAt,
+          });
+          const sequence = BigInt(record.sequence);
+          lease.delivered.push({ sequence, bytes: record.bytes });
+          lease.nextSequence = sequence + 1n;
+        }
+      }
+    } catch {
+      lease.socket?.close(1011, "annotation_delivery_failed");
+    } finally {
+      lease.pumping = false;
+    }
+  }
 }
+
+const annotationLimits = {
+  journalRecords: 100_000, journalAndSourceMetadataBytes: 1_073_741_824,
+  sourceMetadataRows: 1_000_000, consumerIds: 64, activeStreams: 32,
+  inFlightRecordsPerConsumer: 32, inFlightCanonicalBytesPerConsumer: 67_108_864,
+  maxRecordBytes: 16_777_216,
+  replayPolicy: { targetAcknowledgedHistoryDays: 30, pressureCompaction: true,
+    requireActualConsumerAcknowledgement: true },
+};
 
 class HostLock {
   private released = false;
