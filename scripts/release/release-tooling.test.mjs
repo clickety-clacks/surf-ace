@@ -71,6 +71,7 @@ import {
   verifyTightbeamChecksums,
 } from "./smoke-tightbeam-release.mjs";
 import { verifyClientAppVersion } from "./smoke-lib.mjs";
+import { waitForScreenshotPixels } from "./wait-for-screenshot-pixels.mjs";
 import { verifySmokeReceipt, writeSmokeReceipt } from "./write-smoke-receipt.mjs";
 import tightbeamServerLauncher from "./tightbeam-server-launcher.cjs";
 
@@ -177,6 +178,30 @@ test("capture screenshot evidence decodes the expected pixels and rejects a diff
   assert.deepEqual(evidence.matchedRgbHex, ["246bce", "d93636"]);
   assert.throws(() => screenshotFixtureImage(screenshotFixturePng, ["#ff00ff"]), /capture_screenshot_expected_pixels_missing/);
   assert.throws(() => screenshotFixtureImage("not a png", ["d93636"]), /capture_screenshot_image_missing/);
+});
+
+test("screenshot polling waits for visible pixels and preserves failure on timeout", async () => {
+  let captures = 0;
+  const observed = [];
+  const visible = await waitForScreenshotPixels(
+    async () => ({ frame: ++captures }),
+    (capture) => {
+      if (capture.frame < 3) throw new Error("capture_screenshot_expected_pixels_missing:246bce,d93636");
+    },
+    { intervalMs: 0, timeoutMs: 1_000, onAttempt: (capture) => observed.push(capture.frame) },
+  );
+  assert.equal(visible.frame, 3);
+  assert.deepEqual(observed, [1, 2, 3]);
+  await assert.rejects(
+    waitForScreenshotPixels(async () => ({}), () => {
+      throw new Error("capture_screenshot_expected_pixels_missing:246bce");
+    }, { timeoutMs: 0 }),
+    /capture_screenshot_pixels_timeout:1:capture_screenshot_expected_pixels_missing:246bce/,
+  );
+  await assert.rejects(
+    waitForScreenshotPixels(async () => ({}), () => { throw new Error("capture_screenshot_png_invalid_header"); }),
+    /capture_screenshot_png_invalid_header/,
+  );
 });
 
 const exec = promisify(execFile);
@@ -1261,7 +1286,7 @@ test("Linux fresh-install raw CLI evidence binds two isolated roots to their cli
 });
 
 test("Tightbeam v0.2.5 binds the landed discovery-integrity candidate, six hosted assets, and tooling identity", () => {
-  assert.equal(TIGHTBEAM_TOOLING_TAG, "surf-ace-release-tooling-tightbeam-v0.2.5-r4");
+  assert.equal(TIGHTBEAM_TOOLING_TAG, "surf-ace-release-tooling-tightbeam-v0.2.5-r5");
   assert.deepEqual(TIGHTBEAM, {
     candidateCommit: "7878fda6181fd0c97175ca8282e4eb9120a8c039",
     sourceTag: "surf-ace-tightbeam-v0.2.5", version: "0.2.5", toolingTag: TIGHTBEAM_TOOLING_TAG,
@@ -2071,8 +2096,8 @@ test("Tightbeam Linux acceptance uses packaged behavior, not transient acknowled
   assert.match(fixture, /await cli\(options\.cliBinary, cliStateRoot, "push",/);
   assert.match(fixture, /pushOutput\.command !== "push" \|\| pushOutput\.ok !== true/);
   assert.match(fixture, /firstCapture\?\.contentId !== contentId/);
-  assert.match(fixture, /const firstRead = await readPane\(options\.cliBinary, cliStateRoot, app\.endpoint, surfaceId, paneId\)/);
-  assert.match(fixture, /const afterWrongSurfaceRead = await readPane\(options\.cliBinary, cliStateRoot, app\.endpoint, surfaceId, paneId\)/);
+  assert.match(fixture, /const firstRead = await readVisiblePane\(app\.endpoint, surfaceId, paneId\)/);
+  assert.match(fixture, /const afterWrongSurfaceRead = await readVisiblePane\(app\.endpoint, surfaceId, paneId\)/);
   assert.match(fixture, /rejectedWrongSurfacePush\(/);
   assert.match(fixture, /const registryShutdownBeforeRestart = await registryProcess\.stop\(\)/);
   assert.match(fixture, /const postgresRestart = await restartPostgresCluster\(cluster, allocatorProjectionAfterRegistryShutdown\)/);

@@ -11,6 +11,7 @@ import type { PostgresCustodyConfig } from "../../packages/allocator/src/custody
 import { electronLaunchConfig, hasRequiredAllocatorBackupObjects, launchElectron, matchesRegisteredDirectTarget, stop as stopElectron, verifyAllocatorServiceLifecycle, verifyClientAppVersion } from "./smoke-lib.mjs";
 import { TIGHTBEAM } from "./tightbeam-release-config.mjs";
 import tightbeamServerLauncher from "./tightbeam-server-launcher.cjs";
+import { waitForScreenshotPixels } from "./wait-for-screenshot-pixels.mjs";
 
 const { inspectScreenshotPixels } = createRequire(import.meta.url)("./png-pixel-evidence.cjs") as {
   inspectScreenshotPixels: (imageBase64: unknown, expectedColors: string[]) => {
@@ -1110,6 +1111,12 @@ async function freshInstallMain(options: Options) {
   let clientStopped = false;
   let registryStopped = false;
   let lastCaptureImage: string | undefined;
+  const readVisiblePane = (endpoint: string, surfaceId: string, paneId: number) =>
+    waitForScreenshotPixels(
+      () => readPane(options.cliBinary, cliStateRoot, endpoint, surfaceId, paneId),
+      (read) => inspectScreenshotPixels(resultPayload(read.captureOutput)?.image, expectedScreenshotColors),
+      { onAttempt: (read) => { lastCaptureImage = resultPayload(read.captureOutput)?.image; } },
+    );
   try {
     registryProcess = await startPackagedServer(registryLauncher, registryConfig, cluster.root, "fresh-install-registry");
     const registryEndpoint = registryProcess.endpoint;
@@ -1214,9 +1221,8 @@ async function freshInstallMain(options: Options) {
     if (pushOutput.command !== "push" || pushOutput.ok !== true) {
       throw new Error("fresh_install_direct_push_not_accepted");
     }
-    const firstRead = await readPane(options.cliBinary, cliStateRoot, app.endpoint, surfaceId, paneId);
+    const firstRead = await readVisiblePane(app.endpoint, surfaceId, paneId);
     const firstCapture = resultPayload(firstRead.captureOutput);
-    lastCaptureImage = firstCapture?.image;
     const firstRecord = resultPayload(firstRead.output)?.currentContentRecord;
     inspectScreenshotPixels(firstCapture?.image, expectedScreenshotColors);
     if (firstRead.surfaceId !== surfaceId || firstRead.paneId !== paneId ||
@@ -1236,9 +1242,8 @@ async function freshInstallMain(options: Options) {
       paneId,
       surfaceId: wrongSurfaceId,
     });
-    const afterWrongSurfaceRead = await readPane(options.cliBinary, cliStateRoot, app.endpoint, surfaceId, paneId);
+    const afterWrongSurfaceRead = await readVisiblePane(app.endpoint, surfaceId, paneId);
     const afterWrongCapture = resultPayload(afterWrongSurfaceRead.captureOutput);
-    lastCaptureImage = afterWrongCapture?.image;
     const afterWrongRecord = resultPayload(afterWrongSurfaceRead.output)?.currentContentRecord;
     inspectScreenshotPixels(afterWrongCapture?.image, expectedScreenshotColors);
     if (afterWrongSurfaceRead.surfaceId !== surfaceId || afterWrongSurfaceRead.paneId !== paneId ||
@@ -1320,9 +1325,8 @@ async function freshInstallMain(options: Options) {
         diagnosticsAfterRestart.nextOrdinalFence !== diagnosticsAfterRegistration.nextOrdinalFence) {
       throw new Error("fresh_install_restart_reallocated_client");
     }
-    const afterRestartRead = await readPane(options.cliBinary, cliStateRoot, app.endpoint, surfaceId, paneId);
+    const afterRestartRead = await readVisiblePane(app.endpoint, surfaceId, paneId);
     const resumedCapture = resultPayload(afterRestartRead.captureOutput);
-    lastCaptureImage = resumedCapture?.image;
     const resumedRecord = resultPayload(afterRestartRead.output)?.currentContentRecord;
     inspectScreenshotPixels(resumedCapture?.image, expectedScreenshotColors);
     if (afterRestartRead.surfaceId !== surfaceId || afterRestartRead.paneId !== paneId ||
