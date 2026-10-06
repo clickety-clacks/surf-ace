@@ -54,4 +54,19 @@ final class SurfAceAnnotationOutboxTests: XCTestCase {
         XCTAssertThrowsError(try outbox.accept(surfaceId: surfaceId, head: before,
                                                cursor: .init(epoch: sourceEpoch, sequence: "1")))
     }
+
+    func testPublisherReservationMustFitFullRecoverableSurfaceEnvelope() throws {
+        var limits = SurfAceLocklessCapacityLimits.production
+        limits.maxAnnotationPublisherStateBytesPerSurface = Int64(SurfAceAnnotationOutbox.maximumBytes)
+        limits.maxAnnotationPublisherRecordsPerSurface = Int64(SurfAceAnnotationOutbox.maximumRecords)
+        XCTAssertThrowsError(try limits.validate())
+        limits.maxRecoverableSurfaceBytes = 704 * 1_024 * 1_024
+        try limits.validate()
+        var state = try SurfAceLocklessAuthorityState.empty(limits: limits)
+        state.annotationPublisher = try SurfAceAnnotationOutbox(clientId: "client-1", sourceEpoch: sourceEpoch)
+        try state.validate()
+        let restored = try JSONDecoder().decode(SurfAceLocklessAuthorityState.self,
+                                                from: JSONEncoder().encode(state))
+        XCTAssertEqual(restored.annotationPublisher, state.annotationPublisher)
+    }
 }
