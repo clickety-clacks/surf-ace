@@ -59,3 +59,19 @@ test("publisher partition survives the Electron surface state serialization boun
   assert.throws(() => new SurfaceCore({ annotationClientId: "another-client", persistentState: persisted }),
     /invalid persisted annotation publisher state/);
 });
+
+test("frame identity survives restart until explicit close and unavailable events become a sticky gap", () => {
+  const outbox = new AnnotationPublisherOutbox(clientId);
+  const firstFrame = outbox.frameId(surfaceId, 1);
+  assert.equal(outbox.frameId(surfaceId, 1), firstFrame);
+  assert.equal(outbox.lose(surfaceId, "frame_image_unavailable"), "1");
+  const restored = new AnnotationPublisherOutbox(clientId, outbox.snapshot());
+  assert.equal(restored.frameId(surfaceId, 1), firstFrame);
+  const gap = restored.head(surfaceId)!;
+  assert.equal(gap.kind, "gap");
+  assert.equal(JSON.parse(gap.canonical).lostFromSequence, "1");
+  assert.equal(restored.lose(surfaceId, "frame_image_unavailable"), "2");
+  assert.equal(restored.snapshot().surfaces[surfaceId]!.trailingGap?.through, "2");
+  restored.closeFrame(surfaceId, 1);
+  assert.notEqual(restored.frameId(surfaceId, 1), firstFrame);
+});

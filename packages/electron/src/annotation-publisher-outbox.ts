@@ -33,6 +33,7 @@ export type AnnotationPublisherSurface = {
   acceptedCursor: AnnotationCursor | null;
   diagnostic: { code: string; sequence: string } | null;
   fifo: AnnotationPublisherEntry[];
+  frames: Record<string, string>;
   nextSequence: string;
   trailingGap: PendingGap | null;
 };
@@ -90,7 +91,7 @@ export class AnnotationPublisherOutbox {
       throw new RangeError("invalid annotation surface ID");
     }
     const created: AnnotationPublisherSurface = {
-      acceptedCursor: null, diagnostic: null, fifo: [], nextSequence: "1", trailingGap: null,
+      acceptedCursor: null, diagnostic: null, fifo: [], frames: {}, nextSequence: "1", trailingGap: null,
     };
     this.state.surfaces[surfaceId] = created;
     if (!this.fits(surfaceId)) {
@@ -143,6 +144,34 @@ export class AnnotationPublisherOutbox {
       surface.fifo.pop();
       this.extendGap(surface, sourceSequence, "source_retention_overflow");
     }
+    return sourceSequence;
+  }
+
+  frameId(surfaceId: string, paneId: number): string {
+    const surface = this.surface(surfaceId);
+    const key = String(paneId);
+    if (surface.frames[key]) return surface.frames[key];
+    const frameId = `fr_${randomBytes(16).toString("hex")}`;
+    surface.frames[key] = frameId;
+    if (!this.fits(surfaceId)) {
+      delete surface.frames[key];
+      throw new RangeError("annotation publisher frame state capacity");
+    }
+    return frameId;
+  }
+
+  closeFrame(surfaceId: string, paneId: number): void {
+    delete this.surface(surfaceId).frames[String(paneId)];
+  }
+
+  lose(surfaceId: string, code: string): string {
+    const surface = this.surface(surfaceId);
+    const sequence = parseAnnotationSequence(surface.nextSequence);
+    if (sequence >= ANNOTATION_MAX_SEQUENCE) throw new RangeError("annotation source sequence exhausted");
+    const sourceSequence = sequence.toString();
+    surface.nextSequence = (sequence + 1n).toString();
+    this.extendGap(surface, sourceSequence, "source_retention_overflow");
+    surface.diagnostic = { code, sequence: sourceSequence };
     return sourceSequence;
   }
 
@@ -209,7 +238,9 @@ export class AnnotationPublisherOutbox {
     }
     for (const [surfaceId, surface] of Object.entries(this.state.surfaces)) {
       parseAnnotationSequence(surface.nextSequence);
-      if (!Array.isArray(surface.fifo) || surface.fifo.length > this.maxRecords || !this.fits(surfaceId)) {
+      if (!surface.frames || typeof surface.frames !== "object" ||
+          Object.values(surface.frames).some((id) => !/^fr_[0-9a-f]{32}$/.test(id)) ||
+          !Array.isArray(surface.fifo) || surface.fifo.length > this.maxRecords || !this.fits(surfaceId)) {
         throw new RangeError("persisted annotation publisher state exceeds capacity");
       }
       if (surface.acceptedCursor) parseAnnotationCursor(surface.acceptedCursor);
