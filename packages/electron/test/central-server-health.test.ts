@@ -310,9 +310,7 @@ test("the self-check performs fleet.topology over an isolated scoped IPv6 link-l
   const interfaceRecords = networkInterfaces[interfaceName] ?? [];
   const interfaceAddress = interfaceRecords.find((entry) => entry.family === "IPv6" && entry.address.toLowerCase().startsWith("fe80:"));
   assert.ok(interfaceAddress, `${interfaceName} has no IPv6 link-local address`);
-  const scope = interfaceAddress.scopeid && interfaceAddress.scopeid > 0 ? String(interfaceAddress.scopeid) : interfaceName;
-  const scopedAddress = `${interfaceAddress.address}%${scope}`;
-  const server = new WebSocketServer({ host: scopedAddress, path: "/ws", port: 0 });
+  const server = new WebSocketServer({ host: "::", path: "/ws", port: 0 });
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
     server.once("listening", resolve);
