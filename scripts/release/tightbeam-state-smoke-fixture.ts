@@ -600,6 +600,7 @@ async function startPackagedServer(launcher: string, config: unknown, root: stri
   });
   const events: any[] = [];
   const diagnosticEvents: string[] = [];
+  let lastSelfCheckError: string | undefined;
   const diagnosticDigest = createHash("sha256");
   let diagnosticLineCount = 0;
   let pending = "";
@@ -628,6 +629,12 @@ async function startPackagedServer(launcher: string, config: unknown, root: stri
           diagnosticLineCount += 1;
           diagnosticEvents.push(parsed.event);
           diagnosticDigest.update(`${line}\n`);
+          if (parsed.event === "self_check_unhealthy") {
+            const encoded = line.match(/\berror=("(?:[^"\\]|\\.)*")/);
+            if (encoded) {
+              try { lastSelfCheckError = String(JSON.parse(encoded[1])).slice(0, 256); } catch { /* Keep the prior valid diagnostic. */ }
+            }
+          }
           continue;
         }
         const event = parsed.event;
@@ -656,7 +663,9 @@ async function startPackagedServer(launcher: string, config: unknown, root: stri
     ready = await Promise.race([
       readyPromise,
       new Promise((_, reject) => {
-        readyTimeout = setTimeout(() => reject(new Error(`${label}_packaged_server_ready_timeout`)), 30_000);
+        readyTimeout = setTimeout(() => reject(new Error(
+          `${label}_packaged_server_ready_timeout:${lastSelfCheckError ?? "no_self_check_error"}`,
+        )), 30_000);
       }),
     ]);
   } catch (error) {
