@@ -2183,6 +2183,12 @@ test("unknown persistence outcome preserves direct reads while fencing dependent
     const stillPaused = await request(socket, "operation.receipt.ack", { requestId: "another-receipt" });
     assert.equal(stillPaused.ok, false);
     assert.equal(persistenceCalls, beforeFaultCalls + 1);
+    failPersistence = false;
+    server.resumeAfterVerifiedPersistence();
+    const resumed = await request(socket, "operation.receipt.ack", { requestId: "another-receipt" });
+    assert.doesNotMatch(String(resumed.error?.message ?? ""), /persistence is paused/i);
+    assert(persistenceCalls > beforeFaultCalls + 1);
+    assert.deepEqual([surface, other].map(({ surfaceId }) => core.getRendererWindowState(surfaceId).panes[0]!.content), visibleBefore);
     const second = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
     try {
       const listed = await request(second, "surfaces.list", {});

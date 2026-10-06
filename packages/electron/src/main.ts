@@ -1,5 +1,6 @@
 import { ServerConnection } from "./server-connection.js";
 import fs from "node:fs/promises";
+import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 
@@ -83,6 +84,7 @@ let persistentStateWriteGuard: PersistentStateLoadResult["writeGuard"] = false;
 let persistentStateOutcomeUnknown: PersistentStateOutcomeUnknownError | null = null;
 let uncertainStateCandidate: PersistentSurfaceState | null = null;
 let persistenceRecoveryTimer: NodeJS.Timeout | null = null;
+let persistenceRetryDelayMs = 1_000;
 let providerEndpointAvailable = false;
 
 type WebAuthnAccountSelectionCallback = (credentialId?: string | null) => void;
@@ -453,16 +455,37 @@ function schedulePersistenceReconciliation(): void {
   persistenceRecoveryTimer = setTimeout(() => {
     persistenceRecoveryTimer = null;
     void reconcilePersistence();
-  }, 1_000);
+  }, Math.floor(persistenceRetryDelayMs * (0.7 + Math.random() * 0.3)));
+  persistenceRetryDelayMs = Math.min(10_000, persistenceRetryDelayMs * 2);
 }
 
 async function reconcilePersistence(): Promise<void> {
   if (!persistentStateOutcomeUnknown || !uncertainStateCandidate || isQuitting) return;
-  const result = await loadPersistentStateFile(stateDir, STATE_FILE_NAME).catch((error) => ({
+  let result = await loadPersistentStateFile(stateDir, STATE_FILE_NAME).catch((error) => ({
     error,
     state: undefined,
     writeGuard: "ambiguous-persistence" as const,
   }));
+  if (!result.writeGuard &&
+      JSON.stringify(result.state) !== JSON.stringify(uncertainStateCandidate) &&
+      persistentStateOutcomeUnknown.acceptedSha256 !== undefined) {
+    const acceptedHash = result.state
+      ? createHash("sha256").update(JSON.stringify(result.state, null, 2)).digest("hex")
+      : null;
+    if (acceptedHash === persistentStateOutcomeUnknown.acceptedSha256) {
+      // The selector proves the previous generation, so rewriting the same
+      // candidate state cannot duplicate the operation that produced it.
+      try {
+        await writePersistentStateFile(stateDir, STATE_FILE_NAME, uncertainStateCandidate);
+        result = await loadPersistentStateFile(stateDir, STATE_FILE_NAME);
+      } catch (error) {
+        if (error instanceof PersistentStateOutcomeUnknownError) persistentStateOutcomeUnknown = error;
+        clientWarn("state_persistence_retry_failed", errorDiagnosticFields(error));
+        schedulePersistenceReconciliation();
+        return;
+      }
+    }
+  }
   if (!result.writeGuard && result.state &&
       JSON.stringify(result.state) === JSON.stringify(uncertainStateCandidate)) {
     // The exact generation that produced the ambiguous reply is now proved
@@ -472,6 +495,7 @@ async function reconcilePersistence(): Promise<void> {
     persistentStateOutcomeUnknown = null;
     uncertainStateCandidate = null;
     persistentStateWriteGuard = false;
+    persistenceRetryDelayMs = 1_000;
     core.resumeAdmissionAfterVerifiedPersistence();
     server.resumeAfterVerifiedPersistence();
     clientInfo("state_persistence_reconciled");
@@ -481,7 +505,7 @@ async function reconcilePersistence(): Promise<void> {
     });
     return;
   }
-  if (result.writeGuard) {
+  if (result.writeGuard && "error" in result) {
     clientWarn("state_persistence_recheck_failed", errorDiagnosticFields(result.error));
   }
   schedulePersistenceReconciliation();

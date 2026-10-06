@@ -170,6 +170,7 @@ type LayoutNode =
   | { children: LayoutNode[]; direction: "horizontal" | "vertical"; type: "split"; weight?: number };
 
 type RendererWindowState = {
+  capabilityStatus?: string;
   connectionBar: "connected" | "connecting" | "disconnected";
   connectionError?: string;
   geometryRevision: number;
