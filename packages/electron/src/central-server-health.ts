@@ -183,6 +183,14 @@ function websocketUrl(host: string, port: number, path: string): string {
   return `ws://${formattedHost}:${port}${path}`;
 }
 
+function selfCheckHostForAddress(address: string, srvHost: string): string {
+  const unscopedAddress = addressWithoutScope(address);
+  return isIP(unscopedAddress) === 6 && isLinkLocalAddress(unscopedAddress) &&
+    isIP(addressWithoutScope(srvHost)) === 0
+    ? srvHost
+    : address;
+}
+
 function recordEndpoint(service: BonjourResolvedService, listenerPort: number, serverId?: string): {
   host: string;
   port: number;
@@ -382,7 +390,7 @@ export async function checkPublishedServerRecord(
     const failures: Array<{ address: string; reason: string }> = [];
     for (const address of addressesToProbe) {
       try {
-        await request(websocketUrl(address, port, path), timeoutMs);
+        await request(websocketUrl(selfCheckHostForAddress(address, host), port, path), timeoutMs);
       } catch (error) {
         failures.push({ address, reason: errorCode(error) });
       }
@@ -393,7 +401,10 @@ export async function checkPublishedServerRecord(
         : `advertised_target_unreachable:${failures.map(({ address, reason }) => `${address}:${reason}`).join(",")}`;
       throw new CentralServerHealthError(code);
     }
-    return { endpoint: websocketUrl(addressesToProbe[0]!, port, path), transport: "srv-target" };
+    return {
+      endpoint: websocketUrl(selfCheckHostForAddress(addressesToProbe[0]!, host), port, path),
+      transport: "srv-target",
+    };
   }
 
   if (targetAddresses.length === 0 && recordAddresses.length === 0) {
@@ -410,7 +421,7 @@ export async function checkPublishedServerRecord(
   // DNS-SD's resolved A/AAAA records are the contract fallback when the SRV name itself cannot resolve.
   const failures: Array<{ address: string; reason: string }> = [];
   for (const address of recordAddresses) {
-    const addressEndpoint = websocketUrl(address, port, path);
+    const addressEndpoint = websocketUrl(selfCheckHostForAddress(address, host), port, path);
     try {
       await request(addressEndpoint, timeoutMs);
     } catch (fallbackError) {
@@ -418,7 +429,10 @@ export async function checkPublishedServerRecord(
     }
   }
   if (failures.length === 0) {
-    return { endpoint: websocketUrl(recordAddresses[0]!, port, path), transport: "dns-sd-address" };
+    return {
+      endpoint: websocketUrl(selfCheckHostForAddress(recordAddresses[0]!, host), port, path),
+      transport: "dns-sd-address",
+    };
   }
   const code = failures.length === 1
     ? `dns_sd_address_unreachable:${failures[0]!.address}:${failures[0]!.reason}`

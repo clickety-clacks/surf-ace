@@ -101,7 +101,7 @@ test("server self-check rejects a link-local target without a matching local int
   );
 });
 
-test("a scoped link-local DNS-SD target is checked through that published address", async () => {
+test("a scoped IPv6 link-local target uses its SRV hostname so the OS can apply interface scope", async () => {
   const endpointAttempts: string[] = [];
   const networkInterfaces = {
     veth0: [{ address: "fe80::1234", family: "IPv6", internal: false, scopeid: 7 }],
@@ -116,9 +116,9 @@ test("a scoped link-local DNS-SD target is checked through that published addres
     networkInterfaces,
   });
 
-  assert.deepEqual(endpointAttempts, ["ws://[fe80::1234%257]:19001/ws"]);
+  assert.deepEqual(endpointAttempts, ["ws://registry.local:19001/ws"]);
   assert.deepEqual(result, {
-    endpoint: "ws://[fe80::1234%257]:19001/ws",
+    endpoint: "ws://registry.local:19001/ws",
     transport: "srv-target",
   });
 });
@@ -302,15 +302,15 @@ test("the self-check performs a real fleet.topology WebSocket request and valida
   }
 });
 
-test("the self-check performs fleet.topology over an isolated scoped IPv6 link-local endpoint", {
+test("the self-check performs fleet.topology over an isolated IPv4 link-local endpoint", {
   skip: process.env.SURF_ACE_TEST_LINK_LOCAL_INTERFACE !== "veth0",
 }, async () => {
   const interfaceName = process.env.SURF_ACE_TEST_LINK_LOCAL_INTERFACE!;
   const networkInterfaces = os.networkInterfaces();
   const interfaceRecords = networkInterfaces[interfaceName] ?? [];
-  const interfaceAddress = interfaceRecords.find((entry) => entry.family === "IPv6" && entry.address.toLowerCase().startsWith("fe80:"));
-  assert.ok(interfaceAddress, `${interfaceName} has no IPv6 link-local address`);
-  const server = new WebSocketServer({ host: "::", path: "/ws", port: 0 });
+  const interfaceAddress = interfaceRecords.find((entry) => entry.family === "IPv4" && entry.address.startsWith("169.254."));
+  assert.ok(interfaceAddress, `${interfaceName} has no IPv4 link-local address`);
+  const server = new WebSocketServer({ host: interfaceAddress.address, path: "/ws", port: 0 });
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
     server.once("listening", resolve);
@@ -343,7 +343,7 @@ test("the self-check performs fleet.topology over an isolated scoped IPv6 link-l
       resolveTargetAddresses: async () => [interfaceAddress.address],
     });
     assert.equal(checked.transport, "srv-target");
-    assert.match(checked.endpoint, /^ws:\/\/\[fe80:.*%25(?:\d+|veth0)\]:\d+\/ws$/);
+    assert.match(checked.endpoint, /^ws:\/\/169\.254\.\d+\.\d+:\d+\/ws$/);
   } finally {
     for (const socket of server.clients) socket.terminate();
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
