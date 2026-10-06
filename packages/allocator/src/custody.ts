@@ -324,7 +324,7 @@ export class PostgresCustodyAdapter<M extends LeaseMode> {
         // The release is already committed. Recheck only the witness; never replay the mutation.
         await verifyReleaseWitnessWithRetry(verifyWitness, undefined, (event, error) => {
           const reason = error ? releaseWitnessFenceReason(error) : "verified";
-          // The packaged launcher records these fixed tokens as successful-shutdown evidence.
+          // The packaged launcher accepts these fixed tokens; the release fixture retains them.
           console.log(`[surf-ace:server] event=release_witness_${event}_${reason}`);
         });
       } else {

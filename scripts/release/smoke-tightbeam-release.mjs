@@ -519,6 +519,13 @@ export function validateTightbeamFreshInstallState(stateSequence) {
     throw new Error("fresh_install_postgres_restart_changed_projection");
   }
   const registryShutdown = restart.registryShutdown;
+  const witnessEvent = /^release_witness_(?:recovered_verified|(?:retry|exhausted)_(?:primary_version|primary_identity|primary_durability|primary_sync_config|sender_count|sender_slot|witness_endpoint|receiver_primary|receiver_sender_replay|required_commit_replay|other_fence))$/;
+  for (const field of ["releaseWitnessEventsBeforeRestart", "releaseWitnessEventsAfterRestart"]) {
+    if (!Array.isArray(registryShutdown?.[field]) ||
+        registryShutdown[field].some((event) => typeof event !== "string" || !witnessEvent.test(event))) {
+      throw new Error("fresh_install_registry_release_witness_evidence_invalid");
+    }
+  }
   if (!/^[a-f0-9]{64}$/.test(registryShutdown?.activeProjectionSha256 ?? "") ||
       !/^[a-f0-9]{64}$/.test(registryShutdown?.releasedProjectionSha256 ?? "") ||
       registryShutdown.activeProjectionSha256 === registryShutdown.releasedProjectionSha256 ||

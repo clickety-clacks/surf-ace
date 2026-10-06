@@ -715,11 +715,12 @@ async function startPackagedServer(launcher: string, config: unknown, root: stri
           } catch { return []; }
         });
         const diagnostic = diagnostics.at(-1);
+        const witnessEvents = diagnosticEvents.filter((event) => event.startsWith("release_witness_")).slice(-6);
         const detail = diagnostic
           ? [diagnostic.name, diagnostic.code, diagnostic.causeCode, diagnostic.frames?.[0]]
             .filter((value) => typeof value === "string" && value.length > 0).join("|")
           : "missing_shutdown_diagnostic";
-        throw new Error(`${label}_packaged_server_shutdown_invalid:${closed.code ?? closed.signal ?? "unknown"}:${detail}`);
+        throw new Error(`${label}_packaged_server_shutdown_invalid:${closed.code ?? closed.signal ?? "unknown"}:${detail}|witness_events=${witnessEvents.join(",") || "none"}`);
       }
       return {
         exitCode: closed.code,
@@ -727,6 +728,7 @@ async function startPackagedServer(launcher: string, config: unknown, root: stri
         ready,
         packagedDiagnostics: {
           events: [...diagnosticEvents],
+          releaseWitnessEvents: diagnosticEvents.filter((event) => event.startsWith("release_witness_")),
           lineCount: diagnosticLineCount,
           sha256: diagnosticDigest.digest("hex"),
         },
@@ -1403,6 +1405,8 @@ async function freshInstallMain(options: Options) {
         activeProjectionSha256: allocatorProjectionBeforeRestart.projectionSha256,
         continuity: registryShutdownContinuity,
         releasedProjectionSha256: allocatorProjectionAfterRegistryShutdown.projectionSha256,
+        releaseWitnessEventsBeforeRestart: registryShutdownBeforeRestart.packagedDiagnostics.releaseWitnessEvents,
+        releaseWitnessEventsAfterRestart: registryStop.packagedDiagnostics.releaseWitnessEvents,
       },
       registryHealth: registryHealthAfterRestart,
       registryShutdownClean: registryShutdownBeforeRestart.stopped?.status === "clean" && registryStop.stopped?.status === "clean",

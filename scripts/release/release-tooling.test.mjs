@@ -2246,6 +2246,8 @@ test("fresh-install Linux qualification requires direct current content, wrong-s
       registryShutdown: {
         activeProjectionSha256: "c".repeat(64),
         releasedProjectionSha256: projection,
+        releaseWitnessEventsBeforeRestart: [],
+        releaseWitnessEventsAfterRestart: ["release_witness_retry_required_commit_replay", "release_witness_recovered_verified"],
         continuity: {
           appendedRevisionHeads: 1,
           custodyRevisionDelta: 1,
@@ -2431,6 +2433,8 @@ test("Linux fresh-install acceptance is based on direct current-content evidence
       registryShutdown: {
         activeProjectionSha256: "c".repeat(64),
         releasedProjectionSha256: projection,
+        releaseWitnessEventsBeforeRestart: [],
+        releaseWitnessEventsAfterRestart: [],
         continuity: {
           appendedRevisionHeads: 1,
           custodyRevisionDelta: 1,
@@ -2551,6 +2555,8 @@ test("Linux fresh-install state driver binds candidate-only inputs and packaged 
       registryShutdown: {
         activeProjectionSha256: "c".repeat(64),
         releasedProjectionSha256: "b".repeat(64),
+        releaseWitnessEventsBeforeRestart: [],
+        releaseWitnessEventsAfterRestart: [],
         continuity: {
           appendedRevisionHeads: 1,
           custodyRevisionDelta: 1,
