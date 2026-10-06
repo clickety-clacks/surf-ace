@@ -2136,6 +2136,17 @@ test("unknown persistence outcome preserves direct reads while fencing dependent
     width: 1200,
   });
   const other = core.createAdditionalSurface("Other", { height: 800, scale: 2, width: 1200 });
+  for (const [shown, markdown] of [[surface, "# retained first"], [other, "# retained second"]] as const) {
+    core.contentSet(shown.surfaceId, {
+      content: { markdown },
+      contentId: `ct_${shown.surfaceId}` as never,
+      contentType: "markdown",
+      historyOwnerToken: `hot_${shown.surfaceId}` as never,
+      paneId: core.panesList(shown.surfaceId).panes[0]!.paneId,
+      revision: 1 as never,
+    });
+  }
+  const visibleBefore = [surface, other].map(({ surfaceId }) => core.getRendererWindowState(surfaceId).panes[0]!.content);
   let failPersistence = false;
   let materializationInvocations = 0;
   const targetApply = core.targetApply.bind(core);
@@ -2185,6 +2196,7 @@ test("unknown persistence outcome preserves direct reads while fencing dependent
     assert.equal(rejected.ok, false);
     assert.match(rejected.error.message, /unknown|paused/i);
     assert.equal(materializationInvocations, 0);
+    assert.deepEqual([surface, other].map(({ surfaceId }) => core.getRendererWindowState(surfaceId).panes[0]!.content), visibleBefore);
     assert.equal((await request(socket, "panes.list", { surfaceId: surface.surfaceId })).ok, true);
     const second = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
     try {
@@ -2204,6 +2216,17 @@ test("listener bind failure can retry on the same server without changing restor
   const core = new SurfaceCore();
   const first = core.ensurePrimarySurface("First", { height: 800, scale: 1, width: 1200 });
   const second = core.createAdditionalSurface("Second", { height: 800, scale: 1, width: 1200 });
+  for (const [surface, content] of [[first, "# first"], [second, "# second"]] as const) {
+    const paneId = core.panesList(surface.surfaceId).panes[0]!.paneId;
+    core.contentSet(surface.surfaceId, {
+      content: { markdown: content },
+      contentId: `ct_${surface.surfaceId}` as never,
+      contentType: "markdown",
+      historyOwnerToken: `hot_${surface.surfaceId}` as never,
+      paneId,
+      revision: 1 as never,
+    });
+  }
   const before = core.getPersistentState();
   const port = nextPort++;
   const occupant = createServer();
@@ -2230,6 +2253,8 @@ test("listener bind failure can retry on the same server without changing restor
       assert(listed.payload.surfaces.some((item: { surfaceId: string }) => item.surfaceId === first.surfaceId));
       assert(listed.payload.surfaces.some((item: { surfaceId: string }) => item.surfaceId === second.surfaceId));
       assert.deepEqual(core.getPersistentState(), before);
+      assert.equal(core.getRendererWindowState(first.surfaceId).panes[0]?.content.contentType, "markdown");
+      assert.equal(core.getRendererWindowState(second.surfaceId).panes[0]?.content.contentType, "markdown");
     } finally {
       socket.close();
     }
