@@ -1,4 +1,4 @@
-export const TIGHTBEAM_TOOLING_TAG = "surf-ace-release-tooling-tightbeam-v0.2.5-r10";
+export const TIGHTBEAM_TOOLING_TAG = "surf-ace-release-tooling-tightbeam-v0.2.5-r11";
 
 export const TIGHTBEAM_SKILL_ASSET = "surf-ace-tightbeam-skill-v0.2.5.md";
 
@@ -15,8 +15,8 @@ export const TOOLCHAINS = Object.freeze({
 });
 
 export const TIGHTBEAM = Object.freeze({
-  candidateCommit: "a2f4122883fa875624f9e37d6f18dbeaef1d1072",
-  sourceTag: "surf-ace-tightbeam-v0.2.5-r3",
+  candidateCommit: "b91f6aeeff185ad64afb62d05487f9598f22f5c7",
+  sourceTag: "surf-ace-tightbeam-v0.2.5-r4",
   version: "0.2.5",
   toolingTag: TIGHTBEAM_TOOLING_TAG,
   assets: [

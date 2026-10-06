@@ -6,10 +6,10 @@ moving branch.
 
 ## Immutable identity
 
-- Product source: tag `surf-ace-tightbeam-v0.2.5-r3` at product commit
-  `a2f4122883fa875624f9e37d6f18dbeaef1d1072`.
+- Product source: tag `surf-ace-tightbeam-v0.2.5-r4` at product commit
+  `b91f6aeeff185ad64afb62d05487f9598f22f5c7`.
 - Product version: `0.2.5`.
-- Tooling: proposed tag `surf-ace-release-tooling-tightbeam-v0.2.5-r10` at the
+- Tooling: proposed tag `surf-ace-release-tooling-tightbeam-v0.2.5-r11` at the
   exact reviewed tooling commit.
 - Node `24.3.0`, pnpm `10.15.1`, Rust `1.89.0`, PostgreSQL `16`, Linux
   `rust:1.89.0-bookworm`, and Xcode `27.0` on `xcode-27` are recorded in the
