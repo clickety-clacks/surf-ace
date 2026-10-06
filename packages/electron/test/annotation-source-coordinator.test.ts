@@ -33,7 +33,9 @@ test("gated source flush precedes a self-contained at-open frame commit", async 
   assert.equal(core.annotationPublisher!.pendingSurfaceIds().length, 0);
   await source.flushPending(surface.surfaceId, paneId);
   assert.equal(notified, 1);
-  const live = JSON.parse(core.annotationPublisher!.snapshot().surfaces[surface.surfaceId]!.fifo[0]!.canonical);
+  const afterFlush = core.annotationPublisher!.snapshot().surfaces[surface.surfaceId]!;
+  assert.ok(afterFlush.fifo[0], JSON.stringify(afterFlush));
+  const live = JSON.parse(afterFlush.fifo[0]!.canonical);
   assert.equal(live.kind, "live_delta");
   assert.equal(live.frameId, open.frameId);
   assert.equal(live.payload.strokes[0].strokeId, "stroke-one");
