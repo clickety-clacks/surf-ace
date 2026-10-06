@@ -1,5 +1,6 @@
 import bonjourServiceModule, { type Browser, type Service } from "bonjour-service";
 import { isIP } from "node:net";
+import { lookup } from "node:dns/promises";
 import { spawn } from "node:child_process";
 import type { SurfaceViewport } from "../../protocol/src/index.js";
 
@@ -247,6 +248,18 @@ function parseDnsSdLookupOutput(
   });
 }
 
+async function resolveIpv4TransportAddresses(
+  host: string,
+  resolve: (name: string) => Promise<string[]> = async (name) =>
+    (await lookup(name, { family: 4, all: true })).map((entry) => entry.address),
+): Promise<string[]> {
+  try {
+    return [...new Set((await resolve(host)).filter((address) => isIP(address) === 4))];
+  } catch {
+    return [];
+  }
+}
+
 function resolveServiceHost(service: Service): string | null {
   const host = rawServiceHost(service);
   return host || null;
@@ -279,7 +292,9 @@ function serviceToEndpoint(
       ws: txtStr(txt, "ws") ?? "",
     },
   });
-  endpoint.transportAddresses = [...new Set((service.addresses ?? []).filter(address => isIP(address) !== 0 && !isLinkLocalIpv6Address(address)))];
+  endpoint.transportAddresses = [...new Set((service.addresses ?? []).filter(address => isIP(address) !== 0 && !isLinkLocalIpv6Address(address)))].sort(
+    (left, right) => isIP(left) === 4 && isIP(right) !== 4 ? -1 : isIP(right) === 4 && isIP(left) !== 4 ? 1 : 0,
+  );
   return endpoint;
 }
 
@@ -594,9 +609,13 @@ class BonjourSurfAceDiscoveryService implements SurfAceDiscoveryService {
       return endpoints;
     }
     const knownIds = new Set(endpoints.map((ep) => ep.endpointId));
-    const knownInstances = new Set(endpoints.map((ep) => ep.instanceName));
     for (const ep of dnsSdEndpoints) {
-      if (!knownIds.has(ep.endpointId) && !knownInstances.has(ep.instanceName)) {
+      const existing = endpoints.find((current) => current.instanceName === ep.instanceName);
+      if (existing) {
+        existing.transportAddresses = [...new Set([
+          ...(existing.transportAddresses ?? []), ...(ep.transportAddresses ?? []),
+        ])];
+      } else if (!knownIds.has(ep.endpointId)) {
         endpoints.push(ep);
       }
     }
@@ -619,7 +638,13 @@ class BonjourSurfAceDiscoveryService implements SurfAceDiscoveryService {
           ["-L", instanceName, `_${SURF_ACE_SERVICE_TYPE}._tcp`, "local."],
           this.timeoutMs,
         );
-        return parseDnsSdLookupOutput(instanceName, lookupOutput, this.now);
+        const endpoint = parseDnsSdLookupOutput(instanceName, lookupOutput, this.now);
+        if (!endpoint) return null;
+        // dns-sd -L supplies the SRV target but no address records. Resolve its
+        // IPv4 addresses separately so an IPv4-only server never waits for a
+        // missing AAAA answer during the WebSocket opening handshake.
+        endpoint.transportAddresses = await resolveIpv4TransportAddresses(endpoint.host);
+        return endpoint;
       }));
 
       const resolved = endpoints.filter((endpoint): endpoint is SurfAceDiscoveryEndpoint => endpoint !== null);
@@ -682,6 +707,7 @@ export const __test = {
   formatDiagnosticFields,
   parseDnsSdBrowseOutput,
   parseDnsSdLookupOutput,
+  resolveIpv4TransportAddresses,
   resolveServiceHost,
   serviceToEndpoint,
 };

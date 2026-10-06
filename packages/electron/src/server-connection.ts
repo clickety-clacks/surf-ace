@@ -33,12 +33,6 @@ function isUnspecifiedAddress(host: string): boolean {
   return normalized === "0.0.0.0" || normalized === "::" || normalized === "0:0:0:0:0:0:0:0";
 }
 
-function isHostnameResolutionFailure(error: unknown): boolean {
-  if (typeof error !== "object" || error === null || !("code" in error)) return false;
-  const code = (error as NodeJS.ErrnoException).code;
-  return code === "ENOTFOUND" || code === "EAI_AGAIN";
-}
-
 export class ServerConnection {
   private selected: SelectedRegistration | null = null;
   private status: "connected" | "connecting" | "disconnected" = "disconnected";
@@ -96,10 +90,7 @@ export class ServerConnection {
       if (this.stopped) return;
       if (!this.selected || this.status !== "connected") this.setStatus("connecting");
       const failures: string[] = [];
-      let addressResolutionFailed = false;
-
       const tryAddress = async (address: string, configured = false, context = "configured registry"): Promise<boolean> => {
-        addressResolutionFailed = false;
         let candidate: ConfiguredServerRegistration | null = null;
         try {
           candidate = new ConfiguredServerRegistration(
@@ -120,7 +111,6 @@ export class ServerConnection {
           await previous?.registration.stop();
           return true;
         } catch (error) {
-          addressResolutionFailed = isHostnameResolutionFailure(error);
           await candidate?.stop();
           this.reportFailure(`${context} ${address} failed: ${describeError(error)}`, !this.selected, failures);
           return false;
@@ -205,22 +195,20 @@ export class ServerConnection {
       }
 
       for (const endpoint of servers) {
-        const address = endpointAddress(endpoint);
-        if (await tryAddress(address, false, `discovered registry ${endpoint.instanceName}`)) {
-          await this.discovery.stop();
-          this.browsing = false;
-          return;
-        }
-        if (addressResolutionFailed) {
-          for (const transportAddress of endpoint.transportAddresses ?? []) {
-            const unwrappedHost = transportAddress.replace(/^\[(.*)\]$/, "$1");
-            const host = unwrappedHost.includes(":") ? `[${unwrappedHost}]` : unwrappedHost;
-            const fallbackAddress = `ws://${host}:${endpoint.port}${endpoint.wsPath}`;
-            if (await tryAddress(fallbackAddress, false, `DNS-SD transport address for ${endpoint.instanceName}`)) {
-              await this.discovery.stop();
-              this.browsing = false;
-              return;
-            }
+        // DNS-SD has already resolved these addresses for this service. Trying them
+        // before the SRV hostname avoids a slow dual-stack .local lookup consuming
+        // the WebSocket handshake deadline on an IPv4-only listener.
+        const addresses = [...new Set((endpoint.transportAddresses ?? []).map((transportAddress) => {
+          const unwrappedHost = transportAddress.replace(/^\[(.*)\]$/, "$1");
+          const host = unwrappedHost.includes(":") ? `[${unwrappedHost}]` : unwrappedHost;
+          return `ws://${host}:${endpoint.port}${endpoint.wsPath}`;
+        }))];
+        addresses.push(endpointAddress(endpoint));
+        for (const address of addresses) {
+          if (await tryAddress(address, false, `discovered registry ${endpoint.instanceName}`)) {
+            await this.discovery.stop();
+            this.browsing = false;
+            return;
           }
         }
       }

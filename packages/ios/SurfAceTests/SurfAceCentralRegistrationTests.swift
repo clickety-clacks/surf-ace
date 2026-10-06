@@ -576,13 +576,13 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         registration.stop()
     }
 
-    func testNumericDiscoveryFallbackRequiresHostnameResolutionFailure() async throws {
+    func testNumericDiscoveryTransportPrecedesSlowHostnameLookup() async throws {
         let hostname = URL(string: "ws://server.local:9001/")!
         let numeric = URL(string: "ws://192.0.2.1:9001/")!
         for code in [URLError.cannotConnectToHost, URLError.cannotFindHost] {
             let host = Transport()
-            host.error = URLError(code)
             let address = Transport()
+            address.error = URLError(code)
             var attempts: [URL] = []
             var applied = false
             let registration = SurfAceCentralRegistration(clientId: String(repeating: "b", count: 64), configured: nil,
@@ -591,11 +591,9 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
                 transportFallbacks: { _ in [numeric] },
                 snapshot: { [.init(surfaceId: "sf_one", panes: [.init(paneId: "1", paneLineageId: "lineage_one", paneLabel: 1)])] },
                 apply: { _, _ in applied = true })
-            do { try await registration.synchronize() } catch {
-                XCTAssertEqual(code, .cannotConnectToHost)
-            }
-            XCTAssertEqual(attempts, code == .cannotFindHost ? [hostname, numeric] : [hostname])
-            XCTAssertEqual(applied, code == .cannotFindHost)
+            try await registration.synchronize()
+            XCTAssertEqual(attempts, [numeric, hostname])
+            XCTAssertTrue(applied)
             registration.stop()
         }
     }
