@@ -5,6 +5,16 @@ use std::path::PathBuf;
 use surf_ace_cli::{execute, Command, Invocation};
 
 fn main() {
+    let arguments: Vec<String> = env::args().skip(1).collect();
+    if arguments.iter().any(|argument| argument == "annotations") {
+        if let Err(error) = surf_ace_cli::annotations::run(&arguments) {
+            println!("{}", serde_json::to_string(&json!({
+                "error": { "code": error.code, "details": error.details }, "ok": false,
+            })).expect("annotation CLI error is serializable"));
+            std::process::exit(1);
+        }
+        return;
+    }
     match parse().and_then(execute) {
         Ok(output) => {
             println!(
