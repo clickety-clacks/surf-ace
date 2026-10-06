@@ -83,6 +83,19 @@ DATE: ---Sat 21 Mar 2026---
   });
 });
 
+test("macOS SRV target uses IPv4 transport records without waiting for missing AAAA", async () => {
+  const calls: string[] = [];
+  const addresses = await __test.resolveIpv4TransportAddresses("gibson.local", async (host) => {
+    calls.push(host);
+    return ["192.168.50.216", "192.168.50.216", "100.92.53.87", "::1"];
+  });
+  assert.deepEqual(calls, ["gibson.local"]);
+  assert.deepEqual(addresses, ["192.168.50.216", "100.92.53.87"]);
+  assert.deepEqual(await __test.resolveIpv4TransportAddresses("missing.local", async () => {
+    throw new Error("DNS-SD address lookup unavailable");
+  }), []);
+});
+
 test("parseDnsSdLookupOutput gives same host and port distinct service identities", () => {
   const electron = __test.parseDnsSdLookupOutput(
     "workstation-a Surf Ace (workstation-a)",

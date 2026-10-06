@@ -393,15 +393,16 @@ export async function checkPublishedServerRecord(
         );
         if (unservedAddress) {
           // A successful lookup on an unserved family is a broken advertised
-          // endpoint, not a DNS failure. Clients try the SRV hostname first
-          // and only use transport addresses when hostname resolution fails.
+          // endpoint, not a DNS failure. The record has no supported target
+          // address for the hostname fallback path.
           throw new CentralServerHealthError(`advertised_target_family_unserved:${unservedAddress}`);
         }
+        const invalidAddress = targetAddresses.find((address) => addressFamily(address) === 0);
+        if (invalidAddress) {
+          throw new CentralServerHealthError(`advertised_target_invalid_resolution:${invalidAddress}`);
+        }
+        throw new CentralServerHealthError("advertised_target_resolution_unusable");
       }
-
-      // DNS-SD transport addresses remain a fallback when the target cannot
-      // be resolved, or the resolver returns no address records.
-      targetAddresses = [];
     }
   }
 
@@ -421,11 +422,15 @@ export async function checkPublishedServerRecord(
       throw new CentralServerHealthError(advertisedTargetResolutionError(linkLocal));
     }
     if (recordAddresses.length > 0) {
-      const mismatchedAddress = resolvedUsableAddresses.find((address) =>
-        !recordAddresses.some((recordAddress) => sameTransportAddress(recordAddress, address)),
+      // A multi-homed hostname may also resolve to a tailnet or another LAN
+      // address that this Bonjour record does not publish. The record must
+      // still name at least one address of this host, and every address it
+      // actually publishes is handshaken below.
+      const recordMatchesTarget = resolvedUsableAddresses.some((address) =>
+        recordAddresses.some((recordAddress) => sameTransportAddress(recordAddress, address)),
       );
-      if (mismatchedAddress) {
-        throw new CentralServerHealthError(`advertised_target_address_mismatch:${mismatchedAddress}`);
+      if (!recordMatchesTarget) {
+        throw new CentralServerHealthError(`advertised_target_address_mismatch:${resolvedUsableAddresses[0]}`);
       }
     }
     const addressesToProbe = recordAddresses.length > 0 ? recordAddresses : resolvedUsableAddresses;

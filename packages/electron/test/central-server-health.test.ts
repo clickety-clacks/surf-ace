@@ -150,6 +150,22 @@ test("an SRV target resolving only to an unserved family cannot pass by DNS-SD a
   assert.deepEqual(attempted, []);
 });
 
+test("an invalid non-address SRV resolution cannot pass by record-address fallback", async () => {
+  let attempted = false;
+  await assert.rejects(
+    checkPublishedServerRecord(record({ addresses: ["192.0.2.18"] }), LISTENER_PORT, {
+      resolveTargetAddresses: async () => ["not-an-address"],
+      requestTopology: async () => {
+        attempted = true;
+        return { clients: [] };
+      },
+    }),
+    (error: unknown) => error instanceof CentralServerHealthError &&
+      error.code === "advertised_target_invalid_resolution:not-an-address",
+  );
+  assert.equal(attempted, false);
+});
+
 test("server self-check rejects a link-local target without a matching local interface scope", async () => {
   await assert.rejects(
     checkPublishedServerRecord(record({ addresses: ["fe80::1"] }), LISTENER_PORT, {
@@ -202,11 +218,31 @@ test("server self-check rejects an SRV target that disagrees with its DNS-SD add
   assert.equal(attempted, false);
 });
 
+test("multi-homed target stays healthy when its published LAN address handshakes", async () => {
+  const attempted: string[] = [];
+  const result = await checkPublishedServerRecord(record({
+    host: "gibson.local",
+    addresses: ["192.168.50.216"],
+  }), LISTENER_PORT, {
+    resolveTargetAddresses: async () => ["100.92.53.87", "192.168.50.216"],
+    requestTopology: async (endpoint) => {
+      attempted.push(endpoint);
+      return { clients: [] };
+    },
+  });
+
+  assert.deepEqual(attempted, ["ws://192.168.50.216:19001/ws"]);
+  assert.deepEqual(result, {
+    endpoint: "ws://192.168.50.216:19001/ws",
+    transport: "srv-target",
+  });
+});
+
 test("server self-check rejects a published address when any DNS-SD endpoint fails the handshake", async () => {
   const attempted: string[] = [];
   await assert.rejects(
     checkPublishedServerRecord(record({ addresses: ["192.0.2.18", "192.0.2.19"] }), LISTENER_PORT, {
-      resolveTargetAddresses: async () => ["192.0.2.18", "192.0.2.19"],
+      resolveTargetAddresses: async () => ["100.92.53.87", "192.0.2.18", "192.0.2.19"],
       requestTopology: async (endpoint) => {
         attempted.push(endpoint);
         if (endpoint.includes("192.0.2.19")) {

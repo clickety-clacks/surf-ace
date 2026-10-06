@@ -477,7 +477,6 @@ final class SurfAceCentralRegistration {
     private let discoveryError: @MainActor () -> String?
     private let makeTransport: @MainActor (URL) -> any SurfAceRegistrationTransport
     private let transportFallbacks: @MainActor (URL) -> [URL]
-    private var resolutionFailed = false
     private let snapshot: Snapshot
     private let apply: Apply
     private let onError: @MainActor (Error) -> Void
@@ -599,12 +598,12 @@ final class SurfAceCentralRegistration {
             ).errorDescription ?? reason)
         }
         for url in discovered {
-            if try await attempt(url, surfaces: surfaces, failures: failures) { return }
-            if resolutionFailed {
-                for address in transportFallbacks(url) {
-                    if try await attempt(address, surfaces: surfaces, failures: failures, phase: "transport_address_fallback") { return }
-                }
+            // NetService resolved these transport addresses for this advertised
+            // service. Use them before a potentially slow dual-stack .local lookup.
+            for address in transportFallbacks(url) {
+                if try await attempt(address, surfaces: surfaces, failures: failures, phase: "transport_address") { return }
             }
+            if try await attempt(url, surfaces: surfaces, failures: failures) { return }
         }
         let failure = SurfAceCentralRegistrationFailure(
             phase: "retry",
@@ -642,7 +641,6 @@ final class SurfAceCentralRegistration {
     ) async throws -> Bool {
         guard !stopped else { throw SurfAceRegistrationError.stopped }
         guard url.scheme == "ws" || url.scheme == "wss" else { return false }
-        resolutionFailed = false
         if selected == nil { setStatus(.connecting) }
         let candidate = makeTransport(url)
         do {
@@ -657,8 +655,6 @@ final class SurfAceCentralRegistration {
             setStatus(.connected)
             return true
         } catch {
-            let transportError = error as? URLError
-            resolutionFailed = transportError?.code == .cannotFindHost || transportError?.code == .dnsLookupFailed
             candidate.close()
             if selected == nil { setStatus(.disconnected) }
             let failure = reportFailure(
@@ -798,8 +794,7 @@ final class SurfAceCentralDiscovery: NSObject, @preconcurrency NetServiceBrowser
         services.removeValue(forKey: identifier)
         lastError = "Bonjour could not resolve SRV target for \(sender.name): \(diagnosticFields(errorDict))"
         // NetService can provide numeric DNS-SD addresses even when its target
-        // hostname lookup fails. Keep the SRV target as the primary URL and
-        // let registration try these addresses only after a hostname error.
+        // hostname lookup fails. Registration tries those addresses first.
         storeCandidate(from: sender)
         sender.stop()
         sender.delegate = nil
@@ -859,6 +854,10 @@ final class SurfAceCentralDiscovery: NSObject, @preconcurrency NetServiceBrowser
             guard var transport = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return nil }
             transport.host = String(cString: host)
             return transport.url
+        }.sorted { left, right in
+            let leftIsIPv4 = left.host.map { $0.contains(":") == false } ?? false
+            let rightIsIPv4 = right.host.map { $0.contains(":") == false } ?? false
+            return leftIsIPv4 && !rightIsIPv4
         }
     }
 
