@@ -20,6 +20,13 @@ export class AnnotationSourceCoordinator {
     this.unsubscribe = core.subscribe((event) => {
       if (event.type === "drawing-dirty") this.gate.strokeEnded(event.surfaceId, event.paneId);
     });
+    for (const surface of core.listSurfaces()) {
+      for (const paneId of core.activePaneIds(surface.surfaceId)) {
+        if (core.hasPendingDrawingFlush(surface.surfaceId, paneId)) {
+          this.gate.strokeEnded(surface.surfaceId, paneId);
+        }
+      }
+    }
   }
 
   async setAnnotating(surfaceId: string, paneId: number, enabled: boolean): Promise<void> {

@@ -19,6 +19,7 @@ import { PublicControllerWireClient } from "../../controller/src/wire.js";
 import { writePersistentStateFile } from "../../electron/src/persistent-state-file.js";
 import { SURF_ACE_LOCKLESS_V1_CAPABILITY } from "../../protocol/src/lockless.js";
 import { SurfaceCore } from "../../electron/src/surface-core.js";
+import { AnnotationSourceCoordinator } from "../../electron/src/annotation-source-coordinator.js";
 import { SurfaceWsServer } from "../../electron/src/ws-server.js";
 import { AnnotationJournal } from "./annotation-journal.js";
 import { BonjourAdvertiser } from "../../electron/src/bonjour-advertiser.js";
@@ -1102,6 +1103,62 @@ test("annotation migration and append survive duplicate retry without allocating
     } finally {
       await resumed.close();
       await restarted.close();
+    }
+  } finally {
+    await cluster.stop();
+  }
+});
+
+test("annotation Electron source flush and at-open commit ingest into the real journal", { timeout: 180_000 }, async () => {
+  const cluster = await startCluster();
+  try {
+    const recovery = await PostgresCustodyAdapter.initializeAbsentFleet(cluster.config, "alloc_annotation-electron");
+    await recovery.release();
+    await adminQuery(cluster.adminUrl,
+      await readFile(new URL("../sql/003_annotation_journal.sql", import.meta.url), "utf8"));
+    const writer = await PostgresCustodyAdapter.acquireWriter(cluster.config);
+    try {
+      const core = new SurfaceCore({ annotationClientId: "c".repeat(64) });
+      const surface = core.ensurePrimarySurface("Surf Ace", { width: 640, height: 480, scale: 1 });
+      core.admitSurfaceToLockless(surface.surfaceId);
+      const paneId = core.activePaneIds(surface.surfaceId)[0]!;
+      core.locklessContentPush(surface.surfaceId, {
+        content: { markdown: "fixture" }, contentId: "content-one", contentType: "markdown",
+        friendlyChatName: "Fixture", paneId,
+      }, "Fixture");
+      let durable = core.getPersistentState();
+      const source = new AnnotationSourceCoordinator(core, async () => {
+        durable = core.getPersistentState();
+      }, () => {}, (error) => { throw error; });
+      try {
+        await source.setAnnotating(surface.surfaceId, paneId, true);
+        const image = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL/nwAAAABJRU5ErkJggg==";
+        core.annotationPublisher!.openFrame(surface.surfaceId, paneId, {
+          contentId: "content-one", contextKey: "content-one", image, openedAt: 100,
+          scrollOffset: { x: 0, y: 0 }, viewport: { width: 640, height: 480, scale: 1 },
+        });
+        core.addStroke(surface.surfaceId, paneId, {
+          strokeId: "stroke-one" as never, tool: "mouse",
+          points: [{ x: 1, y: 2, timestamp: 110 }],
+        });
+        await source.flushPending(surface.surfaceId, paneId);
+        await source.setAnnotating(surface.surfaceId, paneId, false);
+        const restored = new SurfaceCore({ annotationClientId: "c".repeat(64), persistentState: durable });
+        const fifo = restored.annotationPublisher!.snapshot().surfaces[surface.surfaceId]!.fifo;
+        assert.equal(fifo.length, 2);
+        const journal = new AnnotationJournal(writer);
+        const live = await journal.ingest(JSON.parse(fifo[0]!.canonical));
+        const commit = await journal.ingest(JSON.parse(fifo[1]!.canonical));
+        assert.equal(live.serverCursor.sequence, "1");
+        assert.equal(commit.serverCursor.sequence, "2");
+        assert.equal(commit.duplicate, false);
+        assert.deepEqual((await journal.ingest(JSON.parse(fifo[1]!.canonical))).serverCursor, commit.serverCursor);
+        assert.equal((await writer.annotationInfo()).journalRecords, 2);
+      } finally {
+        source.stop();
+      }
+    } finally {
+      await writer.release();
     }
   } finally {
     await cluster.stop();
