@@ -144,6 +144,8 @@ These are normative, settled statements about Surf Ace behavior. Implementations
 
 Surfaces continue advertising `_surf-ace._tcp` over Bonjour/mDNS.
 
+**CORE INVARIANT — ADVERTISED ADDRESS REACHABILITY (Mike, ruled 2026-10-05):** Every advertised address must be reachable and work.
+
 #### 3.1.1 Multi-Window, Multi-Pane, and History Topology (iPad + Electron)
 
 A single app instance may host multiple surface windows simultaneously. Each window is an independent Surf Ace surface. Within each window, one or more panes provide independent content and annotation contexts. Within each pane, one or more history entries allow multiple OpenClaw sessions to coexist without overwriting each other.
