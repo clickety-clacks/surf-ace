@@ -115,6 +115,27 @@ test("IPv4-only Bonjour records ignore macOS loopback aliases and unserved IPv6 
   });
 });
 
+test("multi-homed SRV resolution accepts extra routes when it overlaps the published record", async () => {
+  const attempted: string[] = [];
+  const result = await checkPublishedServerRecord(record({
+    addresses: ["192.168.50.216"],
+    host: "gibson.local",
+  }), LISTENER_PORT, {
+    expectedHost: "gibson.local",
+    resolveTargetAddresses: async () => ["100.92.53.87", "192.168.50.216"],
+    requestTopology: async (endpoint) => {
+      attempted.push(endpoint);
+      return { clients: [] };
+    },
+  });
+
+  assert.deepEqual(attempted, ["ws://192.168.50.216:19001/ws"]);
+  assert.deepEqual(result, {
+    endpoint: "ws://192.168.50.216:19001/ws",
+    transport: "srv-target",
+  });
+});
+
 test("a loopback-only IPv4 target stays unhealthy when only unserved IPv6 addresses accompany it", async () => {
   const attempted: string[] = [];
   await assert.rejects(
@@ -127,6 +148,25 @@ test("a loopback-only IPv4 target stays unhealthy when only unserved IPv6 addres
     }),
     (error: unknown) => error instanceof CentralServerHealthError &&
       error.code === "advertised_target_loopback_resolution:127.0.1.1",
+  );
+  assert.deepEqual(attempted, []);
+});
+
+test("an SRV target resolving only to an unserved family cannot pass by DNS-SD address fallback", async () => {
+  const attempted: string[] = [];
+  await assert.rejects(
+    checkPublishedServerRecord(record({
+      addresses: ["192.0.2.18"],
+      host: "ipv6-only.registry.local",
+    }), LISTENER_PORT, {
+      resolveTargetAddresses: async () => ["2001:db8::18"],
+      requestTopology: async (endpoint) => {
+        attempted.push(endpoint);
+        return { clients: [] };
+      },
+    }),
+    (error: unknown) => error instanceof CentralServerHealthError &&
+      error.code === "advertised_target_family_unserved:2001:db8::18",
   );
   assert.deepEqual(attempted, []);
 });
@@ -187,7 +227,7 @@ test("server self-check rejects a published address when any DNS-SD endpoint fai
   const attempted: string[] = [];
   await assert.rejects(
     checkPublishedServerRecord(record({ addresses: ["192.0.2.18", "192.0.2.19"] }), LISTENER_PORT, {
-      resolveTargetAddresses: async () => ["192.0.2.18", "192.0.2.19"],
+      resolveTargetAddresses: async () => ["100.92.53.87", "192.0.2.18", "192.0.2.19"],
       requestTopology: async (endpoint) => {
         attempted.push(endpoint);
         if (endpoint.includes("192.0.2.19")) {

@@ -387,10 +387,22 @@ export async function checkPublishedServerRecord(
         (targetAddresses.every(isLoopbackAddress) ? targetAddresses[0] : undefined);
       if (loopback) throw new CentralServerHealthError(advertisedTargetResolutionError(loopback));
 
-      // No resolved address uses a family present in the service record. Treat
-      // that as an unusable SRV resolution and use the record's transport
-      // addresses below; the record still has to pass the real handshake.
-      targetAddresses = [];
+      if (targetAddressesForRecordFamilies.length === 0) {
+        const unservedAddress = targetAddresses.find((address) =>
+          addressFamily(address) !== 0 && !isLoopbackAddress(address),
+        );
+        if (unservedAddress) {
+          // A successful lookup on an unserved family is a broken advertised
+          // endpoint, not a DNS failure. Clients try the SRV hostname first
+          // and only use transport addresses when hostname resolution fails.
+          throw new CentralServerHealthError(`advertised_target_family_unserved:${unservedAddress}`);
+        }
+        const invalidAddress = targetAddresses.find((address) => addressFamily(address) === 0);
+        if (invalidAddress) {
+          throw new CentralServerHealthError(`advertised_target_invalid_resolution:${invalidAddress}`);
+        }
+        throw new CentralServerHealthError("advertised_target_resolution_unusable");
+      }
     }
   }
 
@@ -410,10 +422,11 @@ export async function checkPublishedServerRecord(
       throw new CentralServerHealthError(advertisedTargetResolutionError(linkLocal));
     }
     if (recordAddresses.length > 0) {
-      const mismatchedAddress = resolvedUsableAddresses.find((address) =>
-        !recordAddresses.some((recordAddress) => sameTransportAddress(recordAddress, address)),
+      const hasRecordOverlap = resolvedUsableAddresses.some((address) =>
+        recordAddresses.some((recordAddress) => sameTransportAddress(recordAddress, address)),
       );
-      if (mismatchedAddress) {
+      if (!hasRecordOverlap) {
+        const mismatchedAddress = resolvedUsableAddresses[0]!;
         throw new CentralServerHealthError(`advertised_target_address_mismatch:${mismatchedAddress}`);
       }
     }
