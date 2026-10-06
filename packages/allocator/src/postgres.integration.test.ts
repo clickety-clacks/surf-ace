@@ -554,8 +554,8 @@ test("real PostgreSQL allocator authority", { timeout: 180_000 }, async (t) => {
         const degraded = await wire.request("fleet.topology", {});
         assert.equal(degraded.ok, true);
         assert.equal(degraded.payload?.registrationReady, false);
-        assert.equal((await server.diagnostics()).registrationReady, false);
         cluster.config.witnessServerId = originalWitnessId;
+        assert.equal((await server.diagnostics()).registrationReady, false);
         assert.equal((await wire.request("fleet.topology", {})).payload?.registrationReady, true);
         const recovered = await wire.request("pane.claim", claim);
         assert.equal(recovered.ok, true);
