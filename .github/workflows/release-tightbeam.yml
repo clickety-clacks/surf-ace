@@ -451,14 +451,16 @@ jobs:
                 --manifest build/release/tightbeam/surf-ace-tightbeam-v0.2.5-manifest.json
           ' bash "$smoke_user" "$smoke_tmp" "$smoke_node" "$PATH" \
             "$SURF_ACE_TIGHTBEAM_STATE_DRIVER" "$PRODUCT_COMMIT" "$GITHUB_SHA" \
-            > linux-smoke.json || {
+            > linux-smoke.json 2> linux-smoke-stderr.log || {
               smoke_status=$?
               echo "Linux acceptance smoke failed with exit ${smoke_status}; diagnostic details follow." >&2
+              cat linux-smoke-stderr.log >&2
               if [[ -s linux-smoke.json ]]; then
                 cat linux-smoke.json >&2
               fi
               mkdir -p linux-smoke-failure
-              find "$smoke_tmp" -type f \( -name 'fresh-install-state.json' -o -name 'fresh-install-state.json.capture.png' \) \
+              find "$smoke_tmp" -type f \( -name 'fresh-install-state.json' -o -name 'fresh-install-state.json.capture.png' \
+                -o -name 'fresh-install.client-flight-recorder.log' -o -name 'fresh-install.second-client-flight-recorder.log' \) \
                 -exec cp {} linux-smoke-failure/ \;
               exit "${smoke_status}"
             }
@@ -474,6 +476,7 @@ jobs:
           name: tightbeam-linux-smoke
           path: |
             linux-smoke.json
+            linux-smoke-stderr.log
             linux-smoke-receipt.json
             linux-smoke-failure/
           if-no-files-found: error

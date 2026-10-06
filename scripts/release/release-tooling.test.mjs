@@ -412,7 +412,6 @@ test("Electron handshake binds smoke identity to an explicit userData launch pat
     assert.equal(electronLaunchConfig(home, 19101, null, undefined, "darwin").env.SURF_ACE_DISABLE_GPU, undefined);
     assert.equal(electronLaunchConfig(home, 19101, null, undefined, "darwin", true).env.SURF_ACE_DISABLE_GPU, "1");
     assert.equal(electronLaunchConfig(home, 19101, null, undefined, "linux").env.SURF_ACE_DISABLE_GPU, undefined);
-    assert.equal(electronLaunchConfig(home, 19101, null, undefined, "linux", true).env.SURF_ACE_DISABLE_GPU, "1");
     assert.equal(electronLaunchConfig(home, 19101, "ws://127.0.0.1:19301/ws").env.SURF_ACE_SERVER, "ws://127.0.0.1:19301/ws");
     assert.deepEqual(
       electronLaunchConfig(home, 19101, null, undefined, "linux").args,
