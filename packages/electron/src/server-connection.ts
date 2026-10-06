@@ -203,8 +203,7 @@ export class ServerConnection {
           const host = unwrappedHost.includes(":") ? `[${unwrappedHost}]` : unwrappedHost;
           return `ws://${host}:${endpoint.port}${endpoint.wsPath}`;
         }))];
-        addresses.push(endpointAddress(endpoint));
-        for (const address of addresses) {
+        for (const address of new Set([...addresses, endpointAddress(endpoint)])) {
           if (await tryAddress(address, false, `discovered registry ${endpoint.instanceName}`)) {
             await this.discovery.stop();
             this.browsing = false;
