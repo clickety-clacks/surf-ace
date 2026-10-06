@@ -131,6 +131,25 @@ test("a loopback-only IPv4 target stays unhealthy when only unserved IPv6 addres
   assert.deepEqual(attempted, []);
 });
 
+test("an SRV target resolving only to an unserved family cannot pass by DNS-SD address fallback", async () => {
+  const attempted: string[] = [];
+  await assert.rejects(
+    checkPublishedServerRecord(record({
+      addresses: ["192.0.2.18"],
+      host: "ipv6-only.registry.local",
+    }), LISTENER_PORT, {
+      resolveTargetAddresses: async () => ["2001:db8::18"],
+      requestTopology: async (endpoint) => {
+        attempted.push(endpoint);
+        return { clients: [] };
+      },
+    }),
+    (error: unknown) => error instanceof CentralServerHealthError &&
+      error.code === "advertised_target_family_unserved:2001:db8::18",
+  );
+  assert.deepEqual(attempted, []);
+});
+
 test("server self-check rejects a link-local target without a matching local interface scope", async () => {
   await assert.rejects(
     checkPublishedServerRecord(record({ addresses: ["fe80::1"] }), LISTENER_PORT, {

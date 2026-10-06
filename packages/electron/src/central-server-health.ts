@@ -387,9 +387,20 @@ export async function checkPublishedServerRecord(
         (targetAddresses.every(isLoopbackAddress) ? targetAddresses[0] : undefined);
       if (loopback) throw new CentralServerHealthError(advertisedTargetResolutionError(loopback));
 
-      // No resolved address uses a family present in the service record. Treat
-      // that as an unusable SRV resolution and use the record's transport
-      // addresses below; the record still has to pass the real handshake.
+      if (targetAddressesForRecordFamilies.length === 0) {
+        const unservedAddress = targetAddresses.find((address) =>
+          addressFamily(address) !== 0 && !isLoopbackAddress(address),
+        );
+        if (unservedAddress) {
+          // A successful lookup on an unserved family is a broken advertised
+          // endpoint, not a DNS failure. Clients try the SRV hostname first
+          // and only use transport addresses when hostname resolution fails.
+          throw new CentralServerHealthError(`advertised_target_family_unserved:${unservedAddress}`);
+        }
+      }
+
+      // DNS-SD transport addresses remain a fallback when the target cannot
+      // be resolved, or the resolver returns no address records.
       targetAddresses = [];
     }
   }
