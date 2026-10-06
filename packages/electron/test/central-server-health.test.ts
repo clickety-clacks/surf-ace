@@ -202,6 +202,26 @@ test("server self-check rejects an SRV target that disagrees with its DNS-SD add
   assert.equal(attempted, false);
 });
 
+test("multi-homed target stays healthy when its published LAN address handshakes", async () => {
+  const attempted: string[] = [];
+  const result = await checkPublishedServerRecord(record({
+    host: "gibson.local",
+    addresses: ["192.168.50.216"],
+  }), LISTENER_PORT, {
+    resolveTargetAddresses: async () => ["100.92.53.87", "192.168.50.216"],
+    requestTopology: async (endpoint) => {
+      attempted.push(endpoint);
+      return { clients: [] };
+    },
+  });
+
+  assert.deepEqual(attempted, ["ws://192.168.50.216:19001/ws"]);
+  assert.deepEqual(result, {
+    endpoint: "ws://192.168.50.216:19001/ws",
+    transport: "srv-target",
+  });
+});
+
 test("server self-check rejects a published address when any DNS-SD endpoint fails the handshake", async () => {
   const attempted: string[] = [];
   await assert.rejects(
