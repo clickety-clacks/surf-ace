@@ -70,7 +70,7 @@ final class SurfAceAnnotationOutboxTests: XCTestCase {
         XCTAssertEqual(restored.annotationPublisher, state.annotationPublisher)
     }
 
-    func testSurfaceCloseChargesPublisherPartitionAndRetainsItsSourceHistory() throws {
+    func testSurfaceCloseChargesPublisherPartitionAndRetainsItsSourceHistory() async throws {
         var limits = SurfAceLocklessCapacityLimits.production
         limits.maxAnnotationPublisherStateBytesPerSurface = Int64(SurfAceAnnotationOutbox.maximumBytes)
         limits.maxAnnotationPublisherRecordsPerSurface = Int64(SurfAceAnnotationOutbox.maximumRecords)
@@ -95,6 +95,24 @@ final class SurfAceAnnotationOutboxTests: XCTestCase {
         XCTAssertEqual(tombstone.bytes, base + publisherBytes)
         XCTAssertEqual(state.annotationPublisher?.surfaces[surfaceId]?.fifo.first, pending)
         try state.validate()
+
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SurfAceAnnotationClose-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = SurfAceLocklessGenerationStore(stateURL: directory.appendingPathComponent("authority-v1.json"))
+        try store.save(state)
+        let adapter = try SurfAceLocklessRuntimeAdapter(store: store, annotationClientId: "client-1")
+        let epoch = sourceEpoch
+        try await adapter.transactAnnotationPublisher(surfaceId: surfaceId) { publisher in
+            try publisher.accept(surfaceId: surfaceId, head: pending,
+                                 cursor: .init(epoch: epoch, sequence: "1"))
+        }
+        let accepted = await adapter.snapshot()
+        let updatedTombstone = try XCTUnwrap(accepted.surfaceTombstones.first)
+        let remainingBytes = try XCTUnwrap(accepted.annotationPublisher?.partitionBytes(surfaceId: surfaceId))
+        XCTAssertEqual(updatedTombstone.bytes, base + remainingBytes)
+        XCTAssertLessThan(updatedTombstone.bytes, tombstone.bytes)
+        try accepted.validate()
     }
 
     func testConfiguredAdapterMigratesOldStateBeforeAdmissionAndKeepsEpochOnRestart() async throws {

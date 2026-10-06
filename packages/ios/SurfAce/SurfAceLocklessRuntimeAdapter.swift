@@ -1189,6 +1189,28 @@ actor SurfAceLocklessRuntimeAdapter {
         await coordinator.snapshot()
     }
 
+    func transactAnnotationPublisher<Result: Sendable>(
+        surfaceId: String,
+        _ operation: @escaping @Sendable (inout SurfAceAnnotationOutbox) throws -> Result
+    ) async throws -> Result {
+        try await coordinator.transact(trigger: "annotation_publisher") { state in
+            guard var publisher = state.annotationPublisher else {
+                throw SurfAceLocklessAuthorityError.invalidState("annotation_publisher_unavailable")
+            }
+            let result = try operation(&publisher)
+            state.annotationPublisher = publisher
+            if let index = state.surfaceTombstones.firstIndex(where: { $0.surface.surfaceId == surfaceId }) {
+                let tombstone = state.surfaceTombstones[index]
+                state.surfaceTombstones[index].bytes = try SurfAceLocklessTopologyOperations.surfaceTombstoneBytes(
+                    closedSequence: tombstone.closedSequence, scopes: tombstone.scopes,
+                    surface: tombstone.surface, tombstoneId: tombstone.tombstoneId,
+                    annotationPartitionBytes: publisher.partitionBytes(surfaceId: surfaceId)
+                )
+            }
+            return result
+        }
+    }
+
     func readinessSnapshot() async -> SurfAceLocklessReadinessSnapshot {
         let state = await coordinator.snapshot()
         return SurfAceLocklessReadinessSnapshot(
