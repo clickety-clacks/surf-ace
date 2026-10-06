@@ -25,12 +25,12 @@ env:
   NODE_VERSION: 24.3.0
   PNPM_VERSION: 10.15.1
   POSTGRES_VERSION: "16"
-  PRODUCT_COMMIT: a2f4122883fa875624f9e37d6f18dbeaef1d1072
-  PRODUCT_TAG: surf-ace-tightbeam-v0.2.5-r3
+  PRODUCT_COMMIT: 04a37d82e94d9cae7446841ccc03553a18397ff2
+  PRODUCT_TAG: surf-ace-tightbeam-v0.2.5-r4
   RUST_VERSION: 1.89.0
   LINUX_RUST_TARGET: x86_64-unknown-linux-gnu
   MACOS_RUST_TARGET: aarch64-apple-darwin
-  TOOLING_TAG: surf-ace-release-tooling-tightbeam-v0.2.5-r10
+  TOOLING_TAG: surf-ace-release-tooling-tightbeam-v0.2.5-r11
 
 jobs:
   guard:
@@ -447,7 +447,7 @@ jobs:
                 --source-dir source \
                 --source-commit "$product_commit" \
                 --tooling-commit "$tooling_commit" \
-                --candidate-commit a2f4122883fa875624f9e37d6f18dbeaef1d1072 \
+                --candidate-commit 04a37d82e94d9cae7446841ccc03553a18397ff2 \
                 --manifest build/release/tightbeam/surf-ace-tightbeam-v0.2.5-manifest.json
           ' bash "$smoke_user" "$smoke_tmp" "$smoke_node" "$PATH" \
             "$SURF_ACE_TIGHTBEAM_STATE_DRIVER" "$PRODUCT_COMMIT" "$GITHUB_SHA" \
@@ -531,7 +531,7 @@ jobs:
             --source-dir source \
             --source-commit "${PRODUCT_COMMIT}" \
             --tooling-commit "${GITHUB_SHA}" \
-            --candidate-commit a2f4122883fa875624f9e37d6f18dbeaef1d1072 \
+            --candidate-commit 04a37d82e94d9cae7446841ccc03553a18397ff2 \
             --manifest build/release/tightbeam/surf-ace-tightbeam-v0.2.5-manifest.json \
             > macos-smoke.json
           node tooling/scripts/release/write-smoke-receipt.mjs \
