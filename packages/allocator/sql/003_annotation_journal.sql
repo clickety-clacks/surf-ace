@@ -109,7 +109,7 @@ CREATE TABLE surf_ace_allocator.annotation_consumers (
 );
 
 INSERT INTO surf_ace_allocator.annotation_journal_head(fleet_id, epoch)
-SELECT fleet_id, encode(gen_random_bytes(16), 'hex')
+SELECT fleet_id, encode(public.gen_random_bytes(16), 'hex')
 FROM surf_ace_allocator.fleets;
 
 CREATE FUNCTION surf_ace_allocator.annotation_append(
@@ -155,7 +155,7 @@ BEGIN
     WHERE fleet_id = p_fleet_id AND client_id = p_client_id
       AND source_epoch = p_source_epoch AND source_event_id = p_source_event_id;
   IF FOUND THEN
-    canonical_digest := digest(p_canonical, 'sha256');
+    canonical_digest := public.digest(p_canonical, 'sha256');
     IF receipt.canonical_length <> octet_length(p_canonical) OR receipt.canonical_sha256 <> canonical_digest THEN
       RAISE EXCEPTION 'annotation_source_event_conflict';
     END IF;
