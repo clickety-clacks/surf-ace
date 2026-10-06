@@ -1,5 +1,7 @@
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::net::TcpListener;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
 use std::time::Duration;
@@ -7,6 +9,11 @@ use tempfile::TempDir;
 use tungstenite::{accept, Message, WebSocket};
 
 const EPOCH: &str = "0123456789abcdef0123456789abcdef";
+
+fn listener_path(root: &Path, consumer_id: &str) -> PathBuf {
+    root.join("annotations")
+        .join(format!("{:x}", Sha256::digest(consumer_id.as_bytes())))
+}
 
 fn request(socket: &mut WebSocket<std::net::TcpStream>, expected: &str) -> Value {
     let message = socket.read().unwrap();
@@ -129,11 +136,7 @@ fn watch_persists_delivery_without_ack_then_explicit_ack_uses_same_lease() {
         .as_str()
         .unwrap()
         .starts_with("annotation_"));
-    let state_file = std::fs::read_dir(root.path().join("annotations"))
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .find(|path| path.extension().is_some_and(|ext| ext == "json"))
-        .unwrap();
+    let state_file = listener_path(root.path(), "reviewer");
     let state: Value = serde_json::from_slice(&std::fs::read(state_file).unwrap()).unwrap();
     assert_eq!(state["lastDeliveredCursor"], format!("ann1:{EPOCH}:1"));
     assert_eq!(state["ackCursor"], Value::Null);
@@ -228,29 +231,20 @@ fn foreground_watcher_preserves_ack_written_by_separate_process() {
         .args(["watch", "--consumer-id", "reviewer"])
         .spawn()
         .unwrap();
-    let mut state_file = None;
+    let state_file = listener_path(root.path(), "reviewer");
+    let mut first_delivered = false;
     for _ in 0..100 {
-        if let Ok(entries) = std::fs::read_dir(root.path().join("annotations")) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().is_some_and(|ext| ext == "json") {
-                    if let Ok(bytes) = std::fs::read(&path) {
-                        if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
-                            if value["lastDeliveredCursor"] == format!("ann1:{EPOCH}:1") {
-                                state_file = Some(path);
-                                break;
-                            }
-                        }
-                    }
+        if let Ok(bytes) = std::fs::read(&state_file) {
+            if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
+                if value["lastDeliveredCursor"] == format!("ann1:{EPOCH}:1") {
+                    first_delivered = true;
+                    break;
                 }
             }
         }
-        if state_file.is_some() {
-            break;
-        }
         thread::sleep(Duration::from_millis(10));
     }
-    let state_file = state_file.expect("first record persisted");
+    assert!(first_delivered, "first record persisted");
     let ack = Command::new(env!("CARGO_BIN_EXE_surf-ace"))
         .args(common)
         .args([

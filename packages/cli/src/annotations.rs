@@ -260,16 +260,16 @@ impl StateStore {
     fn open(root: &Path, consumer_id: &str) -> Result<Self, AnnotationError> {
         let root = root.join("annotations");
         fs::create_dir_all(&root).map_err(AnnotationError::transport)?;
+        let digest = format!("{:x}", Sha256::digest(consumer_id.as_bytes()));
         let lock = OpenOptions::new()
             .create(true)
             .read(true)
             .write(true)
             .truncate(false)
-            .open(root.join("listener.lock"))
+            .open(root.join(format!("{digest}.lock")))
             .map_err(AnnotationError::transport)?;
         lock.lock_exclusive().map_err(AnnotationError::transport)?;
-        let digest = format!("{:x}", Sha256::digest(consumer_id.as_bytes()));
-        let path = root.join(format!("{digest}.json"));
+        let path = root.join(digest);
         Ok(Self {
             root,
             path,
