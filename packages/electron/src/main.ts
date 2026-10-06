@@ -69,6 +69,7 @@ import {
 import { isAddressInUse, isPortBoundOnIpv6Any } from "./port-selection.js";
 import { SurfaceWsServer } from "./ws-server.js";
 import { AnnotationRegistryPublisher } from "./annotation-registry-publisher.js";
+import { AnnotationSourceCoordinator } from "./annotation-source-coordinator.js";
 import { restoreWindowPlacement, type WindowPlacement } from "./window-placement.js";
 import { shouldDisableGpuForSoftwareCapture, surfaceWindowCaptureMode, surfaceWindowLoadQuery, surfaceWindowOptions } from "./window-options.js";
 
@@ -180,6 +181,7 @@ const singleInstanceLock = app.requestSingleInstanceLock();
 let advertiser: BonjourAdvertiser | null = null;
 let configuredRegistration: ServerConnection | null = null;
 let annotationRegistryPublisher: AnnotationRegistryPublisher | null = null;
+let annotationSourceCoordinator: AnnotationSourceCoordinator | null = null;
 let advertiserTxtRefreshTimer: NodeJS.Timeout | null = null;
 let core: SurfaceCore;
 let distDir = "";
@@ -1700,7 +1702,8 @@ function installIpc(): void {
         break;
       case "annotate":
         try {
-          core.setAnnotating(surfaceId, paneId, Boolean(payload.enabled));
+          void annotationSourceCoordinator?.setAnnotating(surfaceId, paneId, Boolean(payload.enabled))
+            .catch((error) => clientWarn("annotation_source_commit_failed", errorDiagnosticFields(error)));
         } catch {
           // Renderer commands can race a pane reset during reconnect.
         }
@@ -1828,6 +1831,11 @@ async function boot(): Promise<void> {
   const serverStart = await createAndStartServer(core);
   server = serverStart.server;
 
+  annotationSourceCoordinator = new AnnotationSourceCoordinator(
+    core, persistState, () => annotationRegistryPublisher?.notify(),
+    (error) => clientWarn("annotation_source_flush_failed", errorDiagnosticFields(error)),
+  );
+
   core.subscribe((coreEvent) => {
     if (coreEvent.type === "lockless-authority-changed") {
       void persistState();
@@ -1924,6 +1932,7 @@ if (!singleInstanceLock) {
       [...windows.keys()].map((surfaceId) => releaseNativePaneInstancesForSurface(surfaceId, "app quit")),
     );
     await configuredRegistration?.stop();
+    annotationSourceCoordinator?.stop();
     await annotationRegistryPublisher?.stop();
     await advertiser?.stop();
     await server.stop();

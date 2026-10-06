@@ -270,6 +270,8 @@ const provenanceAnnouncer = document.querySelector(
   "#provenance-announcer",
 ) as HTMLDivElement | null;
 const paneViews = new Map<number, PaneView>();
+const pendingStrokeDelivery = new Map<number, Promise<void>>();
+const annotationIntentEpoch = new Map<number, number>();
 const pendingHistoryAnnouncements = new Map<number, string>();
 const provenanceLabels = new Set<HTMLElement>();
 let bootstrap: Bootstrap | null = null;
@@ -1323,7 +1325,8 @@ function bindDrawing(view: PaneView): void {
     };
     captureReady = false;
     const stroke = activeStroke;
-    activeCapture = window.surfAce.captureAnnotationOpen(view.paneId, stroke.points[0]!.timestamp)
+    activeCapture = (pendingStrokeDelivery.get(view.paneId) ?? Promise.resolve())
+      .then(() => window.surfAce.captureAnnotationOpen(view.paneId, stroke.points[0]!.timestamp))
       .catch(() => false)
       .then((captured) => {
         if (activeStroke === stroke) {
@@ -1345,7 +1348,7 @@ function bindDrawing(view: PaneView): void {
     event.preventDefault();
   });
 
-  const finishStroke = async (event: PointerEvent) => {
+  const finishStroke = (event: PointerEvent) => {
     if (!activeStroke) {
       return;
     }
@@ -1357,16 +1360,18 @@ function bindDrawing(view: PaneView): void {
       canvas.releasePointerCapture(event.pointerId);
     }
     event.preventDefault();
-    await capture;
-    if (stroke.points.length > 0) {
-      window.surfAce.command({
-        paneId: view.paneId,
-        stroke,
-        type: "draw-stroke",
-      });
-    }
-    const pane = paneStateFor(view);
-    if (!activeStroke) redrawDrawings(view, pane?.drawings ?? []);
+    const delivery = (async () => {
+      await capture;
+      if (stroke.points.length > 0) {
+        window.surfAce.command({ paneId: view.paneId, stroke, type: "draw-stroke" });
+      }
+      const pane = paneStateFor(view);
+      if (!activeStroke) redrawDrawings(view, pane?.drawings ?? []);
+    })();
+    pendingStrokeDelivery.set(view.paneId, delivery);
+    void delivery.finally(() => {
+      if (pendingStrokeDelivery.get(view.paneId) === delivery) pendingStrokeDelivery.delete(view.paneId);
+    });
   };
 
   canvas.addEventListener("pointerup", finishStroke);
@@ -1659,6 +1664,7 @@ function buildControls(view: PaneView, pane: RendererPaneState): void {
   const annotate = surfAceOverlay(createIconButton("pen-line", "Sketch", "annotate"), "annotation-control");
   annotate.addEventListener("click", () => {
     rememberPaneContext(pane.paneId);
+    annotationIntentEpoch.set(pane.paneId, (annotationIntentEpoch.get(pane.paneId) ?? 0) + 1);
     window.surfAce.command({ enabled: true, paneId: pane.paneId, type: "annotate" });
   });
   annotate.classList.toggle("active", pane.showDone);
@@ -1668,7 +1674,13 @@ function buildControls(view: PaneView, pane: RendererPaneState): void {
     const done = surfAceOverlay(createButton("Done", "done"), "annotation-control");
     done.addEventListener("click", () => {
       rememberPaneContext(pane.paneId);
-      window.surfAce.command({ enabled: false, paneId: pane.paneId, type: "annotate" });
+      const epoch = (annotationIntentEpoch.get(pane.paneId) ?? 0) + 1;
+      annotationIntentEpoch.set(pane.paneId, epoch);
+      void (pendingStrokeDelivery.get(pane.paneId) ?? Promise.resolve()).then(() => {
+        if (annotationIntentEpoch.get(pane.paneId) === epoch) {
+          window.surfAce.command({ enabled: false, paneId: pane.paneId, type: "annotate" });
+        }
+      });
     });
     annotationPill.appendChild(done);
   }
