@@ -1259,7 +1259,7 @@ test("Linux fresh-install raw CLI evidence binds two isolated roots to their cli
 });
 
 test("Tightbeam v0.2.5 binds the landed discovery-integrity candidate, six hosted assets, and tooling identity", () => {
-  assert.equal(TIGHTBEAM_TOOLING_TAG, "surf-ace-release-tooling-tightbeam-v0.2.5");
+  assert.equal(TIGHTBEAM_TOOLING_TAG, "surf-ace-release-tooling-tightbeam-v0.2.5-r2");
   assert.deepEqual(TIGHTBEAM, {
     candidateCommit: "7878fda6181fd0c97175ca8282e4eb9120a8c039",
     sourceTag: "surf-ace-tightbeam-v0.2.5", version: "0.2.5", toolingTag: TIGHTBEAM_TOOLING_TAG,
@@ -2852,10 +2852,10 @@ test("v0.2.5 standalone specification and release gates bind the product and all
   assert.ok(linuxBuildOrder.every((index) => index >= 0));
   assert.deepEqual([...linuxBuildOrder].sort((left, right) => left - right), linuxBuildOrder);
   const linuxSmokeHostDependencies = workflowRunScript(workflow, "Install Linux smoke host dependencies");
-  for (const packageName of ["libpq-dev", "postgresql-16", "postgresql-client-16", "tar", "unzip", "x11-utils", "xauth", "xvfb"]) {
+  for (const packageName of ["iproute2", "libpq-dev", "postgresql-16", "postgresql-client-16", "util-linux", "tar", "unzip", "x11-utils", "xauth", "xvfb"]) {
     assert.ok(linuxSmokeHostDependencies.includes(packageName), `missing Linux smoke host package ${packageName}`);
   }
-  assert.match(linuxSmokeHostDependencies, /for tool in xvfb-run Xvfb xauth xdpyinfo pg_config tar unzip; do/);
+  assert.match(linuxSmokeHostDependencies, /for tool in ip unshare runuser xvfb-run Xvfb xauth xdpyinfo pg_config tar unzip; do/);
   assert.match(linuxSmokeHostDependencies, /command -v "\$\{tool\}"/);
   assert.match(linuxSmokeHostDependencies, /for tool in initdb postgres pg_ctl psql pg_basebackup pg_dump pg_restore; do/);
   assert.match(linuxSmokeHostDependencies, /linux_smoke_required_postgres_tool_missing/);
@@ -2867,7 +2867,11 @@ test("v0.2.5 standalone specification and release gates bind the product and all
   const linuxSmoke = workflowRunScript(workflow, "Run PostgreSQL-backed server, packaged CLI, and Linux client acceptance");
   assert.match(linuxSmoke, /smoke_tmp="\$\(mktemp -d \/tmp\/sa\.XXXXXX\)"/);
   assert.match(linuxSmoke, /trap 'rm -rf "\$smoke_tmp"' EXIT/);
-  assert.match(linuxSmoke, /TMPDIR="\$smoke_tmp" xvfb-run -a node tooling\/scripts\/release\/smoke-tightbeam-release\.mjs/);
+  assert.match(linuxSmoke, /sudo -n unshare --net -- bash -c/);
+  assert.match(linuxSmoke, /ip route add 224\.0\.0\.0\/4 dev veth0/);
+  assert.match(linuxSmoke, /test -z "\$\(ip route show default\)"/);
+  assert.match(linuxSmoke, /exec runuser -u "\$smoke_user" -- env/);
+  assert.match(linuxSmoke, /xvfb-run -a "\$smoke_node" tooling\/scripts\/release\/smoke-tightbeam-release\.mjs/);
   const macosTests = workflowRunScript(workflow, "Install frozen dependencies and run macOS/iPadOS tests");
   const macosBuildOrder = [
     "pnpm --dir source --filter @surf-ace/protocol build",
