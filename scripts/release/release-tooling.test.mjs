@@ -1261,7 +1261,7 @@ test("Linux fresh-install raw CLI evidence binds two isolated roots to their cli
 test("Tightbeam v0.2.5 binds the landed discovery-integrity candidate, six hosted assets, and tooling identity", () => {
   assert.equal(TIGHTBEAM_TOOLING_TAG, "surf-ace-release-tooling-tightbeam-v0.2.5");
   assert.deepEqual(TIGHTBEAM, {
-    candidateCommit: "1a32b4b645d81aea99eab1afc78941a33f57944d",
+    candidateCommit: "7878fda6181fd0c97175ca8282e4eb9120a8c039",
     sourceTag: "surf-ace-tightbeam-v0.2.5", version: "0.2.5", toolingTag: TIGHTBEAM_TOOLING_TAG,
     assets: ["surf-ace-tightbeam-server-linux-x86_64-v0.2.5.tar.gz","surf-ace-tightbeam-cli-linux-x86_64-v0.2.5.tar.gz","surf-ace-tightbeam-electron-linux-x86_64-v0.2.5.zip","surf-ace-tightbeam-cli-macos-arm64-v0.2.5.tar.gz","surf-ace-tightbeam-electron-macos-arm64-v0.2.5.zip",TIGHTBEAM_SKILL_ASSET],
     manifest: "surf-ace-tightbeam-v0.2.5-manifest.json", checksums: "SHA256SUMS",
@@ -1284,8 +1284,8 @@ test("Linux fresh-install fixture binds its identity gate to the release candida
 
   assert.match(fixture, /import \{ TIGHTBEAM \} from "\.\/tightbeam-release-config\.mjs";/);
   assert.match(fixture, /options\.candidateCommit !== TIGHTBEAM\.candidateCommit \|\| options\.expectedVersion !== TIGHTBEAM\.version/);
-  assert.equal(TIGHTBEAM.candidateCommit, "1a32b4b645d81aea99eab1afc78941a33f57944d");
-  assert.match(operations, /applies only to product commit\s+`1a32b4b645d81aea99eab1afc78941a33f57944d`/);
+  assert.equal(TIGHTBEAM.candidateCommit, "7878fda6181fd0c97175ca8282e4eb9120a8c039");
+  assert.match(operations, /applies only to product commit\s+`7878fda6181fd0c97175ca8282e4eb9120a8c039`/);
   for (const source of [fixture, operations]) {
     assert.doesNotMatch(source, /44421f305516ff3b8b305bc2df24c0f4c40b65c0/);
   }
@@ -2801,7 +2801,7 @@ test("v0.2.5 standalone specification and release gates bind the product and all
   const workflowPath = path.join(repository, ".github/workflows/release-tightbeam.yml");
   const workflow = await fs.readFile(workflowPath, "utf8");
   assert.match(specification, /Product source: proposed tag/);
-  assert.match(specification, /1a32b4b645d81aea99eab1afc78941a33f57944d/);
+  assert.match(specification, /7878fda6181fd0c97175ca8282e4eb9120a8c039/);
   assert.match(specification, /No old-version participant/);
   assert.match(specification, /surf-ace-release-tooling-tightbeam-v0\.2\.5/);
   assert.match(specification, /surf-ace-tightbeam-v0\.2\.5/);
@@ -2831,7 +2831,7 @@ test("v0.2.5 standalone specification and release gates bind the product and all
   for (const match of workflow.matchAll(/^\s*uses:\s*([^\s]+)$/gm)) assert.match(match[1], /@[0-9a-f]{40}$/);
   assert.match(workflow, /run_smoke:[\s\S]*?default: false/);
   assert.match(workflow, /publish_release:[\s\S]*?default: false/);
-  assert.match(workflow, /PRODUCT_COMMIT: 1a32b4b645d81aea99eab1afc78941a33f57944d/);
+  assert.match(workflow, /PRODUCT_COMMIT: 7878fda6181fd0c97175ca8282e4eb9120a8c039/);
   assert.match(workflow, /PRODUCT_TAG: surf-ace-tightbeam-v0\.2\.5/);
   assert.match(workflow, /TOOLING_TAG: surf-ace-release-tooling-tightbeam-v0\.2\.5/);
   assert.match(workflow, /GITHUB_EVENT_NAME/);
@@ -2922,7 +2922,7 @@ test("v0.2.5 release smoke gates bind only matching candidate participants", asy
   for (const input of [workflow, smoke]) assert.doesNotMatch(input, /cf91ef1baab26d6045fac5300487c29d0ddf332d/);
   assert.doesNotMatch(workflow, /build-smoke-baseline|BASELINE_(?:BACKEND|ELECTRON)|baseline-(?:commit|electron|root)/i);
   assert.doesNotMatch(smoke, /SURF_ACE_TIGHTBEAM_BASELINE|function smokeLinux\(|runLinuxStateDriver|validateTightbeamStateSequence/);
-  assert.match(workflow, /--candidate-commit 1a32b4b645d81aea99eab1afc78941a33f57944d/);
+  assert.match(workflow, /--candidate-commit 7878fda6181fd0c97175ca8282e4eb9120a8c039/);
   assert.match(smoke, /tightbeam-\$\{channel\}-v023-candidate-write/);
   assert.match(smoke, /inspectScreenshotPixels\(visible\.capture\.image, expectedScreenshotColors\)/);
   assert.doesNotMatch(`${smoke}\n${fixture}`, /includeImage/);
