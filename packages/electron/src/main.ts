@@ -412,7 +412,7 @@ async function loadPersistentState(): Promise<PersistentSurfaceState | undefined
 }
 
 async function persistState(): Promise<void> {
-  if (persistentStateOutcomeUnknown) throw persistentStateOutcomeUnknown;
+  if (persistentStateOutcomeUnknown) throw new Error("Local persistence is paused pending reconciliation");
   if (persistentStateWriteGuard) {
     clientWarn("state_persist_skipped_corrupt_restore", {
       path: path.join(stateDir, STATE_FILE_NAME),
@@ -423,7 +423,7 @@ async function persistState(): Promise<void> {
   stateWrite = stateWrite
     .catch(() => {})
     .then(async () => {
-      if (persistentStateOutcomeUnknown) throw persistentStateOutcomeUnknown;
+      if (persistentStateOutcomeUnknown) throw new Error("Local persistence is paused pending reconciliation");
       const candidate = core.getPersistentState();
       try {
         await writePersistentStateFile(stateDir, STATE_FILE_NAME, candidate);
@@ -464,10 +464,11 @@ async function reconcilePersistence(): Promise<void> {
     writeGuard: "ambiguous-persistence" as const,
   }));
   if (!result.writeGuard && result.state &&
-      JSON.stringify(result.state) === JSON.stringify(uncertainStateCandidate) &&
-      JSON.stringify(core.getPersistentState()) === JSON.stringify(uncertainStateCandidate)) {
+      JSON.stringify(result.state) === JSON.stringify(uncertainStateCandidate)) {
     // The exact generation that produced the ambiguous reply is now proved
-    // durable, and no subsequent local state change has escaped the fence.
+    // durable. Independent local interaction may have advanced in-memory
+    // state meanwhile; queue its save after reopening the persistence seam.
+    const changedWhilePaused = JSON.stringify(core.getPersistentState()) !== JSON.stringify(uncertainStateCandidate);
     persistentStateOutcomeUnknown = null;
     uncertainStateCandidate = null;
     persistentStateWriteGuard = false;
@@ -475,6 +476,9 @@ async function reconcilePersistence(): Promise<void> {
     server.resumeAfterVerifiedPersistence();
     clientInfo("state_persistence_reconciled");
     for (const surface of core.listSurfaces()) broadcastSurfaceState(surface.surfaceId);
+    if (changedWhilePaused) void persistState().catch((error) => {
+      clientWarn("state_persistence_followup_failed", errorDiagnosticFields(error));
+    });
     return;
   }
   if (result.writeGuard) {
