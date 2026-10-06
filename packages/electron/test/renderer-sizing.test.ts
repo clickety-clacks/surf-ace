@@ -45,7 +45,8 @@ test("connection state preserves assigned pane and window labels in the identity
   assert.match(updateSource, /projectConnectionChrome\(/);
   assert.doesNotMatch(updateSource, /disconnectedGlyph\.hidden/);
   assert.match(updateSource, /pane\.label \? `pane \$\{visibleAddress\}` : null/);
-  assert.match(updateSource, /const connectionDescription = connectionBar === "connected" \? null : connectionBar/);
+  assert.match(updateSource, /const connectionDescription = connectionBar === "connected"\s+\? null\s+: connectionError \? `\$\{connectionBar\}: \$\{connectionError\}` : connectionBar/);
+  assert.match(updateSource, /aria-description/);
   assert.doesNotMatch(updateSource, /Surf Ace disconnected/);
   assert.match(source, /let latestChromeKey: string \| null = null/);
   assert.match(source, /function chromeKey\(state: RendererWindowState\): string/);

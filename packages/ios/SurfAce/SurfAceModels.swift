@@ -1321,6 +1321,7 @@ final class SurfAceSurfaceModel {
     var activeKeyboardPaneId: Int?
     var providerTopologyInitialized = false
     var connectionBarState: SurfAceConnectionBarState = .disconnected
+    var centralConnectionError: String?
     var viewportSize = CGSize(width: 1, height: 1)
     var viewportScale: CGFloat = 1
     var surfaceEpoch = 0

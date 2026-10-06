@@ -1151,6 +1151,17 @@ test("tagless qualification leaves release build and manifest-smoke tag admissio
   assert.match(freshInstallMain, /fresh_install_wrong_surface_changed_valid_target/);
 });
 
+test("packaged registry release smokes bind a discovery-reachable listener", async () => {
+  const fixture = await fs.readFile(path.join(repository, "scripts/release/tightbeam-state-smoke-fixture.ts"), "utf8");
+  const stagedServer = fixture.slice(fixture.indexOf("const serverConfig = {"), fixture.indexOf("const launcher =", fixture.indexOf("const serverConfig = {")));
+  const freshInstallServer = fixture.slice(fixture.indexOf("const registryConfig = {"), fixture.indexOf("let registryProcess", fixture.indexOf("const registryConfig = {")));
+
+  assert.match(stagedServer, /listenHost:\s*"0\.0\.0\.0"/);
+  assert.match(freshInstallServer, /listenHost:\s*"0\.0\.0\.0"/);
+  assert.doesNotMatch(stagedServer, /listenHost:\s*"127\.0\.0\.1"/);
+  assert.doesNotMatch(freshInstallServer, /listenHost:\s*"127\.0\.0\.1"/);
+});
+
 test("DESIGN UI index separates release checks from nonblocking known gaps", async () => {
   const design = await fs.readFile(path.join(repository, "DESIGN.md"), "utf8");
   const workflow = await fs.readFile(path.join(repository, ".github/workflows/release-tightbeam.yml"), "utf8");
@@ -1491,6 +1502,7 @@ test("Tightbeam foreground launcher validates exact PG16 config and WebSocket he
   })), /server_config_custody_shape_invalid|server_config_witness_application_invalid/);
   assert.throws(() => tightbeamServerLauncher.healthUrl("ws://user:secret@127.0.0.1:19001/ws"), /health_endpoint_invalid/);
   assert.throws(() => tightbeamServerLauncher.healthUrl("ws://127.0.0.1:19001/not-ws"), /health_endpoint_invalid/);
+  assert.throws(() => tightbeamServerLauncher.healthUrl("ws://127.0.0.1:19001/"), /health_endpoint_invalid/);
   assert.equal(tightbeamServerLauncher.healthUrl("ws://127.0.0.1:19001/ws").pathname, "/ws");
   if (process.platform === "linux") {
     await fs.chmod(configPath, 0o644);
@@ -1499,9 +1511,25 @@ test("Tightbeam foreground launcher validates exact PG16 config and WebSocket he
   }
 
   const healthServer = new WebSocketServer({ host: "127.0.0.1", path: "/ws", port: 0 });
+  let acceptTopology = true;
   await new Promise((resolve, reject) => {
     healthServer.once("error", reject);
     healthServer.once("listening", resolve);
+  });
+  healthServer.on("connection", (socket) => {
+    socket.on("message", (raw) => {
+      const request = JSON.parse(raw.toString());
+      socket.send(JSON.stringify({
+        id: request.id,
+        op: request.op,
+        type: "response",
+        v: 1,
+        ok: acceptTopology,
+        ...(acceptTopology
+          ? { payload: { clients: [] } }
+          : { error: { code: "registry_unavailable", message: "registry unavailable" } }),
+      }));
+    });
   });
   const address = healthServer.address();
   const endpoint = `ws://127.0.0.1:${address.port}/ws`;
@@ -1509,12 +1537,22 @@ test("Tightbeam foreground launcher validates exact PG16 config and WebSocket he
     assert.deepEqual(await tightbeamServerLauncher.checkHealth(endpoint), {
       endpoint: `ws://127.0.0.1:${address.port}`,
       status: "healthy",
-      transport: "websocket-open",
+      transport: "fleet.topology",
     });
+    acceptTopology = false;
+    await assert.rejects(tightbeamServerLauncher.checkHealth(endpoint), /health_fleet_topology_rejected:registry_unavailable/);
+    await assert.rejects(
+      tightbeamServerLauncher.checkHealth(`ws://127.0.0.2:${address.port}/ws`),
+      /health_websocket_connect_failed|health_websocket_closed_before_open|health_websocket_connect_timeout/,
+    );
+    await assert.rejects(
+      tightbeamServerLauncher.checkHealth(`ws://127.0.0.1:${address.port + 1}/ws`),
+      /health_websocket_connect_failed|health_websocket_closed_before_open|health_websocket_connect_timeout/,
+    );
   } finally {
     await new Promise((resolve, reject) => healthServer.close((error) => error ? reject(error) : resolve()));
   }
-  await assert.rejects(tightbeamServerLauncher.checkHealth(endpoint), /health_check_unavailable/);
+  await assert.rejects(tightbeamServerLauncher.checkHealth(endpoint), /health_websocket_connect_failed|health_websocket_closed_before_open/);
 });
 
 test("Tightbeam foreground output separates product diagnostics from lifecycle events", () => {
@@ -1563,6 +1601,10 @@ test("Tightbeam foreground lifecycle holds and releases its server on SIGTERM wi
     const fs = require("node:fs");
     module.exports = { startCentralServer: async () => ({
       server: { address: { host: "127.0.0.1", port: 19001, url: "ws://127.0.0.1:19001" } },
+      health: {
+        snapshot: () => ({ status: "healthy", endpoint: "ws://registry.local/ws" }),
+        subscribe: (listener) => { listener({ status: "healthy", endpoint: "ws://registry.local/ws" }); return () => {}; },
+      },
       close: async () => fs.writeFileSync(${JSON.stringify(markerPath)}, "closed\\n"),
     }) };
   `);
@@ -1579,8 +1621,9 @@ test("Tightbeam foreground lifecycle holds and releases its server on SIGTERM wi
     },
   });
   await ready;
+  assert.equal(lines[0].port, 80);
   signals.emit("SIGTERM");
-  assert.deepEqual(await running, { endpoint: "ws://127.0.0.1:19001/ws", status: "stopped" });
+  assert.deepEqual(await running, { endpoint: "ws://registry.local/ws", status: "stopped" });
   assert.deepEqual(lines.map(({ event }) => event), ["ready", "stopped"]);
   assert.equal(await fs.readFile(markerPath, "utf8"), "closed\n");
   assert.doesNotMatch(JSON.stringify(lines), /fixture-password/);

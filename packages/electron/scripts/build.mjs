@@ -57,6 +57,7 @@ await build({
   ...shared,
   entryPoints: [
     path.join(rootDir, "test", "bonjour-advertiser.test.ts"),
+    path.join(rootDir, "test", "central-server-health.test.ts"),
     path.join(rootDir, "test", "client-flight-recorder.test.ts"),
     path.join(rootDir, "test", "identity.test.ts"),
     path.join(rootDir, "test", "lockless-acceptance.test.ts"),
@@ -74,6 +75,7 @@ await build({
     path.join(rootDir, "test", "runtime-identity.test.ts"),
     path.join(rootDir, "test", "surface-core.test.ts"),
     path.join(rootDir, "test", "server-connection.test.ts"),
+    path.join(rootDir, "test", "surf-ace-discovery.test.ts"),
     path.join(rootDir, "test", "autostart-host-guard.test.ts"),
     path.join(rootDir, "test", "webauthn-support.test.ts"),
     path.join(rootDir, "test", "window-options.test.ts"),

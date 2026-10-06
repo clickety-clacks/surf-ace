@@ -159,6 +159,7 @@ type LayoutNode =
 type SurfaceState = {
   activeKeyboardPaneId: number | null;
   connectionBar: "connected" | "connecting" | "disconnected";
+  connectionError: string | null;
   focusIntentRevision: number;
   geometryRevision: number;
   layout: LayoutNode | null;
@@ -276,6 +277,7 @@ export type RendererPaneState = {
 
 export type RendererWindowState = {
   connectionBar: SurfaceState["connectionBar"];
+  connectionError?: string;
   layout: LayoutNode | null;
   name: string;
   panes: RendererPaneState[];
@@ -1491,12 +1493,15 @@ export class SurfaceCore {
     };
   }
 
-  setConnectionBar(surfaceId: string, state: SurfaceState["connectionBar"]): void {
+  setConnectionBar(surfaceId: string, state: SurfaceState["connectionBar"], error?: string | null): void {
     const surface = this.getSurface(surfaceId);
-    if (surface.connectionBar === state && (state === "connected" || surface.providerName === null)) {
+    const nextError = state === "connected" ? null : error === undefined ? surface.connectionError : error;
+    if (surface.connectionBar === state && surface.connectionError === nextError &&
+        (state === "connected" || surface.providerName === null)) {
       return;
     }
     surface.connectionBar = state;
+    surface.connectionError = nextError;
     if (state !== "connected") {
       surface.providerName = null;
     }
@@ -1517,6 +1522,7 @@ export class SurfaceCore {
     this.ensureActiveKeyboardPane(surface);
     return {
       connectionBar: surface.connectionBar,
+      ...(surface.connectionError ? { connectionError: surface.connectionError } : {}),
       layout: surface.layout ? structuredClone(surface.layout) : null,
       name: surface.name,
       panes: surface.paneOrder.map((paneId) => {
@@ -3715,6 +3721,7 @@ export class SurfaceCore {
     const surface: SurfaceState = {
       activeKeyboardPaneId: BOOTSTRAP_PANE_ID,
       connectionBar: "disconnected",
+      connectionError: null,
       focusIntentRevision: 0,
       geometryRevision: 1,
       layout: { paneId: BOOTSTRAP_PANE_ID, type: "pane" },
@@ -4020,6 +4027,7 @@ function deserializeSurface(record: PersistentSurfaceRecord, now: number): Surfa
   return {
     activeKeyboardPaneId: panes.has(Number(record.activeKeyboardPaneId)) ? Number(record.activeKeyboardPaneId) : finalPaneOrder[0]!,
     connectionBar: "disconnected",
+    connectionError: null,
     focusIntentRevision:
       Number.isSafeInteger(record.focusIntentRevision) && Number(record.focusIntentRevision) >= 0
         ? Number(record.focusIntentRevision)

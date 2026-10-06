@@ -171,6 +171,7 @@ type LayoutNode =
 
 type RendererWindowState = {
   connectionBar: "connected" | "connecting" | "disconnected";
+  connectionError?: string;
   geometryRevision: number;
   layout: LayoutNode | null;
   name: string;
@@ -2864,7 +2865,10 @@ function updatePane(view: PaneView, pane: RendererPaneState): void {
     visibleWindowLabel ? ` window ${visibleWindowLabel}` : null,
     pane.label ? `pane ${visibleAddress}` : null,
   ].filter(Boolean).join(" ");
-  const connectionDescription = connectionBar === "connected" ? null : connectionBar;
+  const connectionError = latestState?.connectionError?.trim();
+  const connectionDescription = connectionBar === "connected"
+    ? null
+    : connectionError ? `${connectionBar}: ${connectionError}` : connectionBar;
   const accessibleIdentity = pane.label
     ? `Surf Ace${visibleWindowLabel ? ` window ${visibleWindowLabel}` : ""} pane ${visibleAddress}`
     : `Surf Ace${visibleWindowLabel ? ` window ${visibleWindowLabel}` : ""}`;
@@ -2873,6 +2877,8 @@ function updatePane(view: PaneView, pane: RendererPaneState): void {
     "aria-label",
     [accessibleIdentity, connectionDescription].filter(Boolean).join(" "),
   );
+  if (connectionError) labelWrap.setAttribute("aria-description", connectionError);
+  else labelWrap.removeAttribute("aria-description");
   fitPaneLabelToVisibleBounds(view);
   buildControls(view, pane);
   renderPaneContent(view, pane);
@@ -2967,8 +2973,25 @@ function layoutKey(state: RendererWindowState): string {
 function chromeKey(state: RendererWindowState): string {
   return JSON.stringify({
     connectionBar: state.connectionBar,
+    connectionError: state.connectionError ?? null,
     windowLabel: state.windowLabel,
   });
+}
+
+function updateConnectionErrorBanner(wrapper: HTMLElement, state: RendererWindowState): void {
+  let banner = wrapper.querySelector(".connection-status-banner") as HTMLDivElement | null;
+  const message = state.connectionBar === "connected" ? "" : state.connectionError?.trim() ?? "";
+  if (!message) {
+    banner?.remove();
+    return;
+  }
+  if (!banner) {
+    banner = document.createElement("div");
+    banner.className = "connection-status-banner";
+    banner.setAttribute("role", "status");
+    wrapper.appendChild(banner);
+  }
+  banner.textContent = `Registry ${state.connectionBar}: ${message}`;
 }
 
 function patchSameLayoutWindow(previousState: RendererWindowState, state: RendererWindowState): boolean {
@@ -2982,6 +3005,7 @@ function patchSameLayoutWindow(previousState: RendererWindowState, state: Render
   }
 
   wrapper.className = `surface-window connection-${state.connectionBar}`;
+  updateConnectionErrorBanner(wrapper, state);
   const nextChromeKey = chromeKey(state);
   const chromeStateChanged = latestChromeKey !== nextChromeKey;
   const previousPanes = new Map(previousState.panes.map((pane) => [pane.paneId, pane]));
@@ -3051,6 +3075,7 @@ function renderWindow(state: RendererWindowState): void {
   const panesById = new Map(state.panes.map((pane) => [pane.paneId, pane]));
   const wrapper = document.createElement("div");
   wrapper.className = `surface-window connection-${state.connectionBar}`;
+  updateConnectionErrorBanner(wrapper, state);
   const layoutRoot = document.createElement("div");
   layoutRoot.className = "layout-root";
   if (state.layout) {

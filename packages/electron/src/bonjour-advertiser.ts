@@ -14,23 +14,32 @@ type BonjourError = Error & {
 };
 
 type BonjourBrowser = {
-  on(event: "up", listener: (service: BonjourDiscoveredService) => void): void;
+  on(event: "up", listener: (service: BonjourResolvedService) => void): void;
   stop(): void;
 };
 
-type BonjourDiscoveredService = {
+export type BonjourResolvedService = {
+  addresses?: string[];
+  host?: string;
   name: string;
   port?: number;
   txt?: Record<string, unknown>;
+};
+
+export type BonjourSelfDiscoveryResult = {
+  error?: string;
+  service: BonjourResolvedService | null;
 };
 
 type BonjourClient = {
   destroy(): void;
   find(
     options: { protocol: "tcp"; type: "surf-ace" },
-    listener?: (service: BonjourDiscoveredService) => void,
+    listener?: (service: BonjourResolvedService) => void,
   ): BonjourBrowser;
   publish(options: {
+    disableIPv6?: boolean;
+    host?: string;
     name: string;
     port: number;
     probe?: boolean;
@@ -101,8 +110,9 @@ function bonjourErrorMessage(error: unknown): string {
   return String(error);
 }
 
-function useIsolatedBonjourPublisherByDefault(platform: NodeJS.Platform): boolean {
-  return platform === "darwin";
+function useIsolatedBonjourPublisherByDefault(platform: NodeJS.Platform, hasExplicitHost = false): boolean {
+  // `dns-sd -R` chooses the machine target, so use the embedded publisher when the server supplies one.
+  return platform === "darwin" && !hasExplicitHost;
 }
 
 function bonjourInterfaceAddresses(): string[] {
@@ -110,9 +120,11 @@ function bonjourInterfaceAddresses(): string[] {
 }
 
 function isolatedPublisherCommandMatches(command: string, params: {
+  identityKey?: string;
+  identityValue?: string;
   name: string;
   port: number;
-  publicKeyFingerprint: string;
+  publicKeyFingerprint?: string;
 }): boolean {
   const dnsSdIndex = command.indexOf("dns-sd -R ");
   if (dnsSdIndex < 0) {
@@ -129,8 +141,11 @@ function isolatedPublisherCommandMatches(command: string, params: {
     return false;
   }
   const txtArgs = commandAfterRegister.slice(serviceMarkerIndex + serviceMarker.length).trim().split(/\s+/);
-  const expectedPkArg = `pk=${params.publicKeyFingerprint.trim().toLowerCase()}`;
-  return txtArgs.some((arg) => arg.trim().toLowerCase() === expectedPkArg);
+  const identityKey = params.identityKey ?? "pk";
+  const identityValue = (params.identityValue ?? params.publicKeyFingerprint ?? "").trim().toLowerCase();
+  if (!identityValue) return false;
+  const expectedIdentityArg = `${identityKey}=${identityValue}`.toLowerCase();
+  return txtArgs.some((arg) => arg.trim().toLowerCase() === expectedIdentityArg);
 }
 
 export class BonjourAdvertiser {
@@ -142,8 +157,11 @@ export class BonjourAdvertiser {
   private readonly isolatedPublisherKill: IsolatedPublisherKill;
   private readonly isolatedPublisherProcessList: IsolatedPublisherProcessList;
   private readonly isolatedPublisherSpawn: typeof spawn;
+  private readonly onSelfDiscovery: ((result: BonjourSelfDiscoveryResult) => void) | undefined;
   private readonly platform: NodeJS.Platform;
   private readonly port: number;
+  private readonly disableIPv6: boolean;
+  private readonly host: string | undefined;
   private readonly txtProvider: () => Record<string, string>;
   private readonly useIsolatedPublisherByDefault: boolean;
   private destroyed = false;
@@ -164,7 +182,10 @@ export class BonjourAdvertiser {
     isolatedPublisherKill?: IsolatedPublisherKill;
     isolatedPublisherProcessList?: IsolatedPublisherProcessList;
     isolatedPublisherSpawn?: typeof spawn;
+    disableIPv6?: boolean;
+    host?: string;
     name: string;
+    onSelfDiscovery?: (result: BonjourSelfDiscoveryResult) => void;
     platform?: NodeJS.Platform;
     port: number;
     txtProvider: () => Record<string, string>;
@@ -176,11 +197,14 @@ export class BonjourAdvertiser {
     this.isolatedPublisherKill = options.isolatedPublisherKill ?? ((pid) => process.kill(pid, "TERM"));
     this.isolatedPublisherProcessList = options.isolatedPublisherProcessList ?? defaultIsolatedPublisherProcessList;
     this.isolatedPublisherSpawn = options.isolatedPublisherSpawn ?? spawn;
+    this.onSelfDiscovery = options.onSelfDiscovery;
     this.platform = options.platform ?? process.platform;
     this.port = options.port;
+    this.disableIPv6 = options.disableIPv6 ?? false;
+    this.host = options.host;
     this.serviceName = options.name;
     this.txtProvider = options.txtProvider;
-    this.useIsolatedPublisherByDefault = !options.bonjour && useIsolatedBonjourPublisherByDefault(this.platform);
+    this.useIsolatedPublisherByDefault = !options.bonjour && useIsolatedBonjourPublisherByDefault(this.platform, Boolean(this.host));
   }
 
   start(): void {
@@ -272,6 +296,11 @@ export class BonjourAdvertiser {
     this.publishing = true;
     try {
       this.publish(preferredName);
+    } catch (error) {
+      const reason = bonjourErrorMessage(error);
+      this.onSelfDiscovery?.({ error: `bonjour_publish_failed:${reason}`, service: null });
+      console.warn(bonjourDiagnostic("publish_failed", { error: reason, name: preferredName }));
+      this.scheduleVisibilityCheck(BonjourAdvertiser.VISIBILITY_CHECK_INTERVAL_MS);
     } finally {
       this.publishing = false;
     }
@@ -295,6 +324,8 @@ export class BonjourAdvertiser {
       let service: Service;
       try {
         service = binding.client.publish({
+          ...(this.disableIPv6 ? { disableIPv6: true } : {}),
+          ...(this.host ? { host: this.host } : {}),
           name,
           port: this.port,
           probe: false,
@@ -311,6 +342,8 @@ export class BonjourAdvertiser {
       this.attachServiceErrorHandler(service, binding);
     }
     if (services.length === 0) {
+      this.onSelfDiscovery?.({ error: "bonjour_publish_failed:no_active_binding", service: null });
+      if (this.onSelfDiscovery) this.scheduleVisibilityCheck(BonjourAdvertiser.VISIBILITY_CHECK_INTERVAL_MS);
       return;
     }
     this.serviceName = name;
@@ -345,16 +378,38 @@ export class BonjourAdvertiser {
   }
 
   private async verifyPublishedService(): Promise<void> {
-    if (this.destroyed || (this.services.length === 0 && !this.isolatedPublisher) || this.restarting) {
+    if (this.destroyed || this.restarting) {
       return;
     }
     const publishedName = this.serviceName;
-    const activeServices = await this.discoverPublishedServices();
-    if (this.destroyed || (this.services.length === 0 && !this.isolatedPublisher) || this.restarting || this.serviceName !== publishedName) {
+    let activeServices: BonjourResolvedService[];
+    try {
+      activeServices = await this.discoverPublishedServices();
+    } catch (error) {
+      this.onSelfDiscovery?.({
+        error: `bonjour_browse_failed:${bonjourErrorMessage(error)}`,
+        service: null,
+      });
+      console.warn(
+        bonjourDiagnostic("publish_discover_error", {
+          error: bonjourErrorMessage(error),
+          name: publishedName,
+        }),
+      );
+      this.scheduleVisibilityCheck(BonjourAdvertiser.VISIBILITY_CHECK_INTERVAL_MS);
+      return;
+    }
+    if (this.destroyed || this.restarting || this.serviceName !== publishedName) {
       return;
     }
     const txt = this.txtProvider();
     const matchingOwnServices = activeServices.filter((service) => this.matchesAdvertisedIdentity(service, publishedName, txt));
+    const probableOwnService = activeServices.find((service) => this.matchesAdvertisedName(service, publishedName, txt));
+    if (probableOwnService) {
+      this.onSelfDiscovery?.({ service: probableOwnService });
+    } else {
+      this.onSelfDiscovery?.({ error: "bonjour_self_record_not_visible", service: null });
+    }
     const matchingOwnService = matchingOwnServices.length > 0;
     const sameNameServices = activeServices.filter((service) => service.name === publishedName);
     if (!this.isolatedPublisher && matchingOwnService && sameNameServices.length > matchingOwnServices.length) {
@@ -389,8 +444,16 @@ export class BonjourAdvertiser {
         await this.republishWithFallbackName();
         return;
       }
+      if (this.services.length === 0 && this.onSelfDiscovery) {
+        await this.restart();
+        if (this.services.length === 0 && !this.isolatedPublisher) {
+          this.scheduleVisibilityCheck(BonjourAdvertiser.VISIBILITY_CHECK_INTERVAL_MS);
+        }
+        return;
+      }
       if (
         !this.isolatedPublisher &&
+        !this.host &&
         this.visibilityFailures >= BonjourAdvertiser.VISIBILITY_FAILURES_BEFORE_ISOLATION
       ) {
         await this.switchToIsolatedPublisher();
@@ -410,13 +473,24 @@ export class BonjourAdvertiser {
   }
 
   private matchesAdvertisedIdentity(
-    service: BonjourDiscoveredService,
+    service: BonjourResolvedService,
     publishedName: string,
     txt: Record<string, string>,
   ): boolean {
-    return service.name === publishedName &&
-      service.port === this.port &&
-      String(service.txt?.pk ?? "").trim().toLowerCase() === String(txt.pk ?? "").trim().toLowerCase();
+    return this.matchesAdvertisedName(service, publishedName, txt) && service.port === this.port;
+  }
+
+  private matchesAdvertisedName(
+    service: BonjourResolvedService,
+    publishedName: string,
+    txt: Record<string, string>,
+  ): boolean {
+    if (service.name !== publishedName) return false;
+    const expectedServerId = String(txt.serverId ?? "").trim().toLowerCase();
+    if (expectedServerId) {
+      return String(service.txt?.serverId ?? "").trim().toLowerCase() === expectedServerId;
+    }
+    return String(service.txt?.pk ?? "").trim().toLowerCase() === String(txt.pk ?? "").trim().toLowerCase();
   }
 
   private isNameConflict(error: Error): boolean {
@@ -443,8 +517,8 @@ export class BonjourAdvertiser {
     }
   }
 
-  private async discoverPublishedServices(): Promise<BonjourDiscoveredService[]> {
-    const services: BonjourDiscoveredService[] = [];
+  private async discoverPublishedServices(): Promise<BonjourResolvedService[]> {
+    const services: BonjourResolvedService[] = [];
     const browsers: BonjourBrowser[] = [];
     console.info(
       bonjourDiagnostic("publish_discover_begin", {
@@ -462,7 +536,7 @@ export class BonjourAdvertiser {
             services.push(service);
           },
         );
-        browser.on("txt-update", (service: BonjourDiscoveredService) => {
+        browser.on("txt-update", (service: BonjourResolvedService) => {
           services.push(service);
         });
         browsers.push(browser);
@@ -627,37 +701,50 @@ export class BonjourAdvertiser {
   private async publishWithIsolatedPublisher(name: string): Promise<void> {
     const generation = ++this.isolatedPublisherGeneration;
     this.stopIsolatedPublisher();
-    await this.cleanupOrphanedIsolatedPublishers(name);
-    if (this.destroyed || generation !== this.isolatedPublisherGeneration) {
+    let child: ChildProcess;
+    try {
+      await this.cleanupOrphanedIsolatedPublishers(name);
+      if (this.destroyed || generation !== this.isolatedPublisherGeneration) {
+        return;
+      }
+      this.serviceName = name;
+      const txt = this.txtProvider();
+      const txtArgs = Object.entries(txt).map(([k, v]) => `${k}=${v}`);
+      console.info(
+        bonjourDiagnostic("publish_attempt", {
+          isolated: true,
+          name,
+          port: this.port,
+        }),
+      );
+      child = this.isolatedPublisherSpawn(
+        "dns-sd",
+        ["-R", name, "_surf-ace._tcp", "local.", String(this.port), ...txtArgs],
+        { stdio: ["ignore", "ignore", "ignore"] },
+      );
+      this.publishedTxtSignature = txtSignature(txt);
+    } catch (error) {
+      if (this.destroyed || generation !== this.isolatedPublisherGeneration) return;
+      const reason = bonjourErrorMessage(error);
+      this.onSelfDiscovery?.({ error: `bonjour_publish_failed:${reason}`, service: null });
+      console.warn(bonjourDiagnostic("publish_isolated_error", { error: reason, name }));
+      this.scheduleVisibilityCheck(BonjourAdvertiser.VISIBILITY_CHECK_INTERVAL_MS);
       return;
     }
-    this.serviceName = name;
-    const txt = this.txtProvider();
-    const txtArgs = Object.entries(txt).map(([k, v]) => `${k}=${v}`);
-    this.publishedTxtSignature = txtSignature(txt);
-    console.info(
-      bonjourDiagnostic("publish_attempt", {
-        isolated: true,
-        name,
-        port: this.port,
-      }),
-    );
-    const child = this.isolatedPublisherSpawn(
-      "dns-sd",
-      ["-R", name, "_surf-ace._tcp", "local.", String(this.port), ...txtArgs],
-      { stdio: ["ignore", "ignore", "ignore"] },
-    );
     child.on("error", (error: Error) => {
       if (this.isolatedPublisher !== child) {
         return;
       }
+      const reason = (error as BonjourError).code ?? error.message;
       console.warn(
         bonjourDiagnostic("publish_isolated_error", {
-          error: (error as BonjourError).code ?? error.message,
+          error: reason,
           name: this.serviceName,
         }),
       );
       this.isolatedPublisher = null;
+      this.onSelfDiscovery?.({ error: `bonjour_publish_failed:${reason}`, service: null });
+      this.scheduleVisibilityCheck(BonjourAdvertiser.VISIBILITY_CHECK_INTERVAL_MS);
     });
     child.on("exit", (code) => {
       if (this.isolatedPublisher === child) {
@@ -668,6 +755,8 @@ export class BonjourAdvertiser {
           }),
         );
         this.isolatedPublisher = null;
+        this.onSelfDiscovery?.({ error: `bonjour_publisher_exited:${code ?? "null"}`, service: null });
+        this.scheduleVisibilityCheck(BonjourAdvertiser.VISIBILITY_CHECK_INTERVAL_MS);
       }
     });
     this.isolatedPublisher = child;
@@ -692,8 +781,10 @@ export class BonjourAdvertiser {
     if (this.platform !== "darwin") {
       return;
     }
-    const publicKeyFingerprint = this.txtProvider().pk?.trim().toLowerCase();
-    if (!publicKeyFingerprint) {
+    const txt = this.txtProvider();
+    const identityKey = txt.pk ? "pk" : txt.serverId ? "serverId" : null;
+    const identityValue = identityKey ? txt[identityKey]?.trim().toLowerCase() : undefined;
+    if (!identityKey || !identityValue) {
       return;
     }
     const currentPid = this.isolatedPublisher?.pid ?? null;
@@ -712,7 +803,8 @@ export class BonjourAdvertiser {
         !isolatedPublisherCommandMatches(command, {
           name,
           port: this.port,
-          publicKeyFingerprint,
+          identityKey,
+          identityValue,
         })
       ) {
         continue;
