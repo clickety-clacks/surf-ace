@@ -112,6 +112,96 @@ INSERT INTO surf_ace_allocator.annotation_journal_head(fleet_id, epoch)
 SELECT fleet_id, encode(public.gen_random_bytes(16), 'hex')
 FROM surf_ace_allocator.fleets;
 
+CREATE FUNCTION surf_ace_allocator.annotation_compact(
+  p_fleet_id text, p_generation bigint, p_lease_id text,
+  p_incoming_bytes integer, p_maintenance boolean
+)
+RETURNS integer
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = pg_catalog, surf_ace_allocator
+AS $function$
+DECLARE
+  h surf_ace_allocator.annotation_journal_head%ROWTYPE;
+  r surf_ace_allocator.annotation_journal_records%ROWTYPE;
+  compacted integer := 0;
+  receipt_digest bytea;
+  receipt_bytes bigint;
+BEGIN
+  PERFORM surf_ace_allocator.assert_role('surf_ace_allocator_writer');
+  PERFORM surf_ace_allocator.assert_token(p_fleet_id, p_generation, p_lease_id, 'writer');
+  IF p_incoming_bytes < 0 OR p_incoming_bytes > 16785408 THEN
+    RAISE EXCEPTION 'annotation_invalid_request';
+  END IF;
+  SELECT * INTO STRICT h FROM surf_ace_allocator.annotation_journal_head
+    WHERE fleet_id = p_fleet_id FOR UPDATE;
+  LOOP
+    IF h.retained_record_count = 0 THEN EXIT; END IF;
+    IF NOT p_maintenance AND h.retained_record_count < 100000 AND
+       h.retained_canonical_bytes + h.source_metadata_bytes + p_incoming_bytes <= 1073741824 THEN
+      EXIT;
+    END IF;
+    SELECT * INTO r FROM surf_ace_allocator.annotation_journal_records
+      WHERE fleet_id = p_fleet_id AND epoch = h.epoch AND sequence = h.first_retained_sequence;
+    IF NOT FOUND THEN RAISE EXCEPTION 'annotation_journal_unverified'; END IF;
+    IF p_maintenance AND r.committed_at > clock_timestamp() - interval '30 days' THEN EXIT; END IF;
+    -- At least one still-active consumer must actually have acknowledged this
+    -- record, and every active consumer whose requested range covers it must
+    -- also have acknowledged it. An empty set cannot erase unread history.
+    IF NOT EXISTS (
+      SELECT 1 FROM surf_ace_allocator.annotation_consumers c
+      WHERE c.fleet_id = p_fleet_id AND c.retired_at IS NULL
+        AND (c.initial_from_epoch <> h.epoch OR c.initial_from_sequence <= r.sequence)
+        AND c.ack_epoch = h.epoch AND c.ack_sequence >= r.sequence
+    ) OR EXISTS (
+      SELECT 1 FROM surf_ace_allocator.annotation_consumers c
+      WHERE c.fleet_id = p_fleet_id AND c.retired_at IS NULL
+        AND (c.initial_from_epoch <> h.epoch OR c.initial_from_sequence <= r.sequence)
+        AND (c.ack_epoch IS DISTINCT FROM h.epoch OR coalesce(c.ack_sequence, -1) < r.sequence)
+    ) THEN EXIT; END IF;
+    receipt_digest := public.digest(r.canonical_record_bytes, 'sha256');
+    receipt_bytes := octet_length(convert_to(jsonb_build_object(
+      'v', 1, 'clientId', r.client_id, 'sourceEpoch', r.source_epoch,
+      'surfaceId', r.surface_id, 'sourceSequence', r.source_sequence::text,
+      'sourceEventId', r.source_event_id,
+      'lostFromSequence', r.lost_from_sequence::text,
+      'canonicalSha256', encode(receipt_digest, 'hex'),
+      'canonicalLength', r.canonical_record_length,
+      'originalEpoch', r.epoch, 'originalSequence', r.sequence::text,
+      'committedAtMicros', (extract(epoch FROM r.committed_at) * 1000000)::bigint::text
+    )::text, 'utf8'));
+    IF h.source_metadata_rows + 1 > 1000000 OR
+       h.retained_canonical_bytes - r.canonical_record_length + h.source_metadata_bytes +
+         receipt_bytes > 1073741824 THEN
+      EXIT;
+    END IF;
+    INSERT INTO surf_ace_allocator.annotation_source_receipts(
+      fleet_id, client_id, source_epoch, surface_id, source_sequence,
+      source_event_id, lost_from_sequence, canonical_sha256, canonical_length,
+      original_epoch, original_sequence, committed_at)
+    VALUES (p_fleet_id, r.client_id, r.source_epoch, r.surface_id, r.source_sequence,
+      r.source_event_id, r.lost_from_sequence, receipt_digest, r.canonical_record_length,
+      r.epoch, r.sequence, r.committed_at);
+    DELETE FROM surf_ace_allocator.annotation_journal_records
+      WHERE fleet_id = p_fleet_id AND epoch = h.epoch AND sequence = r.sequence;
+    UPDATE surf_ace_allocator.annotation_journal_head SET
+      first_retained_sequence = CASE WHEN r.sequence = h.head_sequence THEN NULL ELSE r.sequence + 1 END,
+      retained_record_count = h.retained_record_count - 1,
+      retained_canonical_bytes = h.retained_canonical_bytes - r.canonical_record_length,
+      source_metadata_rows = h.source_metadata_rows + 1,
+      source_metadata_bytes = h.source_metadata_bytes + receipt_bytes
+    WHERE fleet_id = p_fleet_id;
+    SELECT * INTO STRICT h FROM surf_ace_allocator.annotation_journal_head WHERE fleet_id = p_fleet_id;
+    compacted := compacted + 1;
+  END LOOP;
+  RETURN compacted;
+END
+$function$;
+
+REVOKE ALL ON FUNCTION surf_ace_allocator.annotation_compact(text, bigint, text, integer, boolean)
+  FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION surf_ace_allocator.annotation_compact(text, bigint, text, integer, boolean)
+  TO surf_ace_allocator_writer;
+
 CREATE FUNCTION surf_ace_allocator.annotation_append(
   p_fleet_id text, p_generation bigint, p_lease_id text,
   p_client_id text, p_source_epoch text, p_surface_id text,
@@ -197,6 +287,13 @@ BEGIN
       'v', 1, 'clientId', p_client_id, 'sourceEpoch', p_source_epoch,
       'surfaceId', p_surface_id, 'acceptedThroughSequence', accepted::text)::text, 'utf8'));
   END IF;
+  PERFORM surf_ace_allocator.annotation_compact(
+    p_fleet_id, p_generation, p_lease_id, 0, true);
+  PERFORM surf_ace_allocator.annotation_compact(
+    p_fleet_id, p_generation, p_lease_id,
+    octet_length(p_canonical) + new_head_bytes - old_head_bytes, false);
+  SELECT * INTO STRICT h FROM surf_ace_allocator.annotation_journal_head
+    WHERE fleet_id = p_fleet_id FOR UPDATE;
   new_metadata_rows := h.source_metadata_rows + CASE WHEN accepted = 0 THEN 1 ELSE 0 END;
   new_metadata_bytes := h.source_metadata_bytes - old_head_bytes + new_head_bytes;
   IF h.retained_record_count >= 100000 OR new_metadata_rows > 1000000

@@ -412,6 +412,15 @@ export class PostgresCustodyAdapter<M extends LeaseMode> {
     };
   }
 
+  async compactAnnotations(this: PostgresCustodyAdapter<"writer">): Promise<number> {
+    this.assertMode("writer");
+    const result = await this.mutate("annotation_compact", async () => await this.primary.query<{
+      compacted: number;
+    }>("SELECT surf_ace_allocator.annotation_compact($1,$2,$3,0,true) AS compacted",
+      [this.config.fleetId, this.token.leaseGeneration, this.token.leaseId]));
+    return result.rows[0]?.compacted ?? 0;
+  }
+
   async annotationInfo(this: PostgresCustodyAdapter<"writer">): Promise<AnnotationInfo> {
     this.assertMode("writer");
     return await this.enqueuePrimary(async () => {

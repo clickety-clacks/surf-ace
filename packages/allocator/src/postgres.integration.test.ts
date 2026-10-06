@@ -1088,6 +1088,59 @@ test("annotation migration and append survive duplicate retry without allocating
   }
 });
 
+test("annotation compaction protects absent and unread consumers, then retains source dedup receipts", { timeout: 180_000 }, async () => {
+  const cluster = await startCluster();
+  try {
+    const recovery = await PostgresCustodyAdapter.initializeAbsentFleet(cluster.config, "alloc_annotation-compact");
+    await recovery.release();
+    await adminQuery(cluster.adminUrl,
+      await readFile(new URL("../sql/003_annotation_journal.sql", import.meta.url), "utf8"));
+    const writer = await PostgresCustodyAdapter.acquireWriter(cluster.config);
+    try {
+      const journal = new AnnotationJournal(writer);
+      const record = { protocolVersion: 1, clientId: "compactor", sourceEpoch: "c".repeat(32),
+        surfaceId: "sf_compaction", sourceSequence: "1", sourceEventId: "gap-one",
+        lostFromSequence: "1", lostThroughSequence: "1", reason: "source_retention_overflow" };
+      const first = await journal.ingest(record);
+      await adminQuery(cluster.adminUrl, `UPDATE surf_ace_allocator.annotation_journal_records
+        SET committed_at = clock_timestamp() - interval '31 days'
+        WHERE fleet_id = 'fleet-test' AND sequence = 1`);
+      assert.equal(await writer.compactAnnotations(), 0, "no consumer cannot erase history");
+      const a = await writer.openAnnotationConsumer("A", "watch");
+      const b = await writer.openAnnotationConsumer("B", "watch");
+      assert.equal(await writer.compactAnnotations(), 0, "unread record remains retained");
+      assert.equal((await writer.readAnnotationRecords("1", 1)).length, 1);
+      await writer.ackAnnotationConsumer("A", a.leaseId, first.serverCursor);
+      assert.equal(await writer.compactAnnotations(), 0, "second consumer still holds its backlog");
+      await writer.ackAnnotationConsumer("B", b.leaseId, first.serverCursor);
+      assert.equal(await writer.compactAnnotations(), 1);
+      const compacted = await writer.annotationInfo();
+      assert.equal(compacted.journalRecords, 0);
+      assert.equal(compacted.headSequence, "1");
+      assert.equal(compacted.firstRetainedSequence, null);
+      assert.equal(compacted.sourceMetadataRows, 2, "source head and receipt survive compaction");
+      const duplicate = await journal.ingest(record);
+      assert.equal(duplicate.duplicate, true);
+      assert.deepEqual(duplicate.serverCursor, first.serverCursor);
+      await assert.rejects(journal.ingest({ ...record, reason: "source_record_rejected" }),
+        (error) => error instanceof AllocatorError && error.code === "annotation_source_event_conflict");
+      const second = await journal.ingest({ ...record, sourceSequence: "2", sourceEventId: "gap-two",
+        lostFromSequence: "2", lostThroughSequence: "2" });
+      assert.equal(second.serverCursor.sequence, "2");
+      const after = await writer.annotationInfo();
+      assert.equal(after.firstRetainedSequence, "2");
+      const later = await writer.openAnnotationConsumer("later", "watch", first.serverCursor);
+      assert.equal(later.initialFromCursor.sequence, "1");
+      assert.equal(later.availableFromCursor?.sequence, "2");
+      assert.equal(later.historyCompleteSinceStart, false);
+    } finally {
+      await writer.release();
+    }
+  } finally {
+    await cluster.stop();
+  }
+});
+
 async function startCluster(schemaVersion: "current" | "v0.2.3" = "current"): Promise<TestCluster> {
   const root = await mkdtemp(join(process.cwd(), ".allocator-pg-"));
   const primaryData = join(root, "primary");
