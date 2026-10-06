@@ -114,7 +114,7 @@ FROM surf_ace_allocator.fleets;
 
 CREATE FUNCTION surf_ace_allocator.annotation_compact(
   p_fleet_id text, p_generation bigint, p_lease_id text,
-  p_incoming_bytes integer, p_maintenance boolean
+  p_incoming_bytes bigint, p_maintenance boolean
 )
 RETURNS integer
 LANGUAGE plpgsql SECURITY DEFINER
@@ -197,9 +197,9 @@ BEGIN
 END
 $function$;
 
-REVOKE ALL ON FUNCTION surf_ace_allocator.annotation_compact(text, bigint, text, integer, boolean)
+REVOKE ALL ON FUNCTION surf_ace_allocator.annotation_compact(text, bigint, text, bigint, boolean)
   FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION surf_ace_allocator.annotation_compact(text, bigint, text, integer, boolean)
+GRANT EXECUTE ON FUNCTION surf_ace_allocator.annotation_compact(text, bigint, text, bigint, boolean)
   TO surf_ace_allocator_writer;
 
 CREATE FUNCTION surf_ace_allocator.annotation_append(
