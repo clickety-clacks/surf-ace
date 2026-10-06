@@ -1391,8 +1391,9 @@ export class SurfaceWsServer {
     } else if (request.op === "pair.request" || request.op === "topology.apply") {
       response = (await dispatch()).response;
     } else if (request.op === "surfaces.list") {
-      response = await this.core.locklessAuthority.transactionAsync(() =>
-        this.core.transactionAsync(async () => {
+      try {
+        response = await this.core.locklessAuthority.transactionAsync(() =>
+          this.core.transactionAsync(async () => {
           const attemptCount =
             this.core.listSurfaceAdmissionAttempts().length;
           const result = await dispatch();
@@ -1402,10 +1403,16 @@ export class SurfaceWsServer {
             await this.persistLocklessState();
           }
           return result.response;
-        }),
-      );
+          }),
+        );
+      } catch (error) {
+        if (!(error instanceof PersistentStateOutcomeUnknownError)) throw error;
+        response = errorResponse(request.op, request.id as never, "internal_error",
+          "Persistent state commit outcome is unknown; dependent operations are paused pending reconciliation");
+      }
     } else {
-      response = await this.core.locklessAuthority.transactionAsync(async () => {
+      try {
+        response = await this.core.locklessAuthority.transactionAsync(async () => {
         const result = await dispatch();
         if (
           request.op === "consumable.ack" ||
@@ -1414,7 +1421,12 @@ export class SurfaceWsServer {
           await this.persistLocklessState();
         }
         return result.response;
-      });
+        });
+      } catch (error) {
+        if (!(error instanceof PersistentStateOutcomeUnknownError)) throw error;
+        response = errorResponse(request.op, request.id as never, "internal_error",
+          "Persistent state commit outcome is unknown; dependent operations are paused pending reconciliation");
+      }
     }
     if (!this.persistenceOutcomeUnknown) {
       meta.cache.set(request.id, { payloadHash, response });
