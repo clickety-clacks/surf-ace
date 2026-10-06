@@ -1,4 +1,4 @@
-export const TIGHTBEAM_TOOLING_TAG = "surf-ace-release-tooling-tightbeam-v0.2.5-r2";
+export const TIGHTBEAM_TOOLING_TAG = "surf-ace-release-tooling-tightbeam-v0.2.5-r3";
 
 export const TIGHTBEAM_SKILL_ASSET = "surf-ace-tightbeam-skill-v0.2.5.md";
 
@@ -52,7 +52,7 @@ export const TIGHTBEAM_TEST_COMMANDS = Object.freeze([
   "pnpm --dir source --filter @surf-ace/protocol test",
   "cargo test --manifest-path source/packages/cli/Cargo.toml --locked",
   "pnpm --dir source --filter @surf-ace/electron test",
-  "xcodebuild test -project source/packages/ios/SurfAce.xcodeproj -scheme SurfAce -configuration Release ENABLE_TESTABILITY=YES -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M5),OS=27.0'",
+  "xcodebuild test -project source/packages/ios/SurfAce.xcodeproj -scheme SurfAce -configuration Release ENABLE_TESTABILITY=YES -parallel-testing-enabled NO -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M5),OS=27.0'",
 ]);
 
 export const TIGHTBEAM_BUILD_COMMANDS = Object.freeze([

@@ -1187,6 +1187,8 @@ test("DESIGN UI index separates release checks from nonblocking known gaps", asy
   assert.ok(TIGHTBEAM_TEST_COMMANDS.some((command) => command.startsWith("xcodebuild test ")));
   assert.match(workflow, /pnpm --dir source --filter @surf-ace\/electron test/);
   assert.match(workflow, /xcodebuild test/);
+  assert.match(workflow, /xcodebuild test[\s\S]*?-parallel-testing-enabled NO/);
+  assert.ok(TIGHTBEAM_TEST_COMMANDS.some((command) => command.includes("-parallel-testing-enabled NO")));
 
   const contentByFile = new Map();
   for (const [name, checks] of DESIGN_INVARIANT_CHECKS) {
@@ -1259,7 +1261,7 @@ test("Linux fresh-install raw CLI evidence binds two isolated roots to their cli
 });
 
 test("Tightbeam v0.2.5 binds the landed discovery-integrity candidate, six hosted assets, and tooling identity", () => {
-  assert.equal(TIGHTBEAM_TOOLING_TAG, "surf-ace-release-tooling-tightbeam-v0.2.5-r2");
+  assert.equal(TIGHTBEAM_TOOLING_TAG, "surf-ace-release-tooling-tightbeam-v0.2.5-r3");
   assert.deepEqual(TIGHTBEAM, {
     candidateCommit: "7878fda6181fd0c97175ca8282e4eb9120a8c039",
     sourceTag: "surf-ace-tightbeam-v0.2.5", version: "0.2.5", toolingTag: TIGHTBEAM_TOOLING_TAG,
