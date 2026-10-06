@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { AnnotationPublisherOutbox } from "../src/annotation-publisher-outbox.js";
+import { SurfaceCore } from "../src/surface-core.js";
 
 const clientId = "c".repeat(64);
 const surfaceId = "sf_annotation-test";
@@ -46,4 +47,15 @@ test("definite record rejection replaces only its FIFO slot and persists diagnos
   assert.equal(JSON.parse(state.fifo[0]!.canonical).reason, "source_record_rejected");
   assert.equal(state.fifo[1]!.canonical, second);
   assert.deepEqual(state.diagnostic, { code: "annotation_record_too_large", sequence: "1" });
+});
+
+test("publisher partition survives the Electron surface state serialization boundary", () => {
+  const core = new SurfaceCore({ annotationClientId: clientId });
+  core.annotationPublisher!.append(surfaceId, live("durable"));
+  const persisted = core.getPersistentState();
+  const restarted = new SurfaceCore({ annotationClientId: clientId, persistentState: persisted });
+  assert.equal(restarted.annotationPublisher!.head(surfaceId)!.canonical,
+    core.annotationPublisher!.head(surfaceId)!.canonical);
+  assert.throws(() => new SurfaceCore({ annotationClientId: "another-client", persistentState: persisted }),
+    /invalid persisted annotation publisher state/);
 });

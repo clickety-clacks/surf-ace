@@ -1749,6 +1749,7 @@ async function boot(): Promise<void> {
   });
 
   core = new SurfaceCore({
+    annotationClientId: registrationClientId(identity.publicKeyPem),
     clientIdentity: identityFingerprint,
     persistentState,
   });

@@ -70,6 +70,7 @@ import {
   type LocklessSurfaceAdmissionAttempt,
 } from "../../protocol/src/lockless.js";
 import { cloneWindowPlacement, type WindowPlacement } from "./window-placement.js";
+import { AnnotationPublisherOutbox, type PersistentAnnotationPublisher } from "./annotation-publisher-outbox.js";
 
 type ContentPayload = ContentSetRequest["payload"]["content"];
 type AuthoritativeTopologyPayload = Omit<TopologyApplyRequest["payload"], "panes"> & {
@@ -199,6 +200,7 @@ export type PaneNavigationDirection = "down" | "left" | "right" | "up";
 
 export type PersistentSurfaceState = {
   admissionAttempts?: PersistentSurfaceAdmissionAttempt[];
+  annotationPublisher?: PersistentAnnotationPublisher;
   lockless?: PersistentLocklessClientState;
   nextAdmissionAttemptSequence?: number;
   primarySurfaceId: string | null;
@@ -650,8 +652,10 @@ export class SurfaceCore {
   private readonly now: () => number;
   private nextAdmissionAttemptSequence: number;
   private persistentState: PersistentSurfaceState;
+  readonly annotationPublisher: AnnotationPublisherOutbox | null;
 
   constructor(options?: {
+    annotationClientId?: string;
     clientIdentity?: string;
     logger?: { warn?: (message: string) => void };
     now?: () => number;
@@ -663,6 +667,12 @@ export class SurfaceCore {
       primarySurfaceId: null,
       version: 1,
     };
+    if (this.persistentState.annotationPublisher && !options?.annotationClientId) {
+      throw new TypeError("persisted annotation publisher requires its client ID");
+    }
+    this.annotationPublisher = options?.annotationClientId
+      ? new AnnotationPublisherOutbox(options.annotationClientId, this.persistentState.annotationPublisher)
+      : null;
     this.admissionAttempts = structuredClone(
       this.persistentState.admissionAttempts ?? [],
     );
@@ -731,6 +741,9 @@ export class SurfaceCore {
 
   private restorePersistentState(state: PersistentSurfaceState): void {
     this.persistentState = structuredClone(state);
+    if (this.annotationPublisher && state.annotationPublisher) {
+      this.annotationPublisher.restore(state.annotationPublisher);
+    }
     this.surfaces.clear();
     for (const record of state.surfaces ?? []) {
       const surface = deserializeSurface(record, this.now());
@@ -744,6 +757,7 @@ export class SurfaceCore {
   getPersistentState(): PersistentSurfaceState {
     return {
       ...structuredClone(this.persistentState),
+      ...(this.annotationPublisher ? { annotationPublisher: this.annotationPublisher.snapshot() } : {}),
       admissionAttempts: structuredClone(this.admissionAttempts),
       lockless: this.locklessAuthority.exportState(),
       nextAdmissionAttemptSequence: this.nextAdmissionAttemptSequence,

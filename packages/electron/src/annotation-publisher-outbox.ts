@@ -37,6 +37,7 @@ export type AnnotationPublisherSurface = {
   trailingGap: PendingGap | null;
 };
 export type PersistentAnnotationPublisher = {
+  clientId: string;
   sourceEpoch: string;
   surfaces: Record<string, AnnotationPublisherSurface>;
   version: 1;
@@ -57,12 +58,19 @@ export class AnnotationPublisherOutbox {
       throw new RangeError("invalid annotation publisher limits");
     }
     this.state = structuredClone(state ?? {
-      version: 1, sourceEpoch: randomBytes(16).toString("hex"), surfaces: {},
+      version: 1, clientId, sourceEpoch: randomBytes(16).toString("hex"), surfaces: {},
     });
     this.validateState();
   }
 
   snapshot(): PersistentAnnotationPublisher { return structuredClone(this.state); }
+
+  restore(state: PersistentAnnotationPublisher): void {
+    const previous = this.state;
+    this.state = structuredClone(state);
+    try { this.validateState(); }
+    catch (error) { this.state = previous; throw error; }
+  }
 
   private surface(surfaceId: string): AnnotationPublisherSurface {
     const existing = this.state.surfaces[surfaceId];
@@ -85,7 +93,8 @@ export class AnnotationPublisherOutbox {
     const surface = this.state.surfaces[surfaceId];
     if (!surface || surface.fifo.length > this.maxRecords ||
         surface.fifo.some((entry) => Buffer.byteLength(entry.canonical, "utf8") > ANNOTATION_MAX_RECORD_BYTES)) return false;
-    return Buffer.byteLength(JSON.stringify({ version: 1, sourceEpoch: this.state.sourceEpoch, ...surface }), "utf8") +
+    return Buffer.byteLength(JSON.stringify({ version: 1, clientId: this.clientId,
+      sourceEpoch: this.state.sourceEpoch, ...surface }), "utf8") +
       2 * GAP_SLOT_BYTES <= this.maxBytes;
   }
 
@@ -182,7 +191,8 @@ export class AnnotationPublisherOutbox {
   }
 
   private validateState(): void {
-    if (this.state.version !== 1 || !/^[0-9a-f]{32}$/.test(this.state.sourceEpoch) ||
+    if (this.state.version !== 1 || this.state.clientId !== this.clientId ||
+        !/^[0-9a-f]{32}$/.test(this.state.sourceEpoch) ||
         !this.state.surfaces || typeof this.state.surfaces !== "object") {
       throw new TypeError("invalid persisted annotation publisher state");
     }
