@@ -1275,6 +1275,8 @@ function blockInteractionWhileAnnotating(view: PaneView, event: Event): void {
 
 function bindDrawing(view: PaneView): void {
   let activeStroke: Stroke | null = null;
+  let captureReady = false;
+  let activeCapture: Promise<boolean> | null = null;
   const canvas = view.annotationCanvas;
   const pointFromEvent = (event: PointerEvent): Stroke["points"][number] => {
     const rect = canvas.getBoundingClientRect();
@@ -1319,6 +1321,17 @@ function bindDrawing(view: PaneView): void {
       strokeId: `stroke_${crypto.getRandomValues(new Uint32Array(3)).join("")}`,
       tool: event.pointerType === "pen" ? "pencil" : event.pointerType === "touch" ? "finger" : "mouse",
     };
+    captureReady = false;
+    const stroke = activeStroke;
+    activeCapture = window.surfAce.captureAnnotationOpen(view.paneId, stroke.points[0]!.timestamp)
+      .catch(() => false)
+      .then((captured) => {
+        if (activeStroke === stroke) {
+          captureReady = true;
+          redrawDrawings(view, [...(paneStateFor(view)?.drawings ?? []), stroke]);
+        }
+        return captured;
+      });
     canvas.setPointerCapture(event.pointerId);
     event.preventDefault();
   });
@@ -1328,16 +1341,23 @@ function bindDrawing(view: PaneView): void {
       return;
     }
     activeStroke.points.push(pointFromEvent(event));
-    redrawDrawings(view, [...(paneStateFor(view)?.drawings ?? []), activeStroke]);
+    if (captureReady) redrawDrawings(view, [...(paneStateFor(view)?.drawings ?? []), activeStroke]);
     event.preventDefault();
   });
 
-  const finishStroke = (event: PointerEvent) => {
+  const finishStroke = async (event: PointerEvent) => {
     if (!activeStroke) {
       return;
     }
     const stroke = activeStroke;
+    const capture = activeCapture;
     activeStroke = null;
+    activeCapture = null;
+    if (canvas.hasPointerCapture(event.pointerId)) {
+      canvas.releasePointerCapture(event.pointerId);
+    }
+    event.preventDefault();
+    await capture;
     if (stroke.points.length > 0) {
       window.surfAce.command({
         paneId: view.paneId,
@@ -1345,12 +1365,8 @@ function bindDrawing(view: PaneView): void {
         type: "draw-stroke",
       });
     }
-    if (canvas.hasPointerCapture(event.pointerId)) {
-      canvas.releasePointerCapture(event.pointerId);
-    }
     const pane = paneStateFor(view);
-    redrawDrawings(view, pane?.drawings ?? []);
-    event.preventDefault();
+    if (!activeStroke) redrawDrawings(view, pane?.drawings ?? []);
   };
 
   canvas.addEventListener("pointerup", finishStroke);

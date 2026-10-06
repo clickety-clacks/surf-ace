@@ -1512,6 +1512,51 @@ function installWebAuthnAccountSelection(): void {
 }
 
 function installIpc(): void {
+  ipcMain.handle("surface:annotation-open", async (event, payload: { paneId?: unknown; openedAt?: unknown }) => {
+    const surfaceId = surfaceIdForSender(event.sender);
+    const paneId = payload?.paneId;
+    const openedAt = payload?.openedAt;
+    if (!surfaceId || !Number.isSafeInteger(paneId) || Number(paneId) < 1 ||
+        !Number.isSafeInteger(openedAt) || Number(openedAt) < 0 || !core.annotationPublisher) return false;
+    try {
+      const pane = core.getRendererWindowState(surfaceId).panes.find((item) => item.paneId === paneId);
+      const contentId = pane?.content.contentId;
+      const bounds = core.paneBounds(surfaceId, Number(paneId));
+      if (!pane?.annotationBorderVisible || !contentId || !bounds) return false;
+      const existing = core.annotationPublisher.openFrameFor(surfaceId, Number(paneId));
+      if (existing) return existing.contentId === contentId;
+      const image = await capturePaneImage(surfaceId, Number(paneId));
+      if (!image) return false;
+      const snapshot = core.captureSnapshot(surfaceId, Number(paneId));
+      const content = pane.content.content;
+      const url = content && typeof content === "object" && "url" in content &&
+        typeof content.url === "string" ? content.url : undefined;
+      await core.transactionAsync(async () => {
+        const outbox = core.annotationPublisher!;
+        if (outbox.openFrameFor(surfaceId, Number(paneId))) return;
+        const previous = outbox.snapshot();
+        try {
+          outbox.openFrame(surfaceId, Number(paneId), {
+            contextKey: contentId, contentId, ...(url ? { url } : {}), image,
+            openedAt: Number(openedAt), scrollOffset: snapshot.viewport.scrollOffset,
+            viewport: { width: Math.max(1, Math.floor(bounds.width)),
+              height: Math.max(1, Math.floor(bounds.height)), scale: 1 },
+          });
+          await persistState();
+        } catch (error) {
+          outbox.restore(previous);
+          throw error;
+        }
+      });
+      return true;
+    } catch (error) {
+      clientWarn("annotation_at_open_capture_failed", {
+        surface_id: surfaceId, pane_id: paneId, ...errorDiagnosticFields(error),
+      });
+      return false;
+    }
+  });
+
   ipcMain.handle("surface:get-bootstrap", async (event) => {
     const surfaceId = surfaceIdForSender(event.sender);
     if (!surfaceId) {
