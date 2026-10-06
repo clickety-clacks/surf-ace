@@ -87,6 +87,50 @@ test("server self-check rejects an SRV target that resolves only through loopbac
   assert.deepEqual(attempted, []);
 });
 
+test("IPv4-only Bonjour records ignore macOS loopback aliases and unserved IPv6 results", async () => {
+  const attempted: string[] = [];
+  const result = await checkPublishedServerRecord(record({
+    addresses: ["192.168.50.159"],
+    host: "eezo.local",
+  }), LISTENER_PORT, {
+    expectedHost: "eezo.local",
+    resolveTargetAddresses: async () => [
+      "::1",
+      "127.0.0.1",
+      "fe80::1",
+      "192.168.50.159",
+      "fe80::c76:1234:5678:9abc",
+      "fd44:c7ed:abcd::8f5",
+    ],
+    requestTopology: async (endpoint) => {
+      attempted.push(endpoint);
+      return { clients: [] };
+    },
+  });
+
+  assert.deepEqual(attempted, ["ws://192.168.50.159:19001/ws"]);
+  assert.deepEqual(result, {
+    endpoint: "ws://192.168.50.159:19001/ws",
+    transport: "srv-target",
+  });
+});
+
+test("a loopback-only IPv4 target stays unhealthy when only unserved IPv6 addresses accompany it", async () => {
+  const attempted: string[] = [];
+  await assert.rejects(
+    checkPublishedServerRecord(record({ addresses: ["192.168.50.159"] }), LISTENER_PORT, {
+      resolveTargetAddresses: async () => ["127.0.1.1", "::1", "fe80::1", "fd44:c7ed:abcd::8f5"],
+      requestTopology: async (endpoint) => {
+        attempted.push(endpoint);
+        return { clients: [] };
+      },
+    }),
+    (error: unknown) => error instanceof CentralServerHealthError &&
+      error.code === "advertised_target_loopback_resolution:127.0.1.1",
+  );
+  assert.deepEqual(attempted, []);
+});
+
 test("server self-check rejects a link-local target without a matching local interface scope", async () => {
   await assert.rejects(
     checkPublishedServerRecord(record({ addresses: ["fe80::1"] }), LISTENER_PORT, {

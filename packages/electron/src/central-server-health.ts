@@ -125,6 +125,10 @@ function addressWithoutScope(value: string): string {
   return value.replace(/^\[|\]$/g, "").split("%", 1)[0] ?? value;
 }
 
+function addressFamily(value: string): number {
+  return isIP(addressWithoutScope(value));
+}
+
 function scopedTransportAddresses(
   values: unknown[],
   networkInterfaces: ReturnType<typeof os.networkInterfaces>,
@@ -361,6 +365,33 @@ export async function checkPublishedServerRecord(
     }
     targetResolutionError = error;
     targetAddresses = [];
+  }
+
+  if (targetAddresses.length > 0 && recordAddresses.length > 0) {
+    // DNS lookup can include local loopback aliases and address families this
+    // Bonjour record does not publish (for example, IPv6 on an IPv4-only
+    // listener). The DNS-SD record defines which transport families this
+    // instance actually serves; compare only those families, while still
+    // rejecting a target that resolves to loopback in a served family.
+    const recordFamilies = new Set(recordAddresses.map(addressFamily));
+    const targetAddressesForRecordFamilies = targetAddresses.filter((address) =>
+      recordFamilies.has(addressFamily(address)),
+    );
+    const nonLoopbackTargetAddresses = targetAddressesForRecordFamilies.filter((address) =>
+      !isLoopbackAddress(address),
+    );
+    if (nonLoopbackTargetAddresses.length > 0) {
+      targetAddresses = nonLoopbackTargetAddresses;
+    } else {
+      const loopback = targetAddressesForRecordFamilies.find(isLoopbackAddress) ??
+        (targetAddresses.every(isLoopbackAddress) ? targetAddresses[0] : undefined);
+      if (loopback) throw new CentralServerHealthError(advertisedTargetResolutionError(loopback));
+
+      // No resolved address uses a family present in the service record. Treat
+      // that as an unusable SRV resolution and use the record's transport
+      // addresses below; the record still has to pass the real handshake.
+      targetAddresses = [];
+    }
   }
 
   if (targetAddresses.length > 0) {
