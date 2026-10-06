@@ -10,6 +10,7 @@ import {
   type AnnotationSourceGap,
   type AnnotationSourceRecord,
   type CanonicalJson,
+  type Stroke,
 } from "@surf-ace/protocol";
 
 export const ANNOTATION_PUBLISHER_MAX_BYTES = 67_108_864;
@@ -39,6 +40,7 @@ export type AnnotationOpenFrame = {
   openedAt: number;
   updatedAt: number;
   image: string;
+  failed?: true;
   strokes: Array<{
     strokeId: string;
     points: Array<{ x: number; y: number; pressure?: number }>;
@@ -215,6 +217,35 @@ export class AnnotationPublisherOutbox {
       frame.strokes.pop();
       frame.updatedAt = previousUpdatedAt;
       throw new RangeError("annotation frame strokes exceed publisher state capacity");
+    }
+  }
+
+  /** Keep the direct-client stroke even if the bounded publisher copy is lost. */
+  recordStroke(surfaceId: string, paneId: number, stroke: Stroke): void {
+    const frame = this.state.surfaces[surfaceId]?.openFrames?.[String(paneId)];
+    if (!frame || frame.failed) return;
+    try {
+      if (stroke.points.length === 0) throw new RangeError("empty annotation stroke");
+      const xs = stroke.points.map((point) => point.x);
+      const ys = stroke.points.map((point) => point.y);
+      const x = Math.min(...xs);
+      const y = Math.min(...ys);
+      const last = stroke.points[stroke.points.length - 1]!;
+      this.appendFrameStroke(surfaceId, paneId, {
+        strokeId: stroke.strokeId,
+        points: stroke.points.map((point) => ({ x: point.x, y: point.y,
+          ...(point.pressure === undefined ? {} : { pressure: point.pressure }) })),
+        bbox: { x, y, width: Math.max(...xs) - x, height: Math.max(...ys) - y },
+        startedAt: stroke.points[0]!.timestamp, endedAt: last.timestamp,
+      });
+    } catch {
+      frame.failed = true;
+      frame.image = "";
+      frame.strokes = [];
+      this.state.surfaces[surfaceId]!.diagnostic = {
+        code: "annotation_frame_source_overflow",
+        sequence: this.state.surfaces[surfaceId]!.nextSequence,
+      };
     }
   }
 

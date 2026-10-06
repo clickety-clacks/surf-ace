@@ -3544,6 +3544,7 @@ export class SurfaceCore {
       throw new SurfaceCoreError("invalid_operation", "No active content for annotation");
     }
 
+    this.annotationPublisher?.recordStroke(surfaceId, paneId, stroke);
     entry.annotations = [...entry.annotations, structuredClone(stroke)];
     pane.annotationFrameOpen = true;
     pane.dirtyStrokeIds.push(stroke.strokeId);

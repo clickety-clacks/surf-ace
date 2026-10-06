@@ -102,3 +102,21 @@ test("at-open image and viewport survive restart and cannot be replaced by a lat
   assert.equal(restarted.openFrameFor(surfaceId, 1), null);
   assert.notEqual(restarted.frameId(surfaceId, 1), first.frameId);
 });
+
+test("completed source stroke is copied into the at-open frame with bounded geometry", () => {
+  const outbox = new AnnotationPublisherOutbox(clientId);
+  outbox.openFrame(surfaceId, 1, {
+    contextKey: "content-one", contentId: "content-one", image: "at-open-image",
+    openedAt: 100, scrollOffset: { x: 0, y: 0 }, viewport: { width: 10, height: 10, scale: 1 },
+  });
+  outbox.recordStroke(surfaceId, 1, { strokeId: "stroke-one", tool: "mouse", points: [
+    { x: 6, y: 7, timestamp: 110 }, { x: 2, y: 3, timestamp: 120, pressure: 0.5 },
+  ] } as never);
+  const frame = new AnnotationPublisherOutbox(clientId, outbox.snapshot()).openFrameFor(surfaceId, 1)!;
+  assert.equal(frame.failed, undefined);
+  assert.equal(frame.updatedAt, 120);
+  assert.deepEqual(frame.strokes[0], {
+    strokeId: "stroke-one", points: [{ x: 6, y: 7 }, { x: 2, y: 3, pressure: 0.5 }],
+    bbox: { x: 2, y: 3, width: 4, height: 4 }, startedAt: 110, endedAt: 120,
+  });
+});

@@ -1524,9 +1524,8 @@ function installIpc(): void {
       const bounds = core.paneBounds(surfaceId, Number(paneId));
       if (!pane?.annotationBorderVisible || !contentId || !bounds) return false;
       const existing = core.annotationPublisher.openFrameFor(surfaceId, Number(paneId));
-      if (existing) return existing.contentId === contentId;
-      const image = await capturePaneImage(surfaceId, Number(paneId));
-      if (!image) return false;
+      if (existing) return existing.contentId === contentId && !existing.failed;
+      const image = await capturePaneImage(surfaceId, Number(paneId)).catch(() => null);
       const snapshot = core.captureSnapshot(surfaceId, Number(paneId));
       const content = pane.content.content;
       const url = content && typeof content === "object" && "url" in content &&
@@ -1537,7 +1536,8 @@ function installIpc(): void {
         const previous = outbox.snapshot();
         try {
           outbox.openFrame(surfaceId, Number(paneId), {
-            contextKey: contentId, contentId, ...(url ? { url } : {}), image,
+            contextKey: contentId, contentId, ...(url ? { url } : {}),
+            image: image ?? "", ...(image ? {} : { failed: true as const }),
             openedAt: Number(openedAt), scrollOffset: snapshot.viewport.scrollOffset,
             viewport: { width: Math.max(1, Math.floor(bounds.width)),
               height: Math.max(1, Math.floor(bounds.height)), scale: 1 },
@@ -1548,7 +1548,7 @@ function installIpc(): void {
           throw error;
         }
       });
-      return true;
+      return Boolean(image);
     } catch (error) {
       clientWarn("annotation_at_open_capture_failed", {
         surface_id: surfaceId, pane_id: paneId, ...errorDiagnosticFields(error),
