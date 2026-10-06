@@ -398,10 +398,11 @@ export class PostgresCustodyAdapter<M extends LeaseMode> {
     this.assertMode("writer");
     return await this.enqueuePrimary(async () => {
       this.assertUsable();
-      const result = await this.primary.query<{ info: AnnotationInfo }>(
-        "SELECT surf_ace_allocator.annotation_info($1,$2,$3) AS info",
-        [this.config.fleetId, this.token.leaseGeneration, this.token.leaseId],
-      );
+      const result = await transaction(this.primary, "annotation_info", undefined,
+        async () => await this.primary.query<{ info: AnnotationInfo }>(
+          "SELECT surf_ace_allocator.annotation_info($1,$2,$3) AS info",
+          [this.config.fleetId, this.token.leaseGeneration, this.token.leaseId],
+        ));
       return result.rows[0]!.info;
     });
   }
