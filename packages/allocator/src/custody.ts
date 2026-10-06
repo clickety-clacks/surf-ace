@@ -140,8 +140,11 @@ export function custodyUncertaintyDiagnostic(error: PersistenceOutcomeUnknownErr
     : null;
   const token = (value: unknown): string | null =>
     typeof value === "string" && /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(value) ? value : null;
+  const causeCode = causeRecord?.code;
   return {
-    causeCode: token(causeRecord?.code),
+    causeCode: typeof causeCode === "string" && /^[0-9A-Z]{5}$/.test(causeCode)
+      ? causeCode
+      : token(causeCode),
     causeMessageSha256: createHash("sha256")
       .update(String(causeRecord?.message ?? cause ?? ""))
       .digest("hex"),

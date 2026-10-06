@@ -32,3 +32,19 @@ test("custody uncertainty refuses unbounded or unsafe cause tokens", () => {
   assert.equal(diagnostic.causeName, "unknown");
   assert.doesNotMatch(JSON.stringify(diagnostic), /sensitive detail|forged-log-line/);
 });
+
+test("custody uncertainty retains a PostgreSQL SQLSTATE on a commit failure", () => {
+  const error = new PersistenceOutcomeUnknownError("claim_pane", {
+    code: "40001",
+    message: "postgresql://writer:secret@db/fleet serialization failure",
+    name: "error",
+  }, "commit_ack");
+  const diagnostic = custodyUncertaintyDiagnostic(error);
+
+  assert.equal(diagnostic.operation, "claim_pane");
+  assert.equal(diagnostic.stage, "commit_ack");
+  assert.equal(diagnostic.causeName, "error");
+  assert.equal(diagnostic.causeCode, "40001");
+  assert.match(diagnostic.causeMessageSha256, /^[a-f0-9]{64}$/);
+  assert.doesNotMatch(JSON.stringify(diagnostic), /secret|postgresql:\/\//);
+});
