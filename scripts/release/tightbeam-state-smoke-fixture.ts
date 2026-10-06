@@ -613,6 +613,7 @@ async function startPackagedServer(launcher: string, config: unknown, root: stri
   let pending = "";
   let stdoutBytes = 0;
   let stderrBytes = 0;
+  let stderrTail = "";
   let readyResolve!: (value: any) => void;
   let readyReject!: (error: Error) => void;
   const readyPromise = new Promise<any>((resolve, reject) => {
@@ -657,7 +658,10 @@ async function startPackagedServer(launcher: string, config: unknown, root: stri
       }
     }
   });
-  child.stderr.on("data", (chunk: Buffer) => { stderrBytes += chunk.length; });
+  child.stderr.on("data", (chunk: Buffer) => {
+    stderrBytes += chunk.length;
+    stderrTail = (stderrTail + chunk.toString("utf8")).slice(-16_384);
+  });
   child.once("close", (code, signal) => {
     if (!events.some((event) => event.event === "ready")) {
       readyReject(new Error(`${label}_packaged_server_exited_before_ready:${code ?? signal ?? "unknown"}`));
@@ -704,7 +708,18 @@ async function startPackagedServer(launcher: string, config: unknown, root: stri
       ]);
       const stopped = events.find((event) => event.event === "stopped");
       if (closed.code !== 0 || stopped?.status !== "clean" || stopped?.pid !== child.pid) {
-        throw new Error(`${label}_packaged_server_shutdown_invalid:${closed.code ?? closed.signal ?? "unknown"}`);
+        const diagnostics = stderrTail.split("\n").flatMap((line) => {
+          try {
+            const event = JSON.parse(line);
+            return event?.event === "shutdown_error" ? [event] : [];
+          } catch { return []; }
+        });
+        const diagnostic = diagnostics.at(-1);
+        const detail = diagnostic
+          ? [diagnostic.name, diagnostic.code, diagnostic.causeCode, diagnostic.frames?.[0]]
+            .filter((value) => typeof value === "string" && value.length > 0).join("|")
+          : "missing_shutdown_diagnostic";
+        throw new Error(`${label}_packaged_server_shutdown_invalid:${closed.code ?? closed.signal ?? "unknown"}:${detail}`);
       }
       return {
         exitCode: closed.code,

@@ -23,6 +23,21 @@ function publicError(code) {
   return error;
 }
 
+function shutdownFailureDiagnostic(error) {
+  const token = (value) => typeof value === "string" && /^[A-Za-z0-9_.-]{1,64}$/.test(value) ? value : null;
+  const frames = typeof error?.stack === "string"
+    ? error.stack.split("\n").slice(1).filter((line) => /^\s*at /.test(line)).slice(0, 4)
+      .map((line) => line.trim().slice(0, 240))
+    : [];
+  return {
+    event: "shutdown_error",
+    name: token(error?.name),
+    code: token(error?.code),
+    causeCode: token(error?.cause?.code),
+    frames,
+  };
+}
+
 function isPlainObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -321,7 +336,8 @@ async function startForeground(config, options = {}) {
         await service.close();
         write(JSON.stringify({ event: "stopped", pid: process.pid, signal, status: "clean" }));
         resolve({ endpoint: service.health.snapshot().endpoint, status: "stopped" });
-      } catch {
+      } catch (error) {
+        process.stderr.write(`${JSON.stringify(shutdownFailureDiagnostic(error))}\n`);
         reject(publicError("server_shutdown_failed"));
       }
     };
@@ -361,6 +377,7 @@ module.exports = {
   parseCommand,
   parseForegroundOutputLine,
   readServerConfig,
+  shutdownFailureDiagnostic,
   startForeground,
   validateServerConfig,
 };

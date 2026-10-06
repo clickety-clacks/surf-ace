@@ -1286,7 +1286,7 @@ test("Linux fresh-install raw CLI evidence binds two isolated roots to their cli
 });
 
 test("Tightbeam v0.2.5 binds the landed discovery-integrity candidate, six hosted assets, and tooling identity", () => {
-  assert.equal(TIGHTBEAM_TOOLING_TAG, "surf-ace-release-tooling-tightbeam-v0.2.5-r8");
+  assert.equal(TIGHTBEAM_TOOLING_TAG, "surf-ace-release-tooling-tightbeam-v0.2.5-r9");
   assert.deepEqual(TIGHTBEAM, {
     candidateCommit: "a719c3c394168f772afedd332404c9ee9f71b208",
     sourceTag: "surf-ace-tightbeam-v0.2.5-r2", version: "0.2.5", toolingTag: TIGHTBEAM_TOOLING_TAG,
@@ -1618,6 +1618,21 @@ test("Tightbeam foreground output separates product diagnostics from lifecycle e
   assert.throws(() => tightbeamServerLauncher.defaultDiagnosticLogPath(config, {
     SURF_ACE_CLIENT_DIAGNOSTIC_LOG: "relative/diagnostics.log",
   }), /server_diagnostic_log_path_invalid/);
+});
+
+test("Tightbeam launcher reports bounded shutdown location without exposing error messages", () => {
+  const error = new Error("postgresql://user:secret@host/database");
+  error.code = "57P01";
+  error.stack = `Error: postgresql://user:secret@host/database\n    at Custody.release (server.js:123:4)\n    at async close (central-server.js:45:2)`;
+  const diagnostic = tightbeamServerLauncher.shutdownFailureDiagnostic(error);
+  assert.deepEqual(diagnostic, {
+    event: "shutdown_error",
+    name: "Error",
+    code: "57P01",
+    causeCode: null,
+    frames: ["at Custody.release (server.js:123:4)", "at async close (central-server.js:45:2)"],
+  });
+  assert.doesNotMatch(JSON.stringify(diagnostic), /secret/);
 });
 
 test("Tightbeam foreground lifecycle holds and releases its server on SIGTERM without logging custody URLs", async (t) => {
@@ -2860,7 +2875,7 @@ test("v0.2.5 standalone specification and release gates bind the product and all
   assert.match(workflow, /publish_release:[\s\S]*?default: false/);
   assert.match(workflow, /PRODUCT_COMMIT: a719c3c394168f772afedd332404c9ee9f71b208/);
   assert.match(workflow, /PRODUCT_TAG: surf-ace-tightbeam-v0\.2\.5-r2/);
-  assert.match(workflow, /TOOLING_TAG: surf-ace-release-tooling-tightbeam-v0\.2\.5-r8/);
+  assert.match(workflow, /TOOLING_TAG: surf-ace-release-tooling-tightbeam-v0\.2\.5-r9/);
   assert.match(workflow, /GITHUB_EVENT_NAME/);
   assert.match(workflow, /GITHUB_REF_TYPE/);
   assert.match(workflow, /node tooling\/scripts\/release\/build-tightbeam-release\.mjs/);
