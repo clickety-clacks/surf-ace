@@ -359,6 +359,7 @@ final class SurfAceRuntime {
     @ObservationIgnored private let locklessDeliveryWaitObserver: (@Sendable () -> Void)?
     @ObservationIgnored private var identity: SurfAceIdentity?
     @ObservationIgnored private var centralRegistration: SurfAceCentralRegistration?
+    @ObservationIgnored private var annotationPublisher: SurfAceAnnotationPublisher?
     @ObservationIgnored private var centralConnectionError: String?
     @ObservationIgnored private var confirmedPaneLabels: [String: Int64] = [:]
     private var centralConnectionState: SurfAceConnectionBarState = .disconnected
@@ -513,6 +514,7 @@ final class SurfAceRuntime {
             )
             publishBonjour()
             startCentralRegistration()
+            startAnnotationPublisher()
         } catch {
             let details = startupFailureMessage(for: error)
             surfAceServerRuntimeLog(
@@ -565,7 +567,27 @@ final class SurfAceRuntime {
         registration.start()
     }
 
+    private func startAnnotationPublisher() {
+        guard annotationPublisher == nil,
+              let address = ProcessInfo.processInfo.environment["SURF_ACE_SERVER"],
+              let endpoint = URL(string: address),
+              ["ws", "wss"].contains(endpoint.scheme?.lowercased() ?? ""),
+              endpoint.host != nil else { return }
+        do {
+            let adapter = try ensureLocklessAdapter()
+            let publisher = try SurfAceAnnotationPublisher(adapter: adapter, endpoint: endpoint) { error in
+                surfAceServerRuntimeLog("event=annotation_publisher_failed \(surfAceDiagnosticFields([("error", String(describing: error))]))")
+            }
+            annotationPublisher = publisher
+            publisher.notify()
+        } catch {
+            surfAceServerRuntimeLog("event=annotation_publisher_unavailable \(surfAceDiagnosticFields([("error", String(describing: error))]))")
+        }
+    }
+
     func stop() async {
+        annotationPublisher?.stop()
+        annotationPublisher = nil
         centralRegistration?.stop()
         centralRegistration = nil
         updateCentralRegistrationStatus(.disconnected)
@@ -3580,7 +3602,8 @@ final class SurfAceRuntime {
         let store = SurfAceLocklessGenerationStore(stateURL: stateURL)
         let configuredRegistry = ProcessInfo.processInfo.environment["SURF_ACE_SERVER"]
             .flatMap(URL.init(string:))
-        let annotationClientId = configuredRegistry?.scheme == "ws" && configuredRegistry?.host != nil
+        let annotationClientId = ["ws", "wss"].contains(configuredRegistry?.scheme?.lowercased() ?? "")
+            && configuredRegistry?.host != nil
             ? identity?.clientId : nil
         let adapter = try SurfAceLocklessRuntimeAdapter(store: store, annotationClientId: annotationClientId)
         locklessAdapter = adapter

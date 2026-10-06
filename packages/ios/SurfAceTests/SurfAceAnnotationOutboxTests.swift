@@ -160,3 +160,80 @@ final class SurfAceAnnotationOutboxTests: XCTestCase {
         try state.validate()
     }
 }
+
+@MainActor
+private final class AnnotationWireProbe {
+    var records: [String] = []
+    var connections = 0
+}
+
+@MainActor
+private final class AnnotationWireProbeTransport: SurfAceAnnotationWireTransport {
+    let probe: AnnotationWireProbe
+    init(_ probe: AnnotationWireProbe) {
+        self.probe = probe
+        probe.connections += 1
+    }
+
+    func exchange(_ data: Data) async throws -> Data {
+        let request = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let op = try XCTUnwrap(request["op"] as? String)
+        let id = try XCTUnwrap(request["id"] as? String)
+        var reply: [String: Any] = ["v": 1, "type": "response", "op": op, "id": id, "ok": true]
+        if op != "annotation.hello" {
+            let payload = try XCTUnwrap(request["payload"] as? [String: Any])
+            let record = try XCTUnwrap(payload["record"] as? [String: Any])
+            let canonical = try JSONSerialization.data(withJSONObject: record, options: [.sortedKeys])
+            probe.records.append(String(decoding: canonical, as: UTF8.self))
+            if probe.records.count == 1 { throw URLError(.networkConnectionLost) }
+            reply["payload"] = [
+                "serverCursor": ["epoch": "0123456789abcdef0123456789abcdef", "sequence": "1"],
+                "duplicate": true, "committedAt": "2026-10-06T23:00:00.000Z",
+            ]
+        } else {
+            reply["payload"] = ["registryId": "registry-1"]
+        }
+        return try JSONSerialization.data(withJSONObject: reply)
+    }
+
+    func close() {}
+}
+
+extension SurfAceAnnotationOutboxTests {
+    @MainActor
+    func testPublisherResendsPersistedHeadAfterAmbiguousDisconnect() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SurfAceAnnotationTransport-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = SurfAceLocklessGenerationStore(stateURL: directory.appendingPathComponent("authority-v1.json"))
+        var limits = SurfAceLocklessCapacityLimits.production
+        limits.maxAnnotationPublisherStateBytesPerSurface = Int64(SurfAceAnnotationOutbox.maximumBytes)
+        limits.maxAnnotationPublisherRecordsPerSurface = Int64(SurfAceAnnotationOutbox.maximumRecords)
+        limits.maxRecoverableSurfaceBytes = 704 * 1_024 * 1_024
+        var state = try SurfAceLocklessAuthorityState.empty(limits: limits)
+        state.annotationPublisher = try SurfAceAnnotationOutbox(clientId: "client-1", sourceEpoch: sourceEpoch)
+        let opened = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
+            state: &state, expectedSurfaceSetRevision: state.surfaceSetRevision)
+        let surfaceId = opened.surface.surfaceId
+        _ = try state.annotationPublisher?.append(surfaceId: surfaceId, record: record())
+        let expected = try XCTUnwrap(state.annotationPublisher?.head(surfaceId: surfaceId))
+        try store.save(state)
+        let adapter = try SurfAceLocklessRuntimeAdapter(store: store, annotationClientId: "client-1")
+        let probe = AnnotationWireProbe()
+        let publisher = try SurfAceAnnotationPublisher(
+            adapter: adapter, endpoint: XCTUnwrap(URL(string: "ws://127.0.0.1:19001")),
+            makeTransport: { _ in AnnotationWireProbeTransport(probe) }, onError: { _ in }
+        )
+        publisher.notify()
+        for _ in 0..<80 {
+            if (await adapter.snapshot()).annotationPublisher?.surfaces[surfaceId]?.acceptedCursor != nil { break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        publisher.stop()
+        XCTAssertGreaterThanOrEqual(probe.connections, 2)
+        XCTAssertEqual(probe.records, [expected.canonical, expected.canonical])
+        let saved = try XCTUnwrap(store.load())
+        XCTAssertEqual(saved.annotationPublisher?.surfaces[surfaceId]?.acceptedCursor?.sequence, "1")
+        XCTAssertEqual(saved.annotationPublisher?.pendingSurfaceIds(), [])
+    }
+}
