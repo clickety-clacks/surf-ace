@@ -31,7 +31,7 @@ env:
   RUST_VERSION: 1.89.0
   LINUX_RUST_TARGET: x86_64-unknown-linux-gnu
   MACOS_RUST_TARGET: aarch64-apple-darwin
-  TOOLING_TAG: surf-ace-release-tooling-v0.2.7-r3
+  TOOLING_TAG: surf-ace-release-tooling-v0.2.7-r4
 
 jobs:
   guard:
@@ -464,6 +464,7 @@ jobs:
               fi
               mkdir -p linux-smoke-failure
               find "$smoke_tmp" -type f \( -name 'fresh-install-state.json' -o -name 'fresh-install-state.json.capture.png' \
+                -o -name 'client-flight-recorder.log' \
                 -o -name 'fresh-install.client-flight-recorder.log' -o -name 'fresh-install.second-client-flight-recorder.log' \
                 -o -name 'fresh-install-registry.client-flight-recorder.log' -o -name 'primary.log' -o -name 'witness.log' \) \
                 -exec cp {} linux-smoke-failure/ \;

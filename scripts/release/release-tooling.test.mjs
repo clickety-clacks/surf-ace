@@ -1286,7 +1286,7 @@ test("Linux fresh-install raw CLI evidence binds two isolated roots to their cli
 });
 
 test("Surf Ace v0.2.7 binds the landed resilience candidate, six hosted assets, and tooling identity", () => {
-  assert.equal(TIGHTBEAM_TOOLING_TAG, "surf-ace-release-tooling-v0.2.7-r3");
+  assert.equal(TIGHTBEAM_TOOLING_TAG, "surf-ace-release-tooling-v0.2.7-r4");
   assert.deepEqual(TIGHTBEAM, {
     candidateCommit: "e7da2559d7c7e680a22a986478dff7e97a5f771b",
     sourceTag: "surf-ace-v0.2.7-r2", version: "0.2.7", channel: "surf-ace", toolingTag: TIGHTBEAM_TOOLING_TAG,
@@ -3002,7 +3002,7 @@ test("v0.2.7 standalone specification and release gates bind the product and all
   assert.match(workflow, /publish_release:[\s\S]*?default: false/);
   assert.match(workflow, /PRODUCT_COMMIT: e7da2559d7c7e680a22a986478dff7e97a5f771b/);
   assert.match(workflow, /PRODUCT_TAG: surf-ace-v0\.2\.7-r2/);
-  assert.match(workflow, /TOOLING_TAG: surf-ace-release-tooling-v0\.2\.7-r3/);
+  assert.match(workflow, /TOOLING_TAG: surf-ace-release-tooling-v0\.2\.7-r4/);
   assert.match(workflow, /GITHUB_EVENT_NAME/);
   assert.match(workflow, /GITHUB_REF_TYPE/);
   assert.match(workflow, /node tooling\/scripts\/release\/build-tightbeam-release\.mjs/);
@@ -3038,6 +3038,7 @@ test("v0.2.7 standalone specification and release gates bind the product and all
   assert.match(linuxSmoke, /trap 'rm -rf "\$smoke_tmp"' EXIT/);
   assert.match(linuxSmoke, /timeout --signal=TERM --kill-after=10s 20m sudo -n unshare --net -- bash -c/);
   assert.match(linuxSmoke, /linux_smoke_packaged_acceptance_timeout_20m/);
+  assert.match(linuxSmoke, /-name 'client-flight-recorder\.log'/);
   assert.match(linuxSmoke, /ip route add 224\.0\.0\.0\/4 dev veth0/);
   assert.match(linuxSmoke, /test -z "\$\(ip route show default\)"/);
   assert.match(linuxSmoke, /exec runuser -u "\$smoke_user" -- env/);
