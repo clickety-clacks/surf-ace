@@ -840,7 +840,10 @@ test("configured-first server Bonjour fallback registers and persists clients", 
       return response.payload as { clients: Array<{ clientId: string; surfaces: Array<{ windowLabel: string; panes: Array<{ paneAddress: string }> }> }> };
     };
     const first = await topology();
-    assert.equal(first.clients.length, 2);
+    assert.equal(first.clients.length, 2, JSON.stringify({
+      registeredClientIds: first.clients.map((client) => client.clientId),
+      fixtureClientIds: fixtures.map((fixture) => fixture.clientId),
+    }));
     const firstPaneNumbers = first.clients.flatMap((client) => client.surfaces.flatMap((surface) =>
       surface.panes.map((pane) => Number(pane.paneAddress.slice(surface.windowLabel.length)))));
     assert.equal(firstPaneNumbers.length, 3);
