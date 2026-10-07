@@ -247,6 +247,10 @@ export class AllocatorServer {
           return;
         }
         try {
+          if (registration.op !== "fleet.topology" && !this.custody.registrationReady) {
+            // The registration queue serializes recovery with claims, independent of discovery probes.
+            await this.authority.refreshReadiness();
+          }
           const payload = registration.op === "client.register"
             ? await this.registerClient(registration.payload)
             : registration.op === "pane.claim"
