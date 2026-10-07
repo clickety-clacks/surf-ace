@@ -1,7 +1,6 @@
 import { ServerConnection } from "../../electron/src/server-connection.js";
-import { startCentralServer } from "../../electron/src/central-server.js";
 import assert from "node:assert/strict";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { appendFile, mkdtemp, readFile, rm } from "node:fs/promises";
 import { createServer, createConnection, type Socket } from "node:net";
 import { join } from "node:path";
@@ -20,9 +19,8 @@ import { writePersistentStateFile } from "../../electron/src/persistent-state-fi
 import { SURF_ACE_LOCKLESS_V1_CAPABILITY } from "../../protocol/src/lockless.js";
 import { SurfaceCore } from "../../electron/src/surface-core.js";
 import { SurfaceWsServer } from "../../electron/src/ws-server.js";
-import { BonjourAdvertiser } from "../../electron/src/bonjour-advertiser.js";
 import {
-  createBonjourSurfAceDiscoveryService,
+  type SurfAceDiscoveryEndpoint,
   type SurfAceDiscoveryService,
 } from "../../electron/src/surf-ace-discovery.js";
 
@@ -1003,13 +1001,10 @@ test("configured server registers two stable clients and deduplicates reconnect"
   }
 });
 
-test("configured-first server Bonjour fallback registers and persists clients", { timeout: 90_000 }, async () => {
+test("configured-first server in-process discovery fallback registers and persists clients", { timeout: 90_000 }, async () => {
   const cluster = await startCluster();
   let allocator: AllocatorServer | null = null;
   const clients: ServerConnection[] = [];
-  let central: Awaited<ReturnType<typeof startCentralServer>> | null = null;
-  const prefix = "surf-ace-server-fixture-" + randomUUID();
-  const browsers: SurfAceDiscoveryService[] = [];
   let discoveryStarts = 0;
   let allowConfigured = true;
   let configuredAccepts = 0;
@@ -1026,17 +1021,28 @@ test("configured-first server Bonjour fallback registers and persists clients", 
     upstream.on("close", () => { routeSockets.delete(upstream); socket.destroy(); });
     socket.pipe(upstream).pipe(socket);
   });
-  const discover = (): SurfAceDiscoveryService => {
-    const service = createBonjourSurfAceDiscoveryService({ timeoutMs: 2000 });
-    browsers.push(service);
-    return {
-      getSnapshot: () => service.getSnapshot().filter((endpoint) => endpoint.instanceName === prefix),
-      start: async () => { discoveryStarts++; await service.start(); },
-      stop: () => service.stop(),
-      refreshNow: () => service.refreshNow(),
-      subscribe: (listener) => service.subscribe(() => listener(service.getSnapshot().filter((endpoint) => endpoint.instanceName === prefix))),
-    };
-  };
+  const discover = (): SurfAceDiscoveryService => ({
+    getSnapshot: (): SurfAceDiscoveryEndpoint[] => allocator ? [{
+      busy: false,
+      capabilitiesBitmask: 0,
+      endpointId: `127.0.0.1:${allocator.address.port}/ws#isolated-fixture`,
+      fingerprintPrefix: "fixture",
+      host: "127.0.0.1",
+      instanceName: "isolated allocator fixture",
+      lastSeenAt: Date.now(),
+      name: "isolated allocator fixture",
+      port: allocator.address.port,
+      protocolVersion: 1,
+      role: "server",
+      transportAddresses: ["127.0.0.1"],
+      viewport: { width: 800, height: 600, scale: 1 },
+      wsPath: "/ws",
+    }] : [],
+    start: async () => { discoveryStarts++; },
+    stop: async () => {},
+    refreshNow: async () => {},
+    subscribe: () => () => {},
+  });
   let reader: PublicControllerWireClient | null = null;
   try {
     const recovery = await PostgresCustodyAdapter.initializeAbsentFleet(cluster.config, "alloc_registration-test");
@@ -1048,8 +1054,7 @@ test("configured-first server Bonjour fallback registers and persists clients", 
     clients.push(missing);
     await assert.rejects(missing.synchronize(), /no_surf_ace_server/);
     await missing.stop();
-    central = await startCentralServer({ ...serverConfig(cluster), listenHost: "0.0.0.0" }, prefix);
-    allocator = central.server;
+    allocator = await AllocatorServer.start(serverConfig(cluster));
     await new Promise<void>((resolve) => route.listen(0, "127.0.0.1", resolve));
     const routeAddress = route.address();
     assert.ok(routeAddress && typeof routeAddress !== "string");
@@ -1070,11 +1075,7 @@ test("configured-first server Bonjour fallback registers and persists clients", 
         clientId, core, persist, discovery: discover(),
       });
       clients.push(client);
-      // Publisher and DNS-SD may settle over more than one bounded refresh.
-      for (let attempt = 0; ; attempt++) {
-        try { await client.synchronize(); break; }
-        catch (error) { if (attempt >= 5) throw error; }
-      }
+      await client.synchronize();
       if (name === "one") assert.equal(discoveryStarts, beforeDiscovery);
       else assert.ok(discoveryStarts > beforeDiscovery);
       fixtures.push({ stateDir, clientId, core, surface, persist });
@@ -1194,8 +1195,7 @@ test("configured-first server Bonjour fallback registers and persists clients", 
     await reader?.close();
     for (const socket of routeSockets) socket.destroy();
     await new Promise<void>((resolve) => route.close(() => resolve()));
-    for (const browser of browsers) await browser.stop();
-    await central?.close();
+    await allocator?.close();
     await cluster.stop();
   }
 });
