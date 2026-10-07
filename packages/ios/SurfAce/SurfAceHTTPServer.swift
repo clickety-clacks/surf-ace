@@ -433,8 +433,10 @@ actor SurfAceHTTPServer {
             surfAceServerLog("listener rejected unsupported port=\(port)")
             throw SurfAceHTTPServerError.invalidRequestedPort(port)
         }
-        let address = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil
-            ? "0.0.0.0" : "127.0.0.1"
+        let environment = ProcessInfo.processInfo.environment
+        let isolatedTestHost = environment["SURF_ACE_XCTEST_HOST_NO_AUTOSTART"] == "1"
+            || environment["XCTestConfigurationFilePath"] != nil
+        let address = isolatedTestHost ? "127.0.0.1" : "0.0.0.0"
         guard let bindAddress = IPv4Address(address) else {
             throw SurfAceHTTPServerError.invalidBindAddress
         }

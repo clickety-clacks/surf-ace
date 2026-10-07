@@ -484,7 +484,9 @@ final class SurfAceRuntime {
         surfAceLifecycleLog(
             "event=app_launch \(surfAceDiagnosticFields([("fingerprint", fingerprint), ("screen_name", screenName)]))"
         )
-        let isolatedTestHost = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+        let environment = ProcessInfo.processInfo.environment
+        let isolatedTestHost = environment["SURF_ACE_XCTEST_HOST_NO_AUTOSTART"] == "1"
+            || environment["XCTestConfigurationFilePath"] != nil
         surfAceServerRuntimeLog(
             "event=server_start_request \(surfAceDiagnosticFields([("fixed_port", fixedServerPort), ("health_path", healthPath), ("ws_path", webSocketPath), ("isolated_test_host", isolatedTestHost)]))"
         )
