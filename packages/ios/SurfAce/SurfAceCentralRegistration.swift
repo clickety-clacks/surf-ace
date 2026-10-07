@@ -56,6 +56,34 @@ struct SurfAceProvisionedRegistryBinding: Codable, Equatable, Sendable {
     let binding: SurfAceRegistryBinding
     let confirmedClaims: [SurfAceRegistrationAssignment]
 
+    static func matchesConfirmedClaims(
+        _ provisioned: [SurfAceRegistrationAssignment],
+        _ local: [SurfAceRegistrationAssignment]
+    ) -> Bool {
+        guard !local.isEmpty, provisioned.count == local.count else { return false }
+        var expected: [String: SurfAceRegistrationAssignment] = [:]
+        for claim in provisioned {
+            guard expected.updateValue(claim, forKey: claim.surfaceId) == nil else { return false }
+        }
+        var seen = Set<String>()
+        for claim in local {
+            guard seen.insert(claim.surfaceId).inserted,
+                  let match = expected[claim.surfaceId],
+                  match.windowLabel == claim.windowLabel,
+                  match.panes.count == claim.panes.count else { return false }
+            var expectedPanes: [String: SurfAceRegistrationSurface.Pane] = [:]
+            for pane in match.panes {
+                guard expectedPanes.updateValue(pane, forKey: pane.paneId) == nil else { return false }
+            }
+            var seenPanes = Set<String>()
+            for pane in claim.panes {
+                guard seenPanes.insert(pane.paneId).inserted,
+                      expectedPanes[pane.paneId] == pane else { return false }
+            }
+        }
+        return true
+    }
+
     static func load(from directory: URL) throws -> Self? {
         let url = directory.appendingPathComponent("registry-binding.provisioned.json")
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }

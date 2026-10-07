@@ -14,9 +14,31 @@ export function matchesProvisionedClaims(
   clientId: string,
   claims: ConfirmedRegistryClaim[],
 ): boolean {
-  return provisioned.binding.clientId === clientId &&
-    claims.length > 0 &&
-    JSON.stringify(provisioned.confirmedClaims) === JSON.stringify(claims);
+  if (provisioned.binding.clientId !== clientId || claims.length === 0 ||
+      provisioned.confirmedClaims.length !== claims.length) return false;
+  const expected = new Map<string, ConfirmedRegistryClaim>();
+  for (const claim of provisioned.confirmedClaims) {
+    if (expected.has(claim.surfaceId)) return false;
+    expected.set(claim.surfaceId, claim);
+  }
+  const seen = new Set<string>();
+  for (const claim of claims) {
+    const match = expected.get(claim.surfaceId);
+    if (!match || seen.has(claim.surfaceId) || match.windowLabel !== claim.windowLabel ||
+        match.panes.length !== claim.panes.length) return false;
+    seen.add(claim.surfaceId);
+    const panes = new Map(match.panes.map((pane) => [pane.paneId, pane] as const));
+    if (panes.size !== match.panes.length) return false;
+    const seenPanes = new Set<string>();
+    for (const pane of claim.panes) {
+      const expectedPane = panes.get(pane.paneId);
+      if (!expectedPane || seenPanes.has(pane.paneId) ||
+          expectedPane.paneLabel !== pane.paneLabel ||
+          expectedPane.paneLineageId !== pane.paneLineageId) return false;
+      seenPanes.add(pane.paneId);
+    }
+  }
+  return true;
 }
 
 export async function loadProvisionedRegistryBinding(stateDir: string): Promise<ProvisionedRegistryBinding | null> {
