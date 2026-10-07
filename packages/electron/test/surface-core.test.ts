@@ -3875,3 +3875,12 @@ test("pane number projections require exact registry confirmation", () => {
   assert.equal(core.publicTopologyState(surface.surfaceId).panes[0]?.paneLabel, null);
   assert.equal(core.publicTopologyState(surface.surfaceId).windowLabel, "a");
 });
+
+test("a locally opened surface keeps its provisional letter out of public topology", () => {
+  const core = new SurfaceCore({ persistentState: { primarySurfaceId: null, version: 1 } });
+  const surface = core.createLocklessSurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  assert.match(surface.windowLabel, /^[a-z]+$/);
+  assert.equal(surface.windowLabelConfirmed, false);
+  assert.equal(core.publicTopologyState(surface.surfaceId).windowLabel, null);
+  assert.equal(core.publicTopologyState(surface.surfaceId).panes[0]?.paneLabel, null);
+});

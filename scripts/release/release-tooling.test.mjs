@@ -2744,7 +2744,9 @@ test("Linux fresh-install state driver binds candidate-only inputs and packaged 
   assert.equal(result.mode, "fresh-install");
   assert.equal(result.status, "passed");
   assert.deepEqual(result.registryReleaseWitnessEvents, { beforeRestart: [], afterRestart: [] });
-  assert.equal(result.rawCliEvidence.events.length, 11);
+  assert.equal(result.rawCliEvidence.events.length, events.length);
+  assert.equal(result.rawCliEvidence.events.filter((event) => event.command === "surface-intent").length, 1);
+  assert.equal(result.rawCliEvidence.events.filter((event) => event.command === "topology-intent").length, 1);
   assert.equal(result.rawCliEvidence.events.at(-1).command, "read");
   const unacceptedPushEvents = events.map((event) => event.command === "push" && event.status === 0
     ? { ...event, output: { ...event.output, ok: false }, stdout: JSON.stringify({ ...event.output, ok: false }) }
