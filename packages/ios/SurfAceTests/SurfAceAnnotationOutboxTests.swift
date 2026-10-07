@@ -477,8 +477,8 @@ extension SurfAceAnnotationOutboxTests {
             XCTAssertEqual((error as? URLError)?.code, .networkConnectionLost)
         }
         firstPublisher.stop()
-        XCTAssertNil((await adapter.snapshot()).annotationPublisher?
-            .surfaces[surfaceId]?.acceptedCursor)
+        let afterAmbiguousSend = await adapter.snapshot()
+        XCTAssertNil(afterAmbiguousSend.annotationPublisher?.surfaces[surfaceId]?.acceptedCursor)
         let restartedPublisher = try SurfAceAnnotationPublisher(
             adapter: adapter, endpoint: XCTUnwrap(URL(string: "ws://127.0.0.1:19001")),
             makeTransport: { _ in AnnotationWireProbeTransport(probe) }, onError: { _ in }
