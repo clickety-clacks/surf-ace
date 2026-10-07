@@ -1,7 +1,7 @@
 import { publicReleaseNames } from "./public-release-names.mjs";
 
 // v0.2.5's published identities remain immutable. New releases use Surf Ace names.
-const RELEASE_NAMES = publicReleaseNames({ version: "0.2.6", sourceRevision: "r1", toolingRevision: "r1" });
+const RELEASE_NAMES = publicReleaseNames({ version: "0.2.7", sourceRevision: "r1", toolingRevision: "r1" });
 
 export const TIGHTBEAM_TOOLING_TAG = RELEASE_NAMES.toolingTag;
 
@@ -20,7 +20,7 @@ export const TOOLCHAINS = Object.freeze({
 });
 
 export const TIGHTBEAM = Object.freeze({
-  candidateCommit: "69023a9a291d8196a7cda7bd7ab205c1f9e7d108",
+  candidateCommit: "1221ffb7c2c78607f6496d7c89046805f7f78c67",
   sourceTag: RELEASE_NAMES.sourceTag,
   version: RELEASE_NAMES.version,
   channel: RELEASE_NAMES.channel,

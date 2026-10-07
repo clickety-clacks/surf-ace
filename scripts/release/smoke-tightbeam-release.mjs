@@ -531,8 +531,20 @@ export function validateTightbeamFreshInstallState(stateSequence) {
       migration.restoredHeadHash !== migration.headHashBefore ||
       !Number.isSafeInteger(migration.headSeqBefore) || migration.headSeqBefore < 1 ||
       migration.headSeqAfter !== migration.headSeqBefore ||
+      !/^[a-f0-9]{32}$/.test(migration.annotationEpoch ?? "") ||
       migration.writerCanClaim !== true || migration.witnessSynchronized !== true) {
     throw new Error("fresh_install_v023_migration_unverified");
+  }
+  const annotation = stateSequence.annotationJournal;
+  const accepted = annotation?.acceptedCursor;
+  if (annotation?.status !== "verified" ||
+      !/^[a-f0-9]{32}$/.test(annotation?.journalEpoch ?? "") ||
+      typeof annotation?.consumerId !== "string" || !annotation.consumerId.startsWith("release-") ||
+      typeof annotation?.recordSourceEventId !== "string" || !annotation.recordSourceEventId.startsWith("event-") ||
+      !/^ann1:[a-f0-9]{32}:1$/.test(annotation?.ackCursor ?? "") ||
+      accepted?.epoch !== annotation.journalEpoch || accepted?.sequence !== "1" ||
+      annotation.ackCursor !== `ann1:${accepted.epoch}:${accepted.sequence}`) {
+    throw new Error("fresh_install_annotation_journal_unverified");
   }
   for (const field of ["clientIdentity", "registrationIdentity", "surfaceId", "paneId", "windowLabel", "paneLabel", "databaseIdentity"]) {
     if (after[field] !== before[field]) throw new Error(`fresh_install_${field === "clientIdentity" ? "client_identity" : field}_changed`);
@@ -603,6 +615,7 @@ export function validateTightbeamFreshInstallState(stateSequence) {
     clientAppVersion: before.clientAppVersion,
     clientAppVersionEvidenceSha256: before.clientAppVersionEvidenceSha256,
     contentId: expected.contentId,
+    annotationJournal: { ackCursor: annotation.ackCursor, status: annotation.status },
     databaseIdentity: before.databaseIdentity,
     mode: "fresh-install",
     offlineLocal: {
