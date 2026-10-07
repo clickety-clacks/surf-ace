@@ -1226,6 +1226,10 @@ final class SurfAceRuntime {
         await annotationModeTasks["\(surfaceId):\(paneId)"]?.value
     }
 
+    func awaitAnnotationCommit(surfaceId: String, paneId: Int) async {
+        await annotationCommitTasks["\(surfaceId):\(paneId)"]?.value
+    }
+
     func handlePencilContact(surfaceId: String, paneId: Int) {
         guard let pane = pane(surfaceId: surfaceId, paneId: paneId) else { return }
         guard !pane.annotationMode else {

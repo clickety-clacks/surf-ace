@@ -288,7 +288,7 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         XCTAssertEqual((payload(flush ?? [:])["strokes"] as? [[String: Any]])?.first?["strokeId"] as? String,
                        "after-stage-reentry")
         _ = try await receive(socket, matchingOp: "event.annotation_committed")
-        await runtime.awaitAnnotationModeTransition(surfaceId: sourceSurfaceId, paneId: sourcePaneId)
+        await runtime.awaitAnnotationCommit(surfaceId: sourceSurfaceId, paneId: sourcePaneId)
         let source = await adapter.snapshot().annotationPublisher
         XCTAssertNil(source?.openFrame(surfaceId: sourceSurfaceId, paneId: sourcePaneId))
         let commits = try source?.surfaces[sourceSurfaceId]?.fifo.compactMap { entry -> [String: Any]? in
@@ -474,7 +474,7 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         )
         let firstCommit = try await receive(socket, matchingOp: "event.annotation_committed")
         XCTAssertEqual(payload(firstCommit)["contentId"] as? String, "annotation-content-id")
-        await runtime.awaitAnnotationModeTransition(surfaceId: surface.surfaceId, paneId: pane.paneId)
+        await runtime.awaitAnnotationCommit(surfaceId: surface.surfaceId, paneId: pane.paneId)
         let source = await adapter.snapshot().annotationPublisher
         XCTAssertEqual(source?.surfaces[surface.surfaceId]?.fifo.map(\.kind),
                        ["payload", "payload", "payload"])
