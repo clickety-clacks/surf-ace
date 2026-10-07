@@ -16,8 +16,8 @@ const event = {
 
 test("registry publisher sends only persisted source bytes and removes them after durable acceptance", async () => {
   const core = new SurfaceCore({ annotationClientId: clientId });
-  core.annotationPublisher!.append(surfaceId, event);
   let persisted: PersistentSurfaceState = core.getPersistentState();
+  core.annotationPublisher!.append(surfaceId, event);
   const calls: string[] = [];
   const wire: AnnotationPublisherWire = {
     connect: async () => { calls.push("connect"); },

@@ -95,6 +95,12 @@ export class AnnotationRegistryPublisher {
           })
         : outbox.head(surfaceId);
       if (!entry) continue;
+      // A source mutation can have joined an outstanding core transaction while
+      // its own disk write is queued. Persist the selected canonical head before
+      // the first send, even when an earlier acceptance just persisted.
+      await this.persist();
+      const durableHead = outbox.head(surfaceId);
+      if (!durableHead || durableHead.canonical !== entry.canonical) continue;
       const op = entry.kind === "gap" ? "annotation.source_gap" : "annotation.ingest";
       const response = await this.wire.request(op, { record: JSON.parse(entry.canonical) });
       if (!response.ok) {
