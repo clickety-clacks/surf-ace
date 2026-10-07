@@ -130,6 +130,7 @@ enum SurfAceLocklessTopologyOperations {
             }
             for (surfaceId, label) in labels {
                 candidate.liveSurfaces[surfaceId]?.windowLabel = label
+                candidate.liveSurfaces[surfaceId]?.windowLabelConfirmed = true
             }
         }
     }
@@ -409,7 +410,7 @@ enum SurfAceLocklessTopologyOperations {
                 nextPaneId: 2, nextPaneLabel: 1, paneTombstones: [], panes: ["1": pane], sceneKeys: [],
                 surfaceId: surfaceId, surfaceRevision: 1,
                 topology: .object(["paneId": .integer(1), "type": .string("pane")]),
-                topologyRevision: 0, windowLabel: windowLabel
+                topologyRevision: 0, windowLabel: windowLabel, windowLabelConfirmed: false
             )
             try assertRecoverableCapacity(surface, limits: candidate.limits)
             candidate.liveSurfaces[surfaceId] = surface
@@ -484,6 +485,7 @@ enum SurfAceLocklessTopologyOperations {
             surface.sceneKeys.removeAll()
             if candidate.liveSurfaces.values.contains(where: { $0.windowLabel == surface.windowLabel }) {
                 surface.windowLabel = allocateWindowLabel(&candidate)
+                surface.windowLabelConfirmed = false
             }
             if let placement {
                 surface.nativeRestoreMaterial = .object(["placement": placement])

@@ -719,6 +719,44 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         XCTAssertTrue(probe.laterDeliveryEntered)
     }
 
+    func testForegroundRestoreInTestHostDoesNotPublishBonjour() async throws {
+        XCTAssertEqual(ProcessInfo.processInfo.environment["SURF_ACE_XCTEST_HOST_NO_AUTOSTART"], "1")
+        let suiteName = "SurfAceIsolatedForeground-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        let stateURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(suiteName).json")
+        var createdServices = 0
+        var observeForegroundCompletion = false
+        let foregroundHandled = expectation(description: "isolated foreground notification handled")
+        let publisher = SurfAceBonjourPublisher(
+            serviceFactory: { _, port in
+                createdServices += 1
+                return SurfAceNoNetworkTestService(port: port)
+            },
+            permissionPromptTrigger: {}
+        )
+        let runtime = SurfAceRuntime(
+            userDefaults: defaults,
+            locklessStateURL: stateURL,
+            bonjourPublisher: publisher,
+            foregroundCompletion: {
+                if observeForegroundCompletion { foregroundHandled.fulfill() }
+            }
+        )
+        addTeardownBlock {
+            defaults.removePersistentDomain(forName: suiteName)
+            try? FileManager.default.removeItem(at: stateURL)
+        }
+        addTeardownBlock { await runtime.stop() }
+
+        await runtime.start()
+        XCTAssertGreaterThan(runtime.serverPort, 0)
+        observeForegroundCompletion = true
+        NotificationCenter.default.post(name: UIApplication.willEnterForegroundNotification, object: nil)
+        await fulfillment(of: [foregroundHandled], timeout: 2)
+        XCTAssertEqual(createdServices, 0)
+    }
+
     func testAdmissionProjectionPrecedesItsReclamationEventOnTheWire() async throws {
         let identifier = UUID().uuidString
         let suiteName = "SurfAceLocklessReclamationOrderTests-\(identifier)"
@@ -1503,4 +1541,13 @@ private actor SurfAceAnnotationModeProjectionProbe {
         if count >= target { return }
         await withCheckedContinuation { waiters.append((target, $0)) }
     }
+}
+
+private final class SurfAceNoNetworkTestService: NetService {
+    init(port: Int) {
+        super.init(domain: "local.", type: "_surf-ace._tcp.", name: "isolated-test", port: Int32(port))
+    }
+
+    override func publish(options: NetService.Options = []) {}
+    override func stop() {}
 }

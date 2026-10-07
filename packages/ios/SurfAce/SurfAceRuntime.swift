@@ -347,7 +347,7 @@ final class SurfAceRuntime {
     var isSceneAuthorityReady = false
 
     @ObservationIgnored private let server = SurfAceHTTPServer()
-    @ObservationIgnored private let bonjourPublisher = SurfAceBonjourPublisher()
+    @ObservationIgnored private let bonjourPublisher: SurfAceBonjourPublisher
     @ObservationIgnored private let identityStore = SurfAceIdentityStore()
     @ObservationIgnored private let mappingStoreKey = "SurfAce.SurfaceIdentityMapping"
     @ObservationIgnored private let surfaceTopologyStoreKey = "SurfAce.SurfaceTopologyMapping"
@@ -365,6 +365,7 @@ final class SurfAceRuntime {
     @ObservationIgnored private let annotationDirectEventResultOverride: (@Sendable (String, Bool) async -> Bool)?
     @ObservationIgnored private let annotationModeProjectionObserver: (@Sendable (Bool) async -> Void)?
     @ObservationIgnored private let locklessDeliveryWaitObserver: (@Sendable () -> Void)?
+    @ObservationIgnored private let foregroundCompletion: (@MainActor () -> Void)?
     @ObservationIgnored private var identity: SurfAceIdentity?
     @ObservationIgnored private var centralRegistration: SurfAceCentralRegistration?
     @ObservationIgnored private var annotationPublisher: SurfAceAnnotationPublisher?
@@ -402,6 +403,13 @@ final class SurfAceRuntime {
     }
     @ObservationIgnored private var isStarted = false
     @ObservationIgnored private var isStarting = false
+    @ObservationIgnored private var isolatedTestHostAtStart = false
+    private var isIsolatedTestHost: Bool {
+        if isolatedTestHostAtStart || forceIsolatedTestLoopback { return true }
+        let environment = ProcessInfo.processInfo.environment
+        return environment["SURF_ACE_XCTEST_HOST_NO_AUTOSTART"] == "1"
+            || environment["XCTestConfigurationFilePath"] != nil
+    }
     @ObservationIgnored private var surfaceById: [String: SurfAceSurfaceModel] = [:]
     @ObservationIgnored private var surfaceIdBySceneKey: [String: String] = [:]
     @ObservationIgnored private var sceneDisconnectObserversBySceneKey: [String: SurfAceSceneDisconnectObserver] = [:]
@@ -454,6 +462,8 @@ final class SurfAceRuntime {
         annotationClientId: String? = nil,
         enableFleetDiscovery: Bool = true,
         isolatedTestLoopback: Bool = false,
+        bonjourPublisher: SurfAceBonjourPublisher = SurfAceBonjourPublisher(),
+        foregroundCompletion: (@MainActor () -> Void)? = nil,
         outboundSendPreparation: (@Sendable (
             String, SurfAceOutboundSender.Priority
         ) async -> Void)? = nil,
@@ -469,6 +479,8 @@ final class SurfAceRuntime {
         self.annotationClientIdOverride = annotationClientId
         self.enableFleetDiscovery = enableFleetDiscovery
         self.forceIsolatedTestLoopback = isolatedTestLoopback
+        self.bonjourPublisher = bonjourPublisher
+        self.foregroundCompletion = foregroundCompletion
         self.outboundSendPreparation = outboundSendPreparation
         self.annotationCommitStagePreparation = annotationCommitStagePreparation
         self.annotationFrameCommitPreparation = annotationFrameCommitPreparation
@@ -509,8 +521,8 @@ final class SurfAceRuntime {
         guard !isStarted, !isStarting else { return }
         isStarting = true
         defer { isStarting = false }
-        let isolatedTestLoopback = forceIsolatedTestLoopback ||
-            ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+        let isolatedTestHost = isIsolatedTestHost
+        isolatedTestHostAtStart = isolatedTestHost
         await restoreLocklessAuthority(reason: "process_start")
         isSceneAuthorityReady = true
         observeLifecycle()
@@ -518,34 +530,43 @@ final class SurfAceRuntime {
             "event=app_launch \(surfAceDiagnosticFields([("fingerprint", fingerprint), ("screen_name", screenName)]))"
         )
         surfAceServerRuntimeLog(
-            "event=server_start_request \(surfAceDiagnosticFields([("fixed_port", isolatedTestLoopback ? 0 : fixedServerPort), ("health_path", healthPath), ("ws_path", webSocketPath)]))"
+            "event=server_start_request \(surfAceDiagnosticFields([("fixed_port", isolatedTestHost ? 0 : fixedServerPort), ("health_path", healthPath), ("ws_path", webSocketPath), ("isolated_test_host", isolatedTestHost)]))"
         )
 
         do {
-            let port = try await server.start(
-                webSocketPath: webSocketPath,
-                isolatedTestLoopback: isolatedTestLoopback,
-                httpHandler: { [weak self] request in
-                    guard let self else { return HTTPServerResponse(statusCode: 500) }
-                    return await self.handleHTTP(request: request)
-                },
-                webSocketHandler: { [weak self] socket in
-                    guard let self else {
-                        await socket.close(code: 4500, reason: "runtime_unavailable")
-                        return
-                    }
-                    await self.handleWebSocket(socket)
+            let httpHandler: SurfAceHTTPServer.HTTPHandler = { [weak self] request in
+                guard let self else { return HTTPServerResponse(statusCode: 500) }
+                return await self.handleHTTP(request: request)
+            }
+            let webSocketHandler: SurfAceHTTPServer.WebSocketHandler = { [weak self] socket in
+                guard let self else {
+                    await socket.close(code: 4500, reason: "runtime_unavailable")
+                    return
                 }
-            )
+                await self.handleWebSocket(socket)
+            }
+            let port = if isolatedTestHost {
+                try await server.startIsolatedLoopbackForTesting(
+                    webSocketPath: webSocketPath,
+                    httpHandler: httpHandler,
+                    webSocketHandler: webSocketHandler
+                )
+            } else {
+                try await server.start(
+                    webSocketPath: webSocketPath,
+                    httpHandler: httpHandler,
+                    webSocketHandler: webSocketHandler
+                )
+            }
             serverPort = Int(port)
             isStarted = true
             surfAceServerRuntimeLog(
-                "event=server_start_ok \(surfAceDiagnosticFields([("fingerprint", fingerprint), ("port", serverPort), ("requested_port", isolatedTestLoopback ? 0 : fixedServerPort), ("screen_name", screenName)]))"
+                "event=server_start_ok \(surfAceDiagnosticFields([("fingerprint", fingerprint), ("port", serverPort), ("requested_port", isolatedTestHost ? 0 : fixedServerPort), ("screen_name", screenName)]))"
             )
             surfAceServerRuntimeLog(
-                "event=selected_provider_endpoint \(surfAceDiagnosticFields([("endpoint_address", "\(isolatedTestLoopback ? "127.0.0.1" : "0.0.0.0"):\(serverPort)"), ("health_path", healthPath), ("screen_name", screenName), ("ws_path", webSocketPath)]))"
+                "event=selected_provider_endpoint \(surfAceDiagnosticFields([("endpoint_address", "\(isolatedTestHost ? "127.0.0.1" : "0.0.0.0"):\(serverPort)"), ("health_path", healthPath), ("screen_name", screenName), ("ws_path", webSocketPath)]))"
             )
-            if enableFleetDiscovery && !isolatedTestLoopback {
+            if !isolatedTestHost && enableFleetDiscovery {
                 publishBonjour()
                 startCentralRegistration()
             }
@@ -563,6 +584,7 @@ final class SurfAceRuntime {
     }
 
     private func startCentralRegistration() {
+        guard !isIsolatedTestHost else { return }
         guard centralRegistration == nil, let identity else { return }
         let discovery = SurfAceCentralDiscovery()
         let registration = SurfAceCentralRegistration(
@@ -585,6 +607,23 @@ final class SurfAceRuntime {
                     }
                 })
                 try self.projectLocklessAuthorityState(state)
+            },
+            verifyRegistry: { [weak self] registryIdentity, expected in
+                guard let self else { throw SurfAceRegistrationError.stopped }
+                let adapter = try self.ensureLocklessAdapter()
+                let directory = self.locklessStateURLOverride?.deletingLastPathComponent()
+                    ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+                        .appendingPathComponent("SurfAce", isDirectory: true)
+                let stored = await adapter.snapshot()
+                let provisioned = stored.registryBinding == nil
+                    ? try SurfAceProvisionedRegistryBinding.load(from: directory) : nil
+                let verifiedUnconfirmed = stored.registryBinding == nil
+                    ? try SurfAceVerifiedUnconfirmedMigration.load(from: directory) : nil
+                try await adapter.bindRegistryIdentity(
+                    registryIdentity, clientId: identity.clientId,
+                    expectedSurfaces: expected, provisioned: provisioned,
+                    verifiedUnconfirmed: verifiedUnconfirmed
+                )
             },
             onError: { error in
                 let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
@@ -1897,7 +1936,7 @@ final class SurfAceRuntime {
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor in
-                self?.handleWillEnterForeground()
+                await self?.handleWillEnterForeground()
             }
         }
     }
@@ -1925,18 +1964,15 @@ final class SurfAceRuntime {
         }
     }
 
-    private func handleWillEnterForeground() {
+    func handleWillEnterForeground() async {
         surfAceLifecycleLog(
             "event=app_foreground \(surfAceDiagnosticFields([("surface_count", surfaces.count)]))"
         )
         if locklessAdapter != nil {
-            Task { @MainActor in
-                await restoreLocklessAuthority(reason: "foreground")
-                publishBonjour()
-            }
-            return
+            await restoreLocklessAuthority(reason: "foreground")
         }
         publishBonjour()
+        foregroundCompletion?()
     }
 
     private func handleHTTP(request: HTTPServerRequest) async -> HTTPServerResponse {
@@ -5387,7 +5423,7 @@ final class SurfAceRuntime {
     }
 
     private func publishBonjour() {
-        guard enableFleetDiscovery else { return }
+        guard !isIsolatedTestHost, isStarted, enableFleetDiscovery else { return }
         surfAceServerRuntimeLog(
             "event=bonjour_publish_request \(surfAceDiagnosticFields([("name", screenName), ("port", serverPort)]))"
         )
@@ -5395,7 +5431,7 @@ final class SurfAceRuntime {
     }
 
     private func refreshBonjourTXT() {
-        guard isStarted, enableFleetDiscovery else { return }
+        guard isStarted, !isIsolatedTestHost, enableFleetDiscovery else { return }
         surfAceServerRuntimeLog(
             "event=bonjour_refresh \(surfAceDiagnosticFields([("busy", 0), ("surface_count", surfaces.count)]))"
         )

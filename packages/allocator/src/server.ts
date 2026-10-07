@@ -119,7 +119,11 @@ export class AllocatorServer {
         panes,
       });
     }
-    const result = { clientId, surfaces: registered };
+    const result = {
+      clientId,
+      registryIdentity: { allocatorId: state.allocatorId, fleetId: state.fleetId },
+      surfaces: registered,
+    };
     this.registeredClients.set(clientId, result);
     return result;
   }
@@ -138,6 +142,19 @@ export class AllocatorServer {
       throw new Error("surface_not_registered");
     }
     return { paneLabel: await this.custody.claimPane(value.clientId, value.surfaceId, value.paneId, value.paneLineageId) };
+  }
+
+  private async fleetTopology(): Promise<unknown> {
+    const registrationReady = await this.authority.refreshReadiness();
+    const state = await this.custody.readAcceptedState();
+    return {
+      clients: [...this.registeredClients.values()],
+      registrationReady,
+      registryIdentity: {
+        allocatorId: state.allocatorId,
+        fleetId: state.fleetId,
+      },
+    };
   }
 
   private constructor(
@@ -303,10 +320,7 @@ export class AllocatorServer {
             ? await this.registerClient(registration.payload)
             : registration.op === "pane.claim"
               ? await this.claimPane(registration.payload)
-              : {
-                clients: [...this.registeredClients.values()],
-                registrationReady: await this.authority.refreshReadiness(),
-              };
+              : await this.fleetTopology();
           if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({
             v: 1, type: "response", id: registration.id, op: registration.op, ok: true, payload, sentAt: Date.now(),
           }));

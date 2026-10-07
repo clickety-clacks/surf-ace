@@ -941,6 +941,25 @@ test("configured server registers two stable clients and deduplicates reconnect"
     }
     reader = new PublicControllerWireClient(allocator.address.url);
     await reader.connect();
+    assert.deepEqual(await reader.readRegistryIdentity(), {
+      allocatorId: "alloc_registration-test",
+      fleetId: cluster.config.fleetId,
+    });
+    const existing = fixtures[0];
+    const reconfirmed = await reader.request("client.register", {
+      clientId: existing.clientId,
+      surfaces: existing.core.listSurfaces().map((surface) => ({
+        surfaceId: surface.surfaceId,
+        panes: [...surface.panes.values()].map((pane) => ({
+          paneId: String(pane.paneId), paneLabel: pane.paneLabel,
+          paneLineageId: pane.paneLineageId,
+        })),
+      })),
+    });
+    assert.equal(reconfirmed.ok, true);
+    assert.deepEqual((reconfirmed.payload as { registryIdentity: unknown }).registryIdentity, {
+      allocatorId: "alloc_registration-test", fleetId: cluster.config.fleetId,
+    });
     const topology = async () => {
       const response = await reader!.request("fleet.topology");
       assert.equal(response.ok, true);

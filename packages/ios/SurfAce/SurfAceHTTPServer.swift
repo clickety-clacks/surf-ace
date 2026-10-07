@@ -36,6 +36,7 @@ enum SurfAceHTTPServerError: LocalizedError {
     case listenerCancelled
     case invalidBindAddress
     case invalidRequestedPort(UInt16)
+    case fixedPortUnavailableInIsolatedTestHost
     case boundPortMismatch(requested: UInt16, actual: UInt16)
 
     var errorDescription: String? {
@@ -48,6 +49,8 @@ enum SurfAceHTTPServerError: LocalizedError {
             return "Server failed to bind to 0.0.0.0"
         case .invalidRequestedPort(let port):
             return "Server requires a fixed port; invalid bind request for port \(port)"
+        case .fixedPortUnavailableInIsolatedTestHost:
+            return "Isolated test hosts require an OS-assigned loopback port"
         case .boundPortMismatch(let requested, let actual):
             return "Server bound to unexpected port \(actual); expected fixed port \(requested)"
         }
@@ -369,18 +372,10 @@ actor SurfAceHTTPServer {
 
     func start(
         webSocketPath: String = "/ws",
-        isolatedTestLoopback: Bool = false,
         httpHandler: @escaping HTTPHandler,
         webSocketHandler: @escaping WebSocketHandler
     ) async throws -> UInt16 {
-        if isolatedTestLoopback {
-            return try await startForTesting(
-                port: 0, bindAddress: "127.0.0.1", allowEndpointReuse: false,
-                webSocketPath: webSocketPath,
-                httpHandler: httpHandler, webSocketHandler: webSocketHandler
-            )
-        }
-        return try await startWithFallbackForTesting(
+        try await startWithFallbackForTesting(
             preferredPort: Self.fixedPort,
             fallbackPortOffsetLimit: Self.fallbackPortOffsetLimit,
             webSocketPath: webSocketPath,
@@ -392,8 +387,6 @@ actor SurfAceHTTPServer {
     func startWithFallbackForTesting(
         preferredPort: UInt16,
         fallbackPortOffsetLimit: UInt16,
-        bindAddress: String = "0.0.0.0",
-        allowEndpointReuse: Bool = false,
         webSocketPath: String = "/ws",
         httpHandler: @escaping HTTPHandler,
         webSocketHandler: @escaping WebSocketHandler
@@ -408,8 +401,6 @@ actor SurfAceHTTPServer {
             do {
                 let boundPort = try await startForTesting(
                     port: port,
-                    bindAddress: bindAddress,
-                    allowEndpointReuse: allowEndpointReuse,
                     webSocketPath: webSocketPath,
                     httpHandler: httpHandler,
                     webSocketHandler: webSocketHandler
@@ -432,27 +423,74 @@ actor SurfAceHTTPServer {
 
     func startForTesting(
         port: UInt16,
-        bindAddress: String = "0.0.0.0",
-        allowEndpointReuse: Bool = false,
         webSocketPath: String = "/ws",
         httpHandler: @escaping HTTPHandler,
         webSocketHandler: @escaping WebSocketHandler
     ) async throws -> UInt16 {
         surfAceServerLog("listener start requested port=\(port) webSocketPath=\(webSocketPath)")
-        guard port != 0 || (bindAddress == "127.0.0.1" && !allowEndpointReuse) else {
+        guard port != 0 else {
             surfAceServerLog("listener rejected invalid ephemeral port request")
             throw SurfAceHTTPServerError.invalidRequestedPort(port)
         }
-        let parameters = NWParameters.tcp
-        parameters.allowLocalEndpointReuse = allowEndpointReuse
-        guard let endpointPort = port == 0 ? NWEndpoint.Port.any : NWEndpoint.Port(rawValue: port) else {
+        guard let endpointPort = NWEndpoint.Port(rawValue: port) else {
             surfAceServerLog("listener rejected unsupported port=\(port)")
             throw SurfAceHTTPServerError.invalidRequestedPort(port)
         }
-        guard let bindAddress = IPv4Address(bindAddress) else {
+        let environment = ProcessInfo.processInfo.environment
+        let isolatedTestHost = environment["SURF_ACE_XCTEST_HOST_NO_AUTOSTART"] == "1"
+            || environment["XCTestConfigurationFilePath"] != nil
+        guard !isolatedTestHost else {
+            surfAceServerLog("listener rejected fixed port in isolated test host")
+            throw SurfAceHTTPServerError.fixedPortUnavailableInIsolatedTestHost
+        }
+        guard let bindAddress = IPv4Address("0.0.0.0") else {
             throw SurfAceHTTPServerError.invalidBindAddress
         }
-        parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(bindAddress), port: endpointPort)
+        return try await startListener(
+            port: endpointPort,
+            bindAddress: bindAddress,
+            expectedPort: port,
+            allowEndpointReuse: true,
+            webSocketPath: webSocketPath,
+            httpHandler: httpHandler,
+            webSocketHandler: webSocketHandler
+        )
+    }
+
+    // XCTest-hosted runtimes need a real WebSocket endpoint, but must never
+    // expose it to the LAN or contend with a production listener's port.
+    func startIsolatedLoopbackForTesting(
+        webSocketPath: String = "/ws",
+        httpHandler: @escaping HTTPHandler,
+        webSocketHandler: @escaping WebSocketHandler
+    ) async throws -> UInt16 {
+        guard let bindAddress = IPv4Address("127.0.0.1") else {
+            throw SurfAceHTTPServerError.invalidBindAddress
+        }
+        return try await startListener(
+            port: .any,
+            bindAddress: bindAddress,
+            expectedPort: nil,
+            allowEndpointReuse: false,
+            webSocketPath: webSocketPath,
+            httpHandler: httpHandler,
+            webSocketHandler: webSocketHandler
+        )
+    }
+
+    private func startListener(
+        port: NWEndpoint.Port,
+        bindAddress: IPv4Address,
+        expectedPort: UInt16?,
+        allowEndpointReuse: Bool,
+        webSocketPath: String,
+        httpHandler: @escaping HTTPHandler,
+        webSocketHandler: @escaping WebSocketHandler
+    ) async throws -> UInt16 {
+        surfAceServerLog("listener bind requestedPort=\(expectedPort ?? 0) bindAddress=\(bindAddress) allowEndpointReuse=\(allowEndpointReuse)")
+        let parameters = NWParameters.tcp
+        parameters.allowLocalEndpointReuse = allowEndpointReuse
+        parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(bindAddress), port: port)
         let listener = try NWListener(using: parameters)
         self.listener = listener
         self.httpHandler = httpHandler
@@ -466,14 +504,14 @@ actor SurfAceHTTPServer {
                 switch state {
                 case .ready:
                     let boundPort = listener.port?.rawValue ?? 0
-                    surfAceServerLog("listener ready requestedPort=\(port) actualPort=\(boundPort)")
+                    surfAceServerLog("listener ready requestedPort=\(expectedPort ?? 0) actualPort=\(boundPort) bindAddress=\(bindAddress)")
                     guard startupState.markResumedIfNeeded() else { return }
                     listener.stateUpdateHandler = nil
-                    guard port == 0 || boundPort == port else {
-                        surfAceServerLog("listener bound unexpected port requested=\(port) actual=\(boundPort)")
+                    guard boundPort != 0, expectedPort == nil || boundPort == expectedPort else {
+                        surfAceServerLog("listener bound unexpected port requested=\(expectedPort ?? 0) actual=\(boundPort)")
                         listener.cancel()
                         continuation.resume(
-                            throwing: SurfAceHTTPServerError.boundPortMismatch(requested: port, actual: boundPort)
+                            throwing: SurfAceHTTPServerError.boundPortMismatch(requested: expectedPort ?? 0, actual: boundPort)
                         )
                         return
                     }

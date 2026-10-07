@@ -29,6 +29,7 @@ import {
   recordClientDiagnostic,
 } from "./client-flight-recorder.js";
 import { loadOrCreateIdentity } from "./identity.js";
+import { loadProvisionedRegistryBinding } from "./registry-binding.js";
 import {
   loadPersistentStateFile,
   PersistentStateOutcomeUnknownError,
@@ -467,6 +468,11 @@ async function persistState(): Promise<void> {
     }
     throw error;
   }
+}
+
+async function persistRegistryState(): Promise<void> {
+  if (persistentStateWriteGuard) throw new Error("registry_binding_persistence_pending");
+  await persistState();
 }
 
 function schedulePersistenceReconciliation(): void {
@@ -1981,11 +1987,17 @@ async function boot(): Promise<void> {
   installWebAuthnAccountSelection();
   await acknowledgeCompositorMainAppBinding();
 
+  const configuredAddress = process.env.SURF_ACE_SERVER?.trim();
+  const provisionedBinding = await loadProvisionedRegistryBinding(stateDir).catch((error) => {
+    clientWarn("registry_provisioning_invalid", errorDiagnosticFields(error));
+    return null;
+  });
   configuredRegistration = new ServerConnection({
     configuredAddress,
     clientId: registrationClientId(identity.publicKeyPem),
     core,
-    persist: persistState,
+    persist: persistRegistryState,
+    provisionedBinding,
     onError: (error) => clientWarn("server_registration_failed", errorDiagnosticFields(error)),
   });
   configuredRegistration.start();
