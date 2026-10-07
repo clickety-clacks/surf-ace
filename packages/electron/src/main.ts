@@ -1957,7 +1957,7 @@ async function boot(): Promise<void> {
     (surfaceId, paneId) => server!.completeDirectAnnotation(surfaceId, paneId),
   );
   server.setAnnotationCompletionManaged((surfaceId, paneId) =>
-    core.annotationPublisher?.openFrameFor(surfaceId, paneId)?.commitRequested === true);
+    core.annotationPublisher?.openFrameFor(surfaceId, paneId) != null);
   void annotationSourceCoordinator.resumePending().catch((error) =>
     clientWarn("annotation_source_recovery_failed", errorDiagnosticFields(error)));
 

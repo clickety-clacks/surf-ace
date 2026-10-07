@@ -31,7 +31,7 @@ test("Done still completes the direct frame when registry publishing is not conf
     persistLocklessState: persist, port: 0, viewport: () => viewport,
   });
   server.setAnnotationCompletionManaged((surfaceId, id) =>
-    core.annotationPublisher?.openFrameFor(surfaceId, id)?.commitRequested === true);
+    core.annotationPublisher?.openFrameFor(surfaceId, id) != null);
   const source = new AnnotationSourceCoordinator(core, persist, () => {}, (error) => { throw error; },
     (surfaceId, id) => server.completeDirectAnnotation(surfaceId, id));
   assert.equal(core.annotationPublisher, null);
@@ -373,7 +373,8 @@ test("the lockless direct frame persists before the registry source frame commit
     compositorSocketPath: null, core, endpointName: "Surf Ace", hostName: "localhost",
     persistLocklessState: persist, port: 0, viewport: () => viewport,
   });
-  server.setAnnotationCompletionManaged();
+  server.setAnnotationCompletionManaged((surfaceId, id) =>
+    core.annotationPublisher?.openFrameFor(surfaceId, id) != null);
   const source = new AnnotationSourceCoordinator(core, persist, () => {}, (error) => { throw error; },
     (surfaceId, id) => server.completeDirectAnnotation(surfaceId, id));
   await source.setAnnotating(surface.surfaceId, paneId, true);
