@@ -1,8 +1,7 @@
 import { publicReleaseNames } from "./public-release-names.mjs";
 
-// v0.2.5's published tag and asset names are immutable legacy download identities.
-// New releases use the default Surf Ace names in publicReleaseNames.
-const RELEASE_NAMES = publicReleaseNames({ version: "0.2.5", sourceRevision: "r4", toolingRevision: "r11", legacy: true });
+// v0.2.5's published identities remain immutable. New releases use Surf Ace names.
+const RELEASE_NAMES = publicReleaseNames({ version: "0.2.6", sourceRevision: "r1", toolingRevision: "r1" });
 
 export const TIGHTBEAM_TOOLING_TAG = RELEASE_NAMES.toolingTag;
 
@@ -21,7 +20,7 @@ export const TOOLCHAINS = Object.freeze({
 });
 
 export const TIGHTBEAM = Object.freeze({
-  candidateCommit: "04a37d82e94d9cae7446841ccc03553a18397ff2",
+  candidateCommit: "69023a9a291d8196a7cda7bd7ab205c1f9e7d108",
   sourceTag: RELEASE_NAMES.sourceTag,
   version: RELEASE_NAMES.version,
   channel: RELEASE_NAMES.channel,
