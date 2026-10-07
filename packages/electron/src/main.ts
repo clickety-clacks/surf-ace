@@ -86,6 +86,8 @@ let uncertainStateCandidate: PersistentSurfaceState | null = null;
 let persistenceRecoveryTimer: NodeJS.Timeout | null = null;
 let persistenceRetryDelayMs = 1_000;
 let providerEndpointAvailable = false;
+let providerRetryTimer: NodeJS.Timeout | null = null;
+let resolveProviderRetry: (() => void) | null = null;
 
 type WebAuthnAccountSelectionCallback = (credentialId?: string | null) => void;
 type ShortcutInput = {
@@ -241,6 +243,10 @@ async function startProviderEndpoint(): Promise<void> {
           throw Object.assign(new Error(`Port ${port} is already bound on IPv6`), { code: "EADDRINUSE" });
         }
         await server.start(port);
+        if (isQuitting) {
+          await server.stop();
+          return;
+        }
         providerEndpointAvailable = true;
         for (const surface of core.listSurfaces()) broadcastSurfaceState(surface.surfaceId);
         if (port !== WS_PORT) {
@@ -268,7 +274,14 @@ async function startProviderEndpoint(): Promise<void> {
     // A listener is optional for already restored windows. Keep trying while
     // the app runs so an endpoint released later becomes usable automatically.
     const cap = Math.min(10_000, 500 * 2 ** Math.min(retry++, 5));
-    await new Promise<void>((resolve) => setTimeout(resolve, Math.floor(cap * (0.7 + Math.random() * 0.3))));
+    await new Promise<void>((resolve) => {
+      resolveProviderRetry = resolve;
+      providerRetryTimer = setTimeout(() => {
+        providerRetryTimer = null;
+        resolveProviderRetry = null;
+        resolve();
+      }, Math.floor(cap * (0.7 + Math.random() * 0.3)));
+    });
   }
 }
 
@@ -1959,6 +1972,10 @@ if (!singleInstanceLock) {
       active_window_count: windows.size,
     });
     isQuitting = true;
+    if (providerRetryTimer) clearTimeout(providerRetryTimer);
+    providerRetryTimer = null;
+    resolveProviderRetry?.();
+    resolveProviderRetry = null;
     if (persistenceRecoveryTimer) clearTimeout(persistenceRecoveryTimer);
     clearAdvertiserTxtRefreshTimer();
     await Promise.allSettled(
