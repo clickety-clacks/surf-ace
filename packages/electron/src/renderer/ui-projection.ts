@@ -6,17 +6,22 @@ export type ConnectionChromeElements = {
   windowLabel: Element;
 };
 
+export function visibleWindowLabelText(windowLabel: string): string {
+  return windowLabel ? windowLabel.toUpperCase() : "…";
+}
+
 export function projectConnectionChrome(
   elements: ConnectionChromeElements,
   _connectionBar: ConnectionBarState,
   hasPaneLabel: boolean,
   hasWindowLabel: boolean,
 ): void {
-  // Connection status changes the window-label color, never whether an assigned identity is shown.
-  elements.windowLabel.toggleAttribute("hidden", !hasWindowLabel);
+  // The outline carries connection color even while its fleet label is pending.
+  elements.windowLabel.toggleAttribute("hidden", false);
+  elements.windowLabel.classList.toggle("is-pending", !hasWindowLabel);
   elements.paneLabel.toggleAttribute("hidden", !hasPaneLabel);
   elements.disconnectedGlyph.toggleAttribute("hidden", true);
-  elements.paneLabel.parentElement?.toggleAttribute("hidden", !hasPaneLabel && !hasWindowLabel);
+  elements.paneLabel.parentElement?.toggleAttribute("hidden", false);
 }
 
 export function contentScalePercentage(scale: number): string {
