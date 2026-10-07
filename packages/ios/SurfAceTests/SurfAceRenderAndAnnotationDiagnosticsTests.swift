@@ -1065,13 +1065,10 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
     }
 
     func testConfiguredSourceCommitsFrameWithoutDirectControllerDelivery() async throws {
-        let previous = ProcessInfo.processInfo.environment["SURF_ACE_SERVER"]
-        setenv("SURF_ACE_SERVER", "ws://127.0.0.1:29999", 1)
-        defer {
-            if let previous { setenv("SURF_ACE_SERVER", previous, 1) }
-            else { unsetenv("SURF_ACE_SERVER") }
-        }
-        let runtime = SurfAceRuntime(userDefaults: isolatedUserDefaults(), locklessStateURL: try locklessStateURL())
+        let runtime = SurfAceRuntime(
+            userDefaults: isolatedUserDefaults(), locklessStateURL: try locklessStateURL(),
+            configuredRegistryURL: try XCTUnwrap(URL(string: "ws://127.0.0.1:29999"))
+        )
         addTeardownBlock { await runtime.stop() }
         await runtime.start()
         let registered = await runtime.registerSurfaceForScene(sceneKey: "annotation-source-test")

@@ -353,6 +353,7 @@ final class SurfAceRuntime {
     @ObservationIgnored private let surfaceTopologyStoreKey = "SurfAce.SurfaceTopologyMapping"
     @ObservationIgnored private let userDefaults: UserDefaults
     @ObservationIgnored private let locklessStateURLOverride: URL?
+    @ObservationIgnored private let configuredRegistryURLOverride: URL?
     @ObservationIgnored private let outboundSendPreparation: (@Sendable (
         String, SurfAceOutboundSender.Priority
     ) async -> Void)?
@@ -437,6 +438,7 @@ final class SurfAceRuntime {
     init(
         userDefaults: UserDefaults = .standard,
         locklessStateURL: URL? = nil,
+        configuredRegistryURL: URL? = nil,
         outboundSendPreparation: (@Sendable (
             String, SurfAceOutboundSender.Priority
         ) async -> Void)? = nil,
@@ -444,6 +446,7 @@ final class SurfAceRuntime {
     ) {
         self.userDefaults = userDefaults
         self.locklessStateURLOverride = locklessStateURL
+        self.configuredRegistryURLOverride = configuredRegistryURL
         self.outboundSendPreparation = outboundSendPreparation
         self.locklessDeliveryWaitObserver = locklessDeliveryWaitObserver
         let fallbackName = "Surf Ace"
@@ -529,10 +532,8 @@ final class SurfAceRuntime {
     private func startCentralRegistration() {
         guard centralRegistration == nil, let identity else { return }
         let discovery = SurfAceCentralDiscovery()
-        let address = ProcessInfo.processInfo.environment["SURF_ACE_SERVER"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
         let registration = SurfAceCentralRegistration(
-            clientId: identity.clientId, configured: address.flatMap(URL.init(string:)),
+            clientId: identity.clientId, configured: configuredRegistryURL,
             discover: { await discovery.discover() },
             discoveryError: { discovery.lastError },
             transportFallbacks: { discovery.transportURLs(for: $0) },
@@ -571,8 +572,7 @@ final class SurfAceRuntime {
 
     private func startAnnotationPublisher() {
         guard annotationPublisher == nil,
-              let address = ProcessInfo.processInfo.environment["SURF_ACE_SERVER"],
-              let endpoint = URL(string: address),
+              let endpoint = configuredRegistryURL,
               ["ws", "wss"].contains(endpoint.scheme?.lowercased() ?? ""),
               endpoint.host != nil else { return }
         do {
@@ -3689,14 +3689,19 @@ final class SurfAceRuntime {
                 .appendingPathComponent("lockless-authority-v1.json")
         }
         let store = SurfAceLocklessGenerationStore(stateURL: stateURL)
-        let configuredRegistry = ProcessInfo.processInfo.environment["SURF_ACE_SERVER"]
-            .flatMap(URL.init(string:))
+        let configuredRegistry = configuredRegistryURL
         let annotationClientId = ["ws", "wss"].contains(configuredRegistry?.scheme?.lowercased() ?? "")
             && configuredRegistry?.host != nil
             ? identity?.clientId : nil
         let adapter = try SurfAceLocklessRuntimeAdapter(store: store, annotationClientId: annotationClientId)
         locklessAdapter = adapter
         return adapter
+    }
+
+    private var configuredRegistryURL: URL? {
+        configuredRegistryURLOverride ?? ProcessInfo.processInfo.environment["SURF_ACE_SERVER"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .flatMap(URL.init(string:))
     }
 
     private static func jsonObject<T: Encodable>(_ value: T) throws -> Any {
