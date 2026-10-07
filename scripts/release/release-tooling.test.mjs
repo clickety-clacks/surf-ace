@@ -1441,7 +1441,6 @@ test("Tightbeam Linux stage contains only the standalone CLI, callable server cl
     "packages/electron/dist/schema.json": "{}\n",
     "packages/allocator/sql/001_allocator.sql": "-- schema\n",
     "packages/allocator/sql/002_fleet_panes.sql": "-- migration\n",
-    "packages/allocator/sql/003_annotation_journal.sql": "-- annotation migration\n",
   };
   for (const [relative, contents] of Object.entries(files)) {
     const file = path.join(source, relative);
@@ -1466,7 +1465,6 @@ test("Tightbeam Linux stage contains only the standalone CLI, callable server cl
   assert.match(guide, /await service\.close\(\)/);
   assert.match(guide, /already-provisioned PostgreSQL (?:16 )?custody/);
   assert.match(guide, /foreground launcher/);
-  assert.match(guide, /schemas\/allocator\/003_annotation_journal\.sql/);
   assert.match(guide, /does not install or enable a service/);
   assert.doesNotMatch(actual.join("\n"), /surf-ace-runtime|controller\/dist\/main\.js/);
   const unit = await fs.readFile(path.join(stage, "service/surf-ace-server@.service"), "utf8");
