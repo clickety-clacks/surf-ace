@@ -11,8 +11,8 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         defaults.removePersistentDomain(forName: suiteName)
         let stateURL = FileManager.default.temporaryDirectory.appendingPathComponent("\(suiteName).json")
         let stageGate = SurfAceAnnotationCommitStageGate()
+        addTeardownBlock { await stageGate.release() }
         addTeardownBlock {
-            await stageGate.release()
             defaults.removePersistentDomain(forName: suiteName)
             try? FileManager.default.removeItem(at: stateURL)
         }
