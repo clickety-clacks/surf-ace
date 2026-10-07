@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
 use tempfile::TempDir;
 use tungstenite::{accept, Message, WebSocket};
 
@@ -234,25 +233,17 @@ fn foreground_watcher_preserves_ack_written_by_separate_process() {
         state_root,
         "annotations",
     ];
-    let child = Command::new(cli_binary())
+    let mut child = Command::new(cli_binary())
         .args(common)
         .args(["watch", "--consumer-id", "reviewer"])
+        .stdout(Stdio::piped())
         .spawn()
         .unwrap();
     let state_file = listener_path(root.path(), "reviewer");
-    let mut first_delivered = false;
-    for _ in 0..100 {
-        if let Ok(bytes) = std::fs::read(&state_file) {
-            if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
-                if value["lastDeliveredCursor"] == format!("ann1:{EPOCH}:1") {
-                    first_delivered = true;
-                    break;
-                }
-            }
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
-    assert!(first_delivered, "first record persisted");
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    assert!(lines.next().unwrap().unwrap().contains("annotation.subscription"));
+    let first: Value = serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
+    assert_eq!(first["payload"]["serverCursor"], format!("ann1:{EPOCH}:1"));
     let ack = Command::new(cli_binary())
         .args(common)
         .args([
@@ -269,8 +260,11 @@ fn foreground_watcher_preserves_ack_written_by_separate_process() {
         "{}",
         String::from_utf8_lossy(&ack.stdout)
     );
-    let status = child.wait_with_output().unwrap();
-    assert!(status.status.success());
+    let second: Value = serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
+    assert_eq!(second["payload"]["serverCursor"], format!("ann1:{EPOCH}:2"));
+    let terminal: Value = serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
+    assert_eq!(terminal["op"], "annotation.lease_replaced");
+    assert!(child.wait().unwrap().success());
     server.join().unwrap();
     let state: Value = serde_json::from_slice(&std::fs::read(state_file).unwrap()).unwrap();
     assert_eq!(state["ackCursor"], format!("ann1:{EPOCH}:1"));
