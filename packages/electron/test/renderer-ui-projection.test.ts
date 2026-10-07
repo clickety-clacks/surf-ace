@@ -11,6 +11,7 @@ import {
   projectConnectionChrome,
   projectContentScaleIndicator,
   toggleContentScalePopup,
+  visibleWindowLabelText,
 } from "../src/renderer/ui-projection.js";
 
 const rendererSourcePath = resolve(process.cwd(), "src/renderer/renderer.ts");
@@ -72,15 +73,21 @@ test("an assigned window label remains visible while a pane awaits its registry 
   assert.equal(chrome.disconnectedGlyph.hasAttribute("hidden"), true);
 });
 
-test("identity labels are absent only when neither registry label is assigned", () => {
+test("pending labels retain a neutral outlined identity placeholder and connection color", () => {
   const chrome = connectionChromeFixture();
 
   projectConnectionChrome(chrome, "disconnected", false, false);
 
-  assert.equal(chrome.windowLabel.hasAttribute("hidden"), true);
+  chrome.windowLabel.textContent = visibleWindowLabelText("");
+  assert.equal(chrome.windowLabel.textContent, "…");
+  assert.equal(chrome.windowLabel.hasAttribute("hidden"), false);
+  assert.equal(chrome.windowLabel.classList.contains("is-pending"), true);
   assert.equal(chrome.paneLabel.hasAttribute("hidden"), true);
-  assert.equal(chrome.labelWrap.hasAttribute("hidden"), true);
+  assert.equal(chrome.labelWrap.hasAttribute("hidden"), false);
   assert.equal(chrome.disconnectedGlyph.hasAttribute("hidden"), true);
+  const styles = readFileSync(rendererStylesPath, "utf8");
+  assert.match(styles, /\.connection-disconnected \.pane-label__window\s*\{[^}]*color:/);
+  assert.equal(visibleWindowLabelText("ab"), "AB");
 });
 
 test("same-client panes keep assigned identities while connection state changes", () => {

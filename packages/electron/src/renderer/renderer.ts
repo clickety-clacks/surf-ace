@@ -7,6 +7,7 @@ import {
   bindContentScaleControls,
   projectConnectionChrome,
   toggleContentScalePopup,
+  visibleWindowLabelText,
 } from "./ui-projection.js";
 
 type Selection =
@@ -2854,7 +2855,7 @@ function updatePane(view: PaneView, pane: RendererPaneState): void {
   const visibleAddress = pane.displayId || pane.visibleAddress || pane.label;
   const visibleWindowLabel = latestState?.windowLabel ?? "";
   const connectionBar = latestState?.connectionBar ?? "disconnected";
-  windowLabel.textContent = visibleWindowLabel ? visibleWindowLabel.toUpperCase() : "";
+  windowLabel.textContent = visibleWindowLabelText(visibleWindowLabel);
   label.textContent = pane.label.toUpperCase();
   projectConnectionChrome(
     { disconnectedGlyph, paneLabel: label, windowLabel },
@@ -2865,6 +2866,7 @@ function updatePane(view: PaneView, pane: RendererPaneState): void {
   const identityDescription = [
     visibleWindowLabel ? ` window ${visibleWindowLabel}` : null,
     pane.label ? `pane ${visibleAddress}` : null,
+    !visibleWindowLabel || !pane.label ? "labels pending" : null,
   ].filter(Boolean).join(" ");
   const connectionError = latestState?.connectionError?.trim();
   const connectionDescription = connectionBar === "connected"
@@ -2876,7 +2878,8 @@ function updatePane(view: PaneView, pane: RendererPaneState): void {
   labelWrap.title = `${identityDescription}${connectionDescription ? ` ${connectionDescription}` : ""}`.trim() || "Surf Ace";
   labelWrap.setAttribute(
     "aria-label",
-    [accessibleIdentity, connectionDescription].filter(Boolean).join(" "),
+    [accessibleIdentity, !visibleWindowLabel || !pane.label ? "labels pending" : null, connectionDescription]
+      .filter(Boolean).join(" "),
   );
   if (connectionError) labelWrap.setAttribute("aria-description", connectionError);
   else labelWrap.removeAttribute("aria-description");
