@@ -1,6 +1,6 @@
 import { ServerConnection } from "../../electron/src/server-connection.js";
 import assert from "node:assert/strict";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { appendFile, mkdtemp, readFile, rm } from "node:fs/promises";
 import { createServer, createConnection, type Socket } from "node:net";
 import { join } from "node:path";
@@ -21,8 +21,10 @@ import { SurfaceCore } from "../../electron/src/surface-core.js";
 import { AnnotationSourceCoordinator } from "../../electron/src/annotation-source-coordinator.js";
 import { SurfaceWsServer } from "../../electron/src/ws-server.js";
 import { AnnotationJournal } from "./annotation-journal.js";
-import { BonjourAdvertiser } from "../../electron/src/bonjour-advertiser.js";
-import type { SurfAceDiscoveryService } from "../../electron/src/surf-ace-discovery.js";
+import {
+  type SurfAceDiscoveryEndpoint,
+  type SurfAceDiscoveryService,
+} from "../../electron/src/surf-ace-discovery.js";
 
 
 import {
@@ -441,6 +443,255 @@ test("real PostgreSQL allocator authority", { timeout: 180_000 }, async (t) => {
       }
     });
 
+    await t.test("uncertain pane claim keeps one writer and recovers its exact label", async () => {
+      let injected = false;
+      const writer = await PostgresCustodyAdapter.acquireWriter(cluster.config, {
+        afterCommitBeforeWitness(operation) {
+          if (operation === "claim_pane" && !injected) {
+            injected = true;
+            throw new Error("cut-after-pane-commit");
+          }
+        },
+      });
+      const clientId = createHash("sha256").update("recovery-client").digest("hex");
+      const surfaceId = "sf_recovery-pane";
+      const paneId = "pane-1";
+      const lineageId = "pl_recovery-pane";
+      const originalWitnessId = writer.config.witnessServerId;
+      try {
+        const before = await writer.readAcceptedState();
+        await assert.rejects(writer.claimPane(clientId, surfaceId, paneId, lineageId),
+          (error) => error instanceof PersistenceOutcomeUnknownError);
+        assert.equal(writer.registrationReady, false);
+        await assert.rejects(PostgresCustodyAdapter.acquireWriter(cluster.config),
+          (error) => error instanceof AllocatorError && error.code === "writer_fence_unavailable");
+
+        writer.config.witnessServerId = "divergent-witness";
+        assert.equal(await writer.recoverWriter(), false);
+        assert.equal(writer.registrationReady, false);
+        writer.config.witnessServerId = originalWitnessId;
+        assert.equal(await writer.recoverWriter(), true);
+        const first = (await writer.readAcceptedState()).paneMappings.find((pane) => pane.lineageId === lineageId);
+        assert.ok(first);
+        assert.equal(first.paneId, paneId);
+        assert.equal(first.paneLabel, before.nextPaneOrdinalFence);
+        assert.equal(await writer.claimPane(clientId, surfaceId, paneId, lineageId), first.paneLabel);
+        await assert.rejects(writer.claimPane(clientId, surfaceId, "pane-2", lineageId),
+          (error) => error instanceof AllocatorError && error.code === "assignment_conflict");
+        const after = await writer.readAcceptedState();
+        assert.equal(after.nextPaneOrdinalFence, before.nextPaneOrdinalFence + 1);
+        assert.equal(after.paneMappings.filter((pane) => pane.lineageId === lineageId).length, 1);
+      } finally {
+        writer.config.witnessServerId = originalWitnessId;
+        await writer.release();
+      }
+    });
+
+    await t.test("lost commit acknowledgment reconciles by the original pane identity", async () => {
+      let injected = false;
+      const writer = await PostgresCustodyAdapter.acquireWriter(cluster.config, {
+        afterCommitBeforeAck(operation) {
+          if (operation === "claim_pane" && !injected) {
+            injected = true;
+            throw new Error("lost-commit-ack");
+          }
+        },
+      });
+      const clientId = createHash("sha256").update("ack-client").digest("hex");
+      try {
+        const before = await writer.readAcceptedState();
+        await assert.rejects(writer.claimPane(clientId, "sf_ack", "pane-1", "pl_ack"),
+          (error) => error instanceof PersistenceOutcomeUnknownError && error.stage === "commit_ack");
+        assert.equal(writer.registrationReady, false);
+        assert.equal(await writer.recoverWriter(), true);
+        const label = await writer.claimPane(clientId, "sf_ack", "pane-1", "pl_ack");
+        assert.equal(label, before.nextPaneOrdinalFence);
+        assert.equal((await writer.readAcceptedState()).nextPaneOrdinalFence, label + 1);
+      } finally {
+        await writer.release();
+      }
+    });
+
+    await t.test("pre-commit pane failure leaves the held writer and fence usable", async () => {
+      const writer = await PostgresCustodyAdapter.acquireWriter(cluster.config, {
+        beforeMutation(operation) {
+          if (operation === "claim_pane") throw new Error("cut-before-pane-commit");
+        },
+      });
+      const clientId = createHash("sha256").update("precommit-client").digest("hex");
+      try {
+        const before = await writer.readAcceptedState();
+        await assert.rejects(writer.claimPane(clientId, "sf_precommit", "pane-1", "pl_precommit"),
+          (error) => error instanceof AllocatorError && error.code === "persistence_failed");
+        assert.equal(writer.registrationReady, true);
+        const after = await writer.readAcceptedState();
+        assert.equal(after.nextPaneOrdinalFence, before.nextPaneOrdinalFence);
+      } finally {
+        await writer.release();
+      }
+    });
+
+    await t.test("fleet topology reports registration readiness through an uncertain claim and recovery", async () => {
+      let injected = false;
+      server = await AllocatorServer.start(serverConfig(cluster), {
+        afterCommitBeforeWitness(operation) {
+          if (operation === "claim_pane" && !injected) {
+            injected = true;
+            throw new Error("lost-claim-reply");
+          }
+        },
+      });
+      const wire = await WireClient.connect(server.address.url);
+      const clientId = createHash("sha256").update("readiness-client").digest("hex");
+      const surfaceId = "sf_readiness";
+      const originalWitnessId = cluster.config.witnessServerId;
+      const claim = { clientId, surfaceId, paneId: "pane-1", paneLineageId: "pl_readiness" };
+      try {
+        assert.equal((await wire.request("client.register", { clientId, surfaces: [{ surfaceId, panes: [] }] })).ok, true);
+        assert.equal((await wire.request("fleet.topology", {})).payload?.registrationReady, true);
+        assert.equal((await wire.request("pane.claim", claim)).ok, false);
+        cluster.config.witnessServerId = "divergent-witness";
+        const degraded = await wire.request("fleet.topology", {});
+        assert.equal(degraded.ok, true);
+        assert.equal(degraded.payload?.registrationReady, false);
+        assert.equal((degraded.payload?.clients as unknown[]).length, 1,
+          "read-only fleet inventory stays reachable while the writer is fenced");
+        assert.equal((await wire.request("pane.claim", {
+          clientId, surfaceId, paneId: "pane-2", paneLineageId: "pl_readiness-2",
+        })).ok, false, "another pane claim cannot pass the unvalidated writer");
+        cluster.config.witnessServerId = originalWitnessId;
+        assert.equal((await server.diagnostics()).registrationReady, false);
+        assert.equal((await server.diagnostics()).serveStatus, "writer-unvalidated");
+        assert.equal((await wire.request("fleet.topology", {})).payload?.registrationReady, true);
+        const recovered = await wire.request("pane.claim", claim);
+        assert.equal(recovered.ok, true);
+        const again = await wire.request("pane.claim", claim);
+        assert.equal(again.payload?.paneLabel, recovered.payload?.paneLabel);
+      } finally {
+        cluster.config.witnessServerId = originalWitnessId;
+        await wire.close();
+        await server.close();
+        server = null;
+      }
+    });
+
+    await t.test("client registration recovers a fenced writer without a topology request", { timeout: 30_000 }, async () => {
+      let injected = false;
+      server = await AllocatorServer.start(serverConfig(cluster), {
+        afterCommitBeforeWitness(operation) {
+          if (operation === "claim_pane" && !injected) {
+            injected = true;
+            throw new Error("lost-claim-reply");
+          }
+        },
+      });
+      const wire = await WireClient.connect(server.address.url);
+      const clientId = createHash("sha256").update("registration-recovery-client").digest("hex");
+      const surfaceId = "sf_registration-recovery";
+      const claim = { clientId, surfaceId, paneId: "pane-1", paneLineageId: "pl_registration-recovery" };
+      const emptyRegistration = { clientId, surfaces: [{ surfaceId, panes: [] }] };
+      const fullRegistration = { clientId, surfaces: [{ surfaceId, panes: [{
+        paneId: claim.paneId, paneLineageId: claim.paneLineageId,
+      }] }] };
+      const originalWitnessId = cluster.config.witnessServerId;
+      try {
+        const first = await wire.request("client.register", emptyRegistration);
+        assert.equal(first.ok, true);
+        const beforeFence = (await server.diagnostics()).nextPaneOrdinalFence;
+        assert.equal((await wire.request("pane.claim", claim)).ok, false);
+        assert.equal((await server.diagnostics()).registrationReady, false);
+        await assert.rejects(PostgresCustodyAdapter.acquireWriter(cluster.config),
+          (error) => error instanceof AllocatorError && error.code === "writer_fence_unavailable");
+
+        cluster.config.witnessServerId = "divergent-witness";
+        assert.equal((await wire.request("client.register", fullRegistration)).ok, false,
+          "an unvalidated writer cannot admit a registration through a divergent witness");
+
+        cluster.config.witnessServerId = originalWitnessId;
+        const startedAt = Date.now();
+        const recovered = await wire.request("client.register", fullRegistration);
+        assert.equal(recovered.ok, true);
+        assert.ok(Date.now() - startedAt < 30_000, "registration recovers within the bounded window");
+        const originalSurfaces = (first.payload as { surfaces: Array<{ windowLabel: number }> }).surfaces;
+        const recoveredSurfaces = (recovered.payload as {
+          surfaces: Array<{ windowLabel: number; panes: Array<{ paneLabel: number }> }>;
+        }).surfaces;
+        assert.equal(recoveredSurfaces[0]?.windowLabel, originalSurfaces[0]?.windowLabel);
+        const paneLabel = recoveredSurfaces[0]?.panes[0]?.paneLabel;
+        assert.equal(typeof paneLabel, "number");
+        assert.equal((await wire.request("pane.claim", claim)).payload?.paneLabel, paneLabel);
+        const after = await server.diagnostics();
+        assert.equal(after.registrationReady, true);
+        assert.equal(after.nextPaneOrdinalFence, beforeFence + 1, "the uncertain claim was not replayed");
+      } finally {
+        cluster.config.witnessServerId = originalWitnessId;
+        await wire.close();
+        await server.close();
+        server = null;
+      }
+    });
+
+    await t.test("registration clears an authority fence after a second resolution read failure", { timeout: 30_000 }, async () => {
+      let cutBind = false;
+      let failResolutionRead = false;
+      server = await AllocatorServer.start(serverConfig(cluster), {
+        afterCommitBeforeWitness(operation) {
+          if (operation === "bind_authority" && !cutBind) {
+            cutBind = true;
+            failResolutionRead = true;
+            throw new Error("cut-after-bind-commit");
+          }
+        },
+      });
+      const custody = (server as unknown as { custody: PostgresCustodyAdapter<"writer"> }).custody;
+      const originalRead = custody.readAcceptedState;
+      custody.readAcceptedState = async () => {
+        if (failResolutionRead && custody.registrationReady) {
+          failResolutionRead = false;
+          throw new Error("cut-after-lease-validation");
+        }
+        return await originalRead.call(custody);
+      };
+      const wire = await WireClient.connect(server.address.url);
+      const clientId = createHash("sha256").update("authority-double-fault-client").digest("hex");
+      const surfaceId = "sf_authority-double-fault";
+      const registration = { clientId, surfaces: [{ surfaceId, panes: [] }] };
+      const originalWitnessId = cluster.config.witnessServerId;
+      try {
+        const before = await server.diagnostics();
+        assert.equal((await wire.request("client.register", registration)).ok, false);
+        assert.equal(cutBind, true);
+        assert.equal(failResolutionRead, false, "the second fault followed successful lease validation");
+        assert.equal(custody.registrationReady, true, "custody recovered but authority remains fenced");
+        const fenced = await server.diagnostics();
+        assert.equal(fenced.registrationReady, false);
+        assert.match(fenced.serveStatus, /^fail-closed:unknown-persistence:/);
+
+        cluster.config.witnessServerId = "divergent-witness";
+        assert.equal((await wire.request("client.register", registration)).ok, false,
+          "registration stays fenced while the witness contradicts the held writer");
+        assert.equal(custody.registrationReady, false);
+
+        cluster.config.witnessServerId = originalWitnessId;
+        const startedAt = Date.now();
+        const recovered = await wire.request("client.register", registration);
+        assert.equal(recovered.ok, true);
+        assert.ok(Date.now() - startedAt < 30_000, "a plain retry recovers without topology or discovery");
+        assert.equal((await wire.request("client.register", registration)).ok, true);
+        const after = await server.diagnostics();
+        assert.equal(after.registrationReady, true);
+        assert.equal(after.serveStatus, "serving");
+        assert.equal(after.assignmentCount, before.assignmentCount + 1,
+          "the uncertain binding admitted only the requested surface assignment");
+      } finally {
+        cluster.config.witnessServerId = originalWitnessId;
+        custody.readAcceptedState = originalRead;
+        await wire.close();
+        await server.close();
+        server = null;
+      }
+    });
+
     await t.test("unknown mapping commit resolves to the one durable assignment", async () => {
       let injected = false;
       const writer = await PostgresCustodyAdapter.acquireWriter(cluster.config, {
@@ -752,11 +1003,10 @@ test("configured server registers two stable clients and deduplicates reconnect"
   }
 });
 
-test("configured-first registry discovery fallback registers and persists clients", { timeout: 90_000 }, async () => {
+test("configured-first server in-process discovery fallback registers and persists clients", { timeout: 90_000 }, async () => {
   const cluster = await startCluster();
   let allocator: AllocatorServer | null = null;
   const clients: ServerConnection[] = [];
-  const prefix = "surf-ace-server-fixture-" + randomUUID();
   let discoveryStarts = 0;
   let allowConfigured = true;
   let configuredAccepts = 0;
@@ -773,24 +1023,28 @@ test("configured-first registry discovery fallback registers and persists client
     upstream.on("close", () => { routeSockets.delete(upstream); socket.destroy(); });
     socket.pipe(upstream).pipe(socket);
   });
-  const discover = (): SurfAceDiscoveryService => {
-    let started = false;
-    return {
-      // A real LAN advertisement here lets live clients join the disposable allocator.
-      getSnapshot: () => started && allocator ? [{
-        role: "server", busy: false, capabilitiesBitmask: 0,
-        endpointId: `127.0.0.1:${allocator.address.port}/ws#${prefix}`,
-        fingerprintPrefix: "", host: "127.0.0.1", instanceName: prefix,
-        lastSeenAt: Date.now(), name: prefix, port: allocator.address.port,
-        protocolVersion: 1, viewport: { width: 1, height: 1, scale: 1 },
-        wsPath: "/ws", transportAddresses: ["127.0.0.1"],
-      }] : [],
-      start: async () => { discoveryStarts++; started = true; },
-      stop: async () => { started = false; },
-      refreshNow: async () => {},
-      subscribe: () => () => {},
-    };
-  };
+  const discover = (): SurfAceDiscoveryService => ({
+    getSnapshot: (): SurfAceDiscoveryEndpoint[] => allocator ? [{
+      busy: false,
+      capabilitiesBitmask: 0,
+      endpointId: `127.0.0.1:${allocator.address.port}/ws#isolated-fixture`,
+      fingerprintPrefix: "fixture",
+      host: "127.0.0.1",
+      instanceName: "isolated allocator fixture",
+      lastSeenAt: Date.now(),
+      name: "isolated allocator fixture",
+      port: allocator.address.port,
+      protocolVersion: 1,
+      role: "server",
+      transportAddresses: ["127.0.0.1"],
+      viewport: { width: 800, height: 600, scale: 1 },
+      wsPath: "/ws",
+    }] : [],
+    start: async () => { discoveryStarts++; },
+    stop: async () => {},
+    refreshNow: async () => {},
+    subscribe: () => () => {},
+  });
   let reader: PublicControllerWireClient | null = null;
   try {
     const recovery = await PostgresCustodyAdapter.initializeAbsentFleet(cluster.config, "alloc_registration-test");
@@ -823,11 +1077,7 @@ test("configured-first registry discovery fallback registers and persists client
         clientId, core, persist, discovery: discover(),
       });
       clients.push(client);
-      // Publisher and DNS-SD may settle over more than one bounded refresh.
-      for (let attempt = 0; ; attempt++) {
-        try { await client.synchronize(); break; }
-        catch (error) { if (attempt >= 5) throw error; }
-      }
+      await client.synchronize();
       if (name === "one") assert.equal(discoveryStarts, beforeDiscovery);
       else assert.ok(discoveryStarts > beforeDiscovery);
       fixtures.push({ stateDir, clientId, core, surface, persist });

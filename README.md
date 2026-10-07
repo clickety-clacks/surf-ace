@@ -69,6 +69,10 @@ separate event and is not part of screenshot capture.
 The v0.2.5 release contains six versioned assets, a manifest, and
 `SHA256SUMS`, which covers all six assets plus the manifest:
 
+The existing v0.2.5 asset filenames contain the legacy `tightbeam` segment to
+preserve published download links. Surf Ace is the product; the desktop apps,
+registry, and CLI do not require Tightbeam.
+
 | Asset | Platform and purpose |
 |---|---|
 | `surf-ace-tightbeam-server-linux-x86_64-v0.2.5.tar.gz` | Linux registry/server, CLI, schemas, and operations guide |
@@ -76,7 +80,7 @@ The v0.2.5 release contains six versioned assets, a manifest, and
 | `surf-ace-tightbeam-electron-linux-x86_64-v0.2.5.zip` | Linux desktop client |
 | `surf-ace-tightbeam-cli-macos-arm64-v0.2.5.tar.gz` | macOS arm64 CLI |
 | `surf-ace-tightbeam-electron-macos-arm64-v0.2.5.zip` | macOS arm64 desktop client |
-| `surf-ace-tightbeam-skill-v0.2.5.md` | Standalone Tightbeam agent skill source |
+| `surf-ace-tightbeam-skill-v0.2.5.md` | Optional Surf Ace skill for Tightbeam agents |
 | `surf-ace-tightbeam-v0.2.5-manifest.json` | Source, tooling, dependency, and asset identity |
 | `SHA256SUMS` | Checksums for the six assets and manifest |
 
@@ -103,9 +107,9 @@ checked before CLI operations. Server and CLI archives do not expose a separate
 version command, so their identity comes from the versioned asset name, manifest
 and checksum rather than inferred command output.
 
-## Tightbeam agent skill
+## Optional Tightbeam agent integration
 
-This repository includes the Surf Ace Tightbeam skill at
+This repository includes an optional Surf Ace skill for Tightbeam at
 [`integrations/tightbeam/skills/surf-ace/SKILL.md`](./integrations/tightbeam/skills/surf-ace/SKILL.md).
 The same file is published separately as
 `surf-ace-tightbeam-skill-v0.2.5.md` and is covered by the release manifest and

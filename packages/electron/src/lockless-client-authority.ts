@@ -617,10 +617,12 @@ export class LocklessClientAuthority {
       }
       return result;
     } catch (error) {
-      this.state = beforeState;
-      this.connectionTokens.clear();
-      for (const [key, value] of beforeTokens) {
-        this.connectionTokens.set(key, value);
+      if ((error as { name?: string } | null)?.name !== "PersistentStateOutcomeUnknownError") {
+        this.state = beforeState;
+        this.connectionTokens.clear();
+        for (const [key, value] of beforeTokens) {
+          this.connectionTokens.set(key, value);
+        }
       }
       if (ownsEvents) this.pendingEvents = null;
       else this.pendingEvents?.splice(beforeEventCount);
@@ -663,10 +665,12 @@ export class LocklessClientAuthority {
       for (const event of events) this.deliver(event);
       return result;
     } catch (error) {
-      this.state = beforeState;
-      this.connectionTokens.clear();
-      for (const [key, value] of beforeTokens) {
-        this.connectionTokens.set(key, value);
+      if ((error as { name?: string } | null)?.name !== "PersistentStateOutcomeUnknownError") {
+        this.state = beforeState;
+        this.connectionTokens.clear();
+        for (const [key, value] of beforeTokens) {
+          this.connectionTokens.set(key, value);
+        }
       }
       this.pendingEvents = null;
       throw error;

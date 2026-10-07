@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 
 import pg, { type Client as PgClient, type QueryResultRow } from "pg";
@@ -139,13 +139,18 @@ export type RestoreReady = {
 };
 
 export type AdapterTestHooks = {
+  afterCommitBeforeAck?: (operation: string) => Promise<void> | void;
   afterCommitBeforeWitness?: (operation: string) => Promise<void> | void;
   afterMutationBeforeCommit?: (operation: string, client: PgClient) => Promise<void> | void;
   beforeMutation?: (operation: string, client: PgClient) => Promise<void> | void;
 };
 
 export class PersistenceOutcomeUnknownError extends AllocatorError {
-  constructor(readonly operation: string, cause: unknown) {
+  constructor(
+    readonly operation: string,
+    cause: unknown,
+    readonly stage: "commit_ack" | "post_commit_verification" | "reconciliation" = "reconciliation",
+  ) {
     super(
       "persistence_outcome_unknown",
       `${operation} durability is unknown; query custody by idempotency identity`,
@@ -156,10 +161,46 @@ export class PersistenceOutcomeUnknownError extends AllocatorError {
   }
 }
 
+export function custodyUncertaintyDiagnostic(error: PersistenceOutcomeUnknownError): {
+  causeCode: string | null;
+  causeMessageSha256: string;
+  causeName: string;
+  operation: string;
+  stage: PersistenceOutcomeUnknownError["stage"];
+} {
+  const cause = error.cause;
+  const causeRecord = typeof cause === "object" && cause !== null
+    ? cause as { code?: unknown; message?: unknown; name?: unknown }
+    : null;
+  const token = (value: unknown): string | null =>
+    typeof value === "string" && /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(value) ? value : null;
+  const causeCode = causeRecord?.code;
+  return {
+    causeCode: typeof causeCode === "string" && /^[0-9A-Z]{5}$/.test(causeCode)
+      ? causeCode
+      : token(causeCode),
+    causeMessageSha256: createHash("sha256")
+      .update(String(causeRecord?.message ?? cause ?? ""))
+      .digest("hex"),
+    causeName: token(causeRecord?.name) ?? "unknown",
+    operation: error.operation,
+    stage: error.stage,
+  };
+}
+
+function recordCustodyDiagnostic(event: string, fields: Record<string, unknown>): void {
+  try {
+    console.error(`[surf-ace:server] event=${event} ${JSON.stringify(fields)}`);
+  } catch {
+    // A diagnostic sink must not change a durable-write outcome.
+  }
+}
+
 export class PostgresCustodyAdapter<M extends LeaseMode> {
   private closed = false;
   private operationTail: Promise<void> = Promise.resolve();
   private validated = false;
+  private uncertain: { operation: string; before: AcceptedState; matches: (state: AcceptedState) => boolean } | null = null;
 
   private constructor(
     readonly config: PostgresCustodyConfig,
@@ -309,7 +350,16 @@ export class PostgresCustodyAdapter<M extends LeaseMode> {
   }
 
   async validateLease(): Promise<void> {
-    await this.enqueuePrimary(async () => {
+    await this.enqueuePrimary(async () => await this.validateLeaseNow());
+  }
+
+  get registrationReady(): boolean {
+    return !this.closed && this.validated && this.uncertain === null;
+  }
+
+  private async validateLeaseNow(): Promise<void> {
+    this.validated = false;
+    try {
       const state = await this.readAcceptedStateNow();
       const journal = await this.primary.query<{ valid: boolean }>(
         "SELECT surf_ace_allocator.validate_journal($1) AS valid",
@@ -329,12 +379,39 @@ export class PostgresCustodyAdapter<M extends LeaseMode> {
       }
       const witness = await readAndValidateWitness(this.config, this.primary);
       assertMatchingHead(state, witness);
+      if (this.uncertain) {
+        const { before, matches, operation } = this.uncertain;
+        const unchanged = state.headSeq === before.headSeq
+          && state.headHash === before.headHash
+          && state.custodyRevision === before.custodyRevision;
+        if (!matches(state) && !unchanged) {
+          throw new AllocatorError("allocator_state_corrupt", `${operation} outcome contradicts the held writer's accepted head`);
+        }
+        this.uncertain = null;
+      }
       this.validated = true;
-    });
+    } catch (error) {
+      this.validated = false;
+      throw error;
+    }
   }
 
-  private async mutate<T>(operation: string, body: () => Promise<T>): Promise<T> {
-    return await this.enqueuePrimary(async () => await this.performMutation(operation, body));
+  async recoverWriter(): Promise<boolean> {
+    try {
+      await this.validateLease();
+      return this.registrationReady;
+    } catch {
+      return false;
+    }
+  }
+
+  private async mutate<T>(
+    operation: string,
+    body: () => Promise<T>,
+    matches: (state: AcceptedState) => boolean = () => false,
+    precheck?: (state: AcceptedState) => void,
+  ): Promise<T> {
+    return await this.enqueuePrimary(async () => await this.performMutation(operation, body, matches, precheck));
   }
 
   private async enqueuePrimary<T>(operation: () => Promise<T>): Promise<T> {
@@ -344,8 +421,21 @@ export class PostgresCustodyAdapter<M extends LeaseMode> {
     return await result;
   }
 
-  private async performMutation<T>(operation: string, body: () => Promise<T>): Promise<T> {
+  private async performMutation<T>(
+    operation: string,
+    body: () => Promise<T>,
+    matches: (state: AcceptedState) => boolean,
+    precheck?: (state: AcceptedState) => void,
+  ): Promise<T> {
     this.assertUsable();
+    let before: AcceptedState;
+    try {
+      before = await this.readAcceptedStateNow();
+    } catch (error) {
+      this.validated = false;
+      throw error;
+    }
+    precheck?.(before);
     let committed = false;
     try {
       const result = await transaction(this.primary, operation, this.hooks, body);
@@ -367,9 +457,16 @@ export class PostgresCustodyAdapter<M extends LeaseMode> {
     } catch (error) {
       if (committed || error instanceof PersistenceOutcomeUnknownError) {
         this.validated = false;
-        throw error instanceof PersistenceOutcomeUnknownError
+        this.uncertain = { operation, before, matches };
+        const unknown = error instanceof PersistenceOutcomeUnknownError
           ? error
-          : new PersistenceOutcomeUnknownError(operation, error);
+          : new PersistenceOutcomeUnknownError(operation, error, "post_commit_verification");
+        try {
+          recordCustodyDiagnostic("custody_outcome_unknown", custodyUncertaintyDiagnostic(unknown));
+        } catch {
+          // Neither diagnostic formatting nor output may change the unknown outcome.
+        }
+        throw unknown;
       }
       throw mapDatabaseError(error);
     }
@@ -533,7 +630,8 @@ export class PostgresCustodyAdapter<M extends LeaseMode> {
     await this.mutate("bind_authority", async () => await this.primary.query(
       "SELECT surf_ace_allocator.bind_authority($1, $2, $3, $4, $5)",
       [this.config.fleetId, this.token.leaseGeneration, this.token.leaseId, authorityId, ownerAnchorId],
-    ));
+    ), (state) => state.authorityOwners.some((owner) =>
+      owner.authorityId === authorityId && owner.ownerAnchorId === ownerAnchorId));
   }
 
   async reserve(
@@ -555,7 +653,8 @@ export class PostgresCustodyAdapter<M extends LeaseMode> {
         ownerAnchorId,
         surfaceId,
       ],
-    ));
+    ), (state) => state.transactions.some((tx) => tx.transactionId === transactionId
+      && tx.authorityId === authorityId && tx.ownerAnchorId === ownerAnchorId && tx.surfaceId === surfaceId));
     return reserveFromRow(requiredRow(result.rows[0], "reserve_ordinal"));
   }
 
@@ -567,7 +666,9 @@ export class PostgresCustodyAdapter<M extends LeaseMode> {
     const result = await this.mutate("commit_mapping", async () => await this.primary.query<MappingRow>(
       "SELECT * FROM surf_ace_allocator.commit_mapping($1, $2, $3, $4)",
       [this.config.fleetId, this.token.leaseGeneration, this.token.leaseId, transactionId],
-    ));
+    ), (state) => state.transactions.some((tx) => tx.transactionId === transactionId
+      && tx.status === "committed" && state.mappings.some((mapping) => mapping.ordinal === tx.ordinal
+        && mapping.authorityId === tx.authorityId && mapping.surfaceId === tx.surfaceId)));
     const row = requiredRow(result.rows[0], "commit_mapping");
     return {
       authorityId: row.authority_id,
@@ -586,11 +687,29 @@ export class PostgresCustodyAdapter<M extends LeaseMode> {
     lineageId: string,
   ): Promise<number> {
     this.assertMode("writer");
-    const result = await this.mutate("claim_pane", async () => await this.primary.query<{ pane_label: number | string }>(
-      "SELECT surf_ace_allocator.claim_pane($1, $2, $3, $4, $5, $6, $7) AS pane_label",
-      [this.config.fleetId, this.token.leaseGeneration, this.token.leaseId, clientId, surfaceId, paneId, lineageId],
-    ));
-    return integer(requiredRow(result.rows[0], "claim_pane").pane_label);
+    try {
+      const result = await this.mutate("claim_pane", async () => await this.primary.query<{ pane_label: number | string }>(
+        "SELECT surf_ace_allocator.claim_pane($1, $2, $3, $4, $5, $6, $7) AS pane_label",
+        [this.config.fleetId, this.token.leaseGeneration, this.token.leaseId, clientId, surfaceId, paneId, lineageId],
+      ), (state) => state.paneMappings.some((pane) => pane.clientId === clientId
+        && pane.surfaceId === surfaceId && pane.paneId === paneId && pane.lineageId === lineageId),
+      (state) => {
+        const existing = state.paneMappings.find((pane) => pane.clientId === clientId
+          && pane.surfaceId === surfaceId && pane.lineageId === lineageId);
+        if (existing && existing.paneId !== paneId) {
+          throw new AllocatorError("assignment_conflict", "pane lineage is bound to another pane ID");
+        }
+      });
+      return integer(requiredRow(result.rows[0], "claim_pane").pane_label);
+    } catch (error) {
+      if (error instanceof PersistenceOutcomeUnknownError) {
+        const identitySha256 = createHash("sha256")
+          .update(JSON.stringify([clientId, surfaceId, paneId, lineageId]))
+          .digest("hex");
+        recordCustodyDiagnostic("custody_claim_unknown", { identitySha256 });
+      }
+      throw error;
+    }
   }
 
   async burn(this: PostgresCustodyAdapter<"writer">, transactionId: string): Promise<void> {
@@ -598,7 +717,7 @@ export class PostgresCustodyAdapter<M extends LeaseMode> {
     await this.mutate("burn_reservation", async () => await this.primary.query(
       "SELECT surf_ace_allocator.burn_reservation($1, $2, $3, $4)",
       [this.config.fleetId, this.token.leaseGeneration, this.token.leaseId, transactionId],
-    ));
+    ), (state) => state.transactions.some((tx) => tx.transactionId === transactionId && tx.status === "burned"));
   }
 
   async queryTransaction(transactionId: string): Promise<TransactionRecord | null> {
@@ -801,6 +920,7 @@ async function transaction<T>(
       await hooks?.afterMutationBeforeCommit?.(operation, client);
       commitStarted = true;
       await client.query("COMMIT");
+      await hooks?.afterCommitBeforeAck?.(operation);
       return result;
     } catch (error) {
       if (!commitStarted) {
@@ -810,7 +930,7 @@ async function transaction<T>(
         continue;
       }
       if (commitStarted) {
-        throw new PersistenceOutcomeUnknownError(operation, error);
+        throw new PersistenceOutcomeUnknownError(operation, error, "commit_ack");
       }
       throw error;
     }

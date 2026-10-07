@@ -1289,7 +1289,7 @@ test("Tightbeam v0.2.5 binds the landed discovery-integrity candidate, six hoste
   assert.equal(TIGHTBEAM_TOOLING_TAG, "surf-ace-release-tooling-tightbeam-v0.2.5-r11");
   assert.deepEqual(TIGHTBEAM, {
     candidateCommit: "04a37d82e94d9cae7446841ccc03553a18397ff2",
-    sourceTag: "surf-ace-tightbeam-v0.2.5-r4", version: "0.2.5", toolingTag: TIGHTBEAM_TOOLING_TAG,
+    sourceTag: "surf-ace-tightbeam-v0.2.5-r4", version: "0.2.5", channel: "tightbeam-standalone", toolingTag: TIGHTBEAM_TOOLING_TAG,
     assets: ["surf-ace-tightbeam-server-linux-x86_64-v0.2.5.tar.gz","surf-ace-tightbeam-cli-linux-x86_64-v0.2.5.tar.gz","surf-ace-tightbeam-electron-linux-x86_64-v0.2.5.zip","surf-ace-tightbeam-cli-macos-arm64-v0.2.5.tar.gz","surf-ace-tightbeam-electron-macos-arm64-v0.2.5.zip",TIGHTBEAM_SKILL_ASSET],
     manifest: "surf-ace-tightbeam-v0.2.5-manifest.json", checksums: "SHA256SUMS",
   });

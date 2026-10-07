@@ -309,6 +309,10 @@ export async function requestFleetTopology(endpoint: string, timeoutMs = DEFAULT
         finish(new CentralServerHealthError("fleet_topology_payload_invalid"));
         return;
       }
+      if (response.payload.registrationReady !== true) {
+        finish(new CentralServerHealthError("registration_writer_unavailable"));
+        return;
+      }
       finish(undefined, response.payload);
     });
 
@@ -341,6 +345,12 @@ export async function checkPublishedServerRecord(
     throw new CentralServerHealthError(`advertised_host_mismatch:${host}:expected:${options.expectedHost}`);
   }
   const request = options.requestTopology ?? requestFleetTopology;
+  const requestReady = async (endpoint: string) => {
+    const payload = await request(endpoint, options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+    if (!isPlainObject(payload) || !Array.isArray(payload.clients) || payload.registrationReady !== true) {
+      throw new CentralServerHealthError("registration_writer_unavailable");
+    }
+  };
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const networkInterfaces = options.networkInterfaces ?? os.networkInterfaces();
   const rawRecordAddresses = Array.isArray(service.addresses) ? service.addresses : [];
@@ -437,7 +447,7 @@ export async function checkPublishedServerRecord(
     const failures: Array<{ address: string; reason: string }> = [];
     for (const address of addressesToProbe) {
       try {
-        await request(websocketUrl(selfCheckHostForAddress(address, host), port, path), timeoutMs);
+        await requestReady(websocketUrl(selfCheckHostForAddress(address, host), port, path));
       } catch (error) {
         failures.push({ address, reason: errorCode(error) });
       }
@@ -470,7 +480,7 @@ export async function checkPublishedServerRecord(
   for (const address of recordAddresses) {
     const addressEndpoint = websocketUrl(selfCheckHostForAddress(address, host), port, path);
     try {
-      await request(addressEndpoint, timeoutMs);
+      await requestReady(addressEndpoint);
     } catch (fallbackError) {
       failures.push({ address, reason: errorCode(fallbackError) });
     }
