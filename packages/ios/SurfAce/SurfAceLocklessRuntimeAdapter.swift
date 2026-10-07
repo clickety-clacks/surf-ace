@@ -419,6 +419,11 @@ actor SurfAceLocklessRuntimeAdapter {
                             state.liveSurfaces[id]?.windowLabelConfirmed = false
                         } else if let index = state.surfaceTombstones.firstIndex(where: { $0.surface.surfaceId == id }) {
                             state.surfaceTombstones[index].surface.windowLabelConfirmed = false
+                            let tombstone = state.surfaceTombstones[index]
+                            state.surfaceTombstones[index].bytes = try SurfAceLocklessTopologyOperations.restoredSurfaceTombstoneBytes(
+                                closedSequence: tombstone.closedSequence, scopes: tombstone.scopes,
+                                surface: tombstone.surface, tombstoneId: tombstone.tombstoneId
+                            )
                         }
                     }
                     state.unconfirmedMigration = receipt
@@ -427,7 +432,10 @@ actor SurfAceLocklessRuntimeAdapter {
                 current = try await coordinator.registryBindingDurableSnapshot()
             } catch {
                 if case SurfAceRegistrationError.topologyChanged = error { throw error }
-                current = try await coordinator.reconcileUnconfirmedMigration(receipt)
+                guard let restored = try? await coordinator.reconcileUnconfirmedMigration(receipt) else {
+                    throw error
+                }
+                current = restored
             }
             claims = SurfAceProvisionedRegistryBinding.confirmedClaims(current)
             guard claims.isEmpty else { throw SurfAceRegistrationError.unconfirmedMigrationPending }
