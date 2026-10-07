@@ -140,6 +140,7 @@ test("Done recovery keeps one source frame across pre-direct and post-direct cra
       /injected process interruption/);
     source.stop();
     const restored = new SurfaceCore({ annotationClientId: clientId, persistentState: durable });
+    restored.restorePersistedSurfaces("Surf Ace", viewport);
     let directCalls = 0;
     let recovered = restored.getPersistentState();
     const resumed = new AnnotationSourceCoordinator(restored, async () => {
