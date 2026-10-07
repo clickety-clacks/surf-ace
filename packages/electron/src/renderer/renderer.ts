@@ -170,6 +170,7 @@ type LayoutNode =
   | { children: LayoutNode[]; direction: "horizontal" | "vertical"; type: "split"; weight?: number };
 
 type RendererWindowState = {
+  capabilityStatus?: string;
   connectionBar: "connected" | "connecting" | "disconnected";
   connectionError?: string;
   geometryRevision: number;
@@ -2972,6 +2973,7 @@ function layoutKey(state: RendererWindowState): string {
 
 function chromeKey(state: RendererWindowState): string {
   return JSON.stringify({
+    capabilityStatus: state.capabilityStatus ?? null,
     connectionBar: state.connectionBar,
     connectionError: state.connectionError ?? null,
     windowLabel: state.windowLabel,
@@ -2980,7 +2982,9 @@ function chromeKey(state: RendererWindowState): string {
 
 function updateConnectionErrorBanner(wrapper: HTMLElement, state: RendererWindowState): void {
   let banner = wrapper.querySelector(".connection-status-banner") as HTMLDivElement | null;
-  const message = state.connectionBar === "connected" ? "" : state.connectionError?.trim() ?? "";
+  const registryMessage = state.connectionBar === "connected" ? "" : state.connectionError?.trim() ?? "";
+  const message = [state.capabilityStatus, registryMessage && `Registry ${state.connectionBar}: ${registryMessage}`]
+    .filter(Boolean).join(" · ");
   if (!message) {
     banner?.remove();
     return;
@@ -2991,7 +2995,7 @@ function updateConnectionErrorBanner(wrapper: HTMLElement, state: RendererWindow
     banner.setAttribute("role", "status");
     wrapper.appendChild(banner);
   }
-  banner.textContent = `Registry ${state.connectionBar}: ${message}`;
+  banner.textContent = message;
 }
 
 function patchSameLayoutWindow(previousState: RendererWindowState, state: RendererWindowState): boolean {

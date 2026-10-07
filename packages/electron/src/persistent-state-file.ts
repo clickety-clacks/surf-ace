@@ -15,11 +15,13 @@ type PersistentStateSelector = {
 
 export class PersistentStateOutcomeUnknownError extends Error {
   readonly cause: unknown;
+  readonly acceptedSha256?: string | null;
 
-  constructor(cause: unknown) {
+  constructor(cause: unknown, acceptedSha256?: string | null) {
     super("Persistent state commit outcome is unknown");
     this.name = "PersistentStateOutcomeUnknownError";
     this.cause = cause;
+    this.acceptedSha256 = acceptedSha256;
   }
 }
 
@@ -411,7 +413,7 @@ export async function writePersistentStateFile(
       version: 1,
     }));
   } catch (error) {
-    throw new PersistentStateOutcomeUnknownError(error);
+    throw new PersistentStateOutcomeUnknownError(error, pendingSelector.acceptedSha256);
   }
   // Primary is committed. Backup refresh may lag at the prior committed
   // generation, but it must never turn this transaction into a rejection.

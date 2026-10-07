@@ -227,6 +227,77 @@ test("persistent state writes primary and last-good backup as valid JSON", async
   );
 });
 
+test("selector acknowledgement ambiguity can be reconciled to the exact committed generation", async () => {
+  const stateDir = await temporaryStateDir();
+  const before = multiWindowState();
+  const candidate = { ...multiWindowState(), primarySurfaceId: "sf_secondary" as never };
+  await writePersistentStateFile(stateDir, STATE_FILE_NAME, before);
+  const selectorPath = path.join(stateDir, persistentStateSelectorFileName(STATE_FILE_NAME));
+  const candidateHash = createHash("sha256").update(JSON.stringify(candidate, null, 2)).digest("hex");
+  const originalRename = fs.rename;
+  let injected = false;
+  fs.rename = (async (...args: Parameters<typeof fs.rename>) => {
+    await originalRename(...args);
+    if (args[1] !== selectorPath || injected) return;
+    const selector = JSON.parse(await fs.readFile(selectorPath, "utf8"));
+    if (selector.phase === "committed" && selector.acceptedSha256 === candidateHash) {
+      injected = true;
+      throw Object.assign(new Error("injected selector acknowledgement loss"), { code: "EIO" });
+    }
+  }) as typeof fs.rename;
+  try {
+    await assert.rejects(writePersistentStateFile(stateDir, STATE_FILE_NAME, candidate),
+      (error) => error instanceof PersistentStateOutcomeUnknownError);
+  } finally {
+    fs.rename = originalRename;
+  }
+  assert.equal(injected, true);
+  const reconciled = await loadPersistentStateFile(stateDir, STATE_FILE_NAME);
+  assert.equal(reconciled.writeGuard, false);
+  assert.deepEqual(reconciled.state, candidate);
+  assert.deepEqual(reconciled.state?.surfaces, before.surfaces);
+});
+
+test("uncommitted selector candidate retains prior generation for identity-preserving retry", async () => {
+  const stateDir = await temporaryStateDir();
+  const before = multiWindowState();
+  const candidate = { ...multiWindowState(), primarySurfaceId: "sf_secondary" as never };
+  await writePersistentStateFile(stateDir, STATE_FILE_NAME, before);
+  const selectorPath = path.join(stateDir, persistentStateSelectorFileName(STATE_FILE_NAME));
+  const candidateHash = createHash("sha256").update(JSON.stringify(candidate, null, 2)).digest("hex");
+  const originalRename = fs.rename;
+  let injected = false;
+  fs.rename = (async (...args: Parameters<typeof fs.rename>) => {
+    if (args[1] === selectorPath && !injected) {
+      const selector = JSON.parse(await fs.readFile(args[0], "utf8"));
+      if (selector.phase === "committed" && selector.acceptedSha256 === candidateHash) {
+        injected = true;
+        throw Object.assign(new Error("injected final selector rename failure"), { code: "EIO" });
+      }
+    }
+    await originalRename(...args);
+  }) as typeof fs.rename;
+  let unknown: PersistentStateOutcomeUnknownError | null = null;
+  try {
+    await writePersistentStateFile(stateDir, STATE_FILE_NAME, candidate);
+  } catch (error) {
+    if (error instanceof PersistentStateOutcomeUnknownError) unknown = error;
+    else throw error;
+  } finally {
+    fs.rename = originalRename;
+  }
+  assert.equal(injected, true);
+  assert(unknown);
+  const beforeHash = createHash("sha256").update(JSON.stringify(before, null, 2)).digest("hex");
+  assert.equal(unknown.acceptedSha256, beforeHash);
+  const stillAccepted = await loadPersistentStateFile(stateDir, STATE_FILE_NAME);
+  assert.deepEqual(stillAccepted.state, before);
+  await writePersistentStateFile(stateDir, STATE_FILE_NAME, candidate);
+  const retried = await loadPersistentStateFile(stateDir, STATE_FILE_NAME);
+  assert.deepEqual(retried.state, candidate);
+  assert.deepEqual(retried.state?.surfaces, before.surfaces);
+});
+
 test("persistent state recovers last-good backup when primary JSON is truncated", async () => {
   const stateDir = await temporaryStateDir();
   const state = multiWindowState();

@@ -243,6 +243,15 @@ export class WindowLabelAuthority {
     return this.failClosedReason ? `fail-closed:${this.failClosedReason}` : "serving";
   }
 
+  async refreshReadiness(): Promise<boolean> {
+    const ready = await this.custody.recoverWriter();
+    if (ready && this.failClosedReason?.startsWith("unknown-persistence:")) {
+      // The same lease and accepted operation have been reconciled by custody.
+      this.failClosedReason = null;
+    }
+    return ready && this.failClosedReason === null;
+  }
+
   private async accepted(fleetId: string, expectedAllocatorId?: string): Promise<AcceptedState> {
     const state = await this.custody.readAcceptedState();
     if (fleetId !== state.fleetId) {
