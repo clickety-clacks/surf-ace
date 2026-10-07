@@ -81,6 +81,48 @@ struct SurfAceProvisionedRegistryBinding: Codable, Equatable, Sendable {
     }
 }
 
+// This file is installed only after the owner has independently checked the
+// allocation history and local provenance. Discovery is not that evidence.
+struct SurfAceVerifiedUnconfirmedMigration: Codable, Equatable, Sendable {
+    let clientId: String
+    let evidenceId: String
+    let allocationHistoryEvidence: String
+    let localProvenanceEvidence: String
+    let otherFleetCheckEvidence: String
+    let localClaims: [SurfAceRegistrationAssignment]
+
+    static func load(from directory: URL) throws -> Self? {
+        let url = directory.appendingPathComponent("registry-unconfirmed.provisioned.json")
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        return try JSONDecoder().decode(Self.self, from: Data(contentsOf: url))
+    }
+
+    func matchingSurfaceIds(in state: SurfAceLocklessAuthorityState, clientId: String) -> Set<String>? {
+        guard self.clientId == clientId, !evidenceId.isEmpty,
+              !allocationHistoryEvidence.isEmpty, !localProvenanceEvidence.isEmpty,
+              !otherFleetCheckEvidence.isEmpty, state.registryBinding == nil,
+              state.unconfirmedMigration == nil, !localClaims.isEmpty,
+              localClaims == SurfAceProvisionedRegistryBinding.confirmedClaims(state),
+              localClaims.allSatisfy({ !$0.windowLabel.isEmpty && $0.panes.isEmpty }) else { return nil }
+        let ids = Set(localClaims.map(\.surfaceId))
+        guard ids.count == localClaims.count else { return nil }
+        let surfaces = Array(state.liveSurfaces.values) + state.surfaceTombstones.map(\.surface)
+        guard surfaces.filter({ ids.contains($0.surfaceId) }).count == ids.count,
+              surfaces.filter({ ids.contains($0.surfaceId) }).allSatisfy({
+                  $0.windowLabelConfirmed == nil &&
+                  $0.panes.values.allSatisfy({ $0.paneLabel <= 0 }) &&
+                  $0.paneTombstones.allSatisfy({ $0.pane.paneLabel <= 0 })
+              }) else { return nil }
+        return ids
+    }
+}
+
+struct SurfAceUnconfirmedMigrationReceipt: Codable, Equatable, Sendable {
+    let clientId: String
+    let evidenceId: String
+    let localClaims: [SurfAceRegistrationAssignment]
+}
+
 enum SurfAceRegistrationError: Error {
     case invalidResponse
     case paneClaimRejected(code: String?, message: String?)
@@ -92,6 +134,7 @@ enum SurfAceRegistrationError: Error {
     case foreignRegistryIdentity
     case legacyRegistryBindingPending
     case registryBindingPersistencePending
+    case unconfirmedMigrationPending
 }
 
 struct SurfAceCentralRegistrationFailure: Error, LocalizedError {
@@ -120,6 +163,7 @@ private func surfAceRegistrationErrorDescription(_ error: Error) -> String {
         case .foreignRegistryIdentity: return "foreign_registry_identity"
         case .legacyRegistryBindingPending: return "legacy_registry_binding_pending"
         case .registryBindingPersistencePending: return "registry_binding_persistence_pending"
+        case .unconfirmedMigrationPending: return "unconfirmed_migration_pending"
         }
     }
     if let urlError = error as? URLError {

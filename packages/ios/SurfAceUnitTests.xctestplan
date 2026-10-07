@@ -1,0 +1,28 @@
+{
+  "configurations" : [
+    {
+      "id" : "7795236C-64C7-4AA5-9E61-B61A1CF7B55E",
+      "name" : "Default",
+      "options" : {}
+    }
+  ],
+  "defaultOptions" : {
+    "environmentVariableEntries" : [
+      {
+        "key" : "SURF_ACE_XCTEST_HOST_NO_AUTOSTART",
+        "value" : "1",
+        "isEnabled" : true
+      }
+    ]
+  },
+  "testTargets" : [
+    {
+      "target" : {
+        "containerPath" : "container:SurfAce.xcodeproj",
+        "identifier" : "67A9D8D88698454C7C5A7802",
+        "name" : "SurfAceTests"
+      }
+    }
+  ],
+  "version" : 1
+}

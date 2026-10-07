@@ -557,9 +557,12 @@ final class SurfAceRuntime {
                 let stored = await adapter.snapshot()
                 let provisioned = stored.registryBinding == nil
                     ? try SurfAceProvisionedRegistryBinding.load(from: directory) : nil
+                let verifiedUnconfirmed = stored.registryBinding == nil
+                    ? try SurfAceVerifiedUnconfirmedMigration.load(from: directory) : nil
                 try await adapter.bindRegistryIdentity(
                     registryIdentity, clientId: identity.clientId,
-                    expectedSurfaces: expected, provisioned: provisioned
+                    expectedSurfaces: expected, provisioned: provisioned,
+                    verifiedUnconfirmed: verifiedUnconfirmed
                 )
             },
             onError: { error in

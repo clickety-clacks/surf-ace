@@ -379,10 +379,11 @@ actor SurfAceLocklessRuntimeAdapter {
         _ identity: SurfAceRegistryIdentity,
         clientId: String,
         expectedSurfaces: [SurfAceRegistrationSurface],
-        provisioned: SurfAceProvisionedRegistryBinding?
+        provisioned: SurfAceProvisionedRegistryBinding?,
+        verifiedUnconfirmed: SurfAceVerifiedUnconfirmedMigration? = nil
     ) async throws {
         guard identity.isValid else { throw SurfAceRegistrationError.registryIdentityMissing }
-        let current = try await coordinator.registryBindingDurableSnapshot()
+        var current = try await coordinator.registryBindingDurableSnapshot()
         guard SurfAceRegistrationSurface.snapshot(current) == expectedSurfaces else {
             throw SurfAceRegistrationError.topologyChanged
         }
@@ -400,7 +401,37 @@ actor SurfAceLocklessRuntimeAdapter {
            !pendingRegistryBinding.matches(identity, clientId: clientId) {
             throw SurfAceRegistrationError.foreignRegistryIdentity
         }
-        let claims = SurfAceProvisionedRegistryBinding.confirmedClaims(current)
+        var claims = SurfAceProvisionedRegistryBinding.confirmedClaims(current)
+        if !claims.isEmpty, let verifiedUnconfirmed,
+           let surfaceIds = verifiedUnconfirmed.matchingSurfaceIds(in: current, clientId: clientId) {
+            let receipt = SurfAceUnconfirmedMigrationReceipt(
+                clientId: clientId, evidenceId: verifiedUnconfirmed.evidenceId,
+                localClaims: verifiedUnconfirmed.localClaims
+            )
+            do {
+                _ = try await coordinator.transact(trigger: "verified_unconfirmed_migration") { state in
+                    guard SurfAceRegistrationSurface.snapshot(state) == expectedSurfaces,
+                          verifiedUnconfirmed.matchingSurfaceIds(in: state, clientId: clientId) == surfaceIds else {
+                        throw SurfAceRegistrationError.topologyChanged
+                    }
+                    for id in surfaceIds {
+                        if state.liveSurfaces[id] != nil {
+                            state.liveSurfaces[id]?.windowLabelConfirmed = false
+                        } else if let index = state.surfaceTombstones.firstIndex(where: { $0.surface.surfaceId == id }) {
+                            state.surfaceTombstones[index].surface.windowLabelConfirmed = false
+                        }
+                    }
+                    state.unconfirmedMigration = receipt
+                    return state
+                }
+                current = try await coordinator.registryBindingDurableSnapshot()
+            } catch {
+                if case SurfAceRegistrationError.topologyChanged = error { throw error }
+                current = try await coordinator.reconcileUnconfirmedMigration(receipt)
+            }
+            claims = SurfAceProvisionedRegistryBinding.confirmedClaims(current)
+            guard claims.isEmpty else { throw SurfAceRegistrationError.unconfirmedMigrationPending }
+        }
         let binding: SurfAceRegistryBinding
         if claims.isEmpty {
             binding = SurfAceRegistryBinding(

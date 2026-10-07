@@ -390,6 +390,7 @@ struct SurfAceLocklessAuthorityState: Codable, Equatable, Sendable {
     var pendingControllerRetentionReclamations: [SurfAceLocklessControllerRetentionReclamation]?
     var pendingTombstoneReclamations: [SurfAceLocklessTombstoneReclamation]?
     var registryBinding: SurfAceRegistryBinding?
+    var unconfirmedMigration: SurfAceUnconfirmedMigrationReceipt?
     var sceneSurfaceIds: [String: String]
     var scopes: [String: SurfAceLocklessConsumableScope]
     var sequences: SurfAceLocklessClientSequences
@@ -410,6 +411,7 @@ struct SurfAceLocklessAuthorityState: Codable, Equatable, Sendable {
             pendingControllerRetentionReclamations: [],
             pendingTombstoneReclamations: [],
             registryBinding: nil,
+            unconfirmedMigration: nil,
             sceneSurfaceIds: [:],
             scopes: [:],
             sequences: SurfAceLocklessClientSequences(
@@ -1069,7 +1071,38 @@ final class SurfAceLocklessTransactionCoordinator: @unchecked Sendable {
                         }
                         self.state = stored
                     }
+                    if stored?.unconfirmedMigration != self.state.unconfirmedMigration {
+                        guard self.state.unconfirmedMigration == nil,
+                              let stored,
+                              let receipt = stored.unconfirmedMigration,
+                              receipt.localClaims == SurfAceProvisionedRegistryBinding.confirmedClaims(self.state),
+                              SurfAceProvisionedRegistryBinding.confirmedClaims(stored).isEmpty else {
+                            throw SurfAceRegistrationError.registryBindingPersistencePending
+                        }
+                        self.state = stored
+                    }
                     continuation.resume(returning: self.state)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    func reconcileUnconfirmedMigration(
+        _ receipt: SurfAceUnconfirmedMigrationReceipt
+    ) async throws -> SurfAceLocklessAuthorityState {
+        try await withCheckedThrowingContinuation { continuation in
+            queue.async {
+                do {
+                    guard let stored = try self.store.load(),
+                          stored.unconfirmedMigration == receipt,
+                          stored.registryBinding == nil,
+                          SurfAceProvisionedRegistryBinding.confirmedClaims(stored).isEmpty else {
+                        throw SurfAceRegistrationError.registryBindingPersistencePending
+                    }
+                    self.state = stored
+                    continuation.resume(returning: stored)
                 } catch {
                     continuation.resume(throwing: error)
                 }

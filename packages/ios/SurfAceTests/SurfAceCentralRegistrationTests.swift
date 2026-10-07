@@ -6,6 +6,10 @@ import XCTest
 
 @MainActor
 final class SurfAceCentralRegistrationTests: XCTestCase {
+    func testXCTestHostIsolationFlag() {
+        XCTAssertEqual(ProcessInfo.processInfo.environment["SURF_ACE_XCTEST_HOST_NO_AUTOSTART"], "1")
+    }
+
     private final class Transport: SurfAceRegistrationTransport {
         var error: Error?
         var fails = false
@@ -766,6 +770,147 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         } catch { }
         let afterRestart = await restored.snapshot()
         XCTAssertEqual(afterRestart.liveSurfaces[id]?.panes["1"]?.paneLabel, 700)
+    }
+
+    func testPreMarkerLocalLetterRequiresVerifiedHistoryAndPreservesIdentityAcrossMigration() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("pre-marker-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = SurfAceLocklessGenerationStore(stateURL: root.appendingPathComponent("state.json"))
+        var state = try SurfAceLocklessAuthorityState.empty()
+        let openingRevision = state.surfaceSetRevision
+        let id = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
+            state: &state, expectedSurfaceSetRevision: openingRevision
+        ).surface.surfaceId
+        state.liveSurfaces[id]?.windowLabelConfirmed = nil
+        state.liveSurfaces[id]?.panes["1"]?.target = .string("local content")
+        let lineage = try XCTUnwrap(state.liveSurfaces[id]?.panes["1"]?.paneLineageId)
+        let originalLabel = try XCTUnwrap(state.liveSurfaces[id]?.windowLabel)
+        let claims = SurfAceProvisionedRegistryBinding.confirmedClaims(state)
+        XCTAssertEqual(claims, [.init(surfaceId: id, windowLabel: originalLabel, panes: [])])
+        try store.save(state)
+        let adapter = try SurfAceLocklessRuntimeAdapter(store: store)
+        let clientId = "pre-marker-client"
+        let foreign = SurfAceRegistryIdentity(allocatorId: "alloc_foreign", fleetId: "foreign")
+        let home = SurfAceRegistryIdentity(allocatorId: "alloc_home", fleetId: "home")
+        let surfaces = SurfAceRegistrationSurface.snapshot(state)
+        let verified = SurfAceVerifiedUnconfirmedMigration(
+            clientId: clientId, evidenceId: "owner-review-1",
+            allocationHistoryEvidence: "authoritative-history-no-allocation",
+            localProvenanceEvidence: "local-open-record",
+            otherFleetCheckEvidence: "all-fleet-history-check",
+            localClaims: claims
+        )
+
+        // Missing history or provenance does not turn a pre-marker letter into a fresh client.
+        do {
+            try await adapter.bindRegistryIdentity(foreign, clientId: clientId,
+                expectedSurfaces: surfaces, provisioned: nil)
+            XCTFail("discovery bypassed history verification")
+        } catch { }
+        let unavailable = SurfAceVerifiedUnconfirmedMigration(
+            clientId: clientId, evidenceId: "owner-review-1", allocationHistoryEvidence: "",
+            localProvenanceEvidence: "local-open-record",
+            otherFleetCheckEvidence: "all-fleet-history-check", localClaims: claims
+        )
+        do {
+            try await adapter.bindRegistryIdentity(foreign, clientId: clientId,
+                expectedSurfaces: surfaces, provisioned: nil, verifiedUnconfirmed: unavailable)
+            XCTFail("unavailable history authorized migration")
+        } catch { }
+        XCTAssertEqual(try XCTUnwrap(store.load()), state)
+
+        // An actually confirmed letter stays legacy-bound even if no active registry row remains.
+        var confirmed = state
+        confirmed.liveSurfaces[id]?.windowLabelConfirmed = true
+        let confirmedStore = SurfAceLocklessGenerationStore(stateURL: root.appendingPathComponent("confirmed.json"))
+        try confirmedStore.save(confirmed)
+        let confirmedAdapter = try SurfAceLocklessRuntimeAdapter(store: confirmedStore)
+        do {
+            try await confirmedAdapter.bindRegistryIdentity(home, clientId: clientId,
+                expectedSurfaces: surfaces, provisioned: nil, verifiedUnconfirmed: verified)
+            XCTFail("confirmed label was reclassified from a missing active row")
+        } catch { }
+        XCTAssertEqual(try XCTUnwrap(confirmedStore.load()), confirmed)
+
+        // Model a completed disk replace whose caller never observed success.
+        var committed = state
+        committed.liveSurfaces[id]?.windowLabelConfirmed = false
+        committed.unconfirmedMigration = .init(
+            clientId: clientId, evidenceId: verified.evidenceId, localClaims: claims
+        )
+        committed.generation += 1
+        try store.save(committed)
+        try await adapter.bindRegistryIdentity(home, clientId: clientId,
+            expectedSurfaces: surfaces, provisioned: nil, verifiedUnconfirmed: verified)
+        let bound = try XCTUnwrap(store.load())
+        XCTAssertEqual(bound.registryBinding?.clientId, clientId)
+        XCTAssertEqual(bound.registryBinding?.fleetId, home.fleetId)
+        XCTAssertEqual(bound.unconfirmedMigration?.evidenceId, verified.evidenceId)
+        XCTAssertEqual(bound.liveSurfaces[id]?.windowLabel, originalLabel)
+        XCTAssertEqual(bound.liveSurfaces[id]?.panes["1"]?.paneLineageId, lineage)
+        XCTAssertEqual(bound.liveSurfaces[id]?.panes["1"]?.target, .string("local content"))
+        let restarted = try SurfAceLocklessRuntimeAdapter(store: store)
+        do {
+            try await restarted.bindRegistryIdentity(foreign, clientId: clientId,
+                expectedSurfaces: surfaces, provisioned: nil)
+            XCTFail("restart accepted another fleet")
+        } catch { }
+        XCTAssertEqual(try XCTUnwrap(store.load()), bound)
+        XCTAssertNotNil(verified.matchingSurfaceIds(in: state, clientId: clientId))
+    }
+
+    func testPreMarkerTombstoneRequiresHistoryAndMigratesOnlyRetainedLocalLetter() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("pre-marker-tombstone-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = SurfAceLocklessGenerationStore(stateURL: root.appendingPathComponent("state.json"))
+        var state = try SurfAceLocklessAuthorityState.empty()
+        let firstRevision = state.surfaceSetRevision
+        let opened = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
+            state: &state, expectedSurfaceSetRevision: firstRevision
+        )
+        let closedId = opened.surface.surfaceId
+        state.liveSurfaces[closedId]?.windowLabelConfirmed = nil
+        state.liveSurfaces[closedId]?.panes["1"]?.target = .string("tombstone content")
+        let topologyRevision = try XCTUnwrap(state.liveSurfaces[closedId]?.topologyRevision)
+        let closingRevision = state.surfaceSetRevision
+        _ = try SurfAceLocklessTopologyOperations.surfaceWindowClose(
+            state: &state, surfaceId: closedId,
+            expectedSurfaceSetRevision: closingRevision,
+            expectedTopologyRevision: topologyRevision
+        )
+        let openingRevision = state.surfaceSetRevision
+        let liveId = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
+            state: &state, expectedSurfaceSetRevision: openingRevision
+        ).surface.surfaceId
+        let claims = SurfAceProvisionedRegistryBinding.confirmedClaims(state)
+        XCTAssertEqual(claims.map(\.surfaceId), [closedId])
+        try store.save(state)
+        let adapter = try SurfAceLocklessRuntimeAdapter(store: store)
+        let surfaces = SurfAceRegistrationSurface.snapshot(state)
+        let foreign = SurfAceRegistryIdentity(allocatorId: "alloc_foreign", fleetId: "foreign")
+        do {
+            try await adapter.bindRegistryIdentity(foreign, clientId: "tombstone-local",
+                expectedSurfaces: surfaces, provisioned: nil)
+            XCTFail("retained local tombstone was mistaken for a fresh client")
+        } catch { }
+        XCTAssertEqual(try XCTUnwrap(store.load()), state)
+        let verified = SurfAceVerifiedUnconfirmedMigration(
+            clientId: "tombstone-local", evidenceId: "owner-review-tombstone",
+            allocationHistoryEvidence: "retained-history-no-allocation",
+            localProvenanceEvidence: "closed-local-open-record",
+            otherFleetCheckEvidence: "all-fleet-history-check", localClaims: claims
+        )
+        let home = SurfAceRegistryIdentity(allocatorId: "alloc_home", fleetId: "home")
+        try await adapter.bindRegistryIdentity(home, clientId: "tombstone-local",
+            expectedSurfaces: surfaces, provisioned: nil, verifiedUnconfirmed: verified)
+        let result = try XCTUnwrap(store.load())
+        XCTAssertEqual(result.registryBinding?.fleetId, home.fleetId)
+        XCTAssertEqual(result.surfaceTombstones.first?.surface.windowLabelConfirmed, false)
+        XCTAssertEqual(result.surfaceTombstones.first?.surface.panes["1"]?.target,
+                       .string("tombstone content"))
+        XCTAssertEqual(result.liveSurfaces[liveId]?.windowLabelConfirmed, false)
     }
 
     func testTombstoneOnlyLegacyLabelsRejectForeignThenRecoverWithVerifiedHome() async throws {
