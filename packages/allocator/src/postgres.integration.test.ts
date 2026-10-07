@@ -941,6 +941,10 @@ test("configured server registers two stable clients and deduplicates reconnect"
     }
     reader = new PublicControllerWireClient(allocator.address.url);
     await reader.connect();
+    assert.deepEqual(await reader.readRegistryIdentity(), {
+      allocatorId: "alloc_registration-test",
+      fleetId: cluster.config.fleetId,
+    });
     const topology = async () => {
       const response = await reader!.request("fleet.topology");
       assert.equal(response.ok, true);
