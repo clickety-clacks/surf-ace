@@ -1,4 +1,5 @@
 import { randomBytes, randomUUID } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 
 import { parseHTML } from "linkedom";
 
@@ -650,6 +651,9 @@ export class SurfaceCore {
   private readonly confirmedPaneLabels = new Map<string, { pane: PaneState; label: number }>();
   private readonly listeners = new Set<(event: CoreEvent) => void>();
   private pendingEvents: CoreEvent[] | null = null;
+  private readonly transactionContext = new AsyncLocalStorage<symbol>();
+  private activeAsyncTransaction: symbol | null = null;
+  private transactionTail: Promise<void> = Promise.resolve();
   private readonly logger: { warn?: (message: string) => void };
   private readonly now: () => number;
   private nextAdmissionAttemptSequence: number;
@@ -725,7 +729,13 @@ export class SurfaceCore {
   }
 
   transaction<T>(operation: () => T): T {
-    if (this.pendingEvents) return operation();
+    if (this.pendingEvents) {
+      if (this.activeAsyncTransaction !== null &&
+          this.transactionContext.getStore() !== this.activeAsyncTransaction) {
+        throw new Error("Surface transaction is already in progress");
+      }
+      return operation();
+    }
     this.pendingEvents = [];
     try {
       const result = operation();
@@ -740,7 +750,33 @@ export class SurfaceCore {
   }
 
   async transactionAsync<T>(operation: () => Promise<T>): Promise<T> {
-    if (this.pendingEvents) return await operation();
+    if (this.activeAsyncTransaction !== null &&
+        this.transactionContext.getStore() === this.activeAsyncTransaction) {
+      return await operation();
+    }
+    if (this.pendingEvents && this.activeAsyncTransaction === null) {
+      throw new Error("Async surface transaction cannot nest inside a synchronous transaction");
+    }
+    const previous = this.transactionTail;
+    let release = (): void => {};
+    const current = new Promise<void>((resolve) => { release = resolve; });
+    this.transactionTail = previous.catch(() => undefined).then(() => current);
+    await previous.catch(() => undefined);
+    if (this.pendingEvents) {
+      release();
+      throw new Error("Surface transaction is already in progress");
+    }
+    const token = Symbol("surface transaction");
+    this.activeAsyncTransaction = token;
+    try {
+      return await this.transactionContext.run(token, () => this.transactionAsyncExclusive(operation));
+    } finally {
+      this.activeAsyncTransaction = null;
+      release();
+    }
+  }
+
+  private async transactionAsyncExclusive<T>(operation: () => Promise<T>): Promise<T> {
     const before = this.getPersistentState();
     this.pendingEvents = [];
     try {
