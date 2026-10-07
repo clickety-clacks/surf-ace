@@ -27,9 +27,6 @@ export class AnnotationSourceCoordinator {
       this.flush(surfaceId, paneId, reason), onError);
     this.unsubscribe = core.subscribe((event) => {
       if (event.type === "drawing-dirty") this.gate.strokeEnded(event.surfaceId, event.paneId);
-      if (event.type === "annotation-committed") {
-        void this.finishRequestedFrame(event.surfaceId, event.paneId).catch(onError);
-      }
     });
     for (const surface of core.listSurfaces()) {
       for (const paneId of core.activePaneIds(surface.surfaceId)) {
