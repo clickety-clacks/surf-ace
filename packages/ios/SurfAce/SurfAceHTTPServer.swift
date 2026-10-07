@@ -393,7 +393,7 @@ actor SurfAceHTTPServer {
         preferredPort: UInt16,
         fallbackPortOffsetLimit: UInt16,
         bindAddress: String = "0.0.0.0",
-        allowEndpointReuse: Bool = true,
+        allowEndpointReuse: Bool = false,
         webSocketPath: String = "/ws",
         httpHandler: @escaping HTTPHandler,
         webSocketHandler: @escaping WebSocketHandler
@@ -433,7 +433,7 @@ actor SurfAceHTTPServer {
     func startForTesting(
         port: UInt16,
         bindAddress: String = "0.0.0.0",
-        allowEndpointReuse: Bool = true,
+        allowEndpointReuse: Bool = false,
         webSocketPath: String = "/ws",
         httpHandler: @escaping HTTPHandler,
         webSocketHandler: @escaping WebSocketHandler

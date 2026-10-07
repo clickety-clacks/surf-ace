@@ -1,4 +1,5 @@
 import Darwin
+import Network
 import XCTest
 @testable import SurfAce
 
@@ -68,6 +69,52 @@ final class SurfAceHTTPServerTests: XCTestCase {
         }
 
         await firstServer.stop()
+        await secondServer.stop()
+    }
+
+    func testPrivateListenerRejectsCollisionAndKeepsItsResponseIdentity() async throws {
+        let firstServer = SurfAceHTTPServer()
+        let collisionServer = SurfAceHTTPServer()
+        let secondServer = SurfAceHTTPServer()
+        let firstMarker = "first-\(UUID().uuidString)"
+        let secondMarker = "second-\(UUID().uuidString)"
+
+        let firstPort = try await firstServer.startForTesting(
+            port: 0, bindAddress: "127.0.0.1",
+            httpHandler: { _ in HTTPServerResponse(statusCode: 200, body: Data(firstMarker.utf8)) },
+            webSocketHandler: { _ in }
+        )
+
+        do {
+            _ = try await collisionServer.startWithFallbackForTesting(
+                preferredPort: firstPort, fallbackPortOffsetLimit: 0,
+                bindAddress: "127.0.0.1",
+                httpHandler: { _ in HTTPServerResponse(statusCode: 200, body: Data("collision".utf8)) },
+                webSocketHandler: { _ in }
+            )
+            XCTFail("A second listener must not share the occupied private endpoint")
+        } catch let error as NWError {
+            XCTAssertEqual(error, .posix(.EADDRINUSE))
+        }
+
+        let secondPort = try await secondServer.startForTesting(
+            port: 0, bindAddress: "127.0.0.1",
+            httpHandler: { _ in HTTPServerResponse(statusCode: 200, body: Data(secondMarker.utf8)) },
+            webSocketHandler: { _ in }
+        )
+        XCTAssertNotEqual(firstPort, secondPort)
+
+        let firstURL = try XCTUnwrap(URL(string: "http://127.0.0.1:\(firstPort)/identity"))
+        let secondURL = try XCTUnwrap(URL(string: "http://127.0.0.1:\(secondPort)/identity"))
+        let (firstData, firstResponse) = try await URLSession.shared.data(from: firstURL)
+        let (secondData, secondResponse) = try await URLSession.shared.data(from: secondURL)
+        XCTAssertEqual((firstResponse as? HTTPURLResponse)?.statusCode, 200)
+        XCTAssertEqual((secondResponse as? HTTPURLResponse)?.statusCode, 200)
+        XCTAssertEqual(String(data: firstData, encoding: .utf8), firstMarker)
+        XCTAssertEqual(String(data: secondData, encoding: .utf8), secondMarker)
+
+        await firstServer.stop()
+        await collisionServer.stop()
         await secondServer.stop()
     }
 
