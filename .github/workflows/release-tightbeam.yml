@@ -31,7 +31,7 @@ env:
   RUST_VERSION: 1.89.0
   LINUX_RUST_TARGET: x86_64-unknown-linux-gnu
   MACOS_RUST_TARGET: aarch64-apple-darwin
-  TOOLING_TAG: surf-ace-release-tooling-v0.2.7-r3
+  TOOLING_TAG: surf-ace-release-tooling-v0.2.7-r4
 
 jobs:
   guard:
@@ -386,7 +386,7 @@ jobs:
           sudo apt-get install --yes --no-install-recommends \
             iproute2 libpq-dev postgresql-16 postgresql-client-16 util-linux \
             tar unzip x11-utils xauth xvfb
-          for tool in ip unshare runuser xvfb-run Xvfb xauth xdpyinfo pg_config tar unzip; do
+          for tool in ip unshare runuser xvfb-run Xvfb xauth xdpyinfo pg_config tar unzip timeout; do
             if ! command -v "${tool}" >/dev/null 2>&1; then
               echo "linux_smoke_required_tool_missing:${tool}" >&2
               exit 127
@@ -421,7 +421,7 @@ jobs:
           trap 'rm -rf "$smoke_tmp"' EXIT
           smoke_user="$(id -un)"
           smoke_node="$(command -v node)"
-          sudo -n unshare --net -- bash -c '
+          timeout --signal=TERM --kill-after=10s 20m sudo -n unshare --net -- bash -c '
             set -euo pipefail
             smoke_user=$1
             smoke_tmp=$2
@@ -455,12 +455,16 @@ jobs:
             > linux-smoke.json 2> linux-smoke-stderr.log || {
               smoke_status=$?
               echo "Linux acceptance smoke failed with exit ${smoke_status}; diagnostic details follow." >&2
+              if [[ "${smoke_status}" -eq 124 ]]; then
+                echo "linux_smoke_packaged_acceptance_timeout_20m" >&2
+              fi
               cat linux-smoke-stderr.log >&2
               if [[ -s linux-smoke.json ]]; then
                 cat linux-smoke.json >&2
               fi
               mkdir -p linux-smoke-failure
               find "$smoke_tmp" -type f \( -name 'fresh-install-state.json' -o -name 'fresh-install-state.json.capture.png' \
+                -o -name 'client-flight-recorder.log' \
                 -o -name 'fresh-install.client-flight-recorder.log' -o -name 'fresh-install.second-client-flight-recorder.log' \
                 -o -name 'fresh-install-registry.client-flight-recorder.log' -o -name 'primary.log' -o -name 'witness.log' \) \
                 -exec cp {} linux-smoke-failure/ \;
