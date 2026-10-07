@@ -1,5 +1,4 @@
 import { ServerConnection } from "../../electron/src/server-connection.js";
-import { startCentralServer } from "../../electron/src/central-server.js";
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { appendFile, mkdtemp, readFile, rm } from "node:fs/promises";
@@ -23,10 +22,7 @@ import { AnnotationSourceCoordinator } from "../../electron/src/annotation-sourc
 import { SurfaceWsServer } from "../../electron/src/ws-server.js";
 import { AnnotationJournal } from "./annotation-journal.js";
 import { BonjourAdvertiser } from "../../electron/src/bonjour-advertiser.js";
-import {
-  createBonjourSurfAceDiscoveryService,
-  type SurfAceDiscoveryService,
-} from "../../electron/src/surf-ace-discovery.js";
+import type { SurfAceDiscoveryService } from "../../electron/src/surf-ace-discovery.js";
 
 
 import {
@@ -756,13 +752,11 @@ test("configured server registers two stable clients and deduplicates reconnect"
   }
 });
 
-test("configured-first server Bonjour fallback registers and persists clients", { timeout: 90_000 }, async () => {
+test("configured-first registry discovery fallback registers and persists clients", { timeout: 90_000 }, async () => {
   const cluster = await startCluster();
   let allocator: AllocatorServer | null = null;
   const clients: ServerConnection[] = [];
-  let central: Awaited<ReturnType<typeof startCentralServer>> | null = null;
   const prefix = "surf-ace-server-fixture-" + randomUUID();
-  const browsers: SurfAceDiscoveryService[] = [];
   let discoveryStarts = 0;
   let allowConfigured = true;
   let configuredAccepts = 0;
@@ -780,14 +774,21 @@ test("configured-first server Bonjour fallback registers and persists clients", 
     socket.pipe(upstream).pipe(socket);
   });
   const discover = (): SurfAceDiscoveryService => {
-    const service = createBonjourSurfAceDiscoveryService({ timeoutMs: 2000 });
-    browsers.push(service);
+    let started = false;
     return {
-      getSnapshot: () => service.getSnapshot().filter((endpoint) => endpoint.instanceName === prefix),
-      start: async () => { discoveryStarts++; await service.start(); },
-      stop: () => service.stop(),
-      refreshNow: () => service.refreshNow(),
-      subscribe: (listener) => service.subscribe(() => listener(service.getSnapshot().filter((endpoint) => endpoint.instanceName === prefix))),
+      // A real LAN advertisement here lets live clients join the disposable allocator.
+      getSnapshot: () => started && allocator ? [{
+        role: "server", busy: false, capabilitiesBitmask: 0,
+        endpointId: `127.0.0.1:${allocator.address.port}/ws#${prefix}`,
+        fingerprintPrefix: "", host: "127.0.0.1", instanceName: prefix,
+        lastSeenAt: Date.now(), name: prefix, port: allocator.address.port,
+        protocolVersion: 1, viewport: { width: 1, height: 1, scale: 1 },
+        wsPath: "/ws", transportAddresses: ["127.0.0.1"],
+      }] : [],
+      start: async () => { discoveryStarts++; started = true; },
+      stop: async () => { started = false; },
+      refreshNow: async () => {},
+      subscribe: () => () => {},
     };
   };
   let reader: PublicControllerWireClient | null = null;
@@ -801,8 +802,7 @@ test("configured-first server Bonjour fallback registers and persists clients", 
     clients.push(missing);
     await assert.rejects(missing.synchronize(), /no_surf_ace_server/);
     await missing.stop();
-    central = await startCentralServer({ ...serverConfig(cluster), listenHost: "0.0.0.0" }, prefix);
-    allocator = central.server;
+    allocator = await AllocatorServer.start(serverConfig(cluster));
     await new Promise<void>((resolve) => route.listen(0, "127.0.0.1", resolve));
     const routeAddress = route.address();
     assert.ok(routeAddress && typeof routeAddress !== "string");
@@ -950,8 +950,7 @@ test("configured-first server Bonjour fallback registers and persists clients", 
     await reader?.close();
     for (const socket of routeSockets) socket.destroy();
     await new Promise<void>((resolve) => route.close(() => resolve()));
-    for (const browser of browsers) await browser.stop();
-    await central?.close();
+    await allocator?.close();
     await cluster.stop();
   }
 });
