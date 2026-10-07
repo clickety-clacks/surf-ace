@@ -1,4 +1,5 @@
 import Foundation
+import JavaScriptCore
 
 enum SurfAceAnnotationOutboxError: Error {
     case invalidLimit
@@ -357,11 +358,27 @@ struct SurfAceAnnotationOutbox: Codable, Equatable, Sendable {
         return try partitionBytes(surfaceId: surfaceId) + Int64(2 * Self.gapSlotBytes) <= maxBytes
     }
 
-    private static func canonical(_ value: [String: Any]) -> String? {
+    /// Match the registry's RFC 8785 serializer, including ECMAScript numbers and UTF-16 key order.
+    static func canonical(_ value: [String: Any]) -> String? {
         guard JSONSerialization.isValidJSONObject(value),
-              let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]),
-              let string = String(data: data, encoding: .utf8) else { return nil }
-        return string
+              let data = try? JSONSerialization.data(withJSONObject: value),
+              let input = String(data: data, encoding: .utf8),
+              let context = JSContext(),
+              let serializer = context.evaluateScript("""
+              (function(input) {
+                function canonical(value) {
+                  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+                  if (Array.isArray(value)) return '[' + value.map(canonical).join(',') + ']';
+                  return '{' + Object.keys(value).sort().map(function(key) {
+                    return JSON.stringify(key) + ':' + canonical(value[key]);
+                  }).join(',') + '}';
+                }
+                return canonical(JSON.parse(input));
+              })
+              """),
+              let output = serializer.call(withArguments: [input])?.toString(),
+              context.exception == nil else { return nil }
+        return output
     }
 
     private static func hasBasicRecordShape(_ value: [String: Any]) -> Bool {

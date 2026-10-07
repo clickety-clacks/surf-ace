@@ -17,6 +17,19 @@ final class SurfAceAnnotationOutboxTests: XCTestCase {
         ]
     }
 
+    func testCanonicalSourceBytesUseECMAScriptNumbersEscapesAndUTF16KeyOrder() throws {
+        let canonical = try XCTUnwrap(SurfAceAnnotationOutbox.canonical([
+            "\u{E000}": 1.0,
+            "😀": -0.0,
+            "slash": "/\n\t\u{0000}",
+            "small": 0.000001,
+            "tiny": 0.0000001,
+            "large": 1e21,
+        ]))
+        XCTAssertEqual(canonical,
+                       "{\"large\":1e+21,\"slash\":\"/\\n\\t\\u0000\",\"small\":0.000001,\"tiny\":1e-7,\"😀\":0,\"\u{E000}\":1}")
+    }
+
     func testBoundedOutboxKeepsAcceptedPrefixAndSealsContiguousOverflow() throws {
         var outbox = try SurfAceAnnotationOutbox(clientId: "client-1", sourceEpoch: sourceEpoch)
         XCTAssertEqual(try outbox.append(surfaceId: surfaceId, record: record(), maxBytes: 18_500), "1")
