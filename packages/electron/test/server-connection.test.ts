@@ -416,6 +416,7 @@ test("central closure while registration persists cannot publish connected", asy
 
 test("legacy labels wait for verified pin; foreign and missing identities never register", async () => {
   const correct = await centralFixture({ allocatorId: "alloc_home", fleetId: "fleet-home" });
+  const moved = await centralFixture({ allocatorId: "alloc_home", fleetId: "fleet-home" });
   const foreign = await centralFixture({ allocatorId: "alloc_foreign", fleetId: "fleet-foreign" });
   const missing = await centralFixture(null);
   const clientId = "legacy-client";
@@ -462,9 +463,45 @@ test("legacy labels wait for verified pin; foreign and missing identities never 
     } finally { await replay.stop(); }
     assert.equal(foreign.requests.length, 0);
     assert.deepEqual(restored.registryBinding(), provisionedBinding.binding);
+    const sameFleet = new ConfiguredServerRegistration(moved.address, clientId, restored, async () => {}, () => {}, 200);
+    try {
+      const reconnecting = sameFleet.synchronize();
+      await until(() => moved.requests.length === 1);
+      moved.reply(0, true, true, 703, "d");
+      await reconnecting;
+      assert.deepEqual(restored.registryBinding(), provisionedBinding.binding);
+      assert.equal(restored.panesList(surface.surfaceId).panes[0]?.paneLabel, 703);
+    } finally { await sameFleet.stop(); }
   } finally {
     await correct.close();
+    await moved.close();
     await foreign.close();
     await missing.close();
+  }
+});
+
+test("interrupted first binding write refuses registration and preserves display state", async () => {
+  const registry = await centralFixture();
+  const core = new SurfaceCore();
+  const surface = core.ensurePrimarySurface("Read-only display", { width: 800, height: 600, scale: 1 });
+  const paneId = [...surface.panes.keys()][0]!;
+  core.contentSet(surface.surfaceId, {
+    content: { markdown: "Preserved pixels" }, contentId: "ct_registry_bind" as never,
+    contentType: "markdown", historyOwnerToken: "hot_registry_bind",
+    paneId: paneId as never, revision: 1 as never,
+  });
+  const before = core.getPersistentState();
+  const connection = new ConfiguredServerRegistration(registry.address, "fresh-client", core,
+    async () => { throw new Error("binding_write_interrupted"); }, () => {}, 200);
+  try {
+    await assert.rejects(connection.synchronize(), /binding_write_interrupted/);
+    assert.equal(registry.identityRequests.length, 1);
+    assert.equal(registry.requests.length, 0);
+    assert.equal(core.registryBinding(), null);
+    assert.deepEqual(core.getPersistentState(), before);
+    assert.equal(core.getRendererWindowState(surface.surfaceId).panes[0]?.content.contentId, "ct_registry_bind");
+  } finally {
+    await connection.stop();
+    await registry.close();
   }
 });

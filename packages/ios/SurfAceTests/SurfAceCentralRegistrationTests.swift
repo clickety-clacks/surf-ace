@@ -786,6 +786,15 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         registration.stop()
     }
 
+    func testRegistryIdentityWireRejectsMissingAndMismatchedResponses() throws {
+        let valid = Data(#"{"id":"identity-1","op":"fleet.topology","type":"response","v":1,"ok":true,"payload":{"registryIdentity":{"allocatorId":"alloc_home","fleetId":"fleet-home"}}}"#.utf8)
+        XCTAssertEqual(try SurfAceRegistrationWire.registryIdentity(from: valid, requestId: "identity-1"),
+                       .init(allocatorId: "alloc_home", fleetId: "fleet-home"))
+        let missing = Data(#"{"id":"identity-1","op":"fleet.topology","type":"response","v":1,"ok":true,"payload":{}}"#.utf8)
+        XCTAssertThrowsError(try SurfAceRegistrationWire.registryIdentity(from: missing, requestId: "identity-1"))
+        XCTAssertThrowsError(try SurfAceRegistrationWire.registryIdentity(from: valid, requestId: "different"))
+    }
+
     func testProductionAllocatorAssignsDistinctLabelsAndRetainsIdentityOnReconnect() async throws {
         guard let address = ProcessInfo.processInfo.environment["SURF_ACE_TEST_ALLOCATOR"],
               let url = URL(string: address) else { throw XCTSkip("isolated allocator not supplied") }
