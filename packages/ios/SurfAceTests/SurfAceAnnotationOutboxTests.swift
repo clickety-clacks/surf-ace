@@ -330,7 +330,80 @@ private final class AnnotationWireProbeTransport: SurfAceAnnotationWireTransport
     func close() {}
 }
 
+@MainActor
+private final class AnnotationRejectOneSurfaceTransport: SurfAceAnnotationWireTransport {
+    let rejectedSurfaceId: String
+    var receivedSurfaceIds: [String] = []
+
+    init(rejectedSurfaceId: String) { self.rejectedSurfaceId = rejectedSurfaceId }
+
+    func exchange(_ data: Data) async throws -> Data {
+        let request = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let op = try XCTUnwrap(request["op"] as? String)
+        let id = try XCTUnwrap(request["id"] as? String)
+        var reply: [String: Any] = ["v": 1, "type": "response", "op": op, "id": id, "ok": true]
+        if op == "annotation.hello" {
+            reply["payload"] = ["registryId": "registry-1"]
+        } else {
+            let payload = try XCTUnwrap(request["payload"] as? [String: Any])
+            let record = try XCTUnwrap(payload["record"] as? [String: Any])
+            let surfaceId = try XCTUnwrap(record["surfaceId"] as? String)
+            receivedSurfaceIds.append(surfaceId)
+            if surfaceId == rejectedSurfaceId {
+                reply["ok"] = false
+                reply["error"] = ["code": "annotation_source_sequence_conflict", "message": "conflict"]
+            } else {
+                reply["payload"] = [
+                    "serverCursor": ["epoch": "0123456789abcdef0123456789abcdef", "sequence": "1"],
+                    "duplicate": false, "committedAt": "2026-10-06T23:00:00.000Z",
+                ]
+            }
+        }
+        return try JSONSerialization.data(withJSONObject: reply)
+    }
+
+    func close() {}
+}
+
 extension SurfAceAnnotationOutboxTests {
+    @MainActor
+    func testPublisherPersistsUnhealthySurfaceAndContinuesOtherSurface() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SurfAceAnnotationFault-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = SurfAceLocklessGenerationStore(stateURL: directory.appendingPathComponent("authority-v1.json"))
+        var limits = SurfAceLocklessCapacityLimits.production
+        limits.maxAnnotationPublisherStateBytesPerSurface = Int64(SurfAceAnnotationOutbox.maximumBytes)
+        limits.maxAnnotationPublisherRecordsPerSurface = Int64(SurfAceAnnotationOutbox.maximumRecords)
+        limits.maxRecoverableSurfaceBytes = 704 * 1_024 * 1_024
+        var state = try SurfAceLocklessAuthorityState.empty(limits: limits)
+        state.annotationPublisher = try SurfAceAnnotationOutbox(clientId: "client-1", sourceEpoch: sourceEpoch)
+        let first = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
+            state: &state, expectedSurfaceSetRevision: state.surfaceSetRevision).surface.surfaceId
+        let second = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
+            state: &state, expectedSurfaceSetRevision: state.surfaceSetRevision).surface.surfaceId
+        let rejected = min(first, second)
+        let accepted = max(first, second)
+        _ = try state.annotationPublisher?.append(surfaceId: rejected, record: record())
+        _ = try state.annotationPublisher?.append(surfaceId: accepted, record: record())
+        try store.save(state)
+        let adapter = try SurfAceLocklessRuntimeAdapter(store: store, annotationClientId: "client-1")
+        let transport = AnnotationRejectOneSurfaceTransport(rejectedSurfaceId: rejected)
+        let publisher = try SurfAceAnnotationPublisher(
+            adapter: adapter, endpoint: XCTUnwrap(URL(string: "ws://127.0.0.1:19001")),
+            makeTransport: { _ in transport }, onError: { _ in }
+        )
+        try await publisher.drain()
+        let saved = try XCTUnwrap(store.load()?.annotationPublisher)
+        XCTAssertEqual(transport.receivedSurfaceIds, [rejected, accepted])
+        XCTAssertEqual(saved.surfaces[rejected]?.unhealthy?.code, "annotation_source_sequence_conflict")
+        XCTAssertEqual(saved.surfaces[rejected]?.fifo.count, 1)
+        XCTAssertEqual(saved.surfaces[accepted]?.acceptedCursor?.sequence, "1")
+        XCTAssertEqual(saved.publishableSurfaceIds(), [])
+        XCTAssertEqual(saved.pendingSurfaceIds(), [rejected])
+        publisher.stop()
+    }
+
     @MainActor
     func testPublisherResendsPersistedHeadAfterAmbiguousDisconnect() async throws {
         let directory = FileManager.default.temporaryDirectory

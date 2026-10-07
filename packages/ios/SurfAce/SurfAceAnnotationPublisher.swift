@@ -15,7 +15,7 @@ private enum SurfAceAnnotationWire {
     }
 
     static func response(_ data: Data, id: String, op: String) throws -> SurfAceAnnotationServerCursor? {
-        guard let value = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+        guard let value = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
               value["v"] as? Int == 1, value["type"] as? String == "response",
               value["id"] as? String == id, value["op"] as? String == op else {
             throw SurfAceAnnotationWireError.invalidResponse
@@ -93,6 +93,7 @@ final class SurfAceAnnotationPublisher {
     private var retry: Task<Void, Never>?
     private var wanted = false
     private var stopped = false
+    private var lastSurfaceId: String?
 
     init(adapter: SurfAceLocklessRuntimeAdapter, endpoint: URL,
          makeTransport: @escaping @MainActor (URL) -> any SurfAceAnnotationWireTransport = { url in
@@ -157,14 +158,26 @@ final class SurfAceAnnotationPublisher {
         return try SurfAceAnnotationWire.response(try await transport.exchange(request.data), id: request.id, op: op)
     }
 
-    private func drain() async throws {
+    func drain() async throws {
         while !stopped && !Task.isCancelled {
             wanted = false
             let snapshot = await adapter.snapshot()
-            guard let surfaceId = snapshot.annotationPublisher?.pendingSurfaceIds().first else { return }
+            let candidates = snapshot.annotationPublisher?.publishableSurfaceIds() ?? []
+            guard let surfaceId = candidates.first(where: { lastSurfaceId == nil || $0 > lastSurfaceId! })
+                ?? candidates.first else { return }
+            lastSurfaceId = surfaceId
             if !helloDone {
-                _ = try await exchange("annotation.hello")
-                helloDone = true
+                do {
+                    _ = try await exchange("annotation.hello")
+                    helloDone = true
+                } catch SurfAceAnnotationWireError.rejected(let code) {
+                    if code == "writer_fence_unavailable" { throw SurfAceAnnotationWireError.rejected(code) }
+                    try await markUnhealthy(surfaceId: surfaceId, code: code)
+                    continue
+                } catch SurfAceAnnotationWireError.invalidResponse {
+                    try await markUnhealthy(surfaceId: surfaceId, code: "annotation_protocol_invalid")
+                    continue
+                }
             }
             // head() may seal a trailing gap. The authority transaction finishes before the send.
             guard let head = try await adapter.transactAnnotationPublisher(surfaceId: surfaceId, {
@@ -184,10 +197,31 @@ final class SurfAceAnnotationPublisher {
                     try $0.rejectHead(surfaceId: surfaceId, code: code)
                 }
                 continue
+            } catch SurfAceAnnotationWireError.rejected(let code) {
+                if head.kind != "gap" &&
+                    (code == "annotation_ingest_capacity" || code == "writer_fence_unavailable") {
+                    throw SurfAceAnnotationWireError.rejected(code)
+                }
+                try await markUnhealthy(surfaceId: surfaceId, code: code)
+                continue
+            } catch SurfAceAnnotationWireError.invalidResponse {
+                try await markUnhealthy(surfaceId: surfaceId, code: "annotation_ingest_invalid_response")
+                continue
             }
-            try await adapter.transactAnnotationPublisher(surfaceId: surfaceId) {
-                try $0.accept(surfaceId: surfaceId, head: head, cursor: cursor)
+            do {
+                try await adapter.transactAnnotationPublisher(surfaceId: surfaceId) {
+                    try $0.accept(surfaceId: surfaceId, head: head, cursor: cursor)
+                }
+            } catch SurfAceAnnotationOutboxError.staleAcceptance {
+                try await markUnhealthy(surfaceId: surfaceId, code: "annotation_ingest_cursor_conflict")
             }
         }
+    }
+
+    private func markUnhealthy(surfaceId: String, code: String) async throws {
+        try await adapter.transactAnnotationPublisher(surfaceId: surfaceId) {
+            try $0.markUnhealthy(surfaceId: surfaceId, code: code)
+        }
+        onError(SurfAceAnnotationWireError.rejected(code))
     }
 }

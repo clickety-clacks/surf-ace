@@ -81,6 +81,7 @@ struct SurfAceAnnotationOpenFrame: Codable, Equatable, Sendable {
 struct SurfAceAnnotationSurfaceOutbox: Codable, Equatable, Sendable {
     var acceptedCursor: SurfAceAnnotationServerCursor?
     var diagnostic: SurfAceAnnotationDiagnostic?
+    var unhealthy: SurfAceAnnotationDiagnostic? = nil
     var fifo: [SurfAceAnnotationOutboxEntry]
     var nextSequence: Int64
     var trailingGap: SurfAceAnnotationPendingGap?
@@ -167,6 +168,19 @@ struct SurfAceAnnotationOutbox: Codable, Equatable, Sendable {
             guard let surface = surfaces[surfaceId] else { return false }
             return !surface.fifo.isEmpty || surface.trailingGap != nil
         }.sorted()
+    }
+
+    func publishableSurfaceIds() -> [String] {
+        pendingSurfaceIds().filter { surfaces[$0]?.unhealthy == nil }
+    }
+
+    mutating func markUnhealthy(surfaceId: String, code: String) throws {
+        try ensureSurface(surfaceId, maxBytes: Self.maximumBytes, maxRecords: Self.maximumRecords)
+        guard let surface = surfaces[surfaceId] else { throw SurfAceAnnotationOutboxError.invalidState }
+        let sequence = surface.fifo.first?.sourceSequence ?? surface.trailingGap?.from ?? String(surface.nextSequence)
+        let safeCode = code.range(of: "^[a-z][a-z0-9_]{0,127}$", options: .regularExpression) != nil
+            ? code : "annotation_protocol_invalid"
+        surfaces[surfaceId]?.unhealthy = .init(code: safeCode, sequence: sequence)
     }
 
     func needsSeal(surfaceId: String) -> Bool {
