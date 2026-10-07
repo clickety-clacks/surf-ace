@@ -1030,6 +1030,24 @@ test("configured-first server in-process discovery fallback registers and persis
   let allowConfigured = true;
   let configuredAccepts = 0;
   const routeSockets = new Set<Socket>();
+  const routeIdleWaiters = new Set<() => void>();
+  const routeSocketClosed = () => {
+    if (routeSockets.size === 0) {
+      for (const ready of routeIdleWaiters) ready();
+      routeIdleWaiters.clear();
+    }
+  };
+  const waitForRouteIdle = async () => {
+    if (routeSockets.size === 0) return;
+    await new Promise<void>((resolve, reject) => {
+      const ready = () => { clearTimeout(timeout); resolve(); };
+      const timeout = setTimeout(() => {
+        routeIdleWaiters.delete(ready);
+        reject(new Error("configured route sockets did not close"));
+      }, 2_000);
+      routeIdleWaiters.add(ready);
+    });
+  };
   const route = createServer((socket) => {
     if (!allowConfigured || !allocator) { socket.destroy(); return; }
     configuredAccepts++;
@@ -1038,8 +1056,8 @@ test("configured-first server in-process discovery fallback registers and persis
     routeSockets.add(upstream);
     socket.on("error", () => upstream.destroy());
     upstream.on("error", () => socket.destroy());
-    socket.on("close", () => { routeSockets.delete(socket); upstream.destroy(); });
-    upstream.on("close", () => { routeSockets.delete(upstream); socket.destroy(); });
+    socket.on("close", () => { routeSockets.delete(socket); upstream.destroy(); routeSocketClosed(); });
+    upstream.on("close", () => { routeSockets.delete(upstream); socket.destroy(); routeSocketClosed(); });
     socket.pipe(upstream).pipe(socket);
   });
   const discover = (): SurfAceDiscoveryService => ({
@@ -1124,6 +1142,7 @@ test("configured-first server in-process discovery fallback registers and persis
     }
     const before = await allocator.diagnostics();
     await clients[1].stop();
+    await waitForRouteIdle();
     assert.equal(routeSockets.size, 0, "stopped configured route closes its sockets");
     const restoredIdentity = await loadOrCreateIdentity(fixtures[0].stateDir);
     assert.equal(registrationClientId(restoredIdentity.publicKeyPem), fixtures[0].clientId);
@@ -1188,7 +1207,7 @@ test("configured-first server in-process discovery fallback registers and persis
     assert.equal(mutationCore.getSurface(mutationSurfaceId).panes.get(mutationPaneId)!.name, "concurrent-accepted-name");
     const acceptedDisk = JSON.parse(await readFile(join(fixtures[0].stateDir, "state.json"), "utf8"));
     assert.match(JSON.stringify(acceptedDisk), /concurrent-accepted-name/);
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await waitForRouteIdle();
     assert.equal(routeSockets.size, 0, "failed persistence does not promote the configured route");
     assert.deepEqual(await topology(), first);
     rejectRecoveryPersistence = false;
