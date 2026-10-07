@@ -73,6 +73,7 @@ struct SurfAceAnnotationOpenFrame: Codable, Equatable, Sendable {
     var pendingDirectFlush: SurfAceAnnotationDirectEvent? = nil
     var deliveredDirectStrokeCount: Int? = nil
     var pendingDirectCommit: SurfAceAnnotationDirectEvent? = nil
+    var directCommitAttempted: Bool? = nil
     var directCommitDelivered: Bool? = nil
     var lastSourceViewport: String? = nil
     var directStrokeIds: [String]? = nil
@@ -141,6 +142,7 @@ struct SurfAceAnnotationOutbox: Codable, Equatable, Sendable {
                           && (frame.directStrokeIds?.count ?? 0) <= frame.sourceStrokeCount
                           && (frame.deliveredDirectStrokeCount ?? 0) <= frame.sourceStrokeCount
                           && (frame.pendingDirectFlush?.throughStrokeCount ?? 0) <= frame.sourceStrokeCount
+                          && (frame.directCommitAttempted != true || frame.commitRequested == true)
                           && (frame.directCommitDelivered != true || frame.commitRequested == true)
                   }),
                   try fits(surfaceId: surfaceId, maxBytes: maxBytes, maxRecords: maxRecords) else {
@@ -201,7 +203,8 @@ struct SurfAceAnnotationOutbox: Codable, Equatable, Sendable {
         if let existing = openFrame(surfaceId: surfaceId, paneId: paneId) {
             // Once direct clients have seen the explicit commit, a later stroke
             // must never join this frame while source finalization retries.
-            guard existing.directCommitDelivered != true else {
+            guard existing.directCommitDelivered != true,
+                  existing.directCommitAttempted != true else {
                 throw SurfAceAnnotationOutboxError.invalidState
             }
             return existing
@@ -235,7 +238,8 @@ struct SurfAceAnnotationOutbox: Codable, Equatable, Sendable {
         guard var surface = surfaces[surfaceId], var frame = surface.openFrames?[String(paneId)] else {
             throw SurfAceAnnotationOutboxError.invalidState
         }
-        guard frame.directCommitDelivered != true else {
+        guard frame.directCommitDelivered != true,
+              frame.directCommitAttempted != true else {
             throw SurfAceAnnotationOutboxError.invalidState
         }
         if (frame.directStrokeIds ?? frame.strokes.map(\.strokeId)).contains(stroke.strokeId) { return }
@@ -293,6 +297,7 @@ struct SurfAceAnnotationOutbox: Codable, Equatable, Sendable {
         surfaces[surfaceId]?.openFrames?[String(paneId)]?.commitRequested = requested
         if !requested {
             surfaces[surfaceId]?.openFrames?[String(paneId)]?.pendingDirectCommit = nil
+            surfaces[surfaceId]?.openFrames?[String(paneId)]?.directCommitAttempted = nil
         }
     }
 
@@ -352,6 +357,18 @@ struct SurfAceAnnotationOutbox: Codable, Equatable, Sendable {
         }
         frame.directCommitDelivered = true
         frame.pendingDirectCommit = nil
+        surfaces[surfaceId]?.openFrames?[String(paneId)] = frame
+    }
+
+    mutating func markDirectCommitAttempted(surfaceId: String, paneId: Int,
+                                            eventId: String) throws {
+        guard var frame = openFrame(surfaceId: surfaceId, paneId: paneId),
+              frame.commitRequested == true,
+              frame.pendingDirectCommit?.eventId == eventId,
+              frame.directCommitDelivered != true else {
+            throw SurfAceAnnotationOutboxError.invalidState
+        }
+        frame.directCommitAttempted = true
         surfaces[surfaceId]?.openFrames?[String(paneId)] = frame
     }
 

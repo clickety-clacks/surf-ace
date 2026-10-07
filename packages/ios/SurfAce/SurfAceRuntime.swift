@@ -362,6 +362,7 @@ final class SurfAceRuntime {
     ) async -> Void)?
     @ObservationIgnored private let annotationCommitStagePreparation: (@Sendable () async -> Void)?
     @ObservationIgnored private let annotationFrameCommitPreparation: (@Sendable () async throws -> Void)?
+    @ObservationIgnored private let annotationDirectEventResultOverride: (@Sendable (String, Bool) async -> Bool)?
     @ObservationIgnored private let annotationModeProjectionObserver: (@Sendable (Bool) async -> Void)?
     @ObservationIgnored private let locklessDeliveryWaitObserver: (@Sendable () -> Void)?
     @ObservationIgnored private var identity: SurfAceIdentity?
@@ -458,6 +459,7 @@ final class SurfAceRuntime {
         ) async -> Void)? = nil,
         annotationCommitStagePreparation: (@Sendable () async -> Void)? = nil,
         annotationFrameCommitPreparation: (@Sendable () async throws -> Void)? = nil,
+        annotationDirectEventResultOverride: (@Sendable (String, Bool) async -> Bool)? = nil,
         annotationModeProjectionObserver: (@Sendable (Bool) async -> Void)? = nil,
         locklessDeliveryWaitObserver: (@Sendable () -> Void)? = nil
     ) {
@@ -470,6 +472,7 @@ final class SurfAceRuntime {
         self.outboundSendPreparation = outboundSendPreparation
         self.annotationCommitStagePreparation = annotationCommitStagePreparation
         self.annotationFrameCommitPreparation = annotationFrameCommitPreparation
+        self.annotationDirectEventResultOverride = annotationDirectEventResultOverride
         self.annotationModeProjectionObserver = annotationModeProjectionObserver
         self.locklessDeliveryWaitObserver = locklessDeliveryWaitObserver
         let fallbackName = "Surf Ace"
@@ -1384,8 +1387,20 @@ final class SurfAceRuntime {
     ) async {
         guard let originalPane = pane(surfaceId: surfaceId, paneId: paneId) else { return }
         let wasEnabled = originalPane.annotationMode
-        let durableFrame = await adapter.snapshot().annotationPublisher?
+        var durableFrame = await adapter.snapshot().annotationPublisher?
             .openFrame(surfaceId: surfaceId, paneId: paneId)
+        if enabled, durableFrame?.directCommitAttempted == true,
+           durableFrame?.directCommitDelivered != true {
+            // A failed send may have reached a direct client. Retry the same
+            // durable event ID before allowing another stroke into this frame.
+            await resumeRequestedAnnotationSourceCommits(allowReentryForFrame: "\(surfaceId):\(paneId)")
+            durableFrame = await adapter.snapshot().annotationPublisher?
+                .openFrame(surfaceId: surfaceId, paneId: paneId)
+            if durableFrame != nil {
+                originalPane.toast = "Annotation finalization pending"
+                return
+            }
+        }
         if enabled, let durableFrame, durableFrame.directCommitDelivered == true {
             await finalizeAnnotationSourceFrame(
                 adapter: adapter, surfaceId: surfaceId, paneId: paneId,
@@ -4303,6 +4318,10 @@ final class SurfAceRuntime {
             let delivered = await fanoutLocklessCommittedEvent(
                 op: op, payload: locklessPayload, sentAt: sentAt, eventId: eventId
             )
+            if let annotationDirectEventResultOverride,
+               op == "event.annotation_committed" {
+                return await annotationDirectEventResultOverride(op, delivered)
+            }
             return delivered
         } catch {
             surfaceById[surfaceId]?.lastError = "Event send failed: \(error.localizedDescription)"
@@ -4798,6 +4817,21 @@ final class SurfAceRuntime {
         }
     }
 
+    private func markAnnotationDirectCommitAttempted(surfaceId: String, paneId: Int,
+                                                     eventId: String) async -> Bool {
+        guard let adapter = locklessAdapter else { return false }
+        do {
+            try await adapter.transactAnnotationPublisher(surfaceId: surfaceId) { outbox in
+                try outbox.markDirectCommitAttempted(surfaceId: surfaceId, paneId: paneId,
+                                                     eventId: eventId)
+            }
+            return true
+        } catch {
+            surfAceServerRuntimeLog("event=annotation_direct_commit_attempt_mark_failed \(surfAceDiagnosticFields([("error", String(describing: error))]))")
+            return false
+        }
+    }
+
     private func requestAnnotationCommit(surfaceId: String, paneId: Int) {
         guard let pane = pane(surfaceId: surfaceId, paneId: paneId),
               pane.currentEntry.contentId != nil else {
@@ -4846,6 +4880,12 @@ final class SurfAceRuntime {
             // Staging can suspend while a same-context re-entry is requested.
             // Leave the staged intent for the mode mutation to cancel before
             // the explicit direct commit has entered the send path.
+            guard !annotationReentryRequested.contains(key) else { return }
+            if let directEvent {
+                guard await markAnnotationDirectCommitAttempted(
+                    surfaceId: surfaceId, paneId: paneId, eventId: directEvent.eventId
+                ) else { return }
+            }
             guard !annotationReentryRequested.contains(key) else { return }
             let eventPayload = directEvent.flatMap(Self.annotationDirectPayload) ?? payload
             let delivered = await sendEventAsync(
@@ -4936,7 +4976,7 @@ final class SurfAceRuntime {
         }
     }
 
-    private func resumeRequestedAnnotationSourceCommits() async {
+    private func resumeRequestedAnnotationSourceCommits(allowReentryForFrame: String? = nil) async {
         guard let adapter = locklessAdapter, annotationPublisher != nil else { return }
         let state = await adapter.snapshot()
         for (surfaceId, surface) in state.annotationPublisher?.surfaces ?? [:] {
@@ -4981,8 +5021,9 @@ final class SurfAceRuntime {
                     (frame.deliveredDirectStrokeCount ?? 0) == frame.sourceStrokeCount else {
                     continue
                 }
+                let frameKey = "\(surfaceId):\(paneId)"
                 if frame.directCommitDelivered != true &&
-                    annotationReentryRequested.contains("\(surfaceId):\(paneId)") {
+                    annotationReentryRequested.contains(frameKey) && frameKey != allowReentryForFrame {
                     continue
                 }
                 if frame.directCommitDelivered != true {
@@ -4995,9 +5036,15 @@ final class SurfAceRuntime {
                     guard let stagedCommit = await stageAnnotationDirectCommit(
                         surfaceId: surfaceId, paneId: paneId, payload: payload
                     ), let eventPayload = Self.annotationDirectPayload(stagedCommit) else { continue }
-                    guard !annotationReentryRequested.contains("\(surfaceId):\(paneId)") else {
+                    guard !annotationReentryRequested.contains(frameKey) ||
+                          frameKey == allowReentryForFrame else {
                         continue
                     }
+                    guard await markAnnotationDirectCommitAttempted(
+                        surfaceId: surfaceId, paneId: paneId, eventId: stagedCommit.eventId
+                    ) else { continue }
+                    guard !annotationReentryRequested.contains(frameKey) ||
+                          frameKey == allowReentryForFrame else { continue }
                     let sent = await sendEventAsync(
                         surfaceId: surfaceId, op: "event.annotation_committed", payload: eventPayload,
                         sentAt: stagedCommit.sentAt, eventId: stagedCommit.eventId
