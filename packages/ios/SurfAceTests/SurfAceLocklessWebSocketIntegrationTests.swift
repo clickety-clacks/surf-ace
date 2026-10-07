@@ -1105,8 +1105,16 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         let port = try XCTUnwrap(UInt16(exactly: runtime.serverPort))
         _ = try XCTUnwrap(port != SurfAceHTTPServer.fixedPort ? port : nil,
                           "fixture must own a distinct ephemeral port")
-        let ownedState = try await runtime.locklessReadinessSnapshot().state
+        let marker = "owned-test-runtime-\(UUID().uuidString)"
+        let adapter = try runtime.locklessAuthorityForLocalMutation()
+        _ = try await adapter.commitLocalMutation(operation: "test.listener_identity") { state, _ in
+            state.liveSurfaces[surface.surfaceId]?.name = marker
+            return .object([:])
+        }
+        let ownedState = await adapter.snapshot()
         let ownedSurface = try XCTUnwrap(ownedState.liveSurfaces[surface.surfaceId])
+        _ = try XCTUnwrap(ownedSurface.name == marker ? ownedSurface : nil,
+                          "unique test listener identity was not persisted")
         try await send(socket, op: "surfaces.list", id: requestId, payload: [:])
         let response = try await receive(socket, matchingId: requestId)
         _ = try XCTUnwrap(response["ok"] as? Bool == true ? response : nil,
