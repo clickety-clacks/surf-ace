@@ -363,6 +363,7 @@ final class SurfAceRuntime {
     @ObservationIgnored private var centralRegistration: SurfAceCentralRegistration?
     @ObservationIgnored private var annotationPublisher: SurfAceAnnotationPublisher?
     @ObservationIgnored private var annotationStrokeTasks: [String: Task<Void, Never>] = [:]
+    @ObservationIgnored private var annotationCommitTasks: [String: Task<Void, Never>] = [:]
     @ObservationIgnored private var centralConnectionError: String?
     @ObservationIgnored private var confirmedPaneLabels: [String: Int64] = [:]
     private var centralConnectionState: SurfAceConnectionBarState = .disconnected
@@ -1153,8 +1154,10 @@ final class SurfAceRuntime {
     ) {
         if let adapter = locklessAdapter {
             Task { @MainActor in
+                let key = "\(surfaceId):\(paneId)"
+                await annotationCommitTasks[key]?.value
                 if !enabled {
-                    await annotationStrokeTasks["\(surfaceId):\(paneId)"]?.value
+                    await annotationStrokeTasks[key]?.value
                 }
                 await commitLocalAnnotationMode(
                     adapter: adapter,
@@ -1325,6 +1328,7 @@ final class SurfAceRuntime {
     ) async {
         guard let originalPane = pane(surfaceId: surfaceId, paneId: paneId) else { return }
         let wasEnabled = originalPane.annotationMode
+        let cancelPendingSourceCommit = enabled && originalPane.pendingAnnotationCommit
         do {
             _ = try await commitLocalMutation(adapter: adapter, operation: "local.annotation.mode") { state, sequence in
                 guard var surface = state.liveSurfaces[surfaceId],
@@ -1336,8 +1340,13 @@ final class SurfAceRuntime {
                 surface.surfaceRevision += 1
                 state.liveSurfaces[surfaceId] = surface
                 if var publisher = state.annotationPublisher {
-                    publisher.setFrameCommitRequested(surfaceId: surfaceId, paneId: paneId,
-                                                      requested: !enabled)
+                    // Re-entry cancels a requested source commit only while the
+                    // direct commit boundary is still pending. Once emitted,
+                    // the source frame must finish even if drawing resumes.
+                    if !enabled || cancelPendingSourceCommit {
+                        publisher.setFrameCommitRequested(surfaceId: surfaceId, paneId: paneId,
+                                                          requested: !enabled)
+                    }
                     state.annotationPublisher = publisher
                 }
                 return .object([
@@ -1366,28 +1375,6 @@ final class SurfAceRuntime {
                 "event=annotation_mode_changed \(surfAceDiagnosticFields([("surface_id", surfaceId), ("pane_id", paneId), ("enabled", projectedPane.annotationMode), ("finger_draw_enabled", projectedPane.fingerDrawEnabled), ("source", transitionSource)]))"
             )
             if wasEnabled && !enabled {
-                if !projectedPane.pendingFlushStrokes.isEmpty {
-                    let strokes = projectedPane.pendingFlushStrokes
-                    let first = strokes.first?.points.first?.timestamp ?? timestampNow()
-                    let last = strokes.last?.points.last?.timestamp ?? timestampNow()
-                    let flushPayload: [String: Any] = [
-                        "paneId": paneId, "contentId": projectedPane.currentEntry.contentId ?? "",
-                        "revision": projectedPane.currentEntry.revision,
-                        "flushId": randomHex(prefix: "fl", byteCount: 8),
-                        "flushReason": "idle_window", "idleWindowMs": 8_000, "maxIntervalMs": 30_000,
-                        "strokes": jsonObject(fromEncodable: strokes) ?? [],
-                        "strokeCount": strokes.count,
-                        "pointsCount": strokes.reduce(0) { $0 + $1.points.count },
-                        "firstStrokeAt": first, "lastStrokeAt": last,
-                    ]
-                    await publishAnnotationDelta(surfaceId: surfaceId, paneId: paneId,
-                                                 strokes: strokes, flushPayload: flushPayload)
-                }
-                await finalizeAnnotationSourceFrame(
-                    adapter: adapter, surfaceId: surfaceId, paneId: paneId,
-                    revision: projectedPane.currentEntry.revision,
-                    contentType: projectedPane.currentEntry.contentType?.rawValue
-                )
                 requestAnnotationCommit(surfaceId: surfaceId, paneId: paneId)
                 clearPaneDrawings(projectedPane)
             }
@@ -4572,17 +4559,27 @@ final class SurfAceRuntime {
         }
 
         pane.pendingAnnotationCommit = false
-        if eventIsEnabled(surfaceId: surfaceId, eventName: "event.annotation_committed") {
-            sendEvent(
-                surfaceId: surfaceId,
-                op: "event.annotation_committed",
-                payload: [
-                    "paneId": paneId,
-                    "contentId": contentId,
-                    "revision": pane.currentEntry.revision,
-                    "committedAt": timestampNow(),
-                ]
+        let revision = pane.currentEntry.revision
+        let contentType = pane.currentEntry.contentType?.rawValue
+        let payload: [String: Any] = [
+            "paneId": paneId,
+            "contentId": contentId,
+            "revision": revision,
+            "committedAt": timestampNow(),
+        ]
+        let key = "\(surfaceId):\(paneId)"
+        annotationCommitTasks[key] = Task { @MainActor in
+            defer { annotationCommitTasks.removeValue(forKey: key) }
+            guard eventIsEnabled(surfaceId: surfaceId, eventName: "event.annotation_committed") else { return }
+            let delivered = await sendEventAsync(
+                surfaceId: surfaceId, op: "event.annotation_committed", payload: payload
             )
+            if delivered, let adapter = locklessAdapter {
+                await finalizeAnnotationSourceFrame(
+                    adapter: adapter, surfaceId: surfaceId, paneId: paneId,
+                    revision: revision, contentType: contentType
+                )
+            }
         }
     }
 
