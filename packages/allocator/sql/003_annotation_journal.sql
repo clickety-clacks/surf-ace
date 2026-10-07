@@ -563,6 +563,11 @@ BEGIN
   END IF;
   SELECT * INTO STRICT h FROM surf_ace_allocator.annotation_journal_head
     WHERE fleet_id = p_fleet_id FOR UPDATE;
+  IF p_mode = 'watch' THEN
+    -- The head lock serializes reclamation with all consumer opens and retires.
+    DELETE FROM surf_ace_allocator.annotation_consumers
+      WHERE fleet_id = p_fleet_id AND retired_at < clock_timestamp() - interval '30 days';
+  END IF;
   SELECT * INTO c FROM surf_ace_allocator.annotation_consumers
     WHERE fleet_id = p_fleet_id AND consumer_id = p_consumer_id FOR UPDATE;
   IF p_mode = 'watch' THEN
@@ -582,7 +587,7 @@ BEGIN
     IF consumer_count >= 64 THEN
       RAISE EXCEPTION USING MESSAGE = 'annotation_consumer_capacity', DETAIL = jsonb_build_object(
         'consumerSlots', consumer_count, 'maxConsumerSlots', 64,
-        'retryCondition', 'reviewed_consumer_capacity_increase'
+        'retryCondition', 'consumer_retired_and_30_day_replay_window_elapsed'
       )::text;
     END IF;
   ELSE
@@ -790,10 +795,12 @@ BEGIN
     RAISE EXCEPTION 'annotation_ack_cursor_mismatch';
   END IF;
   first_unacknowledged := CASE WHEN c.ack_epoch = h.epoch THEN c.ack_sequence + 1
-    WHEN c.ack_epoch IS NULL THEN c.initial_from_sequence ELSE 1 END;
+    WHEN c.ack_epoch IS NULL AND c.initial_from_epoch = h.epoch
+      THEN c.initial_from_sequence
+    ELSE coalesce(h.first_retained_sequence, h.head_sequence + 1) END;
   IF h.head_sequence >= first_unacknowledged THEN
     discarded_from := jsonb_build_object(
-      'epoch', CASE WHEN c.ack_epoch IS NULL THEN c.initial_from_epoch ELSE h.epoch END,
+      'epoch', h.epoch,
       'sequence', first_unacknowledged::text);
     discarded_through := jsonb_build_object('epoch', h.epoch, 'sequence', h.head_sequence::text);
   END IF;

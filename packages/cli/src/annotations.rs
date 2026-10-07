@@ -570,10 +570,10 @@ pub fn run(arguments: &[String]) -> Result<(), AnnotationError> {
                         emit(output)?;
                         return Ok(());
                     }
-                    return Err(AnnotationError {
-                        code: "annotation_consumer_lease_stale".into(),
-                        details: json!({}),
-                    });
+                    // Earlier records may already be queued on this socket. They
+                    // belong to the superseded lease, so drain toward its terminal
+                    // event without emitting or persisting them.
+                    continue;
                 }
                 let mut stored = stored.expect("checked above");
                 match op.as_str() {

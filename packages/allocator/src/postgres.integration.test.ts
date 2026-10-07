@@ -1346,6 +1346,17 @@ test("annotation migration and append survive duplicate retry without allocating
       const secondOpen = await secondConsumer.request("annotation.watch", { consumerId: "second" });
       assert.equal(firstOpen.ok, true);
       assert.equal(secondOpen.ok, true);
+      assert.equal((await retireCaller.request("annotation.hello", { protocolVersion: 1, role: "consumer" })).ok, true);
+      const headCursor = (firstOpen.payload as { headCursor: { epoch: string; sequence: string } }).headCursor;
+      const undeliveredOpen = await retireCaller.request("annotation.watch", {
+        consumerId: "undelivered", fromCursor: { epoch: headCursor.epoch, sequence: "2" },
+      });
+      assert.equal(undeliveredOpen.ok, true);
+      const undeliveredAck = await retireCaller.request("annotation.ack", {
+        consumerId: "undelivered", leaseId: (undeliveredOpen.payload as { leaseId: string }).leaseId,
+        throughCursor: headCursor,
+      });
+      assert.equal((undeliveredAck.error as { code: string }).code, "annotation_ack_not_delivered");
       const firstLease = (firstOpen.payload as { leaseId: string }).leaseId;
       const secondLease = (secondOpen.payload as { leaseId: string }).leaseId;
       priorLease = secondLease;
@@ -1399,7 +1410,6 @@ test("annotation migration and append survive duplicate retry without allocating
       } finally {
         await gapResumer.close();
       }
-      assert.equal((await retireCaller.request("annotation.hello", { protocolVersion: 1, role: "consumer" })).ok, true);
       const retire = await retireCaller.request("annotation.consumer.retire", {
         consumerId: "first", expectedAckCursor: cursor, discardUnacknowledged: true,
       });
@@ -1759,13 +1769,30 @@ test("annotation compaction protects absent and unread consumers, then retains s
       assert.equal(later.initialFromCursor.sequence, "1");
       assert.equal(later.availableFromCursor?.sequence, "2");
       assert.equal(later.historyCompleteSinceStart, false);
+      const foreign = await writer.openAnnotationConsumer("foreign-retire", "watch",
+        { epoch: "f".repeat(32), sequence: "10" });
+      assert.equal(foreign.initialFromCursor.sequence, "10");
+      const foreignRetirement = await writer.retireAnnotationConsumer("foreign-retire", null, true);
+      assert.deepEqual(foreignRetirement.discardedFromCursor,
+        { epoch: first.serverCursor.epoch, sequence: "2" });
+      assert.deepEqual(foreignRetirement.discardedThroughCursor,
+        { epoch: first.serverCursor.epoch, sequence: "2" });
     } finally {
       await writer.release();
     }
     await adminQuery(cluster.adminUrl, `UPDATE surf_ace_allocator.annotation_source_heads
       SET accepted_through_sequence = 999 WHERE fleet_id = 'fleet-test'`);
-    await assert.rejects(AllocatorServer.start(serverConfig(cluster)),
-      (error) => error instanceof AllocatorError && error.code === "annotation_journal_unverified");
+    const server = await AllocatorServer.start(serverConfig(cluster));
+    const direct = await WireClient.connect(server.address.url);
+    try {
+      assert.equal((await direct.request("fleet.topology", {})).ok, true,
+        "core allocator service remains available after annotation verification fails");
+      const annotation = await direct.request("annotation.hello", { protocolVersion: 1, role: "consumer" });
+      assert.equal((annotation.error as { code: string }).code, "annotation_journal_unverified");
+    } finally {
+      await direct.close();
+      await server.close();
+    }
   } finally {
     await cluster.stop();
   }
@@ -1839,7 +1866,15 @@ test("annotation pressure compacts only acknowledged history and refuses when re
       await assert.rejects(writer.openAnnotationConsumer("slot-overflow", "watch"),
         (error) => error instanceof AllocatorError && error.code === "annotation_consumer_capacity" &&
           error.details?.consumerSlots === 64 && error.details?.maxConsumerSlots === 64 &&
-          error.details?.retryCondition === "reviewed_consumer_capacity_increase");
+          error.details?.retryCondition === "consumer_retired_and_30_day_replay_window_elapsed");
+      await writer.retireAnnotationConsumer("capacity-63", null, true);
+      await assert.rejects(writer.openAnnotationConsumer("slot-overflow", "watch"),
+        (error) => error instanceof AllocatorError && error.code === "annotation_consumer_capacity");
+      await adminQuery(cluster.adminUrl, `UPDATE surf_ace_allocator.annotation_consumers
+        SET retired_at = clock_timestamp() - interval '31 days'
+        WHERE fleet_id = 'fleet-test' AND consumer_id = 'capacity-63'`);
+      const reclaimed = await writer.openAnnotationConsumer("slot-overflow", "watch");
+      assert.ok(reclaimed.leaseId);
     } finally {
       await writer.release();
     }

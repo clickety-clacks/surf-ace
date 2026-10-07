@@ -296,6 +296,10 @@ fn foreground_watcher_reports_retirement_after_another_process_persists_it() {
             "discardedFromCursor":null,"discardedThroughCursor":null}));
         retired_rx.recv().unwrap();
         watch_socket.send(Message::Text(json!({"v":1,"type":"event",
+            "op":"annotation.record","eventId":"queued-before-retire","sentAt":2,
+            "payload":{"serverCursor":{"epoch":EPOCH,"sequence":"1"},
+            "record":{"kind":"live_delta"},"committedAt":2}}).to_string().into())).unwrap();
+        watch_socket.send(Message::Text(json!({"v":1,"type":"event",
             "op":"annotation.consumer_retired","eventId":"retired","sentAt":2,
             "payload":{"consumerId":"reviewer","retired":true,
             "expectedAckCursor":null,"discardedFromCursor":null,
@@ -347,6 +351,10 @@ fn foreground_watcher_reports_replacement_without_erasing_newer_lease() {
         let resume = request(&mut new_socket, "annotation.resume");
         respond(&mut new_socket, &resume, opened("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
         resumed_rx.recv().unwrap();
+        old_socket.send(Message::Text(json!({"v":1,"type":"event",
+            "op":"annotation.record","eventId":"queued-before-replacement","sentAt":2,
+            "payload":{"serverCursor":{"epoch":EPOCH,"sequence":"1"},
+            "record":{"kind":"live_delta"},"committedAt":2}}).to_string().into())).unwrap();
         old_socket.send(Message::Text(json!({"v":1,"type":"event",
             "op":"annotation.lease_replaced","eventId":"replaced","sentAt":2,
             "payload":{"consumerId":"reviewer",

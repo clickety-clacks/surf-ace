@@ -163,6 +163,7 @@ export class AllocatorServer {
     private readonly custody: PostgresCustodyAdapter<"writer">,
     private readonly authority: WindowLabelAuthority,
     private readonly webSocketServer: WebSocketServer,
+    private readonly annotationVerified: boolean,
   ) {}
 
   static async start(config: AllocatorServerConfig, testHooks: AdapterTestHooks = {}): Promise<AllocatorServer> {
@@ -183,7 +184,15 @@ export class AllocatorServer {
           if ((error as { code?: string }).code !== "42883") throw error;
           annotationInstalled = false;
         }
-        if (annotationInstalled) await custody.verifyAnnotationStartup();
+        let annotationVerified = true;
+        if (annotationInstalled) {
+          try {
+            await custody.verifyAnnotationStartup();
+          } catch (error) {
+            if (asAllocatorError(error).code !== "annotation_journal_unverified") throw error;
+            annotationVerified = false;
+          }
+        }
         const webSocketServer = new WebSocketServer({
           host: config.listenHost,
           port: config.listenPort,
@@ -192,7 +201,7 @@ export class AllocatorServer {
           webSocketServer.once("listening", resolve);
           webSocketServer.once("error", reject);
         });
-        const server = new AllocatorServer(config, hostLock, custody, authority, webSocketServer);
+        const server = new AllocatorServer(config, hostLock, custody, authority, webSocketServer, annotationVerified);
         webSocketServer.on("connection", (socket) => server.accept(socket));
         return server;
       } catch (error) {
@@ -404,6 +413,9 @@ export class AllocatorServer {
         ok, sentAt: Date.now(), [ok ? "payload" : "error"]: value }));
     };
     try {
+      if (!this.annotationVerified) {
+        throw new AllocatorError("annotation_journal_unverified", "annotation continuity could not be verified");
+      }
       if (op === "annotation.hello") {
         if (this.annotationRoles.has(socket)) throw new AllocatorError("annotation_invalid_request", "hello already completed");
         const payload = request.payload as Record<string, unknown>;
@@ -480,7 +492,7 @@ export class AllocatorServer {
           : BigInt(opened.initialFromCursor.sequence);
         const lease: AnnotationLease = { consumerId: payload.consumerId, leaseId: opened.leaseId,
           socket, epoch: opened.ackCursor?.epoch ?? opened.initialFromCursor.epoch, nextSequence: next,
-          acknowledged: opened.ackCursor ? BigInt(opened.ackCursor.sequence) : next - 1n,
+          acknowledged: opened.ackCursor ? BigInt(opened.ackCursor.sequence) : 0n,
           delivered: [], gap: null, pumping: false, pumpRequested: false };
         this.annotationLeases.set(payload.consumerId, lease);
         reply(true, { ...opened, limits: annotationLimits(await this.custody.annotationInfo()) });
