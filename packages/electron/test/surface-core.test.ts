@@ -3883,4 +3883,9 @@ test("a locally opened surface keeps its provisional letter out of public topolo
   assert.equal(surface.windowLabelConfirmed, false);
   assert.equal(core.publicTopologyState(surface.surfaceId).windowLabel, null);
   assert.equal(core.publicTopologyState(surface.surfaceId).panes[0]?.paneLabel, null);
+  assert.equal(core.surfaceWindowLabel(surface.surfaceId), surface.windowLabel);
+  assert.equal(core.getRendererWindowState(surface.surfaceId).windowLabel, "");
+  core.applyWindowLabelOnly(surface.surfaceId, surface.windowLabel);
+  assert.equal(core.surfaceWindowLabel(surface.surfaceId), surface.windowLabel);
+  assert.equal(core.getRendererWindowState(surface.surfaceId).windowLabel, surface.windowLabel);
 });
