@@ -23,6 +23,7 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
             locklessStateURL: stateURL,
             configuredRegistryURL: try XCTUnwrap(URL(string: "ws://127.0.0.1:29999")),
             annotationClientId: "client-ios-reentry-fixture",
+            enableFleetDiscovery: false,
             outboundSendPreparation: { text, priority in
                 await flushGate.prepareSend(text: text, priority: priority)
             }

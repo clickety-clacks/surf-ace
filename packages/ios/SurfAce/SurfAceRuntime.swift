@@ -355,6 +355,7 @@ final class SurfAceRuntime {
     @ObservationIgnored private let locklessStateURLOverride: URL?
     @ObservationIgnored private let configuredRegistryURLOverride: URL?
     @ObservationIgnored private let annotationClientIdOverride: String?
+    @ObservationIgnored private let enableFleetDiscovery: Bool
     @ObservationIgnored private let outboundSendPreparation: (@Sendable (
         String, SurfAceOutboundSender.Priority
     ) async -> Void)?
@@ -443,6 +444,7 @@ final class SurfAceRuntime {
         locklessStateURL: URL? = nil,
         configuredRegistryURL: URL? = nil,
         annotationClientId: String? = nil,
+        enableFleetDiscovery: Bool = true,
         outboundSendPreparation: (@Sendable (
             String, SurfAceOutboundSender.Priority
         ) async -> Void)? = nil,
@@ -452,6 +454,7 @@ final class SurfAceRuntime {
         self.locklessStateURLOverride = locklessStateURL
         self.configuredRegistryURLOverride = configuredRegistryURL
         self.annotationClientIdOverride = annotationClientId
+        self.enableFleetDiscovery = enableFleetDiscovery
         self.outboundSendPreparation = outboundSendPreparation
         self.locklessDeliveryWaitObserver = locklessDeliveryWaitObserver
         let fallbackName = "Surf Ace"
@@ -521,8 +524,10 @@ final class SurfAceRuntime {
             surfAceServerRuntimeLog(
                 "event=selected_provider_endpoint \(surfAceDiagnosticFields([("endpoint_address", "0.0.0.0:\(serverPort)"), ("health_path", healthPath), ("screen_name", screenName), ("ws_path", webSocketPath)]))"
             )
-            publishBonjour()
-            startCentralRegistration()
+            if enableFleetDiscovery {
+                publishBonjour()
+                startCentralRegistration()
+            }
             startAnnotationPublisher()
             Task { @MainActor in await resumeRequestedAnnotationSourceCommits() }
         } catch {
@@ -5074,6 +5079,7 @@ final class SurfAceRuntime {
     }
 
     private func publishBonjour() {
+        guard enableFleetDiscovery else { return }
         surfAceServerRuntimeLog(
             "event=bonjour_publish_request \(surfAceDiagnosticFields([("name", screenName), ("port", serverPort)]))"
         )
@@ -5081,7 +5087,7 @@ final class SurfAceRuntime {
     }
 
     private func refreshBonjourTXT() {
-        guard isStarted else { return }
+        guard isStarted, enableFleetDiscovery else { return }
         surfAceServerRuntimeLog(
             "event=bonjour_refresh \(surfAceDiagnosticFields([("busy", 0), ("surface_count", surfaces.count)]))"
         )

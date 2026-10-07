@@ -1068,7 +1068,7 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         let runtime = SurfAceRuntime(
             userDefaults: isolatedUserDefaults(), locklessStateURL: try locklessStateURL(),
             configuredRegistryURL: try XCTUnwrap(URL(string: "ws://127.0.0.1:29999")),
-            annotationClientId: "client-ios-fixture"
+            annotationClientId: "client-ios-fixture", enableFleetDiscovery: false
         )
         addTeardownBlock { await runtime.stop() }
         await runtime.start()
