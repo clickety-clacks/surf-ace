@@ -5,6 +5,46 @@ import XCTest
 
 @MainActor
 final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
+    func testFailedPairCannotMutateOwnedRuntime() async throws {
+        let suiteName = "SurfAceFailedPair-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        let stateURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(suiteName).json")
+        addTeardownBlock {
+            defaults.removePersistentDomain(forName: suiteName)
+            try? FileManager.default.removeItem(at: stateURL)
+        }
+        let runtime = SurfAceRuntime(userDefaults: defaults, locklessStateURL: stateURL,
+                                     enableFleetDiscovery: false, isolatedTestLoopback: true)
+        await runtime.start()
+        addTeardownBlock { await runtime.stop() }
+        let registered = await runtime.registerSurfaceForScene(sceneKey: suiteName)
+        let surface = try XCTUnwrap(registered)
+        let pane = try XCTUnwrap(surface.panes.first)
+        let socket = socket(port: try XCTUnwrap(UInt16(exactly: runtime.serverPort)))
+        socket.resume()
+        defer { socket.cancel(with: .normalClosure, reason: nil) }
+        try await assertOwnedRuntimeDiscovery(runtime, socket: socket, surface: surface,
+                                              requestId: "negative-discovery")
+
+        let failedPair = try await pair(socket, id: "negative-pair",
+                                        controllerId: "negative-controller",
+                                        surfaceId: "sf_ffffffffffffffff")
+        _ = try XCTUnwrap(failedPair["ok"] as? Bool == false ? failedPair : nil,
+                          "the negative pair unexpectedly succeeded: \(failedPair)")
+        try await send(socket, op: "content.set", id: "negative-content", payload: [
+            "content": ["html": "<main>must not apply</main>"],
+            "contentId": "negative-content-id", "contentType": "html",
+            "friendlyChatName": "Negative Pair", "paneId": pane.paneId,
+            "surfaceId": surface.surfaceId,
+        ])
+        let rejected = try await receive(socket, matchingId: "negative-content")
+        XCTAssertEqual(rejected["ok"] as? Bool, false)
+        XCTAssertEqual((rejected["error"] as? [String: Any])?["code"] as? String, "not_paired")
+        XCTAssertNil(pane.currentEntry.contentId)
+    }
+
     func testRecoveryFinalizesProvenCommitBeforeRequestedReentry() async throws {
         let suiteName = "SurfAceRecoveryReentry-\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
@@ -113,11 +153,12 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         let socket = socket(port: try XCTUnwrap(UInt16(exactly: runtime.serverPort)))
         socket.resume()
         defer { socket.cancel(with: .normalClosure, reason: nil) }
-        try await send(socket, op: "surfaces.list", id: "fault-discovery", payload: [:])
-        _ = try await receive(socket, matchingId: "fault-discovery")
+        try await assertOwnedRuntimeDiscovery(runtime, socket: socket, surface: surface,
+                                              requestId: "fault-discovery")
         let paired = try await pair(socket, id: "fault-pair", controllerId: "fault-controller",
                                     surfaceId: surface.surfaceId)
-        XCTAssertEqual(paired["ok"] as? Bool, true, "pair response: \(paired)")
+        _ = try XCTUnwrap(paired["ok"] as? Bool == true ? paired : nil,
+                          "pair response: \(paired)")
         try await send(socket, op: "content.set", id: "fault-content", payload: [
             "content": ["html": "<main>fault frame</main>"],
             "contentId": "fault-content-id", "contentType": "html",
@@ -125,7 +166,8 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
             "surfaceId": surface.surfaceId,
         ])
         let contentResponse = try await receive(socket, matchingId: "fault-content")
-        XCTAssertEqual(contentResponse["ok"] as? Bool, true)
+        _ = try XCTUnwrap(contentResponse["ok"] as? Bool == true ? contentResponse : nil,
+                          "content response: \(contentResponse)")
 
         let adapter = try runtime.locklessAuthorityForLocalMutation()
         let image = UIGraphicsImageRenderer(size: CGSize(width: 2, height: 2)).pngData { _ in
@@ -209,17 +251,20 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         let pane = try XCTUnwrap(surface.panes.first)
         let socket = socket(port: try XCTUnwrap(UInt16(exactly: runtime.serverPort)))
         socket.resume()
-        try await send(socket, op: "surfaces.list", id: "stage-discovery", payload: [:])
-        _ = try await receive(socket, matchingId: "stage-discovery")
+        try await assertOwnedRuntimeDiscovery(runtime, socket: socket, surface: surface,
+                                              requestId: "stage-discovery")
         let pairResponse = try await pair(socket, id: "stage-pair", controllerId: "stage-controller",
                                           surfaceId: surface.surfaceId)
-        XCTAssertEqual(pairResponse["ok"] as? Bool, true, "pair response: \(pairResponse)")
+        _ = try XCTUnwrap(pairResponse["ok"] as? Bool == true ? pairResponse : nil,
+                          "pair response: \(pairResponse)")
         try await send(socket, op: "content.set", id: "stage-content", payload: [
             "content": ["html": "<main>same annotation context</main>"],
             "contentId": "stage-content-id", "contentType": "html", "friendlyChatName": "Stage Test",
             "paneId": pane.paneId, "surfaceId": surface.surfaceId,
         ])
-        _ = try await receive(socket, matchingId: "stage-content")
+        let contentResponse = try await receive(socket, matchingId: "stage-content")
+        _ = try XCTUnwrap(contentResponse["ok"] as? Bool == true ? contentResponse : nil,
+                          "content response: \(contentResponse)")
 
         let adapter = try runtime.locklessAuthorityForLocalMutation()
         let image = UIGraphicsImageRenderer(size: CGSize(width: 2, height: 2)).pngData { _ in
@@ -345,15 +390,16 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         let pane = try XCTUnwrap(surface.panes.first)
         let socket = socket(port: port)
         socket.resume()
-        try await send(socket, op: "surfaces.list", id: "annotation-discovery", payload: [:])
-        _ = try await receive(socket, matchingId: "annotation-discovery")
+        try await assertOwnedRuntimeDiscovery(runtime, socket: socket, surface: surface,
+                                              requestId: "annotation-discovery")
         let pairResponse = try await pair(
             socket,
             id: "annotation-pair",
             controllerId: "annotation-controller",
             surfaceId: surface.surfaceId
         )
-        XCTAssertEqual(pairResponse["ok"] as? Bool, true, "pair response: \(pairResponse)")
+        _ = try XCTUnwrap(pairResponse["ok"] as? Bool == true ? pairResponse : nil,
+                          "pair response: \(pairResponse)")
         try await send(socket, op: "content.set", id: "annotation-content", payload: [
             "content": ["html": "<main>same annotation context</main>"],
             "contentId": "annotation-content-id",
@@ -362,7 +408,9 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
             "paneId": pane.paneId,
             "surfaceId": surface.surfaceId,
         ])
-        _ = try await receive(socket, matchingId: "annotation-content")
+        let contentResponse = try await receive(socket, matchingId: "annotation-content")
+        _ = try XCTUnwrap(contentResponse["ok"] as? Bool == true ? contentResponse : nil,
+                          "content response: \(contentResponse)")
 
         let adapter = try runtime.locklessAuthorityForLocalMutation()
         let image = UIGraphicsImageRenderer(size: CGSize(width: 2, height: 2)).pngData { _ in
@@ -1046,6 +1094,32 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         let task = URLSession.shared.webSocketTask(with: URL(string: "ws://127.0.0.1:\(port)/ws")!)
         task.maximumMessageSize = 12 * 1_024 * 1_024
         return task
+    }
+
+    private func assertOwnedRuntimeDiscovery(
+        _ runtime: SurfAceRuntime,
+        socket: URLSessionWebSocketTask,
+        surface: SurfAceSurfaceModel,
+        requestId: String
+    ) async throws {
+        let port = try XCTUnwrap(UInt16(exactly: runtime.serverPort))
+        _ = try XCTUnwrap(port != SurfAceHTTPServer.fixedPort ? port : nil,
+                          "fixture must own a distinct ephemeral port")
+        let ownedState = try await runtime.locklessReadinessSnapshot().state
+        let ownedSurface = try XCTUnwrap(ownedState.liveSurfaces[surface.surfaceId])
+        try await send(socket, op: "surfaces.list", id: requestId, payload: [:])
+        let response = try await receive(socket, matchingId: requestId)
+        _ = try XCTUnwrap(response["ok"] as? Bool == true ? response : nil,
+                          "discovery response: \(response)")
+        let body = payload(response)
+        let discovered = try XCTUnwrap(body["surfaces"] as? [[String: Any]])
+        _ = try XCTUnwrap(discovered.first {
+            $0["surfaceId"] as? String == surface.surfaceId &&
+                $0["name"] as? String == ownedSurface.name
+        }, "connected listener did not report this runtime's registered surface")
+        let revision = try XCTUnwrap(body["surfaceSetRevision"] as? NSNumber).int64Value
+        _ = try XCTUnwrap(revision == ownedState.surfaceSetRevision ? response : nil,
+                          "connected listener has a different surface revision")
     }
 
     private func pair(
