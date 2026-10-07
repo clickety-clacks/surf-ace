@@ -81,6 +81,14 @@ allocator and verify the writer lease is released before applying 002. The
 migration refuses an active lease, an in-progress restore, or an unsupported
 state version. The v0.2.5 server does not auto-migrate.
 
+An annotation-capable candidate also carries the forward-only
+`schemas/allocator/003_annotation_journal.sql` migration. Apply it after 002
+to a stopped staging restore, then verify annotation journal startup, source
+deduplication, consumer cursor replay, and a second restore from one consistent
+snapshot before considering a serving upgrade. Keep the code and release gates
+separate: the presence of this file in a candidate does not authorize applying
+it to a serving fleet or change the published v0.2.5 release.
+
 Before touching the serving database, capture a PostgreSQL base backup and a
 schema/data `pg_dump` in a restricted run directory. Restore the backup into
 a disposable staging cluster with its own witness and apply 002 there first;
