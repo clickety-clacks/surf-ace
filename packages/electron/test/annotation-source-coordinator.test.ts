@@ -20,9 +20,10 @@ test("Done still completes the direct frame when registry publishing is not conf
   }, "Direct");
   let completed = (): void => {};
   const completion = new Promise<void>((resolve) => { completed = resolve; });
-  let awaitingCompletion = false;
+  let sawPendingCommit = false;
   const persist = async () => {
-    if (awaitingCompletion && !core.hasPendingAnnotationCommit(surface.surfaceId, paneId)) completed();
+    if (core.hasPendingAnnotationCommit(surface.surfaceId, paneId)) sawPendingCommit = true;
+    if (sawPendingCommit && !core.hasPendingAnnotationCommit(surface.surfaceId, paneId)) completed();
   };
   const server = new SurfaceWsServer({
     bindAddress: "127.0.0.1", capturePaneImage: async () => png,
@@ -39,10 +40,11 @@ test("Done still completes the direct frame when registry publishing is not conf
     strokeId: "direct-stroke" as never, tool: "mouse",
     points: [{ x: 1, y: 2, timestamp: 1 }],
   });
-  awaitingCompletion = true;
   await source.setAnnotating(surface.surfaceId, paneId, false);
   await completion;
   assert.equal(core.hasPendingAnnotationCommit(surface.surfaceId, paneId), false);
+  assert.ok(Object.values(core.getPersistentState().lockless?.scopes ?? {}).some((scope) =>
+    scope.records.some((record) => record.recordClass === "annotation_frame")));
   source.stop();
 });
 
