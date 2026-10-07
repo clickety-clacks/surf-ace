@@ -8,6 +8,7 @@ export class AnnotationSourceCoordinator {
   private readonly gate: AnnotationFlushGate;
   private readonly doneEpoch = new Map<string, number>();
   private readonly completing = new Map<string, Promise<void>>();
+  private readonly directCommitStarted = new Set<string>();
   private readonly unsubscribe: () => void;
 
   constructor(
@@ -44,6 +45,19 @@ export class AnnotationSourceCoordinator {
     const epoch = (this.doneEpoch.get(key) ?? 0) + 1;
     this.doneEpoch.set(key, epoch);
     if (enabled) {
+      const frame = this.core.annotationPublisher?.openFrameFor(surfaceId, paneId);
+      if (frame?.commitRequested && (frame.directCommitDelivered ||
+          !this.core.hasPendingAnnotationCommit(surfaceId, paneId) || this.directCommitStarted.has(key))) {
+        try { await this.finishRequestedFrame(surfaceId, paneId); }
+        catch {
+          // A failed pre-boundary attempt can still be canceled by re-entry.
+        }
+        const pending = this.core.annotationPublisher?.openFrameFor(surfaceId, paneId);
+        if (pending?.commitRequested && (pending.directCommitDelivered ||
+            !this.core.hasPendingAnnotationCommit(surfaceId, paneId))) {
+          throw new Error("annotation source frame remains pending after direct commit");
+        }
+      }
       await this.core.transactionAsync(async () => {
         this.core.setAnnotating(surfaceId, paneId, true);
         this.core.annotationPublisher?.requestFrameCommit(surfaceId, paneId, false);
@@ -95,7 +109,12 @@ export class AnnotationSourceCoordinator {
         await this.flush(surfaceId, paneId, "idle_window");
       }
       if (this.doneEpoch.get(key) !== epoch || !outbox.openFrameFor(surfaceId, paneId)?.commitRequested) return;
-      if (!await this.completeDirect(surfaceId, paneId)) return;
+      this.directCommitStarted.add(key);
+      try {
+        if (!await this.completeDirect(surfaceId, paneId)) return;
+      } finally {
+        this.directCommitStarted.delete(key);
+      }
     }
     // A restart after the direct persistence boundary sees the pane's pending
     // bit cleared while the source frame still carries the requested intent.

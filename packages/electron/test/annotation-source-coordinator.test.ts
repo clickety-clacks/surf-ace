@@ -164,3 +164,57 @@ test("Done recovery keeps one source frame across pre-direct and post-direct cra
     resumed.stop();
   }
 });
+
+test("reentry after durable direct commit closes the old source frame before a new stroke", async () => {
+  const core = new SurfaceCore({ annotationClientId: clientId });
+  const surface = core.ensurePrimarySurface("Surf Ace", viewport);
+  core.admitSurfaceToLockless(surface.surfaceId);
+  const paneId = core.activePaneIds(surface.surfaceId)[0]!;
+  core.locklessContentPush(surface.surfaceId, {
+    content: { markdown: "annotation fixture" }, contentId: "content-one",
+    contentType: "markdown", friendlyChatName: "Fixture", paneId,
+  }, "Fixture");
+  let durable = core.getPersistentState();
+  let interruptSourceCommit = true;
+  const persist = async () => {
+    const candidate = core.getPersistentState();
+    if (interruptSourceCommit && candidate.annotationPublisher?.surfaces[surface.surfaceId]?.fifo.some(
+      (entry) => JSON.parse(entry.canonical).kind === "frame_commit")) {
+      interruptSourceCommit = false;
+      throw new Error("injected source commit write failure");
+    }
+    durable = candidate;
+  };
+  const source = new AnnotationSourceCoordinator(core, persist, () => {}, () => {}, async () => {
+    core.markDrawingFlushSent(surface.surfaceId, paneId);
+    core.markAnnotationCommittedSent(surface.surfaceId, paneId);
+    await persist();
+    return true;
+  });
+  await source.setAnnotating(surface.surfaceId, paneId, true);
+  const old = core.annotationPublisher!.openFrame(surface.surfaceId, paneId, {
+    contentId: "content-one", contextKey: "content-one", image: png,
+    openedAt: 100, scrollOffset: { x: 0, y: 0 }, viewport,
+  });
+  core.addStroke(surface.surfaceId, paneId, {
+    strokeId: "stroke-one" as never, tool: "mouse",
+    points: [{ x: 1, y: 2, timestamp: 110 }],
+  });
+  await assert.rejects(source.setAnnotating(surface.surfaceId, paneId, false),
+    /injected source commit write failure/);
+  assert.equal(durable.annotationPublisher?.surfaces[surface.surfaceId]?.openFrames?.[String(paneId)]
+    ?.directCommitDelivered, true);
+  await source.setAnnotating(surface.surfaceId, paneId, true);
+  const next = core.annotationPublisher!.openFrame(surface.surfaceId, paneId, {
+    contentId: "content-one", contextKey: "content-one", image: png,
+    openedAt: 200, scrollOffset: { x: 0, y: 0 }, viewport,
+  });
+  assert.notEqual(next.frameId, old.frameId);
+  const commits = durable.annotationPublisher!.surfaces[surface.surfaceId]!.fifo
+    .map((entry) => JSON.parse(entry.canonical)).filter((record) => record.kind === "frame_commit");
+  assert.equal(commits.length, 1);
+  assert.equal(commits[0].frameId, old.frameId);
+  assert.deepEqual(commits[0].payload.frame.strokes.map((stroke: { strokeId: string }) => stroke.strokeId),
+    ["stroke-one"]);
+  source.stop();
+});
