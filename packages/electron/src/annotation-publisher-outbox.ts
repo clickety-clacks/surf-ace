@@ -54,6 +54,7 @@ export type AnnotationOpenFrame = {
 export type AnnotationPublisherSurface = {
   acceptedCursor: AnnotationCursor | null;
   diagnostic: { code: string; sequence: string } | null;
+  unhealthy?: { code: string; sequence: string } | null;
   fifo: AnnotationPublisherEntry[];
   frames: Record<string, string>;
   openFrames?: Record<string, AnnotationOpenFrame>;
@@ -100,6 +101,18 @@ export class AnnotationPublisherOutbox {
     return Object.entries(this.state.surfaces)
       .filter(([, surface]) => surface.fifo.length > 0 || surface.trailingGap !== null)
       .map(([surfaceId]) => surfaceId);
+  }
+
+  publishableSurfaceIds(): string[] {
+    return this.pendingSurfaceIds().filter((surfaceId) => !this.state.surfaces[surfaceId]?.unhealthy);
+  }
+
+  markUnhealthy(surfaceId: string, code: string): void {
+    const surface = this.surface(surfaceId);
+    const sequence = surface.fifo[0]?.sourceSequence ?? surface.trailingGap?.from ?? surface.nextSequence;
+    surface.unhealthy = { code: /^[a-z][a-z0-9_]{0,127}$/.test(code) ? code : "annotation_protocol_invalid",
+      sequence };
+    if (!this.fits(surfaceId)) throw new RangeError("annotation publisher unhealthy state capacity");
   }
 
   needsSeal(surfaceId: string): boolean {
@@ -347,6 +360,10 @@ export class AnnotationPublisherOutbox {
     for (const [surfaceId, surface] of Object.entries(this.state.surfaces)) {
       parseAnnotationSequence(surface.nextSequence);
       if (!surface.frames || typeof surface.frames !== "object" ||
+          (surface.unhealthy != null &&
+            (!/^[a-z][a-z0-9_]{0,127}$/.test(surface.unhealthy.code) ||
+             typeof surface.unhealthy.sequence !== "string" ||
+             !/^[1-9][0-9]*$/.test(surface.unhealthy.sequence))) ||
           Object.values(surface.frames).some((id) => !/^fr_[0-9a-f]{32}$/.test(id)) ||
           (surface.openFrames !== undefined && (typeof surface.openFrames !== "object" ||
             Object.entries(surface.openFrames).some(([key, frame]) =>

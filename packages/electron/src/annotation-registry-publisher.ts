@@ -5,6 +5,10 @@ import type { SurfaceCore } from "./surface-core.js";
 export type AnnotationPublisherWire = Pick<PublicControllerWireClient,
   "connect" | "request" | "onClose" | "close" | "abort">;
 
+class AnnotationPublisherRefusal extends Error {
+  constructor(readonly code: string) { super(`annotation registry refused ${code}`); }
+}
+
 /** A single foreground publisher connection to the configured registry. */
 export class AnnotationRegistryPublisher {
   private readonly wire: AnnotationPublisherWire;
@@ -14,6 +18,7 @@ export class AnnotationRegistryPublisher {
   private helloDone = false;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private active: Promise<void> = Promise.resolve();
+  private lastSurfaceId: string | null = null;
 
   constructor(
     address: string,
@@ -29,7 +34,7 @@ export class AnnotationRegistryPublisher {
     this.wire = wireFactory(url.toString());
     this.wire.onClose(() => {
       this.helloDone = false;
-      if (!this.stopped && this.core.annotationPublisher!.pendingSurfaceIds().length > 0) this.retry();
+      if (!this.stopped && this.core.annotationPublisher!.publishableSurfaceIds().length > 0) this.retry();
     });
   }
 
@@ -51,7 +56,7 @@ export class AnnotationRegistryPublisher {
   }
 
   private retry(): void {
-    if (this.stopped || this.retryTimer || this.core.annotationPublisher!.pendingSurfaceIds().length === 0) return;
+    if (this.stopped || this.retryTimer || this.core.annotationPublisher!.publishableSurfaceIds().length === 0) return;
     this.retryTimer = setTimeout(() => {
       this.retryTimer = null;
       this.notify();
@@ -62,16 +67,25 @@ export class AnnotationRegistryPublisher {
     if (this.helloDone) return;
     await this.wire.connect();
     const response = await this.wire.request("annotation.hello", { protocolVersion: 1, role: "publisher" });
-    if (!response.ok) throw new Error(`annotation_hello_failed:${response.error?.code ?? "unknown"}`);
+    if (!response.ok) throw new AnnotationPublisherRefusal(response.error?.code ?? "annotation_protocol_invalid");
     this.helloDone = true;
   }
 
   private async drain(): Promise<void> {
     while (!this.stopped) {
       this.wanted = false;
-      const surfaceId = this.core.annotationPublisher!.pendingSurfaceIds()[0];
+      const candidates = this.core.annotationPublisher!.publishableSurfaceIds().sort();
+      const surfaceId = candidates.find((id) => this.lastSurfaceId === null || id > this.lastSurfaceId!) ?? candidates[0];
       if (!surfaceId) return;
-      await this.ensureHello();
+      this.lastSurfaceId = surfaceId;
+      try { await this.ensureHello(); }
+      catch (error) {
+        if (error instanceof AnnotationPublisherRefusal && error.code !== "writer_fence_unavailable") {
+          await this.markUnhealthy(surfaceId, error.code);
+          continue;
+        }
+        throw error;
+      }
       const outbox = this.core.annotationPublisher!;
       const entry = outbox.needsSeal(surfaceId)
         ? await this.core.transactionAsync(async () => {
@@ -94,14 +108,32 @@ export class AnnotationRegistryPublisher {
           });
           continue;
         }
+        if (entry.kind === "gap" || (response.error?.code !== "annotation_ingest_capacity" &&
+            response.error?.code !== "writer_fence_unavailable")) {
+          await this.markUnhealthy(surfaceId, response.error?.code ?? "annotation_protocol_invalid");
+          continue;
+        }
         throw new Error(`annotation_ingest_failed:${response.error?.code ?? "unknown"}`);
       }
-      const cursor = this.acceptedCursor(response);
+      let cursor: AnnotationCursor;
+      try { cursor = this.acceptedCursor(response); }
+      catch {
+        await this.markUnhealthy(surfaceId, "annotation_ingest_invalid_response");
+        continue;
+      }
       await this.core.transactionAsync(async () => {
         outbox.accepted(surfaceId, entry, cursor);
         await this.persist();
       });
     }
+  }
+
+  private async markUnhealthy(surfaceId: string, code: string): Promise<void> {
+    await this.core.transactionAsync(async () => {
+      this.core.annotationPublisher!.markUnhealthy(surfaceId, code);
+      await this.persist();
+    });
+    this.onError(new AnnotationPublisherRefusal(code));
   }
 
   private acceptedCursor(response: ControllerWireEnvelope): AnnotationCursor {

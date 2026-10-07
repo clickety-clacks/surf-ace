@@ -14,14 +14,6 @@ const event = {
   sourceTimestamp: "2026-10-06T21:00:00Z", payload: { strokes: [] },
 };
 
-async function until(predicate: () => boolean): Promise<void> {
-  for (let attempt = 0; attempt < 100; attempt++) {
-    if (predicate()) return;
-    await new Promise((resolve) => setTimeout(resolve, 2));
-  }
-  throw new Error("publisher did not reach the expected state");
-}
-
 test("registry publisher sends only persisted source bytes and removes them after durable acceptance", async () => {
   const core = new SurfaceCore({ annotationClientId: clientId });
   core.annotationPublisher!.append(surfaceId, event);
@@ -43,10 +35,15 @@ test("registry publisher sends only persisted source bytes and removes them afte
     },
   };
   const errors: unknown[] = [];
+  let accepted!: () => void;
+  const acceptedEvent = new Promise<void>((resolve) => { accepted = resolve; });
   const publisher = new AnnotationRegistryPublisher("ws://127.0.0.1:19001/ws", core,
-    async () => { persisted = core.getPersistentState(); }, (error) => errors.push(error), () => wire);
+    async () => {
+      persisted = core.getPersistentState();
+      if (persisted.annotationPublisher!.surfaces[surfaceId]!.fifo.length === 0) accepted();
+    }, (error) => errors.push(error), () => wire);
   publisher.start();
-  await until(() => persisted.annotationPublisher!.surfaces[surfaceId]!.fifo.length === 0);
+  await acceptedEvent;
   assert.deepEqual(calls, ["connect", "annotation.hello", "annotation.ingest"]);
   assert.deepEqual(errors, []);
   assert.equal(persisted.annotationPublisher!.surfaces[surfaceId]!.fifo.length, 0);
@@ -59,6 +56,8 @@ test("ambiguous transport failure leaves original canonical FIFO head for retry"
   core.annotationPublisher!.append(surfaceId, event);
   const original = core.annotationPublisher!.head(surfaceId)!.canonical;
   const errors: unknown[] = [];
+  let failed!: () => void;
+  const failureEvent = new Promise<void>((resolve) => { failed = resolve; });
   const wire: AnnotationPublisherWire = {
     connect: async () => {}, onClose: () => () => {}, abort: () => {}, close: async () => {},
     request: async (op): Promise<ControllerWireEnvelope> => {
@@ -67,9 +66,48 @@ test("ambiguous transport failure leaves original canonical FIFO head for retry"
     },
   };
   const publisher = new AnnotationRegistryPublisher("ws://127.0.0.1:19001/ws", core,
-    async () => {}, (error) => errors.push(error), () => wire);
+    async () => {}, (error) => { errors.push(error); failed(); }, () => wire);
   publisher.start();
-  await until(() => errors.length > 0);
+  await failureEvent;
   assert.equal(core.annotationPublisher!.head(surfaceId)!.canonical, original);
+  await publisher.stop();
+});
+
+test("a rejected surface records unhealthy truth and does not starve another surface", async () => {
+  const otherSurface = "sf_publisher-other";
+  const core = new SurfaceCore({ annotationClientId: clientId });
+  core.annotationPublisher!.append(surfaceId, event);
+  core.annotationPublisher!.append(otherSurface, event);
+  let persisted = core.getPersistentState();
+  let otherAccepted!: () => void;
+  const acceptedEvent = new Promise<void>((resolve) => { otherAccepted = resolve; });
+  const sent: string[] = [];
+  const wire: AnnotationPublisherWire = {
+    connect: async () => {}, onClose: () => () => {}, abort: () => {}, close: async () => {},
+    request: async (op, payload): Promise<ControllerWireEnvelope> => {
+      if (op === "annotation.hello") return { type: "response", op, ok: true, payload: {}, id: "hello" };
+      const record = (payload as { record: { surfaceId: string } }).record;
+      sent.push(record.surfaceId);
+      if (record.surfaceId === surfaceId) {
+        return { type: "response", op, ok: false, id: "conflict",
+          error: { code: "annotation_source_sequence_conflict", message: "conflict" } };
+      }
+      return { type: "response", op, ok: true, id: "accepted",
+        payload: { serverCursor: { epoch: "a".repeat(32), sequence: "1" }, duplicate: false,
+          committedAt: "2026-10-06T21:00:01Z" } };
+    },
+  };
+  const publisher = new AnnotationRegistryPublisher("ws://127.0.0.1:19001/ws", core,
+    async () => {
+      persisted = core.getPersistentState();
+      if (persisted.annotationPublisher!.surfaces[otherSurface]!.fifo.length === 0) otherAccepted();
+    }, () => {}, () => wire);
+  publisher.start();
+  await acceptedEvent;
+  assert.deepEqual(sent, [surfaceId, otherSurface]);
+  assert.equal(persisted.annotationPublisher!.surfaces[surfaceId]!.unhealthy?.code,
+    "annotation_source_sequence_conflict");
+  assert.equal(persisted.annotationPublisher!.surfaces[surfaceId]!.fifo.length, 1);
+  assert.equal(persisted.annotationPublisher!.surfaces[otherSurface]!.fifo.length, 0);
   await publisher.stop();
 });
