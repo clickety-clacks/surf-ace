@@ -1108,11 +1108,7 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
                 .init(x: 12, y: 24, pressure: 0.7, timestamp: 1_010),
             ], tool: "pencil"),
         ], drawingData: annotationDrawingData(strokeCount: 1))
-        for _ in 0..<80 {
-            if (await adapter.snapshot()).annotationPublisher?
-                .openFrame(surfaceId: surfaceId, paneId: paneId)?.sourceStrokeCount == 1 { break }
-            try await Task.sleep(for: .milliseconds(50))
-        }
+        await runtime.awaitAnnotationStrokeCapture(surfaceId: surfaceId, paneId: paneId)
         let openedState = await adapter.snapshot()
         let open = try XCTUnwrap(openedState.annotationPublisher?
             .openFrame(surfaceId: surfaceId, paneId: paneId))
@@ -1120,10 +1116,8 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         XCTAssertEqual(open.scrollOffset.x, 3)
         runtime.setAnnotationMode(surfaceId: surfaceId, paneId: paneId,
                                   enabled: false, fingerDrawEnabled: false)
-        for _ in 0..<80 {
-            if (await adapter.snapshot()).annotationPublisher?.surfaces[surfaceId]?.fifo.count == 2 { break }
-            try await Task.sleep(for: .milliseconds(50))
-        }
+        await runtime.awaitAnnotationModeTransition(surfaceId: surfaceId, paneId: paneId)
+        await runtime.awaitAnnotationCommit(surfaceId: surfaceId, paneId: paneId)
         let finalState = await adapter.snapshot()
         let publisher = try XCTUnwrap(finalState.annotationPublisher)
         let entries = try XCTUnwrap(publisher.surfaces[surfaceId]?.fifo)
@@ -1193,11 +1187,7 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         addTeardownBlock { await restartedRuntime.stop() }
         await restartedRuntime.start()
         let recoveredAdapter = try restartedRuntime.locklessAuthorityForLocalMutation()
-        for _ in 0..<100 {
-            if (await recoveredAdapter.snapshot()).annotationPublisher?
-                .surfaces[surfaceId]?.fifo.count == 2 { break }
-            try await Task.sleep(for: .milliseconds(10))
-        }
+        await restartedRuntime.awaitAnnotationRecovery()
         let recovered = await recoveredAdapter.snapshot().annotationPublisher
         let records = try XCTUnwrap(recovered?.surfaces[surfaceId]?.fifo).map { entry in
             try XCTUnwrap(JSONSerialization.jsonObject(with: Data(entry.canonical.utf8))
@@ -1274,11 +1264,7 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         addTeardownBlock { await restarted.stop() }
         await restarted.start()
         let recoveredAdapter = try restarted.locklessAuthorityForLocalMutation()
-        for _ in 0..<100 {
-            if (await recoveredAdapter.snapshot()).annotationPublisher?
-                .surfaces[surfaceId]?.fifo.count == 2 { break }
-            try await Task.sleep(for: .milliseconds(10))
-        }
+        await restarted.awaitAnnotationRecovery()
         let recovered = await recoveredAdapter.snapshot().annotationPublisher
         let records = try XCTUnwrap(recovered?.surfaces[surfaceId]?.fifo).map { entry in
             try XCTUnwrap(JSONSerialization.jsonObject(with: Data(entry.canonical.utf8))
@@ -1338,11 +1324,7 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
             )
             await restarted.start()
             let recoveredAdapter = try restarted.locklessAuthorityForLocalMutation()
-            for _ in 0..<100 {
-                if (await recoveredAdapter.snapshot()).annotationPublisher?
-                    .surfaces[surfaceId]?.fifo.count == 1 { break }
-                try await Task.sleep(for: .milliseconds(10))
-            }
+            await restarted.awaitAnnotationRecovery()
             let recovered = await recoveredAdapter.snapshot().annotationPublisher
             let records = try XCTUnwrap(recovered?.surfaces[surfaceId]?.fifo).map { entry in
                 try XCTUnwrap(JSONSerialization.jsonObject(with: Data(entry.canonical.utf8))

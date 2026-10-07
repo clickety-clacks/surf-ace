@@ -466,16 +466,25 @@ extension SurfAceAnnotationOutboxTests {
         try store.save(state)
         let adapter = try SurfAceLocklessRuntimeAdapter(store: store, annotationClientId: "client-1")
         let probe = AnnotationWireProbe()
-        let publisher = try SurfAceAnnotationPublisher(
+        let firstPublisher = try SurfAceAnnotationPublisher(
             adapter: adapter, endpoint: XCTUnwrap(URL(string: "ws://127.0.0.1:19001")),
             makeTransport: { _ in AnnotationWireProbeTransport(probe) }, onError: { _ in }
         )
-        publisher.notify()
-        for _ in 0..<80 {
-            if (await adapter.snapshot()).annotationPublisher?.surfaces[surfaceId]?.acceptedCursor != nil { break }
-            try await Task.sleep(for: .milliseconds(50))
+        do {
+            try await firstPublisher.drain()
+            XCTFail("the first send must lose its response")
+        } catch {
+            XCTAssertEqual((error as? URLError)?.code, .networkConnectionLost)
         }
-        publisher.stop()
+        firstPublisher.stop()
+        XCTAssertNil((await adapter.snapshot()).annotationPublisher?
+            .surfaces[surfaceId]?.acceptedCursor)
+        let restartedPublisher = try SurfAceAnnotationPublisher(
+            adapter: adapter, endpoint: XCTUnwrap(URL(string: "ws://127.0.0.1:19001")),
+            makeTransport: { _ in AnnotationWireProbeTransport(probe) }, onError: { _ in }
+        )
+        try await restartedPublisher.drain()
+        restartedPublisher.stop()
         XCTAssertGreaterThanOrEqual(probe.connections, 2)
         XCTAssertEqual(probe.records, [expected.canonical, expected.canonical])
         let saved = try XCTUnwrap(store.load())
