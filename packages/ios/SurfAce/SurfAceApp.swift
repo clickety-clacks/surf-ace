@@ -128,6 +128,15 @@ struct SurfAceApp: App {
                 .surfAceSpatialWindowTransparency()
                 .surfAceSpatialWindowOrnament()
                 .task {
+                    let environment = ProcessInfo.processInfo.environment
+                    let schemeFlag = environment["SURF_ACE_XCTEST_HOST_NO_AUTOSTART"] == "1"
+                    let xctestHost = environment["XCTestConfigurationFilePath"] != nil
+                    if schemeFlag || xctestHost {
+                        // The app is XCTest's host process. Test-owned runtimes
+                        // still start explicitly with isolated transports.
+                        print("[SurfAce-App] event=test_host_autostart_skipped scheme_flag=\(schemeFlag ? 1 : 0) xctest_host=\(xctestHost ? 1 : 0)")
+                        return
+                    }
                     await runtime.start()
                 }
         }
