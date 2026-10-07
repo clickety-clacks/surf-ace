@@ -1841,6 +1841,7 @@ test("new panes stay unnumbered when the registry rejects a pane claim and recov
       op: "client.register",
       payload: {
         clientId: registrationRequest.payload.clientId,
+        registryIdentity: { allocatorId: "alloc_fixture", fleetId: "fixture-fleet" },
         surfaces: registrationRequest.payload.surfaces.map((entry: any) => ({
           surfaceId: entry.surfaceId,
           windowLabel: "a",

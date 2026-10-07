@@ -88,12 +88,14 @@ async function centralFixture(registryIdentity: { allocatorId: string; fleetId: 
   });
   return {
     server, requests, identityRequests, port, address: `ws://127.0.0.1:${port}/`,
-    reply(index: number, ok = true, assignPaneLabels = true, paneLabelBase = 700, windowLabel?: string) {
+    reply(index: number, ok = true, assignPaneLabels = true, paneLabelBase = 700, windowLabel?: string,
+      responseIdentity: { allocatorId: string; fleetId: string } | null = registryIdentity) {
       const { socket, message } = requests[index]!;
       assert.equal(message.op, "client.register");
       socket.send(JSON.stringify({
-        type: "response", id: message.id, op: message.op, ok,
+        type: "response", v: 1, id: message.id, op: message.op, ok,
         payload: { clientId: message.payload.clientId,
+          ...(responseIdentity ? { registryIdentity: responseIdentity } : {}),
           surfaces: message.payload.surfaces.map((surface: any, i: number) => ({
             surfaceId: surface.surfaceId,
             windowLabel: windowLabel ?? String.fromCharCode(97 + i),
@@ -418,6 +420,7 @@ test("legacy labels wait for verified pin; foreign and missing identities never 
   const correct = await centralFixture({ allocatorId: "alloc_home", fleetId: "fleet-home" });
   const moved = await centralFixture({ allocatorId: "alloc_home", fleetId: "fleet-home" });
   const foreign = await centralFixture({ allocatorId: "alloc_foreign", fleetId: "fleet-foreign" });
+  const replacedAllocator = await centralFixture({ allocatorId: "alloc_replaced", fleetId: "fleet-home" });
   const missing = await centralFixture(null);
   const clientId = "legacy-client";
   const core = new SurfaceCore();
@@ -442,8 +445,10 @@ test("legacy labels wait for verified pin; foreign and missing identities never 
   try {
     await assert.rejects(attempt(foreign.address, null), /legacy_registry_binding_pending/);
     await assert.rejects(attempt(foreign.address), /foreign_registry_identity/);
+    await assert.rejects(attempt(replacedAllocator.address), /foreign_registry_identity/);
     await assert.rejects(attempt(missing.address), /registry_identity_missing_or_invalid/);
     assert.equal(foreign.requests.length, 0);
+    assert.equal(replacedAllocator.requests.length, 0);
     assert.equal(missing.requests.length, 0);
     assert.deepEqual(core.getPersistentState(), before);
 
@@ -476,6 +481,7 @@ test("legacy labels wait for verified pin; foreign and missing identities never 
     await correct.close();
     await moved.close();
     await foreign.close();
+    await replacedAllocator.close();
     await missing.close();
   }
 });
@@ -502,6 +508,61 @@ test("interrupted first binding write refuses registration and preserves display
     assert.equal(core.getRendererWindowState(surface.surfaceId).panes[0]?.content.contentId, "ct_registry_bind");
   } finally {
     await connection.stop();
+    await registry.close();
+  }
+});
+
+test("registration response with a foreign identity cannot apply labels after matching preflight", async () => {
+  const registry = await centralFixture({ allocatorId: "alloc_home", fleetId: "fleet-home" });
+  const core = new SurfaceCore();
+  const surface = core.ensurePrimarySurface("Response identity", { width: 800, height: 600, scale: 1 });
+  const registration = new ConfiguredServerRegistration(registry.address, "response-client", core, async () => {}, () => {}, 200);
+  try {
+    const connecting = registration.synchronize();
+    await until(() => registry.requests.length === 1);
+    registry.reply(0, true, true, 700, "a", { allocatorId: "alloc_foreign", fleetId: "fleet-foreign" });
+    await assert.rejects(connecting, /foreign_registry_identity/);
+    const missing = registration.synchronize();
+    await until(() => registry.requests.length === 2);
+    registry.reply(1, true, true, 700, "a", null);
+    await assert.rejects(missing, /registry_identity_missing_or_invalid/);
+    assert.deepEqual(core.registryBinding(), {
+      clientId: "response-client", allocatorId: "alloc_home", fleetId: "fleet-home",
+    });
+    assert.equal(core.panesList(surface.surfaceId).panes[0]?.paneLabel, 0);
+  } finally {
+    await registration.stop();
+    await registry.close();
+  }
+});
+
+test("ambiguous binding candidate cannot register until persistence is reconciled", async () => {
+  const registry = await centralFixture();
+  const core = new SurfaceCore();
+  core.ensurePrimarySurface("Uncertain binding", { width: 800, height: 600, scale: 1 });
+  let reconciled = false;
+  const registration = new ConfiguredServerRegistration(registry.address, "uncertain-client", core,
+    async () => {
+      if (!reconciled) {
+        const error = new Error("binding_outcome_unknown");
+        error.name = "PersistentStateOutcomeUnknownError";
+        throw error;
+      }
+    }, () => {}, 200);
+  try {
+    await assert.rejects(registration.synchronize(), /binding_outcome_unknown/);
+    assert.deepEqual(core.registryBinding(), {
+      clientId: "uncertain-client", allocatorId: "alloc_fixture", fleetId: "fixture-fleet",
+    });
+    await assert.rejects(registration.synchronize(), /binding_outcome_unknown/);
+    assert.equal(registry.requests.length, 0);
+    reconciled = true;
+    const retry = registration.synchronize();
+    await until(() => registry.requests.length === 1);
+    registry.reply(0);
+    await retry;
+  } finally {
+    await registration.stop();
     await registry.close();
   }
 });

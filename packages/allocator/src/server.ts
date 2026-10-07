@@ -102,7 +102,11 @@ export class AllocatorServer {
         panes,
       });
     }
-    const result = { clientId, surfaces: registered };
+    const result = {
+      clientId,
+      registryIdentity: { allocatorId: state.allocatorId, fleetId: state.fleetId },
+      surfaces: registered,
+    };
     this.registeredClients.set(clientId, result);
     return result;
   }

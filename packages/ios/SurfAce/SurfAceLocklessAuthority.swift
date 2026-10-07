@@ -1049,6 +1049,32 @@ final class SurfAceLocklessTransactionCoordinator: @unchecked Sendable {
         }
     }
 
+    func registryBindingDurableSnapshot() async throws -> SurfAceLocklessAuthorityState {
+        try await withCheckedThrowingContinuation { continuation in
+            queue.async {
+                do {
+                    let stored = try self.store.load()
+                    if let binding = self.state.registryBinding {
+                        guard stored?.registryBinding == binding else {
+                            throw SurfAceRegistrationError.registryBindingPersistencePending
+                        }
+                    } else if let stored, stored.registryBinding != nil {
+                        var comparable = stored
+                        comparable.registryBinding = nil
+                        comparable.generation = self.state.generation
+                        guard comparable == self.state else {
+                            throw SurfAceRegistrationError.registryBindingPersistencePending
+                        }
+                        self.state = stored
+                    }
+                    continuation.resume(returning: self.state)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
     func transact<Result: Sendable>(
         trigger: String = "transaction_enforcement",
         skipUnchanged: Bool = false,

@@ -464,6 +464,11 @@ async function persistState(): Promise<void> {
   }
 }
 
+async function persistRegistryState(): Promise<void> {
+  if (persistentStateWriteGuard) throw new Error("registry_binding_persistence_pending");
+  await persistState();
+}
+
 function schedulePersistenceReconciliation(): void {
   if (persistenceRecoveryTimer || isQuitting) return;
   persistenceRecoveryTimer = setTimeout(() => {
@@ -1927,7 +1932,7 @@ async function boot(): Promise<void> {
     configuredAddress,
     clientId: registrationClientId(identity.publicKeyPem),
     core,
-    persist: persistState,
+    persist: persistRegistryState,
     provisionedBinding,
     onError: (error) => clientWarn("server_registration_failed", errorDiagnosticFields(error)),
   });

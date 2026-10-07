@@ -127,6 +127,7 @@ actor SurfAceLocklessRuntimeAdapter {
     private var connectionByController: [String: String] = [:]
     private var controllerByConnection: [String: String] = [:]
     private var targetWorkRecovered: Bool
+    private var pendingRegistryBinding: SurfAceRegistryBinding?
 
     init(
         store: SurfAceLocklessGenerationStore,
@@ -381,15 +382,23 @@ actor SurfAceLocklessRuntimeAdapter {
         provisioned: SurfAceProvisionedRegistryBinding?
     ) async throws {
         guard identity.isValid else { throw SurfAceRegistrationError.registryIdentityMissing }
-        let current = await coordinator.snapshot()
+        let current = try await coordinator.registryBindingDurableSnapshot()
         guard SurfAceRegistrationSurface.snapshot(current) == expectedSurfaces else {
             throw SurfAceRegistrationError.topologyChanged
         }
         if let binding = current.registryBinding {
+            if let pendingRegistryBinding, pendingRegistryBinding != binding {
+                throw SurfAceRegistrationError.foreignRegistryIdentity
+            }
             guard binding.matches(identity, clientId: clientId) else {
                 throw SurfAceRegistrationError.foreignRegistryIdentity
             }
+            pendingRegistryBinding = nil
             return
+        }
+        if let pendingRegistryBinding,
+           !pendingRegistryBinding.matches(identity, clientId: clientId) {
+            throw SurfAceRegistrationError.foreignRegistryIdentity
         }
         let claims = SurfAceProvisionedRegistryBinding.confirmedClaims(current)
         let binding: SurfAceRegistryBinding
@@ -407,13 +416,28 @@ actor SurfAceLocklessRuntimeAdapter {
             }
             binding = provisioned.binding
         }
-        _ = try await coordinator.transact(trigger: "registry_identity_binding") { state in
-            guard SurfAceRegistrationSurface.snapshot(state) == expectedSurfaces,
-                  state.registryBinding == nil else {
-                throw SurfAceRegistrationError.topologyChanged
+        do {
+            _ = try await coordinator.transact(trigger: "registry_identity_binding") { state in
+                guard SurfAceRegistrationSurface.snapshot(state) == expectedSurfaces,
+                      state.registryBinding == nil else {
+                    throw SurfAceRegistrationError.topologyChanged
+                }
+                state.registryBinding = binding
+                return state
             }
-            state.registryBinding = binding
-            return state
+            pendingRegistryBinding = nil
+        } catch {
+            if case SurfAceRegistrationError.topologyChanged = error { throw error }
+            if let restored = try? await coordinator.registryBindingDurableSnapshot(),
+               let durableBinding = restored.registryBinding {
+                pendingRegistryBinding = nil
+                guard durableBinding == binding else {
+                    throw SurfAceRegistrationError.foreignRegistryIdentity
+                }
+                return
+            }
+            pendingRegistryBinding = binding
+            throw error
         }
     }
 

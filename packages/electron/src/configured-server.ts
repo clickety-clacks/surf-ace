@@ -1,5 +1,5 @@
 import { createHash, createPublicKey } from "node:crypto";
-import { PublicControllerWireClient } from "../../controller/src/wire.js";
+import { PublicControllerWireClient, parseRegistryIdentity } from "../../controller/src/wire.js";
 import { matchesProvisionedClaims, type ProvisionedRegistryBinding } from "./registry-binding.js";
 import type { SurfaceCore } from "./surface-core.js";
 
@@ -62,6 +62,15 @@ export class ConfiguredServerRegistration {
         })),
       });
       if (!response.ok) throw new Error(response.error?.message ?? "registration_failed");
+      if (response.type !== "response" || response.v !== 1 || response.op !== "client.register") {
+        throw new Error("invalid_registration_response");
+      }
+      const responseIdentity = parseRegistryIdentity(response.payload);
+      const binding = this.core.registryBinding();
+      if (!binding || binding.clientId !== this.clientId ||
+          binding.allocatorId !== responseIdentity.allocatorId || binding.fleetId !== responseIdentity.fleetId) {
+        throw new Error("foreign_registry_identity");
+      }
       const payload = response.payload as { clientId: string; surfaces: Array<{
         surfaceId: string; windowLabel: string;
         panes: Array<{ paneId: string; paneLineageId: string; paneLabel: number }>;
@@ -91,6 +100,9 @@ export class ConfiguredServerRegistration {
     if (binding) {
       if (binding.clientId !== this.clientId || binding.allocatorId !== identity.allocatorId ||
           binding.fleetId !== identity.fleetId) throw new Error("foreign_registry_identity");
+      // Reconfirm durability on every mutation attempt. An ambiguous prior write
+      // may leave the exact candidate in memory while local persistence is fenced.
+      await this.persist();
       return;
     }
     const claims = this.core.confirmedRegistryClaims();
