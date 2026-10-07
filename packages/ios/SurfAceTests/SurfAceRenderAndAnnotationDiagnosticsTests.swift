@@ -1067,7 +1067,8 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
     func testConfiguredSourceCommitsFrameWithoutDirectControllerDelivery() async throws {
         let runtime = SurfAceRuntime(
             userDefaults: isolatedUserDefaults(), locklessStateURL: try locklessStateURL(),
-            configuredRegistryURL: try XCTUnwrap(URL(string: "ws://127.0.0.1:29999"))
+            configuredRegistryURL: try XCTUnwrap(URL(string: "ws://127.0.0.1:29999")),
+            annotationClientId: "client-ios-fixture"
         )
         addTeardownBlock { await runtime.stop() }
         await runtime.start()
@@ -1075,6 +1076,9 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         let surface = try XCTUnwrap(registered)
         let pane = try XCTUnwrap(surface.panes.first)
         let adapter = try runtime.locklessAuthorityForLocalMutation()
+        let configuredState = await adapter.snapshot()
+        XCTAssertNotNil(configuredState.annotationPublisher,
+                        "Configured publisher unavailable: \(runtime.endpointError ?? "no endpoint error")")
         let surfaceId = surface.surfaceId
         let paneId = pane.paneId
         _ = try await adapter.commitLocalMutation(operation: "test.annotation.content") { state, _ in

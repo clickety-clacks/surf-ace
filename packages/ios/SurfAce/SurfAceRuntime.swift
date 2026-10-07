@@ -354,6 +354,7 @@ final class SurfAceRuntime {
     @ObservationIgnored private let userDefaults: UserDefaults
     @ObservationIgnored private let locklessStateURLOverride: URL?
     @ObservationIgnored private let configuredRegistryURLOverride: URL?
+    @ObservationIgnored private let annotationClientIdOverride: String?
     @ObservationIgnored private let outboundSendPreparation: (@Sendable (
         String, SurfAceOutboundSender.Priority
     ) async -> Void)?
@@ -439,6 +440,7 @@ final class SurfAceRuntime {
         userDefaults: UserDefaults = .standard,
         locklessStateURL: URL? = nil,
         configuredRegistryURL: URL? = nil,
+        annotationClientId: String? = nil,
         outboundSendPreparation: (@Sendable (
             String, SurfAceOutboundSender.Priority
         ) async -> Void)? = nil,
@@ -447,6 +449,7 @@ final class SurfAceRuntime {
         self.userDefaults = userDefaults
         self.locklessStateURLOverride = locklessStateURL
         self.configuredRegistryURLOverride = configuredRegistryURL
+        self.annotationClientIdOverride = annotationClientId
         self.outboundSendPreparation = outboundSendPreparation
         self.locklessDeliveryWaitObserver = locklessDeliveryWaitObserver
         let fallbackName = "Surf Ace"
@@ -3692,7 +3695,7 @@ final class SurfAceRuntime {
         let configuredRegistry = configuredRegistryURL
         let annotationClientId = ["ws", "wss"].contains(configuredRegistry?.scheme?.lowercased() ?? "")
             && configuredRegistry?.host != nil
-            ? identity?.clientId : nil
+            ? (annotationClientIdOverride ?? identity?.clientId) : nil
         let adapter = try SurfAceLocklessRuntimeAdapter(store: store, annotationClientId: annotationClientId)
         locklessAdapter = adapter
         return adapter
