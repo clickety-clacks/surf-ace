@@ -1637,6 +1637,28 @@ test("Tightbeam launcher reports bounded shutdown location without exposing erro
   assert.doesNotMatch(JSON.stringify(diagnostic), /secret/);
 });
 
+test("Tightbeam startup retains only an allowlisted cause code", async (t) => {
+  const root = await temporary(t);
+  const modulePath = path.join(root, "central-server.cjs");
+  await fs.writeFile(modulePath, `
+    module.exports = { startCentralServer: async () => {
+      const error = new TypeError("postgresql://user:secret@host/database");
+      error.code = "ERR_INVALID_URL";
+      throw error;
+    } };
+  `);
+  await assert.rejects(
+    tightbeamServerLauncher.startForeground(validTightbeamServerConfig(), { serverModulePath: modulePath }),
+    (error) => {
+      assert.equal(error.publicCode, "server_start_failed");
+      const diagnostic = tightbeamServerLauncher.startupCauseDiagnostic(error.cause);
+      assert.deepEqual(diagnostic, { name: "TypeError", causeCode: "ERR_INVALID_URL" });
+      assert.doesNotMatch(JSON.stringify(diagnostic), /secret|postgresql/);
+      return true;
+    },
+  );
+});
+
 test("Tightbeam foreground lifecycle holds and releases its server on SIGTERM without logging custody URLs", async (t) => {
   const root = await temporary(t);
   const modulePath = path.join(root, "central-server.cjs");
