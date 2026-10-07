@@ -3024,7 +3024,7 @@ test("v0.2.7 standalone specification and release gates bind the product and all
   for (const packageName of ["iproute2", "libpq-dev", "postgresql-16", "postgresql-client-16", "util-linux", "tar", "unzip", "x11-utils", "xauth", "xvfb"]) {
     assert.ok(linuxSmokeHostDependencies.includes(packageName), `missing Linux smoke host package ${packageName}`);
   }
-  assert.match(linuxSmokeHostDependencies, /for tool in ip unshare runuser xvfb-run Xvfb xauth xdpyinfo pg_config tar unzip; do/);
+  assert.match(linuxSmokeHostDependencies, /for tool in ip unshare runuser xvfb-run Xvfb xauth xdpyinfo pg_config tar unzip timeout; do/);
   assert.match(linuxSmokeHostDependencies, /command -v "\$\{tool\}"/);
   assert.match(linuxSmokeHostDependencies, /for tool in initdb postgres pg_ctl psql pg_basebackup pg_dump pg_restore; do/);
   assert.match(linuxSmokeHostDependencies, /linux_smoke_required_postgres_tool_missing/);
@@ -3036,7 +3036,8 @@ test("v0.2.7 standalone specification and release gates bind the product and all
   const linuxSmoke = workflowRunScript(workflow, "Run PostgreSQL-backed server, packaged CLI, and Linux client acceptance");
   assert.match(linuxSmoke, /smoke_tmp="\$\(mktemp -d \/tmp\/sa\.XXXXXX\)"/);
   assert.match(linuxSmoke, /trap 'rm -rf "\$smoke_tmp"' EXIT/);
-  assert.match(linuxSmoke, /sudo -n unshare --net -- bash -c/);
+  assert.match(linuxSmoke, /timeout --signal=TERM --kill-after=10s 20m sudo -n unshare --net -- bash -c/);
+  assert.match(linuxSmoke, /linux_smoke_packaged_acceptance_timeout_20m/);
   assert.match(linuxSmoke, /ip route add 224\.0\.0\.0\/4 dev veth0/);
   assert.match(linuxSmoke, /test -z "\$\(ip route show default\)"/);
   assert.match(linuxSmoke, /exec runuser -u "\$smoke_user" -- env/);
