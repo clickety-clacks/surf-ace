@@ -150,6 +150,9 @@ export class PublicControllerWireClient {
   async readRegistryIdentity(): Promise<RegistryIdentity> {
     await this.connect();
     const response = await this.request("fleet.topology");
+    if (response.type !== "response" || response.v !== 1 || response.op !== "fleet.topology") {
+      throw new Error("registry_identity_response_mismatch");
+    }
     if (response.ok !== true) {
       throw new Error(`registry_identity_unavailable:${response.error?.code ?? "unknown"}`);
     }

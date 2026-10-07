@@ -7,7 +7,7 @@ import { WebSocketServer } from "ws";
 
 import { PublicControllerWireClient, type RegistryIdentity } from "./wire.js";
 
-async function registryFixture(registryIdentity: unknown) {
+async function registryFixture(registryIdentity: unknown, responseOp?: string) {
   const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
   await once(server, "listening");
   const operations: string[] = [];
@@ -18,7 +18,7 @@ async function registryFixture(registryIdentity: unknown) {
       socket.send(JSON.stringify({
         id: request.id,
         ok: true,
-        op: request.op,
+        op: responseOp ?? request.op,
         payload: { clients: [], registrationReady: true, registryIdentity },
         type: "response",
         v: 1,
@@ -60,6 +60,21 @@ test("registry identity preflight rejects missing durable identity", async () =>
   const wire = new PublicControllerWireClient(registry.address, 500);
   try {
     await assert.rejects(wire.readRegistryIdentity(), /registry_identity_missing_or_invalid/);
+    assert.deepEqual(registry.operations, ["fleet.topology"]);
+  } finally {
+    await wire.close();
+    await registry.close();
+  }
+});
+
+test("registry identity preflight rejects a mismatched response operation", async () => {
+  const registry = await registryFixture(
+    { allocatorId: "alloc_fixture_a", fleetId: "fleet-a" },
+    "client.register",
+  );
+  const wire = new PublicControllerWireClient(registry.address, 500);
+  try {
+    await assert.rejects(wire.readRegistryIdentity(), /registry_identity_response_mismatch/);
     assert.deepEqual(registry.operations, ["fleet.topology"]);
   } finally {
     await wire.close();
