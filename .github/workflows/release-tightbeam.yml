@@ -128,18 +128,20 @@ jobs:
             --output-dir "${GITHUB_WORKSPACE}/qualification-packages" \
             --version 0.2.6 \
             --target x86_64-unknown-linux-gnu \
-            > qualification-build.json
-          node -e 'const x=require("./qualification-build.json"); if(x.qualificationOnly!==true||x.releaseAdmitted!==false||x.sourceCommit!=="7862bd3a06515b6e60bc4ccd74c5790259ab7f91")process.exit(1)'
+            > qualification-build.log
+          node -e 'const fs=require("node:fs"); const s=fs.readFileSync("qualification-build.log","utf8"); const x=JSON.parse(s.slice(s.lastIndexOf("\n{\n")+1)); if(x.qualificationOnly!==true||x.releaseAdmitted!==false||x.sourceCommit!=="7862bd3a06515b6e60bc4ccd74c5790259ab7f91")process.exit(1); fs.writeFileSync("qualification-build.json",JSON.stringify(x)+"\n")'
           sha256sum qualification-packages/* > qualification-sha256.txt
       - name: Retain exact candidate packages and build identity
+        if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: pr61-offline-qualification-packages
           path: |
             qualification-packages/
+            qualification-build.log
             qualification-build.json
             qualification-sha256.txt
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 30
 
   qualify-pr61-smoke:
@@ -236,7 +238,7 @@ jobs:
           ' bash "$smoke_user" "$smoke_tmp" "$smoke_node" "$PATH" \
             "$SURF_ACE_TIGHTBEAM_STATE_DRIVER" 7862bd3a06515b6e60bc4ccd74c5790259ab7f91 \
             "$GITHUB_SHA" "$GITHUB_WORKSPACE" \
-            > qualification-smoke.json 2> qualification-smoke-stderr.log || {
+            > qualification-smoke.log 2> qualification-smoke-stderr.log || {
               smoke_status=$?
               cat qualification-smoke-stderr.log >&2
               mkdir -p qualification-smoke-failure
@@ -245,7 +247,7 @@ jobs:
                 -exec cp {} qualification-smoke-failure/ \;
               exit "$smoke_status"
             }
-          node -e 'const x=require("./qualification-smoke.json"); if(x.status!=="passed"||x.qualificationOnly!==true||x.releaseAdmitted!==false||x.sourceCommit!=="7862bd3a06515b6e60bc4ccd74c5790259ab7f91"||x.transitions?.state?.offlineLocal?.pendingLabelsObserved!==true)process.exit(1)'
+          node -e 'const fs=require("node:fs"); const s=fs.readFileSync("qualification-smoke.log","utf8"); const x=JSON.parse(s.slice(s.lastIndexOf("\n{\n")+1)); if(x.status!=="passed"||x.qualificationOnly!==true||x.releaseAdmitted!==false||x.sourceCommit!=="7862bd3a06515b6e60bc4ccd74c5790259ab7f91"||x.transitions?.state?.offlineLocal?.pendingLabelsObserved!==true)process.exit(1); fs.writeFileSync("qualification-smoke.json",JSON.stringify(x)+"\n")'
           sha256sum -c qualification-sha256.txt
       - name: Retain smoke result and failure diagnostics
         if: always()
@@ -253,6 +255,7 @@ jobs:
         with:
           name: pr61-offline-qualification-smoke
           path: |
+            qualification-smoke.log
             qualification-smoke.json
             qualification-smoke-stderr.log
             qualification-sha256.txt
