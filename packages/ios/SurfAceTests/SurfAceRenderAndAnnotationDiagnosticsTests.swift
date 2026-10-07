@@ -1064,6 +1064,80 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         XCTAssertEqual(foreground.state.liveSurfaces[surface.surfaceId]?.surfaceId, surface.surfaceId)
     }
 
+    func testConfiguredSourceCommitsFrameWithoutDirectControllerDelivery() async throws {
+        let previous = ProcessInfo.processInfo.environment["SURF_ACE_SERVER"]
+        setenv("SURF_ACE_SERVER", "ws://127.0.0.1:29999", 1)
+        defer {
+            if let previous { setenv("SURF_ACE_SERVER", previous, 1) }
+            else { unsetenv("SURF_ACE_SERVER") }
+        }
+        let runtime = SurfAceRuntime(userDefaults: isolatedUserDefaults(), locklessStateURL: try locklessStateURL())
+        addTeardownBlock { await runtime.stop() }
+        await runtime.start()
+        let registered = await runtime.registerSurfaceForScene(sceneKey: "annotation-source-test")
+        let surface = try XCTUnwrap(registered)
+        let pane = try XCTUnwrap(surface.panes.first)
+        let adapter = try runtime.locklessAuthorityForLocalMutation()
+        let surfaceId = surface.surfaceId
+        let paneId = pane.paneId
+        _ = try await adapter.commitLocalMutation(operation: "test.annotation.content") { state, _ in
+            _ = try SurfAceLocklessContentOperations.set(state: &state, intent: .init(
+                content: .object(["html": .string("<p>Annotate</p>")]),
+                contentId: "content-source", contentType: "html", controllerProductName: "test",
+                friendlyChatName: "test", paneId: Int64(paneId), surfaceId: surfaceId))
+            return .object([:])
+        }
+        await runtime.restoreLocklessAuthority(reason: "annotation-source-content")
+        let bridge = RecordingPaneBridge()
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 100, height: 80)).pngData { _ in
+            UIColor.white.setFill()
+            UIRectFill(CGRect(x: 0, y: 0, width: 100, height: 80))
+        }.base64EncodedString()
+        bridge.annotationBackground = SurfAceSurfaceSnapshot(
+            viewport: SurfAceViewport(
+                scrollOffset: .init(x: 3, y: 7),
+                visibleRect: .init(x: 0, y: 0, width: 100, height: 80),
+                contentSize: .init(width: 100, height: 80), zoomLevel: 1
+            ), selection: nil, imageBase64: image
+        )
+        runtime.attachPaneBridge(surfaceId: surfaceId, paneId: paneId, bridge: bridge)
+        runtime.handleNewStrokes(surfaceId: surfaceId, paneId: paneId, strokes: [
+            SurfAceStroke(strokeId: "stroke-source", points: [
+                .init(x: 10, y: 20, pressure: 0.5, timestamp: 1_000),
+                .init(x: 12, y: 24, pressure: 0.7, timestamp: 1_010),
+            ], tool: "pencil"),
+        ], drawingData: annotationDrawingData(strokeCount: 1))
+        for _ in 0..<80 {
+            if (await adapter.snapshot()).annotationPublisher?
+                .openFrame(surfaceId: surfaceId, paneId: paneId)?.sourceStrokeCount == 1 { break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        let openedState = await adapter.snapshot()
+        let open = try XCTUnwrap(openedState.annotationPublisher?
+            .openFrame(surfaceId: surfaceId, paneId: paneId))
+        XCTAssertEqual(open.image, image)
+        XCTAssertEqual(open.scrollOffset.x, 3)
+        runtime.setAnnotationMode(surfaceId: surfaceId, paneId: paneId,
+                                  enabled: false, fingerDrawEnabled: false)
+        for _ in 0..<80 {
+            if (await adapter.snapshot()).annotationPublisher?.surfaces[surfaceId]?.fifo.count == 2 { break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        let finalState = await adapter.snapshot()
+        let publisher = try XCTUnwrap(finalState.annotationPublisher)
+        let entries = try XCTUnwrap(publisher.surfaces[surfaceId]?.fifo)
+        XCTAssertEqual(entries.map(\.kind), ["payload", "payload"])
+        let records = try entries.map { entry -> [String: Any] in
+            try XCTUnwrap(JSONSerialization.jsonObject(with: Data(entry.canonical.utf8)) as? [String: Any])
+        }
+        XCTAssertEqual(records.map { $0["kind"] as? String }, ["live_delta", "frame_commit"])
+        let commit = try XCTUnwrap(records.last?["payload"] as? [String: Any])
+        let closed = try XCTUnwrap(commit["frame"] as? [String: Any])
+        XCTAssertEqual(closed["image"] as? String, image)
+        XCTAssertEqual((closed["strokes"] as? [[String: Any]])?.count, 1)
+        XCTAssertNil(publisher.openFrame(surfaceId: surfaceId, paneId: paneId))
+    }
+
     func testLocklessZeroLiveSurfaceRestoresExactSurfaceAndPaneIdentity() async throws {
         let runtime = SurfAceRuntime(
             userDefaults: isolatedUserDefaults(),
@@ -1292,6 +1366,7 @@ private final class RecordingPaneBridge: SurfAcePaneBridging {
     var interactionStates: [(annotationMode: Bool, fingerDrawEnabled: Bool)] = []
     var contentScales: [CGFloat] = []
     var clearDrawingsCallCount = 0
+    var annotationBackground: SurfAceSurfaceSnapshot?
 
     func render(entry: SurfAcePaneEntry?, restoreViewport: SurfAceViewport?) {
         renderCallEntries.append(entry)
@@ -1326,6 +1401,10 @@ private final class RecordingPaneBridge: SurfAcePaneBridging {
 
     func fetchSnapshot() async -> SurfAceSurfaceSnapshot? {
         nil
+    }
+
+    func fetchAnnotationBackgroundSnapshot() async -> SurfAceSurfaceSnapshot? {
+        annotationBackground
     }
 
     func fetchSnapshotMetadata() async -> SurfAceSurfaceSnapshot? {
