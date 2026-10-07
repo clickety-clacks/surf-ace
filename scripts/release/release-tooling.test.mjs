@@ -679,7 +679,7 @@ test("Electron smoke checks the running app version before any CLI request", asy
     },
     stateRoot: path.join(root, "cli-state"),
     waitForEndpoint: async () => undefined,
-  }), /tightbeam_client_app_version_mismatch:0\.1\.0:0\.2\.6/);
+  }), /tightbeam_client_app_version_mismatch:0\.1\.0:0\.2\.7/);
   assert.equal(cliCalls, 0);
 });
 
@@ -2950,16 +2950,16 @@ test("v0.2.7 standalone specification and release gates bind the product and all
   assert.match(specification, /Proposed product source: tag/);
   assert.match(specification, /1221ffb7c2c78607f6496d7c89046805f7f78c67/);
   assert.match(specification, /No old-version participant/);
-  assert.match(specification, /surf-ace-release-tooling-v0\.2\.6/);
-  assert.match(specification, /surf-ace-v0\.2\.6/);
+  assert.match(specification, /surf-ace-release-tooling-v0\.2\.7/);
+  assert.match(specification, /surf-ace-v0\.2\.7/);
   assert.match(specification, /copied byte-for-byte from the pinned tooling checkout/);
   for (const name of TIGHTBEAM_PUBLIC_FILES) assert.ok(specification.includes(name));
   assert.match(specification, /custom-format backup/);
   assert.match(specification, /restores only into a\s+separate staged cluster/);
   assert.match(specification, /packaged CLI connects\s+directly to the selected client's/);
   assert.match(specification, /Publication is separately opt-in/);
-  assert.match(readme, /surf-ace-skill-v0\.2\.6\.md/);
-  assert.match(readme, /The v0\.2\.6 release contains six versioned assets/);
+  assert.match(readme, /surf-ace-skill-v0\.2\.7\.md/);
+  assert.match(readme, /The v0\.2\.7 release contains six versioned assets/);
   assert.match(readme, /register\s+the verified Markdown file/);
   assert.match(readme, /sha256sum -c SHA256SUMS/);
   assert.match(readme, /bare `surf-ace` command/);
@@ -2970,7 +2970,7 @@ test("v0.2.7 standalone specification and release gates bind the product and all
   assert.match(readme, /do not use `surf-ace --version`/);
   assert.match(readme, /server archive\s+includes `docs\/OPERATIONS\.md`/);
   assert.match(readme, /## Install and run/);
-  assert.match(skill, /surf-ace-skill-v0\.2\.6\.md/);
+  assert.match(skill, /surf-ace-skill-v0\.2\.7\.md/);
   assert.match(skill, /register the verified Markdown content/);
   assert.doesNotMatch(`${readme}\n${skill}`, /\b(?:Racter|Plumbus|Shrdlu|Gibson|Eezo)\b|\/Users\/mike\/|\b100\.64\.\d{1,3}\.\d{1,3}\b/i);
   assert.match(workflow, /^on:\n  workflow_dispatch:/m);
@@ -2979,8 +2979,8 @@ test("v0.2.7 standalone specification and release gates bind the product and all
   assert.match(workflow, /run_smoke:[\s\S]*?default: false/);
   assert.match(workflow, /publish_release:[\s\S]*?default: false/);
   assert.match(workflow, /PRODUCT_COMMIT: 1221ffb7c2c78607f6496d7c89046805f7f78c67/);
-  assert.match(workflow, /PRODUCT_TAG: surf-ace-v0\.2\.6-r1/);
-  assert.match(workflow, /TOOLING_TAG: surf-ace-release-tooling-v0\.2\.6-r1/);
+  assert.match(workflow, /PRODUCT_TAG: surf-ace-v0\.2\.7-r1/);
+  assert.match(workflow, /TOOLING_TAG: surf-ace-release-tooling-v0\.2\.7-r1/);
   assert.match(workflow, /GITHUB_EVENT_NAME/);
   assert.match(workflow, /GITHUB_REF_TYPE/);
   assert.match(workflow, /node tooling\/scripts\/release\/build-tightbeam-release\.mjs/);
@@ -3050,7 +3050,7 @@ test("v0.2.7 standalone specification and release gates bind the product and all
   const assembleStart = workflow.indexOf("  assemble:\n", compareStart);
   const compareJob = workflow.slice(compareStart, assembleStart);
   for (const name of TIGHTBEAM.assets) assert.ok(compareJob.includes(name));
-  assert.match(compareJob, /surf-ace-skill-v0\.2\.6\.md/);
+  assert.match(compareJob, /surf-ace-skill-v0\.2\.7\.md/);
   assert.match(workflow, /needs: \[assemble, smoke-linux, smoke-macos\]/);
   for (const command of [
     "cargo build --manifest-path source/packages/cli/Cargo.toml",
