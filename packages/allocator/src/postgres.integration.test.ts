@@ -1323,6 +1323,68 @@ test("iOS at-open source records ingest and replay to independent PostgreSQL con
   }
 });
 
+test("annotation offline consumer replays beyond the former client queue capacity", { timeout: 180_000 }, async () => {
+  const cluster = await startCluster();
+  const count = 257;
+  try {
+    const recovery = await PostgresCustodyAdapter.initializeAbsentFleet(cluster.config, "alloc_annotation-offline");
+    await recovery.release();
+    await adminQuery(cluster.adminUrl,
+      await readFile(new URL("../sql/003_annotation_journal.sql", import.meta.url), "utf8"));
+    const writer = await PostgresCustodyAdapter.acquireWriter(cluster.config);
+    try {
+      const initial = await writer.openAnnotationConsumer("offline-queue", "watch");
+      assert.deepEqual(initial.initialFromCursor.sequence, "1");
+      const journal = new AnnotationJournal(writer);
+      for (let sequence = 1; sequence <= count; sequence++) {
+        await journal.ingest({
+          protocolVersion: 1, clientId: "client-offline", sourceEpoch: "d".repeat(32),
+          surfaceId: "sf_offline", paneId: 1, frameId: "fr_offline",
+          sourceSequence: String(sequence), sourceEventId: `event-offline-${sequence}`,
+          kind: "live_delta", contentId: "content-offline", revision: 1, contentType: "html",
+          viewport: { scrollOffset: { x: 0, y: 0 }, visibleRect: { x: 0, y: 0, width: 10, height: 10 },
+            contentSize: { width: 10, height: 10 }, zoomLevel: 1 },
+          sourceTimestamp: "2026-10-06T21:00:00Z",
+          payload: { strokes: [{ strokeId: `stroke-${sequence}` }] },
+        });
+      }
+      assert.equal((await writer.annotationInfo()).journalRecords, count);
+    } finally {
+      await writer.release();
+    }
+    const server = await AllocatorServer.start(serverConfig(cluster));
+    const consumer = await WireClient.connect(server.address.url);
+    try {
+      assert.equal((await consumer.request("annotation.hello", { protocolVersion: 1, role: "consumer" })).ok, true);
+      const opened = await consumer.request("annotation.resume", { consumerId: "offline-queue" });
+      assert.equal(opened.ok, true);
+      assert.equal((opened.payload as { historyCompleteSinceStart: boolean }).historyCompleteSinceStart, true);
+      const leaseId = (opened.payload as { leaseId: string }).leaseId;
+      for (let sequence = 1; sequence <= count; sequence++) {
+        const event = await consumer.waitEvent("annotation.record");
+        const payload = event.payload as {
+          serverCursor: { epoch: string; sequence: string };
+          record: { sourceSequence: string; sourceEventId: string };
+        };
+        assert.equal(payload.serverCursor.sequence, String(sequence));
+        assert.equal(payload.record.sourceSequence, String(sequence));
+        assert.equal(payload.record.sourceEventId, `event-offline-${sequence}`);
+        if (sequence % 16 === 0 || sequence === count) {
+          const ack = await consumer.request("annotation.ack", {
+            consumerId: "offline-queue", leaseId, throughCursor: payload.serverCursor,
+          });
+          assert.equal(ack.ok, true);
+        }
+      }
+    } finally {
+      await consumer.close();
+      await server.close();
+    }
+  } finally {
+    await cluster.stop();
+  }
+});
+
 test("annotation compaction protects absent and unread consumers, then retains source dedup receipts", { timeout: 180_000 }, async () => {
   const cluster = await startCluster();
   try {
