@@ -33,7 +33,7 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         _ = try await receive(socket, matchingId: "stage-discovery")
         let pairResponse = try await pair(socket, id: "stage-pair", controllerId: "stage-controller",
                                           surfaceId: surface.surfaceId)
-        XCTAssertEqual(pairResponse["ok"] as? Bool, true)
+        XCTAssertEqual(pairResponse["ok"] as? Bool, true, "pair response: \(pairResponse)")
         try await send(socket, op: "content.set", id: "stage-content", payload: [
             "content": ["html": "<main>same annotation context</main>"],
             "contentId": "stage-content-id", "contentType": "html", "friendlyChatName": "Stage Test",
@@ -173,7 +173,7 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
             controllerId: "annotation-controller",
             surfaceId: surface.surfaceId
         )
-        XCTAssertEqual(pairResponse["ok"] as? Bool, true)
+        XCTAssertEqual(pairResponse["ok"] as? Bool, true, "pair response: \(pairResponse)")
         try await send(socket, op: "content.set", id: "annotation-content", payload: [
             "content": ["html": "<main>same annotation context</main>"],
             "contentId": "annotation-content-id",
