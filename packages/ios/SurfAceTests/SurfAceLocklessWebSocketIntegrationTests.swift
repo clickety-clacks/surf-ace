@@ -124,6 +124,11 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         }
         XCTAssertEqual(commits?.count, 1)
         XCTAssertEqual(commits?.first?["frameId"] as? String, frameId)
+        let committedFrame = (commits?.first?["payload"] as? [String: Any])?["frame"] as? [String: Any]
+        let committedStrokeIds = (committedFrame?["strokes"] as? [[String: Any]])?.compactMap {
+            $0["strokeId"] as? String
+        }
+        XCTAssertEqual(committedStrokeIds, ["after-stage-reentry"])
         socket.cancel(with: .normalClosure, reason: nil)
     }
 
