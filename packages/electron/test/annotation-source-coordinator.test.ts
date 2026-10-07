@@ -154,7 +154,9 @@ test("Done recovery keeps one source frame across pre-direct and post-direct cra
     await resumed.resumePending();
     const entries = recovered.annotationPublisher!.surfaces[surface.surfaceId]!.fifo;
     assert.deepEqual(entries.map((entry) => JSON.parse(entry.canonical).kind),
-      ["live_delta", "frame_commit"]);
+      ["live_delta", "frame_commit"], JSON.stringify({ crashAfterDirect, directCalls,
+        pending: restored.hasPendingAnnotationCommit(surface.surfaceId, paneId),
+        frame: recovered.annotationPublisher!.surfaces[surface.surfaceId]!.openFrames?.[String(paneId)] }));
     assert.equal(JSON.parse(entries[1]!.canonical).frameId, opened.frameId);
     assert.equal(recovered.annotationPublisher!.surfaces[surface.surfaceId]!.openFrames?.[String(paneId)], undefined);
     assert.equal(directCalls, crashAfterDirect ? 0 : 1);
