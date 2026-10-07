@@ -4777,6 +4777,10 @@ final class SurfAceRuntime {
             let directEvent = await stageAnnotationDirectCommit(
                 surfaceId: surfaceId, paneId: paneId, payload: payload
             )
+            // Staging can suspend while a same-context re-entry is requested.
+            // Leave the staged intent for the mode mutation to cancel before
+            // the explicit direct commit has entered the send path.
+            guard !annotationReentryRequested.contains(key) else { return }
             let eventPayload = directEvent.flatMap(Self.annotationDirectPayload) ?? payload
             let delivered = await sendEventAsync(
                 surfaceId: surfaceId, op: "event.annotation_committed", payload: eventPayload,
@@ -4923,6 +4927,9 @@ final class SurfAceRuntime {
                     guard let stagedCommit = await stageAnnotationDirectCommit(
                         surfaceId: surfaceId, paneId: paneId, payload: payload
                     ), let eventPayload = Self.annotationDirectPayload(stagedCommit) else { continue }
+                    guard !annotationReentryRequested.contains("\(surfaceId):\(paneId)") else {
+                        continue
+                    }
                     let sent = await sendEventAsync(
                         surfaceId: surfaceId, op: "event.annotation_committed", payload: eventPayload,
                         sentAt: stagedCommit.sentAt, eventId: stagedCommit.eventId
