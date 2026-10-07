@@ -357,6 +357,7 @@ final class SurfAceRuntime {
         String, SurfAceOutboundSender.Priority
     ) async -> Void)?
     @ObservationIgnored private let locklessDeliveryWaitObserver: (@Sendable () -> Void)?
+    @ObservationIgnored private let foregroundCompletion: (@MainActor () -> Void)?
     @ObservationIgnored private var identity: SurfAceIdentity?
     @ObservationIgnored private var centralRegistration: SurfAceCentralRegistration?
     @ObservationIgnored private var centralConnectionError: String?
@@ -387,7 +388,9 @@ final class SurfAceRuntime {
     }
     @ObservationIgnored private var isStarted = false
     @ObservationIgnored private var isStarting = false
+    @ObservationIgnored private var isolatedTestHostAtStart = false
     private var isIsolatedTestHost: Bool {
+        if isolatedTestHostAtStart { return true }
         let environment = ProcessInfo.processInfo.environment
         return environment["SURF_ACE_XCTEST_HOST_NO_AUTOSTART"] == "1"
             || environment["XCTestConfigurationFilePath"] != nil
@@ -441,6 +444,7 @@ final class SurfAceRuntime {
         userDefaults: UserDefaults = .standard,
         locklessStateURL: URL? = nil,
         bonjourPublisher: SurfAceBonjourPublisher = SurfAceBonjourPublisher(),
+        foregroundCompletion: (@MainActor () -> Void)? = nil,
         outboundSendPreparation: (@Sendable (
             String, SurfAceOutboundSender.Priority
         ) async -> Void)? = nil,
@@ -449,6 +453,7 @@ final class SurfAceRuntime {
         self.userDefaults = userDefaults
         self.locklessStateURLOverride = locklessStateURL
         self.bonjourPublisher = bonjourPublisher
+        self.foregroundCompletion = foregroundCompletion
         self.outboundSendPreparation = outboundSendPreparation
         self.locklessDeliveryWaitObserver = locklessDeliveryWaitObserver
         let fallbackName = "Surf Ace"
@@ -485,13 +490,14 @@ final class SurfAceRuntime {
         guard !isStarted, !isStarting else { return }
         isStarting = true
         defer { isStarting = false }
+        let isolatedTestHost = isIsolatedTestHost
+        isolatedTestHostAtStart = isolatedTestHost
         await restoreLocklessAuthority(reason: "process_start")
         isSceneAuthorityReady = true
         observeLifecycle()
         surfAceLifecycleLog(
             "event=app_launch \(surfAceDiagnosticFields([("fingerprint", fingerprint), ("screen_name", screenName)]))"
         )
-        let isolatedTestHost = isIsolatedTestHost
         surfAceServerRuntimeLog(
             "event=server_start_request \(surfAceDiagnosticFields([("fixed_port", fixedServerPort), ("health_path", healthPath), ("ws_path", webSocketPath), ("isolated_test_host", isolatedTestHost)]))"
         )
@@ -1778,6 +1784,7 @@ final class SurfAceRuntime {
             await restoreLocklessAuthority(reason: "foreground")
         }
         publishBonjour()
+        foregroundCompletion?()
     }
 
     private func handleHTTP(request: HTTPServerRequest) async -> HTTPServerResponse {

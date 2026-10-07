@@ -444,6 +444,7 @@ actor SurfAceHTTPServer {
             port: endpointPort,
             bindAddress: bindAddress,
             expectedPort: port,
+            allowEndpointReuse: !isolatedTestHost,
             webSocketPath: webSocketPath,
             httpHandler: httpHandler,
             webSocketHandler: webSocketHandler
@@ -464,6 +465,7 @@ actor SurfAceHTTPServer {
             port: .any,
             bindAddress: bindAddress,
             expectedPort: nil,
+            allowEndpointReuse: false,
             webSocketPath: webSocketPath,
             httpHandler: httpHandler,
             webSocketHandler: webSocketHandler
@@ -474,12 +476,14 @@ actor SurfAceHTTPServer {
         port: NWEndpoint.Port,
         bindAddress: IPv4Address,
         expectedPort: UInt16?,
+        allowEndpointReuse: Bool,
         webSocketPath: String,
         httpHandler: @escaping HTTPHandler,
         webSocketHandler: @escaping WebSocketHandler
     ) async throws -> UInt16 {
+        surfAceServerLog("listener bind requestedPort=\(expectedPort ?? 0) bindAddress=\(bindAddress) allowEndpointReuse=\(allowEndpointReuse)")
         let parameters = NWParameters.tcp
-        parameters.allowLocalEndpointReuse = true
+        parameters.allowLocalEndpointReuse = allowEndpointReuse
         parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(bindAddress), port: port)
         let listener = try NWListener(using: parameters)
         self.listener = listener

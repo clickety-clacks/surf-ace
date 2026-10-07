@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 import XCTest
 @testable import SurfAce
 
@@ -212,6 +213,8 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         let stateURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("\(suiteName).json")
         var createdServices = 0
+        var observeForegroundCompletion = false
+        let foregroundHandled = expectation(description: "isolated foreground notification handled")
         let publisher = SurfAceBonjourPublisher(
             serviceFactory: { _, port in
                 createdServices += 1
@@ -222,7 +225,10 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         let runtime = SurfAceRuntime(
             userDefaults: defaults,
             locklessStateURL: stateURL,
-            bonjourPublisher: publisher
+            bonjourPublisher: publisher,
+            foregroundCompletion: {
+                if observeForegroundCompletion { foregroundHandled.fulfill() }
+            }
         )
         addTeardownBlock {
             defaults.removePersistentDomain(forName: suiteName)
@@ -232,7 +238,9 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
 
         await runtime.start()
         XCTAssertGreaterThan(runtime.serverPort, 0)
-        await runtime.handleWillEnterForeground()
+        observeForegroundCompletion = true
+        NotificationCenter.default.post(name: UIApplication.willEnterForegroundNotification, object: nil)
+        await fulfillment(of: [foregroundHandled], timeout: 2)
         XCTAssertEqual(createdServices, 0)
     }
 
