@@ -12,6 +12,7 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         let stateURL = FileManager.default.temporaryDirectory.appendingPathComponent("\(suiteName).json")
         let stageGate = SurfAceAnnotationCommitStageGate()
         addTeardownBlock {
+            await stageGate.release()
             defaults.removePersistentDomain(forName: suiteName)
             try? FileManager.default.removeItem(at: stateURL)
         }
@@ -62,7 +63,9 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         XCTAssertTrue(pane.annotationMode)
         runtime.setAnnotationMode(surfaceId: sourceSurfaceId, paneId: sourcePaneId,
                                   enabled: false, fingerDrawEnabled: false)
-        await stageGate.waitUntilHeld()
+        let stageHeld = expectation(description: "direct commit staged and suspended")
+        Task { await stageGate.waitUntilHeld(); stageHeld.fulfill() }
+        await fulfillment(of: [stageHeld], timeout: 5)
         let staged = await adapter.snapshot().annotationPublisher?
             .openFrame(surfaceId: sourceSurfaceId, paneId: sourcePaneId)
         XCTAssertEqual(staged?.frameId, frameId)
