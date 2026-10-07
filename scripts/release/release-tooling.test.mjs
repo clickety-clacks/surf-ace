@@ -25,6 +25,7 @@ import {
   writeChecksumReceipt,
 } from "./release-lib.mjs";
 import { compareReleaseBuilds } from "./compare-release-builds.mjs";
+import { waitForWebSocketOpen } from "./wait-for-websocket-open.mjs";
 import { cargoLockedPackages, lockedPackages, packagedProductionInventory, workspaceProductionInventory } from "./lockfile-inventory.mjs";
 import { verifySri } from "./verify-sri.mjs";
 import {
@@ -1286,7 +1287,7 @@ test("Linux fresh-install raw CLI evidence binds two isolated roots to their cli
 });
 
 test("Surf Ace v0.2.7 binds the landed resilience candidate, six hosted assets, and tooling identity", () => {
-  assert.equal(TIGHTBEAM_TOOLING_TAG, "surf-ace-release-tooling-v0.2.7-r5");
+  assert.equal(TIGHTBEAM_TOOLING_TAG, "surf-ace-release-tooling-v0.2.7-r6");
   assert.deepEqual(TIGHTBEAM, {
     candidateCommit: "e7da2559d7c7e680a22a986478dff7e97a5f771b",
     sourceTag: "surf-ace-v0.2.7-r2", version: "0.2.7", channel: "surf-ace", toolingTag: TIGHTBEAM_TOOLING_TAG,
@@ -2127,8 +2128,13 @@ test("Tightbeam Linux acceptance uses packaged behavior, not transient acknowled
   assert.doesNotMatch(shared, /acknowledgementEvidenceForReads/);
   assert.match(fixture, /raw-cli-evidence\.ndjson/);
   assert.match(fixture, /raw-cli-progress\.ndjson/);
+  assert.match(fixture, /annotation-journal-progress\.ndjson/);
   assert.match(fixture, /timeout: 120_000, killSignal: "SIGTERM"/);
   assert.ok(fixture.indexOf('phase: "started"') < fixture.indexOf('result = await command(binary, args, { timeout: 120_000'));
+  assert.ok(fixture.indexOf('stage("watch_subscription"') < fixture.indexOf('socket = new WebSocket(registryEndpoint'));
+  assert.match(fixture, /stage\("registry_websocket_open", \(\) => \{[\s\S]*?socket = new WebSocket\(registryEndpoint,[\s\S]*?return waitForWebSocketOpen\(socket, 10_000\)/);
+  assert.match(fixture, /stage\("ack", \(\) => command\(cliBinary,/);
+  assert.match(fixture, /stage\("retire", \(\) => command\(cliBinary,/);
   assert.match(fixture, /rawCliEvidenceSha256/);
   assert.match(fixture, /rawCliEvidenceBase64/);
   assert.match(fixture, /function summarizeFreshInstallPhase/);
@@ -2150,6 +2156,34 @@ test("Tightbeam Linux acceptance uses packaged behavior, not transient acknowled
   assert.match(fixture, /await verifyDisplayReady\(\)/);
   assert.doesNotMatch(fixture, /function semanticState\(/);
   assert.doesNotMatch(fixture, /runPhase\("(?:baseline|candidate|rollback)"/);
+});
+
+test("release smoke WebSocket open wait handles late observation and bounds a stuck handshake", async () => {
+  const alreadyOpen = new EventEmitter();
+  alreadyOpen.readyState = 1;
+  await waitForWebSocketOpen(alreadyOpen, 5);
+
+  const connecting = new EventEmitter();
+  connecting.readyState = 0;
+  connecting.terminate = () => { connecting.readyState = 3; };
+  const opened = waitForWebSocketOpen(connecting, 50);
+  connecting.readyState = 1;
+  connecting.emit("open");
+  await opened;
+
+  const stalled = new EventEmitter();
+  stalled.readyState = 0;
+  let terminated = false;
+  stalled.terminate = () => {
+    terminated = true;
+    stalled.readyState = 3;
+    process.nextTick(() => {
+      stalled.emit("error", new Error("WebSocket was closed before the connection was established"));
+      stalled.emit("close");
+    });
+  };
+  await assert.rejects(waitForWebSocketOpen(stalled, 5), /annotation_registry_websocket_open_timeout_10s/);
+  assert.equal(terminated, true);
 });
 
 function rawCliEvidenceFixture(endpoint = "ws://127.0.0.1:19001/ws", stateRoot = "/fixture/state/cli") {
@@ -3005,7 +3039,7 @@ test("v0.2.7 standalone specification and release gates bind the product and all
   assert.match(workflow, /publish_release:[\s\S]*?default: false/);
   assert.match(workflow, /PRODUCT_COMMIT: e7da2559d7c7e680a22a986478dff7e97a5f771b/);
   assert.match(workflow, /PRODUCT_TAG: surf-ace-v0\.2\.7-r2/);
-  assert.match(workflow, /TOOLING_TAG: surf-ace-release-tooling-v0\.2\.7-r5/);
+  assert.match(workflow, /TOOLING_TAG: surf-ace-release-tooling-v0\.2\.7-r6/);
   assert.match(workflow, /GITHUB_EVENT_NAME/);
   assert.match(workflow, /GITHUB_REF_TYPE/);
   assert.match(workflow, /node tooling\/scripts\/release\/build-tightbeam-release\.mjs/);
@@ -3044,6 +3078,7 @@ test("v0.2.7 standalone specification and release gates bind the product and all
   assert.match(linuxSmoke, /-name 'client-flight-recorder\.log'/);
   assert.match(linuxSmoke, /-name 'raw-cli-progress\.ndjson'/);
   assert.match(linuxSmoke, /-name 'raw-cli-evidence\.ndjson'/);
+  assert.match(linuxSmoke, /-name 'annotation-journal-progress\.ndjson'/);
   assert.match(linuxSmoke, /ip route add 224\.0\.0\.0\/4 dev veth0/);
   assert.match(linuxSmoke, /test -z "\$\(ip route show default\)"/);
   assert.match(linuxSmoke, /exec runuser -u "\$smoke_user" -- env/);

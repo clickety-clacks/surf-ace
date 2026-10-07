@@ -12,6 +12,7 @@ import { electronLaunchConfig, hasRequiredAllocatorBackupObjects, launchElectron
 import { TIGHTBEAM } from "./tightbeam-release-config.mjs";
 import tightbeamServerLauncher from "./tightbeam-server-launcher.cjs";
 import { waitForScreenshotPixels } from "./wait-for-screenshot-pixels.mjs";
+import { waitForWebSocketOpen } from "./wait-for-websocket-open.mjs";
 
 const { inspectScreenshotPixels } = createRequire(import.meta.url)("./png-pixel-evidence.cjs") as {
   inspectScreenshotPixels: (imageBase64: unknown, expectedColors: string[]) => {
@@ -478,6 +479,24 @@ async function packagedAnnotationJournalSmoke(
   const consumerId = `release-${randomUUID()}`;
   const cliArgs = ["--registry", registryEndpoint, "--state-root", stateRoot, "annotations"];
   const listeners: Array<ReturnType<typeof spawn>> = [];
+  const progressPath = path.join(path.dirname(stateRoot), "annotation-journal-progress.ndjson");
+  let stageSequence = 0;
+  const stage = async <T>(name: string, operation: () => Promise<T>): Promise<T> => {
+    const sequence = ++stageSequence;
+    const startedAt = Date.now();
+    await fs.appendFile(progressPath, `${JSON.stringify({ sequence, name, phase: "started", startedAt })}\n`);
+    try {
+      const result = await operation();
+      await fs.appendFile(progressPath, `${JSON.stringify({ sequence, name, phase: "exited", elapsedMs: Date.now() - startedAt })}\n`);
+      return result;
+    } catch (error) {
+      await fs.appendFile(progressPath, `${JSON.stringify({
+        sequence, name, phase: "failed", elapsedMs: Date.now() - startedAt,
+        errorName: error instanceof Error ? error.name : "unknown",
+      })}\n`);
+      throw error;
+    }
+  };
   const stream = (action: "watch" | "resume") => {
     const child = spawn(cliBinary, [...cliArgs, action, "--consumer-id", consumerId],
       { stdio: ["ignore", "pipe", "pipe"] });
@@ -509,16 +528,18 @@ async function packagedAnnotationJournalSmoke(
     };
     return { waitLines };
   };
-  const socket = new WebSocket(registryEndpoint);
+  let socket: any;
   try {
     const watch = stream("watch");
-    const subscription = (await watch.waitLines(1))[0];
+    const subscription = (await stage("watch_subscription", () => watch.waitLines(1)))[0];
     if (subscription?.type !== "annotation.subscription" || subscription.consumerId !== consumerId) {
       throw new Error("annotation_packaged_watch_subscription_invalid");
     }
-    await new Promise<void>((resolve, reject) => {
-      socket.once("open", resolve);
-      socket.once("error", reject);
+    // Open after the watch subscription; otherwise a fast local connection can emit
+    // "open" before the listener is installed and leave this smoke waiting forever.
+    await stage("registry_websocket_open", () => {
+      socket = new WebSocket(registryEndpoint, { handshakeTimeout: 10_000 });
+      return waitForWebSocketOpen(socket, 10_000);
     });
     const request = async (op: string, payload: unknown) => {
       const id = `annotation_release_${randomUUID()}`;
@@ -536,7 +557,7 @@ async function packagedAnnotationJournalSmoke(
         socket.send(JSON.stringify({ id, op, payload, sentAt: Date.now(), type: "request", v: 1 }));
       });
     };
-    const hello = await request("annotation.hello", { protocolVersion: 1, role: "publisher" });
+    const hello = await stage("hello", () => request("annotation.hello", { protocolVersion: 1, role: "publisher" }));
     if (!/^[0-9a-f]{32}$/.test(hello?.journalEpoch ?? "")) throw new Error("annotation_packaged_hello_invalid");
     const sourceEventId = `event-${randomUUID()}`;
     const record = {
@@ -547,32 +568,33 @@ async function packagedAnnotationJournalSmoke(
         contentSize: { width: 10, height: 10 }, zoomLevel: 1 },
       sourceTimestamp: new Date().toISOString(), payload: { strokes: [{ strokeId: `stroke-${randomUUID()}` }] },
     };
-    const accepted = await request("annotation.ingest", { record });
-    const delivered = (await watch.waitLines(2))[1];
+    const accepted = await stage("ingest", () => request("annotation.ingest", { record }));
+    const delivered = (await stage("watch_delivery", () => watch.waitLines(2)))[1];
     const cursor = delivered?.payload?.serverCursor;
     if (delivered?.op !== "annotation.record" ||
         delivered?.payload?.record?.sourceEventId !== sourceEventId ||
         typeof cursor !== "string" || !/^ann1:[0-9a-f]{32}:1$/.test(cursor)) {
       throw new Error("annotation_packaged_watch_delivery_invalid");
     }
-    const acknowledged = JSON.parse((await command(cliBinary,
-      [...cliArgs, "ack", "--consumer-id", consumerId, "--cursor", cursor])).stdout);
+    const acknowledged = JSON.parse((await stage("ack", () => command(cliBinary,
+      [...cliArgs, "ack", "--consumer-id", consumerId, "--cursor", cursor],
+      { timeout: 120_000, killSignal: "SIGTERM" }))).stdout);
     if (acknowledged?.ackCursor !== cursor) throw new Error("annotation_packaged_ack_invalid");
     const resumed = stream("resume");
-    const resumeSubscription = (await resumed.waitLines(1))[0];
+    const resumeSubscription = (await stage("resume_subscription", () => resumed.waitLines(1)))[0];
     if (resumeSubscription?.type !== "annotation.subscription" || resumeSubscription?.ackCursor !== cursor) {
       throw new Error("annotation_packaged_resume_invalid");
     }
-    const retired = JSON.parse((await command(cliBinary,
+    const retired = JSON.parse((await stage("retire", () => command(cliBinary,
       [...cliArgs, "retire", "--consumer-id", consumerId, "--expect-ack", cursor,
-        "--discard-unacknowledged"])).stdout);
+        "--discard-unacknowledged"], { timeout: 120_000, killSignal: "SIGTERM" }))).stdout);
     if (retired?.type !== "annotation.consumer_retired") throw new Error("annotation_packaged_retire_invalid");
     return { ackCursor: cursor, consumerId, journalEpoch: hello.journalEpoch,
       recordSourceEventId: sourceEventId, acceptedCursor: accepted?.serverCursor ?? null,
       status: "verified" };
   } finally {
-    if (socket.readyState === WebSocket.OPEN) socket.close();
-    else socket.terminate();
+    if (socket?.readyState === WebSocket.OPEN) socket.close();
+    else socket?.terminate();
     for (const child of listeners) child.kill();
   }
 }
