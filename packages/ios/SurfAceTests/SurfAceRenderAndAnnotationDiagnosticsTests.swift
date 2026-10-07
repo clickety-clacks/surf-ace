@@ -1261,7 +1261,8 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
             state.annotationPublisher = outbox
             return .object([:])
         }
-        XCTAssertNil((await adapter.snapshot()).annotationPublisher?
+        let interrupted = await adapter.snapshot()
+        XCTAssertNil(interrupted.annotationPublisher?
             .openFrame(surfaceId: surfaceId, paneId: paneId)?.pendingDirectFlush)
         await first.stop()
 
