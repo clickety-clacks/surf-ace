@@ -863,6 +863,10 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
     }
 
     private func socket(port: UInt16) -> URLSessionWebSocketTask {
+        guard port != SurfAceHTTPServer.fixedPort else {
+            XCTFail("XCTest runtime must use a private loopback port")
+            return URLSession.shared.webSocketTask(with: URL(string: "ws://127.0.0.1:0/ws")!)
+        }
         let task = URLSession.shared.webSocketTask(with: URL(string: "ws://127.0.0.1:\(port)/ws")!)
         task.maximumMessageSize = 12 * 1_024 * 1_024
         return task

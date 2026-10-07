@@ -369,10 +369,18 @@ actor SurfAceHTTPServer {
 
     func start(
         webSocketPath: String = "/ws",
+        isolatedTestLoopback: Bool = false,
         httpHandler: @escaping HTTPHandler,
         webSocketHandler: @escaping WebSocketHandler
     ) async throws -> UInt16 {
-        try await startWithFallbackForTesting(
+        if isolatedTestLoopback {
+            return try await startForTesting(
+                port: 0, bindAddress: "127.0.0.1", allowEndpointReuse: false,
+                webSocketPath: webSocketPath,
+                httpHandler: httpHandler, webSocketHandler: webSocketHandler
+            )
+        }
+        return try await startWithFallbackForTesting(
             preferredPort: Self.fixedPort,
             fallbackPortOffsetLimit: Self.fallbackPortOffsetLimit,
             webSocketPath: webSocketPath,
@@ -420,22 +428,24 @@ actor SurfAceHTTPServer {
 
     func startForTesting(
         port: UInt16,
+        bindAddress: String = "0.0.0.0",
+        allowEndpointReuse: Bool = true,
         webSocketPath: String = "/ws",
         httpHandler: @escaping HTTPHandler,
         webSocketHandler: @escaping WebSocketHandler
     ) async throws -> UInt16 {
         surfAceServerLog("listener start requested port=\(port) webSocketPath=\(webSocketPath)")
-        guard port != 0 else {
+        guard port != 0 || (bindAddress == "127.0.0.1" && !allowEndpointReuse) else {
             surfAceServerLog("listener rejected invalid ephemeral port request")
             throw SurfAceHTTPServerError.invalidRequestedPort(port)
         }
         let parameters = NWParameters.tcp
-        parameters.allowLocalEndpointReuse = true
-        guard let endpointPort = NWEndpoint.Port(rawValue: port) else {
+        parameters.allowLocalEndpointReuse = allowEndpointReuse
+        guard let endpointPort = port == 0 ? NWEndpoint.Port.any : NWEndpoint.Port(rawValue: port) else {
             surfAceServerLog("listener rejected unsupported port=\(port)")
             throw SurfAceHTTPServerError.invalidRequestedPort(port)
         }
-        guard let bindAddress = IPv4Address("0.0.0.0") else {
+        guard let bindAddress = IPv4Address(bindAddress) else {
             throw SurfAceHTTPServerError.invalidBindAddress
         }
         parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(bindAddress), port: endpointPort)
@@ -455,7 +465,7 @@ actor SurfAceHTTPServer {
                     surfAceServerLog("listener ready requestedPort=\(port) actualPort=\(boundPort)")
                     guard startupState.markResumedIfNeeded() else { return }
                     listener.stateUpdateHandler = nil
-                    guard boundPort == port else {
+                    guard port == 0 || boundPort == port else {
                         surfAceServerLog("listener bound unexpected port requested=\(port) actual=\(boundPort)")
                         listener.cancel()
                         continuation.resume(

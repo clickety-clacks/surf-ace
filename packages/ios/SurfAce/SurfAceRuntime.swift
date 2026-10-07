@@ -496,6 +496,7 @@ final class SurfAceRuntime {
         guard !isStarted, !isStarting else { return }
         isStarting = true
         defer { isStarting = false }
+        let isolatedTestLoopback = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
         await restoreLocklessAuthority(reason: "process_start")
         isSceneAuthorityReady = true
         observeLifecycle()
@@ -503,12 +504,13 @@ final class SurfAceRuntime {
             "event=app_launch \(surfAceDiagnosticFields([("fingerprint", fingerprint), ("screen_name", screenName)]))"
         )
         surfAceServerRuntimeLog(
-            "event=server_start_request \(surfAceDiagnosticFields([("fixed_port", fixedServerPort), ("health_path", healthPath), ("ws_path", webSocketPath)]))"
+            "event=server_start_request \(surfAceDiagnosticFields([("fixed_port", isolatedTestLoopback ? 0 : fixedServerPort), ("health_path", healthPath), ("ws_path", webSocketPath)]))"
         )
 
         do {
             let port = try await server.start(
                 webSocketPath: webSocketPath,
+                isolatedTestLoopback: isolatedTestLoopback,
                 httpHandler: { [weak self] request in
                     guard let self else { return HTTPServerResponse(statusCode: 500) }
                     return await self.handleHTTP(request: request)
@@ -524,12 +526,12 @@ final class SurfAceRuntime {
             serverPort = Int(port)
             isStarted = true
             surfAceServerRuntimeLog(
-                "event=server_start_ok \(surfAceDiagnosticFields([("fingerprint", fingerprint), ("port", serverPort), ("requested_port", fixedServerPort), ("screen_name", screenName)]))"
+                "event=server_start_ok \(surfAceDiagnosticFields([("fingerprint", fingerprint), ("port", serverPort), ("requested_port", isolatedTestLoopback ? 0 : fixedServerPort), ("screen_name", screenName)]))"
             )
             surfAceServerRuntimeLog(
-                "event=selected_provider_endpoint \(surfAceDiagnosticFields([("endpoint_address", "0.0.0.0:\(serverPort)"), ("health_path", healthPath), ("screen_name", screenName), ("ws_path", webSocketPath)]))"
+                "event=selected_provider_endpoint \(surfAceDiagnosticFields([("endpoint_address", "\(isolatedTestLoopback ? "127.0.0.1" : "0.0.0.0"):\(serverPort)"), ("health_path", healthPath), ("screen_name", screenName), ("ws_path", webSocketPath)]))"
             )
-            if enableFleetDiscovery {
+            if enableFleetDiscovery && !isolatedTestLoopback {
                 publishBonjour()
                 startCentralRegistration()
             }
