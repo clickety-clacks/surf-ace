@@ -20,7 +20,10 @@ export const TOOLCHAINS = Object.freeze({
 });
 
 export const TIGHTBEAM = Object.freeze({
-  candidateCommit: "69023a9a291d8196a7cda7bd7ab205c1f9e7d108",
+  // This branch may qualify PR #61's exact merge without changing published v0.2.6 identity.
+  candidateCommit: process.env.SURF_ACE_PR61_QUALIFICATION_ONLY === "1"
+    ? "7862bd3a06515b6e60bc4ccd74c5790259ab7f91"
+    : "69023a9a291d8196a7cda7bd7ab205c1f9e7d108",
   sourceTag: RELEASE_NAMES.sourceTag,
   version: RELEASE_NAMES.version,
   channel: RELEASE_NAMES.channel,

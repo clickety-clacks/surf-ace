@@ -13,6 +13,11 @@ on:
         required: true
         type: boolean
         default: false
+      qualify_offline_pr61:
+        description: Run branch-only packaged PR61 offline outcome qualification; never publish.
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -35,6 +40,7 @@ env:
 
 jobs:
   guard:
+    if: ${{ !inputs.qualify_offline_pr61 }}
     runs-on: macos-15
     steps:
       - name: Require exact manual tooling and immutable product tags
@@ -61,6 +67,198 @@ jobs:
           product_remote="$(peel_tag "${PRODUCT_TAG}")"
           test "${tooling_remote}" = "${GITHUB_SHA}"
           test "${product_remote}" = "${PRODUCT_COMMIT}"
+
+  qualify-pr61-build:
+    if: ${{ inputs.qualify_offline_pr61 }}
+    runs-on: ubuntu-24.04
+    container:
+      image: rust:1.89.0-bookworm@sha256:948f9b08a66e7fe01b03a98ef1c7568292e07ec2e4fe90d88c07bb14563c84ff
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check qualification-only dispatch and branch identity
+        run: |
+          set -euo pipefail
+          test "${GITHUB_EVENT_NAME}" = workflow_dispatch
+          test "${GITHUB_REF_TYPE}" = branch
+          test "${{ inputs.run_smoke }}" = true
+          test "${{ inputs.publish_release }}" = false
+          test "${GITHUB_REF}" = refs/heads/codex/pr61-offline-qualification-exact
+      - name: Check out exact reviewed qualification tooling
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: tooling
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - name: Check out exact merged PR61 product
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: source
+          persist-credentials: false
+          ref: 7862bd3a06515b6e60bc4ccd74c5790259ab7f91
+      - name: Pin toolchain, frozen dependencies and exact heads
+        run: |
+          set -euo pipefail
+          curl -fsSLO https://nodejs.org/dist/v24.3.0/node-v24.3.0-linux-x64.tar.xz
+          printf '%s  %s\n' a962afadaa8b94bae8bff87ddd6c11f7aae621032424ef05c0a4fe2537fa4de0 node-v24.3.0-linux-x64.tar.xz | sha256sum -c -
+          tar -xJf node-v24.3.0-linux-x64.tar.xz -C /usr/local --strip-components=1
+          corepack enable
+          corepack prepare "pnpm@10.15.1" --activate
+          test "$(rustc --version | cut -d' ' -f2)" = 1.89.0
+          test "$(node --version)" = v24.3.0
+          test "$(pnpm --version)" = 10.15.1
+          test "$(git -C source rev-parse HEAD)" = 7862bd3a06515b6e60bc4ccd74c5790259ab7f91
+          test "$(git -C tooling rev-parse HEAD)" = "${GITHUB_SHA}"
+          pnpm --dir source fetch --frozen-lockfile
+          pnpm --dir source install --offline --frozen-lockfile
+          pnpm --dir tooling fetch --frozen-lockfile
+          pnpm --dir tooling install --offline --frozen-lockfile
+      - name: Build three packaged Linux participants in qualification-only mode
+        env:
+          SURF_ACE_RELEASE_COMPONENT: linux
+          SURF_ACE_PR61_QUALIFICATION_ONLY: "1"
+        run: |
+          set -euo pipefail
+          node tooling/scripts/release/build-tightbeam-release.mjs \
+            --qualification-only linux \
+            --source-dir "${GITHUB_WORKSPACE}/source" \
+            --source-commit 7862bd3a06515b6e60bc4ccd74c5790259ab7f91 \
+            --tooling-commit "${GITHUB_SHA}" \
+            --output-dir "${GITHUB_WORKSPACE}/qualification-packages" \
+            --version 0.2.6 \
+            --target x86_64-unknown-linux-gnu \
+            > qualification-build.json
+          node -e 'const x=require("./qualification-build.json"); if(x.qualificationOnly!==true||x.releaseAdmitted!==false||x.sourceCommit!=="7862bd3a06515b6e60bc4ccd74c5790259ab7f91")process.exit(1)'
+          sha256sum qualification-packages/* > qualification-sha256.txt
+      - name: Retain exact candidate packages and build identity
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pr61-offline-qualification-packages
+          path: |
+            qualification-packages/
+            qualification-build.json
+            qualification-sha256.txt
+          if-no-files-found: error
+          retention-days: 30
+
+  qualify-pr61-smoke:
+    if: ${{ inputs.qualify_offline_pr61 }}
+    needs: qualify-pr61-build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out exact reviewed qualification tooling
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: tooling
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - name: Check out exact merged PR61 product
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: source
+          persist-credentials: false
+          ref: 7862bd3a06515b6e60bc4ccd74c5790259ab7f91
+      - name: Download qualification-only packages
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: pr61-offline-qualification-packages
+          path: .
+      - name: Pin Node and install private-smoke dependencies
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24.3.0
+      - name: Prepare disposable PostgreSQL and Xvfb route
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            iproute2 libpq-dev postgresql-16 postgresql-client-16 util-linux \
+            tar unzip x11-utils xauth xvfb
+          for tool in ip unshare runuser xvfb-run Xvfb xauth xdpyinfo pg_config tar unzip; do
+            command -v "${tool}" >/dev/null
+          done
+          pg_bin="$(pg_config --bindir)"
+          for tool in initdb postgres pg_ctl psql pg_basebackup pg_dump pg_restore; do
+            test -x "${pg_bin}/${tool}"
+          done
+          test "$(pg_config --version | cut -d' ' -f2 | cut -d. -f1)" = 16
+          test "$(git -C source rev-parse HEAD)" = 7862bd3a06515b6e60bc4ccd74c5790259ab7f91
+          test "$(git -C tooling rev-parse HEAD)" = "${GITHUB_SHA}"
+          corepack enable
+          corepack prepare pnpm@10.15.1 --activate
+          pnpm --dir source fetch --frozen-lockfile
+          pnpm --dir source install --offline --frozen-lockfile
+          pnpm --dir tooling fetch --frozen-lockfile
+          pnpm --dir tooling install --offline --frozen-lockfile
+          sha256sum -c qualification-sha256.txt
+      - name: Prove packaged offline open and split in private network
+        env:
+          SURF_ACE_SMOKE_COMPONENT: linux
+          SURF_ACE_PR61_QUALIFICATION_ONLY: "1"
+          SURF_ACE_TIGHTBEAM_STATE_DRIVER: ${{ github.workspace }}/tooling/scripts/release/tightbeam-state-smoke-fixture.ts
+        run: |
+          set -euo pipefail
+          smoke_tmp="$(mktemp -d /tmp/sa-pr61.XXXXXX)"
+          smoke_user="$(id -un)"
+          smoke_node="$(command -v node)"
+          sudo -n unshare --net -- bash -c '
+            set -euo pipefail
+            smoke_user=$1
+            smoke_tmp=$2
+            smoke_node=$3
+            smoke_path=$4
+            state_driver=$5
+            product_commit=$6
+            tooling_commit=$7
+            workspace=$8
+            ip link set lo up
+            ip link add veth0 type veth peer name veth1
+            ip addr add 198.18.0.1/30 dev veth0
+            ip addr add 169.254.77.1/16 dev veth0
+            ip link set veth0 up
+            ip link set veth1 up
+            ip route add 224.0.0.0/4 dev veth0
+            ip -br addr >&2
+            ip route >&2
+            test -z "$(ip route show default)"
+            exec runuser -u "$smoke_user" -- env \
+              PATH="$smoke_path" TMPDIR="$smoke_tmp" \
+              SURF_ACE_SMOKE_COMPONENT=linux \
+              SURF_ACE_PR61_QUALIFICATION_ONLY=1 \
+              SURF_ACE_TIGHTBEAM_STATE_DRIVER="$state_driver" \
+              xvfb-run -a "$smoke_node" tooling/scripts/release/smoke-tightbeam-release.mjs \
+                --qualification-only linux \
+                --source-dir "$workspace/source" \
+                --source-commit "$product_commit" \
+                --tooling-commit "$tooling_commit" \
+                --package-dir "$workspace/qualification-packages"
+          ' bash "$smoke_user" "$smoke_tmp" "$smoke_node" "$PATH" \
+            "$SURF_ACE_TIGHTBEAM_STATE_DRIVER" 7862bd3a06515b6e60bc4ccd74c5790259ab7f91 \
+            "$GITHUB_SHA" "$GITHUB_WORKSPACE" \
+            > qualification-smoke.json 2> qualification-smoke-stderr.log || {
+              smoke_status=$?
+              cat qualification-smoke-stderr.log >&2
+              mkdir -p qualification-smoke-failure
+              find "$smoke_tmp" -type f \( -name 'fresh-install-state.json' -o -name 'fresh-install-state.json.capture.png' \
+                -o -name 'fresh-install.client-flight-recorder.log' -o -name 'fresh-install.second-client-flight-recorder.log' \) \
+                -exec cp {} qualification-smoke-failure/ \;
+              exit "$smoke_status"
+            }
+          node -e 'const x=require("./qualification-smoke.json"); if(x.status!=="passed"||x.qualificationOnly!==true||x.releaseAdmitted!==false||x.sourceCommit!=="7862bd3a06515b6e60bc4ccd74c5790259ab7f91"||x.transitions?.state?.offlineLocal?.pendingLabelsObserved!==true)process.exit(1)'
+          sha256sum -c qualification-sha256.txt
+      - name: Retain smoke result and failure diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pr61-offline-qualification-smoke
+          path: |
+            qualification-smoke.json
+            qualification-smoke-stderr.log
+            qualification-sha256.txt
+            qualification-smoke-failure/
+          if-no-files-found: error
+          retention-days: 30
 
   build-linux:
     needs: guard
