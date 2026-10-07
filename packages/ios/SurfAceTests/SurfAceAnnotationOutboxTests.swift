@@ -159,6 +159,36 @@ final class SurfAceAnnotationOutboxTests: XCTestCase {
         XCTAssertEqual(state.annotationPublisher?.surfaces[first.surface.surfaceId]?.fifo.first, pending)
         try state.validate()
     }
+
+    func testAtOpenFrameAndStrokePositionSurviveRestartUntilExplicitClose() throws {
+        var outbox = try SurfAceAnnotationOutbox(clientId: "client-1", sourceEpoch: sourceEpoch)
+        let frame = try outbox.beginFrame(
+            surfaceId: surfaceId, paneId: 1, contextKey: "content-1", contentId: "content-1",
+            url: nil, scrollOffset: .init(x: 4, y: 8),
+            viewport: .init(width: 100, height: 80, scale: 2), openedAt: 1000,
+            image: "aW1hZ2U="
+        )
+        let stroke = SurfAceAnnotationFrameStroke(
+            strokeId: "stroke-1", points: [.init(x: 10, y: 20, pressure: 0.5)],
+            bbox: .init(x: 10, y: 20, width: 0, height: 0), startedAt: 1000, endedAt: 1010
+        )
+        try outbox.recordStroke(surfaceId: surfaceId, paneId: 1, stroke: stroke)
+        outbox.markFramePublished(surfaceId: surfaceId, paneId: 1)
+        let restored = try JSONDecoder().decode(SurfAceAnnotationOutbox.self,
+                                                from: JSONEncoder().encode(outbox))
+        let open = try XCTUnwrap(restored.openFrame(surfaceId: surfaceId, paneId: 1))
+        XCTAssertEqual(open.frameId, frame.frameId)
+        XCTAssertEqual(open.image, frame.image)
+        XCTAssertEqual(open.strokes, [stroke])
+        XCTAssertEqual(open.publishedStrokeCount, 1)
+        XCTAssertEqual(try outbox.beginFrame(
+            surfaceId: surfaceId, paneId: 1, contextKey: "content-1", contentId: "content-1",
+            url: nil, scrollOffset: .init(x: 0, y: 0),
+            viewport: .init(width: 1, height: 1, scale: 1), openedAt: 2000, image: "different"
+        ).frameId, frame.frameId)
+        outbox.closeFrame(surfaceId: surfaceId, paneId: 1)
+        XCTAssertNil(outbox.openFrame(surfaceId: surfaceId, paneId: 1))
+    }
 }
 
 @MainActor

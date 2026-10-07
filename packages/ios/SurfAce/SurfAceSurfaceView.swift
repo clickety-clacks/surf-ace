@@ -1662,6 +1662,10 @@ private struct SurfAcePaneRepresentable: UIViewRepresentable {
             await hostView?.fetchSnapshot()
         }
 
+        func fetchAnnotationBackgroundSnapshot() async -> SurfAceSurfaceSnapshot? {
+            await hostView?.fetchAnnotationBackgroundSnapshot()
+        }
+
         func fetchSnapshotMetadata() async -> SurfAceSurfaceSnapshot? {
             await hostView?.fetchSnapshotMetadata()
         }
@@ -2220,6 +2224,22 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
             selection: metadata.selection,
             imageBase64: imageBase64
         )
+    }
+
+    func fetchAnnotationBackgroundSnapshot() async -> SurfAceSurfaceSnapshot? {
+        let metadata = await fetchSnapshotMetadata()
+        let imageBase64: String?
+        if !webView.isHidden, let webImage = await captureWebViewSnapshot() {
+            imageBase64 = renderCompositeImageBase64(webImage: webImage, includeCanvas: false)
+        } else {
+            let wasHidden = canvasView.isHidden
+            canvasView.isHidden = true
+            imageBase64 = captureFullScreenshotBase64()
+            canvasView.isHidden = wasHidden
+        }
+        guard let imageBase64, !imageBase64.isEmpty else { return nil }
+        return SurfAceSurfaceSnapshot(viewport: metadata.viewport, selection: metadata.selection,
+                                      imageBase64: imageBase64)
     }
 
     func fetchSnapshotMetadata() async -> SurfAceSurfaceSnapshot {
@@ -2966,13 +2986,13 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
         }
     }
 
-    private func renderCompositeImageBase64(webImage: UIImage) -> String? {
+    private func renderCompositeImageBase64(webImage: UIImage, includeCanvas: Bool = true) -> String? {
         let renderer = UIGraphicsImageRenderer(bounds: bounds)
         let image = renderer.image { _ in
             UIColor.black.setFill()
             UIRectFill(bounds)
             webImage.draw(in: webView.convert(webView.bounds, to: self))
-            if !canvasView.drawing.strokes.isEmpty {
+            if includeCanvas && !canvasView.drawing.strokes.isEmpty {
                 canvasView.drawHierarchy(in: canvasView.convert(canvasView.bounds, to: self), afterScreenUpdates: true)
             }
         }

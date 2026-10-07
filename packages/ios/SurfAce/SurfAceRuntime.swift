@@ -360,6 +360,7 @@ final class SurfAceRuntime {
     @ObservationIgnored private var identity: SurfAceIdentity?
     @ObservationIgnored private var centralRegistration: SurfAceCentralRegistration?
     @ObservationIgnored private var annotationPublisher: SurfAceAnnotationPublisher?
+    @ObservationIgnored private var annotationStrokeTasks: [String: Task<Void, Never>] = [:]
     @ObservationIgnored private var centralConnectionError: String?
     @ObservationIgnored private var confirmedPaneLabels: [String: Int64] = [:]
     private var centralConnectionState: SurfAceConnectionBarState = .disconnected
@@ -1148,6 +1149,9 @@ final class SurfAceRuntime {
     ) {
         if let adapter = locklessAdapter {
             Task { @MainActor in
+                if !enabled {
+                    await annotationStrokeTasks["\(surfaceId):\(paneId)"]?.value
+                }
                 await commitLocalAnnotationMode(
                     adapter: adapter,
                     surfaceId: surfaceId,
@@ -1600,7 +1604,10 @@ final class SurfAceRuntime {
         drawingData: Data
     ) {
         if let adapter = locklessAdapter, !strokes.isEmpty {
-            Task { @MainActor in
+            let key = "\(surfaceId):\(paneId)"
+            let previous = annotationStrokeTasks[key]
+            annotationStrokeTasks[key] = Task { @MainActor in
+                await previous?.value
                 await commitLocalStrokes(
                     adapter: adapter,
                     surfaceId: surfaceId,
@@ -1649,6 +1656,26 @@ final class SurfAceRuntime {
         drawingData: Data
     ) async {
         do {
+            guard let sourcePane = pane(surfaceId: surfaceId, paneId: paneId) else { return }
+            let existingFrame = await adapter.snapshot().annotationPublisher?
+                .openFrame(surfaceId: surfaceId, paneId: paneId)
+            let background = existingFrame == nil
+                ? await sourcePane.bridge?.fetchAnnotationBackgroundSnapshot() : nil
+            let sourceContentId = sourcePane.currentEntry.contentId ?? ""
+            let sourceURL = sourcePane.currentEntry.url
+            let sourceContextKey = sourceURL ?? sourceContentId
+            let sourceOpenedAt = strokes.first?.points.first?.timestamp ?? timestampNow()
+            let sourceOffset = SurfAceAnnotationOpenFrame.Offset(
+                x: background?.viewport.scrollOffset.x ?? sourcePane.lastViewport.scrollOffset.x,
+                y: background?.viewport.scrollOffset.y ?? sourcePane.lastViewport.scrollOffset.y
+            )
+            let sourceViewport = SurfAceAnnotationOpenFrame.Viewport(
+                width: max(1, Int((background?.viewport.visibleRect.width ?? sourcePane.lastViewport.visibleRect.width).rounded())),
+                height: max(1, Int((background?.viewport.visibleRect.height ?? sourcePane.lastViewport.visibleRect.height).rounded())),
+                scale: Double(UIScreen.main.scale)
+            )
+            let sourceImage = background?.imageBase64 ?? ""
+            let sourceStrokes = strokes.map(Self.annotationFrameStroke)
             let serializedStrokes = try Self.locklessJSON(
                 Dictionary(uniqueKeysWithValues: strokes.map { ($0.strokeId, $0) })
             )
@@ -1675,6 +1702,22 @@ final class SurfAceRuntime {
                 surface.panes[String(paneId)] = authorityPane
                 surface.surfaceRevision += 1
                 state.liveSurfaces[surfaceId] = surface
+                if var publisher = state.annotationPublisher {
+                    do {
+                        _ = try publisher.beginFrame(
+                            surfaceId: surfaceId, paneId: paneId, contextKey: sourceContextKey,
+                            contentId: sourceContentId, url: sourceURL, scrollOffset: sourceOffset,
+                            viewport: sourceViewport, openedAt: sourceOpenedAt, image: sourceImage
+                        )
+                        for sourceStroke in sourceStrokes {
+                            try publisher.recordStroke(surfaceId: surfaceId, paneId: paneId,
+                                                       stroke: sourceStroke)
+                        }
+                    } catch {
+                        // Publisher capacity cannot block the direct client stroke mutation.
+                    }
+                    state.annotationPublisher = publisher
+                }
                 return .object([
                     "commitSequence": .integer(sequence),
                     "paneId": .integer(Int64(paneId)),
@@ -1703,6 +1746,21 @@ final class SurfAceRuntime {
         } catch {
             endpointError = "Lockless annotation stroke mutation failed: \(error.localizedDescription)"
         }
+    }
+
+    private static func annotationFrameStroke(_ stroke: SurfAceStroke) -> SurfAceAnnotationFrameStroke {
+        let xs = stroke.points.map(\.x)
+        let ys = stroke.points.map(\.y)
+        let minX = xs.min() ?? 0
+        let minY = ys.min() ?? 0
+        return SurfAceAnnotationFrameStroke(
+            strokeId: stroke.strokeId,
+            points: stroke.points.map { .init(x: $0.x, y: $0.y, pressure: $0.pressure) },
+            bbox: .init(x: minX, y: minY, width: (xs.max() ?? minX) - minX,
+                        height: (ys.max() ?? minY) - minY),
+            startedAt: stroke.points.first?.timestamp ?? 0,
+            endedAt: stroke.points.last?.timestamp ?? 0
+        )
     }
 
     enum HistoryDirection {

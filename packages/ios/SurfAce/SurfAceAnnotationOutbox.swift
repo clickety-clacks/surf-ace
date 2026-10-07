@@ -23,15 +23,54 @@ struct SurfAceAnnotationPendingGap: Codable, Equatable, Sendable {
     var reason: String
 }
 
+struct SurfAceAnnotationFrameStroke: Codable, Equatable, Sendable {
+    struct Point: Codable, Equatable, Sendable {
+        var x: Double
+        var y: Double
+        var pressure: Double?
+    }
+    struct Box: Codable, Equatable, Sendable {
+        var x: Double
+        var y: Double
+        var width: Double
+        var height: Double
+    }
+    var strokeId: String
+    var points: [Point]
+    var bbox: Box
+    var startedAt: Int64
+    var endedAt: Int64
+}
+
+struct SurfAceAnnotationOpenFrame: Codable, Equatable, Sendable {
+    struct Offset: Codable, Equatable, Sendable { var x: Double; var y: Double }
+    struct Viewport: Codable, Equatable, Sendable { var width: Int; var height: Int; var scale: Double }
+    var frameId: String
+    var contextKey: String
+    var contentId: String
+    var url: String?
+    var scrollOffset: Offset
+    var viewport: Viewport
+    var openedAt: Int64
+    var updatedAt: Int64
+    var image: String
+    var strokes: [SurfAceAnnotationFrameStroke]
+    var failed: Bool
+    var sourceStrokeCount: Int
+    var publishedStrokeCount: Int
+}
+
 struct SurfAceAnnotationSurfaceOutbox: Codable, Equatable, Sendable {
     var acceptedCursor: SurfAceAnnotationServerCursor?
     var diagnostic: SurfAceAnnotationDiagnostic?
     var fifo: [SurfAceAnnotationOutboxEntry]
     var nextSequence: Int64
     var trailingGap: SurfAceAnnotationPendingGap?
+    var openFrames: [String: SurfAceAnnotationOpenFrame]?
 
     static var empty: Self {
-        Self(acceptedCursor: nil, diagnostic: nil, fifo: [], nextSequence: 1, trailingGap: nil)
+        Self(acceptedCursor: nil, diagnostic: nil, fifo: [], nextSequence: 1,
+             trailingGap: nil, openFrames: nil)
     }
 }
 
@@ -77,6 +116,10 @@ struct SurfAceAnnotationOutbox: Codable, Equatable, Sendable {
             guard !surfaceId.isEmpty, surfaceId.utf8.count <= 128,
                   surface.nextSequence > 0, surface.fifo.count <= maxRecords,
                   surface.fifo.allSatisfy({ $0.canonical.utf8.count <= Self.maximumRecordBytes }),
+                  (surface.openFrames ?? [:]).allSatisfy({ key, frame in
+                      Int(key).map({ $0 > 0 }) == true && frame.frameId.hasPrefix("fr_")
+                          && frame.sourceStrokeCount >= frame.publishedStrokeCount
+                  }),
                   try fits(surfaceId: surfaceId, maxBytes: maxBytes, maxRecords: maxRecords) else {
                 throw SurfAceAnnotationOutboxError.invalidState
             }
@@ -107,6 +150,87 @@ struct SurfAceAnnotationOutbox: Codable, Equatable, Sendable {
     func needsSeal(surfaceId: String) -> Bool {
         guard let surface = surfaces[surfaceId] else { return false }
         return surface.trailingGap != nil && !surface.fifo.contains { $0.kind == "gap" }
+    }
+
+    func openFrame(surfaceId: String, paneId: Int) -> SurfAceAnnotationOpenFrame? {
+        surfaces[surfaceId]?.openFrames?[String(paneId)]
+    }
+
+    mutating func beginFrame(surfaceId: String, paneId: Int, contextKey: String, contentId: String,
+                             url: String?, scrollOffset: SurfAceAnnotationOpenFrame.Offset,
+                             viewport: SurfAceAnnotationOpenFrame.Viewport, openedAt: Int64,
+                             image: String, maxBytes: Int = maximumBytes) throws -> SurfAceAnnotationOpenFrame {
+        try ensureSurface(surfaceId, maxBytes: maxBytes, maxRecords: Self.maximumRecords)
+        if let existing = openFrame(surfaceId: surfaceId, paneId: paneId) { return existing }
+        var surface = surfaces[surfaceId]!
+        let frame = SurfAceAnnotationOpenFrame(
+            frameId: "fr_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased(),
+            contextKey: contextKey, contentId: contentId, url: url, scrollOffset: scrollOffset,
+            viewport: viewport, openedAt: openedAt, updatedAt: openedAt, image: image,
+            strokes: [], failed: image.isEmpty, sourceStrokeCount: 0, publishedStrokeCount: 0
+        )
+        surface.openFrames = (surface.openFrames ?? [:]).merging([String(paneId): frame]) { _, new in new }
+        surfaces[surfaceId] = surface
+        if try !fits(surfaceId: surfaceId, maxBytes: maxBytes, maxRecords: Self.maximumRecords) {
+            surface.openFrames?[String(paneId)]?.image = ""
+            surface.openFrames?[String(paneId)]?.failed = true
+            surfaces[surfaceId] = surface
+            guard try fits(surfaceId: surfaceId, maxBytes: maxBytes, maxRecords: Self.maximumRecords) else {
+                surface.openFrames?.removeValue(forKey: String(paneId))
+                surfaces[surfaceId] = surface
+                throw SurfAceAnnotationOutboxError.invalidLimit
+            }
+        }
+        return surfaces[surfaceId]!.openFrames![String(paneId)]!
+    }
+
+    mutating func recordStroke(surfaceId: String, paneId: Int,
+                               stroke: SurfAceAnnotationFrameStroke) throws {
+        guard var surface = surfaces[surfaceId], var frame = surface.openFrames?[String(paneId)] else {
+            throw SurfAceAnnotationOutboxError.invalidState
+        }
+        if frame.strokes.contains(where: { $0.strokeId == stroke.strokeId }) { return }
+        frame.sourceStrokeCount += 1
+        if !frame.failed && !stroke.points.isEmpty {
+            frame.strokes.append(stroke)
+            frame.updatedAt = max(frame.updatedAt, stroke.endedAt)
+        } else {
+            frame.failed = true
+        }
+        surface.openFrames?[String(paneId)] = frame
+        surfaces[surfaceId] = surface
+        if try !fits(surfaceId: surfaceId, maxBytes: Self.maximumBytes,
+                     maxRecords: Self.maximumRecords) || frame.failed {
+            frame.failed = true
+            frame.image = ""
+            frame.strokes = []
+            surface.openFrames?[String(paneId)] = frame
+            surfaces[surfaceId] = surface
+        }
+    }
+
+    mutating func markFramePublished(surfaceId: String, paneId: Int) {
+        guard var surface = surfaces[surfaceId],
+              var frame = surface.openFrames?[String(paneId)] else { return }
+        frame.publishedStrokeCount = frame.sourceStrokeCount
+        surface.openFrames?[String(paneId)] = frame
+        surfaces[surfaceId] = surface
+    }
+
+    mutating func closeFrame(surfaceId: String, paneId: Int) {
+        surfaces[surfaceId]?.openFrames?.removeValue(forKey: String(paneId))
+    }
+
+    mutating func lose(surfaceId: String, code: String) throws {
+        try ensureSurface(surfaceId, maxBytes: Self.maximumBytes, maxRecords: Self.maximumRecords)
+        guard var surface = surfaces[surfaceId], surface.nextSequence < Int64.max else {
+            throw SurfAceAnnotationOutboxError.sequenceExhausted
+        }
+        let sequence = String(surface.nextSequence)
+        surface.nextSequence += 1
+        surface.extendGap(sequence: sequence, reason: "source_retention_overflow")
+        surface.diagnostic = .init(code: code, sequence: sequence)
+        surfaces[surfaceId] = surface
     }
 
     mutating func append(surfaceId: String, record: [String: Any],
