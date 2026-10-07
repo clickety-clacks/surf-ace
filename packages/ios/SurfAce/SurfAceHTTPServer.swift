@@ -427,7 +427,6 @@ actor SurfAceHTTPServer {
         httpHandler: @escaping HTTPHandler,
         webSocketHandler: @escaping WebSocketHandler
     ) async throws -> UInt16 {
-        surfAceServerLog("listener start requested port=\(port) webSocketPath=\(webSocketPath)")
         guard port != 0 else {
             surfAceServerLog("listener rejected invalid ephemeral port request")
             throw SurfAceHTTPServerError.invalidRequestedPort(port)
@@ -443,6 +442,7 @@ actor SurfAceHTTPServer {
             surfAceServerLog("listener rejected fixed port in isolated test host")
             throw SurfAceHTTPServerError.fixedPortUnavailableInIsolatedTestHost
         }
+        surfAceServerLog("listener start requested port=\(port) webSocketPath=\(webSocketPath)")
         guard let bindAddress = IPv4Address("0.0.0.0") else {
             throw SurfAceHTTPServerError.invalidBindAddress
         }
