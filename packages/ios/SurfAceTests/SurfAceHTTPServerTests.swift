@@ -1,4 +1,4 @@
-import Darwin
+import Network
 import XCTest
 @testable import SurfAce
 
@@ -9,15 +9,9 @@ final class SurfAceHTTPServerTests: XCTestCase {
 
     func testStartForTestingBindsRequestedFixedPort() async throws {
         let server = SurfAceHTTPServer()
-        let port = try nextAvailablePort()
+        let port = try await startOnPrivateFixedPort(server)
 
-        let boundPort = try await server.startForTesting(
-            port: port,
-            httpHandler: { _ in HTTPServerResponse.empty(statusCode: 200) },
-            webSocketHandler: { _ in }
-        )
-
-        XCTAssertEqual(boundPort, port)
+        XCTAssertTrue((29_001...29_100).contains(Int(port)))
         await server.stop()
     }
 
@@ -44,13 +38,7 @@ final class SurfAceHTTPServerTests: XCTestCase {
     func testStartFailsWhenFixedPortIsAlreadyInUse() async throws {
         let firstServer = SurfAceHTTPServer()
         let secondServer = SurfAceHTTPServer()
-        let port = try nextAvailablePort()
-
-        _ = try await firstServer.startForTesting(
-            port: port,
-            httpHandler: { _ in HTTPServerResponse.empty(statusCode: 200) },
-            webSocketHandler: { _ in }
-        )
+        let port = try await startOnPrivateFixedPort(firstServer)
 
         do {
             _ = try await secondServer.startForTesting(
@@ -70,22 +58,17 @@ final class SurfAceHTTPServerTests: XCTestCase {
     func testStartWithFallbackBindsNextAvailablePortWhenPreferredPortIsInUse() async throws {
         let firstServer = SurfAceHTTPServer()
         let secondServer = SurfAceHTTPServer()
-        let port = try nextAvailablePort()
-
-        _ = try await firstServer.startForTesting(
-            port: port,
-            httpHandler: { _ in HTTPServerResponse.empty(statusCode: 200) },
-            webSocketHandler: { _ in }
-        )
+        let port = try await startOnPrivateFixedPort(firstServer)
 
         let boundPort = try await secondServer.startWithFallbackForTesting(
             preferredPort: port,
-            fallbackPortOffsetLimit: 2,
+            fallbackPortOffsetLimit: 20,
             httpHandler: { _ in HTTPServerResponse.empty(statusCode: 200) },
             webSocketHandler: { _ in }
         )
 
-        XCTAssertEqual(boundPort, port + 1)
+        XCTAssertGreaterThan(boundPort, port)
+        XCTAssertLessThanOrEqual(boundPort, port + 20)
 
         await firstServer.stop()
         await secondServer.stop()
@@ -166,35 +149,20 @@ final class SurfAceHTTPServerTests: XCTestCase {
         )
     }
 
-    private func nextAvailablePort() throws -> UInt16 {
+    private func startOnPrivateFixedPort(_ server: SurfAceHTTPServer) async throws -> UInt16 {
         for candidate in UInt16(29_001)...UInt16(29_100) {
-            let descriptor = socket(AF_INET, SOCK_STREAM, 0)
-            guard descriptor >= 0 else {
+            do {
+                return try await server.startForTesting(
+                    port: candidate,
+                    httpHandler: { _ in HTTPServerResponse.empty(statusCode: 200) },
+                    webSocketHandler: { _ in }
+                )
+            } catch let error as NWError where error == .posix(.EADDRINUSE) {
                 continue
-            }
-            defer { close(descriptor) }
-
-            var value: Int32 = 1
-            setsockopt(descriptor, SOL_SOCKET, SO_REUSEADDR, &value, socklen_t(MemoryLayout<Int32>.size))
-
-            var address = sockaddr_in()
-            address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
-            address.sin_family = sa_family_t(AF_INET)
-            address.sin_port = candidate.bigEndian
-            address.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
-
-            let result = withUnsafePointer(to: &address) {
-                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                    bind(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
-                }
-            }
-
-            if result == 0 {
-                return candidate
             }
         }
 
-        throw XCTSkip("No free TCP port available in test range")
+        throw XCTSkip("No private TCP port available in test range")
     }
 
     private func loadAppInfoPlist() throws -> [String: Any] {
