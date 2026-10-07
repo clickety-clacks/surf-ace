@@ -529,7 +529,7 @@ test("registration response with a foreign identity cannot apply labels after ma
     assert.deepEqual(core.registryBinding(), {
       clientId: "response-client", allocatorId: "alloc_home", fleetId: "fleet-home",
     });
-    assert.equal(core.panesList(surface.surfaceId).panes[0]?.paneLabel, 0);
+    assert.equal(core.panesList(surface.surfaceId).panes[0]?.paneLabel, null);
   } finally {
     await registration.stop();
     await registry.close();
