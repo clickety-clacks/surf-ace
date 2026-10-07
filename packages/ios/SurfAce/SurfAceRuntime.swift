@@ -359,6 +359,7 @@ final class SurfAceRuntime {
     @ObservationIgnored private let outboundSendPreparation: (@Sendable (
         String, SurfAceOutboundSender.Priority
     ) async -> Void)?
+    @ObservationIgnored private let annotationCommitStagePreparation: (@Sendable () async -> Void)?
     @ObservationIgnored private let locklessDeliveryWaitObserver: (@Sendable () -> Void)?
     @ObservationIgnored private var identity: SurfAceIdentity?
     @ObservationIgnored private var centralRegistration: SurfAceCentralRegistration?
@@ -450,6 +451,7 @@ final class SurfAceRuntime {
         outboundSendPreparation: (@Sendable (
             String, SurfAceOutboundSender.Priority
         ) async -> Void)? = nil,
+        annotationCommitStagePreparation: (@Sendable () async -> Void)? = nil,
         locklessDeliveryWaitObserver: (@Sendable () -> Void)? = nil
     ) {
         self.userDefaults = userDefaults
@@ -458,6 +460,7 @@ final class SurfAceRuntime {
         self.annotationClientIdOverride = annotationClientId
         self.enableFleetDiscovery = enableFleetDiscovery
         self.outboundSendPreparation = outboundSendPreparation
+        self.annotationCommitStagePreparation = annotationCommitStagePreparation
         self.locklessDeliveryWaitObserver = locklessDeliveryWaitObserver
         let fallbackName = "Surf Ace"
         let deviceName = UIDevice.current.name
@@ -4704,13 +4707,15 @@ final class SurfAceRuntime {
             sentAt: timestampNow(), throughStrokeCount: frame.sourceStrokeCount
         )
         do {
-            return try await adapter.transactAnnotationPublisher(surfaceId: surfaceId) { outbox in
+            let staged = try await adapter.transactAnnotationPublisher(surfaceId: surfaceId) { outbox in
                 guard outbox.openFrame(surfaceId: surfaceId, paneId: paneId)?.frameId == frame.frameId else {
                     return nil as SurfAceAnnotationDirectEvent?
                 }
                 try outbox.stageDirectCommit(surfaceId: surfaceId, paneId: paneId, event: event)
                 return event
             }
+            if staged != nil { await annotationCommitStagePreparation?() }
+            return staged
         } catch {
             surfAceServerRuntimeLog("event=annotation_direct_commit_stage_failed \(surfAceDiagnosticFields([("error", String(describing: error))]))")
             return nil

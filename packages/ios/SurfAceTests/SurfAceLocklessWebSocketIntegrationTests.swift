@@ -5,6 +5,125 @@ import XCTest
 
 @MainActor
 final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
+    func testReentryWhileDirectCommitStagingSuspendsKeepsOneSourceFrame() async throws {
+        let suiteName = "SurfAceCommitStageReentry-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        let stateURL = FileManager.default.temporaryDirectory.appendingPathComponent("\(suiteName).json")
+        let stageGate = SurfAceAnnotationCommitStageGate()
+        addTeardownBlock {
+            defaults.removePersistentDomain(forName: suiteName)
+            try? FileManager.default.removeItem(at: stateURL)
+        }
+        let runtime = SurfAceRuntime(
+            userDefaults: defaults, locklessStateURL: stateURL,
+            configuredRegistryURL: try XCTUnwrap(URL(string: "ws://127.0.0.1:29999")),
+            annotationClientId: "client-ios-stage-reentry-fixture", enableFleetDiscovery: false,
+            annotationCommitStagePreparation: { await stageGate.holdOnce() }
+        )
+        await runtime.start()
+        addTeardownBlock { await runtime.stop() }
+        let registeredSurface = await runtime.registerSurfaceForScene(sceneKey: "commit-stage-reentry")
+        let surface = try XCTUnwrap(registeredSurface)
+        let pane = try XCTUnwrap(surface.panes.first)
+        let socket = socket(port: try XCTUnwrap(UInt16(exactly: runtime.serverPort)))
+        socket.resume()
+        try await send(socket, op: "surfaces.list", id: "stage-discovery", payload: [:])
+        _ = try await receive(socket, matchingId: "stage-discovery")
+        let pairResponse = try await pair(socket, id: "stage-pair", controllerId: "stage-controller",
+                                          surfaceId: surface.surfaceId)
+        XCTAssertEqual(pairResponse["ok"] as? Bool, true)
+        try await send(socket, op: "content.set", id: "stage-content", payload: [
+            "content": ["html": "<main>same annotation context</main>"],
+            "contentId": "stage-content-id", "contentType": "html", "friendlyChatName": "Stage Test",
+            "paneId": pane.paneId, "surfaceId": surface.surfaceId,
+        ])
+        _ = try await receive(socket, matchingId: "stage-content")
+
+        let adapter = try runtime.locklessAuthorityForLocalMutation()
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 2, height: 2)).pngData { _ in
+            UIColor.white.setFill()
+            UIRectFill(CGRect(x: 0, y: 0, width: 2, height: 2))
+        }.base64EncodedString()
+        let sourceSurfaceId = surface.surfaceId
+        let sourcePaneId = pane.paneId
+        let revision = pane.currentEntry.revision
+        let frameId = try await adapter.transactAnnotationPublisher(surfaceId: sourceSurfaceId) { outbox in
+            try outbox.beginFrame(surfaceId: sourceSurfaceId, paneId: sourcePaneId,
+                                  contextKey: "stage-content-id", contentId: "stage-content-id",
+                                  contentType: "html", revision: revision, url: nil,
+                                  scrollOffset: .init(x: 0, y: 0),
+                                  viewport: .init(width: 2, height: 2, scale: 1),
+                                  openedAt: 100, image: image).frameId
+        }
+        runtime.setAnnotationMode(surfaceId: sourceSurfaceId, paneId: sourcePaneId,
+                                  enabled: true, fingerDrawEnabled: false)
+        for _ in 0..<100 where !pane.annotationMode { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertTrue(pane.annotationMode)
+        runtime.setAnnotationMode(surfaceId: sourceSurfaceId, paneId: sourcePaneId,
+                                  enabled: false, fingerDrawEnabled: false)
+        await stageGate.waitUntilHeld()
+        let staged = await adapter.snapshot().annotationPublisher?
+            .openFrame(surfaceId: sourceSurfaceId, paneId: sourcePaneId)
+        XCTAssertEqual(staged?.frameId, frameId)
+        XCTAssertNotNil(staged?.pendingDirectCommit)
+        XCTAssertEqual(staged?.directCommitDelivered, nil)
+
+        // Reentry is requested while the durable stage is suspended. The mode
+        // mutation waits for that task, but its request must fence the send.
+        runtime.setAnnotationMode(surfaceId: sourceSurfaceId, paneId: sourcePaneId,
+                                  enabled: true, fingerDrawEnabled: false)
+        await stageGate.release()
+        for _ in 0..<100 where !pane.annotationMode { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertTrue(pane.annotationMode)
+        let reentered = await adapter.snapshot().annotationPublisher?
+            .openFrame(surfaceId: sourceSurfaceId, paneId: sourcePaneId)
+        XCTAssertEqual(reentered?.frameId, frameId)
+        XCTAssertEqual(reentered?.commitRequested, false)
+        XCTAssertNil(reentered?.pendingDirectCommit)
+        XCTAssertNotEqual(reentered?.directCommitDelivered, true)
+
+        let sourceStroke = annotationSourceTestStroke("after-stage-reentry")
+        _ = try await adapter.transactAnnotationPublisher(surfaceId: sourceSurfaceId) { outbox in
+            try outbox.recordStroke(surfaceId: sourceSurfaceId, paneId: sourcePaneId,
+                                    stroke: sourceStroke)
+        }
+        queueAnnotationTestStroke("after-stage-reentry", on: pane)
+        runtime.setAnnotationMode(surfaceId: sourceSurfaceId, paneId: sourcePaneId,
+                                  enabled: false, fingerDrawEnabled: false)
+        var beforeFlush: [String] = []
+        var flush: [String: Any]?
+        for _ in 0..<20 {
+            let event = try await receiveNext(socket)
+            if event["op"] as? String == "event.drawing_flush" {
+                flush = event
+                break
+            }
+            beforeFlush.append(event["op"] as? String ?? "")
+        }
+        XCTAssertNotNil(flush)
+        XCTAssertFalse(beforeFlush.contains("event.annotation_committed"),
+                       "staged pre-reentry commit must not reach the direct client")
+        XCTAssertEqual((payload(flush ?? [:])["strokes"] as? [[String: Any]])?.first?["strokeId"] as? String,
+                       "after-stage-reentry")
+        _ = try await receive(socket, matchingOp: "event.annotation_committed")
+        for _ in 0..<100 {
+            if (await adapter.snapshot()).annotationPublisher?
+                .openFrame(surfaceId: sourceSurfaceId, paneId: sourcePaneId) == nil { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let source = await adapter.snapshot().annotationPublisher
+        XCTAssertNil(source?.openFrame(surfaceId: sourceSurfaceId, paneId: sourcePaneId))
+        let commits = try source?.surfaces[sourceSurfaceId]?.fifo.compactMap { entry -> [String: Any]? in
+            let record = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(entry.canonical.utf8))
+                as? [String: Any])
+            return record["kind"] as? String == "frame_commit" ? record : nil
+        }
+        XCTAssertEqual(commits?.count, 1)
+        XCTAssertEqual(commits?.first?["frameId"] as? String, frameId)
+        socket.cancel(with: .normalClosure, reason: nil)
+    }
+
     func testAnnotationFrameReentryUsesTheExplicitCommitBoundary() async throws {
         let identifier = UUID().uuidString
         let suiteName = "SurfAceAnnotationCommitReentry-\(identifier)"
@@ -907,6 +1026,30 @@ private actor SurfAceLocklessPairResponseSendGate {
         await withCheckedContinuation { continuation in
             heldWaiters.append(continuation)
         }
+    }
+
+    func release() async {
+        await releaseGate.open()
+    }
+}
+
+private actor SurfAceAnnotationCommitStageGate {
+    private var held = false
+    private var heldWaiters: [CheckedContinuation<Void, Never>] = []
+    private let releaseGate = SurfAceLocklessTestGate()
+
+    func holdOnce() async {
+        guard !held else { return }
+        held = true
+        let waiters = heldWaiters
+        heldWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        await releaseGate.wait()
+    }
+
+    func waitUntilHeld() async {
+        if held { return }
+        await withCheckedContinuation { heldWaiters.append($0) }
     }
 
     func release() async {
