@@ -75,6 +75,7 @@ struct SurfAceAnnotationOpenFrame: Codable, Equatable, Sendable {
     var pendingDirectCommit: SurfAceAnnotationDirectEvent? = nil
     var directCommitDelivered: Bool? = nil
     var lastSourceViewport: String? = nil
+    var directStrokeIds: [String]? = nil
 }
 
 struct SurfAceAnnotationSurfaceOutbox: Codable, Equatable, Sendable {
@@ -212,8 +213,9 @@ struct SurfAceAnnotationOutbox: Codable, Equatable, Sendable {
         guard var surface = surfaces[surfaceId], var frame = surface.openFrames?[String(paneId)] else {
             throw SurfAceAnnotationOutboxError.invalidState
         }
-        if frame.strokes.contains(where: { $0.strokeId == stroke.strokeId }) { return }
+        if (frame.directStrokeIds ?? frame.strokes.map(\.strokeId)).contains(stroke.strokeId) { return }
         frame.sourceStrokeCount += 1
+        frame.directStrokeIds = (frame.directStrokeIds ?? frame.strokes.map(\.strokeId)) + [stroke.strokeId]
         if let sourceViewport { frame.lastSourceViewport = sourceViewport }
         if !frame.failed && !stroke.points.isEmpty {
             frame.strokes.append(stroke)
@@ -230,6 +232,12 @@ struct SurfAceAnnotationOutbox: Codable, Equatable, Sendable {
             frame.strokes = []
             surface.openFrames?[String(paneId)] = frame
             surfaces[surfaceId] = surface
+            if try !fits(surfaceId: surfaceId, maxBytes: Self.maximumBytes,
+                         maxRecords: Self.maximumRecords) {
+                // A full publisher partition cannot keep recovery IDs. Direct
+                // drawing remains authoritative; the source records the loss.
+                surfaces[surfaceId]?.openFrames?[String(paneId)]?.directStrokeIds = nil
+            }
         }
     }
 

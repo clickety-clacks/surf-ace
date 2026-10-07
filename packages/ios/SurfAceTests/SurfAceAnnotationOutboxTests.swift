@@ -173,6 +173,30 @@ final class SurfAceAnnotationOutboxTests: XCTestCase {
         try state.validate()
     }
 
+    func testFailedSourceFrameRetainsDirectRecoveryStrokeIds() throws {
+        var outbox = try SurfAceAnnotationOutbox(clientId: "client-1", sourceEpoch: sourceEpoch)
+        _ = try outbox.beginFrame(
+            surfaceId: surfaceId, paneId: 1, contextKey: "content-1",
+            contentId: "content-1", contentType: "html", revision: 1, url: nil,
+            scrollOffset: .init(x: 0, y: 0),
+            viewport: .init(width: 2, height: 2, scale: 1), openedAt: 1, image: ""
+        )
+        let stroke = SurfAceAnnotationFrameStroke(
+            strokeId: "stroke-1", points: [.init(x: 1, y: 1, pressure: nil)],
+            bbox: .init(x: 1, y: 1, width: 0, height: 0), startedAt: 1, endedAt: 2
+        )
+        try outbox.recordStroke(surfaceId: surfaceId, paneId: 1, stroke: stroke,
+                                sourceViewport: "{\"zoomLevel\":1}")
+        let restored = try JSONDecoder().decode(SurfAceAnnotationOutbox.self,
+                                                from: JSONEncoder().encode(outbox))
+        let frame = try XCTUnwrap(restored.openFrame(surfaceId: surfaceId, paneId: 1))
+        XCTAssertTrue(frame.failed)
+        XCTAssertTrue(frame.strokes.isEmpty)
+        XCTAssertEqual(frame.directStrokeIds, ["stroke-1"])
+        XCTAssertEqual(frame.lastSourceViewport, "{\"zoomLevel\":1}")
+        try outbox.validate()
+    }
+
     func testAtOpenFrameAndStrokePositionSurviveRestartUntilExplicitClose() throws {
         var outbox = try SurfAceAnnotationOutbox(clientId: "client-1", sourceEpoch: sourceEpoch)
         let frame = try outbox.beginFrame(

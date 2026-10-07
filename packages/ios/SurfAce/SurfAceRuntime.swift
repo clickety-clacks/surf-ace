@@ -4946,7 +4946,8 @@ final class SurfAceRuntime {
         surfaceId: String, paneId: Int, frame: SurfAceAnnotationOpenFrame
     ) async -> SurfAceAnnotationDirectEvent? {
         let delivered = frame.deliveredDirectStrokeCount ?? 0
-        guard !frame.failed, frame.strokes.count == frame.sourceStrokeCount,
+        let strokeIds = frame.directStrokeIds ?? frame.strokes.map(\.strokeId)
+        guard strokeIds.count == frame.sourceStrokeCount,
               delivered < frame.sourceStrokeCount,
               let viewport = frame.lastSourceViewport,
               let authorityPane = state.liveSurfaces[surfaceId]?.panes[String(paneId)],
@@ -4958,7 +4959,7 @@ final class SurfAceRuntime {
             surfAceServerRuntimeLog("event=annotation_unstaged_flush_unavailable \(surfAceDiagnosticFields([("frame_id", frame.frameId)]))")
             return nil
         }
-        let ids = frame.strokes.dropFirst(delivered).map(\.strokeId)
+        let ids = Array(strokeIds.dropFirst(delivered))
         let strokes = ids.compactMap { decoded[$0] }
         guard strokes.count == ids.count, let first = strokes.first, let last = strokes.last else {
             surfAceServerRuntimeLog("event=annotation_unstaged_strokes_unavailable \(surfAceDiagnosticFields([("frame_id", frame.frameId)]))")
