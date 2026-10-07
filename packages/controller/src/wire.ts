@@ -37,6 +37,23 @@ export type AllocatorWindowLabel = {
   windowLabel: string;
 };
 
+export type RegistryIdentity = {
+  allocatorId: string;
+  fleetId: string;
+};
+
+export function parseRegistryIdentity(payload: unknown): RegistryIdentity {
+  const identity = (payload as { registryIdentity?: RegistryIdentity } | null)?.registryIdentity;
+  if (!identity ||
+      typeof identity.allocatorId !== "string" ||
+      !/^alloc_[A-Za-z0-9._:-]{3,64}$/.test(identity.allocatorId) ||
+      typeof identity.fleetId !== "string" ||
+      !/^[A-Za-z0-9._:-]{1,128}$/.test(identity.fleetId)) {
+    throw new Error("registry_identity_missing_or_invalid");
+  }
+  return { allocatorId: identity.allocatorId, fleetId: identity.fleetId };
+}
+
 type PendingRequest = {
   reject: (error: Error) => void;
   resolve: (response: ControllerWireEnvelope) => void;
@@ -128,6 +145,15 @@ export class PublicControllerWireClient {
 
   isOpen(): boolean {
     return this.socket?.readyState === WebSocket.OPEN;
+  }
+
+  async readRegistryIdentity(): Promise<RegistryIdentity> {
+    await this.connect();
+    const response = await this.request("fleet.topology");
+    if (response.ok !== true) {
+      throw new Error(`registry_identity_unavailable:${response.error?.code ?? "unknown"}`);
+    }
+    return parseRegistryIdentity(response.payload);
   }
 
   onEvent(listener: (event: ControllerWireEnvelope) => void): () => void {
