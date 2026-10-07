@@ -1137,6 +1137,9 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         XCTAssertEqual(closed["image"] as? String, image)
         XCTAssertEqual((closed["strokes"] as? [[String: Any]])?.count, 1)
         XCTAssertNil(publisher.openFrame(surfaceId: surfaceId, paneId: paneId))
+        for entry in entries {
+            print("SURF_ACE_IOS_ANNOTATION_RECORD_BASE64:\(Data(entry.canonical.utf8).base64EncodedString())")
+        }
     }
 
     func testLocklessZeroLiveSurfaceRestoresExactSurfaceAndPaneIdentity() async throws {
