@@ -1,7 +1,10 @@
 # Surf Ace
 
 Surf Ace is a standalone surface system for coordinating Linux, macOS, and
-iPadOS clients. The v0.2.6 release assets include a Linux registry/server
+iPadOS clients. The v0.2.7 release adds a durable, event-driven annotation
+journal: any agent or script can run the native CLI's foreground
+`annotations watch` or `resume` against the registry and acknowledge its own
+cursor. The v0.2.7 release assets include a Linux registry/server
 package, the Rust CLI, and Linux/macOS desktop clients. The iPadOS client is
 built and signed separately; it is not part of the hosted asset set.
 
@@ -66,22 +69,22 @@ separate event and is not part of screenshot capture.
 
 ## Release assets
 
-The v0.2.6 release contains six versioned assets, a manifest, and
+The v0.2.7 release contains six versioned assets, a manifest, and
 `SHA256SUMS`, which covers all six assets plus the manifest:
 
 The published v0.2.5 asset filenames retain their legacy `tightbeam` segment
-and existing download links. v0.2.6 uses Surf Ace names. The desktop apps,
+and existing download links. v0.2.7 uses Surf Ace names. The desktop apps,
 registry, and CLI do not require Tightbeam.
 
 | Asset | Platform and purpose |
 |---|---|
-| `surf-ace-server-linux-x86_64-v0.2.6.tar.gz` | Linux registry/server, CLI, schemas, and operations guide |
-| `surf-ace-cli-linux-x86_64-v0.2.6.tar.gz` | Linux CLI |
-| `surf-ace-electron-linux-x86_64-v0.2.6.zip` | Linux desktop client |
-| `surf-ace-cli-macos-arm64-v0.2.6.tar.gz` | macOS arm64 CLI |
-| `surf-ace-electron-macos-arm64-v0.2.6.zip` | macOS arm64 desktop client |
-| `surf-ace-skill-v0.2.6.md` | Optional Surf Ace skill for Tightbeam agents |
-| `surf-ace-v0.2.6-manifest.json` | Source, tooling, dependency, and asset identity |
+| `surf-ace-server-linux-x86_64-v0.2.7.tar.gz` | Linux registry/server, CLI, schemas, and operations guide |
+| `surf-ace-cli-linux-x86_64-v0.2.7.tar.gz` | Linux CLI |
+| `surf-ace-electron-linux-x86_64-v0.2.7.zip` | Linux desktop client |
+| `surf-ace-cli-macos-arm64-v0.2.7.tar.gz` | macOS arm64 CLI |
+| `surf-ace-electron-macos-arm64-v0.2.7.zip` | macOS arm64 desktop client |
+| `surf-ace-skill-v0.2.7.md` | Optional Surf Ace skill for Tightbeam agents |
+| `surf-ace-v0.2.7-manifest.json` | Source, tooling, dependency, and asset identity |
 | `SHA256SUMS` | Checksums for the six assets and manifest |
 
 When published, download assets from the matching Surf Ace GitHub release.
@@ -97,12 +100,12 @@ release.
 ## Testing and participant identity
 
 Before a release smoke uses any server, CLI, or client, it records and verifies
-that participant's exact v0.2.6 asset name, byte size, SHA-256, product commit,
+that participant's exact v0.2.7 asset name, byte size, SHA-256, product commit,
 and tooling commit. It rehashes the archive bytes before use and stops before
 launch or CLI operations if any participant does not match. Checking the server
 or CLI does not establish the client's identity, and vice versa. For Electron,
 the packaged `@surf-ace/electron` version and the running
-`electron.app.getVersion()` value must both be `0.2.6`; the runtime value is
+`electron.app.getVersion()` value must both be `0.2.7`; the runtime value is
 checked before CLI operations. Server and CLI archives do not expose a separate
 version command, so their identity comes from the versioned asset name, manifest
 and checksum rather than inferred command output.
@@ -112,7 +115,7 @@ and checksum rather than inferred command output.
 This repository includes an optional Surf Ace skill for Tightbeam at
 [`integrations/tightbeam/skills/surf-ace/SKILL.md`](./integrations/tightbeam/skills/surf-ace/SKILL.md).
 The same file is published separately as
-`surf-ace-skill-v0.2.6.md` and is covered by the release manifest and
+`surf-ace-skill-v0.2.7.md` and is covered by the release manifest and
 `SHA256SUMS`. It teaches an agent to use the standalone `surf-ace` CLI; it is
 guidance, not a plugin, a separate executable, or a resident service.
 
@@ -133,7 +136,7 @@ in `~/.local/bin` and places it on `PATH`. With the matching Linux CLI asset
 and `SHA256SUMS` already downloaded and verified:
 
 ```sh
-VERSION=0.2.6
+VERSION=0.2.7
 INSTALL_ROOT="$HOME/.local/opt/surf-ace/$VERSION"
 BIN_DIR="$HOME/.local/bin"
 mkdir -p "$INSTALL_ROOT" "$BIN_DIR"
@@ -150,14 +153,14 @@ surf-ace \
 ```
 
 The `readlink` output should point into the selected version directory, for
-example `~/.local/opt/surf-ace/0.2.6/surf-ace-cli/bin/surf-ace`. Confirm the
-asset name and manifest both identify `0.2.6`; the CLI itself has no version
+example `~/.local/opt/surf-ace/0.2.7/surf-ace-cli/bin/surf-ace`. Confirm the
+asset name and manifest both identify `0.2.7`; the CLI itself has no version
 command, so do not use `surf-ace --version`. Add `~/.local/bin` to your shell
 startup file if you want the command on `PATH` in future sessions. To roll
 back, change the symlink to a previously verified version directory.
 
 For a macOS arm64 CLI, use
-`surf-ace-cli-macos-arm64-v0.2.6.tar.gz`; its archive has the same
+`surf-ace-cli-macos-arm64-v0.2.7.tar.gz`; its archive has the same
 `surf-ace-cli/bin/surf-ace` executable path, and use the same versioned install,
 symlink, and `PATH` steps with that archive. Extract a Linux desktop ZIP to a
 user-owned directory and launch `Surf Ace/surf-ace`. Extract the macOS desktop
@@ -172,7 +175,7 @@ create a database, or migrate a serving database. Follow the included
 and start the packaged foreground server:
 
 ```sh
-SERVER_ROOT="$HOME/.local/opt/surf-ace/server/0.2.6/surf-ace-server"
+SERVER_ROOT="$HOME/.local/opt/surf-ace/server/0.2.7/surf-ace-server"
 SERVER_CONFIG="$HOME/.config/surf-ace/server.json"
 "$SERVER_ROOT/bin/surf-ace-server" validate --config "$SERVER_CONFIG"
 "$SERVER_ROOT/bin/surf-ace-server" start --config "$SERVER_CONFIG"

@@ -525,12 +525,12 @@ test("Tightbeam macOS smoke plans one exact candidate profile", async (t) => {
   assert.equal(plan[0].identityFile, path.join(electronLaunchConfig(plan[0].home, plan[0].port).userDataDir, "surface-identity.json"));
 });
 
-test("smoke participant identity gate binds server, CLI, and client to exact v0.2.6 package bytes", () => {
+test("smoke participant identity gate binds server, CLI, and client to exact v0.2.7 package bytes", () => {
   const valid = smokeParticipantIdentities("linux");
   assert.deepEqual(assertTightbeamSmokeParticipantIdentities(valid, "linux").map(({ participant, version }) => ({ participant, version })), [
-    { participant: "server", version: "0.2.6" },
-    { participant: "cli", version: "0.2.6" },
-    { participant: "client", version: "0.2.6" },
+    { participant: "server", version: "0.2.7" },
+    { participant: "cli", version: "0.2.7" },
+    { participant: "client", version: "0.2.7" },
   ]);
   for (const participant of ["server", "cli", "client"]) {
     const mismatched = valid.map((identity) => identity.participant === participant
@@ -1285,17 +1285,17 @@ test("Linux fresh-install raw CLI evidence binds two isolated roots to their cli
   ], bindings), /linux_fresh_install_cli_state_root_not_bound/);
 });
 
-test("Surf Ace v0.2.6 binds the landed resilience candidate, six hosted assets, and tooling identity", () => {
-  assert.equal(TIGHTBEAM_TOOLING_TAG, "surf-ace-release-tooling-v0.2.6-r1");
+test("Surf Ace v0.2.7 binds the landed resilience candidate, six hosted assets, and tooling identity", () => {
+  assert.equal(TIGHTBEAM_TOOLING_TAG, "surf-ace-release-tooling-v0.2.7-r1");
   assert.deepEqual(TIGHTBEAM, {
-    candidateCommit: "69023a9a291d8196a7cda7bd7ab205c1f9e7d108",
-    sourceTag: "surf-ace-v0.2.6-r1", version: "0.2.6", channel: "surf-ace", toolingTag: TIGHTBEAM_TOOLING_TAG,
-    assets: ["surf-ace-server-linux-x86_64-v0.2.6.tar.gz","surf-ace-cli-linux-x86_64-v0.2.6.tar.gz","surf-ace-electron-linux-x86_64-v0.2.6.zip","surf-ace-cli-macos-arm64-v0.2.6.tar.gz","surf-ace-electron-macos-arm64-v0.2.6.zip",TIGHTBEAM_SKILL_ASSET],
-    manifest: "surf-ace-v0.2.6-manifest.json", checksums: "SHA256SUMS",
+    candidateCommit: "1221ffb7c2c78607f6496d7c89046805f7f78c67",
+    sourceTag: "surf-ace-v0.2.7-r1", version: "0.2.7", channel: "surf-ace", toolingTag: TIGHTBEAM_TOOLING_TAG,
+    assets: ["surf-ace-server-linux-x86_64-v0.2.7.tar.gz","surf-ace-cli-linux-x86_64-v0.2.7.tar.gz","surf-ace-electron-linux-x86_64-v0.2.7.zip","surf-ace-cli-macos-arm64-v0.2.7.tar.gz","surf-ace-electron-macos-arm64-v0.2.7.zip",TIGHTBEAM_SKILL_ASSET],
+    manifest: "surf-ace-v0.2.7-manifest.json", checksums: "SHA256SUMS",
   });
-  assert.equal(TIGHTBEAM_SKILL_ASSET, "surf-ace-skill-v0.2.6.md");
+  assert.equal(TIGHTBEAM_SKILL_ASSET, "surf-ace-skill-v0.2.7.md");
   assert.equal(TIGHTBEAM.assets.length, 6);
-  assert.equal(TIGHTBEAM.sourceTag, "surf-ace-v0.2.6-r1");
+  assert.equal(TIGHTBEAM.sourceTag, "surf-ace-v0.2.7-r1");
   assert.equal(TOOLCHAINS.macosRunner, "xcode-27");
   assert.equal(TOOLCHAINS.xcode, "27.0");
   assert.deepEqual(TIGHTBEAM_ROUTING, {
@@ -1311,8 +1311,8 @@ test("Linux fresh-install fixture binds its identity gate to the release candida
 
   assert.match(fixture, /import \{ TIGHTBEAM \} from "\.\/tightbeam-release-config\.mjs";/);
   assert.match(fixture, /options\.candidateCommit !== TIGHTBEAM\.candidateCommit \|\| options\.expectedVersion !== TIGHTBEAM\.version/);
-  assert.equal(TIGHTBEAM.candidateCommit, "69023a9a291d8196a7cda7bd7ab205c1f9e7d108");
-  assert.match(operations, /applies only to product commit\s+`69023a9a291d8196a7cda7bd7ab205c1f9e7d108`/);
+  assert.equal(TIGHTBEAM.candidateCommit, "1221ffb7c2c78607f6496d7c89046805f7f78c67");
+  assert.match(operations, /applies only to product commit\s+`1221ffb7c2c78607f6496d7c89046805f7f78c67`/);
   for (const source of [fixture, operations]) {
     assert.doesNotMatch(source, /44421f305516ff3b8b305bc2df24c0f4c40b65c0/);
   }
@@ -1394,7 +1394,7 @@ test("Tightbeam manifest assembles the six hosted assets including the exact ski
   }), /public_file_set_mismatch/);
 });
 
-test("v0.2.6 packages the skill from the tooling identity, not the product checkout", async (t) => {
+test("v0.2.7 packages the skill from the tooling identity, not the product checkout", async (t) => {
   const outputDir = await temporary(t);
   const toolingSkillDir = await temporary(t);
   const productSkillDir = await temporary(t);
@@ -1441,6 +1441,7 @@ test("Tightbeam Linux stage contains only the standalone CLI, callable server cl
     "packages/electron/dist/schema.json": "{}\n",
     "packages/allocator/sql/001_allocator.sql": "-- schema\n",
     "packages/allocator/sql/002_fleet_panes.sql": "-- migration\n",
+    "packages/allocator/sql/003_annotation_journal.sql": "-- annotation migration\n",
   };
   for (const [relative, contents] of Object.entries(files)) {
     const file = path.join(source, relative);
@@ -1464,6 +1465,7 @@ test("Tightbeam Linux stage contains only the standalone CLI, callable server cl
   assert.match(guide, /startCentralServer\(config, name\)/);
   assert.match(guide, /await service\.close\(\)/);
   assert.match(guide, /already-provisioned PostgreSQL (?:16 )?custody/);
+  assert.match(guide, /003_annotation_journal\.sql/);
   assert.match(guide, /foreground launcher/);
   assert.match(guide, /does not install or enable a service/);
   assert.doesNotMatch(actual.join("\n"), /surf-ace-runtime|controller\/dist\/main\.js/);
@@ -2242,7 +2244,13 @@ test("fresh-install Linux qualification requires direct current content, wrong-s
     migrationEvidence: {
       backupSha256: "a".repeat(64), headHashBefore: "b".repeat(64),
       headHashAfter: "b".repeat(64), restoredHeadHash: "b".repeat(64),
-      headSeqBefore: 1, headSeqAfter: 1, writerCanClaim: true, witnessSynchronized: true,
+      headSeqBefore: 1, headSeqAfter: 1, annotationEpoch: "e".repeat(32),
+      writerCanClaim: true, witnessSynchronized: true,
+    },
+    annotationJournal: {
+      status: "verified", journalEpoch: "e".repeat(32), consumerId: "release-test",
+      recordSourceEventId: "event-test", ackCursor: `ann1:${"e".repeat(32)}:1`,
+      acceptedCursor: { epoch: "e".repeat(32), sequence: "1" },
     },
     wrongSurfaceRejection: {
       directClientEndpoint,
@@ -2336,6 +2344,10 @@ test("fresh-install Linux qualification requires direct current content, wrong-s
     ...evidence,
     wrongSurfaceRejection: { ...evidence.wrongSurfaceRejection, status: "accepted" },
   }), /fresh_install_wrong_surface_not_rejected/);
+  assert.throws(() => validateTightbeamFreshInstallState({
+    ...evidence,
+    annotationJournal: { ...evidence.annotationJournal, ackCursor: null },
+  }), /fresh_install_annotation_journal_unverified/);
   assert.throws(() => validateTightbeamFreshInstallState({
     ...evidence,
     afterRestart: phase({
@@ -2460,7 +2472,13 @@ test("Linux fresh-install acceptance is based on direct current-content evidence
     migrationEvidence: {
       backupSha256: "a".repeat(64), headHashBefore: "b".repeat(64),
       headHashAfter: "b".repeat(64), restoredHeadHash: "b".repeat(64),
-      headSeqBefore: 1, headSeqAfter: 1, writerCanClaim: true, witnessSynchronized: true,
+      headSeqBefore: 1, headSeqAfter: 1, annotationEpoch: "e".repeat(32),
+      writerCanClaim: true, witnessSynchronized: true,
+    },
+    annotationJournal: {
+      status: "verified", journalEpoch: "e".repeat(32), consumerId: "release-test",
+      recordSourceEventId: "event-test", ackCursor: `ann1:${"e".repeat(32)}:1`,
+      acceptedCursor: { epoch: "e".repeat(32), sequence: "1" },
     },
     wrongSurfaceRejection: {
       directClientEndpoint: "ws://127.0.0.1:19001/ws",
@@ -2592,7 +2610,13 @@ test("Linux fresh-install state driver binds candidate-only inputs and packaged 
     migrationEvidence: {
       backupSha256: "a".repeat(64), headHashBefore: "b".repeat(64),
       headHashAfter: "b".repeat(64), restoredHeadHash: "b".repeat(64),
-      headSeqBefore: 1, headSeqAfter: 1, writerCanClaim: true, witnessSynchronized: true,
+      headSeqBefore: 1, headSeqAfter: 1, annotationEpoch: "e".repeat(32),
+      writerCanClaim: true, witnessSynchronized: true,
+    },
+    annotationJournal: {
+      status: "verified", journalEpoch: "e".repeat(32), consumerId: "release-test",
+      recordSourceEventId: "event-test", ackCursor: `ann1:${"e".repeat(32)}:1`,
+      acceptedCursor: { epoch: "e".repeat(32), sequence: "1" },
     },
     wrongSurfaceRejection: {
       directClientEndpoint: initialEndpoint,
@@ -2917,14 +2941,14 @@ test("Linux smoke fixture starts through the product TSX loader and rejects reti
 });
 
 
-test("v0.2.6 standalone specification and release gates bind the product and all public assets", async () => {
-  const specification = await fs.readFile(path.join(repository, "docs/release/surf-ace-standalone-v0.2.6.md"), "utf8");
+test("v0.2.7 standalone specification and release gates bind the product and all public assets", async () => {
+  const specification = await fs.readFile(path.join(repository, "docs/release/surf-ace-standalone-v0.2.7.md"), "utf8");
   const readme = await fs.readFile(path.join(repository, "README.md"), "utf8");
   const skill = await fs.readFile(path.join(repository, "integrations/tightbeam/skills/surf-ace/SKILL.md"), "utf8");
   const workflowPath = path.join(repository, ".github/workflows/release-tightbeam.yml");
   const workflow = await fs.readFile(workflowPath, "utf8");
   assert.match(specification, /Proposed product source: tag/);
-  assert.match(specification, /69023a9a291d8196a7cda7bd7ab205c1f9e7d108/);
+  assert.match(specification, /1221ffb7c2c78607f6496d7c89046805f7f78c67/);
   assert.match(specification, /No old-version participant/);
   assert.match(specification, /surf-ace-release-tooling-v0\.2\.6/);
   assert.match(specification, /surf-ace-v0\.2\.6/);
@@ -2954,7 +2978,7 @@ test("v0.2.6 standalone specification and release gates bind the product and all
   for (const match of workflow.matchAll(/^\s*uses:\s*([^\s]+)$/gm)) assert.match(match[1], /@[0-9a-f]{40}$/);
   assert.match(workflow, /run_smoke:[\s\S]*?default: false/);
   assert.match(workflow, /publish_release:[\s\S]*?default: false/);
-  assert.match(workflow, /PRODUCT_COMMIT: 69023a9a291d8196a7cda7bd7ab205c1f9e7d108/);
+  assert.match(workflow, /PRODUCT_COMMIT: 1221ffb7c2c78607f6496d7c89046805f7f78c67/);
   assert.match(workflow, /PRODUCT_TAG: surf-ace-v0\.2\.6-r1/);
   assert.match(workflow, /TOOLING_TAG: surf-ace-release-tooling-v0\.2\.6-r1/);
   assert.match(workflow, /GITHUB_EVENT_NAME/);
@@ -3039,17 +3063,17 @@ test("v0.2.6 standalone specification and release gates bind the product and all
   assert.ok(TIGHTBEAM_TEST_COMMANDS.some((command) => command.startsWith("xcodebuild test ")));
 });
 
-test("v0.2.6 release smoke gates bind only matching candidate participants", async () => {
+test("v0.2.7 release smoke gates bind only matching candidate participants", async () => {
   const workflow = await fs.readFile(path.join(repository, ".github/workflows/release-tightbeam.yml"), "utf8");
   const smoke = await fs.readFile(path.join(repository, "scripts/release/smoke-tightbeam-release.mjs"), "utf8");
   const fixture = await fs.readFile(path.join(repository, "scripts/release/tightbeam-state-smoke-fixture.ts"), "utf8");
-  const specification = await fs.readFile(path.join(repository, "docs/release/surf-ace-standalone-v0.2.6.md"), "utf8");
+  const specification = await fs.readFile(path.join(repository, "docs/release/surf-ace-standalone-v0.2.7.md"), "utf8");
 
   assert.equal(Object.hasOwn(TIGHTBEAM, "baselineCommit"), false);
   for (const input of [workflow, smoke]) assert.doesNotMatch(input, /cf91ef1baab26d6045fac5300487c29d0ddf332d/);
   assert.doesNotMatch(workflow, /build-smoke-baseline|BASELINE_(?:BACKEND|ELECTRON)|baseline-(?:commit|electron|root)/i);
   assert.doesNotMatch(smoke, /SURF_ACE_TIGHTBEAM_BASELINE|function smokeLinux\(|runLinuxStateDriver|validateTightbeamStateSequence/);
-  assert.match(workflow, /--candidate-commit 69023a9a291d8196a7cda7bd7ab205c1f9e7d108/);
+  assert.match(workflow, /--candidate-commit 1221ffb7c2c78607f6496d7c89046805f7f78c67/);
   assert.match(smoke, /tightbeam-\$\{channel\}-v023-candidate-write/);
   assert.match(smoke, /inspectScreenshotPixels\(visible\.capture\.image, expectedScreenshotColors\)/);
   assert.doesNotMatch(`${smoke}\n${fixture}`, /includeImage/);

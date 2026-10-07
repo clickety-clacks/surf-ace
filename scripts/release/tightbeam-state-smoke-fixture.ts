@@ -450,6 +450,117 @@ async function centralRequest(url: string, op: string, payload: unknown) {
   }
 }
 
+async function packagedAnnotationJournalSmoke(
+  registryEndpoint: string,
+  cliBinary: string,
+  stateRoot: string,
+  clientIdValue: string,
+  surfaceId: string,
+  paneId: number,
+  contentId: string,
+) {
+  const consumerId = `release-${randomUUID()}`;
+  const cliArgs = ["--registry", registryEndpoint, "--state-root", stateRoot, "annotations"];
+  const listeners: Array<ReturnType<typeof spawn>> = [];
+  const stream = (action: "watch" | "resume") => {
+    const child = spawn(cliBinary, [...cliArgs, action, "--consumer-id", consumerId],
+      { stdio: ["ignore", "pipe", "pipe"] });
+    listeners.push(child);
+    const lines: any[] = [];
+    let buffer = "";
+    let stderr = "";
+    let exited: string | null = null;
+    let parseError: string | null = null;
+    child.stdout.on("data", (chunk) => {
+      buffer += String(chunk);
+      for (let newline = buffer.indexOf("\n"); newline >= 0; newline = buffer.indexOf("\n")) {
+        const line = buffer.slice(0, newline);
+        buffer = buffer.slice(newline + 1);
+        try { lines.push(JSON.parse(line)); }
+        catch (error) { parseError = String(error); }
+      }
+    });
+    child.stderr.on("data", (chunk) => { stderr += String(chunk); });
+    child.on("error", (error) => { exited = String(error); });
+    child.on("exit", (code, signal) => { exited = `${code ?? signal ?? "unknown"}`; });
+    const waitLines = async (count: number) => {
+      await waitFor(async () => {
+        if (parseError) throw new Error(`annotation_${action}_invalid_ndjson:${parseError}`);
+        if (exited && lines.length < count) throw new Error(`annotation_${action}_exited:${exited}:${stderr}`);
+        return lines.length >= count;
+      }, `annotation_${action}_${count}_lines`, 10_000);
+      return lines;
+    };
+    return { waitLines };
+  };
+  const socket = new WebSocket(registryEndpoint);
+  try {
+    const watch = stream("watch");
+    const subscription = (await watch.waitLines(1))[0];
+    if (subscription?.type !== "annotation.subscription" || subscription.consumerId !== consumerId) {
+      throw new Error("annotation_packaged_watch_subscription_invalid");
+    }
+    await new Promise<void>((resolve, reject) => {
+      socket.once("open", resolve);
+      socket.once("error", reject);
+    });
+    const request = async (op: string, payload: unknown) => {
+      const id = `annotation_release_${randomUUID()}`;
+      return await new Promise<any>((resolve, reject) => {
+        const timeout = setTimeout(() => { socket.off("message", onMessage); reject(new Error(`${op}_timeout`)); }, 10_000);
+        const onMessage = (data: any) => {
+          const value = JSON.parse(data.toString());
+          if (value.id !== id) return;
+          clearTimeout(timeout);
+          socket.off("message", onMessage);
+          if (value.ok !== true) reject(new Error(`${op}_failed:${JSON.stringify(value.error)}`));
+          else resolve(value.payload);
+        };
+        socket.on("message", onMessage);
+        socket.send(JSON.stringify({ id, op, payload, sentAt: Date.now(), type: "request", v: 1 }));
+      });
+    };
+    const hello = await request("annotation.hello", { protocolVersion: 1, role: "publisher" });
+    if (!/^[0-9a-f]{32}$/.test(hello?.journalEpoch ?? "")) throw new Error("annotation_packaged_hello_invalid");
+    const sourceEventId = `event-${randomUUID()}`;
+    const record = {
+      protocolVersion: 1, clientId: clientIdValue, sourceEpoch: randomBytes(16).toString("hex"),
+      surfaceId, paneId, frameId: `frame-${randomUUID()}`, sourceSequence: "1",
+      sourceEventId, kind: "live_delta", contentId, revision: 1, contentType: "html",
+      viewport: { scrollOffset: { x: 0, y: 0 }, visibleRect: { x: 0, y: 0, width: 10, height: 10 },
+        contentSize: { width: 10, height: 10 }, zoomLevel: 1 },
+      sourceTimestamp: new Date().toISOString(), payload: { strokes: [{ strokeId: `stroke-${randomUUID()}` }] },
+    };
+    const accepted = await request("annotation.ingest", { record });
+    const delivered = (await watch.waitLines(2))[1];
+    const cursor = delivered?.payload?.serverCursor;
+    if (delivered?.op !== "annotation.record" ||
+        delivered?.payload?.record?.sourceEventId !== sourceEventId ||
+        typeof cursor !== "string" || !/^ann1:[0-9a-f]{32}:1$/.test(cursor)) {
+      throw new Error("annotation_packaged_watch_delivery_invalid");
+    }
+    const acknowledged = JSON.parse((await command(cliBinary,
+      [...cliArgs, "ack", "--consumer-id", consumerId, "--cursor", cursor])).stdout);
+    if (acknowledged?.ackCursor !== cursor) throw new Error("annotation_packaged_ack_invalid");
+    const resumed = stream("resume");
+    const resumeSubscription = (await resumed.waitLines(1))[0];
+    if (resumeSubscription?.type !== "annotation.subscription" || resumeSubscription?.ackCursor !== cursor) {
+      throw new Error("annotation_packaged_resume_invalid");
+    }
+    const retired = JSON.parse((await command(cliBinary,
+      [...cliArgs, "retire", "--consumer-id", consumerId, "--expect-ack", cursor,
+        "--discard-unacknowledged"])).stdout);
+    if (retired?.type !== "annotation.consumer_retired") throw new Error("annotation_packaged_retire_invalid");
+    return { ackCursor: cursor, consumerId, journalEpoch: hello.journalEpoch,
+      recordSourceEventId: sourceEventId, acceptedCursor: accepted?.serverCursor ?? null,
+      status: "verified" };
+  } finally {
+    if (socket.readyState === WebSocket.OPEN) socket.close();
+    else socket.terminate();
+    for (const child of listeners) child.kill();
+  }
+}
+
 async function waitForRegisteredSurface(endpoint: string, clientIdValue: string, surfaceId: string, label: string) {
   let topology: any;
   let client: any;
@@ -1028,6 +1139,7 @@ function summarizeFreshInstallPhase(options: {
 async function packagedV023MigrationSmoke(options: Options) {
   const baselineSchema = path.join(options.productSourceDir, "scripts/release/fixtures/001_allocator_v023.sql");
   const migration = path.join(options.candidateRoot, "schemas/allocator/002_fleet_panes.sql");
+  const annotationMigration = path.join(options.candidateRoot, "schemas/allocator/003_annotation_journal.sql");
   const cluster = await startCluster(path.join(options.stateRoot, "v023-migration-primary"), baselineSchema, false);
   const backup = path.join(options.stateRoot, "v023-pre-migration.dump");
   let stage: Cluster | undefined;
@@ -1066,6 +1178,14 @@ async function packagedV023MigrationSmoke(options: Options) {
     }
     await command(path.join(cluster.postgresBin, "psql"), [cluster.adminUrl, "-v", "ON_ERROR_STOP=1", "-f", migration]);
     await command(path.join(cluster.postgresBin, "psql"), [cluster.adminUrl, "-v", "ON_ERROR_STOP=1", "-f", migration]);
+    await command(path.join(cluster.postgresBin, "psql"), [cluster.adminUrl, "-v", "ON_ERROR_STOP=1", "-f", annotationMigration]);
+    const annotationRows = await postgresQuery(cluster.adminUrl, `
+      SELECT epoch, head_sequence::text AS "headSequence"
+      FROM surf_ace_allocator.annotation_journal_head WHERE fleet_id = $1
+    `, [cluster.config.fleetId]) as Array<{ epoch: string; headSequence: string }>;
+    if (!/^[0-9a-f]{32}$/.test(annotationRows[0]?.epoch ?? "") || annotationRows[0]?.headSequence !== "0") {
+      throw new Error("v023_migration_annotation_head_invalid");
+    }
     const after = await allocatorDiagnostics(cluster.adminUrl, cluster.config.fleetId);
     if (after.primaryHeadSeq !== before.primaryHeadSeq ||
         after.primaryHeadHash !== before.primaryHeadHash ||
@@ -1100,6 +1220,7 @@ async function packagedV023MigrationSmoke(options: Options) {
       headSeqBefore: before.primaryHeadSeq,
       headSeqAfter: after.primaryHeadSeq,
       restoredHeadHash: restored.primaryHeadHash,
+      annotationEpoch: annotationRows[0].epoch,
       writerCanClaim: true,
       witnessSynchronized: true,
     };
@@ -1141,6 +1262,8 @@ async function freshInstallMain(options: Options) {
       { onAttempt: (read) => { lastCaptureImage = resultPayload(read.captureOutput)?.image; } },
     );
   try {
+    await command(path.join(cluster.postgresBin, "psql"), [cluster.adminUrl, "-v", "ON_ERROR_STOP=1", "-f",
+      path.join(options.candidateRoot, "schemas/allocator/003_annotation_journal.sql")]);
     registryProcess = await startPackagedServer(registryLauncher, registryConfig, cluster.root, "fresh-install-registry");
     const registryEndpoint = registryProcess.endpoint;
     const initialRegistryHealth = registryProcess.health;
@@ -1171,11 +1294,13 @@ async function freshInstallMain(options: Options) {
       SELECT
         to_regclass('surf_ace_allocator.fleets') IS NOT NULL AS has_fleets,
         to_regclass('surf_ace_allocator.custody_journal') IS NOT NULL AS has_journal,
+        to_regclass('surf_ace_allocator.annotation_journal_head') IS NOT NULL AS has_annotation_head,
         to_regprocedure('surf_ace_allocator.read_accepted_state(text)') IS NOT NULL AS has_read_state,
         to_regprocedure('surf_ace_allocator.validate_journal(text)') IS NOT NULL AS has_journal_validator
     `) as Array<Record<string, boolean>>;
     const schema = schemaRows[0];
-    if (!schema?.has_fleets || !schema.has_journal || !schema.has_read_state || !schema.has_journal_validator) {
+    if (!schema?.has_fleets || !schema.has_journal || !schema.has_annotation_head ||
+        !schema.has_read_state || !schema.has_journal_validator) {
       throw new Error("fresh_install_postgres_schema_contract_mismatch");
     }
     const directList = await cli(options.cliBinary, cliStateRoot, "list", {}, app.endpoint);
@@ -1285,6 +1410,10 @@ async function freshInstallMain(options: Options) {
       registryEndpoint,
       sourceCommit: options.candidateCommit,
     });
+    const annotationJournal = await packagedAnnotationJournalSmoke(
+      registryEndpoint, options.cliBinary, path.join(options.stateRoot, "annotation-cli"),
+      electronClientId, surfaceId, paneId, contentId,
+    );
     const allocatorProjectionBeforeRestart = await allocatorDatabaseProjection(cluster.adminUrl, cluster.config.fleetId);
 
     const registryShutdownBeforeRestart = await registryProcess.stop();
@@ -1482,6 +1611,7 @@ async function freshInstallMain(options: Options) {
     };
     const stateSequence = {
       afterRestart,
+      annotationJournal,
       expectedContentId: contentId,
       expectedScreenshotColors,
       expectedVersion: options.expectedVersion,

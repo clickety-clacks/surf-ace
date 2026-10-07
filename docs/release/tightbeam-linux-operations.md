@@ -1,7 +1,7 @@
 # Surf Ace standalone Linux server operations
 
-This v0.2.6 runbook applies only to product commit
-`69023a9a291d8196a7cda7bd7ab205c1f9e7d108` and PostgreSQL 16. It assumes a
+This v0.2.7 runbook applies only to product commit
+`1221ffb7c2c78607f6496d7c89046805f7f78c67` and PostgreSQL 16. It assumes a
 single configured allocator fleet, one server process at a time, and an
 already-provisioned PostgreSQL primary with its configured synchronous witness.
 The archive never installs a service or provisions, upgrades, or changes a host.
@@ -72,14 +72,22 @@ current/no-loss reads.
 ## Schema and upgrade boundary
 
 For an empty PostgreSQL 16 fleet, initialize with
-`schemas/allocator/001_allocator.sql`. The v0.2.4 release introduced
+`schemas/allocator/001_allocator.sql`, then apply
+`schemas/allocator/003_annotation_journal.sql` while the registry is stopped
+and its writer lease is released. The v0.2.4 release introduced
 `schemas/allocator/002_fleet_panes.sql` for v0.2.3 fleets. It adds the separate
 monotonic pane counter and journal-backed claim function without changing the
 existing journal head. An already migrated v0.2.4 fleet must retain its pane
 state; do not reapply 002. If upgrading directly from v0.2.3, stop the
 allocator and verify the writer lease is released before applying 002. The
 migration refuses an active lease, an in-progress restore, or an unsupported
-state version. The v0.2.6 server does not auto-migrate.
+state version. For an existing v0.2.6 fleet with pane state, apply only 003
+after a verified backup and staged restore. Migration 003 creates the
+annotation journal and independent consumer state; it does not allocate pane
+numbers or advance the allocator's accepted journal head. It refuses an active
+lease, an in-progress restore, or an unsupported state version. The v0.2.7
+server does not auto-migrate; annotation watch and publisher operations remain
+unavailable until 003 is verified.
 
 Before touching the serving database, capture a PostgreSQL base backup and a
 schema/data `pg_dump` in a restricted run directory. Restore the backup into
@@ -87,9 +95,11 @@ a disposable staging cluster with its own witness and apply 002 there first;
 verify the pre- and post-migration head sequence/hash are identical, the
 accepted-state pane fence starts at 1, pane claims advance it, and restart and
 restore do not reuse a number. Run the two-client smoke against that staging
-allocator. After production migration, preserve the backup until the v0.2.6
-qualification settles. If migration fails before commit, PostgreSQL rolls it
-back atomically. If a later rollback is required, stop the writer and restore
+allocator. After production migration, preserve the backup until the v0.2.7
+qualification settles. Stage and verify 003 with the same stopped-writer backup
+and head/fence comparison before applying it to the serving fleet. If a
+migration fails before commit, PostgreSQL rolls it back atomically. If a later
+rollback is required, stop the writer and restore
 the verified pre-migration base backup into a new cluster; never drop the pane
 column or rewind the live counter in place.
 
