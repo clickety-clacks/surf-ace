@@ -204,6 +204,50 @@ final class SurfAceAnnotationOutboxTests: XCTestCase {
         outbox.closeFrame(surfaceId: surfaceId, paneId: 1)
         XCTAssertNil(outbox.openFrame(surfaceId: surfaceId, paneId: 1))
     }
+
+    func testDirectBoundaryEvidenceSurvivesEachCrashPoint() throws {
+        var outbox = try SurfAceAnnotationOutbox(clientId: "client-1", sourceEpoch: sourceEpoch)
+        _ = try outbox.beginFrame(
+            surfaceId: surfaceId, paneId: 1, contextKey: "content-1", contentId: "content-1",
+            url: nil, scrollOffset: .init(x: 0, y: 0),
+            viewport: .init(width: 2, height: 2, scale: 1), openedAt: 1,
+            image: "aW1hZ2U="
+        )
+        try outbox.recordStroke(surfaceId: surfaceId, paneId: 1, stroke: .init(
+            strokeId: "stroke-1", points: [.init(x: 1, y: 1, pressure: nil)],
+            bbox: .init(x: 1, y: 1, width: 0, height: 0), startedAt: 1, endedAt: 2
+        ))
+        outbox.setFrameCommitRequested(surfaceId: surfaceId, paneId: 1, requested: true)
+        let flush = SurfAceAnnotationDirectEvent(
+            eventId: "ev_flush", payload: "{\"strokeId\":\"stroke-1\"}",
+            sentAt: 3, throughStrokeCount: 1
+        )
+        try outbox.stageDirectFlush(surfaceId: surfaceId, paneId: 1, event: flush)
+        var restored = try JSONDecoder().decode(SurfAceAnnotationOutbox.self,
+                                                 from: JSONEncoder().encode(outbox))
+        XCTAssertEqual(restored.openFrame(surfaceId: surfaceId, paneId: 1)?.pendingDirectFlush, flush)
+        XCTAssertEqual(restored.openFrame(surfaceId: surfaceId, paneId: 1)?.directCommitDelivered, nil)
+        try restored.markDirectFlushDelivered(surfaceId: surfaceId, paneId: 1,
+                                              eventId: flush.eventId)
+        restored = try JSONDecoder().decode(SurfAceAnnotationOutbox.self,
+                                             from: JSONEncoder().encode(restored))
+        XCTAssertNil(restored.openFrame(surfaceId: surfaceId, paneId: 1)?.pendingDirectFlush)
+        XCTAssertEqual(restored.openFrame(surfaceId: surfaceId, paneId: 1)?.deliveredDirectStrokeCount, 1)
+        let commit = SurfAceAnnotationDirectEvent(
+            eventId: "ev_commit", payload: "{\"contentId\":\"content-1\"}",
+            sentAt: 4, throughStrokeCount: 1
+        )
+        try restored.stageDirectCommit(surfaceId: surfaceId, paneId: 1, event: commit)
+        restored = try JSONDecoder().decode(SurfAceAnnotationOutbox.self,
+                                             from: JSONEncoder().encode(restored))
+        XCTAssertEqual(restored.openFrame(surfaceId: surfaceId, paneId: 1)?.pendingDirectCommit, commit)
+        try restored.markDirectCommitDelivered(surfaceId: surfaceId, paneId: 1,
+                                               eventId: commit.eventId)
+        restored = try JSONDecoder().decode(SurfAceAnnotationOutbox.self,
+                                             from: JSONEncoder().encode(restored))
+        XCTAssertNil(restored.openFrame(surfaceId: surfaceId, paneId: 1)?.pendingDirectCommit)
+        XCTAssertEqual(restored.openFrame(surfaceId: surfaceId, paneId: 1)?.directCommitDelivered, true)
+    }
 }
 
 @MainActor

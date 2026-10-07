@@ -43,6 +43,13 @@ struct SurfAceAnnotationFrameStroke: Codable, Equatable, Sendable {
     var endedAt: Int64
 }
 
+struct SurfAceAnnotationDirectEvent: Codable, Equatable, Sendable {
+    var eventId: String
+    var payload: String
+    var sentAt: Int64
+    var throughStrokeCount: Int
+}
+
 struct SurfAceAnnotationOpenFrame: Codable, Equatable, Sendable {
     struct Offset: Codable, Equatable, Sendable { var x: Double; var y: Double }
     struct Viewport: Codable, Equatable, Sendable { var width: Int; var height: Int; var scale: Double }
@@ -62,6 +69,10 @@ struct SurfAceAnnotationOpenFrame: Codable, Equatable, Sendable {
     var sourceStrokeCount: Int
     var publishedStrokeCount: Int
     var commitRequested: Bool? = nil
+    var pendingDirectFlush: SurfAceAnnotationDirectEvent? = nil
+    var deliveredDirectStrokeCount: Int? = nil
+    var pendingDirectCommit: SurfAceAnnotationDirectEvent? = nil
+    var directCommitDelivered: Bool? = nil
 }
 
 struct SurfAceAnnotationSurfaceOutbox: Codable, Equatable, Sendable {
@@ -123,6 +134,9 @@ struct SurfAceAnnotationOutbox: Codable, Equatable, Sendable {
                   (surface.openFrames ?? [:]).allSatisfy({ key, frame in
                       Int(key).map({ $0 > 0 }) == true && frame.frameId.hasPrefix("fr_")
                           && frame.sourceStrokeCount >= frame.publishedStrokeCount
+                          && (frame.deliveredDirectStrokeCount ?? 0) <= frame.sourceStrokeCount
+                          && (frame.pendingDirectFlush?.throughStrokeCount ?? 0) <= frame.sourceStrokeCount
+                          && (frame.directCommitDelivered != true || frame.commitRequested == true)
                   }),
                   try fits(surfaceId: surfaceId, maxBytes: maxBytes, maxRecords: maxRecords) else {
                 throw SurfAceAnnotationOutboxError.invalidState
@@ -236,7 +250,72 @@ struct SurfAceAnnotationOutbox: Codable, Equatable, Sendable {
     }
 
     mutating func setFrameCommitRequested(surfaceId: String, paneId: Int, requested: Bool) {
+        guard surfaces[surfaceId]?.openFrames?[String(paneId)]?.directCommitDelivered != true else {
+            return
+        }
         surfaces[surfaceId]?.openFrames?[String(paneId)]?.commitRequested = requested
+        if !requested {
+            surfaces[surfaceId]?.openFrames?[String(paneId)]?.pendingDirectCommit = nil
+        }
+    }
+
+    mutating func stageDirectFlush(surfaceId: String, paneId: Int,
+                                   event: SurfAceAnnotationDirectEvent) throws {
+        guard var frame = openFrame(surfaceId: surfaceId, paneId: paneId),
+              event.throughStrokeCount > (frame.deliveredDirectStrokeCount ?? 0),
+              event.throughStrokeCount <= frame.sourceStrokeCount,
+              frame.pendingDirectFlush == nil || frame.pendingDirectFlush == event else {
+            throw SurfAceAnnotationOutboxError.invalidState
+        }
+        if frame.pendingDirectFlush == event { return }
+        frame.pendingDirectFlush = event
+        surfaces[surfaceId]?.openFrames?[String(paneId)] = frame
+        if try !fits(surfaceId: surfaceId, maxBytes: Self.maximumBytes,
+                     maxRecords: Self.maximumRecords) {
+            surfaces[surfaceId]?.openFrames?[String(paneId)]?.pendingDirectFlush = nil
+            throw SurfAceAnnotationOutboxError.invalidLimit
+        }
+    }
+
+    mutating func markDirectFlushDelivered(surfaceId: String, paneId: Int, eventId: String) throws {
+        guard var frame = openFrame(surfaceId: surfaceId, paneId: paneId),
+              let pending = frame.pendingDirectFlush, pending.eventId == eventId else {
+            throw SurfAceAnnotationOutboxError.invalidState
+        }
+        frame.deliveredDirectStrokeCount = pending.throughStrokeCount
+        frame.pendingDirectFlush = nil
+        surfaces[surfaceId]?.openFrames?[String(paneId)] = frame
+    }
+
+    mutating func stageDirectCommit(surfaceId: String, paneId: Int,
+                                    event: SurfAceAnnotationDirectEvent) throws {
+        guard var frame = openFrame(surfaceId: surfaceId, paneId: paneId),
+              frame.commitRequested == true, frame.pendingDirectFlush == nil,
+              (frame.deliveredDirectStrokeCount ?? 0) == frame.sourceStrokeCount,
+              frame.directCommitDelivered != true,
+              frame.pendingDirectCommit == nil || frame.pendingDirectCommit == event else {
+            throw SurfAceAnnotationOutboxError.invalidState
+        }
+        if frame.pendingDirectCommit == event { return }
+        frame.pendingDirectCommit = event
+        surfaces[surfaceId]?.openFrames?[String(paneId)] = frame
+        if try !fits(surfaceId: surfaceId, maxBytes: Self.maximumBytes,
+                     maxRecords: Self.maximumRecords) {
+            surfaces[surfaceId]?.openFrames?[String(paneId)]?.pendingDirectCommit = nil
+            throw SurfAceAnnotationOutboxError.invalidLimit
+        }
+    }
+
+    mutating func markDirectCommitDelivered(surfaceId: String, paneId: Int,
+                                            eventId: String) throws {
+        guard var frame = openFrame(surfaceId: surfaceId, paneId: paneId),
+              frame.commitRequested == true,
+              frame.pendingDirectCommit?.eventId == eventId else {
+            throw SurfAceAnnotationOutboxError.invalidState
+        }
+        frame.directCommitDelivered = true
+        frame.pendingDirectCommit = nil
+        surfaces[surfaceId]?.openFrames?[String(paneId)] = frame
     }
 
     mutating func lose(surfaceId: String, code: String) throws {

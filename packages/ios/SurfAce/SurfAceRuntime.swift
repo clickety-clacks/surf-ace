@@ -3346,7 +3346,8 @@ final class SurfAceRuntime {
     func fanoutLocklessCommittedEvent(
         op: String,
         payload: SurfAceLocklessJSON,
-        sentAt: Int64? = nil
+        sentAt: Int64? = nil,
+        eventId: String? = nil
     ) async {
         guard let locklessAdapter else { return }
         await withLocklessDeliveryTurn {
@@ -3364,7 +3365,7 @@ final class SurfAceRuntime {
                 "v": 1,
                 "type": "event",
                 "op": op,
-                "eventId": randomHex(prefix: "ev", byteCount: 8),
+                "eventId": eventId ?? randomHex(prefix: "ev", byteCount: 8),
                 "sentAt": sentAt ?? timestampNow(),
                 "payload": Self.foundationJSON(payload),
             ]
@@ -4208,12 +4209,15 @@ final class SurfAceRuntime {
         surfaceId: String,
         op: String,
         payload: [String: Any],
-        sentAt: Int64? = nil
+        sentAt: Int64? = nil,
+        eventId: String? = nil
     ) async -> Bool {
         do {
             guard locklessAdapter != nil else { return false }
             let locklessPayload = try Self.locklessJSON(fromFoundation: payload)
-            await fanoutLocklessCommittedEvent(op: op, payload: locklessPayload, sentAt: sentAt)
+            await fanoutLocklessCommittedEvent(
+                op: op, payload: locklessPayload, sentAt: sentAt, eventId: eventId
+            )
             return true
         } catch {
             surfaceById[surfaceId]?.lastError = "Event send failed: \(error.localizedDescription)"
@@ -4452,9 +4456,20 @@ final class SurfAceRuntime {
         ]
 
         Task { @MainActor in
+            let directEvent = await self.stageAnnotationDirectFlush(
+                surfaceId: surfaceId, paneId: paneId, strokes: strokes, payload: payload
+            )
             await self.publishAnnotationDelta(surfaceId: surfaceId, paneId: paneId,
                                               strokes: strokes, flushPayload: payload)
-            let succeeded = await self.sendEventAsync(surfaceId: surfaceId, op: "event.drawing_flush", payload: payload)
+            let succeeded = await self.sendEventAsync(
+                surfaceId: surfaceId, op: "event.drawing_flush", payload: payload,
+                sentAt: directEvent?.sentAt, eventId: directEvent?.eventId
+            )
+            if succeeded, let directEvent {
+                await self.markAnnotationDirectFlushDelivered(
+                    surfaceId: surfaceId, paneId: paneId, eventId: directEvent.eventId
+                )
+            }
             guard let pane = self.pane(surfaceId: surfaceId, paneId: paneId) else { return }
             pane.isDrawingFlushSending = false
             if succeeded {
@@ -4551,6 +4566,91 @@ final class SurfAceRuntime {
         return formatter.string(from: Date())
     }
 
+    private func stageAnnotationDirectFlush(surfaceId: String, paneId: Int,
+                                            strokes: [SurfAceStroke], payload: [String: Any]) async
+        -> SurfAceAnnotationDirectEvent? {
+        guard let adapter = locklessAdapter,
+              let frame = await adapter.snapshot().annotationPublisher?
+                .openFrame(surfaceId: surfaceId, paneId: paneId) else { return nil }
+        if let pending = frame.pendingDirectFlush { return pending }
+        guard JSONSerialization.isValidJSONObject(payload),
+              let data = try? JSONSerialization.data(withJSONObject: payload),
+              let serialized = String(data: data, encoding: .utf8) else { return nil }
+        let event = SurfAceAnnotationDirectEvent(
+            eventId: randomHex(prefix: "ev", byteCount: 8), payload: serialized,
+            sentAt: timestampNow(),
+            throughStrokeCount: (frame.deliveredDirectStrokeCount ?? 0) + strokes.count
+        )
+        do {
+            return try await adapter.transactAnnotationPublisher(surfaceId: surfaceId) { outbox in
+                guard outbox.openFrame(surfaceId: surfaceId, paneId: paneId)?.frameId == frame.frameId else {
+                    return nil as SurfAceAnnotationDirectEvent?
+                }
+                try outbox.stageDirectFlush(surfaceId: surfaceId, paneId: paneId, event: event)
+                return event
+            }
+        } catch {
+            surfAceServerRuntimeLog("event=annotation_direct_flush_stage_failed \(surfAceDiagnosticFields([("error", String(describing: error))]))")
+            return nil
+        }
+    }
+
+    private func markAnnotationDirectFlushDelivered(surfaceId: String, paneId: Int,
+                                                    eventId: String) async {
+        guard let adapter = locklessAdapter else { return }
+        do {
+            try await adapter.transactAnnotationPublisher(surfaceId: surfaceId) { outbox in
+                try outbox.markDirectFlushDelivered(surfaceId: surfaceId, paneId: paneId,
+                                                    eventId: eventId)
+            }
+        } catch {
+            surfAceServerRuntimeLog("event=annotation_direct_flush_mark_failed \(surfAceDiagnosticFields([("error", String(describing: error))]))")
+        }
+    }
+
+    private func stageAnnotationDirectCommit(surfaceId: String, paneId: Int,
+                                             payload: [String: Any]) async
+        -> SurfAceAnnotationDirectEvent? {
+        guard let adapter = locklessAdapter,
+              let frame = await adapter.snapshot().annotationPublisher?
+                .openFrame(surfaceId: surfaceId, paneId: paneId) else { return nil }
+        if let pending = frame.pendingDirectCommit { return pending }
+        guard JSONSerialization.isValidJSONObject(payload),
+              let data = try? JSONSerialization.data(withJSONObject: payload),
+              let serialized = String(data: data, encoding: .utf8) else { return nil }
+        let event = SurfAceAnnotationDirectEvent(
+            eventId: randomHex(prefix: "ev", byteCount: 8), payload: serialized,
+            sentAt: timestampNow(), throughStrokeCount: frame.sourceStrokeCount
+        )
+        do {
+            return try await adapter.transactAnnotationPublisher(surfaceId: surfaceId) { outbox in
+                guard outbox.openFrame(surfaceId: surfaceId, paneId: paneId)?.frameId == frame.frameId else {
+                    return nil as SurfAceAnnotationDirectEvent?
+                }
+                try outbox.stageDirectCommit(surfaceId: surfaceId, paneId: paneId, event: event)
+                return event
+            }
+        } catch {
+            surfAceServerRuntimeLog("event=annotation_direct_commit_stage_failed \(surfAceDiagnosticFields([("error", String(describing: error))]))")
+            return nil
+        }
+    }
+
+    private func markAnnotationDirectCommitDelivered(surfaceId: String, paneId: Int,
+                                                     eventId: String) async -> Bool {
+        guard let adapter = locklessAdapter else { return false }
+        do {
+            try await adapter.transactAnnotationPublisher(surfaceId: surfaceId) { outbox in
+                try outbox.markDirectCommitDelivered(surfaceId: surfaceId, paneId: paneId,
+                                                     eventId: eventId)
+            }
+            return true
+        } catch {
+            surfAceServerRuntimeLog("event=annotation_direct_commit_mark_failed \(surfAceDiagnosticFields([("error", String(describing: error))]))")
+            return false
+        }
+    }
+
     private func requestAnnotationCommit(surfaceId: String, paneId: Int) {
         guard let pane = pane(surfaceId: surfaceId, paneId: paneId),
               pane.currentEntry.contentId != nil else {
@@ -4593,10 +4693,20 @@ final class SurfAceRuntime {
         annotationCommitTasks[key] = Task { @MainActor in
             defer { annotationCommitTasks.removeValue(forKey: key) }
             guard eventIsEnabled(surfaceId: surfaceId, eventName: "event.annotation_committed") else { return }
-            let delivered = await sendEventAsync(
-                surfaceId: surfaceId, op: "event.annotation_committed", payload: payload
+            let directEvent = await stageAnnotationDirectCommit(
+                surfaceId: surfaceId, paneId: paneId, payload: payload
             )
-            if delivered, let adapter = locklessAdapter {
+            let delivered = await sendEventAsync(
+                surfaceId: surfaceId, op: "event.annotation_committed", payload: payload,
+                sentAt: directEvent?.sentAt, eventId: directEvent?.eventId
+            )
+            var durableBoundary = false
+            if delivered, let directEvent {
+                durableBoundary = await markAnnotationDirectCommitDelivered(
+                    surfaceId: surfaceId, paneId: paneId, eventId: directEvent.eventId
+                )
+            }
+            if durableBoundary, let adapter = locklessAdapter {
                 await finalizeAnnotationSourceFrame(
                     adapter: adapter, surfaceId: surfaceId, paneId: paneId,
                     revision: revision, contentType: contentType
@@ -4610,7 +4720,8 @@ final class SurfAceRuntime {
                                                revision: Int, contentType: String?) async {
         guard let frame = await adapter.snapshot().annotationPublisher?
             .openFrame(surfaceId: surfaceId, paneId: paneId),
-              frame.commitRequested == true else { return }
+              frame.commitRequested == true,
+              frame.directCommitDelivered == true else { return }
         let png = Data(base64Encoded: frame.image)
         let pngSignature = Data([137, 80, 78, 71, 13, 10, 26, 10])
         let validImage = png.map { $0.count <= 10_485_760 && $0.starts(with: pngSignature) } ?? false
@@ -4644,7 +4755,8 @@ final class SurfAceRuntime {
             let appended = try await adapter.transactAnnotationPublisher(surfaceId: surfaceId) { outbox in
                 guard let current = outbox.openFrame(surfaceId: surfaceId, paneId: paneId),
                       current.frameId == frame.frameId,
-                      current.commitRequested == true else { return false }
+                      current.commitRequested == true,
+                      current.directCommitDelivered == true else { return false }
                 if current.sourceStrokeCount > current.publishedStrokeCount {
                     try outbox.lose(surfaceId: surfaceId, code: "annotation_final_delta_unavailable")
                     outbox.markFramePublished(surfaceId: surfaceId, paneId: paneId)
@@ -4675,7 +4787,8 @@ final class SurfAceRuntime {
         guard let adapter = locklessAdapter, annotationPublisher != nil else { return }
         let state = await adapter.snapshot()
         for (surfaceId, surface) in state.annotationPublisher?.surfaces ?? [:] {
-            for (paneKey, frame) in surface.openFrames ?? [:] where frame.commitRequested == true {
+            for (paneKey, frame) in surface.openFrames ?? [:]
+                where frame.commitRequested == true && frame.directCommitDelivered == true {
                 guard let paneId = Int(paneKey) else { continue }
                 let pane = state.liveSurfaces[surfaceId]?.panes[paneKey]
                 await finalizeAnnotationSourceFrame(
