@@ -22,7 +22,7 @@ import {
   LocklessAuthorityError,
   createEmptyLocklessClientState,
 } from "../src/lockless-client-authority.js";
-import { PersistentStateOutcomeUnknownError } from "../src/persistent-state-file.js";
+import { PersistentStateOutcomeUnknownError, PersistentStateWriteGuardError } from "../src/persistent-state-file.js";
 import {
   loadPersistentStateFile,
   writePersistentStateFile,
@@ -3872,6 +3872,84 @@ test("a saturated ledger persisted and restarted still pairs and serves content"
     assert.equal(captured.payload.contentId, "content-restored");
     assert.equal(captured.payload.image, "cG5n");
   } finally {
+    socket.close();
+    await server.stop();
+  }
+});
+
+test("guarded restore keeps two visible panes and local input while refusing an unproven direct write", { timeout: 15_000 }, async () => {
+  const core = new SurfaceCore();
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  const firstPaneId = 7;
+  const secondPaneId = 9;
+  core.applyProviderBootstrapTopology(surface.surfaceId, {
+    initialPaneId: firstPaneId, initialPaneLabel: firstPaneId, windowLabel: "a",
+  });
+  core.paneSplit(surface.surfaceId, {
+    count: 2, direction: "vertical", newPaneIds: [secondPaneId],
+    newPaneLabels: [secondPaneId], paneId: firstPaneId,
+  });
+  let durable = core.getPersistentState();
+  let guarded = false;
+  let entered = (): void => {};
+  const pendingWrite = new Promise<void>((resolve) => { entered = resolve; });
+  let release = (): void => {};
+  const released = new Promise<void>((resolve) => { release = resolve; });
+  const port = nextPort++;
+  const server = new SurfaceWsServer({
+    bindAddress: "127.0.0.1", capturePaneImage: async () => "cG5n",
+    compositorSocketPath: null, core, endpointName: "Surf Ace", hostName: "localhost",
+    persistLocklessState: async () => {
+      if (guarded) {
+        entered();
+        await released;
+        throw new PersistentStateWriteGuardError("unrestorable-primary");
+      }
+      durable = core.getPersistentState();
+    },
+    port, viewport: () => ({ height: 800, scale: 2, width: 1200 }),
+  });
+  await server.start();
+  const socket = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+  try {
+    assert.equal((await pair(socket, "guarded-restore-client", surface.surfaceId)).ok, true);
+    for (const [paneId, contentId] of [[firstPaneId, "first-visible"], [secondPaneId, "second-visible"]] as const) {
+      const seeded = await request(socket, "content.set", {
+        content: { html: `<p>${contentId}</p>` }, contentId, contentType: "html",
+        friendlyChatName: contentId, paneId, surfaceId: surface.surfaceId,
+      });
+      assert.equal(seeded.ok, true, JSON.stringify(seeded));
+    }
+    const committed = structuredClone(durable);
+    guarded = true;
+    const refused = request(socket, "content.set", {
+      content: { html: "<p>unproven</p>" }, contentId: "unproven",
+      contentType: "html", friendlyChatName: "Unproven", paneId: firstPaneId,
+      surfaceId: surface.surfaceId,
+    });
+    await pendingWrite;
+    assert.equal(core.getRendererWindowState(surface.surfaceId).panes.length, 2);
+    assert.equal(core.captureSnapshot(surface.surfaceId, secondPaneId).contentId, "second-visible",
+      "a paused durable mutation must not blank an independent visible pane");
+    core.setActiveKeyboardPane(surface.surfaceId, secondPaneId);
+    assert.equal(core.activeKeyboardPaneId(surface.surfaceId), secondPaneId,
+      "direct local input remains available during the guarded write");
+    const independentRead = request(socket, "snapshot.get", {
+      paneId: secondPaneId, surfaceId: surface.surfaceId,
+    });
+    const readWhilePaused = await independentRead;
+    assert.equal(readWhilePaused.ok, true, JSON.stringify(readWhilePaused));
+    assert.equal(readWhilePaused.payload.contentId, "second-visible");
+    release();
+    const writeResponse = await refused;
+    assert.equal(writeResponse.ok, false, JSON.stringify(writeResponse));
+    assert.equal(writeResponse.error?.code, "internal_error");
+    assert.equal(core.captureSnapshot(surface.surfaceId, firstPaneId).contentId, "first-visible");
+    assert.deepEqual(durable, committed, "the guarded write must not change durable state");
+    assert.equal((await request(socket, "heartbeat.ping", { nonce: "guarded-alive" })).ok, true,
+      "the app and direct connection remain responsive");
+  } finally {
+    release();
     socket.close();
     await server.stop();
   }

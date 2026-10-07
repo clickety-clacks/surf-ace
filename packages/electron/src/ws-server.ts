@@ -87,7 +87,7 @@ import {
   type PersistentTargetApplyWorkItem,
   type PersistentTombstone,
 } from "./lockless-client-authority.js";
-import { PersistentStateOutcomeUnknownError } from "./persistent-state-file.js";
+import { PersistentStateOutcomeUnknownError, PersistentStateWriteGuardError } from "./persistent-state-file.js";
 
 type SocketCacheEntry = {
   payloadHash: string;
@@ -274,6 +274,7 @@ export class SurfaceWsServer {
   private persistenceOutcomeUnknown: PersistentStateOutcomeUnknownError | null = null;
   private annotationCompletionManaged: ((surfaceId: string, paneId: number) => boolean) | null = null;
   private readonly annotationCompletionTasks = new Map<string, Promise<boolean>>();
+  private activePaneMutation: { surfaceId: string; paneId: number } | null = null;
 
   setAnnotationCompletionManaged(shouldManage: (surfaceId: string, paneId: number) => boolean = () => true): void {
     this.annotationCompletionManaged = shouldManage;
@@ -1071,7 +1072,15 @@ export class SurfaceWsServer {
       return;
     }
     if (this.isLocklessWireRequest(socket, parsedRequest)) {
-      await this.handleLocklessMessage(socket, parsedRequest);
+      try {
+        await this.handleLocklessMessage(socket, parsedRequest);
+      } catch (error) {
+        if (!(error instanceof PersistentStateWriteGuardError)) throw error;
+        await this.send(socket, JSON.stringify(errorResponse(
+          parsedRequest.op, parsedRequest.id as never, "internal_error",
+          "Local persistence is guarded; durable operations are unavailable",
+        )));
+      }
       return;
     }
     const request = parsedRequest as Request;
@@ -1320,8 +1329,15 @@ export class SurfaceWsServer {
       locklessOperationMutates(request.op)
     ) {
       try {
-        response = await this.core.locklessAuthority.transactionAsync(() =>
-          this.core.transactionAsync(async () => {
+        response = await this.core.locklessAuthority.transactionAsync(async () => {
+          const paneMutation = ["content.set", "content.append", "content.patch", "content.clear", "annotations.remove"]
+            .includes(request.op) && session.surfaceId !== null &&
+            Number.isInteger((request.payload as { paneId?: number }).paneId)
+            ? { surfaceId: session.surfaceId, paneId: (request.payload as { paneId: number }).paneId }
+            : null;
+          this.activePaneMutation = paneMutation;
+          try {
+            return await this.core.transactionAsync(async () => {
             this.core.locklessAuthority.beginOperationReceipt(
               session.controllerInstanceId,
               request.id,
@@ -1384,8 +1400,11 @@ export class SurfaceWsServer {
             );
             await this.persistLocklessState();
             return response;
-          }),
-        );
+            });
+          } finally {
+            this.activePaneMutation = null;
+          }
+        });
       } catch (error) {
         if (error instanceof PersistentStateOutcomeUnknownError) {
           response = errorResponse(
@@ -1419,6 +1438,12 @@ export class SurfaceWsServer {
           });
         }
       }
+    } else if (request.op === "snapshot.get" &&
+        this.activePaneMutation?.surfaceId === request.payload.surfaceId &&
+        this.activePaneMutation.paneId !== request.payload.paneId) {
+      // A durable mutation holds the lockless queue while its write is pending.
+      // A snapshot of another pane reads no tentative state from that mutation.
+      response = (await dispatch()).response;
     } else if (request.op === "pair.request" || request.op === "topology.apply") {
       response = (await dispatch()).response;
     } else if (request.op === "surfaces.list") {

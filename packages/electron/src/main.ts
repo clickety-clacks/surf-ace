@@ -33,6 +33,7 @@ import { loadProvisionedRegistryBinding } from "./registry-binding.js";
 import {
   loadPersistentStateFile,
   PersistentStateOutcomeUnknownError,
+  PersistentStateWriteGuardError,
   shouldGuardUnrestorablePersistentState,
   writePersistentStateFile,
   type PersistentStateLoadResult,
@@ -438,7 +439,7 @@ async function persistState(): Promise<void> {
       path: path.join(stateDir, STATE_FILE_NAME),
       write_guard: persistentStateWriteGuard,
     });
-    throw new Error(`Local persistence is guarded: ${persistentStateWriteGuard}`);
+    throw new PersistentStateWriteGuardError(persistentStateWriteGuard);
   }
   // Bind this write to the state that requested it. A later source mutation
   // must enqueue its own write before the publisher can send its bytes.

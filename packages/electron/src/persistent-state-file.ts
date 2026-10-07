@@ -25,6 +25,14 @@ export class PersistentStateOutcomeUnknownError extends Error {
   }
 }
 
+/** A restored state was not fully proven, so no durable write was attempted. */
+export class PersistentStateWriteGuardError extends Error {
+  constructor(readonly reason: string) {
+    super(`Local persistence is guarded: ${reason}`);
+    this.name = "PersistentStateWriteGuardError";
+  }
+}
+
 export type PersistentStateLoadResult =
   | {
       recoveredFromBackup: boolean;
