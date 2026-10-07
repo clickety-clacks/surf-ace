@@ -223,6 +223,14 @@ struct SurfAceAnnotationOutbox: Codable, Equatable, Sendable {
         surfaces[surfaceId] = surface
     }
 
+    mutating func advanceFramePublished(surfaceId: String, paneId: Int, by count: Int) {
+        guard count > 0, var surface = surfaces[surfaceId],
+              var frame = surface.openFrames?[String(paneId)] else { return }
+        frame.publishedStrokeCount = min(frame.sourceStrokeCount, frame.publishedStrokeCount + count)
+        surface.openFrames?[String(paneId)] = frame
+        surfaces[surfaceId] = surface
+    }
+
     mutating func closeFrame(surfaceId: String, paneId: Int) {
         surfaces[surfaceId]?.openFrames?.removeValue(forKey: String(paneId))
     }

@@ -4416,7 +4416,7 @@ final class SurfAceRuntime {
     private func flushDrawing(surfaceId: String, paneId: Int) {
         guard let pane = pane(surfaceId: surfaceId, paneId: paneId),
               let contentId = pane.currentEntry.contentId,
-              !pane.pendingFlushStrokes.isEmpty else {
+              !pane.pendingFlushStrokes.isEmpty, !pane.isDrawingFlushSending else {
             return
         }
 
@@ -4458,11 +4458,15 @@ final class SurfAceRuntime {
             guard let pane = self.pane(surfaceId: surfaceId, paneId: paneId) else { return }
             pane.isDrawingFlushSending = false
             if succeeded {
-                pane.pendingFlushStrokes.removeAll()
+                let flushedIds = Set(strokes.map(\.strokeId))
+                pane.pendingFlushStrokes.removeAll { flushedIds.contains($0.strokeId) }
                 pane.deliveredClosedFrameCount += 1
-                pane.firstPendingStrokeAt = nil
-                pane.lastPendingStrokeAt = nil
+                pane.firstPendingStrokeAt = pane.pendingFlushStrokes.first?.points.first?.timestamp
+                pane.lastPendingStrokeAt = pane.pendingFlushStrokes.last?.points.last?.timestamp
                 pane.lastSuccessfulFlushAt = Date()
+                if !pane.pendingFlushStrokes.isEmpty {
+                    self.scheduleDrawingFlush(surfaceId: surfaceId, paneId: paneId)
+                }
                 self.drainPendingAnnotationCommit(surfaceId: surfaceId, paneId: paneId)
             } else {
                 self.scheduleDrawingFlush(surfaceId: surfaceId, paneId: paneId)
@@ -4484,10 +4488,15 @@ final class SurfAceRuntime {
         let frameId = frame?.frameId
         let revision = pane.currentEntry.revision
         let viewport = (try? Self.jsonObject(pane.lastViewport)) as? [String: Any]
-        let expectedIds = Set(frame?.strokes.suffix(pending).map(\.strokeId) ?? [])
+        let unpublished = frame.map { Array($0.strokes.dropFirst($0.publishedStrokeCount)) } ?? []
+        let expectedIds = Set(unpublished.map(\.strokeId))
         let sourceStrokes = strokes.filter { expectedIds.contains($0.strokeId) }
+        if frame?.failed == false && sourceStrokes.isEmpty { return }
+        let matchesUnpublishedPrefix = sourceStrokes.map(\.strokeId)
+            == Array(unpublished.prefix(sourceStrokes.count)).map(\.strokeId)
+        let lossCount = min(strokes.count, pending)
         var recordData: Data?
-        if let frame, !frame.failed, sourceStrokes.count == pending,
+        if let frame, !frame.failed, !sourceStrokes.isEmpty, matchesUnpublishedPrefix,
            let contentId, contentId == frame.contentId, let contentType,
            let viewport, let encoded = jsonObject(fromEncodable: sourceStrokes) {
             var sourcePayload = flushPayload
@@ -4509,15 +4518,25 @@ final class SurfAceRuntime {
             let appended = try await adapter.transactAnnotationPublisher(surfaceId: surfaceId) { outbox in
                 let current = outbox.openFrame(surfaceId: surfaceId, paneId: paneId)
                 guard current?.frameId == frameId,
-                      (current?.sourceStrokeCount ?? 0) - (current?.publishedStrokeCount ?? 0) == pending else {
+                      current?.publishedStrokeCount == frame?.publishedStrokeCount else {
                     return false
                 }
                 if let data, let record = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    let currentUnpublished = current.map {
+                        Array($0.strokes.dropFirst($0.publishedStrokeCount))
+                    } ?? []
+                    guard sourceStrokes.map(\.strokeId)
+                        == Array(currentUnpublished.prefix(sourceStrokes.count)).map(\.strokeId) else {
+                        return false
+                    }
                     _ = try outbox.append(surfaceId: surfaceId, record: record)
+                    outbox.advanceFramePublished(surfaceId: surfaceId, paneId: paneId,
+                                                 by: sourceStrokes.count)
                 } else {
                     try outbox.lose(surfaceId: surfaceId, code: "annotation_source_strokes_unavailable")
+                    outbox.advanceFramePublished(surfaceId: surfaceId, paneId: paneId,
+                                                 by: lossCount)
                 }
-                outbox.markFramePublished(surfaceId: surfaceId, paneId: paneId)
                 return true
             }
             if appended { publisher.notify() }
