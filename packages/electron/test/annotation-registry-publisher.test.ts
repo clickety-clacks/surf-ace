@@ -74,7 +74,7 @@ test("ambiguous transport failure leaves original canonical FIFO head for retry"
 });
 
 test("a rejected surface records unhealthy truth and does not starve another surface", async () => {
-  const otherSurface = "sf_publisher-other";
+  const otherSurface = "sf_publisher-zother";
   const core = new SurfaceCore({ annotationClientId: clientId });
   core.annotationPublisher!.append(surfaceId, event);
   core.annotationPublisher!.append(otherSurface, event);
