@@ -1774,6 +1774,28 @@ test("annotation pressure compacts only acknowledged history and refuses when re
       assert.equal(info.firstRetainedSequence, "2");
       assert.equal(info.sourceMetadataRows, 2);
       assert.deepEqual((await journal.ingest(firstRecord)).serverCursor, first.serverCursor);
+      const leases = [{ consumerId: "pressure-consumer", leaseId: consumer.leaseId }];
+      for (let index = 1; index < 32; index += 1) {
+        const consumerId = `capacity-${index}`;
+        const opened = await writer.openAnnotationConsumer(consumerId, "watch");
+        leases.push({ consumerId, leaseId: opened.leaseId });
+      }
+      await assert.rejects(writer.openAnnotationConsumer("active-overflow", "watch"),
+        (error) => error instanceof AllocatorError && error.code === "annotation_consumer_capacity" &&
+          error.details?.activeStreams === 32 && error.details?.maxActiveStreams === 32 &&
+          error.details?.retryCondition === "active_stream_disconnected");
+      for (const lease of leases) {
+        await writer.disconnectAnnotationConsumer(lease.consumerId, lease.leaseId);
+      }
+      for (let index = 32; index < 64; index += 1) {
+        const consumerId = `capacity-${index}`;
+        const opened = await writer.openAnnotationConsumer(consumerId, "watch");
+        await writer.disconnectAnnotationConsumer(consumerId, opened.leaseId);
+      }
+      await assert.rejects(writer.openAnnotationConsumer("slot-overflow", "watch"),
+        (error) => error instanceof AllocatorError && error.code === "annotation_consumer_capacity" &&
+          error.details?.consumerSlots === 64 && error.details?.maxConsumerSlots === 64 &&
+          error.details?.retryCondition === "reviewed_consumer_capacity_increase");
     } finally {
       await writer.release();
     }
