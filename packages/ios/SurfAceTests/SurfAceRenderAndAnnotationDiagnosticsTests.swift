@@ -1142,6 +1142,71 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         }
     }
 
+    func testInterruptedDirectFlushResumesBeforeSourceCommit() async throws {
+        let defaults = isolatedUserDefaults()
+        let stateURL = try locklessStateURL()
+        let registry = try XCTUnwrap(URL(string: "ws://127.0.0.1:29999"))
+        let firstRuntime = SurfAceRuntime(
+            userDefaults: defaults, locklessStateURL: stateURL,
+            configuredRegistryURL: registry, annotationClientId: "client-ios-restart",
+            enableFleetDiscovery: false
+        )
+        await firstRuntime.start()
+        let registered = await firstRuntime.registerSurfaceForScene(sceneKey: "restart")
+        let surface = try XCTUnwrap(registered)
+        let paneId = try XCTUnwrap(surface.panes.first?.paneId)
+        let surfaceId = surface.surfaceId
+        let adapter = try firstRuntime.locklessAuthorityForLocalMutation()
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 2, height: 2)).pngData { _ in
+            UIColor.white.setFill()
+            UIRectFill(CGRect(x: 0, y: 0, width: 2, height: 2))
+        }.base64EncodedString()
+        _ = try await adapter.transactAnnotationPublisher(surfaceId: surfaceId) { outbox in
+            _ = try outbox.beginFrame(
+                surfaceId: surfaceId, paneId: paneId,
+                contextKey: "content-restart", contentId: "content-restart",
+                contentType: "html", revision: 1, url: nil,
+                scrollOffset: .init(x: 0, y: 0),
+                viewport: .init(width: 2, height: 2, scale: 1), openedAt: 1, image: image
+            )
+            try outbox.recordStroke(surfaceId: surfaceId, paneId: paneId, stroke: .init(
+                strokeId: "stroke-restart", points: [.init(x: 1, y: 1, pressure: nil)],
+                bbox: .init(x: 1, y: 1, width: 0, height: 0), startedAt: 1, endedAt: 2
+            ))
+            outbox.setFrameCommitRequested(surfaceId: surfaceId, paneId: paneId, requested: true)
+            try outbox.stageDirectFlush(surfaceId: surfaceId, paneId: paneId, event: .init(
+                eventId: "ev_restart", payload: "{\"strokes\":[{\"strokeId\":\"stroke-restart\"}]}",
+                sentAt: 3, throughStrokeCount: 1,
+                sourceViewport: "{\"scrollOffset\":{\"x\":0,\"y\":0},\"visibleRect\":{\"x\":0,\"y\":0,\"width\":2,\"height\":2},\"contentSize\":{\"width\":2,\"height\":2},\"zoomLevel\":1}"
+            ))
+        }
+        let interrupted = await adapter.snapshot().annotationPublisher
+        XCTAssertEqual(interrupted?.surfaces[surfaceId]?.fifo.count, 0)
+        XCTAssertEqual(interrupted?.openFrame(surfaceId: surfaceId, paneId: paneId)?.directCommitDelivered, nil)
+        await firstRuntime.stop()
+
+        let restartedRuntime = SurfAceRuntime(
+            userDefaults: defaults, locklessStateURL: stateURL,
+            configuredRegistryURL: registry, annotationClientId: "client-ios-restart",
+            enableFleetDiscovery: false
+        )
+        addTeardownBlock { await restartedRuntime.stop() }
+        await restartedRuntime.start()
+        let recoveredAdapter = try restartedRuntime.locklessAuthorityForLocalMutation()
+        for _ in 0..<100 {
+            if (await recoveredAdapter.snapshot()).annotationPublisher?
+                .surfaces[surfaceId]?.fifo.count == 2 { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let recovered = await recoveredAdapter.snapshot().annotationPublisher
+        let records = try XCTUnwrap(recovered?.surfaces[surfaceId]?.fifo).map { entry in
+            try XCTUnwrap(JSONSerialization.jsonObject(with: Data(entry.canonical.utf8))
+                as? [String: Any])
+        }
+        XCTAssertEqual(records.map { $0["kind"] as? String }, ["live_delta", "frame_commit"])
+        XCTAssertNil(recovered?.openFrame(surfaceId: surfaceId, paneId: paneId))
+    }
+
     func testLocklessZeroLiveSurfaceRestoresExactSurfaceAndPaneIdentity() async throws {
         let runtime = SurfAceRuntime(
             userDefaults: isolatedUserDefaults(),

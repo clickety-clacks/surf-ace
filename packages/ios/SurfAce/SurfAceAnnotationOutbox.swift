@@ -48,6 +48,7 @@ struct SurfAceAnnotationDirectEvent: Codable, Equatable, Sendable {
     var payload: String
     var sentAt: Int64
     var throughStrokeCount: Int
+    var sourceViewport: String? = nil
 }
 
 struct SurfAceAnnotationOpenFrame: Codable, Equatable, Sendable {
