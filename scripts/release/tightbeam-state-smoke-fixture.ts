@@ -775,7 +775,14 @@ async function startPackagedServer(launcher: string, config: unknown, root: stri
   });
   child.once("close", (code, signal) => {
     if (!events.some((event) => event.event === "ready")) {
-      readyReject(new Error(`${label}_packaged_server_exited_before_ready:${code ?? signal ?? "unknown"}`));
+      const diagnosticTokens = stderrTail.split("\n").flatMap((line) => {
+        try {
+          const diagnostic = JSON.parse(line) as Record<string, unknown>;
+          return [diagnostic.event, diagnostic.code, diagnostic.name, diagnostic.causeCode]
+            .filter((value): value is string => typeof value === "string" && /^[A-Za-z0-9_.-]{1,64}$/.test(value));
+        } catch { return []; }
+      }).slice(-8);
+      readyReject(new Error(`${label}_packaged_server_exited_before_ready:${code ?? signal ?? "unknown"}:stderr_events=${diagnosticTokens.join(",") || "none"}:stderr_sha256=${createHash("sha256").update(stderrTail).digest("hex")}`));
     }
   });
 

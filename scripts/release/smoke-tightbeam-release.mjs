@@ -1098,7 +1098,14 @@ async function runDirectClientCandidate(step, executable, cliBinary, stateRoot, 
   });
   const client = await launchClient(executable, step, endpoint, { ...evidencePaths, disableGpu });
   try {
-    await (operations.waitForEndpoint ?? waitForClientWebSocket)(endpoint);
+    try {
+      await (operations.waitForEndpoint ?? waitForClientWebSocket)(endpoint);
+    } catch (error) {
+      const flightRecorder = await readFailureFileTail(evidencePaths.diagnosticLogPath);
+      const stderr = boundedFailureText(client.started?.output?.().stderr ?? "");
+      const exitCode = client.started?.child?.exitCode ?? client.started?.child?.signalCode ?? "running";
+      throw new Error(`tightbeam_${channel}_candidate_endpoint_unready:${boundedFailureText(error?.message ?? error)}:exit=${exitCode}:flight_recorder=${flightRecorder || "absent"}:stderr=${stderr || "absent"}`, { cause: error });
+    }
     const clientRuntimeIdentity = await verifyClientAppVersion(evidencePaths.diagnosticLogPath, TIGHTBEAM.version);
     const identity = await fs.readFile(step.identityFile);
     if (identity.length === 0) throw new Error(`tightbeam_${channel}_${step.phase}_identity_empty`);
@@ -1249,6 +1256,7 @@ export async function runMacosSmokePlan(plan, operations = {}) {
 
 async function smokeMacos(options) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-tightbeam-electron-"));
+  let passed = false;
   try {
     await assertTightbeamSmokeParticipantAssetBytes(options.participantIdentities, "macos", {
       cli: options.cli,
@@ -1262,9 +1270,22 @@ async function smokeMacos(options) {
       sourceDir: options.sourceDir,
       stateRoot: path.join(root, "macos-cli-state"),
     });
+    passed = true;
     return { cliOnly: cliContract, component: "macos", mode: "candidate-only", transitions, status: "passed" };
+  } catch (error) {
+    const output = process.env.SURF_ACE_SMOKE_FAILURE_OUTPUT;
+    if (output) {
+      if (!path.isAbsolute(output)) throw new Error("tightbeam_smoke_failure_output_must_be_absolute", { cause: error });
+      await fs.writeFile(output, `${JSON.stringify({
+        component: "macos",
+        error: boundedFailureText(error?.message ?? error),
+        flightRecorderTail: await readFailureFileTail(path.join(root, "macos-candidate-client-flight-recorder.ndjson")),
+        status: "failed",
+      }, null, 2)}\n`);
+    }
+    throw new Error(`macos_smoke_failed:${boundedFailureText(error?.message ?? error)}:evidence_root:${root}`, { cause: error });
   } finally {
-    await removeIfExists(root);
+    if (passed) await removeIfExists(root);
   }
 }
 

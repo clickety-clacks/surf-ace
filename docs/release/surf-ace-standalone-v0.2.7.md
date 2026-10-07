@@ -14,7 +14,7 @@ v0.2.5 tags, URLs, and bytes retain their legacy names unchanged.
 - Proposed product source: tag `surf-ace-v0.2.7-r1` at product commit
   `1221ffb7c2c78607f6496d7c89046805f7f78c67`.
 - Product version: `0.2.7`.
-- Tooling: proposed tag `surf-ace-release-tooling-v0.2.7-r1` at the
+- Tooling: proposed tag `surf-ace-release-tooling-v0.2.7-r2` at the
   exact reviewed tooling commit.
 - Node `24.3.0`, pnpm `10.15.1`, Rust `1.89.0`, PostgreSQL `16`, Linux
   `rust:1.89.0-bookworm`, and Xcode `27.0` on `xcode-27` are recorded in the
