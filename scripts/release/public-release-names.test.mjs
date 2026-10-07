@@ -9,11 +9,18 @@ test("published v0.2.5 download identities remain exact legacy names", () => {
   assert.equal(names.title, "Surf Ace v0.2.5");
   assert.equal(names.channel, "tightbeam-standalone");
   assert.equal(names.sourceTag, "surf-ace-tightbeam-v0.2.5-r4");
-  assert.equal(names.toolingTag, TIGHTBEAM_TOOLING_TAG);
-  assert.deepEqual(names.assets, TIGHTBEAM.assets);
-  assert.equal(names.skillAsset, TIGHTBEAM_SKILL_ASSET);
-  assert.equal(names.manifest, TIGHTBEAM.manifest);
-  assert.equal(names.checksums, TIGHTBEAM.checksums);
+  assert.equal(names.toolingTag, "surf-ace-release-tooling-tightbeam-v0.2.5-r11");
+  assert.deepEqual(names.assets, [
+    "surf-ace-tightbeam-server-linux-x86_64-v0.2.5.tar.gz",
+    "surf-ace-tightbeam-cli-linux-x86_64-v0.2.5.tar.gz",
+    "surf-ace-tightbeam-electron-linux-x86_64-v0.2.5.zip",
+    "surf-ace-tightbeam-cli-macos-arm64-v0.2.5.tar.gz",
+    "surf-ace-tightbeam-electron-macos-arm64-v0.2.5.zip",
+    "surf-ace-tightbeam-skill-v0.2.5.md",
+  ]);
+  assert.equal(names.skillAsset, "surf-ace-tightbeam-skill-v0.2.5.md");
+  assert.equal(names.manifest, "surf-ace-tightbeam-v0.2.5-manifest.json");
+  assert.equal(names.checksums, "SHA256SUMS");
 });
 
 test("future public release names identify Surf Ace without a Tightbeam product prefix", () => {
@@ -25,6 +32,9 @@ test("future public release names identify Surf Ace without a Tightbeam product 
   assert.equal(names.assets[0], "surf-ace-server-linux-x86_64-v0.2.6.tar.gz");
   assert.equal(names.assets[5], "surf-ace-skill-v0.2.6.md");
   assert.equal(names.manifest, "surf-ace-v0.2.6-manifest.json");
+  assert.deepEqual(TIGHTBEAM.assets, names.assets);
+  assert.equal(TIGHTBEAM_SKILL_ASSET, names.skillAsset);
+  assert.equal(TIGHTBEAM_TOOLING_TAG, names.toolingTag);
   assert.doesNotMatch(JSON.stringify(names), /tightbeam/i);
   assert.throws(() => publicReleaseNames({ version: "0.2.6", sourceRevision: "r1", toolingRevision: "r1", legacy: true }), /legacy_release_naming_is_v025_only/);
 });

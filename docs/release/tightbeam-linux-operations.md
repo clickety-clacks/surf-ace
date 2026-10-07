@@ -1,7 +1,7 @@
 # Surf Ace standalone Linux server operations
 
-This v0.2.5 runbook applies only to product commit
-`04a37d82e94d9cae7446841ccc03553a18397ff2` and PostgreSQL 16. It assumes a
+This v0.2.6 runbook applies only to product commit
+`69023a9a291d8196a7cda7bd7ab205c1f9e7d108` and PostgreSQL 16. It assumes a
 single configured allocator fleet, one server process at a time, and an
 already-provisioned PostgreSQL primary with its configured synchronous witness.
 The archive never installs a service or provisions, upgrades, or changes a host.
@@ -79,7 +79,7 @@ existing journal head. An already migrated v0.2.4 fleet must retain its pane
 state; do not reapply 002. If upgrading directly from v0.2.3, stop the
 allocator and verify the writer lease is released before applying 002. The
 migration refuses an active lease, an in-progress restore, or an unsupported
-state version. The v0.2.5 server does not auto-migrate.
+state version. The v0.2.6 server does not auto-migrate.
 
 An annotation-capable candidate also carries the forward-only
 `schemas/allocator/003_annotation_journal.sql` migration. Apply it after 002
@@ -95,7 +95,7 @@ a disposable staging cluster with its own witness and apply 002 there first;
 verify the pre- and post-migration head sequence/hash are identical, the
 accepted-state pane fence starts at 1, pane claims advance it, and restart and
 restore do not reuse a number. Run the two-client smoke against that staging
-allocator. After production migration, preserve the backup until the v0.2.5
+allocator. After production migration, preserve the backup until the v0.2.6
 qualification settles. If migration fails before commit, PostgreSQL rolls it
 back atomically. If a later rollback is required, stop the writer and restore
 the verified pre-migration base backup into a new cluster; never drop the pane
