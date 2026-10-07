@@ -375,9 +375,14 @@ private final class AnnotationWireProbeTransport: SurfAceAnnotationWireTransport
 @MainActor
 private final class AnnotationRejectOneSurfaceTransport: SurfAceAnnotationWireTransport {
     let rejectedSurfaceId: String
+    let rejectedCode: String
     var receivedSurfaceIds: [String] = []
 
-    init(rejectedSurfaceId: String) { self.rejectedSurfaceId = rejectedSurfaceId }
+    init(rejectedSurfaceId: String,
+         rejectedCode: String = "annotation_source_sequence_conflict") {
+        self.rejectedSurfaceId = rejectedSurfaceId
+        self.rejectedCode = rejectedCode
+    }
 
     func exchange(_ data: Data) async throws -> Data {
         let request = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
@@ -393,7 +398,7 @@ private final class AnnotationRejectOneSurfaceTransport: SurfAceAnnotationWireTr
             receivedSurfaceIds.append(surfaceId)
             if surfaceId == rejectedSurfaceId {
                 reply["ok"] = false
-                reply["error"] = ["code": "annotation_source_sequence_conflict", "message": "conflict"]
+                reply["error"] = ["code": rejectedCode, "message": "rejected"]
             } else {
                 reply["payload"] = [
                     "serverCursor": ["epoch": "0123456789abcdef0123456789abcdef", "sequence": "1"],
@@ -408,6 +413,46 @@ private final class AnnotationRejectOneSurfaceTransport: SurfAceAnnotationWireTr
 }
 
 extension SurfAceAnnotationOutboxTests {
+    @MainActor
+    func testRejectedGapPersistsUnhealthyAndDoesNotBlockOtherSurface() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SurfAceAnnotationRejectedGap-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = SurfAceLocklessGenerationStore(stateURL: directory.appendingPathComponent("authority-v1.json"))
+        var limits = SurfAceLocklessCapacityLimits.production
+        limits.maxAnnotationPublisherStateBytesPerSurface = Int64(SurfAceAnnotationOutbox.maximumBytes)
+        limits.maxAnnotationPublisherRecordsPerSurface = Int64(SurfAceAnnotationOutbox.maximumRecords)
+        limits.maxRecoverableSurfaceBytes = 704 * 1_024 * 1_024
+        var state = try SurfAceLocklessAuthorityState.empty(limits: limits)
+        state.annotationPublisher = try SurfAceAnnotationOutbox(clientId: "client-1", sourceEpoch: sourceEpoch)
+        let first = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
+            state: &state, expectedSurfaceSetRevision: state.surfaceSetRevision).surface.surfaceId
+        let second = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
+            state: &state, expectedSurfaceSetRevision: state.surfaceSetRevision).surface.surfaceId
+        let rejected = min(first, second)
+        let accepted = max(first, second)
+        try state.annotationPublisher?.lose(surfaceId: rejected, code: "annotation_source_strokes_unavailable")
+        _ = try state.annotationPublisher?.append(surfaceId: accepted, record: record())
+        try store.save(state)
+        let adapter = try SurfAceLocklessRuntimeAdapter(store: store, annotationClientId: "client-1")
+        let transport = AnnotationRejectOneSurfaceTransport(
+            rejectedSurfaceId: rejected, rejectedCode: "annotation_invalid_request"
+        )
+        let publisher = try SurfAceAnnotationPublisher(
+            adapter: adapter, endpoint: XCTUnwrap(URL(string: "ws://127.0.0.1:19001")),
+            makeTransport: { _ in transport }, onError: { _ in }
+        )
+        try await publisher.drain()
+        let saved = try XCTUnwrap(store.load()?.annotationPublisher)
+        XCTAssertEqual(transport.receivedSurfaceIds, [rejected, accepted])
+        XCTAssertEqual(saved.surfaces[rejected]?.unhealthy?.code, "annotation_invalid_request")
+        XCTAssertEqual(saved.surfaces[rejected]?.fifo.first?.kind, "gap")
+        XCTAssertNil(saved.surfaces[rejected]?.acceptedCursor)
+        XCTAssertEqual(saved.surfaces[accepted]?.acceptedCursor?.sequence, "1")
+        XCTAssertEqual(saved.pendingSurfaceIds(), [rejected])
+        publisher.stop()
+    }
+
     @MainActor
     func testPublisherPersistsUnhealthySurfaceAndContinuesOtherSurface() async throws {
         let directory = FileManager.default.temporaryDirectory
