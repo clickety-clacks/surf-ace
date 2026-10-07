@@ -117,6 +117,22 @@ INSERT INTO surf_ace_allocator.annotation_journal_head(fleet_id, epoch)
 SELECT fleet_id, encode(public.gen_random_bytes(16), 'hex')
 FROM surf_ace_allocator.fleets;
 
+CREATE FUNCTION surf_ace_allocator.annotation_head_for_new_fleet()
+RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = pg_catalog, surf_ace_allocator
+AS $function$
+BEGIN
+  INSERT INTO surf_ace_allocator.annotation_journal_head(fleet_id, epoch)
+    VALUES (NEW.fleet_id, encode(public.gen_random_bytes(16), 'hex'));
+  RETURN NEW;
+END
+$function$;
+
+CREATE TRIGGER annotation_head_for_new_fleet
+AFTER INSERT ON surf_ace_allocator.fleets
+FOR EACH ROW EXECUTE FUNCTION surf_ace_allocator.annotation_head_for_new_fleet();
+
 CREATE FUNCTION surf_ace_allocator.annotation_compact(
   p_fleet_id text, p_generation bigint, p_lease_id text,
   p_incoming_bytes bigint, p_maintenance boolean
@@ -575,7 +591,8 @@ BEGIN
     'headCursor', CASE WHEN h.head_sequence = 0 THEN NULL ELSE
       jsonb_build_object('epoch', h.epoch, 'sequence', h.head_sequence::text) END,
     'historyCompleteSinceStart', h.head_sequence = 0 OR
-      (h.first_retained_sequence = 1 AND initial_epoch = h.epoch AND initial_sequence >= 1)
+      COALESCE(h.first_retained_sequence = 1, false)
+      AND initial_epoch = h.epoch AND initial_sequence >= 1
   );
 END
 $function$;

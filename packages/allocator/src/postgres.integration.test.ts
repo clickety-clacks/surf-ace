@@ -1237,6 +1237,24 @@ test("v0.2.3 custody migrates without changing its witnessed head", { timeout: 1
   }
 });
 
+test("annotation migration creates a head for fleets initialized afterward", { timeout: 180_000 }, async () => {
+  const cluster = await startCluster();
+  let allocator: AllocatorServer | null = null;
+  try {
+    await adminQuery(cluster.adminUrl,
+      await readFile(new URL("../sql/003_annotation_journal.sql", import.meta.url), "utf8"));
+    const recovery = await PostgresCustodyAdapter.initializeAbsentFleet(cluster.config, "alloc_annotation-new-fleet");
+    await recovery.release();
+    assert.equal(await scalar(cluster.adminUrl,
+      "SELECT count(*)::text FROM surf_ace_allocator.annotation_journal_head WHERE fleet_id = 'fleet-test'"), "1");
+    allocator = await AllocatorServer.start(serverConfig(cluster));
+    assert.ok(allocator.address.port > 0);
+  } finally {
+    await allocator?.close();
+    await cluster.stop();
+  }
+});
+
 test("annotation migration and append survive duplicate retry without allocating a second cursor", { timeout: 180_000 }, async () => {
   const cluster = await startCluster();
   try {
@@ -1666,6 +1684,8 @@ test("annotation compaction protects absent and unread consumers, then retains s
       assert.equal(compacted.headSequence, "1");
       assert.equal(compacted.firstRetainedSequence, null);
       assert.equal(compacted.sourceMetadataRows, 2, "source head and receipt survive compaction");
+      const emptyHistory = await writer.openAnnotationConsumer("empty-history", "watch", first.serverCursor);
+      assert.equal(emptyHistory.historyCompleteSinceStart, false);
       const duplicate = await journal.ingest(record);
       assert.equal(duplicate.duplicate, true);
       assert.deepEqual(duplicate.serverCursor, first.serverCursor);
