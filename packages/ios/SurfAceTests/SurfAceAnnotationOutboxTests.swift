@@ -57,10 +57,10 @@ final class SurfAceAnnotationOutboxTests: XCTestCase {
     func testGapConsumesItsReservedSlotAtExactByteBoundary() throws {
         var outbox = try SurfAceAnnotationOutbox(clientId: "client-1", sourceEpoch: sourceEpoch)
         _ = try outbox.append(surfaceId: surfaceId, record: record())
-        let maxBytes = Int(try outbox.partitionBytes(surfaceId: surfaceId))
-            + 2 * SurfAceAnnotationOutbox.gapSlotBytes + 1
+        let maxBytes = max(Int(try outbox.partitionBytes(surfaceId: surfaceId)) + 1,
+                           1_024) + 2 * SurfAceAnnotationOutbox.gapSlotBytes
         let payload = try XCTUnwrap(outbox.head(surfaceId: surfaceId, maxBytes: maxBytes))
-        XCTAssertEqual(try outbox.append(surfaceId: surfaceId, record: record(),
+        XCTAssertEqual(try outbox.append(surfaceId: surfaceId, record: record(padding: 4_000),
                                          maxBytes: maxBytes), "2")
         XCTAssertEqual(outbox.surfaces[surfaceId]?.trailingGap?.through, "2")
         try outbox.validate(maxBytes: maxBytes)
