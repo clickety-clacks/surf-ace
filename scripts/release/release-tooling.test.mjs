@@ -679,7 +679,7 @@ test("Electron smoke checks the running app version before any CLI request", asy
     },
     stateRoot: path.join(root, "cli-state"),
     waitForEndpoint: async () => undefined,
-  }), /tightbeam_client_app_version_mismatch:0\.1\.0:0\.2\.5/);
+  }), /tightbeam_client_app_version_mismatch:0\.1\.0:0\.2\.6/);
   assert.equal(cliCalls, 0);
 });
 
