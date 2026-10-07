@@ -5,7 +5,7 @@ import { appendFile, mkdtemp, readFile, rm } from "node:fs/promises";
 import { createServer, createConnection, type Socket } from "node:net";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { execFile as execFileCallback } from "node:child_process";
+import { execFile as execFileCallback, spawn } from "node:child_process";
 import test from "node:test";
 
 import pg from "pg";
@@ -18,7 +18,9 @@ import { PublicControllerWireClient } from "../../controller/src/wire.js";
 import { writePersistentStateFile } from "../../electron/src/persistent-state-file.js";
 import { SURF_ACE_LOCKLESS_V1_CAPABILITY } from "../../protocol/src/lockless.js";
 import { SurfaceCore } from "../../electron/src/surface-core.js";
+import { AnnotationSourceCoordinator } from "../../electron/src/annotation-source-coordinator.js";
 import { SurfaceWsServer } from "../../electron/src/ws-server.js";
+import { AnnotationJournal } from "./annotation-journal.js";
 import {
   type SurfAceDiscoveryEndpoint,
   type SurfAceDiscoveryService,
@@ -1028,6 +1030,24 @@ test("configured-first server in-process discovery fallback registers and persis
   let allowConfigured = true;
   let configuredAccepts = 0;
   const routeSockets = new Set<Socket>();
+  const routeIdleWaiters = new Set<() => void>();
+  const routeSocketClosed = () => {
+    if (routeSockets.size === 0) {
+      for (const ready of routeIdleWaiters) ready();
+      routeIdleWaiters.clear();
+    }
+  };
+  const waitForRouteIdle = async () => {
+    if (routeSockets.size === 0) return;
+    await new Promise<void>((resolve, reject) => {
+      const ready = () => { clearTimeout(timeout); resolve(); };
+      const timeout = setTimeout(() => {
+        routeIdleWaiters.delete(ready);
+        reject(new Error("configured route sockets did not close"));
+      }, 2_000);
+      routeIdleWaiters.add(ready);
+    });
+  };
   const route = createServer((socket) => {
     if (!allowConfigured || !allocator) { socket.destroy(); return; }
     configuredAccepts++;
@@ -1036,8 +1056,8 @@ test("configured-first server in-process discovery fallback registers and persis
     routeSockets.add(upstream);
     socket.on("error", () => upstream.destroy());
     upstream.on("error", () => socket.destroy());
-    socket.on("close", () => { routeSockets.delete(socket); upstream.destroy(); });
-    upstream.on("close", () => { routeSockets.delete(upstream); socket.destroy(); });
+    socket.on("close", () => { routeSockets.delete(socket); upstream.destroy(); routeSocketClosed(); });
+    upstream.on("close", () => { routeSockets.delete(upstream); socket.destroy(); routeSocketClosed(); });
     socket.pipe(upstream).pipe(socket);
   });
   const discover = (): SurfAceDiscoveryService => ({
@@ -1107,7 +1127,10 @@ test("configured-first server in-process discovery fallback registers and persis
       return response.payload as { clients: Array<{ clientId: string; surfaces: Array<{ windowLabel: string; panes: Array<{ paneAddress: string }> }> }> };
     };
     const first = await topology();
-    assert.equal(first.clients.length, 2);
+    assert.equal(first.clients.length, 2, JSON.stringify({
+      registeredClientIds: first.clients.map((client) => client.clientId),
+      fixtureClientIds: fixtures.map((fixture) => fixture.clientId),
+    }));
     const firstPaneNumbers = first.clients.flatMap((client) => client.surfaces.flatMap((surface) =>
       surface.panes.map((pane) => Number(pane.paneAddress.slice(surface.windowLabel.length)))));
     assert.equal(firstPaneNumbers.length, 3);
@@ -1119,6 +1142,8 @@ test("configured-first server in-process discovery fallback registers and persis
     }
     const before = await allocator.diagnostics();
     await clients[1].stop();
+    await waitForRouteIdle();
+    assert.equal(routeSockets.size, 0, "stopped configured route closes its sockets");
     const restoredIdentity = await loadOrCreateIdentity(fixtures[0].stateDir);
     assert.equal(registrationClientId(restoredIdentity.publicKeyPem), fixtures[0].clientId);
     allowConfigured = false;
@@ -1131,7 +1156,10 @@ test("configured-first server in-process discovery fallback registers and persis
       configuredAddress: configuredUrl,
       clientId: fixtures[0].clientId, core: fixtures[0].core,
       persist: async () => {
-        if (rejectRecoveryPersistence && ++recoveryWrites === 2) {
+        // Registry identity confirmation now persists on both selected and
+        // candidate transports. Fail the candidate's registration write, not
+        // the selected fallback's unrelated confirmation write.
+        if (rejectRecoveryPersistence && routeSockets.size > 0 && ++recoveryWrites === 2) {
           recoveryPersistenceEntered();
           await heldRecoveryPersistence;
           throw new Error("recovery_persist_failed");
@@ -1179,7 +1207,7 @@ test("configured-first server in-process discovery fallback registers and persis
     assert.equal(mutationCore.getSurface(mutationSurfaceId).panes.get(mutationPaneId)!.name, "concurrent-accepted-name");
     const acceptedDisk = JSON.parse(await readFile(join(fixtures[0].stateDir, "state.json"), "utf8"));
     assert.match(JSON.stringify(acceptedDisk), /concurrent-accepted-name/);
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await waitForRouteIdle();
     assert.equal(routeSockets.size, 0, "failed persistence does not promote the configured route");
     assert.deepEqual(await topology(), first);
     rejectRecoveryPersistence = false;
@@ -1246,6 +1274,610 @@ test("v0.2.3 custody migrates without changing its witnessed head", { timeout: 1
     const state = await scalar(cluster.adminUrl,
       "SELECT surf_ace_allocator.read_accepted_state('fleet-test')->>'nextPaneOrdinalFence'");
     assert.equal(state, "1");
+  } finally {
+    await cluster.stop();
+  }
+});
+
+test("annotation migration creates a head for fleets initialized afterward", { timeout: 180_000 }, async () => {
+  const cluster = await startCluster();
+  let allocator: AllocatorServer | null = null;
+  try {
+    await adminQuery(cluster.adminUrl,
+      await readFile(new URL("../sql/003_annotation_journal.sql", import.meta.url), "utf8"));
+    const recovery = await PostgresCustodyAdapter.initializeAbsentFleet(cluster.config, "alloc_annotation-new-fleet");
+    await recovery.release();
+    assert.equal(await scalar(cluster.adminUrl,
+      "SELECT count(*)::text FROM surf_ace_allocator.annotation_journal_head WHERE fleet_id = 'fleet-test'"), "1");
+    allocator = await AllocatorServer.start(serverConfig(cluster));
+    assert.ok(allocator.address.port > 0);
+  } finally {
+    await allocator?.close();
+    await cluster.stop();
+  }
+});
+
+test("annotation migration and append survive duplicate retry without allocating a second cursor", { timeout: 180_000 }, async () => {
+  const cluster = await startCluster();
+  try {
+    const recovery = await PostgresCustodyAdapter.initializeAbsentFleet(cluster.config, "alloc_annotation-test");
+    await recovery.release();
+    const migration = await readFile(new URL("../sql/003_annotation_journal.sql", import.meta.url), "utf8");
+    await adminQuery(cluster.adminUrl, migration);
+    const writer = await PostgresCustodyAdapter.acquireWriter(cluster.config);
+    try {
+      const journal = new AnnotationJournal(writer);
+      const record = {
+        protocolVersion: 1, clientId: "client-A", sourceEpoch: "a".repeat(32),
+        surfaceId: "sf_A", paneId: 1, frameId: "fr_A", sourceSequence: "1",
+        sourceEventId: "event-A", kind: "live_delta", contentId: "content-A",
+        revision: 1, contentType: "html",
+        viewport: { scrollOffset: { x: 0, y: 0 }, visibleRect: { x: 0, y: 0, width: 10, height: 10 },
+          contentSize: { width: 10, height: 10 }, zoomLevel: 1 },
+        sourceTimestamp: "2026-10-06T21:00:00Z", payload: { strokes: [{ strokeId: "s1" }] },
+      };
+      const first = await journal.ingest(record);
+      const duplicate = await journal.ingest(record);
+      assert.deepEqual(duplicate.serverCursor, first.serverCursor);
+      assert.equal(duplicate.committedAt, first.committedAt);
+      assert.equal(duplicate.duplicate, true);
+      await assert.rejects(journal.ingest({ ...record, revision: 2 }),
+        (error) => error instanceof AllocatorError && error.code === "annotation_source_event_conflict");
+      const info = await writer.annotationInfo();
+      assert.equal(info.journalRecords, 1);
+      assert.equal(info.headSequence, "1");
+      assert.equal(info.firstRetainedSequence, "1");
+    } finally {
+      await writer.release();
+    }
+    const server = await AllocatorServer.start(serverConfig(cluster));
+    const publisher = await WireClient.connect(server.address.url);
+    const firstConsumer = await WireClient.connect(server.address.url);
+    const secondConsumer = await WireClient.connect(server.address.url);
+    const gapConsumer = await WireClient.connect(server.address.url);
+    const retireCaller = await WireClient.connect(server.address.url);
+    let priorLease = "";
+    let priorCursor: { epoch: string; sequence: string } = { epoch: "", sequence: "" };
+    try {
+      assert.equal((await publisher.request("annotation.hello", { protocolVersion: 1, role: "publisher" })).ok, true);
+      assert.equal((await firstConsumer.request("annotation.hello", { protocolVersion: 1, role: "consumer" })).ok, true);
+      assert.equal((await secondConsumer.request("annotation.hello", { protocolVersion: 1, role: "consumer" })).ok, true);
+      const firstOpen = await firstConsumer.request("annotation.watch", { consumerId: "first" });
+      const secondOpen = await secondConsumer.request("annotation.watch", { consumerId: "second" });
+      assert.equal(firstOpen.ok, true);
+      assert.equal(secondOpen.ok, true);
+      assert.equal((await retireCaller.request("annotation.hello", { protocolVersion: 1, role: "consumer" })).ok, true);
+      const headCursor = (firstOpen.payload as { headCursor: { epoch: string; sequence: string } }).headCursor;
+      const undeliveredOpen = await retireCaller.request("annotation.watch", {
+        consumerId: "undelivered", fromCursor: { epoch: headCursor.epoch, sequence: "2" },
+      });
+      assert.equal(undeliveredOpen.ok, true);
+      const undeliveredAck = await retireCaller.request("annotation.ack", {
+        consumerId: "undelivered", leaseId: (undeliveredOpen.payload as { leaseId: string }).leaseId,
+        throughCursor: headCursor,
+      });
+      assert.equal((undeliveredAck.error as { code: string }).code, "annotation_ack_not_delivered");
+      const firstLease = (firstOpen.payload as { leaseId: string }).leaseId;
+      const secondLease = (secondOpen.payload as { leaseId: string }).leaseId;
+      priorLease = secondLease;
+      const deliveredA = await firstConsumer.waitEvent("annotation.record");
+      const deliveredB = await secondConsumer.waitEvent("annotation.record");
+      const cursor = (deliveredA.payload as { serverCursor: { epoch: string; sequence: string } }).serverCursor;
+      priorCursor = cursor;
+      assert.deepEqual((deliveredB.payload as { serverCursor: unknown }).serverCursor, cursor);
+      const acked = await firstConsumer.request("annotation.ack", { consumerId: "first", leaseId: firstLease, throughCursor: cursor });
+      assert.equal(acked.ok, true);
+      const wrongLease = await secondConsumer.request("annotation.ack", {
+        consumerId: "second", leaseId: firstLease, throughCursor: cursor,
+      });
+      assert.equal((wrongLease.error as { code: string }).code, "annotation_consumer_lease_stale");
+      const secondAck = await secondConsumer.request("annotation.ack", {
+        consumerId: "second", leaseId: secondLease, throughCursor: cursor,
+      });
+      assert.equal(secondAck.ok, true);
+      assert.equal((await gapConsumer.request("annotation.hello", { protocolVersion: 1, role: "consumer" })).ok, true);
+      const gapOpen = await gapConsumer.request("annotation.watch", {
+        consumerId: "gap-consumer", fromCursor: { epoch: "f".repeat(32), sequence: "1" },
+      });
+      assert.equal(gapOpen.ok, true);
+      const gapLease = (gapOpen.payload as { leaseId: string }).leaseId;
+      const gap = await gapConsumer.waitEvent("annotation.history_gap");
+      assert.equal((gap.payload as { reason: string }).reason, "epoch_changed");
+      const wrongGap = await gapConsumer.request("annotation.gap.ack", {
+        consumerId: "gap-consumer", leaseId: gapLease, gapId: "0".repeat(32),
+      });
+      assert.equal((wrongGap.error as { code: string }).code, "annotation_gap_id_mismatch");
+      const gapAck = await gapConsumer.request("annotation.gap.ack", {
+        consumerId: "gap-consumer", leaseId: gapLease, gapId: (gap.payload as { gapId: string }).gapId,
+      });
+      assert.equal(gapAck.ok, true);
+      const afterGap = await gapConsumer.waitEvent("annotation.record");
+      assert.deepEqual((afterGap.payload as { serverCursor: unknown }).serverCursor, cursor);
+      const gapResumer = await WireClient.connect(server.address.url);
+      try {
+        assert.equal((await gapResumer.request("annotation.hello", { protocolVersion: 1, role: "consumer" })).ok, true);
+        const resumedGap = await gapResumer.request("annotation.resume", { consumerId: "gap-consumer" });
+        assert.equal(resumedGap.ok, true);
+        assert.deepEqual((resumedGap.payload as { ackCursor: unknown }).ackCursor,
+          (gapAck.payload as { ackCursor: unknown }).ackCursor);
+        const replayed = await gapResumer.waitEvent("annotation.record");
+        assert.deepEqual((replayed.payload as { serverCursor: unknown }).serverCursor, cursor);
+        const replayAck = await gapResumer.request("annotation.ack", {
+          consumerId: "gap-consumer", leaseId: (resumedGap.payload as { leaseId: string }).leaseId,
+          throughCursor: cursor,
+        });
+        assert.equal(replayAck.ok, true);
+      } finally {
+        await gapResumer.close();
+      }
+      const retire = await retireCaller.request("annotation.consumer.retire", {
+        consumerId: "first", expectedAckCursor: cursor, discardUnacknowledged: true,
+      });
+      assert.equal(retire.ok, true);
+      assert.equal((retire.payload as { retired: boolean }).retired, true);
+      assert.equal((await firstConsumer.waitEvent("annotation.consumer_retired")).op, "annotation.consumer_retired");
+      assert.equal((await retireCaller.request("annotation.consumer.retire", {
+        consumerId: "first", expectedAckCursor: cursor, discardUnacknowledged: true,
+      })).ok, true);
+      const mismatchedRetire = await retireCaller.request("annotation.consumer.retire", {
+        consumerId: "first", expectedAckCursor: null, discardUnacknowledged: true,
+      });
+      assert.equal((mismatchedRetire.error as { code: string }).code, "annotation_ack_cursor_mismatch");
+    } finally {
+      await Promise.all([publisher.close(), firstConsumer.close(), secondConsumer.close(), gapConsumer.close(), retireCaller.close()]);
+      await server.close();
+    }
+    const restarted = await AllocatorServer.start(serverConfig(cluster));
+    const resumed = await WireClient.connect(restarted.address.url);
+    try {
+      assert.equal((await resumed.request("annotation.hello", { protocolVersion: 1, role: "consumer" })).ok, true);
+      const stale = await resumed.request("annotation.ack", {
+        consumerId: "second", leaseId: priorLease, throughCursor: priorCursor,
+      });
+      assert.equal((stale.error as { code: string }).code, "annotation_consumer_lease_stale");
+      const opened = await resumed.request("annotation.resume", { consumerId: "second" });
+      assert.equal(opened.ok, true);
+      assert.notEqual((opened.payload as { leaseId: string }).leaseId, priorLease);
+      assert.deepEqual((opened.payload as { ackCursor: unknown }).ackCursor, priorCursor);
+    } finally {
+      await resumed.close();
+      await restarted.close();
+    }
+  } finally {
+    await cluster.stop();
+  }
+});
+
+test("annotation native CLI watch, ack, resume and retire use the PostgreSQL journal", {
+  timeout: 180_000, skip: !process.env.SURF_ACE_TEST_CLI_BIN,
+}, async () => {
+  const binary = process.env.SURF_ACE_TEST_CLI_BIN!;
+  const cluster = await startCluster();
+  const stateRoot = await mkdtemp(join(cluster.root, "annotation-cli-"));
+  const children: ReturnType<typeof spawn>[] = [];
+  try {
+    const recovery = await PostgresCustodyAdapter.initializeAbsentFleet(cluster.config, "alloc_annotation-cli");
+    await recovery.release();
+    await adminQuery(cluster.adminUrl,
+      await readFile(new URL("../sql/003_annotation_journal.sql", import.meta.url), "utf8"));
+    const writer = await PostgresCustodyAdapter.acquireWriter(cluster.config);
+    try {
+      await new AnnotationJournal(writer).ingest({
+        protocolVersion: 1, clientId: "client-cli", sourceEpoch: "a".repeat(32),
+        surfaceId: "sf_cli", paneId: 1, frameId: "fr_cli", sourceSequence: "1",
+        sourceEventId: "event-cli", kind: "live_delta", contentId: "content-cli",
+        revision: 1, contentType: "html",
+        viewport: { scrollOffset: { x: 0, y: 0 }, visibleRect: { x: 0, y: 0, width: 10, height: 10 },
+          contentSize: { width: 10, height: 10 }, zoomLevel: 1 },
+        sourceTimestamp: "2026-10-06T21:00:00Z", payload: { strokes: [{ strokeId: "s1" }] },
+      });
+    } finally {
+      await writer.release();
+    }
+    const server = await AllocatorServer.start(serverConfig(cluster));
+    try {
+      const args = ["--registry", server.address.url, "--state-root", stateRoot,
+        "annotations"];
+      const stream = (action: "watch" | "resume", count: number) => {
+        const child = spawn(binary, [...args, action, "--consumer-id", "cli-consumer"],
+          { stdio: ["ignore", "pipe", "pipe"] });
+        children.push(child);
+        const lines: Array<Record<string, any>> = [];
+        let buffered = "";
+        let errors = "";
+        const ready = new Promise<typeof lines>((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error(`CLI ${action} timed out: ${errors}`)), 10_000);
+          child.stderr.on("data", (chunk) => { errors += String(chunk); });
+          child.on("error", (error) => { clearTimeout(timer); reject(error); });
+          child.on("exit", (code) => {
+            if (lines.length < count) { clearTimeout(timer); reject(new Error(`CLI ${action} exited ${code}: ${errors}`)); }
+          });
+          child.stdout.on("data", (chunk) => {
+            buffered += String(chunk);
+            for (let newline = buffered.indexOf("\n"); newline >= 0; newline = buffered.indexOf("\n")) {
+              const line = buffered.slice(0, newline);
+              buffered = buffered.slice(newline + 1);
+              lines.push(JSON.parse(line));
+              if (lines.length === count) { clearTimeout(timer); resolve(lines); }
+            }
+          });
+        });
+        return { child, ready };
+      };
+      const watched = stream("watch", 2);
+      const delivered = await watched.ready;
+      assert.equal(delivered[0]?.type, "annotation.subscription");
+      assert.equal(delivered[1]?.op, "annotation.record");
+      const cursor = delivered[1]?.payload?.serverCursor;
+      assert.match(cursor, /^ann1:[0-9a-f]{32}:1$/);
+      const acknowledged = await execFile(binary,
+        [...args, "ack", "--consumer-id", "cli-consumer", "--cursor", cursor]);
+      assert.equal(JSON.parse(acknowledged.stdout).ackCursor, cursor);
+      const resumed = stream("resume", 1);
+      const resumedLines = await resumed.ready;
+      assert.equal(resumedLines[0]?.ackCursor, cursor);
+      const retired = await execFile(binary, [...args, "retire", "--consumer-id", "cli-consumer",
+        "--expect-ack", cursor, "--discard-unacknowledged"]);
+      assert.equal(JSON.parse(retired.stdout).type, "annotation.consumer_retired");
+    } finally {
+      for (const child of children) child.kill();
+      await server.close();
+    }
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true });
+    await cluster.stop();
+  }
+});
+
+test("annotation Electron source flush and at-open commit ingest into the real journal", { timeout: 180_000 }, async () => {
+  const cluster = await startCluster();
+  try {
+    const recovery = await PostgresCustodyAdapter.initializeAbsentFleet(cluster.config, "alloc_annotation-electron");
+    await recovery.release();
+    await adminQuery(cluster.adminUrl,
+      await readFile(new URL("../sql/003_annotation_journal.sql", import.meta.url), "utf8"));
+    const writer = await PostgresCustodyAdapter.acquireWriter(cluster.config);
+    try {
+      const core = new SurfaceCore({ annotationClientId: "c".repeat(64) });
+      const surface = core.ensurePrimarySurface("Surf Ace", { width: 640, height: 480, scale: 1 });
+      core.admitSurfaceToLockless(surface.surfaceId);
+      const paneId = core.activePaneIds(surface.surfaceId)[0]!;
+      core.locklessContentPush(surface.surfaceId, {
+        content: { markdown: "fixture" }, contentId: "content-one", contentType: "markdown",
+        friendlyChatName: "Fixture", paneId,
+      }, "Fixture");
+      let durable = core.getPersistentState();
+      const source = new AnnotationSourceCoordinator(core, async () => {
+        durable = core.getPersistentState();
+      }, () => {}, (error) => { throw error; });
+      try {
+        await source.setAnnotating(surface.surfaceId, paneId, true);
+        const image = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL/nwAAAABJRU5ErkJggg==";
+        core.annotationPublisher!.openFrame(surface.surfaceId, paneId, {
+          contentId: "content-one", contextKey: "content-one", image, openedAt: 100,
+          scrollOffset: { x: 0, y: 0 }, viewport: { width: 640, height: 480, scale: 1 },
+        });
+        core.addStroke(surface.surfaceId, paneId, {
+          strokeId: "stroke-one" as never, tool: "mouse",
+          points: [{ x: 1, y: 2, timestamp: 110 }],
+        });
+        await source.flushPending(surface.surfaceId, paneId);
+        await source.setAnnotating(surface.surfaceId, paneId, false);
+        const restored = new SurfaceCore({ annotationClientId: "c".repeat(64), persistentState: durable });
+        const fifo = restored.annotationPublisher!.snapshot().surfaces[surface.surfaceId]!.fifo;
+        assert.equal(fifo.length, 2);
+        const journal = new AnnotationJournal(writer);
+        const live = await journal.ingest(JSON.parse(fifo[0]!.canonical));
+        const commit = await journal.ingest(JSON.parse(fifo[1]!.canonical));
+        assert.equal(live.serverCursor.sequence, "1");
+        assert.equal(commit.serverCursor.sequence, "2");
+        assert.equal(commit.duplicate, false);
+        assert.deepEqual((await journal.ingest(JSON.parse(fifo[1]!.canonical))).serverCursor, commit.serverCursor);
+        assert.equal((await writer.annotationInfo()).journalRecords, 2);
+      } finally {
+        source.stop();
+      }
+    } finally {
+      await writer.release();
+    }
+  } finally {
+    await cluster.stop();
+  }
+});
+
+test("iOS at-open source records ingest and replay to independent PostgreSQL consumers", { timeout: 180_000 }, async () => {
+  const fixture = JSON.parse(await readFile(new URL("../vectors/ios-annotation-v1.json", import.meta.url), "utf8")) as {
+    records: string[];
+  };
+  assert.equal(fixture.records.length, 2);
+  const records = fixture.records.map((bytes) => {
+    const record = JSON.parse(bytes) as Record<string, unknown>;
+    assert.equal(canonicalJson(record as never), bytes, "iOS persisted bytes use the registry canonical form");
+    return record;
+  });
+  assert.deepEqual(records.map((record) => record.kind), ["live_delta", "frame_commit"]);
+  assert.deepEqual(records.map((record) => record.sourceSequence), ["1", "2"]);
+  const secondClient = {
+    ...records[0], clientId: "client-second-fixture", sourceEpoch: "b".repeat(32),
+    surfaceId: "sf_second", paneId: 2, frameId: "fr_second",
+    sourceSequence: "1", sourceEventId: "event-second", contentId: "content-second",
+  };
+  const expectedRecords = [...records, secondClient];
+  const cluster = await startCluster();
+  try {
+    const recovery = await PostgresCustodyAdapter.initializeAbsentFleet(cluster.config, "alloc_annotation-ios");
+    await recovery.release();
+    await adminQuery(cluster.adminUrl,
+      await readFile(new URL("../sql/003_annotation_journal.sql", import.meta.url), "utf8"));
+    const writer = await PostgresCustodyAdapter.acquireWriter(cluster.config);
+    let cursors: Array<{ epoch: string; sequence: string }>;
+    try {
+      const journal = new AnnotationJournal(writer);
+      cursors = [];
+      for (const record of expectedRecords) cursors.push((await journal.ingest(record)).serverCursor);
+      assert.deepEqual(cursors.map((cursor) => cursor.sequence), ["1", "2", "3"]);
+      const duplicate = await journal.ingest(records[1]);
+      assert.equal(duplicate.duplicate, true);
+      assert.deepEqual(duplicate.serverCursor, cursors[1]);
+      assert.equal((await writer.annotationInfo()).journalRecords, 3);
+    } finally {
+      await writer.release();
+    }
+    const server = await AllocatorServer.start(serverConfig(cluster));
+    const first = await WireClient.connect(server.address.url);
+    const second = await WireClient.connect(server.address.url);
+    try {
+      for (const consumer of [first, second]) {
+        assert.equal((await consumer.request("annotation.hello", { protocolVersion: 1, role: "consumer" })).ok, true);
+      }
+      const firstOpen = await first.request("annotation.watch", { consumerId: "ios-first" });
+      const secondOpen = await second.request("annotation.watch", { consumerId: "ios-second" });
+      assert.equal(firstOpen.ok, true);
+      assert.equal(secondOpen.ok, true);
+      const firstLease = (firstOpen.payload as { leaseId: string }).leaseId;
+      const secondLease = (secondOpen.payload as { leaseId: string }).leaseId;
+      for (const consumer of [first, second]) {
+        for (const expected of expectedRecords) {
+          const event = await consumer.waitEvent("annotation.record");
+          const payload = event.payload as { record: Record<string, unknown> };
+          assert.deepEqual(payload.record, expected);
+        }
+      }
+      assert.equal((await first.request("annotation.ack", {
+        consumerId: "ios-first", leaseId: firstLease, throughCursor: cursors[2],
+      })).ok, true);
+      const secondAck = await second.request("annotation.ack", {
+        consumerId: "ios-second", leaseId: secondLease, throughCursor: cursors[0],
+      });
+      assert.equal(secondAck.ok, true);
+      assert.deepEqual((secondAck.payload as { ackCursor: unknown }).ackCursor, cursors[0]);
+    } finally {
+      await Promise.all([first.close(), second.close()]);
+      await server.close();
+    }
+  } finally {
+    await cluster.stop();
+  }
+});
+
+test("annotation offline consumer replays beyond the former client queue capacity", { timeout: 180_000 }, async () => {
+  const cluster = await startCluster();
+  const count = 257;
+  try {
+    const recovery = await PostgresCustodyAdapter.initializeAbsentFleet(cluster.config, "alloc_annotation-offline");
+    await recovery.release();
+    await adminQuery(cluster.adminUrl,
+      await readFile(new URL("../sql/003_annotation_journal.sql", import.meta.url), "utf8"));
+    const writer = await PostgresCustodyAdapter.acquireWriter(cluster.config);
+    try {
+      const initial = await writer.openAnnotationConsumer("offline-queue", "watch");
+      assert.deepEqual(initial.initialFromCursor.sequence, "1");
+      const journal = new AnnotationJournal(writer);
+      for (let sequence = 1; sequence <= count; sequence++) {
+        await journal.ingest({
+          protocolVersion: 1, clientId: "client-offline", sourceEpoch: "d".repeat(32),
+          surfaceId: "sf_offline", paneId: 1, frameId: "fr_offline",
+          sourceSequence: String(sequence), sourceEventId: `event-offline-${sequence}`,
+          kind: "live_delta", contentId: "content-offline", revision: 1, contentType: "html",
+          viewport: { scrollOffset: { x: 0, y: 0 }, visibleRect: { x: 0, y: 0, width: 10, height: 10 },
+            contentSize: { width: 10, height: 10 }, zoomLevel: 1 },
+          sourceTimestamp: "2026-10-06T21:00:00Z",
+          payload: { strokes: [{ strokeId: `stroke-${sequence}` }] },
+        });
+      }
+      assert.equal((await writer.annotationInfo()).journalRecords, count);
+    } finally {
+      await writer.release();
+    }
+    const server = await AllocatorServer.start(serverConfig(cluster));
+    const consumer = await WireClient.connect(server.address.url);
+    try {
+      assert.equal((await consumer.request("annotation.hello", { protocolVersion: 1, role: "consumer" })).ok, true);
+      const opened = await consumer.request("annotation.resume", { consumerId: "offline-queue" });
+      assert.equal(opened.ok, true);
+      assert.equal((opened.payload as { historyCompleteSinceStart: boolean }).historyCompleteSinceStart, true);
+      const leaseId = (opened.payload as { leaseId: string }).leaseId;
+      for (let sequence = 1; sequence <= count; sequence++) {
+        const event = await consumer.waitEvent("annotation.record");
+        const payload = event.payload as {
+          serverCursor: { epoch: string; sequence: string };
+          record: { sourceSequence: string; sourceEventId: string };
+        };
+        assert.equal(payload.serverCursor.sequence, String(sequence));
+        assert.equal(payload.record.sourceSequence, String(sequence));
+        assert.equal(payload.record.sourceEventId, `event-offline-${sequence}`);
+        if (sequence % 16 === 0 || sequence === count) {
+          const ack = await consumer.request("annotation.ack", {
+            consumerId: "offline-queue", leaseId, throughCursor: payload.serverCursor,
+          });
+          assert.equal(ack.ok, true);
+        }
+      }
+    } finally {
+      await consumer.close();
+      await server.close();
+    }
+  } finally {
+    await cluster.stop();
+  }
+});
+
+test("annotation compaction protects absent and unread consumers, then retains source dedup receipts", { timeout: 180_000 }, async () => {
+  const cluster = await startCluster();
+  try {
+    const recovery = await PostgresCustodyAdapter.initializeAbsentFleet(cluster.config, "alloc_annotation-compact");
+    await recovery.release();
+    await adminQuery(cluster.adminUrl,
+      await readFile(new URL("../sql/003_annotation_journal.sql", import.meta.url), "utf8"));
+    const writer = await PostgresCustodyAdapter.acquireWriter(cluster.config);
+    try {
+      const journal = new AnnotationJournal(writer);
+      const record = { protocolVersion: 1, clientId: "compactor", sourceEpoch: "c".repeat(32),
+        surfaceId: "sf_compaction", sourceSequence: "1", sourceEventId: "gap-one",
+        lostFromSequence: "1", lostThroughSequence: "1", reason: "source_retention_overflow" };
+      const first = await journal.ingest(record);
+      await adminQuery(cluster.adminUrl, `UPDATE surf_ace_allocator.annotation_journal_records
+        SET committed_at = clock_timestamp() - interval '31 days'
+        WHERE fleet_id = 'fleet-test' AND sequence = 1`);
+      assert.equal(await writer.compactAnnotations(), 0, "no consumer cannot erase history");
+      const a = await writer.openAnnotationConsumer("A", "watch");
+      const b = await writer.openAnnotationConsumer("B", "watch");
+      assert.equal(await writer.compactAnnotations(), 0, "unread record remains retained");
+      assert.equal((await writer.readAnnotationRecords("1", 1)).length, 1);
+      await writer.ackAnnotationConsumer("A", a.leaseId, first.serverCursor);
+      assert.equal(await writer.compactAnnotations(), 0, "second consumer still holds its backlog");
+      await writer.ackAnnotationConsumer("B", b.leaseId, first.serverCursor);
+      assert.equal(await writer.compactAnnotations(), 1);
+      const compacted = await writer.annotationInfo();
+      assert.equal(compacted.journalRecords, 0);
+      assert.equal(compacted.headSequence, "1");
+      assert.equal(compacted.firstRetainedSequence, null);
+      assert.equal(compacted.sourceMetadataRows, 2, "source head and receipt survive compaction");
+      const emptyHistory = await writer.openAnnotationConsumer("empty-history", "watch", first.serverCursor);
+      assert.equal(emptyHistory.historyCompleteSinceStart, false);
+      const duplicate = await journal.ingest(record);
+      assert.equal(duplicate.duplicate, true);
+      assert.deepEqual(duplicate.serverCursor, first.serverCursor);
+      await assert.rejects(journal.ingest({ ...record, reason: "source_record_rejected" }),
+        (error) => error instanceof AllocatorError && error.code === "annotation_source_event_conflict");
+      const second = await journal.ingest({ ...record, sourceSequence: "2", sourceEventId: "gap-two",
+        lostFromSequence: "2", lostThroughSequence: "2" });
+      assert.equal(second.serverCursor.sequence, "2");
+      const after = await writer.annotationInfo();
+      assert.equal(after.firstRetainedSequence, "2");
+      const later = await writer.openAnnotationConsumer("later", "watch", first.serverCursor);
+      assert.equal(later.initialFromCursor.sequence, "1");
+      assert.equal(later.availableFromCursor?.sequence, "2");
+      assert.equal(later.historyCompleteSinceStart, false);
+      const foreign = await writer.openAnnotationConsumer("foreign-retire", "watch",
+        { epoch: "f".repeat(32), sequence: "10" });
+      assert.equal(foreign.initialFromCursor.sequence, "10");
+      const foreignRetirement = await writer.retireAnnotationConsumer("foreign-retire", null, true);
+      assert.deepEqual(foreignRetirement.discardedFromCursor,
+        { epoch: first.serverCursor.epoch, sequence: "2" });
+      assert.deepEqual(foreignRetirement.discardedThroughCursor,
+        { epoch: first.serverCursor.epoch, sequence: "2" });
+    } finally {
+      await writer.release();
+    }
+    await adminQuery(cluster.adminUrl, `UPDATE surf_ace_allocator.annotation_source_heads
+      SET accepted_through_sequence = 999 WHERE fleet_id = 'fleet-test'`);
+    const server = await AllocatorServer.start(serverConfig(cluster));
+    const direct = await WireClient.connect(server.address.url);
+    try {
+      assert.equal((await direct.request("fleet.topology", {})).ok, true,
+        "core allocator service remains available after annotation verification fails");
+      const annotation = await direct.request("annotation.hello", { protocolVersion: 1, role: "consumer" });
+      assert.equal((annotation.error as { code: string }).code, "annotation_journal_unverified");
+    } finally {
+      await direct.close();
+      await server.close();
+    }
+  } finally {
+    await cluster.stop();
+  }
+});
+
+test("annotation pressure compacts only acknowledged history and refuses when receipt capacity is exhausted", { timeout: 180_000 }, async () => {
+  const cluster = await startCluster();
+  try {
+    const recovery = await PostgresCustodyAdapter.initializeAbsentFleet(cluster.config, "alloc_annotation-pressure");
+    await recovery.release();
+    await adminQuery(cluster.adminUrl,
+      await readFile(new URL("../sql/003_annotation_journal.sql", import.meta.url), "utf8"));
+    await adminQuery(cluster.adminUrl, `UPDATE surf_ace_allocator.annotation_journal_head
+      SET max_journal_records = 1 WHERE fleet_id = 'fleet-test'`);
+    const writer = await PostgresCustodyAdapter.acquireWriter(cluster.config);
+    try {
+      const journal = new AnnotationJournal(writer);
+      const firstRecord = { protocolVersion: 1, clientId: "pressure", sourceEpoch: "d".repeat(32),
+        surfaceId: "sf_pressure", sourceSequence: "1", sourceEventId: "one",
+        lostFromSequence: "1", lostThroughSequence: "1", reason: "source_retention_overflow" };
+      const secondRecord = { ...firstRecord, sourceSequence: "2", sourceEventId: "two",
+        lostFromSequence: "2", lostThroughSequence: "2" };
+      const first = await journal.ingest(firstRecord);
+      await assert.rejects(journal.ingest(secondRecord),
+        (error) => error instanceof AllocatorError && error.code === "annotation_ingest_capacity" &&
+          error.details?.journalRecords === 1 && error.details?.maxJournalRecords === 1 &&
+          typeof error.details?.incomingRecordBytes === "number" &&
+          error.details?.retryCondition === "oldest_required_history_acknowledged_and_compactable_or_capacity_increased");
+      assert.equal((await writer.annotationInfo()).headSequence, "1");
+      const consumer = await writer.openAnnotationConsumer("pressure-consumer", "watch");
+      await assert.rejects(journal.ingest(secondRecord),
+        (error) => error instanceof AllocatorError && error.code === "annotation_ingest_capacity");
+      assert.equal((await writer.readAnnotationRecords("1", 1)).length, 1);
+      await writer.ackAnnotationConsumer("pressure-consumer", consumer.leaseId, first.serverCursor);
+      await adminQuery(cluster.adminUrl, `UPDATE surf_ace_allocator.annotation_journal_head
+        SET max_source_metadata_rows = 1 WHERE fleet_id = 'fleet-test'`);
+      await assert.rejects(journal.ingest(secondRecord),
+        (error) => error instanceof AllocatorError && error.code === "annotation_ingest_capacity" &&
+          error.details?.sourceMetadataRows === 1 &&
+          error.details?.retryCondition === "reviewed_metadata_capacity_increase");
+      assert.equal((await writer.annotationInfo()).journalRecords, 1, "receipt pressure cannot erase history");
+      await adminQuery(cluster.adminUrl, `UPDATE surf_ace_allocator.annotation_journal_head
+        SET max_source_metadata_rows = 1000000 WHERE fleet_id = 'fleet-test'`);
+      const second = await journal.ingest(secondRecord);
+      assert.equal(second.serverCursor.sequence, "2");
+      const info = await writer.annotationInfo();
+      assert.equal(info.journalRecords, 1);
+      assert.equal(info.firstRetainedSequence, "2");
+      assert.equal(info.sourceMetadataRows, 2);
+      assert.equal(info.sourceReceiptRows, 1);
+      assert.ok(info.sourceReceiptBytes > 0);
+      assert.deepEqual((await journal.ingest(firstRecord)).serverCursor, first.serverCursor);
+      const leases = [{ consumerId: "pressure-consumer", leaseId: consumer.leaseId }];
+      for (let index = 1; index < 32; index += 1) {
+        const consumerId = `capacity-${index}`;
+        const opened = await writer.openAnnotationConsumer(consumerId, "watch");
+        leases.push({ consumerId, leaseId: opened.leaseId });
+      }
+      await assert.rejects(writer.openAnnotationConsumer("active-overflow", "watch"),
+        (error) => error instanceof AllocatorError && error.code === "annotation_consumer_capacity" &&
+          error.details?.activeStreams === 32 && error.details?.maxActiveStreams === 32 &&
+          error.details?.retryCondition === "active_stream_disconnected");
+      for (const lease of leases) {
+        await writer.disconnectAnnotationConsumer(lease.consumerId, lease.leaseId);
+      }
+      for (let index = 32; index < 64; index += 1) {
+        const consumerId = `capacity-${index}`;
+        const opened = await writer.openAnnotationConsumer(consumerId, "watch");
+        await writer.disconnectAnnotationConsumer(consumerId, opened.leaseId);
+      }
+      await assert.rejects(writer.openAnnotationConsumer("slot-overflow", "watch"),
+        (error) => error instanceof AllocatorError && error.code === "annotation_consumer_capacity" &&
+          error.details?.consumerSlots === 64 && error.details?.maxConsumerSlots === 64 &&
+          error.details?.retryCondition === "consumer_retired_and_30_day_replay_window_elapsed");
+      await writer.retireAnnotationConsumer("capacity-63", null, true);
+      await assert.rejects(writer.openAnnotationConsumer("slot-overflow", "watch"),
+        (error) => error instanceof AllocatorError && error.code === "annotation_consumer_capacity");
+      await adminQuery(cluster.adminUrl, `UPDATE surf_ace_allocator.annotation_consumers
+        SET retired_at = clock_timestamp() - interval '31 days'
+        WHERE fleet_id = 'fleet-test' AND consumer_id = 'capacity-63'`);
+      const reclaimed = await writer.openAnnotationConsumer("slot-overflow", "watch");
+      assert.ok(reclaimed.leaseId);
+    } finally {
+      await writer.release();
+    }
   } finally {
     await cluster.stop();
   }
@@ -1397,6 +2029,8 @@ function serverConfig(cluster: TestCluster): AllocatorServerConfig {
 
 class WireClient {
   private counter = 0;
+  private readonly events: Array<Record<string, unknown>> = [];
+  private readonly eventWaiters: Array<{ op: string; resolve: (event: Record<string, unknown>) => void }> = [];
   private readonly pending = new Map<string, {
     reject: (error: Error) => void;
     resolve: (response: Record<string, unknown>) => void;
@@ -1405,6 +2039,12 @@ class WireClient {
   private constructor(private readonly socket: WebSocket) {
     socket.on("message", (data) => {
       const response = JSON.parse(data.toString()) as Record<string, unknown>;
+      if (response.type === "event") {
+        const waiterIndex = this.eventWaiters.findIndex((waiter) => waiter.op === response.op);
+        if (waiterIndex >= 0) this.eventWaiters.splice(waiterIndex, 1)[0]!.resolve(response);
+        else this.events.push(response);
+        return;
+      }
       const id = typeof response.id === "string" ? response.id : "";
       const pending = this.pending.get(id);
       if (!pending) return;
@@ -1434,6 +2074,15 @@ class WireClient {
     });
     this.socket.send(JSON.stringify({ id, op, payload, sentAt: Date.now(), type: "request", v: 1 }));
     return await response;
+  }
+
+  async waitEvent(op: string): Promise<Record<string, unknown>> {
+    const index = this.events.findIndex((event) => event.op === op);
+    if (index >= 0) return this.events.splice(index, 1)[0]!;
+    return await new Promise<Record<string, unknown>>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`event timeout: ${op}`)), 5000);
+      this.eventWaiters.push({ op, resolve: (event) => { clearTimeout(timer); resolve(event); } });
+    });
   }
 
   async close(): Promise<void> {

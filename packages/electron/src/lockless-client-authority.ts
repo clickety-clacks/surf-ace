@@ -111,6 +111,7 @@ export type PersistentTargetApplyWorkItem = {
 };
 
 export type PersistentTombstone = {
+  annotationPublisherPartitionBytes?: number;
   bytes: number;
   closedSequence: number;
   kind: "pane" | "surface";
@@ -266,7 +267,8 @@ function refreshTombstoneBytes(tombstone: PersistentTombstone): void {
     refreshTombstoneBytes(child);
   }
   const { bytes: _bytes, ...material } = tombstone;
-  tombstone.bytes = exactDurableBytes({ version: 1, ...material });
+  tombstone.bytes = exactDurableBytes({ version: 1, ...material }) +
+    (tombstone.annotationPublisherPartitionBytes ?? 0);
 }
 
 function refreshRetainedTombstoneBytes(
@@ -384,12 +386,16 @@ export function assertRetainedTombstoneAggregate(
     for (const candidate of [tombstone, ...nestedTombstones(tombstone)]) {
       const { bytes, ...material } = candidate;
       const exact = exactDurableBytes({ version: 1, ...material });
-      if (bytes !== exact) {
+      const publisherBytes = candidate.annotationPublisherPartitionBytes ?? 0;
+      if (!Number.isSafeInteger(publisherBytes) || publisherBytes < 0 ||
+          publisherBytes > (limits.maxAnnotationPublisherStateBytesPerSurface ?? 0) ||
+          candidate.kind === "pane" && publisherBytes !== 0 ||
+          bytes !== exact + publisherBytes) {
         throw new LocklessAuthorityError(
           "capability_mismatch",
           "Persisted tombstone byte accounting is invalid",
           {
-            exactBytes: exact,
+            exactBytes: exact + publisherBytes,
             persistedBytes: bytes,
             tombstoneId: candidate.tombstoneId,
           },
@@ -1408,6 +1414,7 @@ export class LocklessClientAuthority {
   }
 
   createTombstone(input: {
+    annotationPublisherPartitionBytes?: number;
     kind: "pane" | "surface";
     payload: unknown;
     surfaceId: string;
@@ -1440,7 +1447,14 @@ export class LocklessClientAuthority {
         clone(this.state.scopes[scopeId]!),
       ]),
     );
+    const publisherBytes = input.annotationPublisherPartitionBytes ?? 0;
+    if (!Number.isSafeInteger(publisherBytes) || publisherBytes < 0 ||
+        publisherBytes > (this.state.limits.maxAnnotationPublisherStateBytesPerSurface ?? 0) ||
+        input.kind === "pane" && publisherBytes !== 0) {
+      throw new LocklessAuthorityError("internal_error", "Invalid annotation publisher tombstone charge");
+    }
     const tombstoneWithoutBytes = {
+      ...(publisherBytes > 0 ? { annotationPublisherPartitionBytes: publisherBytes } : {}),
       closedSequence: this.state.nextClosedSequence++,
       kind: input.kind,
       payload: clone(input.payload),
@@ -1450,7 +1464,7 @@ export class LocklessClientAuthority {
     };
     const tombstone: PersistentTombstone = {
       ...tombstoneWithoutBytes,
-      bytes: exactDurableBytes({ version: 1, ...tombstoneWithoutBytes }),
+      bytes: exactDurableBytes({ version: 1, ...tombstoneWithoutBytes }) + publisherBytes,
     };
     if (tombstone.bytes > this.state.limits.maxRetainedTombstoneBytes) {
       throw new LocklessAuthorityError(
@@ -1493,6 +1507,33 @@ export class LocklessClientAuthority {
       delete this.state.scopes[scopeId];
     }
     for (const { reason, tombstone: victim } of reclaimed) {
+      this.recordTombstoneReclamation(victim, reason);
+    }
+    return clone(tombstone);
+  }
+
+  reconcileAnnotationPublisherPartition(tombstoneId: string, publisherBytes: number): void {
+    if (!Number.isSafeInteger(publisherBytes) || publisherBytes < 0 ||
+        publisherBytes > (this.state.limits.maxAnnotationPublisherStateBytesPerSurface ?? 0)) {
+      throw new LocklessAuthorityError("internal_error", "Invalid annotation publisher tombstone charge");
+    }
+    const tombstone = this.state.tombstones.find((entry) =>
+      entry.tombstoneId === tombstoneId && entry.kind === "surface");
+    if (!tombstone || (tombstone.annotationPublisherPartitionBytes ?? 0) === publisherBytes) return;
+    if (publisherBytes > 0) tombstone.annotationPublisherPartitionBytes = publisherBytes;
+    else delete tombstone.annotationPublisherPartitionBytes;
+    refreshTombstoneBytes(tombstone);
+    while (this.state.tombstones.reduce((total, entry) => total + entry.bytes, 0) >
+           this.state.limits.maxRetainedTombstoneBytes) {
+      const victim = this.state.tombstones.shift();
+      if (!victim) throw new LocklessAuthorityError("internal_error", "Tombstone pool cannot be reconciled");
+      this.recordTombstoneReclamation(victim, "byte_capacity");
+    }
+  }
+
+  private recordTombstoneReclamation(
+    victim: PersistentTombstone, reason: "count_capacity" | "byte_capacity",
+  ): void {
       const nested = nestedTombstones(victim);
       const discardedRecords = tombstoneScopes(victim).flatMap(
         (scope) => this.scopeProjectionRecords(scope),
@@ -1561,8 +1602,6 @@ export class LocklessClientAuthority {
         unreadBytesDiscarded,
         unreadFrameCount,
       });
-    }
-    return clone(tombstone);
   }
 
   restoreTombstone(

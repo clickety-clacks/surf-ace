@@ -445,7 +445,8 @@ enum SurfAceLocklessTopologyOperations {
             candidate.sequences.nextClosedSequence += 1
             let id = tombstoneId(prefix: "st", sequence: sequence)
             let bytes = try surfaceTombstoneBytes(
-                closedSequence: sequence, scopes: scopes, surface: surface, tombstoneId: id
+                closedSequence: sequence, scopes: scopes, surface: surface, tombstoneId: id,
+                annotationPartitionBytes: try candidate.annotationPublisher?.partitionBytes(surfaceId: surfaceId) ?? 0
             )
             guard bytes <= candidate.limits.maxRetainedTombstoneBytes,
                   bytes <= candidate.limits.maxRecoverableSurfaceBytes else {
@@ -508,13 +509,15 @@ enum SurfAceLocklessTopologyOperations {
         closedSequence: Int64,
         scopes: [String: SurfAceLocklessConsumableScope],
         surface: SurfAceLocklessSurfaceMaterial,
-        tombstoneId: String
+        tombstoneId: String,
+        annotationPartitionBytes: Int64 = 0
     ) throws -> Int64 {
         try surfaceTombstoneBytes(
             closedSequence: closedSequence,
             scopes: scopes,
             surface: surface,
-            tombstoneId: tombstoneId
+            tombstoneId: tombstoneId,
+            annotationPartitionBytes: annotationPartitionBytes
         )
     }
 
@@ -554,7 +557,9 @@ enum SurfAceLocklessTopologyOperations {
                 closedSequence: tombstone.closedSequence,
                 scopes: tombstone.scopes,
                 surface: tombstone.surface,
-                tombstoneId: tombstone.tombstoneId
+                tombstoneId: tombstone.tombstoneId,
+                annotationPartitionBytes: try state.annotationPublisher?.partitionBytes(
+                    surfaceId: tombstone.surface.surfaceId) ?? 0
             )
             guard tombstone.bytes == exact else {
                 throw SurfAceLocklessAuthorityError.invalidState("surface_tombstone_exact_bytes:\(tombstone.tombstoneId)")
@@ -678,8 +683,10 @@ private extension SurfAceLocklessTopologyOperations {
     static func paneTombstoneBytes(closedSequence: Int64, pane: SurfAceLocklessPaneMaterial, scope: SurfAceLocklessConsumableScope, tombstoneId: String) throws -> Int64 {
         try encodedBytes(PaneTombstoneEncoding(closedSequence: closedSequence, pane: pane, scope: scope, tombstoneId: tombstoneId))
     }
-    static func surfaceTombstoneBytes(closedSequence: Int64, scopes: [String: SurfAceLocklessConsumableScope], surface: SurfAceLocklessSurfaceMaterial, tombstoneId: String) throws -> Int64 {
+    static func surfaceTombstoneBytes(closedSequence: Int64, scopes: [String: SurfAceLocklessConsumableScope], surface: SurfAceLocklessSurfaceMaterial, tombstoneId: String,
+                                      annotationPartitionBytes: Int64 = 0) throws -> Int64 {
         try encodedBytes(SurfaceTombstoneEncoding(closedSequence: closedSequence, scopes: scopes, surface: surface, tombstoneId: tombstoneId))
+            + annotationPartitionBytes
     }
 
     static func validateRestoredSurface(

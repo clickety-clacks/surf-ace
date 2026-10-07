@@ -39,12 +39,14 @@ final class SurfAceBonjourPublisher: NSObject, NetServiceDelegate {
     private var desiredPublication: Publication?
     private let permissionPromptTrigger: () -> Void
     private let serviceFactory: (String, Int) -> NetService
+    private let diagnosticLog: (String) -> Void
     var onPublishFailure: (@Sendable (String) -> Void)?
 
     override init() {
         self.permissionPromptTrigger = {
             SurfAceBonjourPublisher.triggerLocalNetworkPermissionPrompt()
         }
+        self.diagnosticLog = surfAceBonjourLog
         self.serviceFactory = { name, port in
             NetService(
                 domain: "local.",
@@ -58,15 +60,17 @@ final class SurfAceBonjourPublisher: NSObject, NetServiceDelegate {
 
     init(
         serviceFactory: @escaping (String, Int) -> NetService,
-        permissionPromptTrigger: @escaping () -> Void
+        permissionPromptTrigger: @escaping () -> Void,
+        diagnosticLog: @escaping (String) -> Void
     ) {
         self.serviceFactory = serviceFactory
         self.permissionPromptTrigger = permissionPromptTrigger
+        self.diagnosticLog = diagnosticLog
         super.init()
     }
 
     func publish(name: String, port: Int, txtRecord: [String: String]) {
-        surfAceBonjourLog(
+        diagnosticLog(
             surfAceBonjourDiagnostic(
                 "publish_attempt",
                 [("name", name), ("port", port), ("txt_keys", txtRecord.keys.sorted().joined(separator: ","))]
@@ -84,7 +88,7 @@ final class SurfAceBonjourPublisher: NSObject, NetServiceDelegate {
                 txtRecord: txtRecord
             )
         }
-        surfAceBonjourLog(
+        diagnosticLog(
             surfAceBonjourDiagnostic(
                 "publish_txt_update",
                 [("name", service?.name ?? "nil"), ("txt_keys", txtRecord.keys.sorted().joined(separator: ","))]
@@ -119,7 +123,7 @@ final class SurfAceBonjourPublisher: NSObject, NetServiceDelegate {
     }
 
     private func stopService() {
-        surfAceBonjourLog(
+        diagnosticLog(
             surfAceBonjourDiagnostic(
                 "publish_stop",
                 [("name", service?.name ?? "nil")]
@@ -139,7 +143,7 @@ final class SurfAceBonjourPublisher: NSObject, NetServiceDelegate {
         let errorCode = errorDict[NetService.errorCode]?.intValue ?? -1
         let errorDomain = errorDict[NetService.errorDomain]?.intValue ?? 0
         let details = "domain=\(errorDomain) code=\(errorCode)"
-        surfAceBonjourLog(
+        diagnosticLog(
             surfAceBonjourDiagnostic(
                 "publish_failed",
                 [("domain", errorDomain), ("error_code", errorCode), ("name", sender.name)]
@@ -155,7 +159,7 @@ final class SurfAceBonjourPublisher: NSObject, NetServiceDelegate {
     }
 
     func netServiceDidPublish(_ sender: NetService) {
-        surfAceBonjourLog(
+        diagnosticLog(
             surfAceBonjourDiagnostic(
                 "publish_ok",
                 [("domain", sender.domain), ("name", sender.name), ("type", sender.type)]
@@ -164,7 +168,7 @@ final class SurfAceBonjourPublisher: NSObject, NetServiceDelegate {
     }
 
     func netServiceDidStop(_ sender: NetService) {
-        surfAceBonjourLog(
+        diagnosticLog(
             surfAceBonjourDiagnostic(
                 "publish_stopped",
                 [("name", sender.name)]

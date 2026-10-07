@@ -1042,6 +1042,7 @@ protocol SurfAcePaneBridging: AnyObject {
     func restoreDrawingStrokes(_ strokes: [SurfAceStroke]) -> Bool
     func captureDrawingData() -> Data
     func fetchSnapshot() async -> SurfAceSurfaceSnapshot?
+    func fetchAnnotationBackgroundSnapshot() async -> SurfAceSurfaceSnapshot?
     func fetchSnapshotMetadata() async -> SurfAceSurfaceSnapshot?
     func applyHTMLPatch(_ patch: SurfAceFramePatchRequest) async -> SurfAceHTMLPatchResult
     func removeDrawingStrokeIDs(_ strokeIDs: [String])
@@ -1052,6 +1053,7 @@ protocol SurfAcePaneBridging: AnyObject {
 }
 
 extension SurfAcePaneBridging {
+    func fetchAnnotationBackgroundSnapshot() async -> SurfAceSurfaceSnapshot? { nil }
     func reloadBrowserURL() {}
     func setContentScale(_ scale: CGFloat) {}
     func browserGoBack() {}

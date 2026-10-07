@@ -131,6 +131,7 @@ actor SurfAceLocklessRuntimeAdapter {
 
     init(
         store: SurfAceLocklessGenerationStore,
+        annotationClientId: String? = nil,
         targetIntentAdmissionPreparation: (@Sendable (String) async -> Void)? = nil
     ) throws {
         self.targetIntentAdmissionPreparation = targetIntentAdmissionPreparation
@@ -140,6 +141,29 @@ actor SurfAceLocklessRuntimeAdapter {
             state = loadedState
         } else {
             state = try SurfAceLocklessAuthorityState.empty()
+        }
+        var annotationMigrationChanged = false
+        if let annotationClientId {
+            if let existing = state.annotationPublisher {
+                guard existing.clientId == annotationClientId else {
+                    throw SurfAceLocklessAuthorityError.invalidState("annotation_client_identity")
+                }
+            } else {
+                var proposed = state.limits
+                if proposed.maxAnnotationPublisherStateBytesPerSurface == nil,
+                   proposed.maxAnnotationPublisherRecordsPerSurface == nil {
+                    if proposed == .production {
+                        proposed.maxRecoverableSurfaceBytes = 704 * 1_024 * 1_024
+                    }
+                    proposed.maxAnnotationPublisherStateBytesPerSurface = Int64(SurfAceAnnotationOutbox.maximumBytes)
+                    proposed.maxAnnotationPublisherRecordsPerSurface = Int64(SurfAceAnnotationOutbox.maximumRecords)
+                }
+                if (try? proposed.validate()) != nil {
+                    state.annotationPublisher = try SurfAceAnnotationOutbox(clientId: annotationClientId)
+                    state.limits = proposed
+                    annotationMigrationChanged = true
+                }
+            }
         }
         try Self.normalizeTopologies(in: &state)
         var restoredLiveController = false
@@ -152,7 +176,7 @@ actor SurfAceLocklessRuntimeAdapter {
         }
         let reclaimedRestoredController = try !SurfAceLocklessDormantRetention
             .enforceBounds(in: &state, trigger: "restored_state_enforcement").isEmpty
-        if restoredLiveController || reclaimedRestoredController || loadedState == nil {
+        if restoredLiveController || reclaimedRestoredController || annotationMigrationChanged || loadedState == nil {
             state.generation += 1
             try store.save(state)
         }
@@ -1272,6 +1296,28 @@ actor SurfAceLocklessRuntimeAdapter {
 
     func snapshot() async -> SurfAceLocklessAuthorityState {
         await coordinator.snapshot()
+    }
+
+    func transactAnnotationPublisher<Result: Sendable>(
+        surfaceId: String,
+        _ operation: @escaping @Sendable (inout SurfAceAnnotationOutbox) throws -> Result
+    ) async throws -> Result {
+        try await coordinator.transact(trigger: "annotation_publisher") { state in
+            guard var publisher = state.annotationPublisher else {
+                throw SurfAceLocklessAuthorityError.invalidState("annotation_publisher_unavailable")
+            }
+            let result = try operation(&publisher)
+            state.annotationPublisher = publisher
+            if let index = state.surfaceTombstones.firstIndex(where: { $0.surface.surfaceId == surfaceId }) {
+                let tombstone = state.surfaceTombstones[index]
+                state.surfaceTombstones[index].bytes = try SurfAceLocklessTopologyOperations.restoredSurfaceTombstoneBytes(
+                    closedSequence: tombstone.closedSequence, scopes: tombstone.scopes,
+                    surface: tombstone.surface, tombstoneId: tombstone.tombstoneId,
+                    annotationPartitionBytes: publisher.partitionBytes(surfaceId: surfaceId)
+                )
+            }
+            return result
+        }
     }
 
     func readinessSnapshot() async -> SurfAceLocklessReadinessSnapshot {

@@ -33,6 +33,7 @@ import { loadProvisionedRegistryBinding } from "./registry-binding.js";
 import {
   loadPersistentStateFile,
   PersistentStateOutcomeUnknownError,
+  PersistentStateWriteGuardError,
   shouldGuardUnrestorablePersistentState,
   writePersistentStateFile,
   type PersistentStateLoadResult,
@@ -70,6 +71,8 @@ import {
 } from "./runtime-identity.js";
 import { isAddressInUse, isPortBoundOnIpv6Any } from "./port-selection.js";
 import { SurfaceWsServer } from "./ws-server.js";
+import { AnnotationRegistryPublisher } from "./annotation-registry-publisher.js";
+import { AnnotationSourceCoordinator } from "./annotation-source-coordinator.js";
 import { restoreWindowPlacement, type WindowPlacement } from "./window-placement.js";
 import { shouldDisableGpuForSoftwareCapture, surfaceWindowCaptureMode, surfaceWindowLoadQuery, surfaceWindowOptions } from "./window-options.js";
 
@@ -186,6 +189,8 @@ const nativeOverlaySnapshots = new Map<string, {
 const singleInstanceLock = app.requestSingleInstanceLock();
 let advertiser: BonjourAdvertiser | null = null;
 let configuredRegistration: ServerConnection | null = null;
+let annotationRegistryPublisher: AnnotationRegistryPublisher | null = null;
+let annotationSourceCoordinator: AnnotationSourceCoordinator | null = null;
 let advertiserTxtRefreshTimer: NodeJS.Timeout | null = null;
 let core: SurfaceCore;
 let distDir = "";
@@ -434,13 +439,15 @@ async function persistState(): Promise<void> {
       path: path.join(stateDir, STATE_FILE_NAME),
       write_guard: persistentStateWriteGuard,
     });
-    return;
+    throw new PersistentStateWriteGuardError(persistentStateWriteGuard);
   }
+  // Bind this write to the state that requested it. A later source mutation
+  // must enqueue its own write before the publisher can send its bytes.
+  const candidate = core.getPersistentState();
   stateWrite = stateWrite
     .catch(() => {})
     .then(async () => {
       if (persistentStateOutcomeUnknown) throw new Error("Local persistence is paused pending reconciliation");
-      const candidate = core.getPersistentState();
       try {
         await writePersistentStateFile(stateDir, STATE_FILE_NAME, candidate);
       } catch (error) {
@@ -1174,13 +1181,13 @@ function handleShortcutInput(
       return;
     }
     if (input.key.toLowerCase() === "a" && !input.meta) {
-      core.setAnnotating(surfaceId, activePaneId, true);
-      void persistState().catch(() => {});
+      void annotationSourceCoordinator?.setAnnotating(surfaceId, activePaneId, true)
+        .catch((error) => clientWarn("annotation_source_mode_failed", errorDiagnosticFields(error)));
       return;
     }
     if (input.key.toLowerCase() === "d" && !input.meta) {
-      core.setAnnotating(surfaceId, activePaneId, false);
-      void persistState().catch(() => {});
+      void annotationSourceCoordinator?.setAnnotating(surfaceId, activePaneId, false)
+        .catch((error) => clientWarn("annotation_source_commit_failed", errorDiagnosticFields(error)));
       return;
     }
     if (input.meta && input.key === "[") {
@@ -1625,6 +1632,54 @@ function installWebAuthnAccountSelection(): void {
 }
 
 function installIpc(): void {
+  ipcMain.handle("surface:annotation-open", async (event, payload: { paneId?: unknown; openedAt?: unknown }) => {
+    const surfaceId = surfaceIdForSender(event.sender);
+    const paneId = payload?.paneId;
+    const openedAt = payload?.openedAt;
+    if (!surfaceId || !Number.isSafeInteger(paneId) || Number(paneId) < 1 ||
+        !Number.isSafeInteger(openedAt) || Number(openedAt) < 0 || !core.annotationPublisher) return false;
+    try {
+      const pane = core.getRendererWindowState(surfaceId).panes.find((item) => item.paneId === paneId);
+      const contentId = pane?.content.contentId;
+      const bounds = core.paneBounds(surfaceId, Number(paneId));
+      if (!pane?.annotationBorderVisible || !contentId || !bounds) return false;
+      const existing = core.annotationPublisher.openFrameFor(surfaceId, Number(paneId));
+      if (existing) return existing.contentId === contentId && !existing.failed;
+      const image = await capturePaneImage(surfaceId, Number(paneId)).catch(() => null);
+      const snapshot = core.captureSnapshot(surfaceId, Number(paneId));
+      const content = pane.content.content;
+      const url = content && typeof content === "object" && "url" in content &&
+        typeof content.url === "string" ? content.url : undefined;
+      const opened = await core.transactionAsync(async () => {
+        const currentPane = core.getRendererWindowState(surfaceId).panes.find((item) => item.paneId === paneId);
+        if (!currentPane?.annotationBorderVisible || currentPane.content.contentId !== contentId) return false;
+        const outbox = core.annotationPublisher!;
+        if (outbox.openFrameFor(surfaceId, Number(paneId))) return false;
+        const previous = outbox.snapshot();
+        try {
+          outbox.openFrame(surfaceId, Number(paneId), {
+            contextKey: contentId, contentId, ...(url ? { url } : {}),
+            image: image ?? "", ...(image ? {} : { failed: true as const }),
+            openedAt: Number(openedAt), scrollOffset: snapshot.viewport.scrollOffset,
+            viewport: { width: Math.max(1, Math.floor(bounds.width)),
+              height: Math.max(1, Math.floor(bounds.height)), scale: 1 },
+          });
+          await persistState();
+          return true;
+        } catch (error) {
+          outbox.restore(previous);
+          throw error;
+        }
+      });
+      return opened && Boolean(image);
+    } catch (error) {
+      clientWarn("annotation_at_open_capture_failed", {
+        surface_id: surfaceId, pane_id: paneId, ...errorDiagnosticFields(error),
+      });
+      return false;
+    }
+  });
+
   ipcMain.handle("surface:get-bootstrap", async (event) => {
     const surfaceId = surfaceIdForSender(event.sender);
     if (!surfaceId) {
@@ -1768,7 +1823,8 @@ function installIpc(): void {
         break;
       case "annotate":
         try {
-          core.setAnnotating(surfaceId, paneId, Boolean(payload.enabled));
+          void annotationSourceCoordinator?.setAnnotating(surfaceId, paneId, Boolean(payload.enabled))
+            .catch((error) => clientWarn("annotation_source_commit_failed", errorDiagnosticFields(error)));
         } catch {
           // Renderer commands can race a pane reset during reconnect.
         }
@@ -1857,6 +1913,7 @@ async function boot(): Promise<void> {
 
   const persistentState = await loadPersistentState();
   const identity = await loadOrCreateIdentity(stateDir);
+  const configuredAddress = process.env.SURF_ACE_SERVER?.trim();
   identityFingerprint = identity.fingerprintPrefix;
   clientInfo("identity_loaded", {
     fingerprint: identityFingerprint,
@@ -1864,6 +1921,8 @@ async function boot(): Promise<void> {
   });
 
   core = new SurfaceCore({
+    annotationClientId: configuredAddress || persistentState?.annotationPublisher
+      ? registrationClientId(identity.publicKeyPem) : undefined,
     clientIdentity: identityFingerprint,
     persistentState,
   });
@@ -1893,6 +1952,16 @@ async function boot(): Promise<void> {
   });
 
   server = createServer(core);
+
+  annotationSourceCoordinator = new AnnotationSourceCoordinator(
+    core, persistState, () => annotationRegistryPublisher?.notify(),
+    (error) => clientWarn("annotation_source_flush_failed", errorDiagnosticFields(error)),
+    (surfaceId, paneId) => server!.completeDirectAnnotation(surfaceId, paneId),
+  );
+  server.setAnnotationCompletionManaged((surfaceId, paneId) =>
+    core.annotationPublisher?.openFrameFor(surfaceId, paneId) != null);
+  void annotationSourceCoordinator.resumePending().catch((error) =>
+    clientWarn("annotation_source_recovery_failed", errorDiagnosticFields(error)));
 
   core.subscribe((coreEvent) => {
     if (coreEvent.type === "lockless-authority-changed") {
@@ -1924,7 +1993,6 @@ async function boot(): Promise<void> {
   installWebAuthnAccountSelection();
   await acknowledgeCompositorMainAppBinding();
 
-  const configuredAddress = process.env.SURF_ACE_SERVER?.trim();
   const provisionedBinding = await loadProvisionedRegistryBinding(stateDir).catch((error) => {
     clientWarn("registry_provisioning_invalid", errorDiagnosticFields(error));
     return null;
@@ -1938,6 +2006,13 @@ async function boot(): Promise<void> {
     onError: (error) => clientWarn("server_registration_failed", errorDiagnosticFields(error)),
   });
   configuredRegistration.start();
+  if (configuredAddress && core.annotationPublisher) {
+    annotationRegistryPublisher = new AnnotationRegistryPublisher(
+      configuredAddress, core, persistState,
+      (error) => clientWarn("annotation_publisher_failed", errorDiagnosticFields(error)),
+    );
+    annotationRegistryPublisher.start();
+  }
 
   const surfacesToOpen = core.listSurfaces();
   for (const surface of surfacesToOpen) {
@@ -1994,6 +2069,8 @@ if (!singleInstanceLock) {
       [...windows.keys()].map((surfaceId) => releaseNativePaneInstancesForSurface(surfaceId, "app quit")),
     );
     await configuredRegistration?.stop();
+    annotationSourceCoordinator?.stop();
+    await annotationRegistryPublisher?.stop();
     await advertiser?.stop();
     if (providerEndpointAvailable) await server.stop();
   });

@@ -10,7 +10,8 @@ final class SurfAceBonjourPublisherTests: XCTestCase {
                 services.append(service)
                 return service
             },
-            permissionPromptTrigger: {}
+            permissionPromptTrigger: {},
+            diagnosticLog: { _ in }
         )
 
         publisher.publish(name: "Emanator", port: 19_001, txtRecord: ["busy": "0"])
@@ -33,7 +34,8 @@ final class SurfAceBonjourPublisherTests: XCTestCase {
                 services.append(service)
                 return service
             },
-            permissionPromptTrigger: {}
+            permissionPromptTrigger: {},
+            diagnosticLog: { _ in }
         )
 
         publisher.publish(name: "Emanator", port: 19_001, txtRecord: ["busy": "0"])

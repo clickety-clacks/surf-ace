@@ -96,6 +96,39 @@ function reservedAdmissionLedgerBytes(
   );
 }
 
+test("concurrent async surface transactions serialize rollback and event delivery", async () => {
+  const core = new SurfaceCore();
+  let releaseFirst = (): void => {};
+  const firstHeld = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  let signalEntered = (): void => {};
+  const firstEntered = new Promise<void>((resolve) => { signalEntered = resolve; });
+  const delivered: string[] = [];
+  core.subscribe((event) => delivered.push(event.type));
+  const first = core.transactionAsync(async () => {
+    core.ensurePrimarySurface("first", { width: 100, height: 100, scale: 1 });
+    signalEntered();
+    await firstHeld;
+    throw new Error("injected persistence failure");
+  });
+  await firstEntered;
+  assert.throws(() => core.transaction(() => core.ensurePrimarySurface(
+    "interleaving", { width: 100, height: 100, scale: 1 },
+  )), /already in progress/);
+  let secondEntered = false;
+  const second = core.transactionAsync(async () => {
+    secondEntered = true;
+    return core.ensurePrimarySurface("second", { width: 100, height: 100, scale: 1 });
+  });
+  assert.equal(secondEntered, false);
+  releaseFirst();
+  await assert.rejects(first, /injected persistence failure/);
+  const committed = await second;
+  assert.equal(core.listSurfaces().length, 1);
+  assert.equal(core.listSurfaces()[0]?.surfaceId, committed.surfaceId);
+  assert.equal(core.listSurfaces()[0]?.name, "second");
+  assert.equal(delivered.filter((type) => type === "surface-created").length, 1);
+});
+
 function failedAdmissionAttempt(
   attemptSequence: number,
   reason: string,

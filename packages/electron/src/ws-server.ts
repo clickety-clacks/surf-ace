@@ -87,7 +87,7 @@ import {
   type PersistentTargetApplyWorkItem,
   type PersistentTombstone,
 } from "./lockless-client-authority.js";
-import { PersistentStateOutcomeUnknownError } from "./persistent-state-file.js";
+import { PersistentStateOutcomeUnknownError, PersistentStateWriteGuardError } from "./persistent-state-file.js";
 
 type SocketCacheEntry = {
   payloadHash: string;
@@ -272,6 +272,13 @@ export class SurfaceWsServer {
   private providerWindowLabelQueue: Promise<void> = Promise.resolve();
   private ignoreInitialSurfaceEvents = true;
   private persistenceOutcomeUnknown: PersistentStateOutcomeUnknownError | null = null;
+  private annotationCompletionManaged: ((surfaceId: string, paneId: number) => boolean) | null = null;
+  private readonly annotationCompletionTasks = new Map<string, Promise<boolean>>();
+  private activePaneMutation: { surfaceId: string; paneId: number } | null = null;
+
+  setAnnotationCompletionManaged(shouldManage: (surfaceId: string, paneId: number) => boolean = () => true): void {
+    this.annotationCompletionManaged = shouldManage;
+  }
 
   constructor(options: SurfaceWsServerOptions) {
     this.bindAddress = options.bindAddress ?? "0.0.0.0";
@@ -816,6 +823,7 @@ export class SurfaceWsServer {
             surfaceId,
           );
         const tombstone = this.core.locklessAuthority.createTombstone({
+          annotationPublisherPartitionBytes: this.core.annotationPublisher?.partitionBytes(surfaceId),
           kind: "surface",
           payload: { paneTombstones, surface: record },
           surfaceId,
@@ -891,7 +899,9 @@ export class SurfaceWsServer {
       case "lockless-authority-changed":
         return;
       case "annotation-committed":
-        await this.maybeSendAnnotationCommitted(event.surfaceId, event.paneId);
+        if (!this.annotationCompletionManaged?.(event.surfaceId, event.paneId)) {
+          await this.completeDirectAnnotation(event.surfaceId, event.paneId);
+        }
         return;
       case "drawing-dirty":
         await this.updateLocklessAnnotationFrame(
@@ -1062,7 +1072,15 @@ export class SurfaceWsServer {
       return;
     }
     if (this.isLocklessWireRequest(socket, parsedRequest)) {
-      await this.handleLocklessMessage(socket, parsedRequest);
+      try {
+        await this.handleLocklessMessage(socket, parsedRequest);
+      } catch (error) {
+        if (!(error instanceof PersistentStateWriteGuardError)) throw error;
+        await this.send(socket, JSON.stringify(errorResponse(
+          parsedRequest.op, parsedRequest.id as never, "internal_error",
+          "Local persistence is guarded; durable operations are unavailable",
+        )));
+      }
       return;
     }
     const request = parsedRequest as Request;
@@ -1292,6 +1310,17 @@ export class SurfaceWsServer {
             ),
           };
         }
+        if (error instanceof PersistentStateWriteGuardError) {
+          return {
+            rejectionCode: "internal_error",
+            response: errorResponse(
+              request.op,
+              request.id as never,
+              "internal_error",
+              "Local persistence is guarded; pairing and durable writes are unavailable until state recovery",
+            ),
+          };
+        }
         return {
           rejectionCode: "internal_error",
           response: errorResponse(
@@ -1311,8 +1340,15 @@ export class SurfaceWsServer {
       locklessOperationMutates(request.op)
     ) {
       try {
-        response = await this.core.locklessAuthority.transactionAsync(() =>
-          this.core.transactionAsync(async () => {
+        response = await this.core.locklessAuthority.transactionAsync(async () => {
+          const paneMutation = ["content.set", "content.append", "content.patch", "content.clear", "annotations.remove"]
+            .includes(request.op) && session.surfaceId !== null &&
+            Number.isInteger((request.payload as { paneId?: number }).paneId)
+            ? { surfaceId: session.surfaceId, paneId: (request.payload as { paneId: number }).paneId }
+            : null;
+          this.activePaneMutation = paneMutation;
+          try {
+            return await this.core.transactionAsync(async () => {
             this.core.locklessAuthority.beginOperationReceipt(
               session.controllerInstanceId,
               request.id,
@@ -1375,8 +1411,11 @@ export class SurfaceWsServer {
             );
             await this.persistLocklessState();
             return response;
-          }),
-        );
+            });
+          } finally {
+            this.activePaneMutation = null;
+          }
+        });
       } catch (error) {
         if (error instanceof PersistentStateOutcomeUnknownError) {
           response = errorResponse(
@@ -1410,6 +1449,12 @@ export class SurfaceWsServer {
           });
         }
       }
+    } else if (request.op === "snapshot.get" &&
+        this.activePaneMutation?.surfaceId === request.payload.surfaceId &&
+        this.activePaneMutation.paneId !== request.payload.paneId) {
+      // A durable mutation holds the lockless queue while its write is pending.
+      // A snapshot of another pane reads no tentative state from that mutation.
+      response = (await dispatch()).response;
     } else if (request.op === "pair.request" || request.op === "topology.apply") {
       response = (await dispatch()).response;
     } else if (request.op === "surfaces.list") {
@@ -1866,9 +1911,8 @@ export class SurfaceWsServer {
             "controller_admission",
           );
         }
-        admission = await this.core.transactionAsync(async () =>
-          await this.core.locklessAuthority.transactionPersisted(
-            () => {
+        admission = await this.core.locklessAuthority.transactionAsync(async () =>
+          await this.core.transactionAsync(async () => {
               const admitted = this.core.locklessAuthority.admit(
                 request.payload,
                 connectionToken,
@@ -1903,10 +1947,9 @@ export class SurfaceWsServer {
                   admissionAttempt.attemptSequence,
                 );
               }
+              await this.persistLocklessState();
               return admitted;
-            },
-            this.persistLocklessState,
-          ),
+            }),
         );
       } catch (error) {
         if (admissionAttempt) {
@@ -2381,6 +2424,7 @@ export class SurfaceWsServer {
               );
             const tombstone =
               this.core.locklessAuthority.createTombstone({
+                annotationPublisherPartitionBytes: this.core.annotationPublisher?.partitionBytes(targetSurfaceId),
                 kind: "surface",
                 payload: { paneTombstones, surface: record },
                 surfaceId: targetSurfaceId,
@@ -3394,12 +3438,12 @@ export class SurfaceWsServer {
     await previous.catch(() => undefined);
     try {
       const transact = () =>
-        this.core.transaction(() =>
+        this.core.transactionAsync(async () =>
           this.core.locklessAuthority.transaction(operation),
         );
       return surfaceId
         ? await this.runSurfaceMutation(surfaceId, transact)
-        : transact();
+        : await transact();
     } finally {
       releaseQueue();
       if (this.lifecycleMutationQueue === queued) {
@@ -3420,8 +3464,8 @@ export class SurfaceWsServer {
     await previous.catch(() => undefined);
     try {
       return await this.runSurfaceMutation(surfaceId, () =>
-        this.core.transactionAsync(() =>
-          this.core.locklessAuthority.transactionAsync(operation),
+        this.core.locklessAuthority.transactionAsync(() =>
+          this.core.transactionAsync(operation),
         ),
       );
     } finally {
@@ -5458,28 +5502,43 @@ export class SurfaceWsServer {
     }
   }
 
-  private async maybeSendAnnotationCommitted(surfaceId: string, paneId: number): Promise<void> {
+  async completeDirectAnnotation(surfaceId: string, paneId: number): Promise<boolean> {
+    const key = JSON.stringify([surfaceId, paneId]);
+    const pending = this.annotationCompletionTasks.get(key);
+    if (pending) return await pending;
+    const work = this.completeDirectAnnotationExclusive(surfaceId, paneId);
+    this.annotationCompletionTasks.set(key, work);
+    try { return await work; }
+    finally { if (this.annotationCompletionTasks.get(key) === work) this.annotationCompletionTasks.delete(key); }
+  }
+
+  private async completeDirectAnnotationExclusive(surfaceId: string, paneId: number): Promise<boolean> {
+    if (!this.core.hasPendingAnnotationCommit(surfaceId, paneId)) return true;
     await this.updateLocklessAnnotationFrame(surfaceId, paneId);
     const snapshot = this.tryCaptureSnapshot(surfaceId, paneId);
-    if (!snapshot?.contentId) return;
+    if (!snapshot?.contentId) return false;
     const scopeId = locklessPaneScopeId(surfaceId, paneId);
-    const record = await this.core.locklessAuthority.transactionAsync(async () => {
-      const finalized = this.core.locklessAuthority.finalizeLiveFrame(
-        scopeId,
-        `annotation:${snapshot.contentId}`,
-        "renderer.annotation_finalized",
-      );
-      if (this.core.hasPendingDrawingFlush(surfaceId, paneId)) {
-        this.core.markDrawingFlushSent(surfaceId, paneId);
-      }
-      this.core.markAnnotationCommittedSent(surfaceId, paneId);
-      this.core.markLocklessAuthorityChanged(surfaceId);
-      await this.persistLocklessState();
-      return finalized;
-    });
+    const record = await this.core.locklessAuthority.transactionAsync(() =>
+      this.core.transactionAsync(async () => {
+        if (!this.core.hasPendingAnnotationCommit(surfaceId, paneId)) return null;
+        const finalized = this.core.locklessAuthority.finalizeLiveFrame(
+          scopeId,
+          `annotation:${snapshot.contentId}`,
+          "renderer.annotation_finalized",
+        );
+        if (this.core.hasPendingDrawingFlush(surfaceId, paneId)) {
+          this.core.markDrawingFlushSent(surfaceId, paneId);
+        }
+        this.core.markAnnotationCommittedSent(surfaceId, paneId);
+        this.core.markLocklessAuthorityChanged(surfaceId);
+        await this.persistLocklessState();
+        return finalized;
+      }),
+    );
     if (record) {
       await this.broadcastLocklessDelta(scopeId, [record]);
     }
+    return true;
   }
 
   private async broadcastLifecycleEvent(event: Event): Promise<void> {

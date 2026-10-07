@@ -45,6 +45,26 @@ function authority(): LocklessClientAuthority {
   return new LocklessClientAuthority(createEmptyLocklessClientState(limits));
 }
 
+test("retained publisher growth reclaims the oldest tombstone at the byte boundary", () => {
+  const withPublisher = { ...limits, maxAnnotationPublisherStateBytesPerSurface: 1_024 };
+  const roomy = { ...withPublisher,
+    maxRecoverableSurfaceBytes: locklessRecoverableSurfaceMinimumBytes(withPublisher),
+    maxRetainedTombstoneBytes: 100_000 };
+  const target = new LocklessClientAuthority(createEmptyLocklessClientState(roomy));
+  const reclaimed: string[] = [];
+  target.subscribe((event) => {
+    if (event.type === "event.tombstone_reclaimed") reclaimed.push(event.tombstoneId);
+  });
+  const first = target.createTombstone({ kind: "surface", surfaceId: "sf_first",
+    annotationPublisherPartitionBytes: 1, payload: { blob: "a".repeat(18_000) } });
+  const second = target.createTombstone({ kind: "surface", surfaceId: "sf_second",
+    annotationPublisherPartitionBytes: 1, payload: { blob: "b".repeat(18_000) } });
+  target.configureLimits({ ...roomy, maxRetainedTombstoneBytes: first.bytes + second.bytes });
+  target.reconcileAnnotationPublisherPartition(first.tombstoneId, 900);
+  assert.deepEqual(target.listTombstones().map((entry) => entry.tombstoneId), [second.tombstoneId]);
+  assert.deepEqual(reclaimed, [first.tombstoneId]);
+});
+
 function admit(
   target: LocklessClientAuthority,
   controllerInstanceId: string,

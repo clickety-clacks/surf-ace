@@ -56,13 +56,24 @@ uses `{"data":"..."}`, `terminal` uses `{"lines":["..."],"scrollback":0}`,
 `markdown` uses `{"markdown":"..."}`, `video` uses a string, and `canvas`
 uses `""` or an object with optional `color` and `grid` fields.
 
-The complete command set is `fleet-list`, `list`, `push`, `read`, `topology-intent`,
+The existing public command set is `fleet-list`, `list`, `push`, `read`, `topology-intent`,
 `topology-realize`, `clear`, `annotations-remove`, `capture-pane`,
 `surface-intent`, `target-register`, and `target-apply`. Each command accepts
 one JSON object via `--input-json` or standard input and writes exactly one JSON
 result to standard output. `read` is strictly local and rejects `--endpoint`.
 Every successful `capture-pane` call includes its PNG screenshot; the command
 has no option to suppress it.
+
+The separate registry annotation listener uses `annotations watch`,
+`annotations resume`, `annotations ack`, and `annotations retire` with an
+explicit `--registry` URL and `--state-root`. `watch` and `resume` stay in the
+foreground and emit NDJSON; receiving a record does not acknowledge it.
+After durably processing a delivered `ann1:<epoch>:<sequence>` cursor, call
+`annotations ack --consumer-id <id> --cursor <cursor>` explicitly. History gaps
+require `annotations ack --consumer-id <id> --gap-id <gapId>`. A consumer is
+removed only by `annotations retire --consumer-id <id> --expect-ack <none|cursor>
+--discard-unacknowledged`. These commands connect to the registry journal and
+never pair with a client or mutate visible annotation state.
 
 `read` keeps unread-delta consumption and current-state inspection separate.
 Its `records` array contains only records at or beyond the projected cursor;

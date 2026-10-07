@@ -56,6 +56,10 @@ await build({
 await build({
   ...shared,
   entryPoints: [
+    path.join(rootDir, "test", "annotation-flush-gate.test.ts"),
+    path.join(rootDir, "test", "annotation-publisher-outbox.test.ts"),
+    path.join(rootDir, "test", "annotation-registry-publisher.test.ts"),
+    path.join(rootDir, "test", "annotation-source-coordinator.test.ts"),
     path.join(rootDir, "test", "bonjour-advertiser.test.ts"),
     path.join(rootDir, "test", "central-server-health.test.ts"),
     path.join(rootDir, "test", "client-flight-recorder.test.ts"),

@@ -9,6 +9,29 @@ export const ALLOCATOR_OPERATIONS = [
 ] as const;
 
 export const ALLOCATOR_ERROR_CODES = [
+  "annotation_invalid_request",
+  "annotation_context_image_invalid",
+  "annotation_record_too_large",
+  "annotation_protocol_unsupported",
+  "annotation_role_operation_invalid",
+  "annotation_source_event_conflict",
+  "annotation_source_sequence_conflict",
+  "annotation_source_gap_required",
+  "annotation_source_gap_invalid",
+  "annotation_ingest_capacity",
+  "annotation_journal_unverified",
+  "annotation_journal_sequence_exhausted",
+  "annotation_consumer_capacity",
+  "annotation_consumer_exists",
+  "annotation_consumer_not_found",
+  "annotation_consumer_lease_stale",
+  "annotation_cursor_invalid",
+  "annotation_ack_regression",
+  "annotation_ack_not_delivered",
+  "annotation_gap_ack_required",
+  "annotation_gap_id_mismatch",
+  "annotation_consumer_retire_confirmation_required",
+  "annotation_ack_cursor_mismatch",
   "allocator_identity_mismatch",
   "allocator_state_corrupt",
   "allocator_state_unsupported_version",
@@ -110,6 +133,7 @@ export class AllocatorError extends Error {
     message: string,
     readonly allocatorId?: string,
     readonly cause?: unknown,
+    readonly details?: Record<string, unknown>,
   ) {
     super(message);
     this.name = "AllocatorError";

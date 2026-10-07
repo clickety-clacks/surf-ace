@@ -19,6 +19,35 @@ final class SurfAceHTTPServerTests: XCTestCase {
         await server.stop()
     }
 
+    func testPrivateListenersReturnOnlyTheirOwnedResponses() async throws {
+        guard requireIsolatedTestPlan() else { return }
+        let first = SurfAceHTTPServer()
+        let second = SurfAceHTTPServer()
+        let firstMarker = "first-\(UUID().uuidString)"
+        let secondMarker = "second-\(UUID().uuidString)"
+        let firstPort = try await first.startIsolatedLoopbackForTesting(
+            httpHandler: { _ in HTTPServerResponse(statusCode: 200, body: Data(firstMarker.utf8)) },
+            webSocketHandler: { _ in }
+        )
+        let secondPort = try await second.startIsolatedLoopbackForTesting(
+            httpHandler: { _ in HTTPServerResponse(statusCode: 200, body: Data(secondMarker.utf8)) },
+            webSocketHandler: { _ in }
+        )
+        XCTAssertNotEqual(firstPort, secondPort)
+        XCTAssertNotEqual(firstPort, SurfAceHTTPServer.fixedPort)
+        XCTAssertNotEqual(secondPort, SurfAceHTTPServer.fixedPort)
+        let firstURL = try XCTUnwrap(URL(string: "http://127.0.0.1:\(firstPort)/identity"))
+        let secondURL = try XCTUnwrap(URL(string: "http://127.0.0.1:\(secondPort)/identity"))
+        let (firstData, firstResponse) = try await URLSession.shared.data(from: firstURL)
+        let (secondData, secondResponse) = try await URLSession.shared.data(from: secondURL)
+        XCTAssertEqual((firstResponse as? HTTPURLResponse)?.statusCode, 200)
+        XCTAssertEqual((secondResponse as? HTTPURLResponse)?.statusCode, 200)
+        XCTAssertEqual(String(data: firstData, encoding: .utf8), firstMarker)
+        XCTAssertEqual(String(data: secondData, encoding: .utf8), secondMarker)
+        await first.stop()
+        await second.stop()
+    }
+
     func testStartForTestingRejectsEphemeralPortRequest() async {
         let server = SurfAceHTTPServer()
 

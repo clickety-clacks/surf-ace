@@ -1,4 +1,5 @@
 import { randomBytes, randomUUID } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 
 import { parseHTML } from "linkedom";
 
@@ -64,12 +65,14 @@ import {
   validLocklessRequestId,
   validLocklessSurfaceAdmissionAttempt,
   validLocklessSurfaceId,
+  locklessRecoverableSurfaceMinimumBytes,
   type LocklessContentCommit,
   type LocklessContentPush,
   type LocklessEntryProvenance,
   type LocklessSurfaceAdmissionAttempt,
 } from "../../protocol/src/lockless.js";
 import { cloneWindowPlacement, type WindowPlacement } from "./window-placement.js";
+import { AnnotationPublisherOutbox, ANNOTATION_PUBLISHER_MAX_BYTES, type PersistentAnnotationPublisher } from "./annotation-publisher-outbox.js";
 
 type ContentPayload = ContentSetRequest["payload"]["content"];
 type AuthoritativeTopologyPayload = Omit<TopologyApplyRequest["payload"], "panes"> & {
@@ -200,6 +203,7 @@ export type PaneNavigationDirection = "down" | "left" | "right" | "up";
 
 export type PersistentSurfaceState = {
   admissionAttempts?: PersistentSurfaceAdmissionAttempt[];
+  annotationPublisher?: PersistentAnnotationPublisher;
   lockless?: PersistentLocklessClientState;
   nextAdmissionAttemptSequence?: number;
   primarySurfaceId: string | null;
@@ -662,12 +666,17 @@ export class SurfaceCore {
   private readonly confirmedPaneLabels = new Map<string, { pane: PaneState; label: number }>();
   private readonly listeners = new Set<(event: CoreEvent) => void>();
   private pendingEvents: CoreEvent[] | null = null;
+  private readonly transactionContext = new AsyncLocalStorage<symbol>();
+  private activeAsyncTransaction: symbol | null = null;
+  private transactionTail: Promise<void> = Promise.resolve();
   private readonly logger: { warn?: (message: string) => void };
   private readonly now: () => number;
   private nextAdmissionAttemptSequence: number;
   private persistentState: PersistentSurfaceState;
+  readonly annotationPublisher: AnnotationPublisherOutbox | null;
 
   constructor(options?: {
+    annotationClientId?: string;
     clientIdentity?: string;
     logger?: { warn?: (message: string) => void };
     now?: () => number;
@@ -679,6 +688,12 @@ export class SurfaceCore {
       primarySurfaceId: null,
       version: 1,
     };
+    if (this.persistentState.annotationPublisher && !options?.annotationClientId) {
+      throw new TypeError("persisted annotation publisher requires its client ID");
+    }
+    this.annotationPublisher = options?.annotationClientId
+      ? new AnnotationPublisherOutbox(options.annotationClientId, this.persistentState.annotationPublisher)
+      : null;
     this.admissionAttempts = structuredClone(
       this.persistentState.admissionAttempts ?? [],
     );
@@ -704,6 +719,21 @@ export class SurfaceCore {
       this.now,
       options?.clientIdentity ?? null,
     );
+    if (this.annotationPublisher) {
+      const limits = this.locklessAuthority.limits;
+      const withPublisher = {
+        ...limits,
+        maxAnnotationPublisherStateBytesPerSurface: ANNOTATION_PUBLISHER_MAX_BYTES,
+      };
+      this.locklessAuthority.configureLimits({
+        ...withPublisher,
+        maxRecoverableSurfaceBytes: Math.max(
+          limits.maxRecoverableSurfaceBytes,
+          locklessRecoverableSurfaceMinimumBytes(withPublisher),
+        ),
+      });
+    }
+    this.reconcileAnnotationTombstones();
   }
 
   subscribe(listener: (event: CoreEvent) => void): () => void {
@@ -714,7 +744,13 @@ export class SurfaceCore {
   }
 
   transaction<T>(operation: () => T): T {
-    if (this.pendingEvents) return operation();
+    if (this.pendingEvents) {
+      if (this.activeAsyncTransaction !== null &&
+          this.transactionContext.getStore() !== this.activeAsyncTransaction) {
+        throw new Error("Surface transaction is already in progress");
+      }
+      return operation();
+    }
     this.pendingEvents = [];
     try {
       const result = operation();
@@ -729,7 +765,33 @@ export class SurfaceCore {
   }
 
   async transactionAsync<T>(operation: () => Promise<T>): Promise<T> {
-    if (this.pendingEvents) return await operation();
+    if (this.activeAsyncTransaction !== null &&
+        this.transactionContext.getStore() === this.activeAsyncTransaction) {
+      return await operation();
+    }
+    if (this.pendingEvents && this.activeAsyncTransaction === null) {
+      throw new Error("Async surface transaction cannot nest inside a synchronous transaction");
+    }
+    const previous = this.transactionTail;
+    let release = (): void => {};
+    const current = new Promise<void>((resolve) => { release = resolve; });
+    this.transactionTail = previous.catch(() => undefined).then(() => current);
+    await previous.catch(() => undefined);
+    if (this.pendingEvents) {
+      release();
+      throw new Error("Surface transaction is already in progress");
+    }
+    const token = Symbol("surface transaction");
+    this.activeAsyncTransaction = token;
+    try {
+      return await this.transactionContext.run(token, () => this.transactionAsyncExclusive(operation));
+    } finally {
+      this.activeAsyncTransaction = null;
+      release();
+    }
+  }
+
+  private async transactionAsyncExclusive<T>(operation: () => Promise<T>): Promise<T> {
     const before = this.getPersistentState();
     this.pendingEvents = [];
     try {
@@ -752,6 +814,9 @@ export class SurfaceCore {
 
   private restorePersistentState(state: PersistentSurfaceState): void {
     this.persistentState = structuredClone(state);
+    if (this.annotationPublisher && state.annotationPublisher) {
+      this.annotationPublisher.restore(state.annotationPublisher);
+    }
     this.surfaces.clear();
     for (const record of state.surfaces ?? []) {
       const surface = deserializeSurface(record, this.now());
@@ -763,13 +828,29 @@ export class SurfaceCore {
   }
 
   getPersistentState(): PersistentSurfaceState {
+    this.reconcileAnnotationTombstones();
     return {
       ...structuredClone(this.persistentState),
+      ...(this.annotationPublisher ? { annotationPublisher: this.annotationPublisher.snapshot() } : {}),
       admissionAttempts: structuredClone(this.admissionAttempts),
       lockless: this.locklessAuthority.exportState(),
       nextAdmissionAttemptSequence: this.nextAdmissionAttemptSequence,
       surfaces: this.listSurfaces().map((surface) => serializeSurface(surface)),
     };
+  }
+
+  private reconcileAnnotationTombstones(): void {
+    const tombstones = this.locklessAuthority.listTombstones("surface");
+    if (!this.annotationPublisher && tombstones.some((entry) =>
+      (entry.annotationPublisherPartitionBytes ?? 0) > 0)) {
+      throw new TypeError("retained annotation publisher requires its source state");
+    }
+    for (const tombstone of tombstones) {
+      this.locklessAuthority.reconcileAnnotationPublisherPartition(
+        tombstone.tombstoneId,
+        this.annotationPublisher?.partitionBytes(tombstone.surfaceId) ?? 0,
+      );
+    }
   }
 
   registryBinding(): PersistentRegistryBinding | null {
@@ -1809,6 +1890,7 @@ export class SurfaceCore {
     if (pane.annotating === enabled) {
       return;
     }
+    if (enabled) pane.pendingAnnotationCommit = false;
     pane.annotating = enabled;
     pane.toast = null;
     bumpGeometryRevision(surface);
@@ -3634,6 +3716,7 @@ export class SurfaceCore {
       throw new SurfaceCoreError("invalid_operation", "No active content for annotation");
     }
 
+    this.annotationPublisher?.recordStroke(surfaceId, paneId, stroke);
     entry.annotations = [...entry.annotations, structuredClone(stroke)];
     pane.annotationFrameOpen = true;
     pane.dirtyStrokeIds.push(stroke.strokeId);

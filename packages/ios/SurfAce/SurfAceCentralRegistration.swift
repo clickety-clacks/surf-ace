@@ -522,6 +522,22 @@ final class SurfAceLocalNumericRegistrationWebSocket: SurfAceRegistrationTranspo
         self.url = url
     }
 
+    func exchange(_ data: Data) async throws -> Data {
+        let timeout = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(5))
+            if !Task.isCancelled { self?.close() }
+        }
+        defer { timeout.cancel() }
+        do {
+            try await connectIfNeeded()
+            try await send(data)
+            return try await receive()
+        } catch {
+            close()
+            throw error
+        }
+    }
+
     func readRegistryIdentity() async throws -> SurfAceRegistryIdentity {
         let timeout = Task { @MainActor [weak self] in
             do {

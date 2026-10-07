@@ -22,7 +22,7 @@ import {
   LocklessAuthorityError,
   createEmptyLocklessClientState,
 } from "../src/lockless-client-authority.js";
-import { PersistentStateOutcomeUnknownError } from "../src/persistent-state-file.js";
+import { PersistentStateOutcomeUnknownError, PersistentStateWriteGuardError } from "../src/persistent-state-file.js";
 import {
   loadPersistentStateFile,
   writePersistentStateFile,
@@ -3369,7 +3369,7 @@ test("AC-SURF-02: complete surface close persists a tombstone before zero-live s
 });
 
 test("AC-SURF-01: controller and local-user surface lifecycle share the persisted client authority seam", async () => {
-  const core = new SurfaceCore();
+  const core = new SurfaceCore({ annotationClientId: "c".repeat(64) });
   core.ensurePrimarySurface("Surf Ace", {
     height: 800,
     scale: 2,
@@ -3404,14 +3404,35 @@ test("AC-SURF-01: controller and local-user surface lifecycle share the persiste
     const localOpened = await server.openSurfaceFromLocalUser();
     assert.equal(localOpened.surfaceSetRevision, opened.payload.surfaceSetRevision + 1);
     assert.equal(persistedRevision, localOpened.surfaceSetRevision);
+    core.annotationPublisher!.lose(localOpened.surfaceId, "frame_image_unavailable");
+    const publisherBytes = core.annotationPublisher!.partitionBytes(localOpened.surfaceId);
     const localClosed = await server.closeSurfaceFromLocalUser(localOpened.surfaceId);
     assert.equal(localClosed.surfaceSetRevision, localOpened.surfaceSetRevision + 1);
     assert.equal(persistedRevision, localClosed.surfaceSetRevision);
-    assert.equal(
-      core.locklessAuthority.listTombstones("surface")
-        .some((entry) => entry.tombstoneId === localClosed.tombstoneId),
-      true,
-    );
+    const tombstone = core.locklessAuthority.listTombstones("surface")
+      .find((entry) => entry.tombstoneId === localClosed.tombstoneId)!;
+    assert.equal(tombstone.annotationPublisherPartitionBytes, publisherBytes);
+    const { bytes, ...material } = tombstone;
+    assert.equal(bytes, Buffer.byteLength(JSON.stringify({ version: 1, ...material }), "utf8") + publisherBytes);
+    const sealed = core.annotationPublisher!.head(localOpened.surfaceId)!;
+    const sealedBytes = core.annotationPublisher!.partitionBytes(localOpened.surfaceId);
+    core.getPersistentState();
+    assert.equal(core.locklessAuthority.listTombstones("surface")
+      .find((entry) => entry.tombstoneId === localClosed.tombstoneId)?.annotationPublisherPartitionBytes,
+    sealedBytes);
+    core.annotationPublisher!.accepted(localOpened.surfaceId, sealed,
+      { epoch: "a".repeat(32), sequence: "1" });
+    const acceptedBytes = core.annotationPublisher!.partitionBytes(localOpened.surfaceId);
+    core.getPersistentState();
+    assert.equal(core.locklessAuthority.listTombstones("surface")
+      .find((entry) => entry.tombstoneId === localClosed.tombstoneId)?.annotationPublisherPartitionBytes,
+    acceptedBytes);
+    const restarted = new SurfaceCore({ annotationClientId: "c".repeat(64),
+      persistentState: core.getPersistentState() });
+    assert.equal(restarted.annotationPublisher!.partitionBytes(localOpened.surfaceId), acceptedBytes);
+    assert.equal(restarted.locklessAuthority.listTombstones("surface")
+      .find((entry) => entry.tombstoneId === localClosed.tombstoneId)?.annotationPublisherPartitionBytes,
+    acceptedBytes);
   } finally {
     lifecycle.close();
     await server.stop();
@@ -3853,6 +3874,159 @@ test("a saturated ledger persisted and restarted still pairs and serves content"
   } finally {
     socket.close();
     await server.stop();
+  }
+});
+
+test("guarded restore keeps two visible panes and local input while refusing an unproven direct write", { timeout: 15_000 }, async () => {
+  const core = new SurfaceCore();
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  const firstPaneId = 7;
+  const secondPaneId = 9;
+  core.applyProviderBootstrapTopology(surface.surfaceId, {
+    initialPaneId: firstPaneId, initialPaneLabel: firstPaneId, windowLabel: "a",
+  });
+  core.paneSplit(surface.surfaceId, {
+    count: 2, direction: "vertical", newPaneIds: [secondPaneId],
+    newPaneLabels: [secondPaneId], paneId: firstPaneId,
+  });
+  let durable = core.getPersistentState();
+  let guarded = false;
+  let entered = (): void => {};
+  const pendingWrite = new Promise<void>((resolve) => { entered = resolve; });
+  let release = (): void => {};
+  const released = new Promise<void>((resolve) => { release = resolve; });
+  const port = nextPort++;
+  const server = new SurfaceWsServer({
+    bindAddress: "127.0.0.1", capturePaneImage: async () => "cG5n",
+    compositorSocketPath: null, core, endpointName: "Surf Ace", hostName: "localhost",
+    persistLocklessState: async () => {
+      if (guarded) {
+        entered();
+        await released;
+        throw new PersistentStateWriteGuardError("unrestorable-primary");
+      }
+      durable = core.getPersistentState();
+    },
+    port, viewport: () => ({ height: 800, scale: 2, width: 1200 }),
+  });
+  await server.start();
+  const socket = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+  try {
+    assert.equal((await pair(socket, "guarded-restore-client", surface.surfaceId)).ok, true);
+    for (const [paneId, contentId] of [[firstPaneId, "first-visible"], [secondPaneId, "second-visible"]] as const) {
+      const seeded = await request(socket, "content.set", {
+        content: { html: `<p>${contentId}</p>` }, contentId, contentType: "html",
+        friendlyChatName: contentId, paneId, surfaceId: surface.surfaceId,
+      });
+      assert.equal(seeded.ok, true, JSON.stringify(seeded));
+    }
+    const committed = structuredClone(durable);
+    guarded = true;
+    const refused = request(socket, "content.set", {
+      content: { html: "<p>unproven</p>" }, contentId: "unproven",
+      contentType: "html", friendlyChatName: "Unproven", paneId: firstPaneId,
+      surfaceId: surface.surfaceId,
+    });
+    await pendingWrite;
+    assert.equal(core.getRendererWindowState(surface.surfaceId).panes.length, 2);
+    assert.equal(core.captureSnapshot(surface.surfaceId, secondPaneId).contentId, "second-visible",
+      "a paused durable mutation must not blank an independent visible pane");
+    core.setActiveKeyboardPane(surface.surfaceId, secondPaneId);
+    assert.equal(core.activeKeyboardPaneId(surface.surfaceId), secondPaneId,
+      "direct local input remains available during the guarded write");
+    const independentRead = request(socket, "snapshot.get", {
+      paneId: secondPaneId, surfaceId: surface.surfaceId,
+    });
+    const readWhilePaused = await independentRead;
+    assert.equal(readWhilePaused.ok, true, JSON.stringify(readWhilePaused));
+    assert.equal(readWhilePaused.payload.contentId, "second-visible");
+    release();
+    const writeResponse = await refused;
+    assert.equal(writeResponse.ok, false, JSON.stringify(writeResponse));
+    assert.equal(writeResponse.error?.code, "internal_error");
+    assert.equal(core.captureSnapshot(surface.surfaceId, firstPaneId).contentId, "first-visible");
+    assert.deepEqual(durable, committed, "the guarded write must not change durable state");
+    assert.equal((await request(socket, "heartbeat.ping", { nonce: "guarded-alive" })).ok, true,
+      "the app and direct connection remain responsive");
+  } finally {
+    release();
+    socket.close();
+    await server.stop();
+  }
+});
+
+test("guarded restart preserves two-pane display but cannot re-pair without durable authority", { timeout: 15_000 }, async () => {
+  const original = new SurfaceCore();
+  const surface = original.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  original.applyProviderBootstrapTopology(surface.surfaceId, {
+    initialPaneId: 7, initialPaneLabel: 7, windowLabel: "a",
+  });
+  original.paneSplit(surface.surfaceId, {
+    count: 2, direction: "vertical", newPaneIds: [9], newPaneLabels: [9], paneId: 7,
+  });
+  let durable = original.getPersistentState();
+  const seedPort = nextPort++;
+  const seedServer = new SurfaceWsServer({
+    bindAddress: "127.0.0.1", capturePaneImage: async () => "cG5n",
+    compositorSocketPath: null, core: original, endpointName: "Surf Ace", hostName: "localhost",
+    persistLocklessState: async () => { durable = original.getPersistentState(); },
+    port: seedPort, viewport: () => ({ height: 800, scale: 2, width: 1200 }),
+  });
+  await seedServer.start();
+  const seedSocket = await connect(`ws://127.0.0.1:${seedPort}${seedServer.wsPath}`);
+  try {
+    assert.equal((await pair(seedSocket, "guarded-restart-client", surface.surfaceId)).ok, true);
+    for (const [paneId, contentId] of [[7, "first-visible"], [9, "second-visible"]] as const) {
+      const response = await request(seedSocket, "content.set", {
+        content: { html: `<p>${contentId}</p>` }, contentId, contentType: "html",
+        friendlyChatName: contentId, paneId, surfaceId: surface.surfaceId,
+      });
+      assert.equal(response.ok, true, JSON.stringify(response));
+    }
+  } finally {
+    seedSocket.close();
+    await seedServer.stop();
+  }
+
+  const committed = structuredClone(durable);
+  const restored = new SurfaceCore({ persistentState: committed });
+  const restoredSurfaces = restored.restorePersistedSurfaces("Surf Ace", {
+    height: 800, scale: 2, width: 1200,
+  });
+  assert.equal(restoredSurfaces.length, 1);
+  assert.equal(restored.getRendererWindowState(surface.surfaceId).panes.length, 2);
+  assert.equal(restored.captureSnapshot(surface.surfaceId, 7).contentId, "first-visible");
+  assert.equal(restored.captureSnapshot(surface.surfaceId, 9).contentId, "second-visible");
+  restored.setActiveKeyboardPane(surface.surfaceId, 9);
+  assert.equal(restored.activeKeyboardPaneId(surface.surfaceId), 9);
+
+  const guardedPort = nextPort++;
+  const guardedServer = new SurfaceWsServer({
+    bindAddress: "127.0.0.1", capturePaneImage: async () => "cG5n",
+    compositorSocketPath: null, core: restored, endpointName: "Surf Ace", hostName: "localhost",
+    persistLocklessState: async () => {
+      throw new PersistentStateWriteGuardError("unrestorable-primary");
+    },
+    port: guardedPort, viewport: () => ({ height: 800, scale: 2, width: 1200 }),
+  });
+  await guardedServer.start();
+  const socket = await connect(`ws://127.0.0.1:${guardedPort}${guardedServer.wsPath}`);
+  try {
+    const refused = await pair(socket, "guarded-restart-client", surface.surfaceId);
+    assert.equal(refused.ok, false, JSON.stringify(refused));
+    assert.equal(refused.error?.code, "internal_error");
+    assert.match(String(refused.error?.message ?? ""),
+      /persistence is guarded; pairing .* unavailable until state recovery/i);
+    assert.equal((await request(socket, "panes.list", { surfaceId: surface.surfaceId })).error?.code,
+      "not_paired");
+    assert.equal((await request(socket, "snapshot.get", {
+      paneId: 9, surfaceId: surface.surfaceId,
+    })).error?.code, "not_paired");
+    assert.deepEqual(durable, committed, "guarded restart must not acknowledge an unpersisted pair");
+    assert.equal(restored.getRendererWindowState(surface.surfaceId).panes.length, 2);
+  } finally {
+    socket.close();
+    await guardedServer.stop();
   }
 });
 
