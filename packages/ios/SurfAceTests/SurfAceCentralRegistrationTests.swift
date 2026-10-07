@@ -6,6 +6,10 @@ import XCTest
 
 @MainActor
 final class SurfAceCentralRegistrationTests: XCTestCase {
+    func testXCTestHostIsolationFlag() {
+        XCTAssertEqual(ProcessInfo.processInfo.environment["SURF_ACE_XCTEST_HOST_NO_AUTOSTART"], "1")
+    }
+
     private final class Transport: SurfAceRegistrationTransport {
         var error: Error?
         var fails = false
@@ -15,7 +19,15 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         var assignsPaneLabels = false
         var registeredSurfaces: [SurfAceRegistrationSurface] = []
         var nextPaneLabel: Int64 = 700
-        func register(clientId: String, surfaces: [SurfAceRegistrationSurface]) async throws -> [SurfAceRegistrationAssignment] {
+        var registryIdentity = SurfAceRegistryIdentity(allocatorId: "alloc_fixture", fleetId: "fixture-fleet")
+        var identityReads = 0
+        func readRegistryIdentity() async throws -> SurfAceRegistryIdentity {
+            identityReads += 1
+            return registryIdentity
+        }
+        func register(clientId: String, surfaces: [SurfAceRegistrationSurface],
+                      expectedIdentity: SurfAceRegistryIdentity) async throws -> [SurfAceRegistrationAssignment] {
+            guard registryIdentity == expectedIdentity else { throw SurfAceRegistrationError.invalidResponse }
             clients.append(clientId)
             registeredSurfaces = surfaces
             if let error { throw error }
@@ -346,7 +358,7 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
             discover: { XCTFail("a successful configured numeric controller must not discover another controller"); return [] },
             makeTransport: { url in attempted.append(url); return transport },
             snapshot: { [.init(surfaceId: "sf_one", panes: [])] },
-            apply: { _, _ in }
+            apply: { _, _ in }, verifyRegistry: { _, _ in }
         )
 
         try await registration.synchronize()
@@ -375,7 +387,8 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
                 return url == configured ? primary : fallback
             },
             snapshot: { [.init(surfaceId: "sf_one", panes: [])] },
-            apply: { assignments, _ in applied.append(assignments[0].windowLabel) }
+            apply: { assignments, _ in applied.append(assignments[0].windowLabel) },
+            verifyRegistry: { _, _ in }
         )
 
         try await registration.synchronize()
@@ -399,7 +412,8 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         let registration = SurfAceCentralRegistration(clientId: "test", configured: configured,
             discover: { XCTFail("configured success must not discover"); return [] },
             makeTransport: { url in attempted.append(url); return transport },
-            snapshot: { [.init(surfaceId: "sf_one", panes: [])] }, apply: { _, _ in })
+            snapshot: { [.init(surfaceId: "sf_one", panes: [])] }, apply: { _, _ in },
+            verifyRegistry: { _, _ in })
 
         try await registration.synchronize()
         XCTAssertEqual(attempted, [configured])
@@ -418,7 +432,7 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
             apply: { _, _ in
                 XCTAssertNotEqual(statuses.last, .connected)
                 persisted = true
-            }, onStatusChange: { state in
+            }, verifyRegistry: { _, _ in }, onStatusChange: { state in
                 if state == .connected { XCTAssertTrue(persisted) }
                 statuses.append(state)
             })
@@ -450,7 +464,7 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
                 apply: { _, _ in
                     if stopDuringApply { registration.stop() }
                     else { throw SurfAceRegistrationError.topologyChanged }
-                }, onStatusChange: { statuses.append($0) })
+                }, verifyRegistry: { _, _ in }, onStatusChange: { statuses.append($0) })
             do { try await registration.synchronize(); XCTFail("uncommitted registration succeeded") } catch { }
             XCTAssertFalse(statuses.contains(.connected))
             XCTAssertEqual(registration.status, .disconnected)
@@ -467,6 +481,7 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         let registration = SurfAceCentralRegistration(clientId: "test", configured: configured,
             discover: { [discovered] }, makeTransport: { $0 == configured ? primary : fallback },
             snapshot: { [.init(surfaceId: "sf_one", panes: [])] }, apply: { _, _ in },
+            verifyRegistry: { _, _ in },
             onStatusChange: { statuses.append($0) })
         try await registration.synchronize()
         XCTAssertEqual(registration.status, .connected)
@@ -485,7 +500,7 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
             snapshot: {
                 registration.stop()
                 return [.init(surfaceId: "sf_one", panes: [])]
-            }, apply: { _, _ in XCTFail("apply after stop") },
+            }, apply: { _, _ in XCTFail("apply after stop") }, verifyRegistry: { _, _ in },
             onStatusChange: { statuses.append($0) })
         do { try await registration.synchronize(); XCTFail("stopped snapshot succeeded") } catch { }
         XCTAssertEqual(statuses, [.connecting, .disconnected])
@@ -495,7 +510,7 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         var statuses: [SurfAceCentralRegistrationStatus] = []
         let registration = SurfAceCentralRegistration(clientId: "test", configured: nil,
             discover: { XCTFail("empty surface discovery"); return [] },
-            snapshot: { [] }, apply: { _, _ in XCTFail("empty registration") },
+            snapshot: { [] }, apply: { _, _ in XCTFail("empty registration") }, verifyRegistry: { _, _ in },
             onStatusChange: { statuses.append($0) })
         try await registration.synchronize()
         XCTAssertEqual(registration.status, .disconnected)
@@ -516,7 +531,8 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         let registration = SurfAceCentralRegistration(clientId: String(repeating: "a", count: 64), configured: configured,
             discover: { discoveries += 1; return [discovered] },
             makeTransport: { url in attempts.append(url); return url == configured ? primary : fallback },
-            snapshot: { surfaces }, apply: { assignments, _ in applied.append(assignments[0].windowLabel) })
+            snapshot: { surfaces }, apply: { assignments, _ in applied.append(assignments[0].windowLabel) },
+            verifyRegistry: { _, _ in })
         try await registration.synchronize()
         XCTAssertEqual(attempts, [configured, discovered])
         XCTAssertEqual(discoveries, 1)
@@ -552,7 +568,7 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
             discover: { [endpoint] },
             makeTransport: { _ in transport },
             snapshot: { surfaces },
-            apply: { _, _ in },
+            apply: { _, _ in }, verifyRegistry: { _, _ in },
             onError: { logErrors.append(($0 as? LocalizedError)?.errorDescription ?? $0.localizedDescription) },
             onConnectionError: { visibleErrors.append($0) }
         )
@@ -590,7 +606,7 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
                 makeTransport: { url in attempts.append(url); return url == hostname ? host : address },
                 transportFallbacks: { _ in [numeric] },
                 snapshot: { [.init(surfaceId: "sf_one", panes: [.init(paneId: "1", paneLineageId: "lineage_one", paneLabel: 1)])] },
-                apply: { _, _ in applied = true })
+                apply: { _, _ in applied = true }, verifyRegistry: { _, _ in })
             try await registration.synchronize()
             XCTAssertEqual(attempts, [numeric, hostname])
             XCTAssertTrue(applied)
@@ -619,7 +635,7 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
                 XCTAssertEqual(expected, surfaces)
                 let panes = try XCTUnwrap(assignments.first?.panes)
                 recovered = Dictionary(uniqueKeysWithValues: panes.map { ($0.paneLineageId, $0.paneLabel) })
-            }
+            }, verifyRegistry: { _, _ in }
         )
         try await registration.synchronize()
 
@@ -662,7 +678,7 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
             from: response,
             requestId: "register-rejected",
             clientId: "stable-client",
-            surfaces: []
+            surfaces: [], expectedIdentity: .init(allocatorId: "alloc_home", fleetId: "fleet-home")
         )) { error in
             guard case let SurfAceRegistrationError.serverRejected(code, message) = error else {
                 XCTFail("server protocol error was not retained")
@@ -704,6 +720,424 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         XCTAssertEqual(afterRestart, durable)
     }
 
+    func testLegacyBindingRejectsForeignBeforeRegistrationAndPersistsForRestart() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("registry-binding-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = SurfAceLocklessGenerationStore(stateURL: root.appendingPathComponent("state.json"))
+        var state = try SurfAceLocklessAuthorityState.empty()
+        let id = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
+            state: &state, expectedSurfaceSetRevision: 0
+        ).surface.surfaceId
+        try SurfAceLocklessTopologyOperations.applyWindowLabels(state: &state, assignments: [(id, "z")])
+        state.liveSurfaces[id]?.panes["1"]?.paneLabel = 700
+        try store.save(state)
+        let adapter = try SurfAceLocklessRuntimeAdapter(store: store)
+        let clientId = "legacy-client"
+        let home = SurfAceRegistryIdentity(allocatorId: "alloc_home", fleetId: "fleet-home")
+        let foreign = SurfAceRegistryIdentity(allocatorId: "alloc_foreign", fleetId: "fleet-foreign")
+        let replacedAllocator = SurfAceRegistryIdentity(allocatorId: "alloc_replaced", fleetId: "fleet-home")
+        let provisioning = SurfAceProvisionedRegistryBinding(
+            binding: .init(allocatorId: home.allocatorId, clientId: clientId, fleetId: home.fleetId),
+            confirmedClaims: SurfAceProvisionedRegistryBinding.confirmedClaims(state)
+        )
+        let surfaces = SurfAceRegistrationSurface.snapshot(state)
+        do {
+            try await adapter.bindRegistryIdentity(foreign, clientId: clientId,
+                expectedSurfaces: surfaces, provisioned: nil)
+            XCTFail("legacy state accepted discovery without provisioning")
+        } catch { }
+        let pending = await adapter.snapshot()
+        XCTAssertNil(pending.registryBinding)
+        do {
+            try await adapter.bindRegistryIdentity(foreign, clientId: clientId,
+                expectedSurfaces: surfaces, provisioned: provisioning)
+            XCTFail("legacy state accepted foreign fleet")
+        } catch { }
+        do {
+            try await adapter.bindRegistryIdentity(replacedAllocator, clientId: clientId,
+                expectedSurfaces: surfaces, provisioned: provisioning)
+            XCTFail("legacy state accepted a different allocator under the same fleet")
+        } catch { }
+        try await adapter.bindRegistryIdentity(home, clientId: clientId,
+            expectedSurfaces: surfaces, provisioned: provisioning)
+        XCTAssertEqual(try XCTUnwrap(store.load()).registryBinding, provisioning.binding)
+        let restored = try SurfAceLocklessRuntimeAdapter(store: store)
+        do {
+            try await restored.bindRegistryIdentity(foreign, clientId: clientId,
+                expectedSurfaces: surfaces, provisioned: nil)
+            XCTFail("restart forgot registry binding")
+        } catch { }
+        let afterRestart = await restored.snapshot()
+        XCTAssertEqual(afterRestart.liveSurfaces[id]?.panes["1"]?.paneLabel, 700)
+    }
+
+    func testPreMarkerLocalLetterRequiresVerifiedHistoryAndPreservesIdentityAcrossMigration() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("pre-marker-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = SurfAceLocklessGenerationStore(stateURL: root.appendingPathComponent("state.json"))
+        var state = try SurfAceLocklessAuthorityState.empty()
+        let openingRevision = state.surfaceSetRevision
+        let id = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
+            state: &state, expectedSurfaceSetRevision: openingRevision
+        ).surface.surfaceId
+        state.liveSurfaces[id]?.windowLabelConfirmed = nil
+        state.liveSurfaces[id]?.panes["1"]?.target = .string("local content")
+        let lineage = try XCTUnwrap(state.liveSurfaces[id]?.panes["1"]?.paneLineageId)
+        let originalLabel = try XCTUnwrap(state.liveSurfaces[id]?.windowLabel)
+        let claims = SurfAceProvisionedRegistryBinding.confirmedClaims(state)
+        XCTAssertEqual(claims, [.init(surfaceId: id, windowLabel: originalLabel, panes: [])])
+        try store.save(state)
+        let adapter = try SurfAceLocklessRuntimeAdapter(store: store)
+        let clientId = "pre-marker-client"
+        let foreign = SurfAceRegistryIdentity(allocatorId: "alloc_foreign", fleetId: "foreign")
+        let home = SurfAceRegistryIdentity(allocatorId: "alloc_home", fleetId: "home")
+        let surfaces = SurfAceRegistrationSurface.snapshot(state)
+        let verified = SurfAceVerifiedUnconfirmedMigration(
+            clientId: clientId, evidenceId: "owner-review-1",
+            allocationHistoryEvidence: "authoritative-history-no-allocation",
+            localProvenanceEvidence: "local-open-record",
+            otherFleetCheckEvidence: "all-fleet-history-check",
+            localClaims: claims
+        )
+
+        // Missing history or provenance does not turn a pre-marker letter into a fresh client.
+        do {
+            try await adapter.bindRegistryIdentity(foreign, clientId: clientId,
+                expectedSurfaces: surfaces, provisioned: nil)
+            XCTFail("discovery bypassed history verification")
+        } catch { }
+        let unavailable = SurfAceVerifiedUnconfirmedMigration(
+            clientId: clientId, evidenceId: "owner-review-1", allocationHistoryEvidence: "",
+            localProvenanceEvidence: "local-open-record",
+            otherFleetCheckEvidence: "all-fleet-history-check", localClaims: claims
+        )
+        do {
+            try await adapter.bindRegistryIdentity(foreign, clientId: clientId,
+                expectedSurfaces: surfaces, provisioned: nil, verifiedUnconfirmed: unavailable)
+            XCTFail("unavailable history authorized migration")
+        } catch { }
+        XCTAssertEqual(try XCTUnwrap(store.load()), state)
+
+        // An actually confirmed letter stays legacy-bound even if no active registry row remains.
+        var confirmed = state
+        confirmed.liveSurfaces[id]?.windowLabelConfirmed = true
+        let confirmedStore = SurfAceLocklessGenerationStore(stateURL: root.appendingPathComponent("confirmed.json"))
+        try confirmedStore.save(confirmed)
+        let confirmedAdapter = try SurfAceLocklessRuntimeAdapter(store: confirmedStore)
+        do {
+            try await confirmedAdapter.bindRegistryIdentity(home, clientId: clientId,
+                expectedSurfaces: surfaces, provisioned: nil, verifiedUnconfirmed: verified)
+            XCTFail("confirmed label was reclassified from a missing active row")
+        } catch { }
+        XCTAssertEqual(try XCTUnwrap(confirmedStore.load()), confirmed)
+
+        // Model a completed disk replace whose caller never observed success.
+        var committed = state
+        committed.liveSurfaces[id]?.windowLabelConfirmed = false
+        committed.unconfirmedMigration = .init(
+            clientId: clientId, evidenceId: verified.evidenceId,
+            allocationHistoryEvidence: verified.allocationHistoryEvidence,
+            localProvenanceEvidence: verified.localProvenanceEvidence,
+            otherFleetCheckEvidence: verified.otherFleetCheckEvidence,
+            localClaims: claims
+        )
+        committed.generation += 1
+        try store.save(committed)
+        try await adapter.bindRegistryIdentity(home, clientId: clientId,
+            expectedSurfaces: surfaces, provisioned: nil, verifiedUnconfirmed: verified)
+        let bound = try XCTUnwrap(store.load())
+        XCTAssertEqual(bound.registryBinding?.clientId, clientId)
+        XCTAssertEqual(bound.registryBinding?.fleetId, home.fleetId)
+        XCTAssertEqual(bound.unconfirmedMigration?.evidenceId, verified.evidenceId)
+        XCTAssertEqual(bound.unconfirmedMigration?.allocationHistoryEvidence,
+                       verified.allocationHistoryEvidence)
+        XCTAssertEqual(bound.liveSurfaces[id]?.windowLabel, originalLabel)
+        XCTAssertEqual(bound.liveSurfaces[id]?.panes["1"]?.paneLineageId, lineage)
+        XCTAssertEqual(bound.liveSurfaces[id]?.panes["1"]?.target, .string("local content"))
+        let restarted = try SurfAceLocklessRuntimeAdapter(store: store)
+        do {
+            try await restarted.bindRegistryIdentity(foreign, clientId: clientId,
+                expectedSurfaces: surfaces, provisioned: nil)
+            XCTFail("restart accepted another fleet")
+        } catch { }
+        XCTAssertEqual(try XCTUnwrap(store.load()), bound)
+        XCTAssertNotNil(verified.matchingSurfaceIds(in: state, clientId: clientId))
+    }
+
+    func testPreMarkerTombstoneRequiresHistoryAndMigratesOnlyRetainedLocalLetter() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("pre-marker-tombstone-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = SurfAceLocklessGenerationStore(stateURL: root.appendingPathComponent("state.json"))
+        var state = try SurfAceLocklessAuthorityState.empty()
+        let firstRevision = state.surfaceSetRevision
+        let opened = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
+            state: &state, expectedSurfaceSetRevision: firstRevision
+        )
+        let closedId = opened.surface.surfaceId
+        state.liveSurfaces[closedId]?.windowLabelConfirmed = nil
+        state.liveSurfaces[closedId]?.panes["1"]?.target = .string("tombstone content")
+        let topologyRevision = try XCTUnwrap(state.liveSurfaces[closedId]?.topologyRevision)
+        let closingRevision = state.surfaceSetRevision
+        _ = try SurfAceLocklessTopologyOperations.surfaceWindowClose(
+            state: &state, surfaceId: closedId,
+            expectedSurfaceSetRevision: closingRevision,
+            expectedTopologyRevision: topologyRevision
+        )
+        let openingRevision = state.surfaceSetRevision
+        let liveId = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
+            state: &state, expectedSurfaceSetRevision: openingRevision
+        ).surface.surfaceId
+        let claims = SurfAceProvisionedRegistryBinding.confirmedClaims(state)
+        XCTAssertEqual(claims.map(\.surfaceId), [closedId])
+        try store.save(state)
+        let adapter = try SurfAceLocklessRuntimeAdapter(store: store)
+        let surfaces = SurfAceRegistrationSurface.snapshot(state)
+        let foreign = SurfAceRegistryIdentity(allocatorId: "alloc_foreign", fleetId: "foreign")
+        do {
+            try await adapter.bindRegistryIdentity(foreign, clientId: "tombstone-local",
+                expectedSurfaces: surfaces, provisioned: nil)
+            XCTFail("retained local tombstone was mistaken for a fresh client")
+        } catch { }
+        XCTAssertEqual(try XCTUnwrap(store.load()), state)
+        let verified = SurfAceVerifiedUnconfirmedMigration(
+            clientId: "tombstone-local", evidenceId: "owner-review-tombstone",
+            allocationHistoryEvidence: "retained-history-no-allocation",
+            localProvenanceEvidence: "closed-local-open-record",
+            otherFleetCheckEvidence: "all-fleet-history-check", localClaims: claims
+        )
+        let home = SurfAceRegistryIdentity(allocatorId: "alloc_home", fleetId: "home")
+        try await adapter.bindRegistryIdentity(home, clientId: "tombstone-local",
+            expectedSurfaces: surfaces, provisioned: nil, verifiedUnconfirmed: verified)
+        let result = try XCTUnwrap(store.load())
+        XCTAssertEqual(result.registryBinding?.fleetId, home.fleetId)
+        XCTAssertEqual(result.surfaceTombstones.first?.surface.windowLabelConfirmed, false)
+        XCTAssertEqual(result.surfaceTombstones.first?.surface.panes["1"]?.target,
+                       .string("tombstone content"))
+        XCTAssertEqual(result.liveSurfaces[liveId]?.windowLabelConfirmed, false)
+    }
+
+    func testPreMarkerMigrationWriteFailureKeepsLocalStateAndNoBinding() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("pre-marker-write-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = SurfAceLocklessGenerationStore(stateURL: root.appendingPathComponent("state.json"))
+        var state = try SurfAceLocklessAuthorityState.empty()
+        let revision = state.surfaceSetRevision
+        let id = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
+            state: &state, expectedSurfaceSetRevision: revision
+        ).surface.surfaceId
+        state.liveSurfaces[id]?.windowLabelConfirmed = nil
+        state.liveSurfaces[id]?.panes["1"]?.target = .string("unsaved-migration content")
+        try store.save(state)
+        let adapter = try SurfAceLocklessRuntimeAdapter(store: store)
+        let blocker = root.appendingPathComponent(".state.json.next")
+        try FileManager.default.createDirectory(at: blocker, withIntermediateDirectories: false)
+        let verified = SurfAceVerifiedUnconfirmedMigration(
+            clientId: "write-failure-client", evidenceId: "owner-review-write",
+            allocationHistoryEvidence: "authoritative-history-no-allocation",
+            localProvenanceEvidence: "local-open-record",
+            otherFleetCheckEvidence: "all-fleet-history-check",
+            localClaims: SurfAceProvisionedRegistryBinding.confirmedClaims(state)
+        )
+        let home = SurfAceRegistryIdentity(allocatorId: "alloc_home", fleetId: "home")
+        do {
+            try await adapter.bindRegistryIdentity(home, clientId: "write-failure-client",
+                expectedSurfaces: SurfAceRegistrationSurface.snapshot(state),
+                provisioned: nil, verifiedUnconfirmed: verified)
+            XCTFail("failed durable replacement accepted an initial binding")
+        } catch { }
+        XCTAssertEqual(try XCTUnwrap(store.load()), state)
+        let unchanged = await adapter.snapshot()
+        XCTAssertEqual(unchanged, state)
+    }
+
+    func testTombstoneOnlyLegacyLabelsRejectForeignThenRecoverWithVerifiedHome() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("registry-tombstone-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = SurfAceLocklessGenerationStore(stateURL: root.appendingPathComponent("state.json"))
+        var state = try SurfAceLocklessAuthorityState.empty()
+        let openingRevision = state.surfaceSetRevision
+        let opened = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
+            state: &state, expectedSurfaceSetRevision: openingRevision
+        )
+        let id = opened.surface.surfaceId
+        try SurfAceLocklessTopologyOperations.applyWindowLabels(state: &state, assignments: [(id, "d")])
+        state.liveSurfaces[id]?.panes["1"]?.paneLabel = 703
+        state.liveSurfaces[id]?.panes["1"]?.target = .string("retained content")
+        let closingRevision = state.surfaceSetRevision
+        let topologyRevision = try XCTUnwrap(state.liveSurfaces[id]).topologyRevision
+        _ = try SurfAceLocklessTopologyOperations.surfaceWindowClose(
+            state: &state, surfaceId: id,
+            expectedSurfaceSetRevision: closingRevision,
+            expectedTopologyRevision: topologyRevision
+        )
+        let tombstone = try XCTUnwrap(state.surfaceTombstones.first)
+        XCTAssertEqual(tombstone.surface.windowLabel, "d")
+        XCTAssertEqual(tombstone.surface.panes["1"]?.paneLabel, 703)
+        let reopeningRevision = state.surfaceSetRevision
+        _ = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
+            state: &state, expectedSurfaceSetRevision: reopeningRevision
+        )
+        let clientId = "tombstone-client"
+        let homeIdentity = SurfAceRegistryIdentity(allocatorId: "alloc_home", fleetId: "fleet-home")
+        let foreignIdentity = SurfAceRegistryIdentity(allocatorId: "alloc_foreign", fleetId: "fleet-foreign")
+        let claims = SurfAceProvisionedRegistryBinding.confirmedClaims(state)
+        XCTAssertEqual(claims, [.init(surfaceId: id, windowLabel: "d", panes: [
+            .init(paneId: "1", paneLineageId: try XCTUnwrap(tombstone.surface.panes["1"]).paneLineageId,
+                  paneLabel: 703)
+        ])])
+        var windowOnly = try SurfAceLocklessAuthorityState.empty()
+        let windowOnlyRevision = windowOnly.surfaceSetRevision
+        let windowOnlyId = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
+            state: &windowOnly, expectedSurfaceSetRevision: windowOnlyRevision
+        ).surface.surfaceId
+        XCTAssertTrue(SurfAceProvisionedRegistryBinding.confirmedClaims(windowOnly).isEmpty)
+        windowOnly.liveSurfaces[windowOnlyId]?.windowLabelConfirmed = nil
+        XCTAssertEqual(SurfAceProvisionedRegistryBinding.confirmedClaims(windowOnly), [
+            .init(surfaceId: windowOnlyId,
+                  windowLabel: try XCTUnwrap(windowOnly.liveSurfaces[windowOnlyId]).windowLabel,
+                  panes: [])
+        ])
+        let provisioned = SurfAceProvisionedRegistryBinding(
+            binding: .init(allocatorId: homeIdentity.allocatorId, clientId: clientId,
+                           fleetId: homeIdentity.fleetId), confirmedClaims: claims
+        )
+        try store.save(state)
+        let adapter = try SurfAceLocklessRuntimeAdapter(store: store)
+        let before = try XCTUnwrap(store.load())
+        let foreign = Transport()
+        foreign.registryIdentity = foreignIdentity
+        let foreignRegistration = SurfAceCentralRegistration(
+            clientId: clientId, configured: URL(string: "ws://127.0.0.1:24001/ws")!,
+            discover: { [] }, makeTransport: { _ in foreign },
+            snapshot: { SurfAceRegistrationSurface.snapshot(await adapter.snapshot()) },
+            apply: { _, _ in },
+            verifyRegistry: { identity, surfaces in
+                try await adapter.bindRegistryIdentity(identity, clientId: clientId,
+                    expectedSurfaces: surfaces, provisioned: provisioned)
+            }
+        )
+        do {
+            try await foreignRegistration.synchronize()
+            XCTFail("tombstone-only legacy state accepted foreign registry")
+        } catch { }
+        foreignRegistration.stop()
+        XCTAssertEqual(foreign.identityReads, 1)
+        XCTAssertTrue(foreign.clients.isEmpty)
+        XCTAssertEqual(try XCTUnwrap(store.load()), before)
+        let pending = await adapter.snapshot()
+        XCTAssertNil(pending.registryBinding)
+
+        let home = Transport()
+        home.registryIdentity = homeIdentity
+        let homeRegistration = SurfAceCentralRegistration(
+            clientId: clientId, configured: URL(string: "ws://127.0.0.1:24002/ws")!,
+            discover: { [] }, makeTransport: { _ in home },
+            snapshot: { SurfAceRegistrationSurface.snapshot(await adapter.snapshot()) },
+            apply: { _, _ in },
+            verifyRegistry: { identity, surfaces in
+                try await adapter.bindRegistryIdentity(identity, clientId: clientId,
+                    expectedSurfaces: surfaces, provisioned: provisioned)
+            }
+        )
+        try await homeRegistration.synchronize()
+        homeRegistration.stop()
+        XCTAssertEqual(home.clients, [clientId])
+        let recovered = try XCTUnwrap(store.load())
+        XCTAssertEqual(recovered.registryBinding, provisioned.binding)
+        XCTAssertEqual(recovered.surfaceTombstones.first?.surface.windowLabel, "d")
+        XCTAssertEqual(recovered.surfaceTombstones.first?.surface.panes["1"]?.paneLabel, 703)
+        XCTAssertEqual(recovered.surfaceTombstones.first?.surface.panes["1"]?.target,
+                       .string("retained content"))
+    }
+
+    func testBindingReadbackReconcilesCommittedDiskCandidateBeforeForeignRetry() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("registry-readback-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = SurfAceLocklessGenerationStore(stateURL: root.appendingPathComponent("state.json"))
+        var state = try SurfAceLocklessAuthorityState.empty()
+        _ = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(state: &state, expectedSurfaceSetRevision: 0)
+        try store.save(state)
+        let adapter = try SurfAceLocklessRuntimeAdapter(store: store)
+        let before = await adapter.snapshot()
+        let surfaces = SurfAceRegistrationSurface.snapshot(before)
+        let home = SurfAceRegistryIdentity(allocatorId: "alloc_home", fleetId: "fleet-home")
+        let foreign = SurfAceRegistryIdentity(allocatorId: "alloc_foreign", fleetId: "fleet-foreign")
+        let binding = SurfAceRegistryBinding(allocatorId: home.allocatorId,
+                                              clientId: "readback-client", fleetId: home.fleetId)
+        var committed = before
+        committed.registryBinding = binding
+        committed.generation += 1
+        try store.save(committed)
+        do {
+            try await adapter.bindRegistryIdentity(foreign, clientId: "readback-client",
+                expectedSurfaces: surfaces, provisioned: nil)
+            XCTFail("foreign identity replaced ambiguous committed candidate")
+        } catch { }
+        let afterReadback = await adapter.snapshot()
+        XCTAssertEqual(afterReadback.registryBinding, binding)
+        try await adapter.bindRegistryIdentity(home, clientId: "readback-client",
+            expectedSurfaces: surfaces, provisioned: nil)
+        XCTAssertEqual(try XCTUnwrap(store.load()).registryBinding, binding)
+    }
+
+    func testTwoRegistryRouteChecksIdentityBeforeRegistration() async throws {
+        let foreignURL = URL(string: "ws://127.0.0.1:24001/ws")!
+        let homeURL = URL(string: "ws://127.0.0.1:24002/ws")!
+        let foreign = Transport()
+        foreign.registryIdentity = .init(allocatorId: "alloc_foreign", fleetId: "fleet-foreign")
+        let home = Transport()
+        home.registryIdentity = .init(allocatorId: "alloc_home", fleetId: "fleet-home")
+        let expected = home.registryIdentity
+        let registration = SurfAceCentralRegistration(
+            clientId: "stable-client", configured: foreignURL,
+            discover: { [homeURL] },
+            makeTransport: { $0 == foreignURL ? foreign : home },
+            snapshot: { [.init(surfaceId: "sf_one", panes: [])] },
+            apply: { _, _ in },
+            verifyRegistry: { identity, _ in
+                guard identity == expected else { throw SurfAceRegistrationError.foreignRegistryIdentity }
+            }
+        )
+        try await registration.synchronize()
+        XCTAssertEqual(foreign.identityReads, 1)
+        XCTAssertTrue(foreign.clients.isEmpty)
+        XCTAssertEqual(home.clients, ["stable-client"])
+        XCTAssertEqual(registration.status, .connected)
+        registration.stop()
+    }
+
+    func testRegistryIdentityWireRejectsMissingAndMismatchedResponses() throws {
+        let valid = Data(#"{"id":"identity-1","op":"fleet.topology","type":"response","v":1,"ok":true,"payload":{"registryIdentity":{"allocatorId":"alloc_home","fleetId":"fleet-home"}}}"#.utf8)
+        XCTAssertEqual(try SurfAceRegistrationWire.registryIdentity(from: valid, requestId: "identity-1"),
+                       .init(allocatorId: "alloc_home", fleetId: "fleet-home"))
+        let missing = Data(#"{"id":"identity-1","op":"fleet.topology","type":"response","v":1,"ok":true,"payload":{}}"#.utf8)
+        XCTAssertThrowsError(try SurfAceRegistrationWire.registryIdentity(from: missing, requestId: "identity-1"))
+        XCTAssertThrowsError(try SurfAceRegistrationWire.registryIdentity(from: valid, requestId: "different"))
+    }
+
+    func testRegistrationResponseIdentityMustMatchPreflightBeforeLabelsApply() throws {
+        let expected = SurfAceRegistryIdentity(allocatorId: "alloc_home", fleetId: "fleet-home")
+        let matching = Data(#"{"id":"register-1","op":"client.register","ok":true,"payload":{"clientId":"stable-client","registryIdentity":{"allocatorId":"alloc_home","fleetId":"fleet-home"},"surfaces":[]}}"#.utf8)
+        XCTAssertEqual(try SurfAceRegistrationWire.assignments(
+            from: matching, requestId: "register-1", clientId: "stable-client",
+            surfaces: [], expectedIdentity: expected
+        ), [])
+        let foreign = Data(#"{"id":"register-1","op":"client.register","ok":true,"payload":{"clientId":"stable-client","registryIdentity":{"allocatorId":"alloc_foreign","fleetId":"fleet-foreign"},"surfaces":[]}}"#.utf8)
+        let missing = Data(#"{"id":"register-1","op":"client.register","ok":true,"payload":{"clientId":"stable-client","surfaces":[]}}"#.utf8)
+        for response in [foreign, missing] {
+            XCTAssertThrowsError(try SurfAceRegistrationWire.assignments(
+                from: response, requestId: "register-1", clientId: "stable-client",
+                surfaces: [], expectedIdentity: expected
+            ))
+        }
+    }
+
     func testProductionAllocatorAssignsDistinctLabelsAndRetainsIdentityOnReconnect() async throws {
         guard let address = ProcessInfo.processInfo.environment["SURF_ACE_TEST_ALLOCATOR"],
               let url = URL(string: address) else { throw XCTSkip("isolated allocator not supplied") }
@@ -722,7 +1156,9 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
             identities.append(identity)
             var state = try SurfAceLocklessAuthorityState.empty()
             _ = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(state: &state, expectedSurfaceSetRevision: 0)
-            let assignments = try await connections[index].register(clientId: identity.clientId, surfaces: SurfAceRegistrationSurface.snapshot(state))
+            let registryIdentity = try await connections[index].readRegistryIdentity()
+            let assignments = try await connections[index].register(clientId: identity.clientId,
+                surfaces: SurfAceRegistrationSurface.snapshot(state), expectedIdentity: registryIdentity)
             try SurfAceLocklessTopologyOperations.applyWindowLabels(state: &state, assignments: assignments.map { ($0.surfaceId, $0.windowLabel) })
             let store = SurfAceLocklessGenerationStore(stateURL: root.appendingPathComponent("state-\(index).json"))
             try store.save(state)
@@ -740,7 +1176,9 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
             XCTAssertEqual(state, states[index])
             let connection = SurfAceRegistrationWebSocket(url: url)
             defer { connection.close() }
-            let assignments = try await connection.register(clientId: identity.clientId, surfaces: SurfAceRegistrationSurface.snapshot(state))
+            let registryIdentity = try await connection.readRegistryIdentity()
+            let assignments = try await connection.register(clientId: identity.clientId,
+                surfaces: SurfAceRegistrationSurface.snapshot(state), expectedIdentity: registryIdentity)
             XCTAssertEqual(assignments.first?.windowLabel, labels[index])
         }
         print("PRODUCTION_REGISTRATION clients=\(identities.map(\.clientId)) labels=\(labels) reconnect=PASS")

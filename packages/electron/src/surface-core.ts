@@ -174,6 +174,7 @@ type SurfaceState = {
   viewport: SurfaceViewport;
   windowPlacement: WindowPlacement | null;
   windowLabel: string;
+  windowLabelConfirmed: boolean | null;
 };
 
 export type PersistentSurfaceAdmissionAttempt = LocklessSurfaceAdmissionAttempt;
@@ -202,8 +203,21 @@ export type PersistentSurfaceState = {
   lockless?: PersistentLocklessClientState;
   nextAdmissionAttemptSequence?: number;
   primarySurfaceId: string | null;
+  registryBinding?: PersistentRegistryBinding;
   surfaces?: PersistentSurfaceRecord[];
   version: 1;
+};
+
+export type PersistentRegistryBinding = {
+  allocatorId: string;
+  clientId: string;
+  fleetId: string;
+};
+
+export type ConfirmedRegistryClaim = {
+  panes: Array<{ paneId: string; paneLabel: number; paneLineageId: string }>;
+  surfaceId: string;
+  windowLabel: string;
 };
 
 type PersistentSurfaceRecord = {
@@ -220,6 +234,7 @@ type PersistentSurfaceRecord = {
   viewport: SurfaceViewport;
   windowPlacement?: WindowPlacement | null;
   windowLabel: string;
+  windowLabelConfirmed?: boolean | null;
 };
 
 type PersistentPaneRecord = {
@@ -757,6 +772,80 @@ export class SurfaceCore {
     };
   }
 
+  registryBinding(): PersistentRegistryBinding | null {
+    const binding = this.persistentState.registryBinding;
+    if (!binding) return null;
+    if (typeof binding.clientId !== "string" || !/^[A-Za-z0-9._:-]{1,128}$/.test(binding.clientId) ||
+        typeof binding.allocatorId !== "string" || !/^alloc_[A-Za-z0-9._:-]{3,64}$/.test(binding.allocatorId) ||
+        typeof binding.fleetId !== "string" || !/^[A-Za-z0-9._:-]{1,128}$/.test(binding.fleetId)) {
+      throw new SurfaceCoreError("invalid_payload", "Stored registry binding is invalid");
+    }
+    return structuredClone(binding);
+  }
+
+  bindRegistryIdentity(binding: PersistentRegistryBinding): void {
+    if (typeof binding.clientId !== "string" || !/^[A-Za-z0-9._:-]{1,128}$/.test(binding.clientId) ||
+        typeof binding.allocatorId !== "string" || !/^alloc_[A-Za-z0-9._:-]{3,64}$/.test(binding.allocatorId) ||
+        typeof binding.fleetId !== "string" || !/^[A-Za-z0-9._:-]{1,128}$/.test(binding.fleetId)) {
+      throw new SurfaceCoreError("invalid_payload", "Proposed registry binding is invalid");
+    }
+    const existing = this.registryBinding();
+    if (existing && (existing.clientId !== binding.clientId ||
+        existing.allocatorId !== binding.allocatorId || existing.fleetId !== binding.fleetId)) {
+      throw new SurfaceCoreError("invalid_payload", "Stored registry identity cannot be replaced implicitly");
+    }
+    this.persistentState.registryBinding = structuredClone(binding);
+  }
+
+  confirmedRegistryClaims(): ConfirmedRegistryClaim[] {
+    const claims = new Map<string, ConfirmedRegistryClaim>();
+    const add = (
+      surfaceId: string,
+      windowLabel: string,
+      windowLabelConfirmed: boolean | null | undefined,
+      panes: Array<{ paneId: number; paneLabel: number; paneLineageId: string }>,
+    ) => {
+      const confirmed = panes.filter((pane) => pane.paneLabel > 0);
+      if ((!isValidWindowLabel(windowLabel) || windowLabelConfirmed === false) && confirmed.length === 0) return;
+      const claim = claims.get(surfaceId) ?? { panes: [], surfaceId, windowLabel };
+      if (isValidWindowLabel(windowLabel)) claim.windowLabel = windowLabel;
+      for (const pane of confirmed) {
+        if (!claim.panes.some((existing) => existing.paneId === String(pane.paneId))) {
+          claim.panes.push({
+            paneId: String(pane.paneId), paneLabel: pane.paneLabel, paneLineageId: pane.paneLineageId,
+          });
+        }
+      }
+      claims.set(surfaceId, claim);
+    };
+    for (const surface of this.listSurfaces()) {
+      add(surface.surfaceId, surface.windowLabel, surface.windowLabelConfirmed, [...surface.panes.values()]);
+    }
+    for (const tombstone of this.locklessAuthority.listTombstones()) {
+      if (tombstone.kind === "pane") {
+        const pane = (tombstone.payload as { pane?: PersistentPaneRecord })?.pane;
+        if (pane) add(tombstone.surfaceId, claims.get(tombstone.surfaceId)?.windowLabel ?? "", null, [pane]);
+        continue;
+      }
+      const payload = tombstone.payload as {
+        paneTombstones?: Array<{ payload?: { pane?: PersistentPaneRecord } }>;
+        surface?: PersistentSurfaceRecord;
+      };
+      if (!payload?.surface) continue;
+      add(payload.surface.surfaceId, payload.surface.windowLabel,
+        payload.surface.windowLabelConfirmed, payload.surface.panes);
+      for (const nested of payload.paneTombstones ?? []) {
+        if (nested.payload?.pane) {
+          add(payload.surface.surfaceId, payload.surface.windowLabel,
+            payload.surface.windowLabelConfirmed, [nested.payload.pane]);
+        }
+      }
+    }
+    return [...claims.values()].map((claim) => ({
+      ...claim, panes: claim.panes.sort((left, right) => left.paneId.localeCompare(right.paneId)),
+    })).sort((left, right) => left.surfaceId.localeCompare(right.surfaceId));
+  }
+
   /**
    * Serialize the whole admission boundary. Recovery planning, terminal
    * compaction, provisional-sequence selection, candidate creation and the
@@ -1274,6 +1363,7 @@ export class SurfaceCore {
           candidate = alphabeticLabel(++ordinal);
         }
         surface.windowLabel = candidate;
+        surface.windowLabelConfirmed = false;
       }
       const prospective = serializeSurface(surface);
       const surfaceBase = ({
@@ -1420,6 +1510,7 @@ export class SurfaceCore {
         candidate = alphabeticLabel(++ordinal);
       }
       prospective.windowLabel = candidate;
+      prospective.windowLabelConfirmed = false;
     }
     const surface = deserializeSurface(prospective, this.now());
     if (!surface) {
@@ -2364,6 +2455,7 @@ export class SurfaceCore {
     this.transaction(() => {
       for (const { surfaceId, windowLabel } of assignments) {
         const surface = this.getSurface(surfaceId);
+        surface.windowLabelConfirmed = true;
         if (surface.windowLabel === windowLabel) continue;
         if ([...surface.panes.values()].some((pane) => pane.externalNative)) bumpGeometryRevision(surface);
         surface.windowLabel = windowLabel;
@@ -3746,6 +3838,7 @@ export class SurfaceCore {
       viewport: cloneViewport(viewport),
       windowPlacement: null,
       windowLabel: "",
+      windowLabelConfirmed: false,
     };
     this.surfaces.set(surfaceId, surface);
     this.emit({ surfaceId, type: "surface-created" });
@@ -3947,6 +4040,7 @@ function serializeSurface(surface: SurfaceState): PersistentSurfaceRecord {
     viewport: cloneViewport(surface.viewport),
     windowPlacement: cloneWindowPlacement(surface.windowPlacement),
     windowLabel: surface.windowLabel,
+    windowLabelConfirmed: surface.windowLabelConfirmed,
   };
 }
 
@@ -4059,6 +4153,8 @@ function deserializeSurface(record: PersistentSurfaceRecord, now: number): Surfa
     },
     windowPlacement: cloneWindowPlacement(record.windowPlacement),
     windowLabel: isValidWindowLabel(record.windowLabel) ? record.windowLabel : "",
+    windowLabelConfirmed: typeof record.windowLabelConfirmed === "boolean"
+      ? record.windowLabelConfirmed : null,
   };
 }
 
