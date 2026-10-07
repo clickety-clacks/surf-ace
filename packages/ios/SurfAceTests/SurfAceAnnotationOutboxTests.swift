@@ -76,6 +76,52 @@ final class SurfAceAnnotationOutboxTests: XCTestCase {
         try outbox.validate(maxBytes: maxBytes)
     }
 
+    func testTrailingGapKeepsItsFullSlotWhileAnOpenFrameGrows() throws {
+        var outbox = try SurfAceAnnotationOutbox(clientId: "client-1", sourceEpoch: sourceEpoch)
+        _ = try outbox.append(surfaceId: surfaceId, record: record(), maxBytes: 22_000)
+        let payload = try XCTUnwrap(outbox.head(surfaceId: surfaceId, maxBytes: 22_000))
+        _ = try outbox.append(surfaceId: surfaceId, record: record(padding: 20_000), maxBytes: 22_000)
+        XCTAssertNotNil(outbox.surfaces[surfaceId]?.trailingGap)
+        let occupied = Int(try outbox.partitionBytes(surfaceId: surfaceId))
+        let limit = occupied + SurfAceAnnotationOutbox.gapSlotBytes + 10_500
+        let frame = try outbox.beginFrame(
+            surfaceId: surfaceId, paneId: 1, contextKey: "content-1", contentId: "content-1",
+            url: nil, scrollOffset: .init(x: 0, y: 0),
+            viewport: .init(width: 1, height: 1, scale: 1), openedAt: 1,
+            image: String(repeating: "x", count: 9_500), maxBytes: limit
+        )
+        XCTAssertTrue(frame.failed, "the occupied trailing gap retains its full byte reservation")
+        try outbox.validate(maxBytes: limit)
+        try outbox.accept(surfaceId: surfaceId, head: payload,
+                          cursor: .init(epoch: sourceEpoch, sequence: "1"))
+        XCTAssertEqual(try outbox.head(surfaceId: surfaceId, maxBytes: limit)?.kind, "gap")
+        try outbox.validate(maxBytes: limit)
+    }
+
+    func testUnstagedDirectBoundaryRetiresItsFrameIntoPendingSourceLoss() throws {
+        var outbox = try SurfAceAnnotationOutbox(clientId: "client-1", sourceEpoch: sourceEpoch)
+        let first = try outbox.beginFrame(
+            surfaceId: surfaceId, paneId: 1, contextKey: "content-1", contentId: "content-1",
+            url: nil, scrollOffset: .init(x: 0, y: 0),
+            viewport: .init(width: 1, height: 1, scale: 1), openedAt: 1, image: "aW1hZ2U="
+        )
+        outbox.setFrameCommitRequested(surfaceId: surfaceId, paneId: 1, requested: true)
+        XCTAssertTrue(try outbox.abandonUnstagedDirectFrame(
+            surfaceId: surfaceId, paneId: 1, frameId: first.frameId))
+        XCTAssertNil(outbox.openFrame(surfaceId: surfaceId, paneId: 1))
+        XCTAssertNotNil(outbox.surfaces[surfaceId]?.trailingGap)
+        XCTAssertEqual(outbox.surfaces[surfaceId]?.unhealthy?.code,
+                       "annotation_direct_stage_unavailable")
+        let second = try outbox.beginFrame(
+            surfaceId: surfaceId, paneId: 1, contextKey: "content-1", contentId: "content-1",
+            url: nil, scrollOffset: .init(x: 0, y: 0),
+            viewport: .init(width: 1, height: 1, scale: 1), openedAt: 2, image: "aW1hZ2U="
+        )
+        XCTAssertNotEqual(second.frameId, first.frameId)
+        XCTAssertFalse(try outbox.abandonUnstagedDirectFrame(
+            surfaceId: surfaceId, paneId: 1, frameId: first.frameId))
+    }
+
     func testDefiniteRejectionReplacesSameSequenceAndEventId() throws {
         var outbox = try SurfAceAnnotationOutbox(clientId: "client-1", sourceEpoch: sourceEpoch)
         _ = try outbox.append(surfaceId: surfaceId, record: record())

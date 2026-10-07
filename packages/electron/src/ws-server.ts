@@ -272,11 +272,11 @@ export class SurfaceWsServer {
   private providerWindowLabelQueue: Promise<void> = Promise.resolve();
   private ignoreInitialSurfaceEvents = true;
   private persistenceOutcomeUnknown: PersistentStateOutcomeUnknownError | null = null;
-  private annotationCompletionManaged = false;
+  private annotationCompletionManaged: ((surfaceId: string, paneId: number) => boolean) | null = null;
   private readonly annotationCompletionTasks = new Map<string, Promise<boolean>>();
 
-  setAnnotationCompletionManaged(): void {
-    this.annotationCompletionManaged = true;
+  setAnnotationCompletionManaged(shouldManage: (surfaceId: string, paneId: number) => boolean = () => true): void {
+    this.annotationCompletionManaged = shouldManage;
   }
 
   constructor(options: SurfaceWsServerOptions) {
@@ -898,7 +898,7 @@ export class SurfaceWsServer {
       case "lockless-authority-changed":
         return;
       case "annotation-committed":
-        if (!this.annotationCompletionManaged) {
+        if (!this.annotationCompletionManaged?.(event.surfaceId, event.paneId)) {
           await this.completeDirectAnnotation(event.surfaceId, event.paneId);
         }
         return;
@@ -1875,9 +1875,8 @@ export class SurfaceWsServer {
             "controller_admission",
           );
         }
-        admission = await this.core.transactionAsync(async () =>
-          await this.core.locklessAuthority.transactionPersisted(
-            () => {
+        admission = await this.core.locklessAuthority.transactionAsync(async () =>
+          await this.core.transactionAsync(async () => {
               const admitted = this.core.locklessAuthority.admit(
                 request.payload,
                 connectionToken,
@@ -1912,10 +1911,9 @@ export class SurfaceWsServer {
                   admissionAttempt.attemptSequence,
                 );
               }
+              await this.persistLocklessState();
               return admitted;
-            },
-            this.persistLocklessState,
-          ),
+            }),
         );
       } catch (error) {
         if (admissionAttempt) {
@@ -3404,12 +3402,12 @@ export class SurfaceWsServer {
     await previous.catch(() => undefined);
     try {
       const transact = () =>
-        this.core.transaction(() =>
-          this.core.locklessAuthority.transaction(operation),
+        this.core.locklessAuthority.transactionAsync(() =>
+          this.core.transactionAsync(async () => operation()),
         );
       return surfaceId
         ? await this.runSurfaceMutation(surfaceId, transact)
-        : transact();
+        : await transact();
     } finally {
       releaseQueue();
       if (this.lifecycleMutationQueue === queued) {
@@ -3430,8 +3428,8 @@ export class SurfaceWsServer {
     await previous.catch(() => undefined);
     try {
       return await this.runSurfaceMutation(surfaceId, () =>
-        this.core.transactionAsync(() =>
-          this.core.locklessAuthority.transactionAsync(operation),
+        this.core.locklessAuthority.transactionAsync(() =>
+          this.core.transactionAsync(operation),
         ),
       );
     } finally {
@@ -5484,8 +5482,8 @@ export class SurfaceWsServer {
     const snapshot = this.tryCaptureSnapshot(surfaceId, paneId);
     if (!snapshot?.contentId) return false;
     const scopeId = locklessPaneScopeId(surfaceId, paneId);
-    const record = await this.core.transactionAsync(() =>
-      this.core.locklessAuthority.transactionAsync(async () => {
+    const record = await this.core.locklessAuthority.transactionAsync(() =>
+      this.core.transactionAsync(async () => {
         if (!this.core.hasPendingAnnotationCommit(surfaceId, paneId)) return null;
         const finalized = this.core.locklessAuthority.finalizeLiveFrame(
           scopeId,

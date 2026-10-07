@@ -56,6 +56,20 @@ export class AnnotationSourceCoordinator {
         }
       }
       await this.core.transactionAsync(async () => {
+        const pane = this.core.getRendererWindowState(surfaceId).panes.find((item) => item.paneId === paneId);
+        const existing = this.core.annotationPublisher?.openFrameFor(surfaceId, paneId);
+        if (!pane?.annotationBorderVisible && existing && !existing.commitRequested &&
+            ((existing.sourceStrokeCount ?? existing.strokes.length) === 0 ||
+             existing.contentId !== pane?.content.contentId)) {
+          // An at-open capture can persist before its first stroke, then be
+          // interrupted by exit or crash. A later session needs a fresh image.
+          // If older strokes exist on different content, account for their loss
+          // before letting the new session create its own frame.
+          this.core.annotationPublisher!.closeFrame(surfaceId, paneId);
+          if ((existing.sourceStrokeCount ?? existing.strokes.length) > 0) {
+            this.core.annotationPublisher!.lose(surfaceId, "annotation_orphaned_frame_context_changed");
+          }
+        }
         this.core.setAnnotating(surfaceId, paneId, true);
         this.core.annotationPublisher?.requestFrameCommit(surfaceId, paneId, false);
         await this.persist();

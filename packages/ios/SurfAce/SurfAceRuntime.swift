@@ -4746,7 +4746,25 @@ final class SurfAceRuntime {
             }
         } catch {
             surfAceServerRuntimeLog("event=annotation_direct_flush_stage_failed \(surfAceDiagnosticFields([("error", String(describing: error))]))")
+            if let outboxError = error as? SurfAceAnnotationOutboxError,
+               case .invalidLimit = outboxError {
+                await abandonUnstagedAnnotationFrame(surfaceId: surfaceId, paneId: paneId,
+                                                      frameId: frame.frameId)
+            }
             return nil
+        }
+    }
+
+    private func abandonUnstagedAnnotationFrame(surfaceId: String, paneId: Int,
+                                                 frameId: String) async {
+        guard let adapter = locklessAdapter else { return }
+        do {
+            _ = try await adapter.transactAnnotationPublisher(surfaceId: surfaceId) { outbox in
+                try outbox.abandonUnstagedDirectFrame(surfaceId: surfaceId, paneId: paneId,
+                                                     frameId: frameId)
+            }
+        } catch {
+            surfAceServerRuntimeLog("event=annotation_unstaged_frame_abandon_failed \(surfAceDiagnosticFields([("error", String(describing: error))]))")
         }
     }
 
@@ -4834,6 +4852,11 @@ final class SurfAceRuntime {
             return staged
         } catch {
             surfAceServerRuntimeLog("event=annotation_direct_commit_stage_failed \(surfAceDiagnosticFields([("error", String(describing: error))]))")
+            if let outboxError = error as? SurfAceAnnotationOutboxError,
+               case .invalidLimit = outboxError {
+                await abandonUnstagedAnnotationFrame(surfaceId: surfaceId, paneId: paneId,
+                                                      frameId: frame.frameId)
+            }
             return nil
         }
     }

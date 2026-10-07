@@ -1648,9 +1648,11 @@ function installIpc(): void {
       const content = pane.content.content;
       const url = content && typeof content === "object" && "url" in content &&
         typeof content.url === "string" ? content.url : undefined;
-      await core.transactionAsync(async () => {
+      const opened = await core.transactionAsync(async () => {
+        const currentPane = core.getRendererWindowState(surfaceId).panes.find((item) => item.paneId === paneId);
+        if (!currentPane?.annotationBorderVisible || currentPane.content.contentId !== contentId) return false;
         const outbox = core.annotationPublisher!;
-        if (outbox.openFrameFor(surfaceId, Number(paneId))) return;
+        if (outbox.openFrameFor(surfaceId, Number(paneId))) return false;
         const previous = outbox.snapshot();
         try {
           outbox.openFrame(surfaceId, Number(paneId), {
@@ -1661,12 +1663,13 @@ function installIpc(): void {
               height: Math.max(1, Math.floor(bounds.height)), scale: 1 },
           });
           await persistState();
+          return true;
         } catch (error) {
           outbox.restore(previous);
           throw error;
         }
       });
-      return Boolean(image);
+      return opened && Boolean(image);
     } catch (error) {
       clientWarn("annotation_at_open_capture_failed", {
         surface_id: surfaceId, pane_id: paneId, ...errorDiagnosticFields(error),
@@ -1953,7 +1956,8 @@ async function boot(): Promise<void> {
     (error) => clientWarn("annotation_source_flush_failed", errorDiagnosticFields(error)),
     (surfaceId, paneId) => server!.completeDirectAnnotation(surfaceId, paneId),
   );
-  server.setAnnotationCompletionManaged();
+  server.setAnnotationCompletionManaged((surfaceId, paneId) =>
+    core.annotationPublisher?.openFrameFor(surfaceId, paneId)?.commitRequested === true);
   void annotationSourceCoordinator.resumePending().catch((error) =>
     clientWarn("annotation_source_recovery_failed", errorDiagnosticFields(error)));
 

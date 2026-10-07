@@ -9,6 +9,141 @@ const clientId = "c".repeat(64);
 const viewport = { width: 640, height: 480, scale: 1 };
 const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL/nwAAAABJRU5ErkJggg==";
 
+test("Done still completes the direct frame when registry publishing is not configured", { timeout: 5_000 }, async () => {
+  const core = new SurfaceCore();
+  const surface = core.ensurePrimarySurface("Surf Ace", viewport);
+  core.admitSurfaceToLockless(surface.surfaceId);
+  const paneId = core.activePaneIds(surface.surfaceId)[0]!;
+  core.locklessContentPush(surface.surfaceId, {
+    content: { markdown: "direct-only" }, contentId: "direct-only",
+    contentType: "markdown", friendlyChatName: "Direct", paneId,
+  }, "Direct");
+  let completed = (): void => {};
+  const completion = new Promise<void>((resolve) => { completed = resolve; });
+  let awaitingCompletion = false;
+  const persist = async () => {
+    if (awaitingCompletion && !core.hasPendingAnnotationCommit(surface.surfaceId, paneId)) completed();
+  };
+  const server = new SurfaceWsServer({
+    bindAddress: "127.0.0.1", capturePaneImage: async () => png,
+    compositorSocketPath: null, core, endpointName: "Surf Ace", hostName: "localhost",
+    persistLocklessState: persist, port: 0, viewport: () => viewport,
+  });
+  server.setAnnotationCompletionManaged((surfaceId, id) =>
+    core.annotationPublisher?.openFrameFor(surfaceId, id)?.commitRequested === true);
+  const source = new AnnotationSourceCoordinator(core, persist, () => {}, (error) => { throw error; },
+    (surfaceId, id) => server.completeDirectAnnotation(surfaceId, id));
+  assert.equal(core.annotationPublisher, null);
+  await source.setAnnotating(surface.surfaceId, paneId, true);
+  core.addStroke(surface.surfaceId, paneId, {
+    strokeId: "direct-stroke" as never, tool: "mouse",
+    points: [{ x: 1, y: 2, timestamp: 1 }],
+  });
+  awaitingCompletion = true;
+  await source.setAnnotating(surface.surfaceId, paneId, false);
+  await completion;
+  assert.equal(core.hasPendingAnnotationCommit(surface.surfaceId, paneId), false);
+  source.stop();
+});
+
+test("new annotation entry discards an orphaned at-open capture before a new context", async () => {
+  const core = new SurfaceCore({ annotationClientId: clientId });
+  const surface = core.ensurePrimarySurface("Surf Ace", viewport);
+  core.admitSurfaceToLockless(surface.surfaceId);
+  const paneId = core.activePaneIds(surface.surfaceId)[0]!;
+  core.locklessContentPush(surface.surfaceId, {
+    content: { markdown: "old" }, contentId: "old-content",
+    contentType: "markdown", friendlyChatName: "Old", paneId,
+  }, "Old");
+  const outbox = core.annotationPublisher!;
+  const orphan = outbox.openFrame(surface.surfaceId, paneId, {
+    contentId: "old-content", contextKey: "old-content", image: png,
+    openedAt: 1, scrollOffset: { x: 0, y: 0 }, viewport,
+  });
+  outbox.recordStroke(surface.surfaceId, paneId, {
+    strokeId: "old-stroke" as never, tool: "mouse", points: [{ x: 1, y: 2, timestamp: 2 }],
+  });
+  core.locklessContentPush(surface.surfaceId, {
+    content: { markdown: "new" }, contentId: "new-content",
+    contentType: "markdown", friendlyChatName: "New", paneId,
+  }, "New");
+  let durable = core.getPersistentState();
+  const source = new AnnotationSourceCoordinator(core, async () => {
+    durable = core.getPersistentState();
+  }, () => {}, (error) => { throw error; });
+  await source.setAnnotating(surface.surfaceId, paneId, true);
+  assert.equal(outbox.openFrameFor(surface.surfaceId, paneId), null);
+  assert.equal(JSON.parse(outbox.head(surface.surfaceId)!.canonical).reason, "source_retention_overflow");
+  const fresh = outbox.openFrame(surface.surfaceId, paneId, {
+    contentId: "new-content", contextKey: "new-content", image: png,
+    openedAt: 3, scrollOffset: { x: 0, y: 0 }, viewport,
+  });
+  assert.notEqual(fresh.frameId, orphan.frameId);
+  assert.equal(durable.annotationPublisher?.surfaces[surface.surfaceId]?.openFrames?.[String(paneId)] ?? null, null);
+  source.stop();
+});
+
+test("same-context reentry during final flush keeps one frame and defeats stale completion", { timeout: 5_000 }, async () => {
+  const core = new SurfaceCore({ annotationClientId: clientId });
+  const surface = core.ensurePrimarySurface("Surf Ace", viewport);
+  core.admitSurfaceToLockless(surface.surfaceId);
+  const paneId = core.activePaneIds(surface.surfaceId)[0]!;
+  core.locklessContentPush(surface.surfaceId, {
+    content: { markdown: "same context" }, contentId: "same-content",
+    contentType: "markdown", friendlyChatName: "Same", paneId,
+  }, "Same");
+  let reachedFlush = (): void => {};
+  const flushing = new Promise<void>((resolve) => { reachedFlush = resolve; });
+  let releaseFlush = (): void => {};
+  const released = new Promise<void>((resolve) => { releaseFlush = resolve; });
+  let holdFlush = true;
+  let directCommits = 0;
+  const source = new AnnotationSourceCoordinator(core, async () => {
+    if (holdFlush && core.annotationPublisher!.snapshot().surfaces[surface.surfaceId]?.fifo.some(
+      (entry) => JSON.parse(entry.canonical).kind === "live_delta")) {
+      holdFlush = false;
+      reachedFlush();
+      await released;
+    }
+  }, () => {}, (error) => { throw error; }, async () => {
+    directCommits += 1;
+    core.markDrawingFlushSent(surface.surfaceId, paneId);
+    core.markAnnotationCommittedSent(surface.surfaceId, paneId);
+    return true;
+  });
+  await source.setAnnotating(surface.surfaceId, paneId, true);
+  const opened = core.annotationPublisher!.openFrame(surface.surfaceId, paneId, {
+    contentId: "same-content", contextKey: "same-content", image: png,
+    openedAt: 100, scrollOffset: { x: 0, y: 0 }, viewport,
+  });
+  core.addStroke(surface.surfaceId, paneId, {
+    strokeId: "first" as never, tool: "mouse", points: [{ x: 1, y: 2, timestamp: 110 }],
+  });
+  const staleDone = source.setAnnotating(surface.surfaceId, paneId, false);
+  await flushing;
+  const reentry = source.setAnnotating(surface.surfaceId, paneId, true);
+  releaseFlush();
+  await Promise.all([staleDone, reentry]);
+  assert.equal(directCommits, 0);
+  assert.equal(core.annotationPublisher!.openFrameFor(surface.surfaceId, paneId)?.frameId, opened.frameId);
+  core.addStroke(surface.surfaceId, paneId, {
+    strokeId: "second" as never, tool: "mouse", points: [{ x: 3, y: 4, timestamp: 120 }],
+  });
+  await source.resumePending();
+  assert.equal(directCommits, 0, "stale recovery must not close reentered strokes");
+  assert.equal(core.annotationPublisher!.openFrameFor(surface.surfaceId, paneId)?.frameId, opened.frameId);
+  await source.setAnnotating(surface.surfaceId, paneId, false);
+  const commits = core.annotationPublisher!.snapshot().surfaces[surface.surfaceId]!.fifo
+    .map((entry) => JSON.parse(entry.canonical))
+    .filter((record) => record.kind === "frame_commit");
+  assert.equal(directCommits, 1);
+  assert.equal(commits.length, 1);
+  assert.equal(commits[0].frameId, opened.frameId);
+  assert.deepEqual(commits[0].payload.frame.strokes.map((stroke: { strokeId: string }) => stroke.strokeId),
+    ["first", "second"]);
+  source.stop();
+});
+
 test("gated source flush precedes a self-contained at-open frame commit", async () => {
   const core = new SurfaceCore({ annotationClientId: clientId });
   const surface = core.ensurePrimarySurface("Surf Ace", viewport);

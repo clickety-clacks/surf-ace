@@ -290,6 +290,20 @@ struct SurfAceAnnotationOutbox: Codable, Equatable, Sendable {
         surfaces[surfaceId]?.openFrames?.removeValue(forKey: String(paneId))
     }
 
+    /// A direct event must still be sent when its durable publisher stage is
+    /// full. Retire that source frame first so a later annotation cannot join
+    /// strokes that direct clients may already have seen committed.
+    mutating func abandonUnstagedDirectFrame(surfaceId: String, paneId: Int,
+                                             frameId: String) throws -> Bool {
+        guard openFrame(surfaceId: surfaceId, paneId: paneId)?.frameId == frameId else {
+            return false
+        }
+        closeFrame(surfaceId: surfaceId, paneId: paneId)
+        try lose(surfaceId: surfaceId, code: "annotation_direct_stage_unavailable")
+        try markUnhealthy(surfaceId: surfaceId, code: "annotation_direct_stage_unavailable")
+        return true
+    }
+
     mutating func setFrameCommitRequested(surfaceId: String, paneId: Int, requested: Bool) {
         guard surfaces[surfaceId]?.openFrames?[String(paneId)]?.directCommitDelivered != true else {
             return
@@ -496,11 +510,19 @@ struct SurfAceAnnotationOutbox: Codable, Equatable, Sendable {
 
     private func fits(surfaceId: String, maxBytes: Int, maxRecords: Int) throws -> Bool {
         guard let surface = surfaces[surfaceId], surface.fifo.count <= maxRecords else { return false }
-        let occupiedGapSlots = (surface.trailingGap != nil ? 1 : 0)
-            + (surface.fifo.contains { $0.kind == "gap" } ? 1 : 0)
+        let gapEntries = surface.fifo.filter { $0.kind == "gap" }
+        let occupiedGapSlots = (surface.trailingGap != nil ? 1 : 0) + gapEntries.count
         let reservedGapSlots = max(0, 2 - occupiedGapSlots)
+        let encoder = JSONEncoder()
+        var occupiedGapShortfall = 0
+        if let trailingGap = surface.trailingGap {
+            occupiedGapShortfall += max(0, Self.gapSlotBytes - (try encoder.encode(trailingGap)).count)
+        }
+        for entry in gapEntries {
+            occupiedGapShortfall += max(0, Self.gapSlotBytes - (try encoder.encode(entry)).count)
+        }
         return try partitionBytes(surfaceId: surfaceId)
-            + Int64(reservedGapSlots * Self.gapSlotBytes) <= maxBytes
+            + Int64(reservedGapSlots * Self.gapSlotBytes + occupiedGapShortfall) <= maxBytes
     }
 
     /// Match the registry's RFC 8785 serializer, including ECMAScript numbers and UTF-16 key order.
