@@ -15,6 +15,12 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         var assignsPaneLabels = false
         var registeredSurfaces: [SurfAceRegistrationSurface] = []
         var nextPaneLabel: Int64 = 700
+        var registryIdentity = SurfAceRegistryIdentity(allocatorId: "alloc_fixture", fleetId: "fixture-fleet")
+        var identityReads = 0
+        func readRegistryIdentity() async throws -> SurfAceRegistryIdentity {
+            identityReads += 1
+            return registryIdentity
+        }
         func register(clientId: String, surfaces: [SurfAceRegistrationSurface]) async throws -> [SurfAceRegistrationAssignment] {
             clients.append(clientId)
             registeredSurfaces = surfaces
@@ -346,7 +352,7 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
             discover: { XCTFail("a successful configured numeric controller must not discover another controller"); return [] },
             makeTransport: { url in attempted.append(url); return transport },
             snapshot: { [.init(surfaceId: "sf_one", panes: [])] },
-            apply: { _, _ in }
+            apply: { _, _ in }, verifyRegistry: { _, _ in }
         )
 
         try await registration.synchronize()
@@ -375,7 +381,8 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
                 return url == configured ? primary : fallback
             },
             snapshot: { [.init(surfaceId: "sf_one", panes: [])] },
-            apply: { assignments, _ in applied.append(assignments[0].windowLabel) }
+            apply: { assignments, _ in applied.append(assignments[0].windowLabel) },
+            verifyRegistry: { _, _ in }
         )
 
         try await registration.synchronize()
@@ -399,7 +406,8 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         let registration = SurfAceCentralRegistration(clientId: "test", configured: configured,
             discover: { XCTFail("configured success must not discover"); return [] },
             makeTransport: { url in attempted.append(url); return transport },
-            snapshot: { [.init(surfaceId: "sf_one", panes: [])] }, apply: { _, _ in })
+            snapshot: { [.init(surfaceId: "sf_one", panes: [])] }, apply: { _, _ in },
+            verifyRegistry: { _, _ in })
 
         try await registration.synchronize()
         XCTAssertEqual(attempted, [configured])
@@ -418,7 +426,7 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
             apply: { _, _ in
                 XCTAssertNotEqual(statuses.last, .connected)
                 persisted = true
-            }, onStatusChange: { state in
+            }, verifyRegistry: { _, _ in }, onStatusChange: { state in
                 if state == .connected { XCTAssertTrue(persisted) }
                 statuses.append(state)
             })
@@ -450,7 +458,7 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
                 apply: { _, _ in
                     if stopDuringApply { registration.stop() }
                     else { throw SurfAceRegistrationError.topologyChanged }
-                }, onStatusChange: { statuses.append($0) })
+                }, verifyRegistry: { _, _ in }, onStatusChange: { statuses.append($0) })
             do { try await registration.synchronize(); XCTFail("uncommitted registration succeeded") } catch { }
             XCTAssertFalse(statuses.contains(.connected))
             XCTAssertEqual(registration.status, .disconnected)
@@ -467,6 +475,7 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         let registration = SurfAceCentralRegistration(clientId: "test", configured: configured,
             discover: { [discovered] }, makeTransport: { $0 == configured ? primary : fallback },
             snapshot: { [.init(surfaceId: "sf_one", panes: [])] }, apply: { _, _ in },
+            verifyRegistry: { _, _ in },
             onStatusChange: { statuses.append($0) })
         try await registration.synchronize()
         XCTAssertEqual(registration.status, .connected)
@@ -485,7 +494,7 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
             snapshot: {
                 registration.stop()
                 return [.init(surfaceId: "sf_one", panes: [])]
-            }, apply: { _, _ in XCTFail("apply after stop") },
+            }, apply: { _, _ in XCTFail("apply after stop") }, verifyRegistry: { _, _ in },
             onStatusChange: { statuses.append($0) })
         do { try await registration.synchronize(); XCTFail("stopped snapshot succeeded") } catch { }
         XCTAssertEqual(statuses, [.connecting, .disconnected])
@@ -495,7 +504,7 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         var statuses: [SurfAceCentralRegistrationStatus] = []
         let registration = SurfAceCentralRegistration(clientId: "test", configured: nil,
             discover: { XCTFail("empty surface discovery"); return [] },
-            snapshot: { [] }, apply: { _, _ in XCTFail("empty registration") },
+            snapshot: { [] }, apply: { _, _ in XCTFail("empty registration") }, verifyRegistry: { _, _ in },
             onStatusChange: { statuses.append($0) })
         try await registration.synchronize()
         XCTAssertEqual(registration.status, .disconnected)
@@ -516,7 +525,8 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         let registration = SurfAceCentralRegistration(clientId: String(repeating: "a", count: 64), configured: configured,
             discover: { discoveries += 1; return [discovered] },
             makeTransport: { url in attempts.append(url); return url == configured ? primary : fallback },
-            snapshot: { surfaces }, apply: { assignments, _ in applied.append(assignments[0].windowLabel) })
+            snapshot: { surfaces }, apply: { assignments, _ in applied.append(assignments[0].windowLabel) },
+            verifyRegistry: { _, _ in })
         try await registration.synchronize()
         XCTAssertEqual(attempts, [configured, discovered])
         XCTAssertEqual(discoveries, 1)
@@ -552,7 +562,7 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
             discover: { [endpoint] },
             makeTransport: { _ in transport },
             snapshot: { surfaces },
-            apply: { _, _ in },
+            apply: { _, _ in }, verifyRegistry: { _, _ in },
             onError: { logErrors.append(($0 as? LocalizedError)?.errorDescription ?? $0.localizedDescription) },
             onConnectionError: { visibleErrors.append($0) }
         )
@@ -590,7 +600,7 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
                 makeTransport: { url in attempts.append(url); return url == hostname ? host : address },
                 transportFallbacks: { _ in [numeric] },
                 snapshot: { [.init(surfaceId: "sf_one", panes: [.init(paneId: "1", paneLineageId: "lineage_one", paneLabel: 1)])] },
-                apply: { _, _ in applied = true })
+                apply: { _, _ in applied = true }, verifyRegistry: { _, _ in })
             try await registration.synchronize()
             XCTAssertEqual(attempts, [numeric, hostname])
             XCTAssertTrue(applied)
@@ -619,7 +629,7 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
                 XCTAssertEqual(expected, surfaces)
                 let panes = try XCTUnwrap(assignments.first?.panes)
                 recovered = Dictionary(uniqueKeysWithValues: panes.map { ($0.paneLineageId, $0.paneLabel) })
-            }
+            }, verifyRegistry: { _, _ in }
         )
         try await registration.synchronize()
 
@@ -702,6 +712,78 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         let restored = try SurfAceLocklessTransactionCoordinator(store: store)
         let afterRestart = await restored.snapshot()
         XCTAssertEqual(afterRestart, durable)
+    }
+
+    func testLegacyBindingRejectsForeignBeforeRegistrationAndPersistsForRestart() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("registry-binding-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = SurfAceLocklessGenerationStore(stateURL: root.appendingPathComponent("state.json"))
+        var state = try SurfAceLocklessAuthorityState.empty()
+        let id = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
+            state: &state, expectedSurfaceSetRevision: 0
+        ).surface.surfaceId
+        try SurfAceLocklessTopologyOperations.applyWindowLabels(state: &state, assignments: [(id, "z")])
+        state.liveSurfaces[id]?.panes["1"]?.paneLabel = 700
+        try store.save(state)
+        let adapter = try SurfAceLocklessRuntimeAdapter(store: store)
+        let clientId = "legacy-client"
+        let home = SurfAceRegistryIdentity(allocatorId: "alloc_home", fleetId: "fleet-home")
+        let foreign = SurfAceRegistryIdentity(allocatorId: "alloc_foreign", fleetId: "fleet-foreign")
+        let provisioning = SurfAceProvisionedRegistryBinding(
+            binding: .init(allocatorId: home.allocatorId, clientId: clientId, fleetId: home.fleetId),
+            confirmedClaims: SurfAceProvisionedRegistryBinding.confirmedClaims(state)
+        )
+        let surfaces = SurfAceRegistrationSurface.snapshot(state)
+        do {
+            try await adapter.bindRegistryIdentity(foreign, clientId: clientId,
+                expectedSurfaces: surfaces, provisioned: nil)
+            XCTFail("legacy state accepted discovery without provisioning")
+        } catch { }
+        let pending = await adapter.snapshot()
+        XCTAssertNil(pending.registryBinding)
+        do {
+            try await adapter.bindRegistryIdentity(foreign, clientId: clientId,
+                expectedSurfaces: surfaces, provisioned: provisioning)
+            XCTFail("legacy state accepted foreign fleet")
+        } catch { }
+        try await adapter.bindRegistryIdentity(home, clientId: clientId,
+            expectedSurfaces: surfaces, provisioned: provisioning)
+        XCTAssertEqual(try XCTUnwrap(store.load()).registryBinding, provisioning.binding)
+        let restored = try SurfAceLocklessRuntimeAdapter(store: store)
+        do {
+            try await restored.bindRegistryIdentity(foreign, clientId: clientId,
+                expectedSurfaces: surfaces, provisioned: nil)
+            XCTFail("restart forgot registry binding")
+        } catch { }
+        let afterRestart = await restored.snapshot()
+        XCTAssertEqual(afterRestart.liveSurfaces[id]?.panes["1"]?.paneLabel, 700)
+    }
+
+    func testTwoRegistryRouteChecksIdentityBeforeRegistration() async throws {
+        let foreignURL = URL(string: "ws://127.0.0.1:24001/ws")!
+        let homeURL = URL(string: "ws://127.0.0.1:24002/ws")!
+        let foreign = Transport()
+        foreign.registryIdentity = .init(allocatorId: "alloc_foreign", fleetId: "fleet-foreign")
+        let home = Transport()
+        home.registryIdentity = .init(allocatorId: "alloc_home", fleetId: "fleet-home")
+        let expected = home.registryIdentity
+        let registration = SurfAceCentralRegistration(
+            clientId: "stable-client", configured: foreignURL,
+            discover: { [homeURL] },
+            makeTransport: { $0 == foreignURL ? foreign : home },
+            snapshot: { [.init(surfaceId: "sf_one", panes: [])] },
+            apply: { _, _ in },
+            verifyRegistry: { identity, _ in
+                guard identity == expected else { throw SurfAceRegistrationError.foreignRegistryIdentity }
+            }
+        )
+        try await registration.synchronize()
+        XCTAssertEqual(foreign.identityReads, 1)
+        XCTAssertTrue(foreign.clients.isEmpty)
+        XCTAssertEqual(home.clients, ["stable-client"])
+        XCTAssertEqual(registration.status, .connected)
+        registration.stop()
     }
 
     func testProductionAllocatorAssignsDistinctLabelsAndRetainsIdentityOnReconnect() async throws {

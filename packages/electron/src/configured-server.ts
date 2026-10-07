@@ -1,5 +1,6 @@
 import { createHash, createPublicKey } from "node:crypto";
 import { PublicControllerWireClient } from "../../controller/src/wire.js";
+import { matchesProvisionedClaims, type ProvisionedRegistryBinding } from "./registry-binding.js";
 import type { SurfaceCore } from "./surface-core.js";
 
 export function registrationClientId(publicKeyPem: string): string {
@@ -21,6 +22,7 @@ export class ConfiguredServerRegistration {
     private readonly persist: () => Promise<void>,
     private readonly onError: (error: unknown) => void = () => undefined,
     requestTimeoutMs = 10_000,
+    private readonly provisionedBinding: ProvisionedRegistryBinding | null = null,
   ) {
     const url = new URL(address);
     if (url.protocol !== "ws:" && url.protocol !== "wss:") throw new Error("server address must use ws or wss");
@@ -33,6 +35,7 @@ export class ConfiguredServerRegistration {
 
   async claimPaneLabel(surfaceId: string, paneId: number, paneLineageId: string): Promise<number> {
     if (this.stopped || !this.wire.isOpen()) throw new Error("allocator_unavailable");
+    await this.confirmRegistryIdentity();
     const response = await this.wire.request("pane.claim", {
       clientId: this.clientId, surfaceId, paneId: String(paneId), paneLineageId,
     });
@@ -46,6 +49,7 @@ export class ConfiguredServerRegistration {
     const run = this.pending.then(async () => {
       if (this.stopped) return;
       await this.wire.connect();
+      await this.confirmRegistryIdentity();
       for (const surface of this.core.listSurfaces()) this.core.admitSurfaceToLockless(surface.surfaceId);
       const response = await this.wire.request("client.register", {
         clientId: this.clientId,
@@ -79,6 +83,32 @@ export class ConfiguredServerRegistration {
     });
     this.pending = run.catch(() => undefined);
     return run;
+  }
+
+  private async confirmRegistryIdentity(): Promise<void> {
+    const identity = await this.wire.readRegistryIdentity();
+    let binding = this.core.registryBinding();
+    if (binding) {
+      if (binding.clientId !== this.clientId || binding.allocatorId !== identity.allocatorId ||
+          binding.fleetId !== identity.fleetId) throw new Error("foreign_registry_identity");
+      return;
+    }
+    const claims = this.core.confirmedRegistryClaims();
+    if (claims.length > 0) {
+      if (!this.provisionedBinding || !matchesProvisionedClaims(this.provisionedBinding, this.clientId, claims)) {
+        throw new Error("legacy_registry_binding_pending");
+      }
+      binding = this.provisionedBinding.binding;
+      if (binding.allocatorId !== identity.allocatorId || binding.fleetId !== identity.fleetId) {
+        throw new Error("foreign_registry_identity");
+      }
+    } else {
+      binding = { ...identity, clientId: this.clientId };
+    }
+    await this.core.transactionAsync(async () => {
+      this.core.bindRegistryIdentity(binding);
+      await this.persist();
+    });
   }
 
   start(): void {

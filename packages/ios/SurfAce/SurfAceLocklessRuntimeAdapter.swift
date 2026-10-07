@@ -374,6 +374,49 @@ actor SurfAceLocklessRuntimeAdapter {
         }
     }
 
+    func bindRegistryIdentity(
+        _ identity: SurfAceRegistryIdentity,
+        clientId: String,
+        expectedSurfaces: [SurfAceRegistrationSurface],
+        provisioned: SurfAceProvisionedRegistryBinding?
+    ) async throws {
+        guard identity.isValid else { throw SurfAceRegistrationError.registryIdentityMissing }
+        let current = await coordinator.snapshot()
+        guard SurfAceRegistrationSurface.snapshot(current) == expectedSurfaces else {
+            throw SurfAceRegistrationError.topologyChanged
+        }
+        if let binding = current.registryBinding {
+            guard binding.matches(identity, clientId: clientId) else {
+                throw SurfAceRegistrationError.foreignRegistryIdentity
+            }
+            return
+        }
+        let claims = SurfAceProvisionedRegistryBinding.confirmedClaims(current)
+        let binding: SurfAceRegistryBinding
+        if claims.isEmpty {
+            binding = SurfAceRegistryBinding(
+                allocatorId: identity.allocatorId, clientId: clientId, fleetId: identity.fleetId
+            )
+        } else {
+            guard let provisioned, provisioned.binding.clientId == clientId,
+                  provisioned.confirmedClaims == claims else {
+                throw SurfAceRegistrationError.legacyRegistryBindingPending
+            }
+            guard provisioned.binding.matches(identity, clientId: clientId) else {
+                throw SurfAceRegistrationError.foreignRegistryIdentity
+            }
+            binding = provisioned.binding
+        }
+        _ = try await coordinator.transact(trigger: "registry_identity_binding") { state in
+            guard SurfAceRegistrationSurface.snapshot(state) == expectedSurfaces,
+                  state.registryBinding == nil else {
+                throw SurfAceRegistrationError.topologyChanged
+            }
+            state.registryBinding = binding
+            return state
+        }
+    }
+
     func applyRegistrationLabels(
         _ assignments: [SurfAceRegistrationAssignment],
         expectedSurfaces: [SurfAceRegistrationSurface]

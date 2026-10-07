@@ -387,6 +387,7 @@ struct SurfAceLocklessAuthorityState: Codable, Equatable, Sendable {
     var liveSurfaces: [String: SurfAceLocklessSurfaceMaterial]
     var pendingControllerRetentionReclamations: [SurfAceLocklessControllerRetentionReclamation]?
     var pendingTombstoneReclamations: [SurfAceLocklessTombstoneReclamation]?
+    var registryBinding: SurfAceRegistryBinding?
     var sceneSurfaceIds: [String: String]
     var scopes: [String: SurfAceLocklessConsumableScope]
     var sequences: SurfAceLocklessClientSequences
@@ -406,6 +407,7 @@ struct SurfAceLocklessAuthorityState: Codable, Equatable, Sendable {
             liveSurfaces: [:],
             pendingControllerRetentionReclamations: [],
             pendingTombstoneReclamations: [],
+            registryBinding: nil,
             sceneSurfaceIds: [:],
             scopes: [:],
             sequences: SurfAceLocklessClientSequences(

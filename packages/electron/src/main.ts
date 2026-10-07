@@ -29,6 +29,7 @@ import {
   recordClientDiagnostic,
 } from "./client-flight-recorder.js";
 import { loadOrCreateIdentity } from "./identity.js";
+import { loadProvisionedRegistryBinding } from "./registry-binding.js";
 import {
   loadPersistentStateFile,
   PersistentStateOutcomeUnknownError,
@@ -1918,11 +1919,16 @@ async function boot(): Promise<void> {
   await acknowledgeCompositorMainAppBinding();
 
   const configuredAddress = process.env.SURF_ACE_SERVER?.trim();
+  const provisionedBinding = await loadProvisionedRegistryBinding(stateDir).catch((error) => {
+    clientWarn("registry_provisioning_invalid", errorDiagnosticFields(error));
+    return null;
+  });
   configuredRegistration = new ServerConnection({
     configuredAddress,
     clientId: registrationClientId(identity.publicKeyPem),
     core,
     persist: persistState,
+    provisionedBinding,
     onError: (error) => clientWarn("server_registration_failed", errorDiagnosticFields(error)),
   });
   configuredRegistration.start();

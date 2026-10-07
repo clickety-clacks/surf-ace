@@ -548,6 +548,18 @@ final class SurfAceRuntime {
                 })
                 try self.projectLocklessAuthorityState(state)
             },
+            verifyRegistry: { [weak self] registryIdentity, expected in
+                guard let self else { throw SurfAceRegistrationError.stopped }
+                let adapter = try self.ensureLocklessAdapter()
+                let directory = self.locklessStateURLOverride?.deletingLastPathComponent()
+                    ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+                        .appendingPathComponent("SurfAce", isDirectory: true)
+                let provisioned = try SurfAceProvisionedRegistryBinding.load(from: directory)
+                try await adapter.bindRegistryIdentity(
+                    registryIdentity, clientId: identity.clientId,
+                    expectedSurfaces: expected, provisioned: provisioned
+                )
+            },
             onError: { error in
                 let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
                 surfAceServerRuntimeLog(

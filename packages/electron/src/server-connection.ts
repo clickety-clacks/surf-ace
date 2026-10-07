@@ -4,6 +4,7 @@ import {
   type SurfAceDiscoveryService,
 } from "./surf-ace-discovery.js";
 import { ConfiguredServerRegistration } from "./configured-server.js";
+import type { ProvisionedRegistryBinding } from "./registry-binding.js";
 import type { SurfaceCore } from "./surface-core.js";
 
 type SelectedRegistration = {
@@ -52,6 +53,7 @@ export class ServerConnection {
     onError?: (error: unknown) => void;
     discovery?: SurfAceDiscoveryService;
     requestTimeoutMs?: number;
+    provisionedBinding?: ProvisionedRegistryBinding | null;
   }) {
     this.discovery = options.discovery ?? createBonjourSurfAceDiscoveryService({ timeoutMs: 1500 });
   }
@@ -96,6 +98,7 @@ export class ServerConnection {
           candidate = new ConfiguredServerRegistration(
             address, this.options.clientId, this.options.core, this.options.persist,
             this.options.onError, this.options.requestTimeoutMs ?? 2000,
+            this.options.provisionedBinding,
           );
           candidate.onClose(() => {
             if (this.selected?.registration === candidate) {
