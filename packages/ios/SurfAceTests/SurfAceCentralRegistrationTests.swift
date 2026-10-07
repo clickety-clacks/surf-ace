@@ -6,6 +6,35 @@ import XCTest
 
 @MainActor
 final class SurfAceCentralRegistrationTests: XCTestCase {
+    func testProvisionedClaimsIgnoreOrderButRejectMissingOrDuplicatedIdentity() {
+        let first = SurfAceRegistrationAssignment(surfaceId: "sf_first", windowLabel: "d", panes: [
+            .init(paneId: "1", paneLineageId: "pl_first", paneLabel: 703),
+            .init(paneId: "2", paneLineageId: "pl_second", paneLabel: 704)
+        ])
+        let second = SurfAceRegistrationAssignment(surfaceId: "sf_second", windowLabel: "e")
+        let reordered = SurfAceRegistrationAssignment(
+            surfaceId: first.surfaceId, windowLabel: first.windowLabel,
+            panes: Array(first.panes.reversed())
+        )
+        let matches = SurfAceProvisionedRegistryBinding.matchesConfirmedClaims
+        XCTAssertTrue(matches([first, second], [second, reordered]))
+        XCTAssertFalse(matches([first, second], [first]))
+        XCTAssertFalse(matches([first, second], [first, first]))
+        XCTAssertFalse(matches([first, first], [first, second]))
+        XCTAssertFalse(matches([first, second], [
+            .init(surfaceId: first.surfaceId, windowLabel: first.windowLabel,
+                  panes: [first.panes[0], first.panes[0]]), second
+        ]))
+        XCTAssertFalse(matches([
+            .init(surfaceId: first.surfaceId, windowLabel: first.windowLabel,
+                  panes: [first.panes[0], first.panes[0]]), second
+        ], [first, second]))
+        XCTAssertFalse(matches([first, second], [
+            .init(surfaceId: first.surfaceId, windowLabel: first.windowLabel,
+                  panes: [.init(paneId: "1", paneLineageId: "pl_foreign", paneLabel: 703), first.panes[1]]),
+            second
+        ]))
+    }
     func testXCTestHostIsolationFlag() {
         XCTAssertEqual(ProcessInfo.processInfo.environment["SURF_ACE_XCTEST_HOST_NO_AUTOSTART"], "1")
     }
