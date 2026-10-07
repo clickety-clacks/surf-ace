@@ -631,6 +631,67 @@ test("real PostgreSQL allocator authority", { timeout: 180_000 }, async (t) => {
       }
     });
 
+    await t.test("registration clears an authority fence after a second resolution read failure", { timeout: 30_000 }, async () => {
+      let cutBind = false;
+      let failResolutionRead = false;
+      server = await AllocatorServer.start(serverConfig(cluster), {
+        afterCommitBeforeWitness(operation) {
+          if (operation === "bind_authority" && !cutBind) {
+            cutBind = true;
+            failResolutionRead = true;
+            throw new Error("cut-after-bind-commit");
+          }
+        },
+      });
+      const custody = (server as unknown as { custody: PostgresCustodyAdapter<"writer"> }).custody;
+      const originalRead = custody.readAcceptedState;
+      custody.readAcceptedState = async () => {
+        if (failResolutionRead && custody.registrationReady) {
+          failResolutionRead = false;
+          throw new Error("cut-after-lease-validation");
+        }
+        return await originalRead.call(custody);
+      };
+      const wire = await WireClient.connect(server.address.url);
+      const clientId = createHash("sha256").update("authority-double-fault-client").digest("hex");
+      const surfaceId = "sf_authority-double-fault";
+      const registration = { clientId, surfaces: [{ surfaceId, panes: [] }] };
+      const originalWitnessId = cluster.config.witnessServerId;
+      try {
+        const before = await server.diagnostics();
+        assert.equal((await wire.request("client.register", registration)).ok, false);
+        assert.equal(cutBind, true);
+        assert.equal(failResolutionRead, false, "the second fault followed successful lease validation");
+        assert.equal(custody.registrationReady, true, "custody recovered but authority remains fenced");
+        const fenced = await server.diagnostics();
+        assert.equal(fenced.registrationReady, false);
+        assert.match(fenced.serveStatus, /^fail-closed:unknown-persistence:/);
+
+        cluster.config.witnessServerId = "divergent-witness";
+        assert.equal((await wire.request("client.register", registration)).ok, false,
+          "registration stays fenced while the witness contradicts the held writer");
+        assert.equal(custody.registrationReady, false);
+
+        cluster.config.witnessServerId = originalWitnessId;
+        const startedAt = Date.now();
+        const recovered = await wire.request("client.register", registration);
+        assert.equal(recovered.ok, true);
+        assert.ok(Date.now() - startedAt < 30_000, "a plain retry recovers without topology or discovery");
+        assert.equal((await wire.request("client.register", registration)).ok, true);
+        const after = await server.diagnostics();
+        assert.equal(after.registrationReady, true);
+        assert.equal(after.serveStatus, "serving");
+        assert.equal(after.assignmentCount, before.assignmentCount + 1,
+          "the uncertain binding admitted only the requested surface assignment");
+      } finally {
+        cluster.config.witnessServerId = originalWitnessId;
+        custody.readAcceptedState = originalRead;
+        await wire.close();
+        await server.close();
+        server = null;
+      }
+    });
+
     await t.test("unknown mapping commit resolves to the one durable assignment", async () => {
       let injected = false;
       const writer = await PostgresCustodyAdapter.acquireWriter(cluster.config, {
