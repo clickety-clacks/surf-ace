@@ -105,10 +105,12 @@ export class ConfiguredServerRegistration {
     } else {
       binding = { ...identity, clientId: this.clientId };
     }
-    await this.core.transactionAsync(async () => {
-      this.core.bindRegistryIdentity(binding);
-      await this.persist();
-    });
+    await this.core.locklessAuthority.transactionAsync(() =>
+      this.core.transactionAsync(async () => {
+        this.core.bindRegistryIdentity(binding);
+        await this.persist();
+      }),
+    );
   }
 
   start(): void {

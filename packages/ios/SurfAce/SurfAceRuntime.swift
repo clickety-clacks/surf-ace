@@ -554,7 +554,9 @@ final class SurfAceRuntime {
                 let directory = self.locklessStateURLOverride?.deletingLastPathComponent()
                     ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
                         .appendingPathComponent("SurfAce", isDirectory: true)
-                let provisioned = try SurfAceProvisionedRegistryBinding.load(from: directory)
+                let stored = await adapter.snapshot()
+                let provisioned = stored.registryBinding == nil
+                    ? try SurfAceProvisionedRegistryBinding.load(from: directory) : nil
                 try await adapter.bindRegistryIdentity(
                     registryIdentity, clientId: identity.clientId,
                     expectedSurfaces: expected, provisioned: provisioned
