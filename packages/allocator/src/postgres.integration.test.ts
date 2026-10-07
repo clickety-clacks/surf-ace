@@ -1246,6 +1246,75 @@ test("annotation Electron source flush and at-open commit ingest into the real j
   }
 });
 
+test("iOS at-open source records ingest and replay to independent PostgreSQL consumers", { timeout: 180_000 }, async () => {
+  const fixture = JSON.parse(await readFile(new URL("../vectors/ios-annotation-v1.json", import.meta.url), "utf8")) as {
+    records: string[];
+  };
+  assert.equal(fixture.records.length, 2);
+  const records = fixture.records.map((bytes) => {
+    const record = JSON.parse(bytes) as Record<string, unknown>;
+    assert.equal(canonicalJson(record as never), bytes, "iOS persisted bytes use the registry canonical form");
+    return record;
+  });
+  assert.deepEqual(records.map((record) => record.kind), ["live_delta", "frame_commit"]);
+  assert.deepEqual(records.map((record) => record.sourceSequence), ["1", "2"]);
+  const cluster = await startCluster();
+  try {
+    const recovery = await PostgresCustodyAdapter.initializeAbsentFleet(cluster.config, "alloc_annotation-ios");
+    await recovery.release();
+    await adminQuery(cluster.adminUrl,
+      await readFile(new URL("../sql/003_annotation_journal.sql", import.meta.url), "utf8"));
+    const writer = await PostgresCustodyAdapter.acquireWriter(cluster.config);
+    let cursors: Array<{ epoch: string; sequence: string }>;
+    try {
+      const journal = new AnnotationJournal(writer);
+      cursors = [];
+      for (const record of records) cursors.push((await journal.ingest(record)).serverCursor);
+      assert.deepEqual(cursors.map((cursor) => cursor.sequence), ["1", "2"]);
+      const duplicate = await journal.ingest(records[1]);
+      assert.equal(duplicate.duplicate, true);
+      assert.deepEqual(duplicate.serverCursor, cursors[1]);
+      assert.equal((await writer.annotationInfo()).journalRecords, 2);
+    } finally {
+      await writer.release();
+    }
+    const server = await AllocatorServer.start(serverConfig(cluster));
+    const first = await WireClient.connect(server.address.url);
+    const second = await WireClient.connect(server.address.url);
+    try {
+      for (const consumer of [first, second]) {
+        assert.equal((await consumer.request("annotation.hello", { protocolVersion: 1, role: "consumer" })).ok, true);
+      }
+      const firstOpen = await first.request("annotation.watch", { consumerId: "ios-first" });
+      const secondOpen = await second.request("annotation.watch", { consumerId: "ios-second" });
+      assert.equal(firstOpen.ok, true);
+      assert.equal(secondOpen.ok, true);
+      const firstLease = (firstOpen.payload as { leaseId: string }).leaseId;
+      const secondLease = (secondOpen.payload as { leaseId: string }).leaseId;
+      for (const consumer of [first, second]) {
+        for (const expected of records) {
+          const event = await consumer.waitEvent("annotation.record");
+          const payload = event.payload as { record: Record<string, unknown> };
+          assert.deepEqual(payload.record, expected);
+        }
+      }
+      assert.equal((await first.request("annotation.ack", {
+        consumerId: "ios-first", leaseId: firstLease, throughCursor: cursors[1],
+      })).ok, true);
+      const secondAck = await second.request("annotation.ack", {
+        consumerId: "ios-second", leaseId: secondLease, throughCursor: cursors[0],
+      });
+      assert.equal(secondAck.ok, true);
+      assert.deepEqual((secondAck.payload as { ackCursor: unknown }).ackCursor, cursors[0]);
+    } finally {
+      await Promise.all([first.close(), second.close()]);
+      await server.close();
+    }
+  } finally {
+    await cluster.stop();
+  }
+});
+
 test("annotation compaction protects absent and unread consumers, then retains source dedup receipts", { timeout: 180_000 }, async () => {
   const cluster = await startCluster();
   try {
