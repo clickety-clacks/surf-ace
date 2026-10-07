@@ -1286,7 +1286,7 @@ test("Linux fresh-install raw CLI evidence binds two isolated roots to their cli
 });
 
 test("Surf Ace v0.2.7 binds the landed resilience candidate, six hosted assets, and tooling identity", () => {
-  assert.equal(TIGHTBEAM_TOOLING_TAG, "surf-ace-release-tooling-v0.2.7-r1");
+  assert.equal(TIGHTBEAM_TOOLING_TAG, "surf-ace-release-tooling-v0.2.7-r2");
   assert.deepEqual(TIGHTBEAM, {
     candidateCommit: "1221ffb7c2c78607f6496d7c89046805f7f78c67",
     sourceTag: "surf-ace-v0.2.7-r1", version: "0.2.7", channel: "surf-ace", toolingTag: TIGHTBEAM_TOOLING_TAG,
@@ -2980,7 +2980,7 @@ test("v0.2.7 standalone specification and release gates bind the product and all
   assert.match(workflow, /publish_release:[\s\S]*?default: false/);
   assert.match(workflow, /PRODUCT_COMMIT: 1221ffb7c2c78607f6496d7c89046805f7f78c67/);
   assert.match(workflow, /PRODUCT_TAG: surf-ace-v0\.2\.7-r1/);
-  assert.match(workflow, /TOOLING_TAG: surf-ace-release-tooling-v0\.2\.7-r1/);
+  assert.match(workflow, /TOOLING_TAG: surf-ace-release-tooling-v0\.2\.7-r2/);
   assert.match(workflow, /GITHUB_EVENT_NAME/);
   assert.match(workflow, /GITHUB_REF_TYPE/);
   assert.match(workflow, /node tooling\/scripts\/release\/build-tightbeam-release\.mjs/);
