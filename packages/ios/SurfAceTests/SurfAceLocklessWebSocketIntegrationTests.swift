@@ -100,8 +100,12 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         XCTAssertTrue(pane.pendingAnnotationCommit)
         XCTAssertTrue(pane.isDrawingFlushSending)
         let heldSource = await adapter.snapshot().annotationPublisher
-        XCTAssertEqual(heldSource?.surfaces[surface.surfaceId]?.fifo.count, 0,
-                       "the source must wait for the final direct flush")
+        let heldKinds = try heldSource?.surfaces[surface.surfaceId]?.fifo.map { entry in
+            try XCTUnwrap((JSONSerialization.jsonObject(with: Data(entry.canonical.utf8))
+                as? [String: Any])?["kind"] as? String)
+        }
+        XCTAssertEqual(heldKinds, ["live_delta"],
+                       "the source commit must wait for the final direct flush")
         XCTAssertEqual(heldSource?.openFrame(surfaceId: surface.surfaceId,
                                              paneId: pane.paneId)?.commitRequested, true)
 
