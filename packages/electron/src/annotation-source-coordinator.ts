@@ -7,7 +7,7 @@ import type { SurfaceCore } from "./surface-core.js";
 export class AnnotationSourceCoordinator {
   private readonly gate: AnnotationFlushGate;
   private readonly doneEpoch = new Map<string, number>();
-  private readonly completing = new Map<string, Promise<void>>();
+  private readonly completing = new Map<string, { epoch: number | undefined; work: Promise<void> }>();
   private readonly directCommitStarted = new Set<string>();
   private readonly unsubscribe: () => void;
 
@@ -88,12 +88,23 @@ export class AnnotationSourceCoordinator {
 
   async finishRequestedFrame(surfaceId: string, paneId: number): Promise<void> {
     const key = JSON.stringify([surfaceId, paneId]);
+    const epoch = this.doneEpoch.get(key);
     const pending = this.completing.get(key);
-    if (pending) return await pending;
+    if (pending) {
+      try { await pending.work; }
+      catch (error) {
+        if (pending.epoch === epoch) throw error;
+      }
+      // A re-entry or later Done may have replaced the intent while an older
+      // completion was suspended. Its settled promise cannot close the new one.
+      if (pending.epoch !== epoch) return await this.finishRequestedFrame(surfaceId, paneId);
+      return;
+    }
     const work = this.finishRequestedFrameExclusive(surfaceId, paneId);
-    this.completing.set(key, work);
+    const entry = { epoch, work };
+    this.completing.set(key, entry);
     try { await work; }
-    finally { if (this.completing.get(key) === work) this.completing.delete(key); }
+    finally { if (this.completing.get(key) === entry) this.completing.delete(key); }
   }
 
   private async finishRequestedFrameExclusive(surfaceId: string, paneId: number): Promise<void> {
