@@ -319,7 +319,20 @@ BEGIN
   new_metadata_bytes := h.source_metadata_bytes - old_head_bytes + new_head_bytes;
   IF h.retained_record_count >= h.max_journal_records OR new_metadata_rows > h.max_source_metadata_rows
      OR h.retained_canonical_bytes + octet_length(p_canonical) + new_metadata_bytes > h.max_journal_and_metadata_bytes THEN
-    RAISE EXCEPTION 'annotation_ingest_capacity';
+    RAISE EXCEPTION USING MESSAGE = 'annotation_ingest_capacity', DETAIL = jsonb_build_object(
+      'maxJournalRecords', h.max_journal_records,
+      'journalRecords', h.retained_record_count,
+      'maxJournalAndMetadataBytes', h.max_journal_and_metadata_bytes,
+      'journalCanonicalBytes', h.retained_canonical_bytes,
+      'maxSourceMetadataRows', h.max_source_metadata_rows,
+      'sourceMetadataRows', h.source_metadata_rows,
+      'sourceMetadataBytes', h.source_metadata_bytes,
+      'incomingRecordBytes', octet_length(p_canonical),
+      'incomingSourceMetadataBytes', new_head_bytes - old_head_bytes,
+      'retryCondition', CASE WHEN new_metadata_rows > h.max_source_metadata_rows
+        THEN 'reviewed_metadata_capacity_increase'
+        ELSE 'oldest_required_history_acknowledged_and_compactable_or_capacity_increased' END
+    )::text;
   END IF;
   INSERT INTO surf_ace_allocator.annotation_journal_records(
     fleet_id, epoch, sequence, client_id, source_epoch, surface_id,
@@ -528,6 +541,8 @@ DECLARE
   new_lease text;
   initial_epoch text;
   initial_sequence bigint;
+  consumer_count bigint;
+  active_count bigint;
 BEGIN
   PERFORM surf_ace_allocator.assert_role('surf_ace_allocator_writer');
   PERFORM surf_ace_allocator.assert_token(p_fleet_id, p_generation, p_lease_id, 'writer');
@@ -552,8 +567,12 @@ BEGIN
       initial_epoch := h.epoch;
       initial_sequence := coalesce(h.first_retained_sequence, h.head_sequence + 1);
     END IF;
-    IF (SELECT count(*) FROM surf_ace_allocator.annotation_consumers WHERE fleet_id = p_fleet_id) >= 64 THEN
-      RAISE EXCEPTION 'annotation_consumer_capacity';
+    SELECT count(*) INTO consumer_count FROM surf_ace_allocator.annotation_consumers WHERE fleet_id = p_fleet_id;
+    IF consumer_count >= 64 THEN
+      RAISE EXCEPTION USING MESSAGE = 'annotation_consumer_capacity', DETAIL = jsonb_build_object(
+        'consumerSlots', consumer_count, 'maxConsumerSlots', 64,
+        'retryCondition', 'reviewed_consumer_capacity_increase'
+      )::text;
     END IF;
   ELSE
     IF NOT FOUND OR c.retired_at IS NOT NULL THEN RAISE EXCEPTION 'annotation_consumer_not_found'; END IF;
@@ -563,10 +582,14 @@ BEGIN
     initial_epoch := c.initial_from_epoch;
     initial_sequence := c.initial_from_sequence;
   END IF;
-  IF (SELECT count(*) FROM surf_ace_allocator.annotation_consumers
+  SELECT count(*) INTO active_count FROM surf_ace_allocator.annotation_consumers
       WHERE fleet_id = p_fleet_id AND lease_connected AND retired_at IS NULL
-        AND consumer_id <> p_consumer_id) >= 32 THEN
-    RAISE EXCEPTION 'annotation_consumer_capacity';
+        AND consumer_id <> p_consumer_id;
+  IF active_count >= 32 THEN
+    RAISE EXCEPTION USING MESSAGE = 'annotation_consumer_capacity', DETAIL = jsonb_build_object(
+      'activeStreams', active_count, 'maxActiveStreams', 32,
+      'retryCondition', 'active_stream_disconnected'
+    )::text;
   END IF;
   new_lease := encode(public.gen_random_bytes(16), 'hex');
   IF p_mode = 'watch' THEN

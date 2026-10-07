@@ -1152,7 +1152,16 @@ function mapDatabaseError(error: unknown): AllocatorError {
   if (error instanceof AllocatorError) return error;
   const message = String((error as { message?: unknown })?.message ?? error);
   if (isSqlState(error, "P0001") && /^(annotation_invalid_request|annotation_journal_unverified|annotation_record_too_large|annotation_source_event_conflict|annotation_source_sequence_conflict|annotation_source_gap_required|annotation_source_gap_invalid|annotation_ingest_capacity|annotation_journal_sequence_exhausted|annotation_consumer_capacity|annotation_consumer_exists|annotation_consumer_not_found|annotation_consumer_lease_stale|annotation_cursor_invalid|annotation_ack_regression|annotation_gap_id_mismatch|annotation_consumer_retire_confirmation_required|annotation_ack_cursor_mismatch)$/.test(message)) {
-    return new AllocatorError(message as AllocatorError["code"], message, undefined, error);
+    let details: Record<string, unknown> | undefined;
+    if (message === "annotation_ingest_capacity" || message === "annotation_consumer_capacity") {
+      try {
+        const parsed: unknown = JSON.parse(String((error as { detail?: unknown }).detail));
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          details = parsed as Record<string, unknown>;
+        }
+      } catch { /* A missing or malformed database detail cannot turn a refusal into success. */ }
+    }
+    return new AllocatorError(message as AllocatorError["code"], message, undefined, error, details);
   }
   if (isSqlState(error, "23505")) {
     return new AllocatorError(

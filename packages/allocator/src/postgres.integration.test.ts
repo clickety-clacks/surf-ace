@@ -1748,7 +1748,10 @@ test("annotation pressure compacts only acknowledged history and refuses when re
         lostFromSequence: "2", lostThroughSequence: "2" };
       const first = await journal.ingest(firstRecord);
       await assert.rejects(journal.ingest(secondRecord),
-        (error) => error instanceof AllocatorError && error.code === "annotation_ingest_capacity");
+        (error) => error instanceof AllocatorError && error.code === "annotation_ingest_capacity" &&
+          error.details?.journalRecords === 1 && error.details?.maxJournalRecords === 1 &&
+          typeof error.details?.incomingRecordBytes === "number" &&
+          error.details?.retryCondition === "oldest_required_history_acknowledged_and_compactable_or_capacity_increased");
       assert.equal((await writer.annotationInfo()).headSequence, "1");
       const consumer = await writer.openAnnotationConsumer("pressure-consumer", "watch");
       await assert.rejects(journal.ingest(secondRecord),
@@ -1758,7 +1761,9 @@ test("annotation pressure compacts only acknowledged history and refuses when re
       await adminQuery(cluster.adminUrl, `UPDATE surf_ace_allocator.annotation_journal_head
         SET max_source_metadata_rows = 1 WHERE fleet_id = 'fleet-test'`);
       await assert.rejects(journal.ingest(secondRecord),
-        (error) => error instanceof AllocatorError && error.code === "annotation_ingest_capacity");
+        (error) => error instanceof AllocatorError && error.code === "annotation_ingest_capacity" &&
+          error.details?.sourceMetadataRows === 1 &&
+          error.details?.retryCondition === "reviewed_metadata_capacity_increase");
       assert.equal((await writer.annotationInfo()).journalRecords, 1, "receipt pressure cannot erase history");
       await adminQuery(cluster.adminUrl, `UPDATE surf_ace_allocator.annotation_journal_head
         SET max_source_metadata_rows = 1000000 WHERE fleet_id = 'fleet-test'`);

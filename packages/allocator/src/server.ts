@@ -554,7 +554,8 @@ export class AllocatorServer {
       }
     } catch (error) {
       const failure = error instanceof AllocatorError ? error : asAllocatorError(error);
-      reply(false, { code: failure.code, message: failure.message });
+      reply(false, { code: failure.code, message: failure.message,
+        ...(failure.details ? { details: failure.details } : {}) });
     }
   }
 

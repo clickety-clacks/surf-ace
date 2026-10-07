@@ -133,6 +133,7 @@ export class AllocatorError extends Error {
     message: string,
     readonly allocatorId?: string,
     readonly cause?: unknown,
+    readonly details?: Record<string, unknown>,
   ) {
     super(message);
     this.name = "AllocatorError";
