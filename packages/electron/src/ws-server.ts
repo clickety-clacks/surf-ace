@@ -272,6 +272,12 @@ export class SurfaceWsServer {
   private providerWindowLabelQueue: Promise<void> = Promise.resolve();
   private ignoreInitialSurfaceEvents = true;
   private persistenceOutcomeUnknown: PersistentStateOutcomeUnknownError | null = null;
+  private annotationCompletionManaged = false;
+  private readonly annotationCompletionTasks = new Map<string, Promise<boolean>>();
+
+  setAnnotationCompletionManaged(): void {
+    this.annotationCompletionManaged = true;
+  }
 
   constructor(options: SurfaceWsServerOptions) {
     this.bindAddress = options.bindAddress ?? "0.0.0.0";
@@ -892,7 +898,9 @@ export class SurfaceWsServer {
       case "lockless-authority-changed":
         return;
       case "annotation-committed":
-        await this.maybeSendAnnotationCommitted(event.surfaceId, event.paneId);
+        if (!this.annotationCompletionManaged) {
+          await this.completeDirectAnnotation(event.surfaceId, event.paneId);
+        }
         return;
       case "drawing-dirty":
         await this.updateLocklessAnnotationFrame(
@@ -5460,28 +5468,43 @@ export class SurfaceWsServer {
     }
   }
 
-  private async maybeSendAnnotationCommitted(surfaceId: string, paneId: number): Promise<void> {
+  async completeDirectAnnotation(surfaceId: string, paneId: number): Promise<boolean> {
+    const key = JSON.stringify([surfaceId, paneId]);
+    const pending = this.annotationCompletionTasks.get(key);
+    if (pending) return await pending;
+    const work = this.completeDirectAnnotationExclusive(surfaceId, paneId);
+    this.annotationCompletionTasks.set(key, work);
+    try { return await work; }
+    finally { if (this.annotationCompletionTasks.get(key) === work) this.annotationCompletionTasks.delete(key); }
+  }
+
+  private async completeDirectAnnotationExclusive(surfaceId: string, paneId: number): Promise<boolean> {
+    if (!this.core.hasPendingAnnotationCommit(surfaceId, paneId)) return true;
     await this.updateLocklessAnnotationFrame(surfaceId, paneId);
     const snapshot = this.tryCaptureSnapshot(surfaceId, paneId);
-    if (!snapshot?.contentId) return;
+    if (!snapshot?.contentId) return false;
     const scopeId = locklessPaneScopeId(surfaceId, paneId);
-    const record = await this.core.locklessAuthority.transactionAsync(async () => {
-      const finalized = this.core.locklessAuthority.finalizeLiveFrame(
-        scopeId,
-        `annotation:${snapshot.contentId}`,
-        "renderer.annotation_finalized",
-      );
-      if (this.core.hasPendingDrawingFlush(surfaceId, paneId)) {
-        this.core.markDrawingFlushSent(surfaceId, paneId);
-      }
-      this.core.markAnnotationCommittedSent(surfaceId, paneId);
-      this.core.markLocklessAuthorityChanged(surfaceId);
-      await this.persistLocklessState();
-      return finalized;
-    });
+    const record = await this.core.transactionAsync(() =>
+      this.core.locklessAuthority.transactionAsync(async () => {
+        if (!this.core.hasPendingAnnotationCommit(surfaceId, paneId)) return null;
+        const finalized = this.core.locklessAuthority.finalizeLiveFrame(
+          scopeId,
+          `annotation:${snapshot.contentId}`,
+          "renderer.annotation_finalized",
+        );
+        if (this.core.hasPendingDrawingFlush(surfaceId, paneId)) {
+          this.core.markDrawingFlushSent(surfaceId, paneId);
+        }
+        this.core.markAnnotationCommittedSent(surfaceId, paneId);
+        this.core.markLocklessAuthorityChanged(surfaceId);
+        await this.persistLocklessState();
+        return finalized;
+      }),
+    );
     if (record) {
       await this.broadcastLocklessDelta(scopeId, [record]);
     }
+    return true;
   }
 
   private async broadcastLifecycleEvent(event: Event): Promise<void> {

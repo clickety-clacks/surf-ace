@@ -1762,6 +1762,7 @@ export class SurfaceCore {
     if (pane.annotating === enabled) {
       return;
     }
+    if (enabled) pane.pendingAnnotationCommit = false;
     pane.annotating = enabled;
     pane.toast = null;
     bumpGeometryRevision(surface);

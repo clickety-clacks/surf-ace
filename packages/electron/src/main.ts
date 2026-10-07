@@ -1174,13 +1174,13 @@ function handleShortcutInput(
       return;
     }
     if (input.key.toLowerCase() === "a" && !input.meta) {
-      core.setAnnotating(surfaceId, activePaneId, true);
-      void persistState().catch(() => {});
+      void annotationSourceCoordinator?.setAnnotating(surfaceId, activePaneId, true)
+        .catch((error) => clientWarn("annotation_source_mode_failed", errorDiagnosticFields(error)));
       return;
     }
     if (input.key.toLowerCase() === "d" && !input.meta) {
-      core.setAnnotating(surfaceId, activePaneId, false);
-      void persistState().catch(() => {});
+      void annotationSourceCoordinator?.setAnnotating(surfaceId, activePaneId, false)
+        .catch((error) => clientWarn("annotation_source_commit_failed", errorDiagnosticFields(error)));
       return;
     }
     if (input.meta && input.key === "[") {
@@ -1945,7 +1945,11 @@ async function boot(): Promise<void> {
   annotationSourceCoordinator = new AnnotationSourceCoordinator(
     core, persistState, () => annotationRegistryPublisher?.notify(),
     (error) => clientWarn("annotation_source_flush_failed", errorDiagnosticFields(error)),
+    (surfaceId, paneId) => server!.completeDirectAnnotation(surfaceId, paneId),
   );
+  server.setAnnotationCompletionManaged();
+  void annotationSourceCoordinator.resumePending().catch((error) =>
+    clientWarn("annotation_source_recovery_failed", errorDiagnosticFields(error)));
 
   core.subscribe((coreEvent) => {
     if (coreEvent.type === "lockless-authority-changed") {

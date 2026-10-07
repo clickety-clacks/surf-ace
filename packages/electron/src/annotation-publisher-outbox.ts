@@ -34,6 +34,8 @@ export type AnnotationOpenFrame = {
   frameId: string;
   contextKey: string;
   contentId: string;
+  commitRequested?: boolean;
+  directCommitDelivered?: boolean;
   url?: string;
   scrollOffset: { x: number; y: number };
   viewport: { width: number; height: number; scale: number };
@@ -226,6 +228,18 @@ export class AnnotationPublisherOutbox {
     return frame ? structuredClone(frame) : null;
   }
 
+  requestFrameCommit(surfaceId: string, paneId: number, requested: boolean): void {
+    const frame = this.state.surfaces[surfaceId]?.openFrames?.[String(paneId)];
+    if (!frame || frame.directCommitDelivered) return;
+    frame.commitRequested = requested;
+  }
+
+  markDirectCommitDelivered(surfaceId: string, paneId: number): void {
+    const frame = this.state.surfaces[surfaceId]?.openFrames?.[String(paneId)];
+    if (!frame?.commitRequested) throw new Error("annotation direct commit has no durable intent");
+    frame.directCommitDelivered = true;
+  }
+
   appendFrameStroke(surfaceId: string, paneId: number, stroke: AnnotationOpenFrame["strokes"][number]): void {
     const surface = this.surface(surfaceId);
     const frame = surface.openFrames?.[String(paneId)];
@@ -368,7 +382,11 @@ export class AnnotationPublisherOutbox {
           (surface.openFrames !== undefined && (typeof surface.openFrames !== "object" ||
             Object.entries(surface.openFrames).some(([key, frame]) =>
               surface.frames[key] !== frame.frameId || typeof frame.image !== "string" ||
-              !Array.isArray(frame.strokes)))) ||
+              !Array.isArray(frame.strokes) ||
+              (frame.commitRequested !== undefined && typeof frame.commitRequested !== "boolean") ||
+              (frame.directCommitDelivered !== undefined &&
+                (typeof frame.directCommitDelivered !== "boolean" ||
+                 (frame.directCommitDelivered && frame.commitRequested !== true)))))) ||
           !Array.isArray(surface.fifo) || surface.fifo.length > this.maxRecords || !this.fits(surfaceId)) {
         throw new RangeError("persisted annotation publisher state exceeds capacity");
       }

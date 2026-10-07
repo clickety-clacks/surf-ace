@@ -101,3 +101,63 @@ test("unavailable at-open image produces an ordered durable source gap", async (
   assert.equal(record.reason, "source_retention_overflow");
   source.stop();
 });
+
+test("Done recovery keeps one source frame across pre-direct and post-direct crashes", async () => {
+  for (const crashAfterDirect of [false, true]) {
+    const core = new SurfaceCore({ annotationClientId: clientId });
+    const surface = core.ensurePrimarySurface("Surf Ace", viewport);
+    core.admitSurfaceToLockless(surface.surfaceId);
+    const paneId = core.activePaneIds(surface.surfaceId)[0]!;
+    core.locklessContentPush(surface.surfaceId, {
+      content: { markdown: "annotation fixture" }, contentId: "content-one",
+      contentType: "markdown", friendlyChatName: "Fixture", paneId,
+    }, "Fixture");
+    let durable = core.getPersistentState();
+    const persist = async () => { durable = core.getPersistentState(); };
+    const source = new AnnotationSourceCoordinator(core, persist, () => {}, () => {},
+      async () => {
+        const frame = durable.annotationPublisher?.surfaces[surface.surfaceId]?.openFrames?.[String(paneId)];
+        assert.equal(frame?.commitRequested, true, "Done intent must survive before direct completion");
+        assert.equal(durable.annotationPublisher?.surfaces[surface.surfaceId]?.fifo.some(
+          (entry) => JSON.parse(entry.canonical).kind === "frame_commit"), false);
+        if (crashAfterDirect) {
+          core.markDrawingFlushSent(surface.surfaceId, paneId);
+          core.markAnnotationCommittedSent(surface.surfaceId, paneId);
+          await persist();
+        }
+        throw new Error("injected process interruption");
+      });
+    await source.setAnnotating(surface.surfaceId, paneId, true);
+    const opened = core.annotationPublisher!.openFrame(surface.surfaceId, paneId, {
+      contentId: "content-one", contextKey: "content-one", image: png,
+      openedAt: 100, scrollOffset: { x: 0, y: 0 }, viewport,
+    });
+    core.addStroke(surface.surfaceId, paneId, {
+      strokeId: "stroke-one" as never, tool: "mouse",
+      points: [{ x: 1, y: 2, timestamp: 110 }],
+    });
+    await assert.rejects(source.setAnnotating(surface.surfaceId, paneId, false),
+      /injected process interruption/);
+    source.stop();
+    const restored = new SurfaceCore({ annotationClientId: clientId, persistentState: durable });
+    let directCalls = 0;
+    let recovered = restored.getPersistentState();
+    const resumed = new AnnotationSourceCoordinator(restored, async () => {
+      recovered = restored.getPersistentState();
+    }, () => {}, (error) => { throw error; }, async () => {
+      directCalls += 1;
+      restored.markDrawingFlushSent(surface.surfaceId, paneId);
+      restored.markAnnotationCommittedSent(surface.surfaceId, paneId);
+      recovered = restored.getPersistentState();
+      return true;
+    });
+    await resumed.resumePending();
+    const entries = recovered.annotationPublisher!.surfaces[surface.surfaceId]!.fifo;
+    assert.deepEqual(entries.map((entry) => JSON.parse(entry.canonical).kind),
+      ["live_delta", "frame_commit"]);
+    assert.equal(JSON.parse(entries[1]!.canonical).frameId, opened.frameId);
+    assert.equal(recovered.annotationPublisher!.surfaces[surface.surfaceId]!.openFrames?.[String(paneId)], undefined);
+    assert.equal(directCalls, crashAfterDirect ? 0 : 1);
+    resumed.stop();
+  }
+});

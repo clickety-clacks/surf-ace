@@ -7,6 +7,7 @@ import type { SurfaceCore } from "./surface-core.js";
 export class AnnotationSourceCoordinator {
   private readonly gate: AnnotationFlushGate;
   private readonly doneEpoch = new Map<string, number>();
+  private readonly completing = new Map<string, Promise<void>>();
   private readonly unsubscribe: () => void;
 
   constructor(
@@ -14,11 +15,20 @@ export class AnnotationSourceCoordinator {
     private readonly persist: () => Promise<void>,
     private readonly notify: () => void,
     onError: (error: unknown) => void,
+    private readonly completeDirect: (surfaceId: string, paneId: number) => Promise<boolean> = async (surfaceId, paneId) => {
+      if (!core.hasPendingAnnotationCommit(surfaceId, paneId)) return false;
+      core.markAnnotationCommittedSent(surfaceId, paneId);
+      await persist();
+      return true;
+    },
   ) {
     this.gate = new AnnotationFlushGate((surfaceId, paneId, reason) =>
       this.flush(surfaceId, paneId, reason), onError);
     this.unsubscribe = core.subscribe((event) => {
       if (event.type === "drawing-dirty") this.gate.strokeEnded(event.surfaceId, event.paneId);
+      if (event.type === "annotation-committed") {
+        void this.finishRequestedFrame(event.surfaceId, event.paneId).catch(onError);
+      }
     });
     for (const surface of core.listSurfaces()) {
       for (const paneId of core.activePaneIds(surface.surfaceId)) {
@@ -34,45 +44,95 @@ export class AnnotationSourceCoordinator {
     const epoch = (this.doneEpoch.get(key) ?? 0) + 1;
     this.doneEpoch.set(key, epoch);
     if (enabled) {
-      this.core.setAnnotating(surfaceId, paneId, true);
+      await this.core.transactionAsync(async () => {
+        this.core.setAnnotating(surfaceId, paneId, true);
+        this.core.annotationPublisher?.requestFrameCommit(surfaceId, paneId, false);
+        await this.persist();
+      });
       return;
     }
-    await this.gate.flushPending(surfaceId, paneId);
-    // A restored dirty pane has no in-memory timer, but still needs its final flush.
-    if (this.core.hasPendingDrawingFlush(surfaceId, paneId)) {
-      await this.flush(surfaceId, paneId, "idle_window");
-    }
-    if (this.doneEpoch.get(key) !== epoch) return;
-    let appended = false;
     await this.core.transactionAsync(async () => {
       this.core.setAnnotating(surfaceId, paneId, false);
-      const outbox = this.core.annotationPublisher;
-      if (this.core.hasPendingAnnotationCommit(surfaceId, paneId) && outbox) {
-        const frame = outbox.openFrameFor(surfaceId, paneId);
-        const pane = this.core.getRendererWindowState(surfaceId).panes.find((item) => item.paneId === paneId);
-        const contentType = pane?.content.contentType === "browser_url" ? "html" : pane?.content.contentType;
-        if (!frame || frame.failed || !contentType || frame.contentId !== pane?.content.contentId) {
-          outbox.lose(surfaceId, "annotation_frame_commit_unavailable");
-        } else {
-          const closedFrame = {
-            frameId: frame.frameId, contextKey: frame.contextKey, contentId: frame.contentId,
-            ...(frame.url === undefined ? {} : { url: frame.url }),
-            scrollOffset: frame.scrollOffset, viewport: frame.viewport,
-            openedAt: frame.openedAt, updatedAt: frame.updatedAt,
-            image: frame.image, strokes: frame.strokes,
-          };
-          outbox.append(surfaceId, {
-            paneId, frameId: frame.frameId, kind: "frame_commit", contentId: frame.contentId,
-            revision: pane!.content.revision, contentType, viewport: frame.viewport,
-            sourceTimestamp: new Date().toISOString(),
-            payload: { frame: closedFrame,
-              imageSha256: createHash("sha256").update(Buffer.from(frame.image, "base64")).digest("hex") },
-          });
-        }
-        appended = true;
+      if (this.core.hasPendingAnnotationCommit(surfaceId, paneId)) {
+        this.core.annotationPublisher?.requestFrameCommit(surfaceId, paneId, true);
       }
-      outbox?.closeFrame(surfaceId, paneId);
       await this.persist();
+    });
+    if (this.doneEpoch.get(key) === epoch) await this.finishRequestedFrame(surfaceId, paneId);
+  }
+
+  async resumePending(): Promise<void> {
+    for (const surface of this.core.listSurfaces()) {
+      for (const paneId of this.core.activePaneIds(surface.surfaceId)) {
+        if (this.core.hasPendingAnnotationCommit(surface.surfaceId, paneId) ||
+            this.core.annotationPublisher?.openFrameFor(surface.surfaceId, paneId)?.commitRequested) {
+          await this.finishRequestedFrame(surface.surfaceId, paneId);
+        }
+      }
+    }
+  }
+
+  async finishRequestedFrame(surfaceId: string, paneId: number): Promise<void> {
+    const key = JSON.stringify([surfaceId, paneId]);
+    const pending = this.completing.get(key);
+    if (pending) return await pending;
+    const work = this.finishRequestedFrameExclusive(surfaceId, paneId);
+    this.completing.set(key, work);
+    try { await work; }
+    finally { if (this.completing.get(key) === work) this.completing.delete(key); }
+  }
+
+  private async finishRequestedFrameExclusive(surfaceId: string, paneId: number): Promise<void> {
+    const outbox = this.core.annotationPublisher;
+    if (!outbox) return;
+    const frame = outbox.openFrameFor(surfaceId, paneId);
+    if (!frame?.commitRequested) return;
+    const key = JSON.stringify([surfaceId, paneId]);
+    const epoch = this.doneEpoch.get(key);
+    if (!frame.directCommitDelivered && this.core.hasPendingAnnotationCommit(surfaceId, paneId)) {
+      await this.gate.flushPending(surfaceId, paneId);
+      if (this.core.hasPendingDrawingFlush(surfaceId, paneId)) {
+        await this.flush(surfaceId, paneId, "idle_window");
+      }
+      if (this.doneEpoch.get(key) !== epoch || !outbox.openFrameFor(surfaceId, paneId)?.commitRequested) return;
+      if (!await this.completeDirect(surfaceId, paneId)) return;
+    }
+    // A restart after the direct persistence boundary sees the pane's pending
+    // bit cleared while the source frame still carries the requested intent.
+    if (!this.core.hasPendingAnnotationCommit(surfaceId, paneId) &&
+        !outbox.openFrameFor(surfaceId, paneId)?.directCommitDelivered) {
+      await this.core.transactionAsync(async () => {
+        outbox.markDirectCommitDelivered(surfaceId, paneId);
+        await this.persist();
+      });
+    }
+    let appended = false;
+    await this.core.transactionAsync(async () => {
+      const current = outbox.openFrameFor(surfaceId, paneId);
+      if (!current?.commitRequested || !current.directCommitDelivered) return;
+      const pane = this.core.getRendererWindowState(surfaceId).panes.find((item) => item.paneId === paneId);
+      const contentType = pane?.content.contentType === "browser_url" ? "html" : pane?.content.contentType;
+      if (current.failed || !contentType || current.contentId !== pane?.content.contentId) {
+        outbox.lose(surfaceId, "annotation_frame_commit_unavailable");
+      } else {
+        const closedFrame = {
+          frameId: current.frameId, contextKey: current.contextKey, contentId: current.contentId,
+          ...(current.url === undefined ? {} : { url: current.url }),
+          scrollOffset: current.scrollOffset, viewport: current.viewport,
+          openedAt: current.openedAt, updatedAt: current.updatedAt,
+          image: current.image, strokes: current.strokes,
+        };
+        outbox.append(surfaceId, {
+          paneId, frameId: current.frameId, kind: "frame_commit", contentId: current.contentId,
+          revision: pane!.content.revision, contentType, viewport: current.viewport,
+          sourceTimestamp: new Date().toISOString(),
+          payload: { frame: closedFrame,
+            imageSha256: createHash("sha256").update(Buffer.from(current.image, "base64")).digest("hex") },
+        });
+      }
+      outbox.closeFrame(surfaceId, paneId);
+      await this.persist();
+      appended = true;
     });
     if (appended) this.notify();
   }
