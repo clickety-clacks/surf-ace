@@ -2174,7 +2174,14 @@ test("release smoke WebSocket open wait handles late observation and bounds a st
   const stalled = new EventEmitter();
   stalled.readyState = 0;
   let terminated = false;
-  stalled.terminate = () => { terminated = true; stalled.readyState = 3; };
+  stalled.terminate = () => {
+    terminated = true;
+    stalled.readyState = 3;
+    process.nextTick(() => {
+      stalled.emit("error", new Error("WebSocket was closed before the connection was established"));
+      stalled.emit("close");
+    });
+  };
   await assert.rejects(waitForWebSocketOpen(stalled, 5), /annotation_registry_websocket_open_timeout_10s/);
   assert.equal(terminated, true);
 });
