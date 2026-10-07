@@ -3406,13 +3406,15 @@ final class SurfAceRuntime {
         try await locklessAuthorityForLocalMutation().readinessSnapshot()
     }
 
+    @discardableResult
     func fanoutLocklessCommittedEvent(
         op: String,
         payload: SurfAceLocklessJSON,
         sentAt: Int64? = nil,
         eventId: String? = nil
-    ) async {
-        guard let locklessAdapter else { return }
+    ) async -> Bool {
+        guard let locklessAdapter else { return false }
+        var delivered = true
         await withLocklessDeliveryTurn {
             let tombstoneBlockedControllerIds = await drainTombstoneReclamationsInCurrentTurn(
                 adapter: locklessAdapter
@@ -3432,13 +3434,22 @@ final class SurfAceRuntime {
                 "sentAt": sentAt ?? timestampNow(),
                 "payload": Self.foundationJSON(payload),
             ]
-            guard let json = encodeJSON(envelope) else { return }
+            guard let json = encodeJSON(envelope) else {
+                delivered = false
+                return
+            }
             for connectionUUID in fanout.connectionTokens {
                 guard let connection = locklessConnectionsByConnectionUUID[connectionUUID],
                       !blockedControllerIds.contains(connection.controllerInstanceId) else { continue }
-                try? await connection.sender.send(text: json, priority: .event)
+                do {
+                    try await connection.sender.send(text: json, priority: .event)
+                } catch {
+                    delivered = false
+                    surfAceServerRuntimeLog("event=direct_event_send_failed \(surfAceDiagnosticFields([("op", op), ("event_id", eventId), ("error", String(describing: error))]))")
+                }
             }
         }
+        return delivered
     }
 
     private func drainControllerRetentionReclamations(
@@ -4278,10 +4289,10 @@ final class SurfAceRuntime {
         do {
             guard locklessAdapter != nil else { return false }
             let locklessPayload = try Self.locklessJSON(fromFoundation: payload)
-            await fanoutLocklessCommittedEvent(
+            let delivered = await fanoutLocklessCommittedEvent(
                 op: op, payload: locklessPayload, sentAt: sentAt, eventId: eventId
             )
-            return true
+            return delivered
         } catch {
             surfaceById[surfaceId]?.lastError = "Event send failed: \(error.localizedDescription)"
             return false
