@@ -4,7 +4,37 @@ import type { AddressInfo } from "node:net";
 import { WebSocketServer, WebSocket } from "ws";
 import { ServerConnection } from "../src/server-connection.js";
 import { ConfiguredServerRegistration } from "../src/configured-server.js";
+import { matchesProvisionedClaims } from "../src/registry-binding.js";
 import { SurfaceCore } from "../src/surface-core.js";
+
+test("owner-verified claims compare by identity without accepting omissions or duplicates", () => {
+  const first = { surfaceId: "sf_first", windowLabel: "d", panes: [
+    { paneId: "1", paneLabel: 703, paneLineageId: "pl_first" },
+    { paneId: "2", paneLabel: 704, paneLineageId: "pl_second" },
+  ] };
+  const second = { surfaceId: "sf_second", windowLabel: "e", panes: [] };
+  const provisioned = {
+    binding: { clientId: "owner-client", allocatorId: "alloc_home", fleetId: "fleet-home" },
+    confirmedClaims: [first, second],
+  };
+  assert.equal(matchesProvisionedClaims(provisioned, "owner-client", [
+    second, { ...first, panes: [...first.panes].reverse() },
+  ]), true);
+  assert.equal(matchesProvisionedClaims(provisioned, "other-client", [first, second]), false);
+  assert.equal(matchesProvisionedClaims(provisioned, "owner-client", [first]), false);
+  assert.equal(matchesProvisionedClaims(provisioned, "owner-client", [first, first]), false);
+  assert.equal(matchesProvisionedClaims({ ...provisioned, confirmedClaims: [first, first] },
+    "owner-client", [first, second]), false);
+  assert.equal(matchesProvisionedClaims(provisioned, "owner-client", [
+    { ...first, panes: [first.panes[0]!, first.panes[0]!] }, second,
+  ]), false);
+  assert.equal(matchesProvisionedClaims({ ...provisioned, confirmedClaims: [
+    { ...first, panes: [first.panes[0]!, first.panes[0]!] }, second,
+  ] }, "owner-client", [first, second]), false);
+  assert.equal(matchesProvisionedClaims(provisioned, "owner-client", [
+    { ...first, panes: [{ ...first.panes[0]!, paneLineageId: "pl_foreign" }, first.panes[1]!] }, second,
+  ]), false);
+});
 
 test("Bonjour transport address avoids slow hostname resolution and retains hostname fallback", async () => {
   const original = ConfiguredServerRegistration.prototype.synchronize;

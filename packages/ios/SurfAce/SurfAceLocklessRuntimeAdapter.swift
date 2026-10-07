@@ -474,7 +474,7 @@ actor SurfAceLocklessRuntimeAdapter {
             )
         } else {
             guard let provisioned, provisioned.binding.clientId == clientId,
-                  provisioned.confirmedClaims == claims else {
+                  SurfAceProvisionedRegistryBinding.matchesConfirmedClaims(provisioned.confirmedClaims, claims) else {
                 throw SurfAceRegistrationError.legacyRegistryBindingPending
             }
             guard provisioned.binding.matches(identity, clientId: clientId) else {
