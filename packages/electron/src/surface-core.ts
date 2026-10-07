@@ -2413,6 +2413,7 @@ export class SurfaceCore {
     const surface = this.getSurface(surfaceId);
     return {
       ...topology,
+      windowLabel: surface.windowLabelConfirmed === true ? surface.windowLabel : null,
       panes: topology.panes.map((entry) => {
         const pane = surface.panes.get(Number(entry.paneId))!;
         return {

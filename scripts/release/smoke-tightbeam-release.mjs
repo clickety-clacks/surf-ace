@@ -159,7 +159,7 @@ function decodeRawCliEvidence(base64, expectedBytes, expectedSha256, name) {
     let event;
     try { event = JSON.parse(line); } catch { throw new Error(`${name}_raw_cli_event_invalid_json`); }
     if (!Array.isArray(event?.args) || typeof event.command !== "string" ||
-        !["list", "capture-pane", "read", "push", "topology-intent"].includes(event.command) ||
+        !["list", "capture-pane", "read", "push", "surface-intent", "topology-intent"].includes(event.command) ||
         !event.input || typeof event.input !== "object" || Array.isArray(event.input) ||
         event.inputJson !== JSON.stringify(event.input) ||
         typeof event.stdout !== "string" || typeof event.stderr !== "string") {
@@ -307,7 +307,7 @@ function requireLinuxFreshInstallRawCliCoverage(stateSequence, rawCliEvidence) {
       [...registryEndpoints].some((endpoint) => endpoints.has(endpoint))) {
     throw new Error("linux_fresh_install_endpoint_bindings_invalid");
   }
-  if (rawCliEvidence.events.some((event) => !["list", "push", "capture-pane", "read"].includes(event.command))) {
+  if (rawCliEvidence.events.some((event) => !["list", "push", "capture-pane", "read", "surface-intent", "topology-intent"].includes(event.command))) {
     throw new Error("linux_fresh_install_unapproved_cli_operation");
   }
   const direct = rawCliEvidence.events.filter((event) => event.endpoint !== null);
@@ -345,8 +345,27 @@ function requireLinuxFreshInstallRawCliCoverage(stateSequence, rawCliEvidence) {
     event.expectedRejection?.code === "unknown_surface" &&
     event.expectedRejection?.expectedSurfaceId === initial.surfaceId, pushIndex + 1);
   if (rejectedPushIndex < 0) throw new Error("linux_fresh_install_wrong_surface_raw_event_missing");
-  // The first post-rejection list is the resumed client's baseline.
-  const resumedListIndex = eventIndex(phaseList(afterRestart), rejectedPushIndex + 1);
+  const offline = stateSequence.offlineLocal;
+  const offlineOpenIndex = eventIndex((event) => event.command === "surface-intent" &&
+    event.endpoint === initial.directClientEndpoint && event.status === 0 &&
+    event.input?.action === "open" &&
+    (event.output?.result?.payload ?? event.output?.result)?.surfaceId === offline.newSurfaceId,
+  rejectedPushIndex + 1);
+  const offlineSplitIndex = eventIndex((event) => event.command === "topology-intent" &&
+    event.endpoint === initial.directClientEndpoint && event.status === 0 &&
+    event.input?.action === "split" && event.input?.surfaceId === offline.newSurfaceId &&
+    event.input?.count === 2, offlineOpenIndex + 1);
+  const offlineListIndex = eventIndex((event) => event.command === "list" &&
+    event.endpoint === initial.directClientEndpoint && event.status === 0 &&
+    (event.output?.result?.payload ?? event.output?.result)?.surfaces?.some((surface) =>
+      surface.surfaceId === offline.newSurfaceId &&
+      surface.topology?.windowLabel === null &&
+      JSON.stringify(surface.topology?.panes?.map((pane) => pane.paneLabel)) === "[null,null]"),
+  offlineSplitIndex + 1);
+  if (offlineOpenIndex < 0 || offlineSplitIndex < 0 || offlineListIndex < 0) {
+    throw new Error("linux_fresh_install_offline_local_raw_evidence_missing");
+  }
+  const resumedListIndex = eventIndex(phaseList(afterRestart), offlineListIndex + 1);
   if (resumedListIndex < 0) throw new Error("linux_fresh_install_post_restart_direct_list_missing");
   const currentReads = events.filter((event) => event.command === "read" && event.status === 0 &&
     event.output?.ok === true && event.output?.command === "read" && event.endpoint === null &&
@@ -361,7 +380,7 @@ function requireLinuxFreshInstallRawCliCoverage(stateSequence, rawCliEvidence) {
           paneId: initial.paneId,
         });
     })());
-  if (currentReads.length < 3 || currentReads[0].args.length === 0 ||
+  if (currentReads.length < 4 || currentReads[0].args.length === 0 ||
       events.findIndex((event) => event === currentReads[0]) <= pushIndex ||
       events.findIndex((event) => event === currentReads.at(-1)) <= resumedListIndex) {
     throw new Error("linux_fresh_install_current_content_read_evidence_missing");
@@ -384,13 +403,14 @@ function requireLinuxFreshInstallRawCliCoverage(stateSequence, rawCliEvidence) {
   const postDenialCaptureIndex = eventIndex(captureMatches(initial), rejectedPushIndex + 1);
   const resumedCaptureIndex = eventIndex(captureMatches(afterRestart), resumedListIndex + 1);
   if (initialCaptureIndex < 0 || initialCaptureIndex >= rejectedPushIndex ||
-      postDenialCaptureIndex < 0 || postDenialCaptureIndex >= resumedListIndex ||
+      postDenialCaptureIndex < 0 || postDenialCaptureIndex >= offlineOpenIndex ||
       resumedCaptureIndex < 0) {
     throw new Error("linux_fresh_install_direct_capture_target_mismatch");
   }
   const readIndices = currentReads.map((event) => events.findIndex((candidate) => candidate === event));
   if (!(readIndices.some((index) => index > pushIndex && index < rejectedPushIndex) &&
-        readIndices.some((index) => index > rejectedPushIndex && index < resumedListIndex) &&
+        readIndices.some((index) => index > rejectedPushIndex && index < offlineOpenIndex) &&
+        readIndices.some((index) => index > offlineListIndex && index < resumedListIndex) &&
         readIndices.some((index) => index > resumedListIndex))) {
     throw new Error("linux_fresh_install_current_read_phase_order_invalid");
   }
@@ -470,6 +490,26 @@ export function validateTightbeamFreshInstallState(stateSequence) {
   requireFreshInstallPhase(stateSequence.afterRestart, "fresh_install_after_restart", expected);
   const before = stateSequence.initial;
   const after = stateSequence.afterRestart;
+  const offline = stateSequence.offlineLocal;
+  if (!offline || offline.registryEndpointUnavailable !== true ||
+      offline.directClientEndpoint !== before.directClientEndpoint ||
+      offline.existingSurfaceId !== before.surfaceId ||
+      offline.existingWindowLabel !== before.windowLabel ||
+      offline.preservedContentId !== expected.contentId ||
+      typeof offline.newSurfaceId !== "string" || !offline.newSurfaceId ||
+      offline.newSurfaceId === before.surfaceId ||
+      offline.pendingWindowLabel !== null ||
+      !Array.isArray(offline.newPaneIds) || offline.newPaneIds.length !== 2 ||
+      new Set(offline.newPaneIds).size !== 2 ||
+      offline.newPaneIds.some((paneId) => !Number.isSafeInteger(paneId) || paneId < 1) ||
+      !Array.isArray(offline.pendingPaneLabels) || offline.pendingPaneLabels.length !== 2 ||
+      offline.pendingPaneLabels.some((label) => label !== null) ||
+      typeof offline.confirmedWindowLabel !== "string" || !offline.confirmedWindowLabel ||
+      !Array.isArray(offline.confirmedPaneLabels) || offline.confirmedPaneLabels.length !== 2 ||
+      new Set(offline.confirmedPaneLabels).size !== 2 ||
+      offline.confirmedPaneLabels.some((label) => !Number.isSafeInteger(label) || label < 1)) {
+    throw new Error("fresh_install_offline_local_open_split_unverified");
+  }
   const fleet = stateSequence.fleetPaneUniqueness;
   if (!fleet || fleet.firstClientId === fleet.secondClientId ||
       fleet.firstSurfaceId === fleet.secondSurfaceId ||
@@ -565,6 +605,12 @@ export function validateTightbeamFreshInstallState(stateSequence) {
     contentId: expected.contentId,
     databaseIdentity: before.databaseIdentity,
     mode: "fresh-install",
+    offlineLocal: {
+      newPaneIds: [...offline.newPaneIds],
+      newSurfaceId: offline.newSurfaceId,
+      pendingLabelsObserved: true,
+      registryEndpointUnavailable: true,
+    },
     registryReleaseWitnessEvents: {
       beforeRestart: [...registryShutdown.releaseWitnessEventsBeforeRestart],
       afterRestart: [...registryShutdown.releaseWitnessEventsAfterRestart],

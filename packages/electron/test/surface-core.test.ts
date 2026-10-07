@@ -3856,6 +3856,7 @@ test("pane number projections require exact registry confirmation", () => {
   assert.equal(core.panesList(surface.surfaceId).panes[0]?.paneLabel, null);
   assert.equal(core.pairState(surface.surfaceId).panes[0]?.paneLabel, null);
   assert.equal(core.publicTopologyState(surface.surfaceId).panes[0]?.paneLabel, null);
+  assert.equal(core.publicTopologyState(surface.surfaceId).windowLabel, null);
   assert.throws(() => core.confirmRegistryPaneLabels([{ ...assignment, panes: [{
     ...assignment.panes[0]!, paneLabel: 0,
   }] }]), /confirmation changed/);
@@ -3865,9 +3866,12 @@ test("pane number projections require exact registry confirmation", () => {
   assert.equal(core.panesList(surface.surfaceId).panes[0]?.paneLabel, 97);
   assert.equal(core.pairState(surface.surfaceId).panes[0]?.paneLabel, 97);
   assert.equal(core.publicTopologyState(surface.surfaceId).panes[0]?.paneLabel, 97);
+  core.applyWindowLabelOnly(surface.surfaceId, "a");
+  assert.equal(core.publicTopologyState(surface.surfaceId).windowLabel, "a");
 
   core.clearRegistryPaneConfirmations();
   assert.equal(core.panesList(surface.surfaceId).panes[0]?.paneLabel, null);
   assert.equal(core.pairState(surface.surfaceId).panes[0]?.paneLabel, null);
   assert.equal(core.publicTopologyState(surface.surfaceId).panes[0]?.paneLabel, null);
+  assert.equal(core.publicTopologyState(surface.surfaceId).windowLabel, "a");
 });
