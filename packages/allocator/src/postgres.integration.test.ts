@@ -1258,6 +1258,12 @@ test("iOS at-open source records ingest and replay to independent PostgreSQL con
   });
   assert.deepEqual(records.map((record) => record.kind), ["live_delta", "frame_commit"]);
   assert.deepEqual(records.map((record) => record.sourceSequence), ["1", "2"]);
+  const secondClient = {
+    ...records[0], clientId: "client-second-fixture", sourceEpoch: "b".repeat(32),
+    surfaceId: "sf_second", paneId: 2, frameId: "fr_second",
+    sourceSequence: "1", sourceEventId: "event-second", contentId: "content-second",
+  };
+  const expectedRecords = [...records, secondClient];
   const cluster = await startCluster();
   try {
     const recovery = await PostgresCustodyAdapter.initializeAbsentFleet(cluster.config, "alloc_annotation-ios");
@@ -1269,12 +1275,12 @@ test("iOS at-open source records ingest and replay to independent PostgreSQL con
     try {
       const journal = new AnnotationJournal(writer);
       cursors = [];
-      for (const record of records) cursors.push((await journal.ingest(record)).serverCursor);
-      assert.deepEqual(cursors.map((cursor) => cursor.sequence), ["1", "2"]);
+      for (const record of expectedRecords) cursors.push((await journal.ingest(record)).serverCursor);
+      assert.deepEqual(cursors.map((cursor) => cursor.sequence), ["1", "2", "3"]);
       const duplicate = await journal.ingest(records[1]);
       assert.equal(duplicate.duplicate, true);
       assert.deepEqual(duplicate.serverCursor, cursors[1]);
-      assert.equal((await writer.annotationInfo()).journalRecords, 2);
+      assert.equal((await writer.annotationInfo()).journalRecords, 3);
     } finally {
       await writer.release();
     }
@@ -1292,14 +1298,14 @@ test("iOS at-open source records ingest and replay to independent PostgreSQL con
       const firstLease = (firstOpen.payload as { leaseId: string }).leaseId;
       const secondLease = (secondOpen.payload as { leaseId: string }).leaseId;
       for (const consumer of [first, second]) {
-        for (const expected of records) {
+        for (const expected of expectedRecords) {
           const event = await consumer.waitEvent("annotation.record");
           const payload = event.payload as { record: Record<string, unknown> };
           assert.deepEqual(payload.record, expected);
         }
       }
       assert.equal((await first.request("annotation.ack", {
-        consumerId: "ios-first", leaseId: firstLease, throughCursor: cursors[1],
+        consumerId: "ios-first", leaseId: firstLease, throughCursor: cursors[2],
       })).ok, true);
       const secondAck = await second.request("annotation.ack", {
         consumerId: "ios-second", leaseId: secondLease, throughCursor: cursors[0],
