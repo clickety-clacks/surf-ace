@@ -247,7 +247,8 @@ export class AllocatorServer {
           return;
         }
         try {
-          if (registration.op !== "fleet.topology" && !this.custody.registrationReady) {
+          if (registration.op !== "fleet.topology"
+              && (!this.custody.registrationReady || this.authority.serveStatus !== "serving")) {
             // The registration queue serializes recovery with claims, independent of discovery probes.
             await this.authority.refreshReadiness();
           }
