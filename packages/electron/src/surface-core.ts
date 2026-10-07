@@ -202,8 +202,21 @@ export type PersistentSurfaceState = {
   lockless?: PersistentLocklessClientState;
   nextAdmissionAttemptSequence?: number;
   primarySurfaceId: string | null;
+  registryBinding?: PersistentRegistryBinding;
   surfaces?: PersistentSurfaceRecord[];
   version: 1;
+};
+
+export type PersistentRegistryBinding = {
+  allocatorId: string;
+  clientId: string;
+  fleetId: string;
+};
+
+export type ConfirmedRegistryClaim = {
+  panes: Array<{ paneId: string; paneLabel: number; paneLineageId: string }>;
+  surfaceId: string;
+  windowLabel: string;
 };
 
 type PersistentSurfaceRecord = {
@@ -755,6 +768,45 @@ export class SurfaceCore {
       nextAdmissionAttemptSequence: this.nextAdmissionAttemptSequence,
       surfaces: this.listSurfaces().map((surface) => serializeSurface(surface)),
     };
+  }
+
+  registryBinding(): PersistentRegistryBinding | null {
+    const binding = this.persistentState.registryBinding;
+    if (!binding) return null;
+    if (typeof binding.clientId !== "string" || !/^[A-Za-z0-9._:-]{1,128}$/.test(binding.clientId) ||
+        typeof binding.allocatorId !== "string" || !/^alloc_[A-Za-z0-9._:-]{3,64}$/.test(binding.allocatorId) ||
+        typeof binding.fleetId !== "string" || !/^[A-Za-z0-9._:-]{1,128}$/.test(binding.fleetId)) {
+      throw new SurfaceCoreError("invalid_payload", "Stored registry binding is invalid");
+    }
+    return structuredClone(binding);
+  }
+
+  bindRegistryIdentity(binding: PersistentRegistryBinding): void {
+    if (typeof binding.clientId !== "string" || !/^[A-Za-z0-9._:-]{1,128}$/.test(binding.clientId) ||
+        typeof binding.allocatorId !== "string" || !/^alloc_[A-Za-z0-9._:-]{3,64}$/.test(binding.allocatorId) ||
+        typeof binding.fleetId !== "string" || !/^[A-Za-z0-9._:-]{1,128}$/.test(binding.fleetId)) {
+      throw new SurfaceCoreError("invalid_payload", "Proposed registry binding is invalid");
+    }
+    const existing = this.registryBinding();
+    if (existing && (existing.clientId !== binding.clientId ||
+        existing.allocatorId !== binding.allocatorId || existing.fleetId !== binding.fleetId)) {
+      throw new SurfaceCoreError("invalid_payload", "Stored registry identity cannot be replaced implicitly");
+    }
+    this.persistentState.registryBinding = structuredClone(binding);
+  }
+
+  confirmedRegistryClaims(): ConfirmedRegistryClaim[] {
+    return this.listSurfaces().map((surface) => ({
+      panes: [...surface.panes.values()]
+        .filter((pane) => pane.paneLabel > 0)
+        .map((pane) => ({
+          paneId: String(pane.paneId), paneLabel: pane.paneLabel, paneLineageId: pane.paneLineageId,
+        }))
+        .sort((left, right) => left.paneId.localeCompare(right.paneId)),
+      surfaceId: surface.surfaceId,
+      windowLabel: surface.windowLabel,
+    })).filter((surface) => surface.panes.length > 0)
+      .sort((left, right) => left.surfaceId.localeCompare(right.surfaceId));
   }
 
   /**

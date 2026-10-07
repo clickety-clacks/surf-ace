@@ -387,6 +387,7 @@ struct SurfAceLocklessAuthorityState: Codable, Equatable, Sendable {
     var liveSurfaces: [String: SurfAceLocklessSurfaceMaterial]
     var pendingControllerRetentionReclamations: [SurfAceLocklessControllerRetentionReclamation]?
     var pendingTombstoneReclamations: [SurfAceLocklessTombstoneReclamation]?
+    var registryBinding: SurfAceRegistryBinding?
     var sceneSurfaceIds: [String: String]
     var scopes: [String: SurfAceLocklessConsumableScope]
     var sequences: SurfAceLocklessClientSequences
@@ -406,6 +407,7 @@ struct SurfAceLocklessAuthorityState: Codable, Equatable, Sendable {
             liveSurfaces: [:],
             pendingControllerRetentionReclamations: [],
             pendingTombstoneReclamations: [],
+            registryBinding: nil,
             sceneSurfaceIds: [:],
             scopes: [:],
             sequences: SurfAceLocklessClientSequences(
@@ -1044,6 +1046,32 @@ final class SurfAceLocklessTransactionCoordinator: @unchecked Sendable {
     func snapshot() async -> SurfAceLocklessAuthorityState {
         await withCheckedContinuation { continuation in
             queue.async { continuation.resume(returning: self.state) }
+        }
+    }
+
+    func registryBindingDurableSnapshot() async throws -> SurfAceLocklessAuthorityState {
+        try await withCheckedThrowingContinuation { continuation in
+            queue.async {
+                do {
+                    let stored = try self.store.load()
+                    if let binding = self.state.registryBinding {
+                        guard stored?.registryBinding == binding else {
+                            throw SurfAceRegistrationError.registryBindingPersistencePending
+                        }
+                    } else if let stored, stored.registryBinding != nil {
+                        var comparable = stored
+                        comparable.registryBinding = nil
+                        comparable.generation = self.state.generation
+                        guard comparable == self.state else {
+                            throw SurfAceRegistrationError.registryBindingPersistencePending
+                        }
+                        self.state = stored
+                    }
+                    continuation.resume(returning: self.state)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
         }
     }
 

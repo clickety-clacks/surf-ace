@@ -32,6 +32,49 @@ struct SurfAceRegistrationAssignment: Codable, Equatable, Sendable {
     }
 }
 
+struct SurfAceRegistryIdentity: Codable, Equatable, Sendable {
+    let allocatorId: String
+    let fleetId: String
+
+    var isValid: Bool {
+        allocatorId.range(of: #"^alloc_[A-Za-z0-9._:-]{3,64}$"#, options: .regularExpression) != nil &&
+        fleetId.range(of: #"^[A-Za-z0-9._:-]{1,128}$"#, options: .regularExpression) != nil
+    }
+}
+
+struct SurfAceRegistryBinding: Codable, Equatable, Sendable {
+    let allocatorId: String
+    let clientId: String
+    let fleetId: String
+
+    func matches(_ identity: SurfAceRegistryIdentity, clientId: String) -> Bool {
+        self.clientId == clientId && allocatorId == identity.allocatorId && fleetId == identity.fleetId
+    }
+}
+
+struct SurfAceProvisionedRegistryBinding: Codable, Equatable, Sendable {
+    let binding: SurfAceRegistryBinding
+    let confirmedClaims: [SurfAceRegistrationAssignment]
+
+    static func load(from directory: URL) throws -> Self? {
+        let url = directory.appendingPathComponent("registry-binding.provisioned.json")
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        return try JSONDecoder().decode(Self.self, from: Data(contentsOf: url))
+    }
+
+    static func confirmedClaims(_ state: SurfAceLocklessAuthorityState) -> [SurfAceRegistrationAssignment] {
+        state.liveSurfaces.values.sorted { $0.surfaceId < $1.surfaceId }.compactMap { surface in
+            let panes = surface.panes.values.filter { $0.paneLabel > 0 }.sorted { $0.paneId < $1.paneId }
+                .map { SurfAceRegistrationSurface.Pane(
+                    paneId: String($0.paneId), paneLineageId: $0.paneLineageId, paneLabel: $0.paneLabel
+                ) }
+            return panes.isEmpty ? nil : SurfAceRegistrationAssignment(
+                surfaceId: surface.surfaceId, windowLabel: surface.windowLabel, panes: panes
+            )
+        }
+    }
+}
+
 enum SurfAceRegistrationError: Error {
     case invalidResponse
     case paneClaimRejected(code: String?, message: String?)
@@ -39,6 +82,10 @@ enum SurfAceRegistrationError: Error {
     case noServer
     case stopped
     case topologyChanged
+    case registryIdentityMissing
+    case foreignRegistryIdentity
+    case legacyRegistryBindingPending
+    case registryBindingPersistencePending
 }
 
 struct SurfAceCentralRegistrationFailure: Error, LocalizedError {
@@ -63,6 +110,10 @@ private func surfAceRegistrationErrorDescription(_ error: Error) -> String {
         case .noServer: return "no_surf_ace_server"
         case .stopped: return "registration_stopped"
         case .topologyChanged: return "registration_topology_changed"
+        case .registryIdentityMissing: return "registry_identity_missing_or_invalid"
+        case .foreignRegistryIdentity: return "foreign_registry_identity"
+        case .legacyRegistryBindingPending: return "legacy_registry_binding_pending"
+        case .registryBindingPersistencePending: return "registry_binding_persistence_pending"
         }
     }
     if let urlError = error as? URLError {
@@ -90,6 +141,36 @@ enum SurfAceRegistrationWire {
     struct ErrorPayload: Decodable {
         let code: String?
         let message: String?
+    }
+
+    struct TopologyRequest: Encodable {
+        let id: String
+        let op = "fleet.topology"
+        let type = "request"
+        let v = 1
+        let sentAt = Int64(Date().timeIntervalSince1970 * 1000)
+    }
+
+    struct TopologyResponse: Decodable {
+        struct Payload: Decodable { let registryIdentity: SurfAceRegistryIdentity? }
+        let id: String
+        let op: String
+        let type: String
+        let v: Int
+        let ok: Bool
+        let payload: Payload?
+    }
+
+    static func topologyData(id: String) throws -> Data {
+        try JSONEncoder().encode(TopologyRequest(id: id))
+    }
+
+    static func registryIdentity(from data: Data, requestId: String) throws -> SurfAceRegistryIdentity {
+        let response = try JSONDecoder().decode(TopologyResponse.self, from: data)
+        guard response.id == requestId, response.op == "fleet.topology", response.type == "response",
+              response.v == 1, response.ok, let identity = response.payload?.registryIdentity,
+              identity.isValid else { throw SurfAceRegistrationError.registryIdentityMissing }
+        return identity
     }
 
     struct PaneClaimRequest: Encodable {
@@ -132,6 +213,7 @@ enum SurfAceRegistrationWire {
     struct Response: Decodable {
         struct Payload: Decodable {
             let clientId: String
+            let registryIdentity: SurfAceRegistryIdentity?
             let surfaces: [SurfAceRegistrationAssignment]
         }
         let id: String
@@ -174,7 +256,8 @@ enum SurfAceRegistrationWire {
         from data: Data,
         requestId: String,
         clientId: String,
-        surfaces: [SurfAceRegistrationSurface]
+        surfaces: [SurfAceRegistrationSurface],
+        expectedIdentity: SurfAceRegistryIdentity
     ) throws -> [SurfAceRegistrationAssignment] {
         let response = try JSONDecoder().decode(Response.self, from: data)
         guard response.id == requestId, response.op == "client.register" else {
@@ -187,6 +270,8 @@ enum SurfAceRegistrationWire {
             )
         }
         guard let payload = response.payload, payload.clientId == clientId,
+              let identity = payload.registryIdentity, identity.isValid,
+              identity == expectedIdentity,
               payload.surfaces.count == surfaces.count,
               Set(payload.surfaces.map(\.surfaceId)) == Set(surfaces.map(\.surfaceId)) else {
             throw SurfAceRegistrationError.invalidResponse
@@ -230,7 +315,9 @@ enum SurfAceRegistrationEndpoint {
 
 @MainActor
 protocol SurfAceRegistrationTransport: AnyObject {
-    func register(clientId: String, surfaces: [SurfAceRegistrationSurface]) async throws -> [SurfAceRegistrationAssignment]
+    func readRegistryIdentity() async throws -> SurfAceRegistryIdentity
+    func register(clientId: String, surfaces: [SurfAceRegistrationSurface],
+                  expectedIdentity: SurfAceRegistryIdentity) async throws -> [SurfAceRegistrationAssignment]
     func claimPaneLabel(clientId: String, surfaceId: String, paneId: Int64, paneLineageId: String) async throws -> Int64
     func close()
 }
@@ -254,7 +341,28 @@ final class SurfAceRegistrationWebSocket: SurfAceRegistrationTransport {
         socket.resume()
     }
 
-    func register(clientId: String, surfaces: [SurfAceRegistrationSurface]) async throws -> [SurfAceRegistrationAssignment] {
+    func readRegistryIdentity() async throws -> SurfAceRegistryIdentity {
+        let id = "rq_" + UUID().uuidString.replacingOccurrences(of: "-", with: "")
+        let timeout = Task { [socket] in
+            do {
+                try await Task.sleep(for: .seconds(2))
+                socket.cancel(with: .goingAway, reason: nil)
+            } catch { }
+        }
+        defer { timeout.cancel() }
+        try await socket.send(.data(SurfAceRegistrationWire.topologyData(id: id)))
+        let message = try await socket.receive()
+        let data: Data
+        switch message {
+        case .data(let value): data = value
+        case .string(let value): data = Data(value.utf8)
+        @unknown default: throw SurfAceRegistrationError.invalidResponse
+        }
+        return try SurfAceRegistrationWire.registryIdentity(from: data, requestId: id)
+    }
+
+    func register(clientId: String, surfaces: [SurfAceRegistrationSurface],
+                  expectedIdentity: SurfAceRegistryIdentity) async throws -> [SurfAceRegistrationAssignment] {
         let id = "rq_" + UUID().uuidString.replacingOccurrences(of: "-", with: "")
         let timeout = Task { [socket] in
             do {
@@ -271,7 +379,8 @@ final class SurfAceRegistrationWebSocket: SurfAceRegistrationTransport {
         case .string(let value): data = Data(value.utf8)
         @unknown default: throw SurfAceRegistrationError.invalidResponse
         }
-        return try SurfAceRegistrationWire.assignments(from: data, requestId: id, clientId: clientId, surfaces: surfaces)
+        return try SurfAceRegistrationWire.assignments(from: data, requestId: id, clientId: clientId,
+                                                        surfaces: surfaces, expectedIdentity: expectedIdentity)
     }
 
     func claimPaneLabel(clientId: String, surfaceId: String, paneId: Int64, paneLineageId: String) async throws -> Int64 {
@@ -332,7 +441,27 @@ final class SurfAceLocalNumericRegistrationWebSocket: SurfAceRegistrationTranspo
         self.url = url
     }
 
-    func register(clientId: String, surfaces: [SurfAceRegistrationSurface]) async throws -> [SurfAceRegistrationAssignment] {
+    func readRegistryIdentity() async throws -> SurfAceRegistryIdentity {
+        let timeout = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: .seconds(2))
+                self?.connection?.cancel()
+            } catch { }
+        }
+        defer { timeout.cancel() }
+        do {
+            try await connectIfNeeded()
+            let id = "rq_" + UUID().uuidString.replacingOccurrences(of: "-", with: "")
+            try await send(SurfAceRegistrationWire.topologyData(id: id))
+            return try SurfAceRegistrationWire.registryIdentity(from: await receive(), requestId: id)
+        } catch {
+            close()
+            throw error
+        }
+    }
+
+    func register(clientId: String, surfaces: [SurfAceRegistrationSurface],
+                  expectedIdentity: SurfAceRegistryIdentity) async throws -> [SurfAceRegistrationAssignment] {
         let timeout = Task { @MainActor [weak self] in
             do {
                 try await Task.sleep(for: .seconds(2))
@@ -347,7 +476,8 @@ final class SurfAceLocalNumericRegistrationWebSocket: SurfAceRegistrationTranspo
             let data = try SurfAceRegistrationWire.requestData(clientId: clientId, surfaces: surfaces, id: id)
             try await send(data)
             let response = try await receive()
-            return try SurfAceRegistrationWire.assignments(from: response, requestId: id, clientId: clientId, surfaces: surfaces)
+            return try SurfAceRegistrationWire.assignments(from: response, requestId: id, clientId: clientId,
+                                                            surfaces: surfaces, expectedIdentity: expectedIdentity)
         } catch {
             close()
             throw error
@@ -471,6 +601,7 @@ final class SurfAceCentralRegistration {
 
     typealias Snapshot = @MainActor () async throws -> [SurfAceRegistrationSurface]
     typealias Apply = @MainActor ([SurfAceRegistrationAssignment], [SurfAceRegistrationSurface]) async throws -> Void
+    typealias VerifyRegistry = @MainActor (SurfAceRegistryIdentity, [SurfAceRegistrationSurface]) async throws -> Void
     private let clientId: String
     private let configured: URL?
     private let discover: @MainActor () async -> [URL]
@@ -479,6 +610,7 @@ final class SurfAceCentralRegistration {
     private let transportFallbacks: @MainActor (URL) -> [URL]
     private let snapshot: Snapshot
     private let apply: Apply
+    private let verifyRegistry: VerifyRegistry
     private let onError: @MainActor (Error) -> Void
     private var selected: (url: URL, transport: any SurfAceRegistrationTransport)?
     private var loop: Task<Void, Never>?
@@ -527,6 +659,7 @@ final class SurfAceCentralRegistration {
          makeTransport: @escaping @MainActor (URL) -> any SurfAceRegistrationTransport = { SurfAceRegistrationTransportFactory.make(url: $0) },
          transportFallbacks: @escaping @MainActor (URL) -> [URL] = { _ in [] },
          snapshot: @escaping Snapshot, apply: @escaping Apply,
+         verifyRegistry: @escaping VerifyRegistry,
          onError: @escaping @MainActor (Error) -> Void = { _ in },
          onStatusChange: @escaping @MainActor (SurfAceCentralRegistrationStatus) -> Void = { _ in },
          onConnectionError: @escaping @MainActor (String?) -> Void = { _ in }) {
@@ -538,6 +671,7 @@ final class SurfAceCentralRegistration {
         self.transportFallbacks = transportFallbacks
         self.snapshot = snapshot
         self.apply = apply
+        self.verifyRegistry = verifyRegistry
         self.onError = onError
         self.onStatusChange = onStatusChange
         self.onConnectionError = onConnectionError
@@ -554,7 +688,11 @@ final class SurfAceCentralRegistration {
         let failures = FailureCollector()
         if let selected {
             do {
-                let assignments = try await selected.transport.register(clientId: clientId, surfaces: surfaces)
+                let identity = try await selected.transport.readRegistryIdentity()
+                try await verifyRegistry(identity, surfaces)
+                let assignments = try await selected.transport.register(
+                    clientId: clientId, surfaces: surfaces, expectedIdentity: identity
+                )
                 guard !stopped else { throw SurfAceRegistrationError.stopped }
                 try await apply(assignments, surfaces)
                 guard !stopped else { throw SurfAceRegistrationError.stopped }
@@ -628,6 +766,8 @@ final class SurfAceCentralRegistration {
         // consumed by this claim while either request is suspended.
         let transport = makeTransport(selected.url)
         defer { transport.close() }
+        let surfaces = try await snapshot()
+        try await verifyRegistry(try await transport.readRegistryIdentity(), surfaces)
         return try await transport.claimPaneLabel(
             clientId: clientId, surfaceId: surfaceId, paneId: paneId, paneLineageId: paneLineageId
         )
@@ -644,7 +784,11 @@ final class SurfAceCentralRegistration {
         if selected == nil { setStatus(.connecting) }
         let candidate = makeTransport(url)
         do {
-            let assignments = try await candidate.register(clientId: clientId, surfaces: surfaces)
+            let identity = try await candidate.readRegistryIdentity()
+            try await verifyRegistry(identity, surfaces)
+            let assignments = try await candidate.register(
+                clientId: clientId, surfaces: surfaces, expectedIdentity: identity
+            )
             guard !stopped else { throw SurfAceRegistrationError.stopped }
             try await apply(assignments, surfaces)
             guard !stopped else { throw SurfAceRegistrationError.stopped }
