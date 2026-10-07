@@ -1311,6 +1311,9 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
                     eventId: "ev_commit_window", payload: "{\"paneId\":\(paneId),\"contentId\":\"content-commit-window\",\"revision\":1,\"committedAt\":3}",
                     sentAt: 3, throughStrokeCount: 0
                 ))
+                try outbox.markDirectCommitAttempted(
+                    surfaceId: surfaceId, paneId: paneId, eventId: "ev_commit_window"
+                )
                 if directCommitDelivered {
                     try outbox.markDirectCommitDelivered(
                         surfaceId: surfaceId, paneId: paneId, eventId: "ev_commit_window"
