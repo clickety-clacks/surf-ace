@@ -48,6 +48,8 @@ struct SurfAceAnnotationOpenFrame: Codable, Equatable, Sendable {
     var frameId: String
     var contextKey: String
     var contentId: String
+    var contentType: String? = nil
+    var revision: Int? = nil
     var url: String?
     var scrollOffset: Offset
     var viewport: Viewport
@@ -58,6 +60,7 @@ struct SurfAceAnnotationOpenFrame: Codable, Equatable, Sendable {
     var failed: Bool
     var sourceStrokeCount: Int
     var publishedStrokeCount: Int
+    var commitRequested: Bool? = nil
 }
 
 struct SurfAceAnnotationSurfaceOutbox: Codable, Equatable, Sendable {
@@ -157,6 +160,7 @@ struct SurfAceAnnotationOutbox: Codable, Equatable, Sendable {
     }
 
     mutating func beginFrame(surfaceId: String, paneId: Int, contextKey: String, contentId: String,
+                             contentType: String? = nil, revision: Int? = nil,
                              url: String?, scrollOffset: SurfAceAnnotationOpenFrame.Offset,
                              viewport: SurfAceAnnotationOpenFrame.Viewport, openedAt: Int64,
                              image: String, maxBytes: Int = maximumBytes) throws -> SurfAceAnnotationOpenFrame {
@@ -165,7 +169,8 @@ struct SurfAceAnnotationOutbox: Codable, Equatable, Sendable {
         var surface = surfaces[surfaceId]!
         let frame = SurfAceAnnotationOpenFrame(
             frameId: "fr_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased(),
-            contextKey: contextKey, contentId: contentId, url: url, scrollOffset: scrollOffset,
+            contextKey: contextKey, contentId: contentId, contentType: contentType,
+            revision: revision, url: url, scrollOffset: scrollOffset,
             viewport: viewport, openedAt: openedAt, updatedAt: openedAt, image: image,
             strokes: [], failed: image.isEmpty, sourceStrokeCount: 0, publishedStrokeCount: 0
         )
@@ -219,6 +224,10 @@ struct SurfAceAnnotationOutbox: Codable, Equatable, Sendable {
 
     mutating func closeFrame(surfaceId: String, paneId: Int) {
         surfaces[surfaceId]?.openFrames?.removeValue(forKey: String(paneId))
+    }
+
+    mutating func setFrameCommitRequested(surfaceId: String, paneId: Int, requested: Bool) {
+        surfaces[surfaceId]?.openFrames?[String(paneId)]?.commitRequested = requested
     }
 
     mutating func lose(surfaceId: String, code: String) throws {

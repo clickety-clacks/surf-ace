@@ -174,6 +174,7 @@ final class SurfAceAnnotationOutboxTests: XCTestCase {
         )
         try outbox.recordStroke(surfaceId: surfaceId, paneId: 1, stroke: stroke)
         outbox.markFramePublished(surfaceId: surfaceId, paneId: 1)
+        outbox.setFrameCommitRequested(surfaceId: surfaceId, paneId: 1, requested: true)
         let restored = try JSONDecoder().decode(SurfAceAnnotationOutbox.self,
                                                 from: JSONEncoder().encode(outbox))
         let open = try XCTUnwrap(restored.openFrame(surfaceId: surfaceId, paneId: 1))
@@ -181,6 +182,7 @@ final class SurfAceAnnotationOutboxTests: XCTestCase {
         XCTAssertEqual(open.image, frame.image)
         XCTAssertEqual(open.strokes, [stroke])
         XCTAssertEqual(open.publishedStrokeCount, 1)
+        XCTAssertEqual(open.commitRequested, true)
         XCTAssertEqual(try outbox.beginFrame(
             surfaceId: surfaceId, paneId: 1, contextKey: "content-1", contentId: "content-1",
             url: nil, scrollOffset: .init(x: 0, y: 0),
