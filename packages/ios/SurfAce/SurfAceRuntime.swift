@@ -4459,10 +4459,14 @@ final class SurfAceRuntime {
             let directEvent = await self.stageAnnotationDirectFlush(
                 surfaceId: surfaceId, paneId: paneId, strokes: strokes, payload: payload
             )
+            let eventPayload = directEvent.flatMap(Self.annotationDirectPayload) ?? payload
+            let eventStrokeIds = Set((eventPayload["strokes"] as? [[String: Any]] ?? [])
+                .compactMap { $0["strokeId"] as? String })
+            let eventStrokes = strokes.filter { eventStrokeIds.contains($0.strokeId) }
             await self.publishAnnotationDelta(surfaceId: surfaceId, paneId: paneId,
-                                              strokes: strokes, flushPayload: payload)
+                                              strokes: eventStrokes, flushPayload: eventPayload)
             let succeeded = await self.sendEventAsync(
-                surfaceId: surfaceId, op: "event.drawing_flush", payload: payload,
+                surfaceId: surfaceId, op: "event.drawing_flush", payload: eventPayload,
                 sentAt: directEvent?.sentAt, eventId: directEvent?.eventId
             )
             if succeeded, let directEvent {
@@ -4473,8 +4477,7 @@ final class SurfAceRuntime {
             guard let pane = self.pane(surfaceId: surfaceId, paneId: paneId) else { return }
             pane.isDrawingFlushSending = false
             if succeeded {
-                let flushedIds = Set(strokes.map(\.strokeId))
-                pane.pendingFlushStrokes.removeAll { flushedIds.contains($0.strokeId) }
+                pane.pendingFlushStrokes.removeAll { eventStrokeIds.contains($0.strokeId) }
                 pane.deliveredClosedFrameCount += 1
                 pane.firstPendingStrokeAt = pane.pendingFlushStrokes.first?.points.first?.timestamp
                 pane.lastPendingStrokeAt = pane.pendingFlushStrokes.last?.points.last?.timestamp
@@ -4564,6 +4567,12 @@ final class SurfAceRuntime {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return formatter.string(from: Date())
+    }
+
+    private static func annotationDirectPayload(_ event: SurfAceAnnotationDirectEvent)
+        -> [String: Any]? {
+        guard let data = event.payload.data(using: .utf8) else { return nil }
+        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
     }
 
     private func stageAnnotationDirectFlush(surfaceId: String, paneId: Int,
@@ -4696,8 +4705,9 @@ final class SurfAceRuntime {
             let directEvent = await stageAnnotationDirectCommit(
                 surfaceId: surfaceId, paneId: paneId, payload: payload
             )
+            let eventPayload = directEvent.flatMap(Self.annotationDirectPayload) ?? payload
             let delivered = await sendEventAsync(
-                surfaceId: surfaceId, op: "event.annotation_committed", payload: payload,
+                surfaceId: surfaceId, op: "event.annotation_committed", payload: eventPayload,
                 sentAt: directEvent?.sentAt, eventId: directEvent?.eventId
             )
             var durableBoundary = false
