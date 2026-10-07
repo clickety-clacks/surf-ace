@@ -294,6 +294,39 @@ final class SurfAceAnnotationOutboxTests: XCTestCase {
         XCTAssertNil(restored.openFrame(surfaceId: surfaceId, paneId: 1)?.pendingDirectCommit)
         XCTAssertEqual(restored.openFrame(surfaceId: surfaceId, paneId: 1)?.directCommitDelivered, true)
     }
+
+    func testProvenDirectCommitCannotReuseFrameWhileSourceFinalizationRetries() throws {
+        var outbox = try SurfAceAnnotationOutbox(clientId: "client-1", sourceEpoch: sourceEpoch)
+        let first = try outbox.beginFrame(
+            surfaceId: surfaceId, paneId: 1, contextKey: "content-1", contentId: "content-1",
+            url: nil, scrollOffset: .init(x: 0, y: 0),
+            viewport: .init(width: 2, height: 2, scale: 1), openedAt: 1, image: "aW1hZ2U="
+        )
+        outbox.setFrameCommitRequested(surfaceId: surfaceId, paneId: 1, requested: true)
+        let commit = SurfAceAnnotationDirectEvent(
+            eventId: "ev_commit", payload: "{}", sentAt: 2, throughStrokeCount: 0
+        )
+        try outbox.stageDirectCommit(surfaceId: surfaceId, paneId: 1, event: commit)
+        try outbox.markDirectCommitDelivered(surfaceId: surfaceId, paneId: 1,
+                                             eventId: commit.eventId)
+        let durable = try JSONDecoder().decode(SurfAceAnnotationOutbox.self,
+                                                from: JSONEncoder().encode(outbox))
+        var recovered = durable
+        XCTAssertThrowsError(try recovered.beginFrame(
+            surfaceId: surfaceId, paneId: 1, contextKey: "content-1", contentId: "content-1",
+            url: nil, scrollOffset: .init(x: 0, y: 0),
+            viewport: .init(width: 2, height: 2, scale: 1), openedAt: 3, image: "bmV3"
+        ))
+        XCTAssertEqual(recovered.openFrame(surfaceId: surfaceId, paneId: 1),
+                       durable.openFrame(surfaceId: surfaceId, paneId: 1))
+        recovered.closeFrame(surfaceId: surfaceId, paneId: 1)
+        let next = try recovered.beginFrame(
+            surfaceId: surfaceId, paneId: 1, contextKey: "content-1", contentId: "content-1",
+            url: nil, scrollOffset: .init(x: 0, y: 0),
+            viewport: .init(width: 2, height: 2, scale: 1), openedAt: 3, image: "bmV3"
+        )
+        XCTAssertNotEqual(next.frameId, first.frameId)
+    }
 }
 
 @MainActor

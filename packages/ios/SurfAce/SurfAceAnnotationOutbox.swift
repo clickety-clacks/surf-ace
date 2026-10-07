@@ -198,7 +198,14 @@ struct SurfAceAnnotationOutbox: Codable, Equatable, Sendable {
                              viewport: SurfAceAnnotationOpenFrame.Viewport, openedAt: Int64,
                              image: String, maxBytes: Int = maximumBytes) throws -> SurfAceAnnotationOpenFrame {
         try ensureSurface(surfaceId, maxBytes: maxBytes, maxRecords: Self.maximumRecords)
-        if let existing = openFrame(surfaceId: surfaceId, paneId: paneId) { return existing }
+        if let existing = openFrame(surfaceId: surfaceId, paneId: paneId) {
+            // Once direct clients have seen the explicit commit, a later stroke
+            // must never join this frame while source finalization retries.
+            guard existing.directCommitDelivered != true else {
+                throw SurfAceAnnotationOutboxError.invalidState
+            }
+            return existing
+        }
         var surface = surfaces[surfaceId]!
         let frame = SurfAceAnnotationOpenFrame(
             frameId: "fr_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased(),

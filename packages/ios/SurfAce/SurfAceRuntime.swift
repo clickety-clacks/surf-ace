@@ -4919,7 +4919,8 @@ final class SurfAceRuntime {
                     (frame.deliveredDirectStrokeCount ?? 0) == frame.sourceStrokeCount else {
                     continue
                 }
-                if annotationReentryRequested.contains("\(surfaceId):\(paneId)") {
+                if frame.directCommitDelivered != true &&
+                    annotationReentryRequested.contains("\(surfaceId):\(paneId)") {
                     continue
                 }
                 if frame.directCommitDelivered != true {
