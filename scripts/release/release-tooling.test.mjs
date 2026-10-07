@@ -2969,7 +2969,7 @@ test("v0.2.7 standalone specification and release gates bind the product and all
   const skill = await fs.readFile(path.join(repository, "integrations/tightbeam/skills/surf-ace/SKILL.md"), "utf8");
   const workflowPath = path.join(repository, ".github/workflows/release-tightbeam.yml");
   const workflow = await fs.readFile(workflowPath, "utf8");
-  assert.match(specification, /Proposed product source: tag/);
+  assert.match(specification, /Product source: tag/);
   assert.match(specification, /e7da2559d7c7e680a22a986478dff7e97a5f771b/);
   assert.match(specification, /No old-version participant/);
   assert.match(specification, /surf-ace-release-tooling-v0\.2\.7/);
