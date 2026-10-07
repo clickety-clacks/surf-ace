@@ -55,6 +55,54 @@ final class SurfAceHTTPServerTests: XCTestCase {
         await secondServer.stop()
     }
 
+    func testIsolatedLoopbackCannotCoBindWildcardListenerOnSamePort() async throws {
+        guard ProcessInfo.processInfo.environment["SURF_ACE_XCTEST_HOST_NO_AUTOSTART"] == "1" else {
+            XCTFail("The wildcard collision fixture requires the isolated XCTest plan")
+            return
+        }
+
+        let parameters = NWParameters.tcp
+        parameters.allowLocalEndpointReuse = true
+        parameters.requiredInterfaceType = .loopback
+        parameters.requiredLocalEndpoint = .hostPort(
+            host: .ipv4(try XCTUnwrap(IPv4Address("0.0.0.0"))),
+            port: .any
+        )
+        let wildcardListener = try NWListener(using: parameters)
+        let wildcardReady = expectation(description: "wildcard listener restricted to loopback is ready")
+        wildcardListener.newConnectionHandler = { $0.cancel() }
+        wildcardListener.stateUpdateHandler = { state in
+            switch state {
+            case .ready:
+                wildcardReady.fulfill()
+            case .failed(let error):
+                XCTFail("Loopback-restricted wildcard fixture failed: \(error)")
+                wildcardReady.fulfill()
+            default:
+                break
+            }
+        }
+        wildcardListener.start(queue: DispatchQueue(label: "SurfAceTests.wildcardLoopback"))
+        defer { wildcardListener.cancel() }
+        await fulfillment(of: [wildcardReady], timeout: 5)
+        let port = try XCTUnwrap(wildcardListener.port?.rawValue)
+
+        let contender = SurfAceHTTPServer()
+        do {
+            _ = try await contender.startForTesting(
+                port: port,
+                httpHandler: { _ in HTTPServerResponse.empty(statusCode: 200) },
+                webSocketHandler: { _ in }
+            )
+            XCTFail("Loopback test listener co-bound a loopback-restricted wildcard listener")
+        } catch let error as NWError where error == .posix(.EADDRINUSE) {
+            // The wildcard incumbent holds the port; the no-reuse test listener fails closed.
+        } catch {
+            XCTFail("Unexpected loopback collision error: \(error)")
+        }
+        await contender.stop()
+    }
+
     func testStartWithFallbackBindsNextAvailablePortWhenPreferredPortIsInUse() async throws {
         let firstServer = SurfAceHTTPServer()
         let secondServer = SurfAceHTTPServer()
