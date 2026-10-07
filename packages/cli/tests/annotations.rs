@@ -1,8 +1,10 @@
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::io::{BufRead, BufReader};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -273,6 +275,60 @@ fn foreground_watcher_preserves_ack_written_by_separate_process() {
     let state: Value = serde_json::from_slice(&std::fs::read(state_file).unwrap()).unwrap();
     assert_eq!(state["ackCursor"], format!("ann1:{EPOCH}:1"));
     assert_eq!(state["lastDeliveredCursor"], format!("ann1:{EPOCH}:2"));
+}
+
+#[test]
+fn foreground_watcher_reports_retirement_after_another_process_persists_it() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let root = TempDir::new().unwrap();
+    let (retired_tx, retired_rx) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut watch_socket = accept(stream).unwrap();
+        hello(&mut watch_socket);
+        let watch = request(&mut watch_socket, "annotation.watch");
+        respond(&mut watch_socket, &watch, json!({"consumerId":"reviewer",
+            "leaseId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","ackCursor":null,
+            "initialFromCursor":{"epoch":EPOCH,"sequence":"1"},
+            "availableFromCursor":null,"headCursor":null,"historyCompleteSinceStart":true,
+            "limits":{"replayPolicy":{"targetAcknowledgedHistoryDays":30}}}));
+        let (stream, _) = listener.accept().unwrap();
+        let mut retire_socket = accept(stream).unwrap();
+        hello(&mut retire_socket);
+        let retire = request(&mut retire_socket, "annotation.consumer.retire");
+        respond(&mut retire_socket, &retire, json!({"consumerId":"reviewer",
+            "retired":true,"expectedAckCursor":null,
+            "discardedFromCursor":null,"discardedThroughCursor":null}));
+        retired_rx.recv().unwrap();
+        watch_socket.send(Message::Text(json!({"v":1,"type":"event",
+            "op":"annotation.consumer_retired","eventId":"retired","sentAt":2,
+            "payload":{"consumerId":"reviewer","retired":true,
+            "expectedAckCursor":null,"discardedFromCursor":null,
+            "discardedThroughCursor":null}}).to_string().into())).unwrap();
+    });
+    let registry = format!("ws://{address}");
+    let common = ["--registry", registry.as_str(), "--state-root",
+        root.path().to_str().unwrap(), "annotations"];
+    let mut watcher = Command::new(cli_binary()).args(common)
+        .args(["watch", "--consumer-id", "reviewer"])
+        .stdout(Stdio::piped()).spawn().unwrap();
+    let mut lines = BufReader::new(watcher.stdout.take().unwrap()).lines();
+    let subscription: Value = serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
+    assert_eq!(subscription["type"], "annotation.subscription");
+    let retired = Command::new(cli_binary()).args(common)
+        .args(["retire", "--consumer-id", "reviewer", "--expect-ack", "none",
+            "--discard-unacknowledged"]).output().unwrap();
+    assert!(retired.status.success(), "{}", String::from_utf8_lossy(&retired.stdout));
+    retired_tx.send(()).unwrap();
+    let terminal: Value = serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
+    assert_eq!(terminal["op"], "annotation.consumer_retired");
+    assert!(watcher.wait().unwrap().success());
+    server.join().unwrap();
+    let state: Value = serde_json::from_slice(
+        &std::fs::read(listener_path(root.path(), "reviewer")).unwrap()).unwrap();
+    assert_eq!(state["retired"], true);
+    assert_eq!(state["leaseId"], Value::Null);
 }
 
 #[test]

@@ -560,15 +560,22 @@ pub fn run(arguments: &[String]) -> Result<(), AnnotationError> {
                     .get("payload")
                     .ok_or_else(|| AnnotationError::protocol("event.payload"))?;
                 let store = StateStore::open(&invocation.state_root, &invocation.consumer_id)?;
-                let mut stored = store
-                    .load()?
-                    .ok_or_else(|| AnnotationError::protocol("listener-state"))?;
-                if stored.lease_id != active_lease {
+                let terminal = op == "annotation.lease_replaced" || op == "annotation.consumer_retired";
+                let stored = store.load()?;
+                if stored.as_ref().is_none_or(|state| state.lease_id != active_lease) {
+                    // Another CLI invocation can persist the replacement or retirement
+                    // before this foreground listener reads its terminal wire event.
+                    // Report that event without overwriting the newer local state.
+                    if terminal {
+                        emit(output)?;
+                        return Ok(());
+                    }
                     return Err(AnnotationError {
                         code: "annotation_consumer_lease_stale".into(),
                         details: json!({}),
                     });
                 }
+                let mut stored = stored.expect("checked above");
                 match op.as_str() {
                     "annotation.record" => {
                         stored.last_delivered_cursor = Some(cursor_text(
@@ -596,7 +603,7 @@ pub fn run(arguments: &[String]) -> Result<(), AnnotationError> {
                 store.save(&stored)?;
                 drop(store);
                 emit(output)?;
-                if op == "annotation.lease_replaced" || op == "annotation.consumer_retired" {
+                if terminal {
                     return Ok(());
                 }
             }
