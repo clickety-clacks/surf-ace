@@ -469,7 +469,7 @@ final class SurfAceRuntime {
             self.identity = identity
             self.fingerprint = identity.fingerprint
         } catch {
-            self.endpointError = "Identity init failed: \(error.localizedDescription)"
+            self.endpointError = "Identity init failed: \(String(reflecting: error))"
         }
 
         loadIdentityMapping()
