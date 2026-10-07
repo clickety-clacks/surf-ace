@@ -74,6 +74,7 @@ struct SurfAceAnnotationOpenFrame: Codable, Equatable, Sendable {
     var deliveredDirectStrokeCount: Int? = nil
     var pendingDirectCommit: SurfAceAnnotationDirectEvent? = nil
     var directCommitDelivered: Bool? = nil
+    var lastSourceViewport: String? = nil
 }
 
 struct SurfAceAnnotationSurfaceOutbox: Codable, Equatable, Sendable {
@@ -206,12 +207,14 @@ struct SurfAceAnnotationOutbox: Codable, Equatable, Sendable {
     }
 
     mutating func recordStroke(surfaceId: String, paneId: Int,
-                               stroke: SurfAceAnnotationFrameStroke) throws {
+                               stroke: SurfAceAnnotationFrameStroke,
+                               sourceViewport: String? = nil) throws {
         guard var surface = surfaces[surfaceId], var frame = surface.openFrames?[String(paneId)] else {
             throw SurfAceAnnotationOutboxError.invalidState
         }
         if frame.strokes.contains(where: { $0.strokeId == stroke.strokeId }) { return }
         frame.sourceStrokeCount += 1
+        if let sourceViewport { frame.lastSourceViewport = sourceViewport }
         if !frame.failed && !stroke.points.isEmpty {
             frame.strokes.append(stroke)
             frame.updatedAt = max(frame.updatedAt, stroke.endedAt)

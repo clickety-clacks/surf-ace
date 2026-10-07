@@ -1207,6 +1207,89 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         XCTAssertNil(recovered?.openFrame(surfaceId: surfaceId, paneId: paneId))
     }
 
+    func testCommitRequestBeforeFlushStagingRecoversDurableStroke() async throws {
+        let defaults = isolatedUserDefaults()
+        let stateURL = try locklessStateURL()
+        let registry = try XCTUnwrap(URL(string: "ws://127.0.0.1:29999"))
+        let first = SurfAceRuntime(
+            userDefaults: defaults, locklessStateURL: stateURL,
+            configuredRegistryURL: registry, annotationClientId: "client-ios-unstaged",
+            enableFleetDiscovery: false
+        )
+        await first.start()
+        let registered = await first.registerSurfaceForScene(sceneKey: "unstaged")
+        let surface = try XCTUnwrap(registered)
+        let surfaceId = surface.surfaceId
+        let paneId = try XCTUnwrap(surface.panes.first?.paneId)
+        let adapter = try first.locklessAuthorityForLocalMutation()
+        let stroke = SurfAceStroke(strokeId: "stroke-unstaged", points: [
+            .init(x: 1, y: 1, pressure: 0.5, timestamp: 10),
+            .init(x: 2, y: 2, pressure: 0.5, timestamp: 20),
+        ], tool: "pencil")
+        let strokeJSON = try JSONDecoder().decode(
+            SurfAceLocklessJSON.self, from: JSONEncoder().encode(stroke)
+        )
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 2, height: 2)).pngData { _ in
+            UIColor.white.setFill()
+            UIRectFill(CGRect(x: 0, y: 0, width: 2, height: 2))
+        }.base64EncodedString()
+        let viewport = "{\"scrollOffset\":{\"x\":0,\"y\":0},\"visibleRect\":{\"x\":0,\"y\":0,\"width\":2,\"height\":2},\"contentSize\":{\"width\":2,\"height\":2},\"zoomLevel\":1}"
+        _ = try await adapter.commitLocalMutation(operation: "test.unstaged.frame") { state, _ in
+            var live = try XCTUnwrap(state.liveSurfaces[surfaceId])
+            var pane = try XCTUnwrap(live.panes[String(paneId)])
+            pane.history.visible.contentId = "content-unstaged"
+            pane.history.visible.contentType = "html"
+            pane.history.visible.annotations = .object([
+                "drawingData": .string(""),
+                "strokesById": .object([stroke.strokeId: strokeJSON]),
+            ])
+            live.panes[String(paneId)] = pane
+            state.liveSurfaces[surfaceId] = live
+            var outbox = try XCTUnwrap(state.annotationPublisher)
+            _ = try outbox.beginFrame(
+                surfaceId: surfaceId, paneId: paneId,
+                contextKey: "content-unstaged", contentId: "content-unstaged",
+                contentType: "html", revision: 1, url: nil,
+                scrollOffset: .init(x: 0, y: 0),
+                viewport: .init(width: 2, height: 2, scale: 1), openedAt: 10, image: image
+            )
+            try outbox.recordStroke(surfaceId: surfaceId, paneId: paneId, stroke: .init(
+                strokeId: stroke.strokeId, points: [.init(x: 1, y: 1, pressure: nil)],
+                bbox: .init(x: 1, y: 1, width: 1, height: 1), startedAt: 10, endedAt: 20
+            ), sourceViewport: viewport)
+            outbox.setFrameCommitRequested(surfaceId: surfaceId, paneId: paneId, requested: true)
+            state.annotationPublisher = outbox
+            return .object([:])
+        }
+        XCTAssertNil((await adapter.snapshot()).annotationPublisher?
+            .openFrame(surfaceId: surfaceId, paneId: paneId)?.pendingDirectFlush)
+        await first.stop()
+
+        let restarted = SurfAceRuntime(
+            userDefaults: defaults, locklessStateURL: stateURL,
+            configuredRegistryURL: registry, annotationClientId: "client-ios-unstaged",
+            enableFleetDiscovery: false
+        )
+        addTeardownBlock { await restarted.stop() }
+        await restarted.start()
+        let recoveredAdapter = try restarted.locklessAuthorityForLocalMutation()
+        for _ in 0..<100 {
+            if (await recoveredAdapter.snapshot()).annotationPublisher?
+                .surfaces[surfaceId]?.fifo.count == 2 { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let recovered = await recoveredAdapter.snapshot().annotationPublisher
+        let records = try XCTUnwrap(recovered?.surfaces[surfaceId]?.fifo).map { entry in
+            try XCTUnwrap(JSONSerialization.jsonObject(with: Data(entry.canonical.utf8))
+                as? [String: Any])
+        }
+        XCTAssertEqual(records.map { $0["kind"] as? String }, ["live_delta", "frame_commit"])
+        let delta = try XCTUnwrap(records.first?["payload"] as? [String: Any])
+        XCTAssertEqual((delta["strokes"] as? [[String: Any]])?.first?["strokeId"] as? String,
+                       stroke.strokeId)
+        XCTAssertNil(recovered?.openFrame(surfaceId: surfaceId, paneId: paneId))
+    }
+
     func testLocklessZeroLiveSurfaceRestoresExactSurfaceAndPaneIdentity() async throws {
         let runtime = SurfAceRuntime(
             userDefaults: isolatedUserDefaults(),

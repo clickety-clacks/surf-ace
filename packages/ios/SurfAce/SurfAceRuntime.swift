@@ -1704,6 +1704,8 @@ final class SurfAceRuntime {
             )
             let sourceImage = background?.imageBase64 ?? ""
             let sourceStrokes = strokes.map(Self.annotationFrameStroke)
+            let sourceViewportJSON = try JSONEncoder().encode(sourcePane.lastViewport)
+            let sourceViewportText = String(decoding: sourceViewportJSON, as: UTF8.self)
             let serializedStrokes = try Self.locklessJSON(
                 Dictionary(uniqueKeysWithValues: strokes.map { ($0.strokeId, $0) })
             )
@@ -1740,7 +1742,8 @@ final class SurfAceRuntime {
                         )
                         for sourceStroke in sourceStrokes {
                             try publisher.recordStroke(surfaceId: surfaceId, paneId: paneId,
-                                                       stroke: sourceStroke)
+                                                       stroke: sourceStroke,
+                                                       sourceViewport: sourceViewportText)
                         }
                     } catch {
                         // Publisher capacity cannot block the direct client stroke mutation.
@@ -4592,7 +4595,7 @@ final class SurfAceRuntime {
               let serialized = String(data: data, encoding: .utf8) else { return nil }
         let sourceViewport: String? = pane(surfaceId: surfaceId, paneId: paneId)
             .flatMap { try? JSONEncoder().encode($0.lastViewport) }
-            .flatMap { String(data: $0, encoding: .utf8) }
+            .flatMap { String(data: $0, encoding: .utf8) } ?? frame.lastSourceViewport
         let event = SurfAceAnnotationDirectEvent(
             eventId: randomHex(prefix: "ev", byteCount: 8), payload: serialized,
             sentAt: timestampNow(),
@@ -4854,10 +4857,25 @@ final class SurfAceRuntime {
             for (paneKey, initialFrame) in surface.openFrames ?? [:]
                 where initialFrame.commitRequested == true {
                 guard let paneId = Int(paneKey) else { continue }
-                if let stagedFlush = initialFrame.pendingDirectFlush {
+                let stagedFlush: SurfAceAnnotationDirectEvent?
+                if let pending = initialFrame.pendingDirectFlush {
+                    stagedFlush = pending
+                } else if (initialFrame.deliveredDirectStrokeCount ?? 0) < initialFrame.sourceStrokeCount {
+                    stagedFlush = await stageRecoveredAnnotationDirectFlush(
+                        adapter: adapter, state: state, surfaceId: surfaceId,
+                        paneId: paneId, frame: initialFrame
+                    )
+                } else {
+                    stagedFlush = nil
+                }
+                if let stagedFlush {
+                    guard let currentFrame = await adapter.snapshot().annotationPublisher?
+                        .openFrame(surfaceId: surfaceId, paneId: paneId),
+                        currentFrame.frameId == initialFrame.frameId,
+                        currentFrame.commitRequested == true else { continue }
                     guard await publishStagedAnnotationDelta(
                         surfaceId: surfaceId, paneId: paneId,
-                        frame: initialFrame, event: stagedFlush
+                        frame: currentFrame, event: stagedFlush
                     ), let payload = Self.annotationDirectPayload(stagedFlush) else { continue }
                     let sent = await sendEventAsync(
                         surfaceId: surfaceId, op: "event.drawing_flush", payload: payload,
@@ -4901,6 +4919,65 @@ final class SurfAceRuntime {
                     contentType: pane?.history.visible.contentType ?? frame.contentType
                 )
             }
+        }
+    }
+
+    private func stageRecoveredAnnotationDirectFlush(
+        adapter: SurfAceLocklessRuntimeAdapter, state: SurfAceLocklessAuthorityState,
+        surfaceId: String, paneId: Int, frame: SurfAceAnnotationOpenFrame
+    ) async -> SurfAceAnnotationDirectEvent? {
+        let delivered = frame.deliveredDirectStrokeCount ?? 0
+        guard !frame.failed, frame.strokes.count == frame.sourceStrokeCount,
+              delivered < frame.sourceStrokeCount,
+              let viewport = frame.lastSourceViewport,
+              let authorityPane = state.liveSurfaces[surfaceId]?.panes[String(paneId)],
+              authorityPane.history.visible.contentId == frame.contentId,
+              case .object(let annotations) = authorityPane.history.visible.annotations,
+              let strokeJSON = annotations["strokesById"],
+              let decoded = try? JSONDecoder().decode([String: SurfAceStroke].self,
+                                                       from: JSONEncoder().encode(strokeJSON)) else {
+            surfAceServerRuntimeLog("event=annotation_unstaged_flush_unavailable \(surfAceDiagnosticFields([("frame_id", frame.frameId)]))")
+            return nil
+        }
+        let ids = frame.strokes.dropFirst(delivered).map(\.strokeId)
+        let strokes = ids.compactMap { decoded[$0] }
+        guard strokes.count == ids.count, let first = strokes.first, let last = strokes.last else {
+            surfAceServerRuntimeLog("event=annotation_unstaged_strokes_unavailable \(surfAceDiagnosticFields([("frame_id", frame.frameId)]))")
+            return nil
+        }
+        let config = SurfAceDrawingFlushConfig.default
+        let payload: [String: Any] = [
+            "paneId": paneId, "contentId": frame.contentId,
+            "revision": frame.revision ?? 0,
+            "flushId": randomHex(prefix: "fl", byteCount: 8),
+            "flushReason": "idle_window", "idleWindowMs": config.idleWindowMs,
+            "maxIntervalMs": config.maxIntervalMs,
+            "strokes": jsonObject(fromEncodable: strokes) ?? [],
+            "strokeCount": strokes.count,
+            "pointsCount": strokes.reduce(0) { $0 + $1.points.count },
+            "firstStrokeAt": first.points.first?.timestamp ?? frame.openedAt,
+            "lastStrokeAt": last.points.last?.timestamp ?? frame.updatedAt,
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload),
+              let serialized = String(data: data, encoding: .utf8) else { return nil }
+        let event = SurfAceAnnotationDirectEvent(
+            eventId: randomHex(prefix: "ev", byteCount: 8), payload: serialized,
+            sentAt: timestampNow(), throughStrokeCount: frame.sourceStrokeCount,
+            sourceViewport: viewport
+        )
+        do {
+            return try await adapter.transactAnnotationPublisher(surfaceId: surfaceId) { outbox in
+                guard let current = outbox.openFrame(surfaceId: surfaceId, paneId: paneId),
+                      current.frameId == frame.frameId, current.commitRequested == true,
+                      current.pendingDirectFlush == nil,
+                      (current.deliveredDirectStrokeCount ?? 0) == delivered,
+                      current.sourceStrokeCount == frame.sourceStrokeCount else { return nil }
+                try outbox.stageDirectFlush(surfaceId: surfaceId, paneId: paneId, event: event)
+                return event
+            }
+        } catch {
+            surfAceServerRuntimeLog("event=annotation_unstaged_flush_stage_failed \(surfAceDiagnosticFields([("error", String(describing: error))]))")
+            return nil
         }
     }
 
