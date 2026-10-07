@@ -366,6 +366,8 @@ final class SurfAceRuntime {
     @ObservationIgnored private var annotationStrokeTasks: [String: Task<Void, Never>] = [:]
     @ObservationIgnored private var annotationModeTasks: [String: Task<Void, Never>] = [:]
     @ObservationIgnored private var annotationCommitTasks: [String: Task<Void, Never>] = [:]
+    @ObservationIgnored private var annotationRecoveryTask: Task<Void, Never>?
+    @ObservationIgnored private var annotationReentryRequested: Set<String> = []
     @ObservationIgnored private var centralConnectionError: String?
     @ObservationIgnored private var confirmedPaneLabels: [String: Int64] = [:]
     private var centralConnectionState: SurfAceConnectionBarState = .disconnected
@@ -529,7 +531,9 @@ final class SurfAceRuntime {
                 startCentralRegistration()
             }
             startAnnotationPublisher()
-            Task { @MainActor in await resumeRequestedAnnotationSourceCommits() }
+            annotationRecoveryTask = Task { @MainActor in
+                await resumeRequestedAnnotationSourceCommits()
+            }
         } catch {
             let details = startupFailureMessage(for: error)
             surfAceServerRuntimeLog(
@@ -598,6 +602,9 @@ final class SurfAceRuntime {
     }
 
     func stop() async {
+        annotationRecoveryTask?.cancel()
+        await annotationRecoveryTask?.value
+        annotationRecoveryTask = nil
         annotationPublisher?.stop()
         annotationPublisher = nil
         centralRegistration?.stop()
@@ -1160,9 +1167,11 @@ final class SurfAceRuntime {
     ) {
         if let adapter = locklessAdapter {
             let key = "\(surfaceId):\(paneId)"
+            if enabled { annotationReentryRequested.insert(key) }
             let previous = annotationModeTasks[key]
             annotationModeTasks[key] = Task { @MainActor in
                 await previous?.value
+                await annotationRecoveryTask?.value
                 await annotationCommitTasks[key]?.value
                 if !enabled {
                     await annotationStrokeTasks[key]?.value
@@ -1175,6 +1184,7 @@ final class SurfAceRuntime {
                     fingerDrawEnabled: fingerDrawEnabled,
                     source: source
                 )
+                if enabled { annotationReentryRequested.remove(key) }
             }
             return
         }
@@ -1336,7 +1346,12 @@ final class SurfAceRuntime {
     ) async {
         guard let originalPane = pane(surfaceId: surfaceId, paneId: paneId) else { return }
         let wasEnabled = originalPane.annotationMode
-        let cancelPendingSourceCommit = enabled && originalPane.pendingAnnotationCommit
+        let durableFrame = await adapter.snapshot().annotationPublisher?
+            .openFrame(surfaceId: surfaceId, paneId: paneId)
+        let cancelPendingSourceCommit = enabled && (
+            originalPane.pendingAnnotationCommit ||
+            (durableFrame?.commitRequested == true && durableFrame?.directCommitDelivered != true)
+        )
         do {
             _ = try await commitLocalMutation(adapter: adapter, operation: "local.annotation.mode") { state, sequence in
                 guard var surface = state.liveSurfaces[surfaceId],
@@ -4856,6 +4871,7 @@ final class SurfAceRuntime {
         for (surfaceId, surface) in state.annotationPublisher?.surfaces ?? [:] {
             for (paneKey, initialFrame) in surface.openFrames ?? [:]
                 where initialFrame.commitRequested == true {
+                if Task.isCancelled { return }
                 guard let paneId = Int(paneKey) else { continue }
                 let stagedFlush: SurfAceAnnotationDirectEvent?
                 if let pending = initialFrame.pendingDirectFlush {
@@ -4892,6 +4908,9 @@ final class SurfAceRuntime {
                     frame.commitRequested == true,
                     frame.pendingDirectFlush == nil,
                     (frame.deliveredDirectStrokeCount ?? 0) == frame.sourceStrokeCount else {
+                    continue
+                }
+                if annotationReentryRequested.contains("\(surfaceId):\(paneId)") {
                     continue
                 }
                 if frame.directCommitDelivered != true {
