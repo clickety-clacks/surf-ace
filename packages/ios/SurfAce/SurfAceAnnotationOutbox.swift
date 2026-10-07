@@ -300,7 +300,9 @@ struct SurfAceAnnotationOutbox: Codable, Equatable, Sendable {
         }
         closeFrame(surfaceId: surfaceId, paneId: paneId)
         try lose(surfaceId: surfaceId, code: "annotation_direct_stage_unavailable")
-        try markUnhealthy(surfaceId: surfaceId, code: "annotation_direct_stage_unavailable")
+        // Capacity loss is recoverable. The persisted diagnostic and gap
+        // describe this boundary; keeping the surface publishable lets the
+        // publisher drain older FIFO entries and the gap after an outage.
         return true
     }
 
@@ -316,7 +318,8 @@ struct SurfAceAnnotationOutbox: Codable, Equatable, Sendable {
     }
 
     mutating func stageDirectFlush(surfaceId: String, paneId: Int,
-                                   event: SurfAceAnnotationDirectEvent) throws {
+                                   event: SurfAceAnnotationDirectEvent,
+                                   maxBytes: Int = maximumBytes) throws {
         guard var frame = openFrame(surfaceId: surfaceId, paneId: paneId),
               event.throughStrokeCount > (frame.deliveredDirectStrokeCount ?? 0),
               event.throughStrokeCount <= frame.sourceStrokeCount,
@@ -326,7 +329,7 @@ struct SurfAceAnnotationOutbox: Codable, Equatable, Sendable {
         if frame.pendingDirectFlush == event { return }
         frame.pendingDirectFlush = event
         surfaces[surfaceId]?.openFrames?[String(paneId)] = frame
-        if try !fits(surfaceId: surfaceId, maxBytes: Self.maximumBytes,
+        if try !fits(surfaceId: surfaceId, maxBytes: maxBytes,
                      maxRecords: Self.maximumRecords) {
             surfaces[surfaceId]?.openFrames?[String(paneId)]?.pendingDirectFlush = nil
             throw SurfAceAnnotationOutboxError.invalidLimit
@@ -344,7 +347,8 @@ struct SurfAceAnnotationOutbox: Codable, Equatable, Sendable {
     }
 
     mutating func stageDirectCommit(surfaceId: String, paneId: Int,
-                                    event: SurfAceAnnotationDirectEvent) throws {
+                                    event: SurfAceAnnotationDirectEvent,
+                                    maxBytes: Int = maximumBytes) throws {
         guard var frame = openFrame(surfaceId: surfaceId, paneId: paneId),
               frame.commitRequested == true, frame.pendingDirectFlush == nil,
               (frame.deliveredDirectStrokeCount ?? 0) == frame.sourceStrokeCount,
@@ -355,7 +359,7 @@ struct SurfAceAnnotationOutbox: Codable, Equatable, Sendable {
         if frame.pendingDirectCommit == event { return }
         frame.pendingDirectCommit = event
         surfaces[surfaceId]?.openFrames?[String(paneId)] = frame
-        if try !fits(surfaceId: surfaceId, maxBytes: Self.maximumBytes,
+        if try !fits(surfaceId: surfaceId, maxBytes: maxBytes,
                      maxRecords: Self.maximumRecords) {
             surfaces[surfaceId]?.openFrames?[String(paneId)]?.pendingDirectCommit = nil
             throw SurfAceAnnotationOutboxError.invalidLimit

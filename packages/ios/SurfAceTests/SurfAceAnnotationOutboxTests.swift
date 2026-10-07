@@ -110,8 +110,10 @@ final class SurfAceAnnotationOutboxTests: XCTestCase {
             surfaceId: surfaceId, paneId: 1, frameId: first.frameId))
         XCTAssertNil(outbox.openFrame(surfaceId: surfaceId, paneId: 1))
         XCTAssertNotNil(outbox.surfaces[surfaceId]?.trailingGap)
-        XCTAssertEqual(outbox.surfaces[surfaceId]?.unhealthy?.code,
+        XCTAssertNil(outbox.surfaces[surfaceId]?.unhealthy)
+        XCTAssertEqual(outbox.surfaces[surfaceId]?.diagnostic?.code,
                        "annotation_direct_stage_unavailable")
+        XCTAssertEqual(outbox.publishableSurfaceIds(), [surfaceId])
         let second = try outbox.beginFrame(
             surfaceId: surfaceId, paneId: 1, contextKey: "content-1", contentId: "content-1",
             url: nil, scrollOffset: .init(x: 0, y: 0),

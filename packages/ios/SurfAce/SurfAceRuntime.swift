@@ -355,6 +355,7 @@ final class SurfAceRuntime {
     @ObservationIgnored private let locklessStateURLOverride: URL?
     @ObservationIgnored private let configuredRegistryURLOverride: URL?
     @ObservationIgnored private let annotationClientIdOverride: String?
+    @ObservationIgnored var annotationDirectStageMaxBytesForTesting: Int?
     @ObservationIgnored private let enableFleetDiscovery: Bool
     @ObservationIgnored private let forceIsolatedTestLoopback: Bool
     @ObservationIgnored private let outboundSendPreparation: (@Sendable (
@@ -460,6 +461,7 @@ final class SurfAceRuntime {
         locklessStateURL: URL? = nil,
         configuredRegistryURL: URL? = nil,
         annotationClientId: String? = nil,
+        annotationDirectStageMaxBytesForTesting: Int? = nil,
         enableFleetDiscovery: Bool = true,
         isolatedTestLoopback: Bool = false,
         bonjourPublisher: SurfAceBonjourPublisher = SurfAceBonjourPublisher(),
@@ -477,6 +479,7 @@ final class SurfAceRuntime {
         self.locklessStateURLOverride = locklessStateURL
         self.configuredRegistryURLOverride = configuredRegistryURL
         self.annotationClientIdOverride = annotationClientId
+        self.annotationDirectStageMaxBytesForTesting = annotationDirectStageMaxBytesForTesting
         self.enableFleetDiscovery = enableFleetDiscovery
         self.forceIsolatedTestLoopback = isolatedTestLoopback
         self.bonjourPublisher = bonjourPublisher
@@ -4736,12 +4739,16 @@ final class SurfAceRuntime {
             throughStrokeCount: (frame.deliveredDirectStrokeCount ?? 0) + strokes.count,
             sourceViewport: sourceViewport
         )
+        let stageMaxBytes = annotationDirectStageMaxBytesForTesting ?? SurfAceAnnotationOutbox.maximumBytes
         do {
             return try await adapter.transactAnnotationPublisher(surfaceId: surfaceId) { outbox in
                 guard outbox.openFrame(surfaceId: surfaceId, paneId: paneId)?.frameId == frame.frameId else {
                     return nil as SurfAceAnnotationDirectEvent?
                 }
-                try outbox.stageDirectFlush(surfaceId: surfaceId, paneId: paneId, event: event)
+                try outbox.stageDirectFlush(
+                    surfaceId: surfaceId, paneId: paneId, event: event,
+                    maxBytes: stageMaxBytes
+                )
                 return event
             }
         } catch {
@@ -4840,12 +4847,16 @@ final class SurfAceRuntime {
             eventId: randomHex(prefix: "ev", byteCount: 8), payload: serialized,
             sentAt: timestampNow(), throughStrokeCount: frame.sourceStrokeCount
         )
+        let stageMaxBytes = annotationDirectStageMaxBytesForTesting ?? SurfAceAnnotationOutbox.maximumBytes
         do {
             let staged = try await adapter.transactAnnotationPublisher(surfaceId: surfaceId) { outbox in
                 guard outbox.openFrame(surfaceId: surfaceId, paneId: paneId)?.frameId == frame.frameId else {
                     return nil as SurfAceAnnotationDirectEvent?
                 }
-                try outbox.stageDirectCommit(surfaceId: surfaceId, paneId: paneId, event: event)
+                try outbox.stageDirectCommit(
+                    surfaceId: surfaceId, paneId: paneId, event: event,
+                    maxBytes: stageMaxBytes
+                )
                 return event
             }
             if staged != nil { await annotationCommitStagePreparation?() }
