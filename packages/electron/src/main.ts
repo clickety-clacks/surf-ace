@@ -437,13 +437,15 @@ async function persistState(): Promise<void> {
       path: path.join(stateDir, STATE_FILE_NAME),
       write_guard: persistentStateWriteGuard,
     });
-    return;
+    throw new Error(`Local persistence is guarded: ${persistentStateWriteGuard}`);
   }
+  // Bind this write to the state that requested it. A later source mutation
+  // must enqueue its own write before the publisher can send its bytes.
+  const candidate = core.getPersistentState();
   stateWrite = stateWrite
     .catch(() => {})
     .then(async () => {
       if (persistentStateOutcomeUnknown) throw new Error("Local persistence is paused pending reconciliation");
-      const candidate = core.getPersistentState();
       try {
         await writePersistentStateFile(stateDir, STATE_FILE_NAME, candidate);
       } catch (error) {
