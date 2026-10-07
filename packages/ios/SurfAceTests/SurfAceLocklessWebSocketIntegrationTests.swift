@@ -314,6 +314,7 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         let stateURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("\(suiteName).json")
         let flushGate = SurfAceAnnotationFlushSendGate()
+        let modeProjection = SurfAceAnnotationModeProjectionProbe()
         addTeardownBlock {
             defaults.removePersistentDomain(forName: suiteName)
             try? FileManager.default.removeItem(at: stateURL)
@@ -327,6 +328,9 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
             enableFleetDiscovery: false,
             outboundSendPreparation: { text, priority in
                 await flushGate.prepareSend(text: text, priority: priority)
+            },
+            annotationModeProjectionObserver: { enabled in
+                if enabled { await modeProjection.record() }
             }
         )
         await runtime.start()
@@ -395,8 +399,9 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
             enabled: false,
             fingerDrawEnabled: false
         )
-        let flushWasHeld = await flushGate.waitUntilHeld()
-        XCTAssertTrue(flushWasHeld)
+        let flushHeld = expectation(description: "final direct flush held")
+        Task { if await flushGate.waitUntilHeld() { flushHeld.fulfill() } }
+        await fulfillment(of: [flushHeld], timeout: 5)
         XCTAssertTrue(pane.isDrawingFlushSending)
         XCTAssertTrue(pane.pendingAnnotationCommit)
         XCTAssertTrue(pane.isDrawingFlushSending)
@@ -418,7 +423,7 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
             enabled: true,
             fingerDrawEnabled: false
         )
-        await runtime.awaitAnnotationModeTransition(surfaceId: surface.surfaceId, paneId: pane.paneId)
+        await modeProjection.waitForCount(2)
         XCTAssertTrue(pane.annotationMode)
         XCTAssertFalse(pane.pendingAnnotationCommit)
         let reenteredSource = await adapter.snapshot().annotationPublisher
@@ -1270,5 +1275,22 @@ private actor SurfAceAnnotationFlushSendGate {
 
     func release() async {
         await releaseGate.open()
+    }
+}
+
+private actor SurfAceAnnotationModeProjectionProbe {
+    private var count = 0
+    private var waiters: [(Int, CheckedContinuation<Void, Never>)] = []
+
+    func record() {
+        count += 1
+        let ready = waiters.filter { $0.0 <= count }
+        waiters.removeAll { $0.0 <= count }
+        ready.forEach { $0.1.resume() }
+    }
+
+    func waitForCount(_ target: Int) async {
+        if count >= target { return }
+        await withCheckedContinuation { waiters.append((target, $0)) }
     }
 }

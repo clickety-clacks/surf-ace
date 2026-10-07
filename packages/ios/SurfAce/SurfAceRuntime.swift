@@ -361,6 +361,7 @@ final class SurfAceRuntime {
     ) async -> Void)?
     @ObservationIgnored private let annotationCommitStagePreparation: (@Sendable () async -> Void)?
     @ObservationIgnored private let annotationFrameCommitPreparation: (@Sendable () async throws -> Void)?
+    @ObservationIgnored private let annotationModeProjectionObserver: (@Sendable (Bool) async -> Void)?
     @ObservationIgnored private let locklessDeliveryWaitObserver: (@Sendable () -> Void)?
     @ObservationIgnored private var identity: SurfAceIdentity?
     @ObservationIgnored private var centralRegistration: SurfAceCentralRegistration?
@@ -454,6 +455,7 @@ final class SurfAceRuntime {
         ) async -> Void)? = nil,
         annotationCommitStagePreparation: (@Sendable () async -> Void)? = nil,
         annotationFrameCommitPreparation: (@Sendable () async throws -> Void)? = nil,
+        annotationModeProjectionObserver: (@Sendable (Bool) async -> Void)? = nil,
         locklessDeliveryWaitObserver: (@Sendable () -> Void)? = nil
     ) {
         self.userDefaults = userDefaults
@@ -464,6 +466,7 @@ final class SurfAceRuntime {
         self.outboundSendPreparation = outboundSendPreparation
         self.annotationCommitStagePreparation = annotationCommitStagePreparation
         self.annotationFrameCommitPreparation = annotationFrameCommitPreparation
+        self.annotationModeProjectionObserver = annotationModeProjectionObserver
         self.locklessDeliveryWaitObserver = locklessDeliveryWaitObserver
         let fallbackName = "Surf Ace"
         let deviceName = UIDevice.current.name
@@ -1404,6 +1407,7 @@ final class SurfAceRuntime {
                 ])
             }
             try projectLocklessAuthorityState(await adapter.snapshot())
+            await annotationModeProjectionObserver?(enabled)
             guard let projectedPane = self.pane(surfaceId: surfaceId, paneId: paneId) else { return }
             if enabled && !wasEnabled {
                 // Cancel only a not-yet-emitted commit. After the event has
