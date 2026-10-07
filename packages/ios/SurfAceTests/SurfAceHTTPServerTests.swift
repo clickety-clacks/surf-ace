@@ -7,11 +7,15 @@ final class SurfAceHTTPServerTests: XCTestCase {
         XCTAssertEqual(SurfAceHTTPServer.fixedPort, 19_001)
     }
 
-    func testStartForTestingBindsRequestedFixedPort() async throws {
+    func testIsolatedLoopbackUsesOSAssignedPort() async throws {
         let server = SurfAceHTTPServer()
-        let port = try await startOnPrivateFixedPort(server)
+        let port = try await server.startIsolatedLoopbackForTesting(
+            httpHandler: { _ in HTTPServerResponse.empty(statusCode: 200) },
+            webSocketHandler: { _ in }
+        )
 
-        XCTAssertTrue((29_001...29_100).contains(Int(port)))
+        XCTAssertNotEqual(port, 0)
+        XCTAssertNotEqual(port, SurfAceHTTPServer.fixedPort)
         await server.stop()
     }
 
@@ -35,31 +39,25 @@ final class SurfAceHTTPServerTests: XCTestCase {
         }
     }
 
-    func testStartFailsWhenFixedPortIsAlreadyInUse() async throws {
-        let firstServer = SurfAceHTTPServer()
-        let secondServer = SurfAceHTTPServer()
-        let port = try await startOnPrivateFixedPort(firstServer)
+    func testIsolatedHostRejectsFixedPortBeforeBinding() async {
+        guard requireIsolatedTestPlan() else { return }
+        let server = SurfAceHTTPServer()
 
         do {
-            _ = try await secondServer.startForTesting(
-                port: port,
+            _ = try await server.startForTesting(
+                port: SurfAceHTTPServer.fixedPort,
                 httpHandler: { _ in HTTPServerResponse.empty(statusCode: 200) },
                 webSocketHandler: { _ in }
             )
-            XCTFail("Expected bind failure when fixed port is already in use")
+            XCTFail("Isolated XCTest host must reject a fixed port before binding")
+        } catch SurfAceHTTPServerError.fixedPortUnavailableInIsolatedTestHost {
         } catch {
-            XCTAssertFalse(error.localizedDescription.isEmpty)
+            XCTFail("Unexpected fixed-port rejection error: \(error)")
         }
-
-        await firstServer.stop()
-        await secondServer.stop()
     }
 
-    func testIsolatedLoopbackCannotCoBindWildcardListenerOnSamePort() async throws {
-        guard ProcessInfo.processInfo.environment["SURF_ACE_XCTEST_HOST_NO_AUTOSTART"] == "1" else {
-            XCTFail("The wildcard collision fixture requires the isolated XCTest plan")
-            return
-        }
+    func testOSAssignedLoopbackPortAvoidsWildcardIncumbent() async throws {
+        guard requireIsolatedTestPlan() else { return }
 
         let parameters = NWParameters.tcp
         parameters.allowLocalEndpointReuse = true
@@ -94,32 +92,36 @@ final class SurfAceHTTPServerTests: XCTestCase {
                 httpHandler: { _ in HTTPServerResponse.empty(statusCode: 200) },
                 webSocketHandler: { _ in }
             )
-            XCTFail("Loopback test listener co-bound a loopback-restricted wildcard listener")
-        } catch let error as NWError where error == .posix(.EADDRINUSE) {
-            // The wildcard incumbent holds the port; the no-reuse test listener fails closed.
+            XCTFail("Isolated XCTest host must reject the wildcard incumbent's fixed port")
+        } catch SurfAceHTTPServerError.fixedPortUnavailableInIsolatedTestHost {
         } catch {
-            XCTFail("Unexpected loopback collision error: \(error)")
+            XCTFail("Unexpected fixed-port rejection error: \(error)")
         }
-        await contender.stop()
-    }
 
-    func testStartWithFallbackBindsNextAvailablePortWhenPreferredPortIsInUse() async throws {
-        let firstServer = SurfAceHTTPServer()
-        let secondServer = SurfAceHTTPServer()
-        let port = try await startOnPrivateFixedPort(firstServer)
-
-        let boundPort = try await secondServer.startWithFallbackForTesting(
-            preferredPort: port,
-            fallbackPortOffsetLimit: 20,
+        let assignedPort = try await contender.startIsolatedLoopbackForTesting(
             httpHandler: { _ in HTTPServerResponse.empty(statusCode: 200) },
             webSocketHandler: { _ in }
         )
+        XCTAssertNotEqual(assignedPort, port)
+        await contender.stop()
+    }
 
-        XCTAssertGreaterThan(boundPort, port)
-        XCTAssertLessThanOrEqual(boundPort, port + 20)
+    func testIsolatedHostRejectsFixedPortFallbackBeforeBinding() async {
+        guard requireIsolatedTestPlan() else { return }
+        let server = SurfAceHTTPServer()
 
-        await firstServer.stop()
-        await secondServer.stop()
+        do {
+            _ = try await server.startWithFallbackForTesting(
+                preferredPort: SurfAceHTTPServer.fixedPort,
+                fallbackPortOffsetLimit: SurfAceHTTPServer.fallbackPortOffsetLimit,
+                httpHandler: { _ in HTTPServerResponse.empty(statusCode: 200) },
+                webSocketHandler: { _ in }
+            )
+            XCTFail("Isolated XCTest host must reject fixed-port fallback before binding")
+        } catch SurfAceHTTPServerError.fixedPortUnavailableInIsolatedTestHost {
+        } catch {
+            XCTFail("Unexpected fixed-port fallback error: \(error)")
+        }
     }
 
     @MainActor
@@ -197,20 +199,12 @@ final class SurfAceHTTPServerTests: XCTestCase {
         )
     }
 
-    private func startOnPrivateFixedPort(_ server: SurfAceHTTPServer) async throws -> UInt16 {
-        for candidate in UInt16(29_001)...UInt16(29_100) {
-            do {
-                return try await server.startForTesting(
-                    port: candidate,
-                    httpHandler: { _ in HTTPServerResponse.empty(statusCode: 200) },
-                    webSocketHandler: { _ in }
-                )
-            } catch let error as NWError where error == .posix(.EADDRINUSE) {
-                continue
-            }
+    private func requireIsolatedTestPlan() -> Bool {
+        guard ProcessInfo.processInfo.environment["SURF_ACE_XCTEST_HOST_NO_AUTOSTART"] == "1" else {
+            XCTFail("Fixed-port safety tests require the isolated XCTest plan")
+            return false
         }
-
-        throw XCTSkip("No private TCP port available in test range")
+        return true
     }
 
     private func loadAppInfoPlist() throws -> [String: Any] {

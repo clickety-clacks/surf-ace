@@ -36,6 +36,7 @@ enum SurfAceHTTPServerError: LocalizedError {
     case listenerCancelled
     case invalidBindAddress
     case invalidRequestedPort(UInt16)
+    case fixedPortUnavailableInIsolatedTestHost
     case boundPortMismatch(requested: UInt16, actual: UInt16)
 
     var errorDescription: String? {
@@ -48,6 +49,8 @@ enum SurfAceHTTPServerError: LocalizedError {
             return "Server failed to bind to 0.0.0.0"
         case .invalidRequestedPort(let port):
             return "Server requires a fixed port; invalid bind request for port \(port)"
+        case .fixedPortUnavailableInIsolatedTestHost:
+            return "Isolated test hosts require an OS-assigned loopback port"
         case .boundPortMismatch(let requested, let actual):
             return "Server bound to unexpected port \(actual); expected fixed port \(requested)"
         }
@@ -436,15 +439,18 @@ actor SurfAceHTTPServer {
         let environment = ProcessInfo.processInfo.environment
         let isolatedTestHost = environment["SURF_ACE_XCTEST_HOST_NO_AUTOSTART"] == "1"
             || environment["XCTestConfigurationFilePath"] != nil
-        let address = isolatedTestHost ? "127.0.0.1" : "0.0.0.0"
-        guard let bindAddress = IPv4Address(address) else {
+        guard !isolatedTestHost else {
+            surfAceServerLog("listener rejected fixed port in isolated test host")
+            throw SurfAceHTTPServerError.fixedPortUnavailableInIsolatedTestHost
+        }
+        guard let bindAddress = IPv4Address("0.0.0.0") else {
             throw SurfAceHTTPServerError.invalidBindAddress
         }
         return try await startListener(
             port: endpointPort,
             bindAddress: bindAddress,
             expectedPort: port,
-            allowEndpointReuse: !isolatedTestHost,
+            allowEndpointReuse: true,
             webSocketPath: webSocketPath,
             httpHandler: httpHandler,
             webSocketHandler: webSocketHandler
