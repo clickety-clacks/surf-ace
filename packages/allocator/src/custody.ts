@@ -51,6 +51,8 @@ export type AnnotationInfo = {
   journalCanonicalBytes: number;
   sourceMetadataRows: number;
   sourceMetadataBytes: number;
+  sourceReceiptRows: number;
+  sourceReceiptBytes: number;
   consumerSlots: number;
   activeStreams: number;
 };

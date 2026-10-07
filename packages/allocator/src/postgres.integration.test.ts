@@ -1773,6 +1773,8 @@ test("annotation pressure compacts only acknowledged history and refuses when re
       assert.equal(info.journalRecords, 1);
       assert.equal(info.firstRetainedSequence, "2");
       assert.equal(info.sourceMetadataRows, 2);
+      assert.equal(info.sourceReceiptRows, 1);
+      assert.ok(info.sourceReceiptBytes > 0);
       assert.deepEqual((await journal.ingest(firstRecord)).serverCursor, first.serverCursor);
       const leases = [{ consumerId: "pressure-consumer", leaseId: consumer.leaseId }];
       for (let index = 1; index < 32; index += 1) {

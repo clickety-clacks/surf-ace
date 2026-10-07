@@ -415,6 +415,7 @@ export class AllocatorServer {
           limits: annotationLimits(info),
           usage: { journalRecords: info.journalRecords, journalCanonicalBytes: info.journalCanonicalBytes,
             sourceMetadataRows: info.sourceMetadataRows, sourceMetadataBytes: info.sourceMetadataBytes,
+            sourceReceiptRows: info.sourceReceiptRows, sourceReceiptBytes: info.sourceReceiptBytes,
             consumerSlots: info.consumerSlots, activeStreams: info.activeStreams },
         });
       } else if (op === "annotation.ingest" || op === "annotation.source_gap") {

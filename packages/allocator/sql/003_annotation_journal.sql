@@ -37,6 +37,8 @@ CREATE TABLE surf_ace_allocator.annotation_journal_head (
   retained_canonical_bytes bigint NOT NULL DEFAULT 0 CHECK (retained_canonical_bytes >= 0),
   source_metadata_rows bigint NOT NULL DEFAULT 0 CHECK (source_metadata_rows >= 0),
   source_metadata_bytes bigint NOT NULL DEFAULT 0 CHECK (source_metadata_bytes >= 0),
+  source_receipt_rows bigint NOT NULL DEFAULT 0 CHECK (source_receipt_rows >= 0),
+  source_receipt_bytes bigint NOT NULL DEFAULT 0 CHECK (source_receipt_bytes >= 0),
   max_journal_records bigint NOT NULL DEFAULT 100000 CHECK (max_journal_records BETWEEN 1 AND 100000),
   max_journal_and_metadata_bytes bigint NOT NULL DEFAULT 1073741824
     CHECK (max_journal_and_metadata_bytes BETWEEN 1 AND 1073741824),
@@ -209,7 +211,9 @@ BEGIN
       retained_record_count = h.retained_record_count - 1,
       retained_canonical_bytes = h.retained_canonical_bytes - r.canonical_record_length,
       source_metadata_rows = h.source_metadata_rows + 1,
-      source_metadata_bytes = h.source_metadata_bytes + receipt_bytes
+      source_metadata_bytes = h.source_metadata_bytes + receipt_bytes,
+      source_receipt_rows = h.source_receipt_rows + 1,
+      source_receipt_bytes = h.source_receipt_bytes + receipt_bytes
     WHERE fleet_id = p_fleet_id;
     SELECT * INTO STRICT h FROM surf_ace_allocator.annotation_journal_head WHERE fleet_id = p_fleet_id;
     compacted := compacted + 1;
@@ -327,9 +331,12 @@ BEGIN
       'maxSourceMetadataRows', h.max_source_metadata_rows,
       'sourceMetadataRows', h.source_metadata_rows,
       'sourceMetadataBytes', h.source_metadata_bytes,
+      'sourceReceiptRows', h.source_receipt_rows,
+      'sourceReceiptBytes', h.source_receipt_bytes,
       'incomingRecordBytes', octet_length(p_canonical),
       'incomingSourceMetadataBytes', new_head_bytes - old_head_bytes,
-      'retryCondition', CASE WHEN new_metadata_rows > h.max_source_metadata_rows
+      'retryCondition', CASE WHEN h.source_metadata_rows >= h.max_source_metadata_rows
+        OR new_metadata_rows > h.max_source_metadata_rows
         THEN 'reviewed_metadata_capacity_increase'
         ELSE 'oldest_required_history_acknowledged_and_compactable_or_capacity_increased' END
     )::text;
@@ -386,6 +393,8 @@ BEGIN
     'journalCanonicalBytes', h.retained_canonical_bytes,
     'sourceMetadataRows', h.source_metadata_rows,
     'sourceMetadataBytes', h.source_metadata_bytes,
+    'sourceReceiptRows', h.source_receipt_rows,
+    'sourceReceiptBytes', h.source_receipt_bytes,
     'consumerSlots', (SELECT count(*) FROM surf_ace_allocator.annotation_consumers WHERE fleet_id = p_fleet_id),
     'activeStreams', (SELECT count(*) FROM surf_ace_allocator.annotation_consumers
       WHERE fleet_id = p_fleet_id AND lease_connected AND retired_at IS NULL)
@@ -455,6 +464,8 @@ BEGIN
      OR (h.head_sequence > 0 AND (first_position <> 1 OR last_position <> h.head_sequence))
      OR receipt_count + head_count <> h.source_metadata_rows
      OR receipt_bytes + head_bytes <> h.source_metadata_bytes
+     OR receipt_count <> h.source_receipt_rows
+     OR receipt_bytes <> h.source_receipt_bytes
      OR EXISTS (SELECT 1 FROM surf_ace_allocator.annotation_journal_records
        WHERE fleet_id = p_fleet_id AND epoch <> h.epoch)
      OR EXISTS (SELECT 1 FROM surf_ace_allocator.annotation_source_receipts
