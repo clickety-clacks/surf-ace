@@ -3402,8 +3402,8 @@ export class SurfaceWsServer {
     await previous.catch(() => undefined);
     try {
       const transact = () =>
-        this.core.locklessAuthority.transactionAsync(() =>
-          this.core.transactionAsync(async () => operation()),
+        this.core.transactionAsync(async () =>
+          this.core.locklessAuthority.transaction(operation),
         );
       return surfaceId
         ? await this.runSurfaceMutation(surfaceId, transact)
