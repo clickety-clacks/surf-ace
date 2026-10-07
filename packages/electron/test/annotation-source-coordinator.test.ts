@@ -3,6 +3,7 @@ import test from "node:test";
 
 import { AnnotationSourceCoordinator } from "../src/annotation-source-coordinator.js";
 import { SurfaceCore } from "../src/surface-core.js";
+import { SurfaceWsServer } from "../src/ws-server.js";
 
 const clientId = "c".repeat(64);
 const viewport = { width: 640, height: 480, scale: 1 };
@@ -216,5 +217,44 @@ test("reentry after durable direct commit closes the old source frame before a n
   assert.equal(commits[0].frameId, old.frameId);
   assert.deepEqual(commits[0].payload.frame.strokes.map((stroke: { strokeId: string }) => stroke.strokeId),
     ["stroke-one"]);
+  source.stop();
+});
+
+test("the lockless direct frame persists before the registry source frame commit", async () => {
+  const core = new SurfaceCore({ annotationClientId: clientId });
+  const surface = core.ensurePrimarySurface("Surf Ace", viewport);
+  core.admitSurfaceToLockless(surface.surfaceId);
+  const paneId = core.activePaneIds(surface.surfaceId)[0]!;
+  core.locklessContentPush(surface.surfaceId, {
+    content: { markdown: "annotation fixture" }, contentId: "content-one",
+    contentType: "markdown", friendlyChatName: "Fixture", paneId,
+  }, "Fixture");
+  const writes: ReturnType<SurfaceCore["getPersistentState"]>[] = [];
+  const persist = async () => { writes.push(core.getPersistentState()); };
+  const server = new SurfaceWsServer({
+    bindAddress: "127.0.0.1", capturePaneImage: async () => png,
+    compositorSocketPath: null, core, endpointName: "Surf Ace", hostName: "localhost",
+    persistLocklessState: persist, port: 0, viewport: () => viewport,
+  });
+  server.setAnnotationCompletionManaged();
+  const source = new AnnotationSourceCoordinator(core, persist, () => {}, (error) => { throw error; },
+    (surfaceId, id) => server.completeDirectAnnotation(surfaceId, id));
+  await source.setAnnotating(surface.surfaceId, paneId, true);
+  core.annotationPublisher!.openFrame(surface.surfaceId, paneId, {
+    contentId: "content-one", contextKey: "content-one", image: png,
+    openedAt: 100, scrollOffset: { x: 0, y: 0 }, viewport,
+  });
+  core.addStroke(surface.surfaceId, paneId, {
+    strokeId: "stroke-one" as never, tool: "mouse",
+    points: [{ x: 1, y: 2, timestamp: 110 }],
+  });
+  await source.setAnnotating(surface.surfaceId, paneId, false);
+  const firstSourceCommit = writes.findIndex((state) =>
+    Object.values(state.annotationPublisher?.surfaces ?? {}).some((partition) =>
+      partition.fifo.some((entry) => JSON.parse(entry.canonical).kind === "frame_commit")));
+  assert.ok(firstSourceCommit > 0);
+  assert.equal(writes[firstSourceCommit - 1]!.surfaces?.find((item) => item.surfaceId === surface.surfaceId)
+    ?.panes?.find((item) => item.paneId === paneId)?.pendingAnnotationCommit, false);
+  assert.equal(core.hasPendingAnnotationCommit(surface.surfaceId, paneId), false);
   source.stop();
 });
