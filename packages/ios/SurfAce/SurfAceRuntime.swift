@@ -1351,6 +1351,18 @@ final class SurfAceRuntime {
         let wasEnabled = originalPane.annotationMode
         let durableFrame = await adapter.snapshot().annotationPublisher?
             .openFrame(surfaceId: surfaceId, paneId: paneId)
+        if enabled, let durableFrame, durableFrame.directCommitDelivered == true {
+            await finalizeAnnotationSourceFrame(
+                adapter: adapter, surfaceId: surfaceId, paneId: paneId,
+                revision: durableFrame.revision ?? originalPane.currentEntry.revision,
+                contentType: durableFrame.contentType ?? originalPane.currentEntry.contentType?.rawValue
+            )
+            if await adapter.snapshot().annotationPublisher?
+                .openFrame(surfaceId: surfaceId, paneId: paneId)?.frameId == durableFrame.frameId {
+                originalPane.toast = "Annotation finalization pending"
+                return
+            }
+        }
         let cancelPendingSourceCommit = enabled && (
             originalPane.pendingAnnotationCommit ||
             (durableFrame?.commitRequested == true && durableFrame?.directCommitDelivered != true)
