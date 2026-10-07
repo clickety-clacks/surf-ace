@@ -3001,8 +3001,8 @@ test("v0.2.7 standalone specification and release gates bind the product and all
   assert.match(workflow, /run_smoke:[\s\S]*?default: false/);
   assert.match(workflow, /publish_release:[\s\S]*?default: false/);
   assert.match(workflow, /PRODUCT_COMMIT: e7da2559d7c7e680a22a986478dff7e97a5f771b/);
-  assert.match(workflow, /PRODUCT_TAG: surf-ace-v0\.2\.7-r1/);
-  assert.match(workflow, /TOOLING_TAG: surf-ace-release-tooling-v0\.2\.7-r2/);
+  assert.match(workflow, /PRODUCT_TAG: surf-ace-v0\.2\.7-r2/);
+  assert.match(workflow, /TOOLING_TAG: surf-ace-release-tooling-v0\.2\.7-r3/);
   assert.match(workflow, /GITHUB_EVENT_NAME/);
   assert.match(workflow, /GITHUB_REF_TYPE/);
   assert.match(workflow, /node tooling\/scripts\/release\/build-tightbeam-release\.mjs/);
