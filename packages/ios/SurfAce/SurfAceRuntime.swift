@@ -363,6 +363,7 @@ final class SurfAceRuntime {
     @ObservationIgnored private var centralRegistration: SurfAceCentralRegistration?
     @ObservationIgnored private var annotationPublisher: SurfAceAnnotationPublisher?
     @ObservationIgnored private var annotationStrokeTasks: [String: Task<Void, Never>] = [:]
+    @ObservationIgnored private var annotationModeTasks: [String: Task<Void, Never>] = [:]
     @ObservationIgnored private var annotationCommitTasks: [String: Task<Void, Never>] = [:]
     @ObservationIgnored private var centralConnectionError: String?
     @ObservationIgnored private var confirmedPaneLabels: [String: Int64] = [:]
@@ -1153,8 +1154,10 @@ final class SurfAceRuntime {
         source: String? = nil
     ) {
         if let adapter = locklessAdapter {
-            Task { @MainActor in
-                let key = "\(surfaceId):\(paneId)"
+            let key = "\(surfaceId):\(paneId)"
+            let previous = annotationModeTasks[key]
+            annotationModeTasks[key] = Task { @MainActor in
+                await previous?.value
                 await annotationCommitTasks[key]?.value
                 if !enabled {
                     await annotationStrokeTasks[key]?.value

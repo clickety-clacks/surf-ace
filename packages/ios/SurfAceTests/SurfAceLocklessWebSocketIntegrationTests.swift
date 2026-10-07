@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 import XCTest
 @testable import SurfAce
 
@@ -20,6 +21,8 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         let runtime = SurfAceRuntime(
             userDefaults: defaults,
             locklessStateURL: stateURL,
+            configuredRegistryURL: try XCTUnwrap(URL(string: "ws://127.0.0.1:29999")),
+            annotationClientId: "client-ios-reentry-fixture",
             outboundSendPreparation: { text, priority in
                 await flushGate.prepareSend(text: text, priority: priority)
             }
@@ -53,6 +56,27 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         ])
         _ = try await receive(socket, matchingId: "annotation-content")
 
+        let adapter = try runtime.locklessAuthorityForLocalMutation()
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 2, height: 2)).pngData { _ in
+            UIColor.white.setFill()
+            UIRectFill(CGRect(x: 0, y: 0, width: 2, height: 2))
+        }.base64EncodedString()
+        let sourceSurfaceId = surface.surfaceId
+        let sourcePaneId = pane.paneId
+        let sourceRevision = pane.currentEntry.revision
+        let firstSourceStroke = annotationSourceTestStroke("before-reentry")
+        _ = try await adapter.transactAnnotationPublisher(surfaceId: surface.surfaceId) { outbox in
+            _ = try outbox.beginFrame(
+                surfaceId: sourceSurfaceId, paneId: sourcePaneId,
+                contextKey: "annotation-content-id", contentId: "annotation-content-id",
+                contentType: "html", revision: sourceRevision, url: nil,
+                scrollOffset: .init(x: 0, y: 0),
+                viewport: .init(width: 2, height: 2, scale: 1), openedAt: 100, image: image
+            )
+            try outbox.recordStroke(surfaceId: sourceSurfaceId, paneId: sourcePaneId,
+                                    stroke: firstSourceStroke)
+        }
+
         runtime.setAnnotationMode(
             surfaceId: surface.surfaceId,
             paneId: pane.paneId,
@@ -75,6 +99,11 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         XCTAssertTrue(flushWasHeld)
         XCTAssertTrue(pane.pendingAnnotationCommit)
         XCTAssertTrue(pane.isDrawingFlushSending)
+        let heldSource = await adapter.snapshot().annotationPublisher
+        XCTAssertEqual(heldSource?.surfaces[surface.surfaceId]?.fifo.count, 0,
+                       "the source must wait for the final direct flush")
+        XCTAssertEqual(heldSource?.openFrame(surfaceId: surface.surfaceId,
+                                             paneId: pane.paneId)?.commitRequested, true)
 
         // Re-enter while the final drawing flush is held and before the
         // explicit commit event can be emitted. This must keep the same frame.
@@ -89,6 +118,9 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         }
         XCTAssertTrue(pane.annotationMode)
         XCTAssertFalse(pane.pendingAnnotationCommit)
+        let reenteredSource = await adapter.snapshot().annotationPublisher
+        XCTAssertEqual(reenteredSource?
+            .openFrame(surfaceId: surface.surfaceId, paneId: pane.paneId)?.commitRequested, false)
         await flushGate.release()
 
         let firstFlush = try await receive(socket, matchingOp: "event.drawing_flush")
@@ -100,6 +132,11 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
 
         // A later same-context session continues the pre-commit frame. Its
         // flush must arrive before the first explicit commit event.
+        let secondSourceStroke = annotationSourceTestStroke("after-reentry")
+        _ = try await adapter.transactAnnotationPublisher(surfaceId: sourceSurfaceId) { outbox in
+            try outbox.recordStroke(surfaceId: sourceSurfaceId, paneId: sourcePaneId,
+                                    stroke: secondSourceStroke)
+        }
         queueAnnotationTestStroke("after-reentry", on: pane)
         runtime.setAnnotationMode(
             surfaceId: surface.surfaceId,
@@ -129,6 +166,20 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         )
         let firstCommit = try await receive(socket, matchingOp: "event.annotation_committed")
         XCTAssertEqual(payload(firstCommit)["contentId"] as? String, "annotation-content-id")
+        for _ in 0..<100 {
+            if (await adapter.snapshot()).annotationPublisher?
+                .surfaces[surface.surfaceId]?.fifo.count == 3 { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let source = await adapter.snapshot().annotationPublisher
+        XCTAssertEqual(source?.surfaces[surface.surfaceId]?.fifo.map(\.kind),
+                       ["payload", "payload", "payload"])
+        let sourceKinds = try source?.surfaces[surface.surfaceId]?.fifo.map { entry in
+            try XCTUnwrap((JSONSerialization.jsonObject(with: Data(entry.canonical.utf8))
+                as? [String: Any])?["kind"] as? String)
+        }
+        XCTAssertEqual(sourceKinds, ["live_delta", "live_delta", "frame_commit"])
+        XCTAssertNil(source?.openFrame(surfaceId: surface.surfaceId, paneId: pane.paneId))
 
         // After the explicit event, a new same-context session has its own
         // commit boundary and must emit a fresh flush/commit pair.
@@ -775,6 +826,14 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
             strokeId: strokeId,
             points: [SurfAceStrokePoint(x: 10, y: 20, pressure: 1, timestamp: 100)],
             tool: "finger"
+        )
+    }
+
+    private func annotationSourceTestStroke(_ strokeId: String) -> SurfAceAnnotationFrameStroke {
+        SurfAceAnnotationFrameStroke(
+            strokeId: strokeId, points: [.init(x: 10, y: 20, pressure: 1)],
+            bbox: .init(x: 10, y: 20, width: 0, height: 0),
+            startedAt: 100, endedAt: 100
         )
     }
 
