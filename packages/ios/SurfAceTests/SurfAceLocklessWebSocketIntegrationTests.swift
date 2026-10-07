@@ -306,6 +306,17 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         await runtime.awaitAnnotationModeTransition(surfaceId: surfaceId, paneId: paneId)
         let retry = try await receive(socket, matchingOp: "event.annotation_committed")
         XCTAssertEqual(retry["eventId"] as? String, firstCommit["eventId"] as? String)
+        XCTAssertFalse(pane.annotationMode)
+        let stillPending = await adapter.snapshot().annotationPublisher
+        XCTAssertEqual(stillPending?.openFrame(surfaceId: surfaceId, paneId: paneId)?.frameId,
+                       frameId)
+        XCTAssertTrue(stillPending?.surfaces[surfaceId]?.fifo.isEmpty == true)
+
+        runtime.setAnnotationMode(surfaceId: surfaceId, paneId: paneId,
+                                  enabled: true, fingerDrawEnabled: false)
+        await runtime.awaitAnnotationModeTransition(surfaceId: surfaceId, paneId: paneId)
+        let resolved = try await receive(socket, matchingOp: "event.annotation_committed")
+        XCTAssertEqual(resolved["eventId"] as? String, firstCommit["eventId"] as? String)
         XCTAssertTrue(pane.annotationMode)
         let settled = await adapter.snapshot().annotationPublisher
         XCTAssertNil(settled?.openFrame(surfaceId: surfaceId, paneId: paneId))
@@ -1438,11 +1449,12 @@ private actor SurfAceAnnotationCommitStageGate {
 }
 
 private actor SurfAceAnnotationAmbiguousCommitResult {
-    private var failedOnce = false
+    private var remainingAmbiguousResults = 2
 
     func report(op: String, delivered: Bool) -> Bool {
-        guard op == "event.annotation_committed", delivered, !failedOnce else { return delivered }
-        failedOnce = true
+        guard op == "event.annotation_committed", delivered,
+              remainingAmbiguousResults > 0 else { return delivered }
+        remainingAmbiguousResults -= 1
         return false
     }
 }
