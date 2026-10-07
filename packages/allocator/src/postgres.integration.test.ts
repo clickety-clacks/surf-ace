@@ -1340,6 +1340,23 @@ test("annotation migration and append survive duplicate retry without allocating
       assert.equal(gapAck.ok, true);
       const afterGap = await gapConsumer.waitEvent("annotation.record");
       assert.deepEqual((afterGap.payload as { serverCursor: unknown }).serverCursor, cursor);
+      const gapResumer = await WireClient.connect(server.address.url);
+      try {
+        assert.equal((await gapResumer.request("annotation.hello", { protocolVersion: 1, role: "consumer" })).ok, true);
+        const resumedGap = await gapResumer.request("annotation.resume", { consumerId: "gap-consumer" });
+        assert.equal(resumedGap.ok, true);
+        assert.deepEqual((resumedGap.payload as { ackCursor: unknown }).ackCursor,
+          (gapAck.payload as { ackCursor: unknown }).ackCursor);
+        const replayed = await gapResumer.waitEvent("annotation.record");
+        assert.deepEqual((replayed.payload as { serverCursor: unknown }).serverCursor, cursor);
+        const replayAck = await gapResumer.request("annotation.ack", {
+          consumerId: "gap-consumer", leaseId: (resumedGap.payload as { leaseId: string }).leaseId,
+          throughCursor: cursor,
+        });
+        assert.equal(replayAck.ok, true);
+      } finally {
+        await gapResumer.close();
+      }
       assert.equal((await retireCaller.request("annotation.hello", { protocolVersion: 1, role: "consumer" })).ok, true);
       const retire = await retireCaller.request("annotation.consumer.retire", {
         consumerId: "first", expectedAckCursor: cursor, discardUnacknowledged: true,

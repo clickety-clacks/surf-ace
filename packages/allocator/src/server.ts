@@ -464,7 +464,7 @@ export class AllocatorServer {
           ? BigInt(opened.ackCursor.sequence) + 1n
           : BigInt(opened.initialFromCursor.sequence);
         const lease: AnnotationLease = { consumerId: payload.consumerId, leaseId: opened.leaseId,
-          socket, epoch: opened.initialFromCursor.epoch, nextSequence: next,
+          socket, epoch: opened.ackCursor?.epoch ?? opened.initialFromCursor.epoch, nextSequence: next,
           acknowledged: opened.ackCursor ? BigInt(opened.ackCursor.sequence) : next - 1n,
           delivered: [], gap: null, pumping: false, pumpRequested: false };
         this.annotationLeases.set(payload.consumerId, lease);
