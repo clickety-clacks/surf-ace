@@ -913,6 +913,41 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         XCTAssertEqual(result.liveSurfaces[liveId]?.windowLabelConfirmed, false)
     }
 
+    func testPreMarkerMigrationWriteFailureKeepsLocalStateAndNoBinding() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("pre-marker-write-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = SurfAceLocklessGenerationStore(stateURL: root.appendingPathComponent("state.json"))
+        var state = try SurfAceLocklessAuthorityState.empty()
+        let revision = state.surfaceSetRevision
+        let id = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
+            state: &state, expectedSurfaceSetRevision: revision
+        ).surface.surfaceId
+        state.liveSurfaces[id]?.windowLabelConfirmed = nil
+        state.liveSurfaces[id]?.panes["1"]?.target = .string("unsaved-migration content")
+        try store.save(state)
+        let adapter = try SurfAceLocklessRuntimeAdapter(store: store)
+        let blocker = root.appendingPathComponent(".state.json.next")
+        try FileManager.default.createDirectory(at: blocker, withIntermediateDirectories: false)
+        let verified = SurfAceVerifiedUnconfirmedMigration(
+            clientId: "write-failure-client", evidenceId: "owner-review-write",
+            allocationHistoryEvidence: "authoritative-history-no-allocation",
+            localProvenanceEvidence: "local-open-record",
+            otherFleetCheckEvidence: "all-fleet-history-check",
+            localClaims: SurfAceProvisionedRegistryBinding.confirmedClaims(state)
+        )
+        let home = SurfAceRegistryIdentity(allocatorId: "alloc_home", fleetId: "home")
+        do {
+            try await adapter.bindRegistryIdentity(home, clientId: "write-failure-client",
+                expectedSurfaces: SurfAceRegistrationSurface.snapshot(state),
+                provisioned: nil, verifiedUnconfirmed: verified)
+            XCTFail("failed durable replacement accepted an initial binding")
+        } catch { }
+        XCTAssertEqual(try XCTUnwrap(store.load()), state)
+        let unchanged = await adapter.snapshot()
+        XCTAssertEqual(unchanged, state)
+    }
+
     func testTombstoneOnlyLegacyLabelsRejectForeignThenRecoverWithVerifiedHome() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("registry-tombstone-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
