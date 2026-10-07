@@ -4422,6 +4422,8 @@ final class SurfAceRuntime {
         ]
 
         Task { @MainActor in
+            await self.publishAnnotationDelta(surfaceId: surfaceId, paneId: paneId,
+                                              strokes: strokes, flushPayload: payload)
             let succeeded = await self.sendEventAsync(surfaceId: surfaceId, op: "event.drawing_flush", payload: payload)
             guard let pane = self.pane(surfaceId: surfaceId, paneId: paneId) else { return }
             pane.isDrawingFlushSending = false
@@ -4436,6 +4438,68 @@ final class SurfAceRuntime {
                 self.scheduleDrawingFlush(surfaceId: surfaceId, paneId: paneId)
             }
         }
+    }
+
+    private func publishAnnotationDelta(surfaceId: String, paneId: Int,
+                                        strokes: [SurfAceStroke], flushPayload: [String: Any]) async {
+        guard let adapter = locklessAdapter,
+              let publisher = annotationPublisher,
+              let pane = pane(surfaceId: surfaceId, paneId: paneId) else { return }
+        let snapshot = await adapter.snapshot()
+        let frame = snapshot.annotationPublisher?.openFrame(surfaceId: surfaceId, paneId: paneId)
+        let pending = frame.map { $0.sourceStrokeCount - $0.publishedStrokeCount } ?? strokes.count
+        guard pending > 0 else { return }
+        let contentId = pane.currentEntry.contentId
+        let contentType = pane.currentEntry.contentType?.rawValue
+        let frameId = frame?.frameId
+        let revision = pane.currentEntry.revision
+        let viewport = (try? Self.jsonObject(pane.lastViewport)) as? [String: Any]
+        let expectedIds = Set(frame?.strokes.suffix(pending).map(\.strokeId) ?? [])
+        let sourceStrokes = strokes.filter { expectedIds.contains($0.strokeId) }
+        var recordData: Data?
+        if let frame, !frame.failed, sourceStrokes.count == pending,
+           let contentId, contentId == frame.contentId, let contentType,
+           let viewport, let encoded = jsonObject(fromEncodable: sourceStrokes) {
+            var sourcePayload = flushPayload
+            sourcePayload["strokes"] = encoded
+            sourcePayload["strokeCount"] = sourceStrokes.count
+            sourcePayload["pointsCount"] = sourceStrokes.reduce(0) { $0 + $1.points.count }
+            sourcePayload["firstStrokeAt"] = sourceStrokes.first?.points.first?.timestamp ?? 0
+            sourcePayload["lastStrokeAt"] = sourceStrokes.last?.points.last?.timestamp ?? 0
+            let record: [String: Any] = [
+                "paneId": paneId, "frameId": frame.frameId, "kind": "live_delta",
+                "contentId": contentId, "revision": revision, "contentType": contentType,
+                "sourceTimestamp": Self.annotationSourceTimestamp(), "viewport": viewport,
+                "payload": sourcePayload,
+            ]
+            recordData = try? JSONSerialization.data(withJSONObject: record)
+        }
+        do {
+            let data = recordData
+            let appended = try await adapter.transactAnnotationPublisher(surfaceId: surfaceId) { outbox in
+                let current = outbox.openFrame(surfaceId: surfaceId, paneId: paneId)
+                guard current?.frameId == frameId,
+                      (current?.sourceStrokeCount ?? 0) - (current?.publishedStrokeCount ?? 0) == pending else {
+                    return false
+                }
+                if let data, let record = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    _ = try outbox.append(surfaceId: surfaceId, record: record)
+                } else {
+                    try outbox.lose(surfaceId: surfaceId, code: "annotation_source_strokes_unavailable")
+                }
+                outbox.markFramePublished(surfaceId: surfaceId, paneId: paneId)
+                return true
+            }
+            if appended { publisher.notify() }
+        } catch {
+            surfAceServerRuntimeLog("event=annotation_delta_failed \(surfAceDiagnosticFields([("error", String(describing: error))]))")
+        }
+    }
+
+    private static func annotationSourceTimestamp() -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.string(from: Date())
     }
 
     private func requestAnnotationCommit(surfaceId: String, paneId: Int) {
@@ -4459,8 +4523,7 @@ final class SurfAceRuntime {
               pane.pendingAnnotationCommit else {
             return
         }
-        guard eventIsEnabled(surfaceId: surfaceId, eventName: "event.annotation_committed"),
-              let contentId = pane.currentEntry.contentId else {
+        guard let contentId = pane.currentEntry.contentId else {
             pane.pendingAnnotationCommit = false
             return
         }
@@ -4469,16 +4532,86 @@ final class SurfAceRuntime {
         }
 
         pane.pendingAnnotationCommit = false
-        sendEvent(
-            surfaceId: surfaceId,
-            op: "event.annotation_committed",
-            payload: [
-                "paneId": paneId,
-                "contentId": contentId,
-                "revision": pane.currentEntry.revision,
-                "committedAt": timestampNow(),
+        if eventIsEnabled(surfaceId: surfaceId, eventName: "event.annotation_committed") {
+            sendEvent(
+                surfaceId: surfaceId,
+                op: "event.annotation_committed",
+                payload: [
+                    "paneId": paneId,
+                    "contentId": contentId,
+                    "revision": pane.currentEntry.revision,
+                    "committedAt": timestampNow(),
+                ]
+            )
+        }
+        if let adapter = locklessAdapter, annotationPublisher != nil {
+            let key = "\(surfaceId):\(paneId)"
+            let previous = annotationStrokeTasks[key]
+            let revision = pane.currentEntry.revision
+            let contentType = pane.currentEntry.contentType?.rawValue
+            annotationStrokeTasks[key] = Task { @MainActor in
+                await previous?.value
+                await finalizeAnnotationSourceFrame(
+                    adapter: adapter, surfaceId: surfaceId, paneId: paneId,
+                    revision: revision, contentType: contentType
+                )
+            }
+        }
+    }
+
+    private func finalizeAnnotationSourceFrame(adapter: SurfAceLocklessRuntimeAdapter,
+                                               surfaceId: String, paneId: Int,
+                                               revision: Int, contentType: String?) async {
+        guard let frame = await adapter.snapshot().annotationPublisher?
+            .openFrame(surfaceId: surfaceId, paneId: paneId) else { return }
+        let png = Data(base64Encoded: frame.image)
+        let pngSignature = Data([137, 80, 78, 71, 13, 10, 26, 10])
+        let validImage = png.map { $0.count <= 10_485_760 && $0.starts(with: pngSignature) } ?? false
+        let frameObject: [String: Any] = [
+            "frameId": frame.frameId, "contextKey": frame.contextKey,
+            "contentId": frame.contentId, "scrollOffset": ["x": frame.scrollOffset.x, "y": frame.scrollOffset.y],
+            "viewport": ["width": frame.viewport.width, "height": frame.viewport.height,
+                         "scale": frame.viewport.scale],
+            "openedAt": frame.openedAt, "updatedAt": frame.updatedAt,
+            "image": frame.image, "strokes": jsonObject(fromEncodable: frame.strokes) ?? [],
+        ]
+        var closedFrame = frameObject
+        if let url = frame.url { closedFrame["url"] = url }
+        var recordData: Data?
+        if !frame.failed, validImage, let contentType, !frame.contentId.isEmpty,
+           let png {
+            let hash = SHA256.hash(data: png).map { String(format: "%02x", $0) }.joined()
+            let record: [String: Any] = [
+                "paneId": paneId, "frameId": frame.frameId, "kind": "frame_commit",
+                "contentId": frame.contentId, "revision": revision, "contentType": contentType,
+                "sourceTimestamp": Self.annotationSourceTimestamp(),
+                "viewport": ["width": frame.viewport.width, "height": frame.viewport.height,
+                             "scale": frame.viewport.scale],
+                "payload": ["frame": closedFrame, "imageSha256": hash],
             ]
-        )
+            recordData = try? JSONSerialization.data(withJSONObject: record)
+        }
+        do {
+            let data = recordData
+            let appended = try await adapter.transactAnnotationPublisher(surfaceId: surfaceId) { outbox in
+                guard let current = outbox.openFrame(surfaceId: surfaceId, paneId: paneId),
+                      current.frameId == frame.frameId else { return false }
+                if current.sourceStrokeCount > current.publishedStrokeCount {
+                    try outbox.lose(surfaceId: surfaceId, code: "annotation_final_delta_unavailable")
+                    outbox.markFramePublished(surfaceId: surfaceId, paneId: paneId)
+                }
+                if let data, let record = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    _ = try outbox.append(surfaceId: surfaceId, record: record)
+                } else {
+                    try outbox.lose(surfaceId: surfaceId, code: "annotation_frame_commit_unavailable")
+                }
+                outbox.closeFrame(surfaceId: surfaceId, paneId: paneId)
+                return true
+            }
+            if appended { annotationPublisher?.notify() }
+        } catch {
+            surfAceServerRuntimeLog("event=annotation_commit_failed \(surfAceDiagnosticFields([("error", String(describing: error))]))")
+        }
     }
 
     private func pane(surfaceId: String, paneId: Int) -> SurfAcePaneModel? {
