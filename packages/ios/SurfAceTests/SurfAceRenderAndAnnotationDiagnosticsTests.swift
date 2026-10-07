@@ -1291,6 +1291,69 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         XCTAssertNil(recovered?.openFrame(surfaceId: surfaceId, paneId: paneId))
     }
 
+    func testDirectCommitCrashWindowsCloseTheSameFrame() async throws {
+        for directCommitDelivered in [false, true] {
+            let defaults = isolatedUserDefaults()
+            let stateURL = try locklessStateURL()
+            let registry = try XCTUnwrap(URL(string: "ws://127.0.0.1:29999"))
+            let first = SurfAceRuntime(
+                userDefaults: defaults, locklessStateURL: stateURL,
+                configuredRegistryURL: registry, annotationClientId: "client-ios-commit-window",
+                enableFleetDiscovery: false
+            )
+            await first.start()
+            let registered = await first.registerSurfaceForScene(sceneKey: "commit-window")
+            let surface = try XCTUnwrap(registered)
+            let surfaceId = surface.surfaceId
+            let paneId = try XCTUnwrap(surface.panes.first?.paneId)
+            let adapter = try first.locklessAuthorityForLocalMutation()
+            let image = UIGraphicsImageRenderer(size: CGSize(width: 2, height: 2)).pngData { _ in
+                UIColor.white.setFill()
+                UIRectFill(CGRect(x: 0, y: 0, width: 2, height: 2))
+            }.base64EncodedString()
+            _ = try await adapter.transactAnnotationPublisher(surfaceId: surfaceId) { outbox in
+                _ = try outbox.beginFrame(
+                    surfaceId: surfaceId, paneId: paneId,
+                    contextKey: "content-commit-window", contentId: "content-commit-window",
+                    contentType: "html", revision: 1, url: nil,
+                    scrollOffset: .init(x: 0, y: 0),
+                    viewport: .init(width: 2, height: 2, scale: 1), openedAt: 1, image: image
+                )
+                outbox.setFrameCommitRequested(surfaceId: surfaceId, paneId: paneId, requested: true)
+                try outbox.stageDirectCommit(surfaceId: surfaceId, paneId: paneId, event: .init(
+                    eventId: "ev_commit_window", payload: "{\"paneId\":\(paneId),\"contentId\":\"content-commit-window\",\"revision\":1,\"committedAt\":3}",
+                    sentAt: 3, throughStrokeCount: 0
+                ))
+                if directCommitDelivered {
+                    try outbox.markDirectCommitDelivered(
+                        surfaceId: surfaceId, paneId: paneId, eventId: "ev_commit_window"
+                    )
+                }
+            }
+            await first.stop()
+            let restarted = SurfAceRuntime(
+                userDefaults: defaults, locklessStateURL: stateURL,
+                configuredRegistryURL: registry, annotationClientId: "client-ios-commit-window",
+                enableFleetDiscovery: false
+            )
+            await restarted.start()
+            let recoveredAdapter = try restarted.locklessAuthorityForLocalMutation()
+            for _ in 0..<100 {
+                if (await recoveredAdapter.snapshot()).annotationPublisher?
+                    .surfaces[surfaceId]?.fifo.count == 1 { break }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            let recovered = await recoveredAdapter.snapshot().annotationPublisher
+            let records = try XCTUnwrap(recovered?.surfaces[surfaceId]?.fifo).map { entry in
+                try XCTUnwrap(JSONSerialization.jsonObject(with: Data(entry.canonical.utf8))
+                    as? [String: Any])
+            }
+            XCTAssertEqual(records.map { $0["kind"] as? String }, ["frame_commit"])
+            XCTAssertNil(recovered?.openFrame(surfaceId: surfaceId, paneId: paneId))
+            await restarted.stop()
+        }
+    }
+
     func testLocklessZeroLiveSurfaceRestoresExactSurfaceAndPaneIdentity() async throws {
         let runtime = SurfAceRuntime(
             userDefaults: isolatedUserDefaults(),
