@@ -1117,7 +1117,7 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         runtime.setAnnotationMode(surfaceId: surfaceId, paneId: paneId,
                                   enabled: false, fingerDrawEnabled: false)
         await runtime.awaitAnnotationModeTransition(surfaceId: surfaceId, paneId: paneId)
-        await runtime.awaitAnnotationCommit(surfaceId: surfaceId, paneId: paneId)
+        await runtime.awaitAnnotationDirectCompletion(surfaceId: surfaceId, paneId: paneId)
         let finalState = await adapter.snapshot()
         let publisher = try XCTUnwrap(finalState.annotationPublisher)
         let entries = try XCTUnwrap(publisher.surfaces[surfaceId]?.fifo)

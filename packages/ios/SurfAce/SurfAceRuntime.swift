@@ -367,6 +367,7 @@ final class SurfAceRuntime {
     @ObservationIgnored private var centralRegistration: SurfAceCentralRegistration?
     @ObservationIgnored private var annotationPublisher: SurfAceAnnotationPublisher?
     @ObservationIgnored private var annotationStrokeTasks: [String: Task<Void, Never>] = [:]
+    @ObservationIgnored private var annotationFlushTasks: [String: Task<Void, Never>] = [:]
     @ObservationIgnored private var annotationModeTasks: [String: Task<Void, Never>] = [:]
     @ObservationIgnored private var annotationCommitTasks: [String: Task<Void, Never>] = [:]
     @ObservationIgnored private var annotationRecoveryTask: Task<Void, Never>?
@@ -1228,6 +1229,12 @@ final class SurfAceRuntime {
 
     func awaitAnnotationCommit(surfaceId: String, paneId: Int) async {
         await annotationCommitTasks["\(surfaceId):\(paneId)"]?.value
+    }
+
+    func awaitAnnotationDirectCompletion(surfaceId: String, paneId: Int) async {
+        let key = "\(surfaceId):\(paneId)"
+        await annotationFlushTasks[key]?.value
+        await annotationCommitTasks[key]?.value
     }
 
     func awaitAnnotationStrokeCapture(surfaceId: String, paneId: Int) async {
@@ -4529,7 +4536,9 @@ final class SurfAceRuntime {
             "lastStrokeAt": lastStrokeAt,
         ]
 
-        Task { @MainActor in
+        let key = "\(surfaceId):\(paneId)"
+        annotationFlushTasks[key] = Task { @MainActor in
+            defer { annotationFlushTasks.removeValue(forKey: key) }
             let directEvent = await self.stageAnnotationDirectFlush(
                 surfaceId: surfaceId, paneId: paneId, strokes: strokes, payload: payload
             )
