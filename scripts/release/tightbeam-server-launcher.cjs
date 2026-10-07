@@ -23,6 +23,14 @@ function publicError(code) {
   return error;
 }
 
+function startupCauseDiagnostic(error) {
+  const token = (value) => typeof value === "string" && /^[A-Za-z0-9_.-]{1,64}$/.test(value) ? value : null;
+  return {
+    name: token(error?.name),
+    causeCode: token(error?.code ?? error?.cause?.code),
+  };
+}
+
 function shutdownFailureDiagnostic(error) {
   const token = (value) => typeof value === "string" && /^[A-Za-z0-9_.-]{1,64}$/.test(value) ? value : null;
   const frames = typeof error?.stack === "string"
@@ -300,8 +308,10 @@ async function startForeground(config, options = {}) {
     const serverModule = require(modulePath);
     if (typeof serverModule.startCentralServer !== "function") throw publicError("callable_server_missing");
     service = await serverModule.startCentralServer(config, config.name ?? "Surf Ace Server");
-  } catch {
-    throw publicError("server_start_failed");
+  } catch (cause) {
+    const error = publicError("server_start_failed");
+    error.cause = cause;
+    throw error;
   }
   const write = options.write ?? ((line) => process.stdout.write(`${line}\n`));
   let readyWritten = false;
@@ -365,7 +375,8 @@ async function main(argv = process.argv.slice(2)) {
     await startForeground(config);
   } catch (error) {
     const code = typeof error?.publicCode === "string" ? error.publicCode : "server_operation_failed";
-    process.stderr.write(`${JSON.stringify({ event: "error", code })}\n`);
+    const cause = code === "server_start_failed" ? startupCauseDiagnostic(error.cause) : {};
+    process.stderr.write(`${JSON.stringify({ event: "error", code, ...cause })}\n`);
     process.exitCode = 1;
   }
 }
@@ -378,6 +389,7 @@ module.exports = {
   parseForegroundOutputLine,
   readServerConfig,
   shutdownFailureDiagnostic,
+  startupCauseDiagnostic,
   startForeground,
   validateServerConfig,
 };
