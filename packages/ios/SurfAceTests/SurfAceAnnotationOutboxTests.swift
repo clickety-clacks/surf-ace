@@ -317,6 +317,11 @@ final class SurfAceAnnotationOutboxTests: XCTestCase {
             url: nil, scrollOffset: .init(x: 0, y: 0),
             viewport: .init(width: 2, height: 2, scale: 1), openedAt: 3, image: "bmV3"
         ))
+        XCTAssertThrowsError(try recovered.recordStroke(
+            surfaceId: surfaceId, paneId: 1,
+            stroke: .init(strokeId: "later-stroke", points: [.init(x: 1, y: 1, pressure: nil)],
+                          bbox: .init(x: 1, y: 1, width: 0, height: 0), startedAt: 3, endedAt: 4)
+        ))
         XCTAssertEqual(recovered.openFrame(surfaceId: surfaceId, paneId: 1),
                        durable.openFrame(surfaceId: surfaceId, paneId: 1))
         recovered.closeFrame(surfaceId: surfaceId, paneId: 1)

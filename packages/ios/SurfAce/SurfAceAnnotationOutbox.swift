@@ -235,6 +235,9 @@ struct SurfAceAnnotationOutbox: Codable, Equatable, Sendable {
         guard var surface = surfaces[surfaceId], var frame = surface.openFrames?[String(paneId)] else {
             throw SurfAceAnnotationOutboxError.invalidState
         }
+        guard frame.directCommitDelivered != true else {
+            throw SurfAceAnnotationOutboxError.invalidState
+        }
         if (frame.directStrokeIds ?? frame.strokes.map(\.strokeId)).contains(stroke.strokeId) { return }
         frame.sourceStrokeCount += 1
         frame.directStrokeIds = (frame.directStrokeIds ?? frame.strokes.map(\.strokeId)) + [stroke.strokeId]
