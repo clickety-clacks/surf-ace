@@ -3699,9 +3699,10 @@ final class SurfAceRuntime {
     }
 
     private var configuredRegistryURL: URL? {
-        configuredRegistryURLOverride ?? ProcessInfo.processInfo.environment["SURF_ACE_SERVER"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .flatMap(URL.init(string:))
+        if let configuredRegistryURLOverride { return configuredRegistryURLOverride }
+        guard let address = ProcessInfo.processInfo.environment["SURF_ACE_SERVER"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines) else { return nil }
+        return URL(string: address)
     }
 
     private static func jsonObject<T: Encodable>(_ value: T) throws -> Any {
