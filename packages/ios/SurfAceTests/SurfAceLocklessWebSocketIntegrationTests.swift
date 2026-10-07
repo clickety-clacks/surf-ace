@@ -733,7 +733,8 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
                 createdServices += 1
                 return SurfAceNoNetworkTestService(port: port)
             },
-            permissionPromptTrigger: {}
+            permissionPromptTrigger: {},
+            diagnosticLog: { _ in }
         )
         let runtime = SurfAceRuntime(
             userDefaults: defaults,
