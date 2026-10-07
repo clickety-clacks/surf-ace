@@ -1,6 +1,8 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
+declare const __dirname: string;
+
 type JsonSchema = Readonly<Record<string, unknown>>;
 
 type ProtocolSchemaDefName =
