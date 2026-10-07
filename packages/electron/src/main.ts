@@ -1987,7 +1987,6 @@ async function boot(): Promise<void> {
   installWebAuthnAccountSelection();
   await acknowledgeCompositorMainAppBinding();
 
-  const configuredAddress = process.env.SURF_ACE_SERVER?.trim();
   const provisionedBinding = await loadProvisionedRegistryBinding(stateDir).catch((error) => {
     clientWarn("registry_provisioning_invalid", errorDiagnosticFields(error));
     return null;
