@@ -10,6 +10,12 @@ use tungstenite::{accept, Message, WebSocket};
 
 const EPOCH: &str = "0123456789abcdef0123456789abcdef";
 
+fn cli_binary() -> PathBuf {
+    std::env::var_os("SURF_ACE_PACKAGED_CLI_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_surf-ace")))
+}
+
 fn listener_path(root: &Path, consumer_id: &str) -> PathBuf {
     root.join("annotations")
         .join(format!("{:x}", Sha256::digest(consumer_id.as_bytes())))
@@ -109,7 +115,7 @@ fn watch_persists_delivery_without_ack_then_explicit_ack_uses_same_lease() {
         root.path().to_str().unwrap(),
         "annotations",
     ];
-    let watch = Command::new(env!("CARGO_BIN_EXE_surf-ace"))
+    let watch = Command::new(cli_binary())
         .args(common)
         .args(["watch", "--consumer-id", "reviewer"])
         .output()
@@ -140,7 +146,7 @@ fn watch_persists_delivery_without_ack_then_explicit_ack_uses_same_lease() {
     let state: Value = serde_json::from_slice(&std::fs::read(state_file).unwrap()).unwrap();
     assert_eq!(state["lastDeliveredCursor"], format!("ann1:{EPOCH}:1"));
     assert_eq!(state["ackCursor"], Value::Null);
-    let ack = Command::new(env!("CARGO_BIN_EXE_surf-ace"))
+    let ack = Command::new(cli_binary())
         .args(common)
         .args([
             "ack",
@@ -226,7 +232,7 @@ fn foreground_watcher_preserves_ack_written_by_separate_process() {
         state_root,
         "annotations",
     ];
-    let child = Command::new(env!("CARGO_BIN_EXE_surf-ace"))
+    let child = Command::new(cli_binary())
         .args(common)
         .args(["watch", "--consumer-id", "reviewer"])
         .spawn()
@@ -245,7 +251,7 @@ fn foreground_watcher_preserves_ack_written_by_separate_process() {
         thread::sleep(Duration::from_millis(10));
     }
     assert!(first_delivered, "first record persisted");
-    let ack = Command::new(env!("CARGO_BIN_EXE_surf-ace"))
+    let ack = Command::new(cli_binary())
         .args(common)
         .args([
             "ack",
@@ -351,7 +357,7 @@ fn history_gap_requires_explicit_gap_ack_before_confirmed_retirement() {
         "annotations",
     ];
     let cursor = format!("ann1:{EPOCH}:1");
-    let watch = Command::new(env!("CARGO_BIN_EXE_surf-ace"))
+    let watch = Command::new(cli_binary())
         .args(common)
         .args([
             "watch",
@@ -374,7 +380,7 @@ fn history_gap_requires_explicit_gap_ack_before_confirmed_retirement() {
         lines[1]["payload"]["availableFromCursor"],
         format!("ann1:{EPOCH}:2")
     );
-    let ack = Command::new(env!("CARGO_BIN_EXE_surf-ace"))
+    let ack = Command::new(cli_binary())
         .args(common)
         .args(["ack", "--consumer-id", "gap-reader", "--gap-id", "gap-1"])
         .output()
@@ -386,7 +392,7 @@ fn history_gap_requires_explicit_gap_ack_before_confirmed_retirement() {
     );
     let ack_json: Value = serde_json::from_slice(&ack.stdout).unwrap();
     assert_eq!(ack_json["ackCursor"], cursor);
-    let retire = Command::new(env!("CARGO_BIN_EXE_surf-ace"))
+    let retire = Command::new(cli_binary())
         .args(common)
         .args([
             "retire",
