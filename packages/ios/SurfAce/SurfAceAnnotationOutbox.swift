@@ -455,7 +455,11 @@ struct SurfAceAnnotationOutbox: Codable, Equatable, Sendable {
 
     private func fits(surfaceId: String, maxBytes: Int, maxRecords: Int) throws -> Bool {
         guard let surface = surfaces[surfaceId], surface.fifo.count <= maxRecords else { return false }
-        return try partitionBytes(surfaceId: surfaceId) + Int64(2 * Self.gapSlotBytes) <= maxBytes
+        let occupiedGapSlots = (surface.trailingGap != nil ? 1 : 0)
+            + (surface.fifo.contains { $0.kind == "gap" } ? 1 : 0)
+        let reservedGapSlots = max(0, 2 - occupiedGapSlots)
+        return try partitionBytes(surfaceId: surfaceId)
+            + Int64(reservedGapSlots * Self.gapSlotBytes) <= maxBytes
     }
 
     /// Match the registry's RFC 8785 serializer, including ECMAScript numbers and UTF-16 key order.
