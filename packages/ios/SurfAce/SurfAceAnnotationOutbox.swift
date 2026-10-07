@@ -137,6 +137,7 @@ struct SurfAceAnnotationOutbox: Codable, Equatable, Sendable {
                   (surface.openFrames ?? [:]).allSatisfy({ key, frame in
                       Int(key).map({ $0 > 0 }) == true && frame.frameId.hasPrefix("fr_")
                           && frame.sourceStrokeCount >= frame.publishedStrokeCount
+                          && (frame.directStrokeIds?.count ?? 0) <= frame.sourceStrokeCount
                           && (frame.deliveredDirectStrokeCount ?? 0) <= frame.sourceStrokeCount
                           && (frame.pendingDirectFlush?.throughStrokeCount ?? 0) <= frame.sourceStrokeCount
                           && (frame.directCommitDelivered != true || frame.commitRequested == true)
