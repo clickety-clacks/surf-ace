@@ -18,7 +18,7 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         let first = SurfAceRuntime(
             userDefaults: defaults, locklessStateURL: stateURL,
             configuredRegistryURL: registryURL, annotationClientId: "client-ios-recovery-reentry",
-            enableFleetDiscovery: false
+            enableFleetDiscovery: false, isolatedTestLoopback: true
         )
         await first.start()
         let firstRegistered = await first.registerSurfaceForScene(sceneKey: "recovery-reentry")
@@ -53,7 +53,7 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         let restored = SurfAceRuntime(
             userDefaults: defaults, locklessStateURL: stateURL,
             configuredRegistryURL: registryURL, annotationClientId: "client-ios-recovery-reentry",
-            enableFleetDiscovery: false,
+            enableFleetDiscovery: false, isolatedTestLoopback: true,
             annotationFrameCommitPreparation: { await gate.holdOnce() }
         )
         await restored.start()
@@ -102,6 +102,7 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
             userDefaults: defaults, locklessStateURL: stateURL,
             configuredRegistryURL: try XCTUnwrap(URL(string: "ws://127.0.0.1:29999")),
             annotationClientId: "client-ios-finalize-fault", enableFleetDiscovery: false,
+            isolatedTestLoopback: true,
             annotationFrameCommitPreparation: { try await fault.failOnce() }
         )
         await runtime.start()
@@ -198,6 +199,7 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
             userDefaults: defaults, locklessStateURL: stateURL,
             configuredRegistryURL: try XCTUnwrap(URL(string: "ws://127.0.0.1:29999")),
             annotationClientId: "client-ios-stage-reentry-fixture", enableFleetDiscovery: false,
+            isolatedTestLoopback: true,
             annotationCommitStagePreparation: { await stageGate.holdOnce() }
         )
         await runtime.start()
@@ -325,7 +327,7 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
             locklessStateURL: stateURL,
             configuredRegistryURL: try XCTUnwrap(URL(string: "ws://127.0.0.1:29999")),
             annotationClientId: "client-ios-reentry-fixture",
-            enableFleetDiscovery: false,
+            enableFleetDiscovery: false, isolatedTestLoopback: true,
             outboundSendPreparation: { text, priority in
                 await flushGate.prepareSend(text: text, priority: priority)
             },
@@ -519,7 +521,8 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         let runtime = SurfAceRuntime(
             userDefaults: defaults,
             locklessStateURL: FileManager.default.temporaryDirectory
-                .appendingPathComponent("unused-delivery-gate-\(UUID().uuidString).json")
+                .appendingPathComponent("unused-delivery-gate-\(UUID().uuidString).json"),
+            enableFleetDiscovery: false, isolatedTestLoopback: true
         )
         let activeTurnEntered = expectation(description: "active delivery turn entered")
         let activeTurnRelease = SurfAceLocklessTestGate()
@@ -581,6 +584,7 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         let runtime = SurfAceRuntime(
             userDefaults: defaults,
             locklessStateURL: stateURL,
+            enableFleetDiscovery: false, isolatedTestLoopback: true,
             outboundSendPreparation: { text, priority in
                 await pairResponseGate.prepareSend(text: text, priority: priority)
             },
@@ -688,7 +692,8 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
             try? FileManager.default.removeItem(at: stateURL)
         }
 
-        let runtime = SurfAceRuntime(userDefaults: defaults, locklessStateURL: stateURL)
+        let runtime = SurfAceRuntime(userDefaults: defaults, locklessStateURL: stateURL,
+                                     enableFleetDiscovery: false, isolatedTestLoopback: true)
         await runtime.start()
         let port = try XCTUnwrap(UInt16(exactly: runtime.serverPort))
         addTeardownBlock { await runtime.stop() }
@@ -777,7 +782,8 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
             defaults.removePersistentDomain(forName: "SurfAceLocklessWebSocketIntegrationTests-\(identifier)")
             try? FileManager.default.removeItem(at: stateURL)
         }
-        let runtime = SurfAceRuntime(userDefaults: defaults, locklessStateURL: stateURL)
+        let runtime = SurfAceRuntime(userDefaults: defaults, locklessStateURL: stateURL,
+                                     enableFleetDiscovery: false, isolatedTestLoopback: true)
         await runtime.start()
         XCTAssertNil(runtime.endpointError)
         let port = try XCTUnwrap(UInt16(exactly: runtime.serverPort))

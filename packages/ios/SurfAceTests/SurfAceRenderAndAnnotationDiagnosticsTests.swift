@@ -1068,7 +1068,8 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         let runtime = SurfAceRuntime(
             userDefaults: isolatedUserDefaults(), locklessStateURL: try locklessStateURL(),
             configuredRegistryURL: try XCTUnwrap(URL(string: "ws://127.0.0.1:29999")),
-            annotationClientId: "client-ios-fixture", enableFleetDiscovery: false
+            annotationClientId: "client-ios-fixture", enableFleetDiscovery: false,
+            isolatedTestLoopback: true
         )
         addTeardownBlock { await runtime.stop() }
         await runtime.start()
@@ -1143,7 +1144,7 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         let firstRuntime = SurfAceRuntime(
             userDefaults: defaults, locklessStateURL: stateURL,
             configuredRegistryURL: registry, annotationClientId: "client-ios-restart",
-            enableFleetDiscovery: false
+            enableFleetDiscovery: false, isolatedTestLoopback: true
         )
         await firstRuntime.start()
         let registered = await firstRuntime.registerSurfaceForScene(sceneKey: "restart")
@@ -1182,7 +1183,7 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         let restartedRuntime = SurfAceRuntime(
             userDefaults: defaults, locklessStateURL: stateURL,
             configuredRegistryURL: registry, annotationClientId: "client-ios-restart",
-            enableFleetDiscovery: false
+            enableFleetDiscovery: false, isolatedTestLoopback: true
         )
         addTeardownBlock { await restartedRuntime.stop() }
         await restartedRuntime.start()
@@ -1204,7 +1205,7 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         let first = SurfAceRuntime(
             userDefaults: defaults, locklessStateURL: stateURL,
             configuredRegistryURL: registry, annotationClientId: "client-ios-unstaged",
-            enableFleetDiscovery: false
+            enableFleetDiscovery: false, isolatedTestLoopback: true
         )
         await first.start()
         let registered = await first.registerSurfaceForScene(sceneKey: "unstaged")
@@ -1259,7 +1260,7 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         let restarted = SurfAceRuntime(
             userDefaults: defaults, locklessStateURL: stateURL,
             configuredRegistryURL: registry, annotationClientId: "client-ios-unstaged",
-            enableFleetDiscovery: false
+            enableFleetDiscovery: false, isolatedTestLoopback: true
         )
         addTeardownBlock { await restarted.stop() }
         await restarted.start()
@@ -1285,7 +1286,7 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
             let first = SurfAceRuntime(
                 userDefaults: defaults, locklessStateURL: stateURL,
                 configuredRegistryURL: registry, annotationClientId: "client-ios-commit-window",
-                enableFleetDiscovery: false
+                enableFleetDiscovery: false, isolatedTestLoopback: true
             )
             await first.start()
             let registered = await first.registerSurfaceForScene(sceneKey: "commit-window")
@@ -1320,7 +1321,7 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
             let restarted = SurfAceRuntime(
                 userDefaults: defaults, locklessStateURL: stateURL,
                 configuredRegistryURL: registry, annotationClientId: "client-ios-commit-window",
-                enableFleetDiscovery: false
+                enableFleetDiscovery: false, isolatedTestLoopback: true
             )
             await restarted.start()
             let recoveredAdapter = try restarted.locklessAuthorityForLocalMutation()
@@ -1369,7 +1370,10 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         let originalPaneIds = original.panes.map(\.paneId)
         await firstRuntime.unregisterSurfaceForScene(sceneKey: "scene-restart")
 
-        let restartedRuntime = SurfAceRuntime(userDefaults: isolatedUserDefaults(), locklessStateURL: stateURL)
+        let restartedRuntime = SurfAceRuntime(userDefaults: isolatedUserDefaults(),
+                                              locklessStateURL: stateURL,
+                                              enableFleetDiscovery: false,
+                                              isolatedTestLoopback: true)
         addTeardownBlock { await restartedRuntime.stop() }
         XCTAssertFalse(restartedRuntime.isSceneAuthorityReady)
         await restartedRuntime.start()

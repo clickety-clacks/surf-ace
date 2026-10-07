@@ -356,6 +356,7 @@ final class SurfAceRuntime {
     @ObservationIgnored private let configuredRegistryURLOverride: URL?
     @ObservationIgnored private let annotationClientIdOverride: String?
     @ObservationIgnored private let enableFleetDiscovery: Bool
+    @ObservationIgnored private let forceIsolatedTestLoopback: Bool
     @ObservationIgnored private let outboundSendPreparation: (@Sendable (
         String, SurfAceOutboundSender.Priority
     ) async -> Void)?
@@ -451,6 +452,7 @@ final class SurfAceRuntime {
         configuredRegistryURL: URL? = nil,
         annotationClientId: String? = nil,
         enableFleetDiscovery: Bool = true,
+        isolatedTestLoopback: Bool = false,
         outboundSendPreparation: (@Sendable (
             String, SurfAceOutboundSender.Priority
         ) async -> Void)? = nil,
@@ -464,6 +466,7 @@ final class SurfAceRuntime {
         self.configuredRegistryURLOverride = configuredRegistryURL
         self.annotationClientIdOverride = annotationClientId
         self.enableFleetDiscovery = enableFleetDiscovery
+        self.forceIsolatedTestLoopback = isolatedTestLoopback
         self.outboundSendPreparation = outboundSendPreparation
         self.annotationCommitStagePreparation = annotationCommitStagePreparation
         self.annotationFrameCommitPreparation = annotationFrameCommitPreparation
@@ -503,7 +506,8 @@ final class SurfAceRuntime {
         guard !isStarted, !isStarting else { return }
         isStarting = true
         defer { isStarting = false }
-        let isolatedTestLoopback = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+        let isolatedTestLoopback = forceIsolatedTestLoopback ||
+            ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
         await restoreLocklessAuthority(reason: "process_start")
         isSceneAuthorityReady = true
         observeLifecycle()
