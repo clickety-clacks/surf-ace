@@ -4015,6 +4015,8 @@ test("guarded restart preserves two-pane display but cannot re-pair without dura
     const refused = await pair(socket, "guarded-restart-client", surface.surfaceId);
     assert.equal(refused.ok, false, JSON.stringify(refused));
     assert.equal(refused.error?.code, "internal_error");
+    assert.match(String(refused.error?.message ?? ""),
+      /persistence is guarded; pairing .* unavailable until state recovery/i);
     assert.equal((await request(socket, "panes.list", { surfaceId: surface.surfaceId })).error?.code,
       "not_paired");
     assert.equal((await request(socket, "snapshot.get", {

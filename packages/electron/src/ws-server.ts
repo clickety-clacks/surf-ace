@@ -1310,6 +1310,17 @@ export class SurfaceWsServer {
             ),
           };
         }
+        if (error instanceof PersistentStateWriteGuardError) {
+          return {
+            rejectionCode: "internal_error",
+            response: errorResponse(
+              request.op,
+              request.id as never,
+              "internal_error",
+              "Local persistence is guarded; pairing and durable writes are unavailable until state recovery",
+            ),
+          };
+        }
         return {
           rejectionCode: "internal_error",
           response: errorResponse(
