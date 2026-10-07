@@ -5,6 +5,89 @@ import XCTest
 
 @MainActor
 final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
+    func testRecoveryFinalizesProvenCommitBeforeRequestedReentry() async throws {
+        let suiteName = "SurfAceRecoveryReentry-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        let stateURL = FileManager.default.temporaryDirectory.appendingPathComponent("\(suiteName).json")
+        addTeardownBlock {
+            defaults.removePersistentDomain(forName: suiteName)
+            try? FileManager.default.removeItem(at: stateURL)
+        }
+        let registryURL = try XCTUnwrap(URL(string: "ws://127.0.0.1:29999"))
+        let first = SurfAceRuntime(
+            userDefaults: defaults, locklessStateURL: stateURL,
+            configuredRegistryURL: registryURL, annotationClientId: "client-ios-recovery-reentry",
+            enableFleetDiscovery: false
+        )
+        await first.start()
+        let firstRegistered = await first.registerSurfaceForScene(sceneKey: "recovery-reentry")
+        let firstSurface = try XCTUnwrap(firstRegistered)
+        let surfaceId = firstSurface.surfaceId
+        let paneId = try XCTUnwrap(firstSurface.panes.first?.paneId)
+        let firstAdapter = try first.locklessAuthorityForLocalMutation()
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 2, height: 2)).pngData { _ in
+            UIColor.white.setFill()
+            UIRectFill(CGRect(x: 0, y: 0, width: 2, height: 2))
+        }.base64EncodedString()
+        let oldFrameId = try await firstAdapter.transactAnnotationPublisher(surfaceId: surfaceId) { outbox in
+            let frame = try outbox.beginFrame(
+                surfaceId: surfaceId, paneId: paneId, contextKey: "recovery-content",
+                contentId: "recovery-content", contentType: "html", revision: 0,
+                url: nil, scrollOffset: .init(x: 0, y: 0),
+                viewport: .init(width: 2, height: 2, scale: 1), openedAt: 100, image: image
+            )
+            outbox.setFrameCommitRequested(surfaceId: surfaceId, paneId: paneId, requested: true)
+            let commit = SurfAceAnnotationDirectEvent(
+                eventId: "ev_recovered_commit", payload: "{}", sentAt: 101, throughStrokeCount: 0
+            )
+            try outbox.stageDirectCommit(surfaceId: surfaceId, paneId: paneId, event: commit)
+            try outbox.markDirectCommitDelivered(surfaceId: surfaceId, paneId: paneId,
+                                                 eventId: commit.eventId)
+            return frame.frameId
+        }
+        await first.stop()
+
+        let gate = SurfAceAnnotationCommitStageGate()
+        addTeardownBlock { await gate.release() }
+        let restored = SurfAceRuntime(
+            userDefaults: defaults, locklessStateURL: stateURL,
+            configuredRegistryURL: registryURL, annotationClientId: "client-ios-recovery-reentry",
+            enableFleetDiscovery: false,
+            annotationFrameCommitPreparation: { await gate.holdOnce() }
+        )
+        await restored.start()
+        addTeardownBlock { await restored.stop() }
+        let registered = await restored.registerSurfaceForScene(sceneKey: "recovery-reentry")
+        let surface = try XCTUnwrap(registered)
+        let pane = try XCTUnwrap(surface.panes.first)
+        let recoveryHeld = expectation(description: "proven source finalization held")
+        Task { await gate.waitUntilHeld(); recoveryHeld.fulfill() }
+        await fulfillment(of: [recoveryHeld], timeout: 5)
+        restored.setAnnotationMode(surfaceId: surfaceId, paneId: paneId,
+                                   enabled: true, fingerDrawEnabled: false)
+        await gate.release()
+        await restored.awaitAnnotationModeTransition(surfaceId: surfaceId, paneId: paneId)
+        XCTAssertTrue(pane.annotationMode)
+        let adapter = try restored.locklessAuthorityForLocalMutation()
+        let outbox = await adapter.snapshot().annotationPublisher
+        XCTAssertNil(outbox?.openFrame(surfaceId: surfaceId, paneId: paneId))
+        let committed = try XCTUnwrap(outbox?.surfaces[surfaceId]?.fifo.last)
+        let record = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(committed.canonical.utf8))
+            as? [String: Any])
+        XCTAssertEqual(record["kind"] as? String, "frame_commit")
+        XCTAssertEqual(record["frameId"] as? String, oldFrameId)
+        let newFrameId = try await adapter.transactAnnotationPublisher(surfaceId: surfaceId) { outbox in
+            try outbox.beginFrame(surfaceId: surfaceId, paneId: paneId,
+                                  contextKey: "recovery-content", contentId: "recovery-content",
+                                  contentType: "html", revision: 0,
+                                  url: nil, scrollOffset: .init(x: 0, y: 0),
+                                  viewport: .init(width: 2, height: 2, scale: 1),
+                                  openedAt: 200, image: image).frameId
+        }
+        XCTAssertNotEqual(newFrameId, oldFrameId)
+    }
+
     func testProvenCommitFinalizationFailureKeepsFrameUntilReentryRetry() async throws {
         let suiteName = "SurfAceFinalizationRetry-\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
