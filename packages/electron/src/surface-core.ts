@@ -276,6 +276,7 @@ export type RendererPaneState = {
 };
 
 export type RendererWindowState = {
+  capabilityStatus?: string;
   connectionBar: SurfaceState["connectionBar"];
   connectionError?: string;
   layout: LayoutNode | null;
@@ -723,7 +724,12 @@ export class SurfaceCore {
       for (const event of events) this.deliver(event);
       return result;
     } catch (error) {
-      this.restorePersistentState(before);
+      // An ambiguous selector commit may already contain the new generation.
+      // Keep the exact candidate in memory for read-only display and later
+      // reconciliation; rolling it back here would erase operation identity.
+      if ((error as { name?: string } | null)?.name !== "PersistentStateOutcomeUnknownError") {
+        this.restorePersistentState(before);
+      }
       this.pendingEvents = null;
       throw error;
     }
@@ -930,6 +936,10 @@ export class SurfaceCore {
 
   isAdmissionFailStopped(): boolean {
     return this.admissionFailStop;
+  }
+
+  resumeAdmissionAfterVerifiedPersistence(): void {
+    this.admissionFailStop = false;
   }
 
   /**

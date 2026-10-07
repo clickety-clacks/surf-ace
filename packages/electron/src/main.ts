@@ -1,5 +1,6 @@
 import { ServerConnection } from "./server-connection.js";
 import fs from "node:fs/promises";
+import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 
@@ -81,6 +82,12 @@ const ADVERTISER_TXT_REFRESH_DEBOUNCE_MS = 500;
 const SURF_ACE_WEBAUTHN_KEYCHAIN_ACCESS_GROUP = "Z7R59J7QV8.ai.surf-ace.electron.webauthn";
 let persistentStateWriteGuard: PersistentStateLoadResult["writeGuard"] = false;
 let persistentStateOutcomeUnknown: PersistentStateOutcomeUnknownError | null = null;
+let uncertainStateCandidate: PersistentSurfaceState | null = null;
+let persistenceRecoveryTimer: NodeJS.Timeout | null = null;
+let persistenceRetryDelayMs = 1_000;
+let providerEndpointAvailable = false;
+let providerRetryTimer: NodeJS.Timeout | null = null;
+let resolveProviderRetry: (() => void) | null = null;
 
 type WebAuthnAccountSelectionCallback = (credentialId?: string | null) => void;
 type ShortcutInput = {
@@ -198,18 +205,8 @@ function candidatePorts(preferredPort: number): number[] {
   return ports;
 }
 
-async function createAndStartServer(coreValue: SurfaceCore): Promise<{ port: number; server: SurfaceWsServer }> {
-  const ports = candidatePorts(WS_PORT);
-  let lastError: unknown;
-  for (const port of ports) {
-    if (BIND_ADDRESS === "0.0.0.0" && await isPortBoundOnIpv6Any(port)) {
-      lastError = Object.assign(new Error(`Port ${port} is already bound on IPv6`), { code: "EADDRINUSE" });
-      if (port === ports.at(-1)) {
-        throw lastError;
-      }
-      continue;
-    }
-    const candidate = new SurfaceWsServer({
+function createServer(coreValue: SurfaceCore): SurfaceWsServer {
+  return new SurfaceWsServer({
       bindAddress: BIND_ADDRESS,
       capturePaneImage,
       claimPaneLabel: async (surfaceId, paneId, paneLineageId) => {
@@ -231,38 +228,61 @@ async function createAndStartServer(coreValue: SurfaceCore): Promise<{ port: num
 	        broadcastSurfaceState(surfaceId);
 	      },
       persistLocklessState: persistState,
-      port,
+      port: WS_PORT,
       viewport: () => displayViewport(),
     });
-    try {
-      await candidate.start();
-      if (port !== WS_PORT) {
-        console.warn(
-          `[surf-ace] WS port ${WS_PORT} unavailable; using ${port} for this Electron surface on ${shortHostName()}.`,
-        );
-      }
-      clientInfo("selected_provider_endpoint", {
-        bind_address: BIND_ADDRESS,
-        endpoint_name: endpointName(),
-        host_name: shortHostName(),
-        port,
-        requested_port: WS_PORT,
-        ws_path: candidate.wsPath,
-      });
-      return { port, server: candidate };
-    } catch (error) {
-      lastError = error;
-      clientWarn("provider_endpoint_bind_failed", {
-        bind_address: BIND_ADDRESS,
-        port,
-        ...errorDiagnosticFields(error),
-      });
-      if (!isAddressInUse(error) || port === ports.at(-1)) {
-        throw error;
+}
+
+async function startProviderEndpoint(): Promise<void> {
+  let retry = 0;
+  while (!isQuitting) {
+    const ports = candidatePorts(WS_PORT);
+    for (const port of ports) {
+      try {
+        if (BIND_ADDRESS === "0.0.0.0" && await isPortBoundOnIpv6Any(port)) {
+          throw Object.assign(new Error(`Port ${port} is already bound on IPv6`), { code: "EADDRINUSE" });
+        }
+        await server.start(port);
+        if (isQuitting) {
+          await server.stop();
+          return;
+        }
+        providerEndpointAvailable = true;
+        for (const surface of core.listSurfaces()) broadcastSurfaceState(surface.surfaceId);
+        if (port !== WS_PORT) {
+          console.warn(`[surf-ace] WS port ${WS_PORT} unavailable; using ${port} for this Electron surface on ${shortHostName()}.`);
+        }
+        clientInfo("selected_provider_endpoint", {
+          bind_address: BIND_ADDRESS,
+          endpoint_name: endpointName(),
+          host_name: shortHostName(),
+          port,
+          requested_port: WS_PORT,
+          ws_path: server.wsPath,
+        });
+        return;
+      } catch (error) {
+        providerEndpointAvailable = false;
+        clientWarn("provider_endpoint_bind_failed", {
+          bind_address: BIND_ADDRESS,
+          port,
+          ...errorDiagnosticFields(error),
+        });
+        if (!isAddressInUse(error)) break;
       }
     }
+    // A listener is optional for already restored windows. Keep trying while
+    // the app runs so an endpoint released later becomes usable automatically.
+    const cap = Math.min(10_000, 500 * 2 ** Math.min(retry++, 5));
+    await new Promise<void>((resolve) => {
+      resolveProviderRetry = resolve;
+      providerRetryTimer = setTimeout(() => {
+        providerRetryTimer = null;
+        resolveProviderRetry = null;
+        resolve();
+      }, Math.floor(cap * (0.7 + Math.random() * 0.3)));
+    });
   }
-  throw lastError;
 }
 
 function scheduleAdvertiserTxtRefresh(): void {
@@ -407,7 +427,7 @@ async function loadPersistentState(): Promise<PersistentSurfaceState | undefined
 }
 
 async function persistState(): Promise<void> {
-  if (persistentStateOutcomeUnknown) throw persistentStateOutcomeUnknown;
+  if (persistentStateOutcomeUnknown) throw new Error("Local persistence is paused pending reconciliation");
   if (persistentStateWriteGuard) {
     clientWarn("state_persist_skipped_corrupt_restore", {
       path: path.join(stateDir, STATE_FILE_NAME),
@@ -418,7 +438,16 @@ async function persistState(): Promise<void> {
   stateWrite = stateWrite
     .catch(() => {})
     .then(async () => {
-      await writePersistentStateFile(stateDir, STATE_FILE_NAME, core.getPersistentState());
+      if (persistentStateOutcomeUnknown) throw new Error("Local persistence is paused pending reconciliation");
+      const candidate = core.getPersistentState();
+      try {
+        await writePersistentStateFile(stateDir, STATE_FILE_NAME, candidate);
+      } catch (error) {
+        if (error instanceof PersistentStateOutcomeUnknownError) {
+          uncertainStateCandidate = candidate;
+        }
+        throw error;
+      }
     });
   try {
     await stateWrite;
@@ -427,10 +456,72 @@ async function persistState(): Promise<void> {
       persistentStateOutcomeUnknown = error;
       persistentStateWriteGuard = "ambiguous-persistence";
       server?.failStopPersistence(error);
-      app.quit();
+      for (const surface of core.listSurfaces()) broadcastSurfaceState(surface.surfaceId);
+      schedulePersistenceReconciliation();
     }
     throw error;
   }
+}
+
+function schedulePersistenceReconciliation(): void {
+  if (persistenceRecoveryTimer || isQuitting) return;
+  persistenceRecoveryTimer = setTimeout(() => {
+    persistenceRecoveryTimer = null;
+    void reconcilePersistence();
+  }, Math.floor(persistenceRetryDelayMs * (0.7 + Math.random() * 0.3)));
+  persistenceRetryDelayMs = Math.min(10_000, persistenceRetryDelayMs * 2);
+}
+
+async function reconcilePersistence(): Promise<void> {
+  if (!persistentStateOutcomeUnknown || !uncertainStateCandidate || isQuitting) return;
+  let result = await loadPersistentStateFile(stateDir, STATE_FILE_NAME).catch((error) => ({
+    error,
+    state: undefined,
+    writeGuard: "ambiguous-persistence" as const,
+  }));
+  if (!result.writeGuard &&
+      JSON.stringify(result.state) !== JSON.stringify(uncertainStateCandidate) &&
+      persistentStateOutcomeUnknown.acceptedSha256 !== undefined) {
+    const acceptedHash = result.state
+      ? createHash("sha256").update(JSON.stringify(result.state, null, 2)).digest("hex")
+      : null;
+    if (acceptedHash === persistentStateOutcomeUnknown.acceptedSha256) {
+      // The selector proves the previous generation, so rewriting the same
+      // candidate state cannot duplicate the operation that produced it.
+      try {
+        await writePersistentStateFile(stateDir, STATE_FILE_NAME, uncertainStateCandidate);
+        result = await loadPersistentStateFile(stateDir, STATE_FILE_NAME);
+      } catch (error) {
+        if (error instanceof PersistentStateOutcomeUnknownError) persistentStateOutcomeUnknown = error;
+        clientWarn("state_persistence_retry_failed", errorDiagnosticFields(error));
+        schedulePersistenceReconciliation();
+        return;
+      }
+    }
+  }
+  if (!result.writeGuard && result.state &&
+      JSON.stringify(result.state) === JSON.stringify(uncertainStateCandidate)) {
+    // The exact generation that produced the ambiguous reply is now proved
+    // durable. Independent local interaction may have advanced in-memory
+    // state meanwhile; queue its save after reopening the persistence seam.
+    const changedWhilePaused = JSON.stringify(core.getPersistentState()) !== JSON.stringify(uncertainStateCandidate);
+    persistentStateOutcomeUnknown = null;
+    uncertainStateCandidate = null;
+    persistentStateWriteGuard = false;
+    persistenceRetryDelayMs = 1_000;
+    core.resumeAdmissionAfterVerifiedPersistence();
+    server.resumeAfterVerifiedPersistence();
+    clientInfo("state_persistence_reconciled");
+    for (const surface of core.listSurfaces()) broadcastSurfaceState(surface.surfaceId);
+    if (changedWhilePaused) void persistState().catch((error) => {
+      clientWarn("state_persistence_followup_failed", errorDiagnosticFields(error));
+    });
+    return;
+  }
+  if (result.writeGuard && "error" in result) {
+    clientWarn("state_persistence_recheck_failed", errorDiagnosticFields(result.error));
+  }
+  schedulePersistenceReconciliation();
 }
 
 function surfaceIdForSender(contents: WebContents): string | null {
@@ -488,12 +579,21 @@ function flushPendingWindowState(surfaceId: string): void {
   window.webContents.send("surface:state", pendingState);
 }
 
+function rendererWindowState(surfaceId: string): RendererWindowState {
+  const state = core.getRendererWindowState(surfaceId);
+  state.capabilityStatus = [
+    persistentStateOutcomeUnknown ? "Local changes paused: saved state is being reconciled" : null,
+    !providerEndpointAvailable ? "Direct connection unavailable; retrying" : null,
+  ].filter(Boolean).join(" · ") || undefined;
+  return state;
+}
+
 function broadcastSurfaceState(surfaceId: string): void {
   const window = windows.get(surfaceId);
   if (!window || window.isDestroyed()) {
     return;
   }
-  const state = core.getRendererWindowState(surfaceId);
+  const state = rendererWindowState(surfaceId);
   const windowLabel = core.surfaceWindowLabel(surfaceId);
   window.setTitle(windowLabel ? `${endpointName()} · ${windowLabel}` : endpointName());
   if (!readyWindows.has(surfaceId)) {
@@ -1012,7 +1112,7 @@ function handleShortcutInput(
     if (focusedPaneId && focusedPaneId > 0) {
       core.setActiveKeyboardPane(surfaceId, focusedPaneId);
     }
-    const state = core.getRendererWindowState(surfaceId);
+    const state = rendererWindowState(surfaceId);
     const activePaneId = focusedPaneId && focusedPaneId > 0 ? focusedPaneId : core.activeKeyboardPaneId(surfaceId);
     const activePane = state.panes.find((pane) => pane.paneId === activePaneId);
     if (!activePaneId || !activePane) {
@@ -1069,12 +1169,12 @@ function handleShortcutInput(
     }
     if (input.key.toLowerCase() === "a" && !input.meta) {
       core.setAnnotating(surfaceId, activePaneId, true);
-      void persistState();
+      void persistState().catch(() => {});
       return;
     }
     if (input.key.toLowerCase() === "d" && !input.meta) {
       core.setAnnotating(surfaceId, activePaneId, false);
-      void persistState();
+      void persistState().catch(() => {});
       return;
     }
     if (input.meta && input.key === "[") {
@@ -1298,8 +1398,15 @@ async function createWindowForSurface(surfaceId: string): Promise<BrowserWindow>
         }
         server.disconnectLocklessSurfaceSessions(surfaceId, "surface_closed");
         await server.closeSurfaceFromLocalUser(surfaceId);
-        void persistState();
+        void persistState().catch(() => {});
       })();
+    }
+  });
+
+  window.on("close", (event) => {
+    if (persistentStateOutcomeUnknown && !isQuitting && !programmaticSurfaceCloses.has(surfaceId)) {
+      event.preventDefault();
+      clientWarn("window_close_paused_uncertain_persistence", { surface_id: surfaceId });
     }
   });
 
@@ -1433,6 +1540,7 @@ async function contentPayloadFromFile(
 }
 
 async function createAdditionalWindow(): Promise<void> {
+  if (persistentStateOutcomeUnknown) return;
   await server.openSurfaceFromLocalUser();
 }
 
@@ -1519,7 +1627,7 @@ function installIpc(): void {
       });
       return null;
     }
-    const state = core.getRendererWindowState(surfaceId);
+    const state = rendererWindowState(surfaceId);
     clientInfo("renderer_bootstrap_routed", {
       content_pane_count: state.panes.filter((pane) => Boolean(pane.content.contentType)).length,
       has_layout: Boolean(state.layout),
@@ -1777,22 +1885,21 @@ async function boot(): Promise<void> {
     restored_surface_count: restoredSurfaces.length,
   });
 
-  const serverStart = await createAndStartServer(core);
-  server = serverStart.server;
+  server = createServer(core);
 
   core.subscribe((coreEvent) => {
     if (coreEvent.type === "lockless-authority-changed") {
-      void persistState();
+      void persistState().catch(() => {});
       return;
     }
     if (coreEvent.type === "surface-changed") {
       broadcastSurfaceState(coreEvent.surfaceId);
-      void persistState();
+      void persistState().catch(() => {});
       return;
     }
     if (coreEvent.type === "surface-created") {
       void createWindowForSurface(coreEvent.surfaceId);
-      void persistState();
+      void persistState().catch(() => {});
       return;
     }
     if (coreEvent.type === "surface-removed") {
@@ -1801,7 +1908,7 @@ async function boot(): Promise<void> {
         programmaticSurfaceCloses.add(coreEvent.surfaceId);
         window.close();
       }
-      void persistState();
+      void persistState().catch(() => {});
     }
   });
 
@@ -1831,6 +1938,7 @@ async function boot(): Promise<void> {
     open_window_count: windows.size,
     surface_ids: core.listSurfaces().map((surface) => surface.surfaceId).join(","),
   });
+  void startProviderEndpoint();
 }
 
 if (!singleInstanceLock) {
@@ -1864,12 +1972,17 @@ if (!singleInstanceLock) {
       active_window_count: windows.size,
     });
     isQuitting = true;
+    if (providerRetryTimer) clearTimeout(providerRetryTimer);
+    providerRetryTimer = null;
+    resolveProviderRetry?.();
+    resolveProviderRetry = null;
+    if (persistenceRecoveryTimer) clearTimeout(persistenceRecoveryTimer);
     clearAdvertiserTxtRefreshTimer();
     await Promise.allSettled(
       [...windows.keys()].map((surfaceId) => releaseNativePaneInstancesForSurface(surfaceId, "app quit")),
     );
     await configuredRegistration?.stop();
     await advertiser?.stop();
-    await server.stop();
+    if (providerEndpointAvailable) await server.stop();
   });
 }
