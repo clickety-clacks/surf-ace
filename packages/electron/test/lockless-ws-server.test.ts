@@ -1742,6 +1742,10 @@ test("new panes stay unnumbered when the registry rejects a pane claim and recov
   const registryAddress = `ws://127.0.0.1:${(registry.address() as AddressInfo).port}/`;
   const clientRegistration = new ConfiguredServerRegistration(
     registryAddress, "allocator-recovery-client", core, async () => {}, () => {}, 500,
+    {
+      binding: { clientId: "allocator-recovery-client", allocatorId: "alloc_fixture", fleetId: "fixture-fleet" },
+      confirmedClaims: core.confirmedRegistryClaims(),
+    },
   );
   try {
     assert.equal((await pair(controller, "allocator-recovery-controller", surface.surfaceId)).ok, true);
@@ -1807,7 +1811,17 @@ test("new panes stay unnumbered when the registry rejects a pane claim and recov
     assert.ok(unnumberedLineages.has(restoredPane.paneLineageId));
     const registrationRequestPromise = new Promise<{ socket: WebSocket; message: any }>((resolve) => {
       registry.once("connection", (socket) => {
-        socket.once("message", (raw) => resolve({ socket, message: JSON.parse(String(raw)) }));
+        socket.on("message", (raw) => {
+          const message = JSON.parse(String(raw));
+          if (message.op === "fleet.topology") {
+            socket.send(JSON.stringify({
+              id: message.id, ok: true, op: message.op, type: "response", v: 1,
+              payload: { registryIdentity: { allocatorId: "alloc_fixture", fleetId: "fixture-fleet" } },
+            }));
+          } else if (message.op === "client.register") {
+            resolve({ socket, message });
+          }
+        });
       });
     });
     const synchronize = clientRegistration.synchronize();
