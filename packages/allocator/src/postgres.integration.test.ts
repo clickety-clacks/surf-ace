@@ -1124,6 +1124,7 @@ test("configured-first server in-process discovery fallback registers and persis
     }
     const before = await allocator.diagnostics();
     await clients[1].stop();
+    assert.equal(routeSockets.size, 0, "stopped configured route closes its sockets");
     const restoredIdentity = await loadOrCreateIdentity(fixtures[0].stateDir);
     assert.equal(registrationClientId(restoredIdentity.publicKeyPem), fixtures[0].clientId);
     allowConfigured = false;
@@ -1136,7 +1137,10 @@ test("configured-first server in-process discovery fallback registers and persis
       configuredAddress: configuredUrl,
       clientId: fixtures[0].clientId, core: fixtures[0].core,
       persist: async () => {
-        if (rejectRecoveryPersistence && ++recoveryWrites === 2) {
+        // Registry identity confirmation now persists on both selected and
+        // candidate transports. Fail the candidate's registration write, not
+        // the selected fallback's unrelated confirmation write.
+        if (rejectRecoveryPersistence && routeSockets.size > 0 && ++recoveryWrites === 2) {
           recoveryPersistenceEntered();
           await heldRecoveryPersistence;
           throw new Error("recovery_persist_failed");
