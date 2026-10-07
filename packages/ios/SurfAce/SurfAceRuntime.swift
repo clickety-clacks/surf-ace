@@ -360,6 +360,7 @@ final class SurfAceRuntime {
         String, SurfAceOutboundSender.Priority
     ) async -> Void)?
     @ObservationIgnored private let annotationCommitStagePreparation: (@Sendable () async -> Void)?
+    @ObservationIgnored private let annotationFrameCommitPreparation: (@Sendable () async throws -> Void)?
     @ObservationIgnored private let locklessDeliveryWaitObserver: (@Sendable () -> Void)?
     @ObservationIgnored private var identity: SurfAceIdentity?
     @ObservationIgnored private var centralRegistration: SurfAceCentralRegistration?
@@ -452,6 +453,7 @@ final class SurfAceRuntime {
             String, SurfAceOutboundSender.Priority
         ) async -> Void)? = nil,
         annotationCommitStagePreparation: (@Sendable () async -> Void)? = nil,
+        annotationFrameCommitPreparation: (@Sendable () async throws -> Void)? = nil,
         locklessDeliveryWaitObserver: (@Sendable () -> Void)? = nil
     ) {
         self.userDefaults = userDefaults
@@ -461,6 +463,7 @@ final class SurfAceRuntime {
         self.enableFleetDiscovery = enableFleetDiscovery
         self.outboundSendPreparation = outboundSendPreparation
         self.annotationCommitStagePreparation = annotationCommitStagePreparation
+        self.annotationFrameCommitPreparation = annotationFrameCommitPreparation
         self.locklessDeliveryWaitObserver = locklessDeliveryWaitObserver
         let fallbackName = "Surf Ace"
         let deviceName = UIDevice.current.name
@@ -1214,6 +1217,10 @@ final class SurfAceRuntime {
             requestAnnotationCommit(surfaceId: surfaceId, paneId: paneId)
             clearPaneDrawings(pane)
         }
+    }
+
+    func awaitAnnotationModeTransition(surfaceId: String, paneId: Int) async {
+        await annotationModeTasks["\(surfaceId):\(paneId)"]?.value
     }
 
     func handlePencilContact(surfaceId: String, paneId: Int) {
@@ -4856,6 +4863,7 @@ final class SurfAceRuntime {
             recordData = try? JSONSerialization.data(withJSONObject: record)
         }
         do {
+            try await annotationFrameCommitPreparation?()
             let data = recordData
             let appended = try await adapter.transactAnnotationPublisher(surfaceId: surfaceId) { outbox in
                 guard let current = outbox.openFrame(surfaceId: surfaceId, paneId: paneId),

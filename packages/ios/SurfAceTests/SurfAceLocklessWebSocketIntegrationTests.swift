@@ -5,6 +5,101 @@ import XCTest
 
 @MainActor
 final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
+    func testProvenCommitFinalizationFailureKeepsFrameUntilReentryRetry() async throws {
+        let suiteName = "SurfAceFinalizationRetry-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        let stateURL = FileManager.default.temporaryDirectory.appendingPathComponent("\(suiteName).json")
+        addTeardownBlock {
+            defaults.removePersistentDomain(forName: suiteName)
+            try? FileManager.default.removeItem(at: stateURL)
+        }
+        let fault = SurfAceAnnotationFinalizeFault()
+        let runtime = SurfAceRuntime(
+            userDefaults: defaults, locklessStateURL: stateURL,
+            configuredRegistryURL: try XCTUnwrap(URL(string: "ws://127.0.0.1:29999")),
+            annotationClientId: "client-ios-finalize-fault", enableFleetDiscovery: false,
+            annotationFrameCommitPreparation: { try await fault.failOnce() }
+        )
+        await runtime.start()
+        addTeardownBlock { await runtime.stop() }
+        let registeredSurface = await runtime.registerSurfaceForScene(sceneKey: "finalize-fault")
+        let surface = try XCTUnwrap(registeredSurface)
+        let pane = try XCTUnwrap(surface.panes.first)
+        let socket = socket(port: try XCTUnwrap(UInt16(exactly: runtime.serverPort)))
+        socket.resume()
+        defer { socket.cancel(with: .normalClosure, reason: nil) }
+        try await send(socket, op: "surfaces.list", id: "fault-discovery", payload: [:])
+        _ = try await receive(socket, matchingId: "fault-discovery")
+        let paired = try await pair(socket, id: "fault-pair", controllerId: "fault-controller",
+                                    surfaceId: surface.surfaceId)
+        XCTAssertEqual(paired["ok"] as? Bool, true, "pair response: \(paired)")
+        try await send(socket, op: "content.set", id: "fault-content", payload: [
+            "content": ["html": "<main>fault frame</main>"],
+            "contentId": "fault-content-id", "contentType": "html",
+            "friendlyChatName": "Fault Frame", "paneId": pane.paneId,
+            "surfaceId": surface.surfaceId,
+        ])
+        let contentResponse = try await receive(socket, matchingId: "fault-content")
+        XCTAssertEqual(contentResponse["ok"] as? Bool, true)
+
+        let adapter = try runtime.locklessAuthorityForLocalMutation()
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 2, height: 2)).pngData { _ in
+            UIColor.white.setFill()
+            UIRectFill(CGRect(x: 0, y: 0, width: 2, height: 2))
+        }.base64EncodedString()
+        let surfaceId = surface.surfaceId
+        let paneId = pane.paneId
+        let sourceRevision = pane.currentEntry.revision
+        let oldFrameId = try await adapter.transactAnnotationPublisher(surfaceId: surfaceId) { outbox in
+            let frame = try outbox.beginFrame(
+                surfaceId: surfaceId, paneId: paneId, contextKey: "fault-content-id",
+                contentId: "fault-content-id", contentType: "html", revision: sourceRevision,
+                url: nil, scrollOffset: .init(x: 0, y: 0),
+                viewport: .init(width: 2, height: 2, scale: 1), openedAt: 100, image: image
+            )
+            outbox.setFrameCommitRequested(surfaceId: surfaceId, paneId: paneId, requested: true)
+            let commit = SurfAceAnnotationDirectEvent(
+                eventId: "ev_proven_commit", payload: "{}", sentAt: 101, throughStrokeCount: 0
+            )
+            try outbox.stageDirectCommit(surfaceId: surfaceId, paneId: paneId, event: commit)
+            try outbox.markDirectCommitDelivered(surfaceId: surfaceId, paneId: paneId,
+                                                 eventId: commit.eventId)
+            return frame.frameId
+        }
+        runtime.setAnnotationMode(surfaceId: surfaceId, paneId: paneId,
+                                  enabled: true, fingerDrawEnabled: false)
+        await runtime.awaitAnnotationModeTransition(surfaceId: surfaceId, paneId: paneId)
+        let heldSnapshot = await adapter.snapshot()
+        let held = heldSnapshot.annotationPublisher?
+            .openFrame(surfaceId: surfaceId, paneId: paneId)
+        XCTAssertFalse(pane.annotationMode)
+        XCTAssertEqual(held?.frameId, oldFrameId)
+        XCTAssertEqual(held?.directCommitDelivered, true)
+        XCTAssertTrue(heldSnapshot.annotationPublisher?.surfaces[surfaceId]?.fifo.isEmpty == true)
+
+        runtime.setAnnotationMode(surfaceId: surfaceId, paneId: paneId,
+                                  enabled: true, fingerDrawEnabled: false)
+        await runtime.awaitAnnotationModeTransition(surfaceId: surfaceId, paneId: paneId)
+        XCTAssertTrue(pane.annotationMode)
+        let closed = await adapter.snapshot().annotationPublisher
+        XCTAssertNil(closed?.openFrame(surfaceId: surfaceId, paneId: paneId))
+        let committed = try XCTUnwrap(closed?.surfaces[surfaceId]?.fifo.last)
+        let record = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(committed.canonical.utf8))
+            as? [String: Any])
+        XCTAssertEqual(record["kind"] as? String, "frame_commit")
+        XCTAssertEqual(record["frameId"] as? String, oldFrameId)
+        let newFrameId = try await adapter.transactAnnotationPublisher(surfaceId: surfaceId) { outbox in
+            try outbox.beginFrame(surfaceId: surfaceId, paneId: paneId,
+                                  contextKey: "fault-content-id", contentId: "fault-content-id",
+                                  contentType: "html", revision: sourceRevision,
+                                  url: nil, scrollOffset: .init(x: 0, y: 0),
+                                  viewport: .init(width: 2, height: 2, scale: 1),
+                                  openedAt: 200, image: image).frameId
+        }
+        XCTAssertNotEqual(newFrameId, oldFrameId)
+    }
+
     func testReentryWhileDirectCommitStagingSuspendsKeepsOneSourceFrame() async throws {
         let suiteName = "SurfAceCommitStageReentry-\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
@@ -1042,6 +1137,16 @@ private actor SurfAceLocklessPairResponseSendGate {
 
     func release() async {
         await releaseGate.open()
+    }
+}
+
+private actor SurfAceAnnotationFinalizeFault {
+    private var attempts = 0
+    private enum Injected: Error { case persistenceUnavailable }
+
+    func failOnce() throws {
+        attempts += 1
+        if attempts == 1 { throw Injected.persistenceUnavailable }
     }
 }
 
