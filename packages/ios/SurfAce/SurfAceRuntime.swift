@@ -4648,6 +4648,7 @@ final class SurfAceRuntime {
             "viewport": viewport, "payload": payload,
         ]
         guard let data = try? JSONSerialization.data(withJSONObject: record) else { return false }
+        let strokeCount = strokes.count
         do {
             let appended = try await adapter.transactAnnotationPublisher(surfaceId: surfaceId) { outbox in
                 guard let current = outbox.openFrame(surfaceId: surfaceId, paneId: paneId),
@@ -4659,7 +4660,7 @@ final class SurfAceRuntime {
                 }
                 _ = try outbox.append(surfaceId: surfaceId, record: record)
                 outbox.advanceFramePublished(surfaceId: surfaceId, paneId: paneId,
-                                             by: strokes.count)
+                                             by: strokeCount)
                 return true
             }
             if appended { annotationPublisher?.notify() }
