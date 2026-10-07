@@ -1,4 +1,7 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
+declare const __dirname: string;
 
 type JsonSchema = Readonly<Record<string, unknown>>;
 
@@ -63,8 +66,16 @@ type ProtocolSchemaDocument = {
   $defs: Record<string, JsonSchema>;
 };
 
+// The protocol package is ESM, while Electron and the standalone server bundle
+// it into CJS. In that bundle esbuild cannot preserve import.meta.url. The
+// packaged server keeps the schema under ../schemas/protocol; Electron keeps it
+// beside its CJS entrypoints.
+const bundledSchemaPath = typeof __dirname === "string"
+  ? [resolve(__dirname, "schema.json"), resolve(__dirname, "../schemas/protocol/schema.json")]
+      .find((candidate) => existsSync(candidate))
+  : undefined;
 const protocolSchemaDocument = JSON.parse(
-  readFileSync(new URL("../schema.json", import.meta.url), "utf8"),
+  readFileSync(bundledSchemaPath ?? new URL("../schema.json", import.meta.url), "utf8"),
 ) as ProtocolSchemaDocument;
 
 function getSchemaDef(name: ProtocolSchemaDefName): JsonSchema {
