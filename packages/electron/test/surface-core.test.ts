@@ -1096,6 +1096,7 @@ test("surface core renders the visible pane label separately from paneId", () =>
     windowLabel: "a",
   });
   confirmFixturePaneLabels(core);
+  core.applyWindowLabelOnly(surface.surfaceId, "a");
 
   const windowState = core.getRendererWindowState(surface.surfaceId);
   assert.equal(windowState.panes[0]?.paneId, 7);
@@ -1126,6 +1127,7 @@ test("surface core projects window and pane labels as the visible pane address",
     windowLabel: "e",
   });
   confirmFixturePaneLabels(core);
+  core.applyWindowLabelOnly(surface.surfaceId, "e");
 
   const pane = core.getRendererWindowState(surface.surfaceId).panes[0];
   assert.equal(core.getRendererWindowState(surface.surfaceId).windowLabel, "e");
@@ -2290,6 +2292,7 @@ test("surface core topology.apply reuses existing pane content and replaces prov
     windowLabel: "a",
   });
   confirmFixturePaneLabels(core);
+  core.applyWindowLabelOnly(surface.surfaceId, "a");
 
   assert.equal(applied.topologyRevision, 3);
   assert.deepEqual(applied.panes.map((pane) => [pane.paneId, pane.paneLabel, pane.name]), [
@@ -2392,7 +2395,8 @@ test("surface core accepts provider window labels beyond zz", () => {
   }));
 
   const windowState = core.getRendererWindowState(surface.surfaceId);
-  assert.equal(windowState.windowLabel, "aaa");
+  assert.equal(core.getSurface(surface.surfaceId).windowLabel, "aaa");
+  assert.equal(windowState.windowLabel, "");
 });
 
 test("surface core lets fresh provider bootstrap replace stale local window labels", () => {
@@ -2417,7 +2421,8 @@ test("surface core lets fresh provider bootstrap replace stale local window labe
   confirmFixturePaneLabels(core);
 
   const windowState = core.getRendererWindowState(surface.surfaceId);
-  assert.equal(windowState.windowLabel, "b");
+  assert.equal(core.getSurface(surface.surfaceId).windowLabel, "b");
+  assert.equal(windowState.windowLabel, "");
   assert.deepEqual(windowState.panes.map((pane) => pane.label), ["7"]);
 });
 
@@ -2445,7 +2450,8 @@ test("surface core commits topology.apply provider window relabels atomically", 
   );
 
   const rejectedWindowState = core.getRendererWindowState(surface.surfaceId);
-  assert.equal(rejectedWindowState.windowLabel, "a");
+  assert.equal(core.getSurface(surface.surfaceId).windowLabel, "a");
+  assert.equal(rejectedWindowState.windowLabel, "");
   assert.deepEqual(rejectedWindowState.panes.map((pane) => pane.label), ["7"]);
 
   assert.doesNotThrow(() => core.topologyApply(surface.surfaceId, {
@@ -2459,7 +2465,10 @@ test("surface core commits topology.apply provider window relabels atomically", 
   confirmFixturePaneLabels(core);
 
   const acceptedWindowState = core.getRendererWindowState(surface.surfaceId);
-  assert.equal(acceptedWindowState.windowLabel, "b");
+  assert.equal(core.getSurface(surface.surfaceId).windowLabel, "b");
+  assert.equal(acceptedWindowState.windowLabel, "");
+  core.applyWindowLabelOnly(surface.surfaceId, "b");
+  assert.equal(core.getRendererWindowState(surface.surfaceId).windowLabel, "b");
   assert.deepEqual(acceptedWindowState.panes.map((pane) => pane.label), ["41"]);
 });
 
@@ -2514,9 +2523,11 @@ test("surface core rejects provider window relabels that collide with another li
     /Duplicate windowLabel in live surface set: a/,
   );
 
-  assert.equal(core.getRendererWindowState(primary.surfaceId).windowLabel, "a");
+  assert.equal(core.getSurface(primary.surfaceId).windowLabel, "a");
+  assert.equal(core.getRendererWindowState(primary.surfaceId).windowLabel, "");
   assert.deepEqual(core.getRendererWindowState(primary.surfaceId).panes.map((pane) => pane.paneId), [primaryPaneId]);
-  assert.equal(core.getRendererWindowState(secondary.surfaceId).windowLabel, "b");
+  assert.equal(core.getSurface(secondary.surfaceId).windowLabel, "b");
+  assert.equal(core.getRendererWindowState(secondary.surfaceId).windowLabel, "");
   assert.deepEqual(core.getRendererWindowState(secondary.surfaceId).panes.map((pane) => pane.paneId), [secondaryPaneId]);
 });
 
@@ -3889,6 +3900,7 @@ test("pane number projections require exact registry confirmation", () => {
   assert.equal(core.panesList(surface.surfaceId).panes[0]?.paneLabel, null);
   assert.equal(core.pairState(surface.surfaceId).panes[0]?.paneLabel, null);
   assert.equal(core.publicTopologyState(surface.surfaceId).panes[0]?.paneLabel, null);
+  assert.equal(core.publicTopologyState(surface.surfaceId).windowLabel, null);
   assert.throws(() => core.confirmRegistryPaneLabels([{ ...assignment, panes: [{
     ...assignment.panes[0]!, paneLabel: 0,
   }] }]), /confirmation changed/);
@@ -3898,9 +3910,26 @@ test("pane number projections require exact registry confirmation", () => {
   assert.equal(core.panesList(surface.surfaceId).panes[0]?.paneLabel, 97);
   assert.equal(core.pairState(surface.surfaceId).panes[0]?.paneLabel, 97);
   assert.equal(core.publicTopologyState(surface.surfaceId).panes[0]?.paneLabel, 97);
+  core.applyWindowLabelOnly(surface.surfaceId, "a");
+  assert.equal(core.publicTopologyState(surface.surfaceId).windowLabel, "a");
 
   core.clearRegistryPaneConfirmations();
   assert.equal(core.panesList(surface.surfaceId).panes[0]?.paneLabel, null);
   assert.equal(core.pairState(surface.surfaceId).panes[0]?.paneLabel, null);
   assert.equal(core.publicTopologyState(surface.surfaceId).panes[0]?.paneLabel, null);
+  assert.equal(core.publicTopologyState(surface.surfaceId).windowLabel, "a");
+});
+
+test("a locally opened surface keeps its provisional letter out of public topology", () => {
+  const core = new SurfaceCore({ persistentState: { primarySurfaceId: null, version: 1 } });
+  const surface = core.createLocklessSurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  assert.match(surface.windowLabel, /^[a-z]+$/);
+  assert.equal(surface.windowLabelConfirmed, false);
+  assert.equal(core.publicTopologyState(surface.surfaceId).windowLabel, null);
+  assert.equal(core.publicTopologyState(surface.surfaceId).panes[0]?.paneLabel, null);
+  assert.equal(core.surfaceWindowLabel(surface.surfaceId), surface.windowLabel);
+  assert.equal(core.getRendererWindowState(surface.surfaceId).windowLabel, "");
+  core.applyWindowLabelOnly(surface.surfaceId, surface.windowLabel);
+  assert.equal(core.surfaceWindowLabel(surface.surfaceId), surface.windowLabel);
+  assert.equal(core.getRendererWindowState(surface.surfaceId).windowLabel, surface.windowLabel);
 });

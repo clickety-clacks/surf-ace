@@ -981,7 +981,7 @@ function summarizeFreshInstallPhase(options: {
   registryEndpoint: string;
   sourceCommit: string;
 }) {
-  const listed = listedSurface(options.directList);
+  const listed = listedSurface(options.directList, options.read.surfaceId);
   const pane = listed.topology.panes.find((candidate: any) => Number(candidate.paneId) === options.read.paneId);
   const registeredPane = options.registration.surface.panes.find((candidate: any) => Number(candidate.paneId) === options.read.paneId);
   const capture = resultPayload(options.read.captureOutput);
@@ -1304,6 +1304,56 @@ async function freshInstallMain(options: Options) {
         releasedProjectionSha256: allocatorProjectionAfterRegistryShutdown.projectionSha256,
       })}`);
     }
+    if (await directWebSocketReady(registryEndpoint) || !await directWebSocketReady(app.endpoint)) {
+      throw new Error("fresh_install_offline_registry_or_local_endpoint_invalid");
+    }
+    const offlineBefore = await cli(options.cliBinary, cliStateRoot, "list", {}, app.endpoint);
+    const offlineOriginal = listedSurface(offlineBefore, surfaceId);
+    const opened = await cli(options.cliBinary, cliStateRoot, "surface-intent", {
+      action: "open",
+      expectedSurfaceSetRevision: Number(resultPayload(offlineBefore)?.surfaceSetRevision),
+    }, app.endpoint);
+    const offlineSurfaceId = resultPayload(opened)?.surfaceId;
+    if (typeof offlineSurfaceId !== "string" || !offlineSurfaceId || offlineSurfaceId === surfaceId) {
+      throw new Error("fresh_install_offline_surface_open_missing_stable_id");
+    }
+    const offlineOpened = listedSurface(await cli(options.cliBinary, cliStateRoot, "list", {}, app.endpoint), offlineSurfaceId);
+    const offlineInitialPaneId = Number(offlineOpened.topology.panes[0]?.paneId);
+    if (!Number.isSafeInteger(offlineInitialPaneId) || offlineInitialPaneId < 1 ||
+        offlineOpened.topology.windowLabel !== null || offlineOpened.topology.panes[0]?.paneLabel !== null) {
+      throw new Error("fresh_install_offline_open_labels_not_pending");
+    }
+    await cli(options.cliBinary, cliStateRoot, "topology-intent", {
+      action: "split", count: 2, direction: "horizontal",
+      expectedTopologyRevision: Number(offlineOpened.topology.topologyRevision),
+      paneId: offlineInitialPaneId, surfaceId: offlineSurfaceId,
+    }, app.endpoint);
+    const offlineAfterList = await cli(options.cliBinary, cliStateRoot, "list", {}, app.endpoint);
+    const offlineSplit = listedSurface(offlineAfterList, offlineSurfaceId);
+    const offlinePaneIds = offlineSplit.topology.panes.map((pane: any) => Number(pane.paneId));
+    if (offlinePaneIds.length !== 2 || new Set(offlinePaneIds).size !== 2 ||
+        !offlinePaneIds.includes(offlineInitialPaneId) ||
+        offlineSplit.topology.windowLabel !== null ||
+        offlineSplit.topology.panes.some((pane: any) => pane.paneLabel !== null) ||
+        listedSurface(offlineAfterList, surfaceId).topology.windowLabel !== offlineOriginal.topology.windowLabel) {
+      throw new Error("fresh_install_offline_split_identity_or_pending_labels_invalid");
+    }
+    const offlineRead = await readVisiblePane(app.endpoint, surfaceId, paneId);
+    if (!matchesFreshInstallCurrentContent(resultPayload(offlineRead.output)?.currentContentRecord,
+      contentId, surfaceId, paneId)) {
+      throw new Error("fresh_install_offline_content_lost");
+    }
+    const offlineLocal = {
+      directClientEndpoint: app.endpoint,
+      existingSurfaceId: surfaceId,
+      existingWindowLabel: offlineOriginal.topology.windowLabel,
+      newSurfaceId: offlineSurfaceId,
+      newPaneIds: offlinePaneIds,
+      pendingWindowLabel: offlineSplit.topology.windowLabel,
+      pendingPaneLabels: offlineSplit.topology.panes.map((pane: any) => pane.paneLabel),
+      preservedContentId: contentRecordId(resultPayload(offlineRead.output)?.currentContentRecord),
+      registryEndpointUnavailable: true,
+    };
     const postgresRestart = await restartPostgresCluster(cluster, allocatorProjectionAfterRegistryShutdown);
     if (postgresRestart.databaseIdentity !== allocatorProjectionAfterRegistryShutdown.databaseIdentity ||
         postgresRestart.projectionBeforeSha256 !== allocatorProjectionAfterRegistryShutdown.projectionSha256 ||
@@ -1326,6 +1376,14 @@ async function freshInstallMain(options: Options) {
       surfaceId,
       "fresh-install-after-restart",
     );
+    const offlineRegistration = await waitForRegisteredSurface(
+      registryEndpoint, electronClientId, offlineSurfaceId, "fresh-install-offline-surface-after-restart",
+    );
+    if (offlineRegistration.surface.panes.length !== 2 ||
+        new Set(offlineRegistration.surface.panes.map((pane: any) => Number(pane.paneId))).size !== 2 ||
+        offlineRegistration.surface.panes.some((pane: any) => !offlinePaneIds.includes(Number(pane.paneId)))) {
+      throw new Error("fresh_install_offline_split_not_registered_once");
+    }
     const secondRegistrationAfterRestart = await waitForRegisteredSurface(
       registryEndpoint, secondClientId, secondSurface.surfaceId, "fresh-install-second-client-after-restart",
     );
@@ -1339,14 +1397,22 @@ async function freshInstallMain(options: Options) {
     }
     const listAfterRestart = await cli(options.cliBinary, cliStateRoot, "list", {}, app.endpoint);
     const listedAfterRestart = listedSurface(listAfterRestart, surfaceId);
+    const offlineListedAfterRestart = listedSurface(listAfterRestart, offlineSurfaceId);
+    if (offlineListedAfterRestart.topology.windowLabel !== offlineRegistration.surface.windowLabel ||
+        offlineListedAfterRestart.topology.panes.length !== 2 ||
+        offlineListedAfterRestart.topology.panes.some((pane: any) =>
+          !offlinePaneIds.includes(Number(pane.paneId)) ||
+          !Number.isSafeInteger(Number(pane.paneLabel)) || Number(pane.paneLabel) < 1)) {
+      throw new Error("fresh_install_offline_split_reconnect_labels_invalid");
+    }
     if (!matchesRegisteredDirectTarget(electronClientId, registrationAfterRestart, listedAfterRestart)) {
       throw new Error("fresh_install_reconnected_target_mismatch");
     }
     const diagnosticsAfterRestart = await allocatorDiagnostics(cluster.adminUrl, cluster.config.fleetId);
     if (diagnosticsAfterRestart.allocatorId !== diagnosticsAfterRegistration.allocatorId ||
-        diagnosticsAfterRestart.assignmentCount !== diagnosticsAfterRegistration.assignmentCount ||
-        diagnosticsAfterRestart.nextOrdinalFence !== diagnosticsAfterRegistration.nextOrdinalFence) {
-      throw new Error("fresh_install_restart_reallocated_client");
+        diagnosticsAfterRestart.assignmentCount < diagnosticsAfterRegistration.assignmentCount ||
+        diagnosticsAfterRestart.nextOrdinalFence < diagnosticsAfterRegistration.nextOrdinalFence) {
+      throw new Error("fresh_install_restart_allocator_identity_or_fence_regressed");
     }
     const afterRestartRead = await readVisiblePane(app.endpoint, surfaceId, paneId);
     const resumedCapture = resultPayload(afterRestartRead.captureOutput);
@@ -1421,6 +1487,11 @@ async function freshInstallMain(options: Options) {
       expectedVersion: options.expectedVersion,
       displayReady,
       initial,
+      offlineLocal: {
+        ...offlineLocal,
+        confirmedWindowLabel: offlineListedAfterRestart.topology.windowLabel,
+        confirmedPaneLabels: offlineListedAfterRestart.topology.panes.map((pane: any) => pane.paneLabel),
+      },
       fleetPaneUniqueness,
       migrationEvidence,
       mode: "fresh-install",

@@ -607,7 +607,7 @@ function broadcastSurfaceState(surfaceId: string): void {
     return;
   }
   const state = rendererWindowState(surfaceId);
-  const windowLabel = core.surfaceWindowLabel(surfaceId);
+  const windowLabel = state.windowLabel;
   window.setTitle(windowLabel ? `${endpointName()} · ${windowLabel}` : endpointName());
   if (!readyWindows.has(surfaceId)) {
     pendingWindowStates.set(surfaceId, state);
@@ -1286,6 +1286,7 @@ async function createWindowForSurface(surfaceId: string): Promise<BrowserWindow>
   }
 
   const surface = core.getSurface(surfaceId);
+  const visibleWindowLabel = core.publicTopologyState(surfaceId).windowLabel;
   const compositorSocketPath = resolveCompositorControlSocketPath();
   const restoredPlacement = compositorSocketPath
     ? null
@@ -1295,7 +1296,7 @@ async function createWindowForSurface(surfaceId: string): Promise<BrowserWindow>
     has_restored_bounds: Boolean(restoredPlacement?.bounds),
     restored_fullscreen: restoredPlacement?.fullscreen ?? false,
     surface_id: surfaceId,
-    window_label: surface.windowLabel,
+    window_label: visibleWindowLabel,
   });
   const captureMode = surfaceWindowCaptureMode({
     compositorSocketPath,
@@ -1307,7 +1308,7 @@ async function createWindowForSurface(surfaceId: string): Promise<BrowserWindow>
       compositorSocketPath,
       endpointName: endpointName(),
       viewport: surface.viewport,
-      windowLabel: surface.windowLabel,
+      windowLabel: visibleWindowLabel,
     }),
     webPreferences: {
       contextIsolation: true,
@@ -1324,7 +1325,7 @@ async function createWindowForSurface(surfaceId: string): Promise<BrowserWindow>
   clientInfo("window_created", {
     pane_ids: core.activePaneIds(surfaceId).join(","),
     surface_id: surfaceId,
-    window_label: surface.windowLabel,
+    window_label: visibleWindowLabel,
   });
   readyWindows.delete(surfaceId);
   wireWindowShortcuts(surfaceId, window);

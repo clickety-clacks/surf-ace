@@ -1702,6 +1702,7 @@ export class SurfaceCore {
   getRendererWindowState(surfaceId: string): RendererWindowState {
     const surface = this.getSurface(surfaceId);
     this.ensureActiveKeyboardPane(surface);
+    const visibleWindowLabel = surface.windowLabelConfirmed === true ? surface.windowLabel : "";
     return {
       connectionBar: surface.connectionBar,
       ...(surface.connectionError ? { connectionError: surface.connectionError } : {}),
@@ -1733,14 +1734,14 @@ export class SurfaceCore {
           name: pane.name,
           ownerName: provenanceDisplayName(current.display),
           paneId,
-          displayId: this.isRegistryPaneConfirmed(surface.surfaceId, paneId, pane)
-            ? visiblePaneAddress(surface.windowLabel, pane.paneLabel) : "",
+          displayId: visibleWindowLabel && this.isRegistryPaneConfirmed(surface.surfaceId, paneId, pane)
+            ? visiblePaneAddress(visibleWindowLabel, pane.paneLabel) : "",
           provenanceName: provenanceDisplayName(current.display),
           provenance: current.provenance
             ? structuredClone(current.provenance)
             : null,
-          visibleAddress: this.isRegistryPaneConfirmed(surface.surfaceId, paneId, pane)
-            ? visiblePaneAddress(surface.windowLabel, pane.paneLabel) : "",
+          visibleAddress: visibleWindowLabel && this.isRegistryPaneConfirmed(surface.surfaceId, paneId, pane)
+            ? visiblePaneAddress(visibleWindowLabel, pane.paneLabel) : "",
           showDone: pane.annotating,
           toast: pane.toast,
         };
@@ -1751,7 +1752,7 @@ export class SurfaceCore {
       surfaceEpoch: surface.surfaceEpoch,
       topologyRevision: surface.topologyRevision,
       viewport: cloneViewport(surface.viewport),
-      windowLabel: surface.windowLabel,
+      windowLabel: visibleWindowLabel,
     };
   }
 
@@ -2495,6 +2496,7 @@ export class SurfaceCore {
     const surface = this.getSurface(surfaceId);
     return {
       ...topology,
+      windowLabel: surface.windowLabelConfirmed === true ? surface.windowLabel : null,
       panes: topology.panes.map((entry) => {
         const pane = surface.panes.get(Number(entry.paneId))!;
         return {

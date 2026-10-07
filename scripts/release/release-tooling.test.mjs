@@ -2216,6 +2216,19 @@ test("fresh-install Linux qualification requires direct current content, wrong-s
     expectedVersion: TIGHTBEAM.version,
     initial: phase(),
     afterRestart: phase(),
+    offlineLocal: {
+      directClientEndpoint,
+      existingSurfaceId: "sf_fresh",
+      existingWindowLabel: "a",
+      preservedContentId: contentId,
+      newSurfaceId: "sf_offline",
+      newPaneIds: [2, 3],
+      pendingWindowLabel: null,
+      pendingPaneLabels: [null, null],
+      confirmedWindowLabel: "c",
+      confirmedPaneLabels: [3, 4],
+      registryEndpointUnavailable: true,
+    },
     fleetPaneUniqueness: {
       firstClientId: registrationIdentity,
       firstPaneNumber: 1,
@@ -2273,6 +2286,11 @@ test("fresh-install Linux qualification requires direct current content, wrong-s
 
   const validated = validateTightbeamFreshInstallState(evidence);
   assert.equal(validated.status, "passed");
+  assert.deepEqual(validated.offlineLocal.newPaneIds, [2, 3]);
+  assert.throws(() => validateTightbeamFreshInstallState({
+    ...evidence,
+    offlineLocal: { ...evidence.offlineLocal, pendingWindowLabel: "b" },
+  }), /fresh_install_offline_local_open_split_unverified/);
   assert.deepEqual(validated.registryReleaseWitnessEvents, {
     beforeRestart: [],
     afterRestart: ["release_witness_retry_required_commit_replay", "release_witness_recovered_verified"],
@@ -2416,6 +2434,19 @@ test("Linux fresh-install acceptance is based on direct current-content evidence
     expectedVersion: TIGHTBEAM.version,
     initial: phase(contentId),
     afterRestart: phase(contentId),
+    offlineLocal: {
+      directClientEndpoint: "ws://127.0.0.1:19001/ws",
+      existingSurfaceId: "sf_fresh",
+      existingWindowLabel: "a",
+      preservedContentId: contentId,
+      newSurfaceId: "sf_offline",
+      newPaneIds: [2, 3],
+      pendingWindowLabel: null,
+      pendingPaneLabels: [null, null],
+      confirmedWindowLabel: "c",
+      confirmedPaneLabels: [3, 4],
+      registryEndpointUnavailable: true,
+    },
     fleetPaneUniqueness: {
       firstClientId: `1234abcd${"a".repeat(56)}`,
       firstPaneNumber: 1,
@@ -2535,6 +2566,19 @@ test("Linux fresh-install state driver binds candidate-only inputs and packaged 
     expectedScreenshotColors: ["246bce", "d93636"],
     initial: phase(initialEndpoint),
     afterRestart: phase(initialEndpoint),
+    offlineLocal: {
+      directClientEndpoint: initialEndpoint,
+      existingSurfaceId: "sf_fresh",
+      existingWindowLabel: "a",
+      preservedContentId: contentId,
+      newSurfaceId: "sf_offline",
+      newPaneIds: [2, 3],
+      pendingWindowLabel: null,
+      pendingPaneLabels: [null, null],
+      confirmedWindowLabel: "c",
+      confirmedPaneLabels: [3, 4],
+      registryEndpointUnavailable: true,
+    },
     fleetPaneUniqueness: {
       firstClientId: registrationIdentity,
       firstPaneNumber: 1,
@@ -2642,6 +2686,21 @@ test("Linux fresh-install state driver binds candidate-only inputs and packaged 
   record("capture-pane", { paneId: 1, surfaceId: "sf_fresh" }, initialEndpoint, capture);
   record("read", { scopeId: "pane:sf_fresh:1" }, null, read);
   record("list", {}, initialEndpoint, listed);
+  record("surface-intent", { action: "open", expectedSurfaceSetRevision: 1 }, initialEndpoint,
+    { surfaceId: "sf_offline" });
+  record("list", {}, initialEndpoint, { surfaces: [...listed.surfaces, {
+    surfaceId: "sf_offline", topology: { panes: [{ paneId: 2, paneLabel: null }], windowLabel: null },
+  }] });
+  record("topology-intent", { action: "split", count: 2, direction: "horizontal",
+    expectedTopologyRevision: 1, paneId: 2, surfaceId: "sf_offline" }, initialEndpoint);
+  record("list", {}, initialEndpoint, { surfaces: [...listed.surfaces, {
+    surfaceId: "sf_offline", topology: { panes: [
+      { paneId: 2, paneLabel: null }, { paneId: 3, paneLabel: null },
+    ], windowLabel: null },
+  }] });
+  record("capture-pane", { paneId: 1, surfaceId: "sf_fresh" }, initialEndpoint, capture);
+  record("read", { scopeId: "pane:sf_fresh:1" }, null, read);
+  record("list", {}, initialEndpoint, listed);
   record("capture-pane", { paneId: 1, surfaceId: "sf_fresh" }, initialEndpoint, capture);
   record("read", { scopeId: "pane:sf_fresh:1" }, null, read);
   const bytes = Buffer.from(`${events.map((event) => JSON.stringify(event)).join("\n")}\n`);
@@ -2685,7 +2744,9 @@ test("Linux fresh-install state driver binds candidate-only inputs and packaged 
   assert.equal(result.mode, "fresh-install");
   assert.equal(result.status, "passed");
   assert.deepEqual(result.registryReleaseWitnessEvents, { beforeRestart: [], afterRestart: [] });
-  assert.equal(result.rawCliEvidence.events.length, 11);
+  assert.equal(result.rawCliEvidence.events.length, events.length);
+  assert.equal(result.rawCliEvidence.events.filter((event) => event.command === "surface-intent").length, 1);
+  assert.equal(result.rawCliEvidence.events.filter((event) => event.command === "topology-intent").length, 1);
   assert.equal(result.rawCliEvidence.events.at(-1).command, "read");
   const unacceptedPushEvents = events.map((event) => event.command === "push" && event.status === 0
     ? { ...event, output: { ...event.output, ok: false }, stdout: JSON.stringify({ ...event.output, ok: false }) }
