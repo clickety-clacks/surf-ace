@@ -25,6 +25,7 @@ let Client: any;
 let PostgresCustodyAdapter: any;
 let WebSocket: any;
 let locklessPaneScopeId: any;
+let cliAttemptSequence = 0;
 
 type Options = {
   mode: "fresh-install";
@@ -391,11 +392,22 @@ async function cli(binary: string, stateRoot: string, commandName: string, input
   const args = ["--state-root", stateRoot];
   if (endpoint) args.push("--endpoint", endpoint, "--product-label", "Surf Ace release smoke");
   args.push(commandName, "--input-json", JSON.stringify(input));
+  const progressPath = path.join(path.dirname(stateRoot), "raw-cli-progress.ndjson");
+  const attempt = ++cliAttemptSequence;
+  const startedAt = Date.now();
+  const route = endpoint ? "direct-client-websocket" : "endpointless-local-read";
+  await fs.appendFile(progressPath, `${JSON.stringify({ attempt, command: commandName, phase: "started", route, startedAt })}\n`);
   let result: { stdout: string; stderr: string };
   try {
-    result = await command(binary, args);
+    result = await command(binary, args, { timeout: 120_000, killSignal: "SIGTERM" });
   } catch (error) {
-    const failure = error as Error & { code?: number | string; stderr?: string; stdout?: string };
+    const failure = error as Error & { code?: number | string; killed?: boolean; signal?: string; stderr?: string; stdout?: string };
+    const elapsedMs = Date.now() - startedAt;
+    const timedOut = failure.killed === true && elapsedMs >= 120_000;
+    await fs.appendFile(progressPath, `${JSON.stringify({
+      attempt, command: commandName, elapsedMs, phase: timedOut ? "timed_out" : "failed",
+      route, status: failure.code ?? null, signal: failure.signal ?? null,
+    })}\n`);
     await fs.appendFile(path.join(path.dirname(stateRoot), "raw-cli-evidence.ndjson"), `${JSON.stringify({
       args,
       command: commandName,
@@ -407,8 +419,12 @@ async function cli(binary: string, stateRoot: string, commandName: string, input
       stderr: failure.stderr ?? "",
       stdout: failure.stdout ?? "",
     })}\n`);
+    if (timedOut) throw new Error(`packaged_cli_${commandName}_timeout_120s`, { cause: error });
     throw error;
   }
+  await fs.appendFile(progressPath, `${JSON.stringify({
+    attempt, command: commandName, elapsedMs: Date.now() - startedAt, phase: "exited", route, status: 0,
+  })}\n`);
   const parsed = JSON.parse(result.stdout);
   await fs.appendFile(path.join(path.dirname(stateRoot), "raw-cli-evidence.ndjson"), `${JSON.stringify({
     args,
