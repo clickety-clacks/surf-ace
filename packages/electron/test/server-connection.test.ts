@@ -435,7 +435,7 @@ test("legacy labels wait for verified pin; foreign and missing identities never 
     binding: { clientId, allocatorId: "alloc_home", fleetId: "fleet-home" },
     confirmedClaims: core.confirmedRegistryClaims(),
   };
-  const attempt = async (address: string, provisioned = provisionedBinding) => {
+  const attempt = async (address: string, provisioned: typeof provisionedBinding | null = provisionedBinding) => {
     const connection = new ConfiguredServerRegistration(address, clientId, core, async () => {}, () => {}, 200, provisioned);
     try { await connection.synchronize(); } finally { await connection.stop(); }
   };
