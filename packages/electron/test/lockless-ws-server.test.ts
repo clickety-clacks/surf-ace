@@ -3955,6 +3955,79 @@ test("guarded restore keeps two visible panes and local input while refusing an 
   }
 });
 
+test("guarded restart preserves two-pane display but cannot re-pair without durable authority", { timeout: 15_000 }, async () => {
+  const original = new SurfaceCore();
+  const surface = original.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  original.applyProviderBootstrapTopology(surface.surfaceId, {
+    initialPaneId: 7, initialPaneLabel: 7, windowLabel: "a",
+  });
+  original.paneSplit(surface.surfaceId, {
+    count: 2, direction: "vertical", newPaneIds: [9], newPaneLabels: [9], paneId: 7,
+  });
+  let durable = original.getPersistentState();
+  const seedPort = nextPort++;
+  const seedServer = new SurfaceWsServer({
+    bindAddress: "127.0.0.1", capturePaneImage: async () => "cG5n",
+    compositorSocketPath: null, core: original, endpointName: "Surf Ace", hostName: "localhost",
+    persistLocklessState: async () => { durable = original.getPersistentState(); },
+    port: seedPort, viewport: () => ({ height: 800, scale: 2, width: 1200 }),
+  });
+  await seedServer.start();
+  const seedSocket = await connect(`ws://127.0.0.1:${seedPort}${seedServer.wsPath}`);
+  try {
+    assert.equal((await pair(seedSocket, "guarded-restart-client", surface.surfaceId)).ok, true);
+    for (const [paneId, contentId] of [[7, "first-visible"], [9, "second-visible"]] as const) {
+      const response = await request(seedSocket, "content.set", {
+        content: { html: `<p>${contentId}</p>` }, contentId, contentType: "html",
+        friendlyChatName: contentId, paneId, surfaceId: surface.surfaceId,
+      });
+      assert.equal(response.ok, true, JSON.stringify(response));
+    }
+  } finally {
+    seedSocket.close();
+    await seedServer.stop();
+  }
+
+  const committed = structuredClone(durable);
+  const restored = new SurfaceCore({ persistentState: committed });
+  const restoredSurfaces = restored.restorePersistedSurfaces("Surf Ace", {
+    height: 800, scale: 2, width: 1200,
+  });
+  assert.equal(restoredSurfaces.length, 1);
+  assert.equal(restored.getRendererWindowState(surface.surfaceId).panes.length, 2);
+  assert.equal(restored.captureSnapshot(surface.surfaceId, 7).contentId, "first-visible");
+  assert.equal(restored.captureSnapshot(surface.surfaceId, 9).contentId, "second-visible");
+  restored.setActiveKeyboardPane(surface.surfaceId, 9);
+  assert.equal(restored.activeKeyboardPaneId(surface.surfaceId), 9);
+
+  const guardedPort = nextPort++;
+  const guardedServer = new SurfaceWsServer({
+    bindAddress: "127.0.0.1", capturePaneImage: async () => "cG5n",
+    compositorSocketPath: null, core: restored, endpointName: "Surf Ace", hostName: "localhost",
+    persistLocklessState: async () => {
+      throw new PersistentStateWriteGuardError("unrestorable-primary");
+    },
+    port: guardedPort, viewport: () => ({ height: 800, scale: 2, width: 1200 }),
+  });
+  await guardedServer.start();
+  const socket = await connect(`ws://127.0.0.1:${guardedPort}${guardedServer.wsPath}`);
+  try {
+    const refused = await pair(socket, "guarded-restart-client", surface.surfaceId);
+    assert.equal(refused.ok, false, JSON.stringify(refused));
+    assert.equal(refused.error?.code, "internal_error");
+    assert.equal((await request(socket, "panes.list", { surfaceId: surface.surfaceId })).error?.code,
+      "not_paired");
+    assert.equal((await request(socket, "snapshot.get", {
+      paneId: 9, surfaceId: surface.surfaceId,
+    })).error?.code, "not_paired");
+    assert.deepEqual(durable, committed, "guarded restart must not acknowledge an unpersisted pair");
+    assert.equal(restored.getRendererWindowState(surface.surfaceId).panes.length, 2);
+  } finally {
+    socket.close();
+    await guardedServer.stop();
+  }
+});
+
 test("concurrent pair.requests are serialized through the global durable boundary", async () => {
   const core = new SurfaceCore();
   const surface = core.ensurePrimarySurface("Surf Ace", {
