@@ -1106,13 +1106,14 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         _ = try XCTUnwrap(port != SurfAceHTTPServer.fixedPort ? port : nil,
                           "fixture must own a distinct ephemeral port")
         let marker = "owned-test-runtime-\(UUID().uuidString)"
+        let surfaceId = surface.surfaceId
         let adapter = try runtime.locklessAuthorityForLocalMutation()
         _ = try await adapter.commitLocalMutation(operation: "test.listener_identity") { state, _ in
-            state.liveSurfaces[surface.surfaceId]?.name = marker
+            state.liveSurfaces[surfaceId]?.name = marker
             return .object([:])
         }
         let ownedState = await adapter.snapshot()
-        let ownedSurface = try XCTUnwrap(ownedState.liveSurfaces[surface.surfaceId])
+        let ownedSurface = try XCTUnwrap(ownedState.liveSurfaces[surfaceId])
         _ = try XCTUnwrap(ownedSurface.name == marker ? ownedSurface : nil,
                           "unique test listener identity was not persisted")
         try await send(socket, op: "surfaces.list", id: requestId, payload: [:])
@@ -1122,7 +1123,7 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         let body = payload(response)
         let discovered = try XCTUnwrap(body["surfaces"] as? [[String: Any]])
         _ = try XCTUnwrap(discovered.first {
-            $0["surfaceId"] as? String == surface.surfaceId &&
+            $0["surfaceId"] as? String == surfaceId &&
                 $0["name"] as? String == ownedSurface.name
         }, "connected listener did not report this runtime's registered surface")
         let revision = try XCTUnwrap(body["surfaceSetRevision"] as? NSNumber).int64Value
