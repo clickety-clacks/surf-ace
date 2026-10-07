@@ -837,7 +837,11 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         var committed = state
         committed.liveSurfaces[id]?.windowLabelConfirmed = false
         committed.unconfirmedMigration = .init(
-            clientId: clientId, evidenceId: verified.evidenceId, localClaims: claims
+            clientId: clientId, evidenceId: verified.evidenceId,
+            allocationHistoryEvidence: verified.allocationHistoryEvidence,
+            localProvenanceEvidence: verified.localProvenanceEvidence,
+            otherFleetCheckEvidence: verified.otherFleetCheckEvidence,
+            localClaims: claims
         )
         committed.generation += 1
         try store.save(committed)
@@ -847,6 +851,8 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         XCTAssertEqual(bound.registryBinding?.clientId, clientId)
         XCTAssertEqual(bound.registryBinding?.fleetId, home.fleetId)
         XCTAssertEqual(bound.unconfirmedMigration?.evidenceId, verified.evidenceId)
+        XCTAssertEqual(bound.unconfirmedMigration?.allocationHistoryEvidence,
+                       verified.allocationHistoryEvidence)
         XCTAssertEqual(bound.liveSurfaces[id]?.windowLabel, originalLabel)
         XCTAssertEqual(bound.liveSurfaces[id]?.panes["1"]?.paneLineageId, lineage)
         XCTAssertEqual(bound.liveSurfaces[id]?.panes["1"]?.target, .string("local content"))

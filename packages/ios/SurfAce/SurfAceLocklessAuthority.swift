@@ -433,6 +433,16 @@ struct SurfAceLocklessAuthorityState: Codable, Equatable, Sendable {
         guard version == 1, capability == surfAceLocklessCapability, generation >= 0 else {
             throw SurfAceLocklessAuthorityError.unsupportedVersion
         }
+        if let unconfirmedMigration {
+            guard !unconfirmedMigration.clientId.isEmpty,
+                  !unconfirmedMigration.evidenceId.isEmpty,
+                  !unconfirmedMigration.allocationHistoryEvidence.isEmpty,
+                  !unconfirmedMigration.localProvenanceEvidence.isEmpty,
+                  !unconfirmedMigration.otherFleetCheckEvidence.isEmpty,
+                  !unconfirmedMigration.localClaims.isEmpty else {
+                throw SurfAceLocklessAuthorityError.invalidState("unconfirmed_migration_evidence")
+            }
+        }
         try limits.validate()
         let allSequences = [
             sequences.nextClosedSequence,

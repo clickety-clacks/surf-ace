@@ -120,6 +120,9 @@ struct SurfAceVerifiedUnconfirmedMigration: Codable, Equatable, Sendable {
 struct SurfAceUnconfirmedMigrationReceipt: Codable, Equatable, Sendable {
     let clientId: String
     let evidenceId: String
+    let allocationHistoryEvidence: String
+    let localProvenanceEvidence: String
+    let otherFleetCheckEvidence: String
     let localClaims: [SurfAceRegistrationAssignment]
 }
 

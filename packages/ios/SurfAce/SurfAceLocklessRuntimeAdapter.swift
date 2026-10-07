@@ -406,6 +406,9 @@ actor SurfAceLocklessRuntimeAdapter {
            let surfaceIds = verifiedUnconfirmed.matchingSurfaceIds(in: current, clientId: clientId) {
             let receipt = SurfAceUnconfirmedMigrationReceipt(
                 clientId: clientId, evidenceId: verifiedUnconfirmed.evidenceId,
+                allocationHistoryEvidence: verifiedUnconfirmed.allocationHistoryEvidence,
+                localProvenanceEvidence: verifiedUnconfirmed.localProvenanceEvidence,
+                otherFleetCheckEvidence: verifiedUnconfirmed.otherFleetCheckEvidence,
                 localClaims: verifiedUnconfirmed.localClaims
             )
             do {
