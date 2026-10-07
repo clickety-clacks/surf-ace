@@ -237,7 +237,7 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         }
         runtime.setAnnotationMode(surfaceId: sourceSurfaceId, paneId: sourcePaneId,
                                   enabled: true, fingerDrawEnabled: false)
-        for _ in 0..<100 where !pane.annotationMode { try await Task.sleep(for: .milliseconds(10)) }
+        await runtime.awaitAnnotationModeTransition(surfaceId: sourceSurfaceId, paneId: sourcePaneId)
         XCTAssertTrue(pane.annotationMode)
         runtime.setAnnotationMode(surfaceId: sourceSurfaceId, paneId: sourcePaneId,
                                   enabled: false, fingerDrawEnabled: false)
@@ -255,7 +255,7 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         runtime.setAnnotationMode(surfaceId: sourceSurfaceId, paneId: sourcePaneId,
                                   enabled: true, fingerDrawEnabled: false)
         await stageGate.release()
-        for _ in 0..<100 where !pane.annotationMode { try await Task.sleep(for: .milliseconds(10)) }
+        await runtime.awaitAnnotationModeTransition(surfaceId: sourceSurfaceId, paneId: sourcePaneId)
         XCTAssertTrue(pane.annotationMode)
         let reentered = await adapter.snapshot().annotationPublisher?
             .openFrame(surfaceId: sourceSurfaceId, paneId: sourcePaneId)
@@ -288,11 +288,7 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         XCTAssertEqual((payload(flush ?? [:])["strokes"] as? [[String: Any]])?.first?["strokeId"] as? String,
                        "after-stage-reentry")
         _ = try await receive(socket, matchingOp: "event.annotation_committed")
-        for _ in 0..<100 {
-            if (await adapter.snapshot()).annotationPublisher?
-                .openFrame(surfaceId: sourceSurfaceId, paneId: sourcePaneId) == nil { break }
-            try await Task.sleep(for: .milliseconds(10))
-        }
+        await runtime.awaitAnnotationModeTransition(surfaceId: sourceSurfaceId, paneId: sourcePaneId)
         let source = await adapter.snapshot().annotationPublisher
         XCTAssertNil(source?.openFrame(surfaceId: sourceSurfaceId, paneId: sourcePaneId))
         let commits = try source?.surfaces[sourceSurfaceId]?.fifo.compactMap { entry -> [String: Any]? in
@@ -389,7 +385,7 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
             enabled: true,
             fingerDrawEnabled: false
         )
-        for _ in 0..<100 where !pane.annotationMode { try await Task.sleep(for: .milliseconds(10)) }
+        await runtime.awaitAnnotationModeTransition(surfaceId: surface.surfaceId, paneId: pane.paneId)
         XCTAssertTrue(pane.annotationMode)
         queueAnnotationTestStroke("before-reentry", on: pane)
 
@@ -399,10 +395,9 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
             enabled: false,
             fingerDrawEnabled: false
         )
-        for _ in 0..<100 where !pane.isDrawingFlushSending { try await Task.sleep(for: .milliseconds(10)) }
-        XCTAssertTrue(pane.isDrawingFlushSending)
         let flushWasHeld = await flushGate.waitUntilHeld()
         XCTAssertTrue(flushWasHeld)
+        XCTAssertTrue(pane.isDrawingFlushSending)
         XCTAssertTrue(pane.pendingAnnotationCommit)
         XCTAssertTrue(pane.isDrawingFlushSending)
         let heldSource = await adapter.snapshot().annotationPublisher
@@ -423,9 +418,7 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
             enabled: true,
             fingerDrawEnabled: false
         )
-        for _ in 0..<100 where !pane.annotationMode {
-            try await Task.sleep(for: .milliseconds(10))
-        }
+        await runtime.awaitAnnotationModeTransition(surfaceId: surface.surfaceId, paneId: pane.paneId)
         XCTAssertTrue(pane.annotationMode)
         XCTAssertFalse(pane.pendingAnnotationCommit)
         let reenteredSource = await adapter.snapshot().annotationPublisher
@@ -476,11 +469,7 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         )
         let firstCommit = try await receive(socket, matchingOp: "event.annotation_committed")
         XCTAssertEqual(payload(firstCommit)["contentId"] as? String, "annotation-content-id")
-        for _ in 0..<100 {
-            if (await adapter.snapshot()).annotationPublisher?
-                .surfaces[surface.surfaceId]?.fifo.count == 3 { break }
-            try await Task.sleep(for: .milliseconds(10))
-        }
+        await runtime.awaitAnnotationModeTransition(surfaceId: surface.surfaceId, paneId: pane.paneId)
         let source = await adapter.snapshot().annotationPublisher
         XCTAssertEqual(source?.surfaces[surface.surfaceId]?.fifo.map(\.kind),
                        ["payload", "payload", "payload"])
@@ -499,9 +488,7 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
             enabled: true,
             fingerDrawEnabled: false
         )
-        for _ in 0..<100 where !pane.annotationMode {
-            try await Task.sleep(for: .milliseconds(10))
-        }
+        await runtime.awaitAnnotationModeTransition(surfaceId: surface.surfaceId, paneId: pane.paneId)
         XCTAssertTrue(pane.annotationMode)
         queueAnnotationTestStroke("after-commit", on: pane)
         runtime.setAnnotationMode(
@@ -1276,11 +1263,9 @@ private actor SurfAceAnnotationFlushSendGate {
     }
 
     func waitUntilHeld() async -> Bool {
-        for _ in 0..<100 {
-            if held { return true }
-            try? await Task.sleep(for: .milliseconds(10))
-        }
-        return held
+        if held { return true }
+        await withCheckedContinuation { heldWaiters.append($0) }
+        return true
     }
 
     func release() async {

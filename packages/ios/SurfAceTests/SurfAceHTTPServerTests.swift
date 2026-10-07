@@ -13,6 +13,7 @@ final class SurfAceHTTPServerTests: XCTestCase {
 
         let boundPort = try await server.startForTesting(
             port: port,
+            bindAddress: "127.0.0.1", allowEndpointReuse: false,
             httpHandler: { _ in HTTPServerResponse.empty(statusCode: 200) },
             webSocketHandler: { _ in }
         )
@@ -27,6 +28,7 @@ final class SurfAceHTTPServerTests: XCTestCase {
         do {
             _ = try await server.startForTesting(
                 port: 0,
+                bindAddress: "127.0.0.1", allowEndpointReuse: true,
                 httpHandler: { _ in HTTPServerResponse.empty(statusCode: 200) },
                 webSocketHandler: { _ in }
             )
@@ -48,6 +50,7 @@ final class SurfAceHTTPServerTests: XCTestCase {
 
         _ = try await firstServer.startForTesting(
             port: port,
+            bindAddress: "127.0.0.1", allowEndpointReuse: false,
             httpHandler: { _ in HTTPServerResponse.empty(statusCode: 200) },
             webSocketHandler: { _ in }
         )
@@ -55,6 +58,7 @@ final class SurfAceHTTPServerTests: XCTestCase {
         do {
             _ = try await secondServer.startForTesting(
                 port: port,
+                bindAddress: "127.0.0.1", allowEndpointReuse: false,
                 httpHandler: { _ in HTTPServerResponse.empty(statusCode: 200) },
                 webSocketHandler: { _ in }
             )
@@ -74,6 +78,7 @@ final class SurfAceHTTPServerTests: XCTestCase {
 
         _ = try await firstServer.startForTesting(
             port: port,
+            bindAddress: "127.0.0.1", allowEndpointReuse: false,
             httpHandler: { _ in HTTPServerResponse.empty(statusCode: 200) },
             webSocketHandler: { _ in }
         )
@@ -81,6 +86,7 @@ final class SurfAceHTTPServerTests: XCTestCase {
         let boundPort = try await secondServer.startWithFallbackForTesting(
             preferredPort: port,
             fallbackPortOffsetLimit: 2,
+            bindAddress: "127.0.0.1", allowEndpointReuse: false,
             httpHandler: { _ in HTTPServerResponse.empty(statusCode: 200) },
             webSocketHandler: { _ in }
         )
