@@ -433,6 +433,11 @@ test("legacy labels wait for verified pin; foreign and missing identities never 
   }];
   core.applyWindowLabels(assignment);
   core.applyRegistryPaneLabels(assignment);
+  core.contentSet(surface.surfaceId, {
+    content: { markdown: "Legacy content remains readable" }, contentId: "ct_legacy_registry" as never,
+    contentType: "markdown", historyOwnerToken: "hot_legacy_registry",
+    paneId: pane.paneId as never, revision: 1 as never,
+  });
   const before = core.getPersistentState();
   const provisionedBinding = {
     binding: { clientId, allocatorId: "alloc_home", fleetId: "fleet-home" },
@@ -451,6 +456,7 @@ test("legacy labels wait for verified pin; foreign and missing identities never 
     assert.equal(replacedAllocator.requests.length, 0);
     assert.equal(missing.requests.length, 0);
     assert.deepEqual(core.getPersistentState(), before);
+    assert.equal(core.getRendererWindowState(surface.surfaceId).panes[0]?.content.contentId, "ct_legacy_registry");
 
     const connecting = attempt(correct.address);
     await until(() => correct.requests.length === 1);
