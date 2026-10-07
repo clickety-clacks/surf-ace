@@ -484,35 +484,48 @@ final class SurfAceRuntime {
         surfAceLifecycleLog(
             "event=app_launch \(surfAceDiagnosticFields([("fingerprint", fingerprint), ("screen_name", screenName)]))"
         )
+        let isolatedTestHost = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
         surfAceServerRuntimeLog(
-            "event=server_start_request \(surfAceDiagnosticFields([("fixed_port", fixedServerPort), ("health_path", healthPath), ("ws_path", webSocketPath)]))"
+            "event=server_start_request \(surfAceDiagnosticFields([("fixed_port", fixedServerPort), ("health_path", healthPath), ("ws_path", webSocketPath), ("isolated_test_host", isolatedTestHost)]))"
         )
 
         do {
-            let port = try await server.start(
-                webSocketPath: webSocketPath,
-                httpHandler: { [weak self] request in
-                    guard let self else { return HTTPServerResponse(statusCode: 500) }
-                    return await self.handleHTTP(request: request)
-                },
-                webSocketHandler: { [weak self] socket in
-                    guard let self else {
-                        await socket.close(code: 4500, reason: "runtime_unavailable")
-                        return
-                    }
-                    await self.handleWebSocket(socket)
+            let httpHandler: SurfAceHTTPServer.HTTPHandler = { [weak self] request in
+                guard let self else { return HTTPServerResponse(statusCode: 500) }
+                return await self.handleHTTP(request: request)
+            }
+            let webSocketHandler: SurfAceHTTPServer.WebSocketHandler = { [weak self] socket in
+                guard let self else {
+                    await socket.close(code: 4500, reason: "runtime_unavailable")
+                    return
                 }
-            )
+                await self.handleWebSocket(socket)
+            }
+            let port = if isolatedTestHost {
+                try await server.startIsolatedLoopbackForTesting(
+                    webSocketPath: webSocketPath,
+                    httpHandler: httpHandler,
+                    webSocketHandler: webSocketHandler
+                )
+            } else {
+                try await server.start(
+                    webSocketPath: webSocketPath,
+                    httpHandler: httpHandler,
+                    webSocketHandler: webSocketHandler
+                )
+            }
             serverPort = Int(port)
             isStarted = true
             surfAceServerRuntimeLog(
                 "event=server_start_ok \(surfAceDiagnosticFields([("fingerprint", fingerprint), ("port", serverPort), ("requested_port", fixedServerPort), ("screen_name", screenName)]))"
             )
             surfAceServerRuntimeLog(
-                "event=selected_provider_endpoint \(surfAceDiagnosticFields([("endpoint_address", "0.0.0.0:\(serverPort)"), ("health_path", healthPath), ("screen_name", screenName), ("ws_path", webSocketPath)]))"
+                "event=selected_provider_endpoint \(surfAceDiagnosticFields([("endpoint_address", "\(isolatedTestHost ? "127.0.0.1" : "0.0.0.0"):\(serverPort)"), ("health_path", healthPath), ("screen_name", screenName), ("ws_path", webSocketPath)]))"
             )
-            publishBonjour()
-            startCentralRegistration()
+            if !isolatedTestHost {
+                publishBonjour()
+                startCentralRegistration()
+            }
         } catch {
             let details = startupFailureMessage(for: error)
             surfAceServerRuntimeLog(
