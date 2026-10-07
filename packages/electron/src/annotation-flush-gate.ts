@@ -63,7 +63,7 @@ export class AnnotationFlushGate {
     }, delay);
   }
 
-  private async fire(key: string, state: PaneGate): Promise<void> {
+  private async fire(key: string, state: PaneGate, propagateFailure = false): Promise<void> {
     if (this.stopped || !state.dirty || state.active) return;
     const now = this.now();
     if (now < state.idleDueAt && now < state.maxDueAt) {
@@ -85,6 +85,7 @@ export class AnnotationFlushGate {
       this.onError(error);
       // Failure leaves the dirty work intact; a later stroke or explicit retry
       // must re-arm it after the caller resolves its persistence condition.
+      if (propagateFailure) throw error;
       return;
     } finally {
       state.active = null;
@@ -99,7 +100,7 @@ export class AnnotationFlushGate {
     if (state.active) await state.active;
     if (!state.dirty) return;
     state.idleDueAt = this.now();
-    await this.fire(key, state);
+    await this.fire(key, state, true);
   }
 
   stop(): void {
