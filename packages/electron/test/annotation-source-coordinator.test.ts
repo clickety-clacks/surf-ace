@@ -258,3 +258,57 @@ test("the lockless direct frame persists before the registry source frame commit
   assert.equal(core.hasPendingAnnotationCommit(surface.surfaceId, paneId), false);
   source.stop();
 });
+
+test("restart after the Done intent but before final flush resumes the same frame", async () => {
+  const core = new SurfaceCore({ annotationClientId: clientId });
+  const surface = core.ensurePrimarySurface("Surf Ace", viewport);
+  core.admitSurfaceToLockless(surface.surfaceId);
+  const paneId = core.activePaneIds(surface.surfaceId)[0]!;
+  core.locklessContentPush(surface.surfaceId, {
+    content: { markdown: "annotation fixture" }, contentId: "content-one",
+    contentType: "markdown", friendlyChatName: "Fixture", paneId,
+  }, "Fixture");
+  let durable = core.getPersistentState();
+  let interruptFlush = true;
+  const source = new AnnotationSourceCoordinator(core, async () => {
+    const candidate = core.getPersistentState();
+    if (interruptFlush && candidate.annotationPublisher?.surfaces[surface.surfaceId]?.fifo.some(
+      (entry) => JSON.parse(entry.canonical).kind === "live_delta")) {
+      interruptFlush = false;
+      throw new Error("injected final flush write failure");
+    }
+    durable = candidate;
+  }, () => {}, () => {}, async () => {
+    throw new Error("direct completion must wait for the durable final flush");
+  });
+  await source.setAnnotating(surface.surfaceId, paneId, true);
+  const opened = core.annotationPublisher!.openFrame(surface.surfaceId, paneId, {
+    contentId: "content-one", contextKey: "content-one", image: png,
+    openedAt: 100, scrollOffset: { x: 0, y: 0 }, viewport,
+  });
+  core.addStroke(surface.surfaceId, paneId, {
+    strokeId: "stroke-one" as never, tool: "mouse",
+    points: [{ x: 1, y: 2, timestamp: 110 }],
+  });
+  await assert.rejects(source.setAnnotating(surface.surfaceId, paneId, false),
+    /injected final flush write failure/);
+  source.stop();
+  assert.equal(durable.annotationPublisher?.surfaces[surface.surfaceId]?.openFrames?.[String(paneId)]
+    ?.commitRequested, true);
+  const restored = new SurfaceCore({ annotationClientId: clientId, persistentState: durable });
+  restored.restorePersistedSurfaces("Surf Ace", viewport);
+  const resumed = new AnnotationSourceCoordinator(restored, async () => {
+    durable = restored.getPersistentState();
+  }, () => {}, (error) => { throw error; }, async () => {
+    restored.markDrawingFlushSent(surface.surfaceId, paneId);
+    restored.markAnnotationCommittedSent(surface.surfaceId, paneId);
+    durable = restored.getPersistentState();
+    return true;
+  });
+  await resumed.resumePending();
+  const entries = durable.annotationPublisher!.surfaces[surface.surfaceId]!.fifo
+    .map((entry) => JSON.parse(entry.canonical));
+  assert.deepEqual(entries.map((entry) => entry.kind), ["live_delta", "frame_commit"]);
+  assert.equal(entries[1]!.frameId, opened.frameId);
+  resumed.stop();
+});
