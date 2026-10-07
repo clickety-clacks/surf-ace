@@ -189,6 +189,8 @@ struct SurfAceLocklessSurfaceMaterial: Codable, Equatable, Sendable {
     var topology: SurfAceLocklessJSON
     var topologyRevision: Int64
     var windowLabel: String
+    // nil denotes a pre-marker persisted surface; treat its label as legacy evidence.
+    var windowLabelConfirmed: Bool? = nil
 }
 
 struct SurfAceLocklessSurfaceTombstone: Codable, Equatable, Sendable {

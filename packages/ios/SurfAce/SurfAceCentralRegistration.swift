@@ -63,12 +63,18 @@ struct SurfAceProvisionedRegistryBinding: Codable, Equatable, Sendable {
     }
 
     static func confirmedClaims(_ state: SurfAceLocklessAuthorityState) -> [SurfAceRegistrationAssignment] {
-        state.liveSurfaces.values.sorted { $0.surfaceId < $1.surfaceId }.compactMap { surface in
-            let panes = surface.panes.values.filter { $0.paneLabel > 0 }.sorted { $0.paneId < $1.paneId }
+        let surfaces = Array(state.liveSurfaces.values) + state.surfaceTombstones.map(\.surface)
+        return surfaces.sorted { $0.surfaceId < $1.surfaceId }.compactMap { surface in
+            let retained = Array(surface.panes.values) + surface.paneTombstones.map(\.pane)
+            let panes = retained.filter { $0.paneLabel > 0 }.sorted { $0.paneId < $1.paneId }
                 .map { SurfAceRegistrationSurface.Pane(
                     paneId: String($0.paneId), paneLineageId: $0.paneLineageId, paneLabel: $0.paneLabel
                 ) }
-            return panes.isEmpty ? nil : SurfAceRegistrationAssignment(
+            // New local letters are provisional. An absent marker is older state
+            // whose window-only label must not be mistaken for a fresh client.
+            guard (!surface.windowLabel.isEmpty && surface.windowLabelConfirmed != false)
+                    || !panes.isEmpty else { return nil }
+            return SurfAceRegistrationAssignment(
                 surfaceId: surface.surfaceId, windowLabel: surface.windowLabel, panes: panes
             )
         }

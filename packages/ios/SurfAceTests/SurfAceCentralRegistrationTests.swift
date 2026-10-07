@@ -768,6 +768,107 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         XCTAssertEqual(afterRestart.liveSurfaces[id]?.panes["1"]?.paneLabel, 700)
     }
 
+    func testTombstoneOnlyLegacyLabelsRejectForeignThenRecoverWithVerifiedHome() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("registry-tombstone-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = SurfAceLocklessGenerationStore(stateURL: root.appendingPathComponent("state.json"))
+        var state = try SurfAceLocklessAuthorityState.empty()
+        let openingRevision = state.surfaceSetRevision
+        let opened = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
+            state: &state, expectedSurfaceSetRevision: openingRevision
+        )
+        let id = opened.surface.surfaceId
+        try SurfAceLocklessTopologyOperations.applyWindowLabels(state: &state, assignments: [(id, "d")])
+        state.liveSurfaces[id]?.panes["1"]?.paneLabel = 703
+        state.liveSurfaces[id]?.panes["1"]?.target = .string("retained content")
+        let closingRevision = state.surfaceSetRevision
+        let topologyRevision = try XCTUnwrap(state.liveSurfaces[id]).topologyRevision
+        _ = try SurfAceLocklessTopologyOperations.surfaceWindowClose(
+            state: &state, surfaceId: id,
+            expectedSurfaceSetRevision: closingRevision,
+            expectedTopologyRevision: topologyRevision
+        )
+        let tombstone = try XCTUnwrap(state.surfaceTombstones.first)
+        XCTAssertEqual(tombstone.surface.windowLabel, "d")
+        XCTAssertEqual(tombstone.surface.panes["1"]?.paneLabel, 703)
+        let reopeningRevision = state.surfaceSetRevision
+        _ = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
+            state: &state, expectedSurfaceSetRevision: reopeningRevision
+        )
+        let clientId = "tombstone-client"
+        let homeIdentity = SurfAceRegistryIdentity(allocatorId: "alloc_home", fleetId: "fleet-home")
+        let foreignIdentity = SurfAceRegistryIdentity(allocatorId: "alloc_foreign", fleetId: "fleet-foreign")
+        let claims = SurfAceProvisionedRegistryBinding.confirmedClaims(state)
+        XCTAssertEqual(claims, [.init(surfaceId: id, windowLabel: "d", panes: [
+            .init(paneId: "1", paneLineageId: try XCTUnwrap(tombstone.surface.panes["1"]).paneLineageId,
+                  paneLabel: 703)
+        ])])
+        var windowOnly = try SurfAceLocklessAuthorityState.empty()
+        let windowOnlyRevision = windowOnly.surfaceSetRevision
+        let windowOnlyId = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
+            state: &windowOnly, expectedSurfaceSetRevision: windowOnlyRevision
+        ).surface.surfaceId
+        XCTAssertTrue(SurfAceProvisionedRegistryBinding.confirmedClaims(windowOnly).isEmpty)
+        windowOnly.liveSurfaces[windowOnlyId]?.windowLabelConfirmed = nil
+        XCTAssertEqual(SurfAceProvisionedRegistryBinding.confirmedClaims(windowOnly), [
+            .init(surfaceId: windowOnlyId,
+                  windowLabel: try XCTUnwrap(windowOnly.liveSurfaces[windowOnlyId]).windowLabel,
+                  panes: [])
+        ])
+        let provisioned = SurfAceProvisionedRegistryBinding(
+            binding: .init(allocatorId: homeIdentity.allocatorId, clientId: clientId,
+                           fleetId: homeIdentity.fleetId), confirmedClaims: claims
+        )
+        try store.save(state)
+        let adapter = try SurfAceLocklessRuntimeAdapter(store: store)
+        let before = try XCTUnwrap(store.load())
+        let foreign = Transport()
+        foreign.registryIdentity = foreignIdentity
+        let foreignRegistration = SurfAceCentralRegistration(
+            clientId: clientId, configured: URL(string: "ws://127.0.0.1:24001/ws")!,
+            discover: { [] }, makeTransport: { _ in foreign },
+            snapshot: { SurfAceRegistrationSurface.snapshot(await adapter.snapshot()) },
+            apply: { _, _ in },
+            verifyRegistry: { identity, surfaces in
+                try await adapter.bindRegistryIdentity(identity, clientId: clientId,
+                    expectedSurfaces: surfaces, provisioned: provisioned)
+            }
+        )
+        do {
+            try await foreignRegistration.synchronize()
+            XCTFail("tombstone-only legacy state accepted foreign registry")
+        } catch { }
+        foreignRegistration.stop()
+        XCTAssertEqual(foreign.identityReads, 1)
+        XCTAssertTrue(foreign.clients.isEmpty)
+        XCTAssertEqual(try XCTUnwrap(store.load()), before)
+        let pending = await adapter.snapshot()
+        XCTAssertNil(pending.registryBinding)
+
+        let home = Transport()
+        home.registryIdentity = homeIdentity
+        let homeRegistration = SurfAceCentralRegistration(
+            clientId: clientId, configured: URL(string: "ws://127.0.0.1:24002/ws")!,
+            discover: { [] }, makeTransport: { _ in home },
+            snapshot: { SurfAceRegistrationSurface.snapshot(await adapter.snapshot()) },
+            apply: { _, _ in },
+            verifyRegistry: { identity, surfaces in
+                try await adapter.bindRegistryIdentity(identity, clientId: clientId,
+                    expectedSurfaces: surfaces, provisioned: provisioned)
+            }
+        )
+        try await homeRegistration.synchronize()
+        homeRegistration.stop()
+        XCTAssertEqual(home.clients, [clientId])
+        let recovered = try XCTUnwrap(store.load())
+        XCTAssertEqual(recovered.registryBinding, provisioned.binding)
+        XCTAssertEqual(recovered.surfaceTombstones.first?.surface.windowLabel, "d")
+        XCTAssertEqual(recovered.surfaceTombstones.first?.surface.panes["1"]?.paneLabel, 703)
+        XCTAssertEqual(recovered.surfaceTombstones.first?.surface.panes["1"]?.target,
+                       .string("retained content"))
+    }
+
     func testBindingReadbackReconcilesCommittedDiskCandidateBeforeForeignRetry() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("registry-readback-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

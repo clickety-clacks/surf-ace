@@ -492,6 +492,76 @@ test("legacy labels wait for verified pin; foreign and missing identities never 
   }
 });
 
+test("tombstone-only legacy labels refuse foreign-first binding and recover with verified home", async () => {
+  const foreign = await centralFixture({ allocatorId: "alloc_foreign", fleetId: "fleet-foreign" });
+  const home = await centralFixture({ allocatorId: "alloc_home", fleetId: "fleet-home" });
+  const core = new SurfaceCore();
+  const surface = core.ensurePrimarySurface("Retained legacy", { width: 800, height: 600, scale: 1 });
+  const pane = [...surface.panes.values()][0]!;
+  const assignment = [{ surfaceId: surface.surfaceId, windowLabel: "d", panes: [{
+    paneId: String(pane.paneId), paneLineageId: pane.paneLineageId, paneLabel: 703,
+  }] }];
+  core.applyWindowLabels(assignment);
+  core.applyRegistryPaneLabels(assignment);
+  core.contentSet(surface.surfaceId, {
+    content: { markdown: "Retained content" }, contentId: "ct_retained_registry" as never,
+    contentType: "markdown", historyOwnerToken: "hot_retained_registry",
+    paneId: pane.paneId as never, revision: 1 as never,
+  });
+  const retained = core.captureSurfaceTombstonePayload(surface.surfaceId);
+  core.locklessAuthority.createTombstone({
+    kind: "surface", payload: { paneTombstones: [], surface: retained }, surfaceId: surface.surfaceId,
+  });
+  core.removeSurface(surface.surfaceId);
+  assert.equal(core.listSurfaces().length, 0);
+  const confirmedClaims = core.confirmedRegistryClaims();
+  assert.deepEqual(confirmedClaims, assignment);
+  const windowOnly = new SurfaceCore();
+  const unnumbered = windowOnly.ensurePrimarySurface("Window-only legacy", { width: 800, height: 600, scale: 1 });
+  assert.deepEqual(windowOnly.confirmedRegistryClaims(), []);
+  windowOnly.applyWindowLabelOnly(unnumbered.surfaceId, "e");
+  assert.deepEqual(windowOnly.confirmedRegistryClaims(), [
+    { surfaceId: unnumbered.surfaceId, windowLabel: "e", panes: [] },
+  ]);
+  const before = core.getPersistentState();
+  const provisioned = {
+    binding: { clientId: "tombstone-client", allocatorId: "alloc_home", fleetId: "fleet-home" },
+    confirmedClaims,
+  };
+  const attempt = async (address: string, pin: typeof provisioned | null) => {
+    const connection = new ConfiguredServerRegistration(address, provisioned.binding.clientId,
+      core, async () => {}, () => {}, 200, pin);
+    try { await connection.synchronize(); } finally { await connection.stop(); }
+  };
+  try {
+    await assert.rejects(attempt(foreign.address, null), /legacy_registry_binding_pending/);
+    await assert.rejects(attempt(foreign.address, provisioned), /foreign_registry_identity/);
+    assert.equal(foreign.requests.length, 0);
+    assert.equal(core.registryBinding(), null);
+    assert.deepEqual(core.getPersistentState(), before);
+
+    const recovering = attempt(home.address, provisioned);
+    await until(() => home.requests.length === 1);
+    assert.deepEqual(home.requests[0]!.message.payload.surfaces, []);
+    home.reply(0);
+    await recovering;
+    assert.deepEqual(core.registryBinding(), provisioned.binding);
+    const restored = core.restoreSurfaceTombstone(retained);
+    assert.equal(restored.windowLabel, "d");
+    assert.equal([...restored.panes.values()][0]?.paneLabel, 703);
+    assert.equal(core.getRendererWindowState(surface.surfaceId).panes[0]?.content.contentId,
+      "ct_retained_registry");
+    const restoredRegistration = attempt(home.address, null);
+    await until(() => home.requests.length === 2);
+    home.reply(1, true, true, 703, "d");
+    await restoredRegistration;
+    assert.equal(core.panesList(surface.surfaceId).panes[0]?.paneLabel, 703);
+  } finally {
+    await foreign.close();
+    await home.close();
+  }
+});
+
 test("interrupted first binding write refuses registration and preserves display state", async () => {
   const registry = await centralFixture();
   const core = new SurfaceCore();
