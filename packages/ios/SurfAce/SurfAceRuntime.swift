@@ -347,7 +347,7 @@ final class SurfAceRuntime {
     var isSceneAuthorityReady = false
 
     @ObservationIgnored private let server = SurfAceHTTPServer()
-    @ObservationIgnored private let bonjourPublisher = SurfAceBonjourPublisher()
+    @ObservationIgnored private let bonjourPublisher: SurfAceBonjourPublisher
     @ObservationIgnored private let identityStore = SurfAceIdentityStore()
     @ObservationIgnored private let mappingStoreKey = "SurfAce.SurfaceIdentityMapping"
     @ObservationIgnored private let surfaceTopologyStoreKey = "SurfAce.SurfaceTopologyMapping"
@@ -387,6 +387,11 @@ final class SurfAceRuntime {
     }
     @ObservationIgnored private var isStarted = false
     @ObservationIgnored private var isStarting = false
+    private var isIsolatedTestHost: Bool {
+        let environment = ProcessInfo.processInfo.environment
+        return environment["SURF_ACE_XCTEST_HOST_NO_AUTOSTART"] == "1"
+            || environment["XCTestConfigurationFilePath"] != nil
+    }
     @ObservationIgnored private var surfaceById: [String: SurfAceSurfaceModel] = [:]
     @ObservationIgnored private var surfaceIdBySceneKey: [String: String] = [:]
     @ObservationIgnored private var sceneDisconnectObserversBySceneKey: [String: SurfAceSceneDisconnectObserver] = [:]
@@ -435,6 +440,7 @@ final class SurfAceRuntime {
     init(
         userDefaults: UserDefaults = .standard,
         locklessStateURL: URL? = nil,
+        bonjourPublisher: SurfAceBonjourPublisher = SurfAceBonjourPublisher(),
         outboundSendPreparation: (@Sendable (
             String, SurfAceOutboundSender.Priority
         ) async -> Void)? = nil,
@@ -442,6 +448,7 @@ final class SurfAceRuntime {
     ) {
         self.userDefaults = userDefaults
         self.locklessStateURLOverride = locklessStateURL
+        self.bonjourPublisher = bonjourPublisher
         self.outboundSendPreparation = outboundSendPreparation
         self.locklessDeliveryWaitObserver = locklessDeliveryWaitObserver
         let fallbackName = "Surf Ace"
@@ -484,9 +491,7 @@ final class SurfAceRuntime {
         surfAceLifecycleLog(
             "event=app_launch \(surfAceDiagnosticFields([("fingerprint", fingerprint), ("screen_name", screenName)]))"
         )
-        let environment = ProcessInfo.processInfo.environment
-        let isolatedTestHost = environment["SURF_ACE_XCTEST_HOST_NO_AUTOSTART"] == "1"
-            || environment["XCTestConfigurationFilePath"] != nil
+        let isolatedTestHost = isIsolatedTestHost
         surfAceServerRuntimeLog(
             "event=server_start_request \(surfAceDiagnosticFields([("fixed_port", fixedServerPort), ("health_path", healthPath), ("ws_path", webSocketPath), ("isolated_test_host", isolatedTestHost)]))"
         )
@@ -538,6 +543,7 @@ final class SurfAceRuntime {
     }
 
     private func startCentralRegistration() {
+        guard !isIsolatedTestHost else { return }
         guard centralRegistration == nil, let identity else { return }
         let discovery = SurfAceCentralDiscovery()
         let address = ProcessInfo.processInfo.environment["SURF_ACE_SERVER"]?
@@ -1736,7 +1742,7 @@ final class SurfAceRuntime {
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor in
-                self?.handleWillEnterForeground()
+                await self?.handleWillEnterForeground()
             }
         }
     }
@@ -1764,16 +1770,12 @@ final class SurfAceRuntime {
         }
     }
 
-    private func handleWillEnterForeground() {
+    func handleWillEnterForeground() async {
         surfAceLifecycleLog(
             "event=app_foreground \(surfAceDiagnosticFields([("surface_count", surfaces.count)]))"
         )
         if locklessAdapter != nil {
-            Task { @MainActor in
-                await restoreLocklessAuthority(reason: "foreground")
-                publishBonjour()
-            }
-            return
+            await restoreLocklessAuthority(reason: "foreground")
         }
         publishBonjour()
     }
@@ -4692,6 +4694,7 @@ final class SurfAceRuntime {
     }
 
     private func publishBonjour() {
+        guard !isIsolatedTestHost, isStarted else { return }
         surfAceServerRuntimeLog(
             "event=bonjour_publish_request \(surfAceDiagnosticFields([("name", screenName), ("port", serverPort)]))"
         )
@@ -4699,7 +4702,7 @@ final class SurfAceRuntime {
     }
 
     private func refreshBonjourTXT() {
-        guard isStarted else { return }
+        guard isStarted, !isIsolatedTestHost else { return }
         surfAceServerRuntimeLog(
             "event=bonjour_refresh \(surfAceDiagnosticFields([("busy", 0), ("surface_count", surfaces.count)]))"
         )
