@@ -66,6 +66,73 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
         XCTAssertEqual(surface.topologyEpoch, 4)
     }
 
+    @MainActor
+    func testLocklessResizeCommitsProjectsAndSurvivesRestart() async throws {
+        let suiteName = "SurfAceResizeCommit.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(suiteName, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        addTeardownBlock {
+            defaults.removePersistentDomain(forName: suiteName)
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let stateURL = directory.appendingPathComponent("authority-v1.json")
+        let runtime = SurfAceRuntime(
+            userDefaults: defaults, locklessStateURL: stateURL,
+            enableFleetDiscovery: false, isolatedTestLoopback: true
+        )
+        await runtime.restoreLocklessAuthority(reason: "resize-test")
+        let registered = await runtime.registerSurfaceForScene(sceneKey: suiteName)
+        let surface = try XCTUnwrap(registered)
+        let surfaceId = surface.surfaceId
+        let adapter = try runtime.locklessAuthorityForLocalMutation()
+        _ = try await adapter.commitLocalMutation(operation: "test.resize.split") { state, _ in
+            let split = try TestRegistryTopology.paneSplit(
+                state: &state, surfaceId: surfaceId, paneId: 1,
+                count: 2, direction: "vertical",
+                expectedTopologyRevision: state.liveSurfaces[surfaceId]?.topologyRevision ?? -1
+            )
+            return .integer(split.newPaneIds[0])
+        }
+        await runtime.restoreLocklessAuthority(reason: "resize-test-split")
+        guard case .split(_, let initialChildren, _) = surface.paneLayout else {
+            return XCTFail("Expected projected split before resize")
+        }
+        XCTAssertEqual(initialChildren.map(\.layoutWeight), [1, 1])
+
+        let generationBefore = (await adapter.snapshot()).generation
+        runtime.resizeSplit(surfaceId: surfaceId, path: [], weights: [1.4, 0.6])
+        var committed = false
+        for _ in 0..<100 {
+            let state = await adapter.snapshot()
+            if state.generation > generationBefore,
+               case .split(_, let children, _) = surface.paneLayout,
+               abs(children[0].layoutWeight - 1.4) < 0.001 {
+                committed = true
+                break
+            }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        let after = await adapter.snapshot()
+        XCTAssertTrue(
+            committed,
+            "Resize must commit and project back into the visible tree; generation \(generationBefore)->\(after.generation), endpointError=\(runtime.endpointError ?? "none"), topology=\(after.liveSurfaces[surfaceId]?.topology ?? .null)"
+        )
+
+        let restarted = SurfAceRuntime(
+            userDefaults: defaults, locklessStateURL: stateURL,
+            enableFleetDiscovery: false, isolatedTestLoopback: true
+        )
+        await restarted.restoreLocklessAuthority(reason: "resize-test-restart")
+        let restored = await restarted.registerSurfaceForScene(sceneKey: suiteName)
+        guard case .split(_, let restoredChildren, _) = try XCTUnwrap(restored).paneLayout else {
+            return XCTFail("Expected split after restart")
+        }
+        XCTAssertEqual(restoredChildren.map(\.layoutWeight), [1.4, 0.6])
+    }
+
     func testKeyboardFocusOutlineIsSuppressedForSinglePaneSurfaces() {
         XCTAssertFalse(surfAceShowsKeyboardFocusOutline(activePaneId: 1, paneId: 1, paneCount: 1))
         XCTAssertFalse(surfAceShowsKeyboardFocusOutline(activePaneId: nil, paneId: 1, paneCount: 1))
