@@ -52,14 +52,26 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
         ))
         XCTAssertEqual(canonical, .object([
             "children": .array([
-                .object(["paneId": .integer(7), "type": .string("pane")]),
-                .object(["paneId": .integer(9), "type": .string("pane")]),
+                .object(["paneId": .integer(7), "type": .string("pane"), "weight": .double(0.25)]),
+                .object(["paneId": .integer(9), "type": .string("pane"), "weight": .double(0.75)]),
             ]),
             "direction": .string("horizontal"),
             "type": .string("split"),
+            "weight": .double(1),
         ]))
         let projected = try persistedPaneLayout(fromCanonical: canonical)
         XCTAssertEqual(projected.runtimeNode.paneIDs, [7, 9])
+        guard case .split(_, let children, _) = projected.runtimeNode else {
+            return XCTFail("Expected weighted split")
+        }
+        XCTAssertEqual(children.map(\.layoutWeight), [0.25, 0.75])
+        XCTAssertEqual(try SurfAceLocklessTopologyCodec.canonical(canonical), canonical)
+        XCTAssertThrowsError(try SurfAceLocklessTopologyCodec.canonical(.object([
+            "paneId": .integer(7), "type": .string("pane"), "weight": .double(0),
+        ])))
+        XCTAssertThrowsError(try SurfAceLocklessTopologyCodec.canonical(.object([
+            "paneId": .integer(7), "type": .string("pane"), "weight": .double(.nan),
+        ])))
         XCTAssertThrowsError(try persistedPaneLayout(fromCanonical: .object([
             "kind": .string("leaf"),
             "paneId": .integer(7),
