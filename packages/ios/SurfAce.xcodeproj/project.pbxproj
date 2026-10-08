@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		A9A100000000000000000002 /* SurfAceResizeUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9A100000000000000000001 /* SurfAceResizeUITests.swift */; };
 		A70100000000000000000002 /* SurfAceAnnotationOutbox.swift in Sources */ = {isa = PBXBuildFile; fileRef = A70100000000000000000001 /* SurfAceAnnotationOutbox.swift */; };
 		A70100000000000000000003 /* SurfAceAnnotationOutbox.swift in Sources */ = {isa = PBXBuildFile; fileRef = A70100000000000000000001 /* SurfAceAnnotationOutbox.swift */; };
 		A70200000000000000000002 /* SurfAceAnnotationPublisher.swift in Sources */ = {isa = PBXBuildFile; fileRef = A70200000000000000000001 /* SurfAceAnnotationPublisher.swift */; };
@@ -87,6 +88,8 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		A9A100000000000000000001 /* SurfAceResizeUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceResizeUITests.swift; sourceTree = "<group>"; };
+		A9A100000000000000000003 /* SurfAceResizeUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = SurfAceResizeUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		A70100000000000000000001 /* SurfAceAnnotationOutbox.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceAnnotationOutbox.swift; sourceTree = "<group>"; };
 		A70200000000000000000001 /* SurfAceAnnotationPublisher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceAnnotationPublisher.swift; sourceTree = "<group>"; };
 		A70100000000000000000004 /* SurfAceAnnotationOutboxTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceAnnotationOutboxTests.swift; sourceTree = "<group>"; };
@@ -142,6 +145,7 @@
 				1F3A8CD9D6ADA0793B8A7A29 /* packages */,
 				4CF5D060294BE463D8CACA33 /* SurfAce */,
 				6897A8D003370E2CC8B694CB /* SurfAceTests */,
+				A9A100000000000000000004 /* SurfAceResizeUITests */,
 				EE59F87F57539D75E6853D10 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -217,6 +221,14 @@
 			path = SurfAceTests;
 			sourceTree = "<group>";
 		};
+		A9A100000000000000000004 /* SurfAceResizeUITests */ = {
+			isa = PBXGroup;
+			children = (
+				A9A100000000000000000001 /* SurfAceResizeUITests.swift */,
+			);
+			path = SurfAceResizeUITests;
+			sourceTree = "<group>";
+		};
 		AA7CC5578E3437D1EE330F32 /* vectors */ = {
 			isa = PBXGroup;
 			children = (
@@ -241,6 +253,7 @@
 				DA0B8CE0B10CC8BE7F94EC21 /* SurfAce.app */,
 				900E30042618968CF5054D9D /* SurfAceSpatial.app */,
 				E1026649686E370A8442CA40 /* SurfAceTests.xctest */,
+				A9A100000000000000000003 /* SurfAceResizeUITests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -248,6 +261,22 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		A9A100000000000000000005 /* SurfAceResizeUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A9A100000000000000000008 /* Build configuration list for PBXNativeTarget "SurfAceResizeUITests" */;
+			buildPhases = (
+				A9A100000000000000000006 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				939CAD971356B56D4A53BD0E /* PBXTargetDependency */,
+			);
+			name = SurfAceResizeUITests;
+			productName = SurfAceResizeUITests;
+			productReference = A9A100000000000000000003 /* SurfAceResizeUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
 		67A9D8D88698454C7C5A7802 /* SurfAceTests */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = 8844C2C5F00C007C81697FD5 /* Build configuration list for PBXNativeTarget "SurfAceTests" */;
@@ -342,6 +371,7 @@
 				E78D6E7B48D8F200079A1C31 /* SurfAce */,
 				A3F82FD6C105A9FB434006D5 /* SurfAceSpatial */,
 				67A9D8D88698454C7C5A7802 /* SurfAceTests */,
+				A9A100000000000000000005 /* SurfAceResizeUITests */,
 			);
 		};
 /* End PBXProject section */
@@ -382,6 +412,14 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		A9A100000000000000000006 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A9A100000000000000000002 /* SurfAceResizeUITests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		2CE0AE1F202FC9159047705E /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -470,6 +508,32 @@
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
+		A9A100000000000000000009 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGNING_ALLOWED = NO;
+				GENERATE_INFOPLIST_FILE = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = co.clicketyclacks.SurfAceResizeUITests;
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = SurfAce;
+			};
+			name = Debug;
+		};
+		A9A10000000000000000000A /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGNING_ALLOWED = NO;
+				GENERATE_INFOPLIST_FILE = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = co.clicketyclacks.SurfAceResizeUITests;
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = SurfAce;
+			};
+			name = Release;
+		};
 		0F78BF2A3D58CDFA37F20E28 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -720,6 +784,15 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		A9A100000000000000000008 /* Build configuration list for PBXNativeTarget "SurfAceResizeUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A9A100000000000000000009 /* Debug */,
+				A9A10000000000000000000A /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
 		1AF7DA2C5103745993957DB9 /* Build configuration list for PBXProject "SurfAce" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
