@@ -1,6 +1,6 @@
 ---
 name: surf-ace
-description: Control Surf Ace through the installed standalone surf-ace CLI.
+description: "Control Surf Ace through the installed standalone surf-ace CLI. Use for Surf Ace or Surface panes and windows, including numbered pane or window references when that product context is established. Exclude ordinary operating-system windows and unrelated app panes."
 ---
 
 # Surf Ace
