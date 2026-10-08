@@ -532,6 +532,7 @@ private struct SurfAceSplitResizeHandle: View {
                     .stroke(.white.opacity(0.18), lineWidth: 1)
             }
             .contentShape(Rectangle())
+            .accessibilityIdentifier("surf-ace-split-resize-handle")
             .gesture(
                 DragGesture(minimumDistance: 0, coordinateSpace: .global)
                     .onChanged { value in
@@ -571,6 +572,108 @@ private struct SurfAceSplitResizeHandle: View {
         return nextWeights
     }
 }
+
+#if DEBUG
+// The UI-test probe stays entirely local and uses the production split handle.
+// It never creates SurfAceRuntime, a listener, or a Bonjour publisher.
+struct SurfAceResizeProbeView: View {
+    @State private var weights = [1.0, 1.0]
+
+    var body: some View {
+        GeometryReader { proxy in
+            ZStack(alignment: .topLeading) {
+                HStack(spacing: 0) {
+                    SurfAceResizeProbeWebView()
+                        .frame(width: proxy.size.width * weights[0] / 2)
+                    SurfAceResizeProbeWebView()
+                        .frame(width: proxy.size.width * weights[1] / 2)
+                }
+                SurfAceSplitResizeHandle(
+                    direction: .vertical,
+                    weights: weights,
+                    childIndex: 0,
+                    extent: proxy.size.width
+                ) { weights = $0 }
+                    .position(x: proxy.size.width * weights[0] / 2, y: proxy.size.height / 2)
+                Text(String(format: "first weight %.3f", weights[0]))
+                    .accessibilityIdentifier("surf-ace-resize-probe-weight")
+                    .padding(12)
+                    .background(.black)
+                    .foregroundStyle(.white)
+            }
+        }
+    }
+}
+
+private struct SurfAceResizeProbeWebView: UIViewRepresentable {
+    func makeUIView(context: Context) -> WKWebView {
+        let view = WKWebView(frame: .zero)
+        view.loadHTMLString("<html><body style='background:#183047'></body></html>", baseURL: nil)
+        return view
+    }
+
+    func updateUIView(_ view: WKWebView, context: Context) {}
+}
+
+// Exercises the shipping pane tree and resizeSplit path with a local runtime.
+// The app's normal startup is bypassed, so this never opens a listener.
+struct SurfAceResizeTreeProbeView: View {
+    var direction: SurfAceLayoutDirection = .vertical
+    @State private var runtime = SurfAceRuntime()
+    @State private var surface: SurfAceSurfaceModel?
+
+    var body: some View {
+        GeometryReader { proxy in
+            if let surface {
+                ZStack(alignment: .topLeading) {
+                    SurfAcePaneTreeView(
+                        runtime: runtime,
+                        surface: surface,
+                        node: surface.paneLayout,
+                        surfaceBounds: CGRect(origin: .zero, size: proxy.size)
+                    )
+                    Text(weightLabel(surface.paneLayout))
+                        .accessibilityIdentifier("surf-ace-resize-tree-weight")
+                        .padding(12)
+                        .background(.black)
+                        .foregroundStyle(.white)
+                }
+                .coordinateSpace(name: surfAceSurfaceCoordinateSpaceName)
+            }
+        }
+        .task {
+            guard surface == nil else { return }
+            let local = runtime.registerSurface(sceneKey: "resize-ui-probe")
+            let left = SurfAcePaneModel(paneId: 1, paneLabel: 1)
+            let right = SurfAcePaneModel(paneId: 2, paneLabel: 2)
+            for pane in [left, right] {
+                pane.currentEntry = SurfAcePaneEntry.from(frame: SurfAceFrame(
+                    contentId: "ct_resize_probe_\(pane.paneId)",
+                    revision: 1,
+                    contentType: .html,
+                    payload: .html(html: "<html><body style='height:200vh;background:#183047'>Local pane</body></html>", baseURL: nil),
+                    reloadSource: nil,
+                    title: "Local pane",
+                    scrollable: true,
+                    interactive: true
+                ))
+            }
+            local.panesById = [1: left, 2: right]
+            local.paneLayout = .split(
+                direction: direction,
+                children: [.leaf(1, weight: 1), .leaf(2, weight: 1)]
+            )
+            surface = local
+        }
+    }
+
+    private func weightLabel(_ layout: SurfAcePaneLayoutNode) -> String {
+        guard case .split(_, let children, _) = layout,
+              let first = children.first else { return "first weight missing" }
+        return String(format: "first weight %.3f", first.layoutWeight)
+    }
+}
+#endif
 
 private struct SurfAcePaneView: View {
     let runtime: SurfAceRuntime

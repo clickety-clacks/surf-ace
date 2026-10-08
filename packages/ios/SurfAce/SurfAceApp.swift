@@ -123,27 +123,43 @@ struct SurfAceApp: App {
 
     var body: some Scene {
         WindowGroup(id: SurfAceSceneID.mainWindow) {
-            SurfAceRootView(runtime: runtime)
-                .surfAceSpatialWindowContentSizing()
-                .surfAceSpatialWindowTransparency()
-                .surfAceSpatialWindowOrnament()
-                .task {
-                    let environment = ProcessInfo.processInfo.environment
-                    let schemeFlag = environment["SURF_ACE_XCTEST_HOST_NO_AUTOSTART"] == "1"
-                    let xctestHost = environment["XCTestConfigurationFilePath"] != nil
-                    if schemeFlag || xctestHost {
-                        // The app is XCTest's host process. Test-owned runtimes
-                        // still start explicitly with isolated transports.
-                        print("[SurfAce-App] event=test_host_autostart_skipped scheme_flag=\(schemeFlag ? 1 : 0) xctest_host=\(xctestHost ? 1 : 0)")
-                        return
-                    }
-                    await runtime.start()
-                }
+            #if DEBUG
+            if ProcessInfo.processInfo.environment["SURF_ACE_RESIZE_PROBE"] == "1" {
+                SurfAceResizeProbeView()
+            } else if ProcessInfo.processInfo.environment["SURF_ACE_RESIZE_PROBE"] == "tree" {
+                SurfAceResizeTreeProbeView()
+            } else if ProcessInfo.processInfo.environment["SURF_ACE_RESIZE_PROBE"] == "tree-horizontal" {
+                SurfAceResizeTreeProbeView(direction: .horizontal)
+            } else {
+                normalRoot
+            }
+            #else
+            normalRoot
+            #endif
         }
         .surfAceSpatialWindowSizing()
         .commands {
             SurfAceWindowCommands(runtime: runtime)
         }
+    }
+
+    private var normalRoot: some View {
+        SurfAceRootView(runtime: runtime)
+            .surfAceSpatialWindowContentSizing()
+            .surfAceSpatialWindowTransparency()
+            .surfAceSpatialWindowOrnament()
+            .task {
+                let environment = ProcessInfo.processInfo.environment
+                let schemeFlag = environment["SURF_ACE_XCTEST_HOST_NO_AUTOSTART"] == "1"
+                let xctestHost = environment["XCTestConfigurationFilePath"] != nil
+                if schemeFlag || xctestHost {
+                    // The app is XCTest's host process. Test-owned runtimes
+                    // still start explicitly with isolated transports.
+                    print("[SurfAce-App] event=test_host_autostart_skipped scheme_flag=\(schemeFlag ? 1 : 0) xctest_host=\(xctestHost ? 1 : 0)")
+                    return
+                }
+                await runtime.start()
+            }
     }
 }
 
