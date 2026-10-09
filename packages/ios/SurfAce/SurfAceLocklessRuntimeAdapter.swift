@@ -511,7 +511,7 @@ actor SurfAceLocklessRuntimeAdapter {
         _ assignments: [SurfAceRegistrationAssignment],
         expectedSurfaces: [SurfAceRegistrationSurface]
     ) async throws -> SurfAceLocklessAuthorityState {
-        try await coordinator.transact(trigger: "central_registration") { state in
+        try await coordinator.transact(trigger: "central_registration", skipUnchanged: true) { state in
             guard SurfAceRegistrationSurface.snapshot(state) == expectedSurfaces,
                   assignments.count == expectedSurfaces.count,
                   Set(assignments.map(\.surfaceId)) == Set(expectedSurfaces.map(\.surfaceId)) else {

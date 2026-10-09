@@ -145,6 +145,50 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
         XCTAssertEqual(recovered.liveSurfaces["sf_1"]?.panes["2"]?.paneLineageId, lineage)
     }
 
+    func testRepeatedIdenticalRegistrationDoesNotWriteAnotherGeneration() async throws {
+        let fixture = try makeFixture()
+        let expected = SurfAceRegistrationSurface.snapshot(await fixture.adapter.snapshot())
+        let assignments = expected.map { surface in
+            SurfAceRegistrationAssignment(
+                surfaceId: surface.surfaceId,
+                windowLabel: "z",
+                panes: surface.panes.enumerated().map { index, pane in
+                    .init(
+                        paneId: pane.paneId,
+                        paneLineageId: pane.paneLineageId,
+                        paneLabel: Int64(1200 + index)
+                    )
+                }
+            )
+        }
+
+        _ = try await fixture.adapter.applyRegistrationLabels(assignments, expectedSurfaces: expected)
+        let firstState = try XCTUnwrap(fixture.store.load())
+        let firstBytes = try Data(contentsOf: fixture.store.stateURL)
+
+        let unchanged = try await fixture.adapter.applyRegistrationLabels(
+            assignments,
+            expectedSurfaces: SurfAceRegistrationSurface.snapshot(await fixture.adapter.snapshot())
+        )
+        XCTAssertEqual(unchanged.liveSurfaces["sf_1"]?.windowLabel, "z")
+        XCTAssertEqual(try fixture.store.load()?.generation, firstState.generation)
+        XCTAssertEqual(try Data(contentsOf: fixture.store.stateURL), firstBytes)
+
+        let changed = assignments.map { assignment in
+            SurfAceRegistrationAssignment(
+                surfaceId: assignment.surfaceId,
+                windowLabel: "y",
+                panes: assignment.panes
+            )
+        }
+        _ = try await fixture.adapter.applyRegistrationLabels(
+            changed,
+            expectedSurfaces: SurfAceRegistrationSurface.snapshot(await fixture.adapter.snapshot())
+        )
+        XCTAssertEqual(try fixture.store.load()?.generation, firstState.generation + 1)
+        XCTAssertEqual(try fixture.store.load()?.liveSurfaces["sf_1"]?.windowLabel, "y")
+    }
+
     func testAdmissionRejectsDuplicateLiveIdentityThenResumesDormantBundle() async throws {
         let fixture = try makeFixture()
         let adapter = fixture.adapter
