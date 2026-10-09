@@ -308,7 +308,7 @@ enum SurfAceLocklessConsumableOperations {
     static func reclaimController(
         _ controllerInstanceId: String,
         in state: inout SurfAceLocklessAuthorityState
-    ) {
+    ) throws {
         for scopeId in state.scopes.keys.sorted() {
             guard var scope = state.scopes[scopeId] else { continue }
             removeController(controllerInstanceId, from: &scope)
@@ -317,22 +317,32 @@ enum SurfAceLocklessConsumableOperations {
         for surfaceId in state.liveSurfaces.keys.sorted() {
             guard var surface = state.liveSurfaces[surfaceId] else { continue }
             for index in surface.paneTombstones.indices {
-                removeController(controllerInstanceId, from: &surface.paneTombstones[index].scope)
+                try removeController(controllerInstanceId, from: &surface.paneTombstones[index])
             }
             state.liveSurfaces[surfaceId] = surface
         }
         for surfaceIndex in state.surfaceTombstones.indices {
-            for scopeId in state.surfaceTombstones[surfaceIndex].scopes.keys.sorted() {
-                guard var scope = state.surfaceTombstones[surfaceIndex].scopes[scopeId] else { continue }
+            var tombstone = state.surfaceTombstones[surfaceIndex]
+            for scopeId in tombstone.scopes.keys.sorted() {
+                guard var scope = tombstone.scopes[scopeId] else { continue }
                 removeController(controllerInstanceId, from: &scope)
-                state.surfaceTombstones[surfaceIndex].scopes[scopeId] = scope
+                tombstone.scopes[scopeId] = scope
             }
-            for paneIndex in state.surfaceTombstones[surfaceIndex].surface.paneTombstones.indices {
-                removeController(
+            for paneIndex in tombstone.surface.paneTombstones.indices {
+                try removeController(
                     controllerInstanceId,
-                    from: &state.surfaceTombstones[surfaceIndex].surface.paneTombstones[paneIndex].scope
+                    from: &tombstone.surface.paneTombstones[paneIndex]
                 )
             }
+            guard tombstone != state.surfaceTombstones[surfaceIndex] else { continue }
+            // Nested pane accounting must be current before encoding its container.
+            tombstone.bytes = try SurfAceLocklessTopologyOperations.restoredSurfaceTombstoneBytes(
+                closedSequence: tombstone.closedSequence, scopes: tombstone.scopes,
+                surface: tombstone.surface, tombstoneId: tombstone.tombstoneId,
+                annotationPartitionBytes: state.annotationPublisher?.partitionBytes(
+                    surfaceId: tombstone.surface.surfaceId) ?? 0
+            )
+            state.surfaceTombstones[surfaceIndex] = tombstone
         }
     }
 
@@ -493,6 +503,21 @@ enum SurfAceLocklessConsumableOperations {
     ) {
         scope.cursors.removeValue(forKey: controllerInstanceId)
         dropFullyConsumedRecords(from: &scope)
+    }
+
+    private static func removeController(
+        _ controllerInstanceId: String,
+        from tombstone: inout SurfAceLocklessPaneTombstone
+    ) throws {
+        var scope = tombstone.scope
+        removeController(controllerInstanceId, from: &scope)
+        guard scope != tombstone.scope else { return }
+        let bytes = try SurfAceLocklessTopologyOperations.restoredPaneTombstoneBytes(
+            closedSequence: tombstone.closedSequence, pane: tombstone.pane,
+            scope: scope, tombstoneId: tombstone.tombstoneId
+        )
+        tombstone.scope = scope
+        tombstone.bytes = bytes
     }
 
     private static func orderedUnion(
