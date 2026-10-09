@@ -343,6 +343,7 @@ final class SurfAceRuntime {
     var instanceDisambiguator: String
     var serverPort: Int = 0
     var endpointError: String?
+    var resizeSaveFailures: Set<String> = []
     var surfaces: [SurfAceSurfaceModel] = []
     var isSceneAuthorityReady = false
 
@@ -4403,7 +4404,11 @@ final class SurfAceRuntime {
         resizeSplit(surfaceId: surfaceId, path: path, weights: nextWeights)
     }
 
-    func resizeSplit(surfaceId: String, path: [Int], weights: [Double], onComplete: @escaping () -> Void = {}) {
+    func resizeSplit(
+        surfaceId: String, path: [Int], weights: [Double],
+        expectedTopologyRevision: Int64? = nil,
+        onComplete: @escaping () -> Void = {}
+    ) {
         guard let surface = surfaceById[surfaceId] else {
             onComplete()
             return
@@ -4423,7 +4428,8 @@ final class SurfAceRuntime {
                     surfaceId: surfaceId,
                     path: path,
                     weights: weights,
-                    expectedSplitIdentity: target.layoutIdentity
+                    expectedSplitIdentity: target.layoutIdentity,
+                    expectedTopologyRevision: expectedTopologyRevision
                 )
                 onComplete()
             }
@@ -4450,14 +4456,16 @@ final class SurfAceRuntime {
         surfaceId: String,
         path: [Int],
         weights: [Double],
-        expectedSplitIdentity: String
+        expectedSplitIdentity: String,
+        expectedTopologyRevision: Int64?
     ) async {
         do {
             guard let commit = try await adapter.commitLocalResize(
                 surfaceId: surfaceId,
                 path: path,
                 weights: weights,
-                expectedSplitIdentity: expectedSplitIdentity
+                expectedSplitIdentity: expectedSplitIdentity,
+                expectedTopologyRevision: expectedTopologyRevision
             ) else { return }
             try projectLocklessAuthorityState(await adapter.snapshot())
             guard case .object(let result) = commit.result,
@@ -4472,8 +4480,13 @@ final class SurfAceRuntime {
                 ])
             )
             await drainControllerRetentionReclamations(adapter: adapter)
+            resizeSaveFailures.remove(surfaceId)
+            if endpointError?.hasPrefix("Lockless resize mutation failed:") == true {
+                endpointError = nil
+            }
         } catch {
             endpointError = "Lockless resize mutation failed: \(error.localizedDescription)"
+            resizeSaveFailures.insert(surfaceId)
         }
     }
 

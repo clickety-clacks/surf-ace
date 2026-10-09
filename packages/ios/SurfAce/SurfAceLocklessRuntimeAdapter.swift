@@ -567,13 +567,17 @@ actor SurfAceLocklessRuntimeAdapter {
         surfaceId: String,
         path: [Int],
         weights: [Double],
-        expectedSplitIdentity: String
+        expectedSplitIdentity: String,
+        expectedTopologyRevision: Int64? = nil
     ) async throws -> SurfAceLocklessLocalCommit? {
         try await commitLocalMutationIfChanged(
             operation: "local.topology.resize", skipUnchanged: true
         ) { state, sequence in
             guard var surface = state.liveSurfaces[surfaceId] else {
                 throw SurfAceLocklessAuthorityError.invalidState("local_resize_surface")
+            }
+            guard expectedTopologyRevision == nil || surface.topologyRevision == expectedTopologyRevision else {
+                throw SurfAceLocklessAuthorityError.invalidState("local_resize_stale_revision")
             }
             let layout = try persistedPaneLayout(fromCanonical: surface.topology).runtimeNode
             guard let target = layout.node(at: path),
