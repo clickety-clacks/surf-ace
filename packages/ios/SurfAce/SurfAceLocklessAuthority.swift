@@ -943,7 +943,7 @@ enum SurfAceLocklessDormantRetention {
         state.pendingControllerRetentionReclamations = pending
         state.sequences.nextCommitSequence += 1
         state.controllers.removeValue(forKey: controllerId)
-        SurfAceLocklessConsumableOperations.reclaimController(controllerId, in: &state)
+        try SurfAceLocklessConsumableOperations.reclaimController(controllerId, in: &state)
         return diagnostic
     }
 
