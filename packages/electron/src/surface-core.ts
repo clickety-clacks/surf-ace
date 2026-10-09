@@ -265,6 +265,7 @@ type PersistentPaneRecord = {
 };
 
 export type RendererPaneState = {
+  paneLineageId: string;
   activeKeyboardPane: boolean;
   annotationBorderVisible: boolean;
   canGoBack: boolean;
@@ -1719,6 +1720,7 @@ export class SurfaceCore {
         const pane = surface.panes.get(paneId)!;
         const current = currentEntry(pane);
         return {
+          paneLineageId: pane.paneLineageId,
           activeKeyboardPane: surface.activeKeyboardPaneId === paneId,
           annotationBorderVisible: pane.annotating,
           canGoBack: pane.historyIndex > 0,

@@ -28,6 +28,7 @@ function pane(paneId: number, annotationBorderVisible = false) {
     name: null,
     ownerName: null,
     paneId,
+    paneLineageId: `lineage-${paneId}`,
     provenance: null,
     provenanceName: null,
     showDone: annotationBorderVisible,
@@ -622,6 +623,18 @@ test("renderer DOM integrates authoritative connection states and live scale con
     assert.equal(selected.classList.contains("pane-popped-out"), false);
     assert.equal(toggle.title, "unsupported compositor");
     presentationResponse = null;
+    let acknowledgeInitial!: (response: { ok: boolean }) => void;
+    presentationResponse = () => new Promise((resolve) => { acknowledgeInitial = resolve; });
+    toggle.click();
+    stateListener!({ ...next, providerName: "connection metadata changed" });
+    acknowledgeInitial({ ok: true });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(selected.classList.contains("pane-popped-out"), true,
+      "unrelated state refresh cannot discard an acknowledged initial transition");
+    presentationResponse = null;
+    toggle.click();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    stateListener!(next);
     for (let cycle = 0; cycle < 3; cycle++) {
       toggle.click();
       assert.equal(selected.classList.contains("pane-popped-out"), false, "pending ack retains tiled display");
@@ -646,6 +659,40 @@ test("renderer DOM integrates authoritative connection states and live scale con
       assert.equal(selected.querySelector("webview"), liveHost);
       assert.deepEqual(slots.map((slot) => slot.style.flexGrow), slotWeights);
     }
+    // A native resize cannot move the retained DOM ahead of its acknowledgement.
+    toggle.click();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const oldWidth = selected.style.width;
+    let acknowledgeResize!: (response: { ok: boolean }) => void;
+    presentationResponse = () => new Promise((resolve) => { acknowledgeResize = resolve; });
+    window.dispatchEvent(new window.Event("resize"));
+    assert.equal(selected.querySelector(".pane-content")!.hasAttribute("inert"), true);
+    assert.equal(toggle.hasAttribute("inert"), false, "Restore remains available during resize");
+    const resized = { ...next, viewport: { ...next.viewport, width: 1000, height: 700 },
+      geometryRevision: next.geometryRevision + 1 };
+    stateListener!(resized);
+    assert.equal(selected.style.width, oldWidth, "pending resize keeps last acknowledged geometry");
+    assert.equal(selected.querySelector("webview"), liveHost);
+    acknowledgeResize({ ok: true });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(selected.style.width, "972px");
+    assert.equal(selected.style.left, "14px");
+    assert.equal(selected.querySelector(".pane-content")!.hasAttribute("inert"), false);
+    assert.equal(presentations.at(-1)!.paneId, 2, "resize reselects rather than restoring");
+    assert.deepEqual(slots.map((slot) => slot.style.flexGrow), slotWeights);
+    // A subsequent resize ack arriving after Restore cannot expand again.
+    window.dispatchEvent(new window.Event("resize"));
+    stateListener!({ ...resized, viewport: { ...resized.viewport, width: 900 }, geometryRevision: resized.geometryRevision + 1 });
+    const obsoleteAck = acknowledgeResize;
+    presentationResponse = null;
+    toggle.click();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    obsoleteAck({ ok: true });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(selected.classList.contains("pane-popped-out"), false);
+    assert.equal(Boolean(selected.style.width), false);
+    assert.equal(selected.querySelector("webview"), liveHost);
+    stateListener!(next);
     assert.equal(liveHost.pageCounter, 12);
     assert.equal(roots[0]!.querySelector(".pane-content"), siblingContent);
     assert.equal(siblingContent.getAttribute("data-live-tick"), "2");
@@ -663,6 +710,12 @@ test("renderer DOM integrates authoritative connection states and live scale con
     assert.equal(selected.querySelector("webview"), liveHost);
     assert.deepEqual(slots.map((slot) => slot.style.flexGrow), slotWeights);
     presentationResponse = null;
+    toggle.click();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    stateListener!({ ...next, panes: next.panes.map((pane) => pane.paneId === 2
+      ? { ...pane, paneLineageId: "replacement-lineage" } : pane) });
+    assert.equal(selected.classList.contains("pane-popped-out"), false, "same label with replaced lineage clears presentation");
+    stateListener!(next);
     toggle.click();
     stateListener!({ ...next, topologyRevision: next.topologyRevision + 1 });
     await new Promise<void>((resolve) => setImmediate(resolve));

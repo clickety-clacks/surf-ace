@@ -255,9 +255,10 @@ body.compositor-hosted .pane-shell.native-backed .pane-content {
 
 .pane-shell.pane-popped-out {
   position: fixed;
-  inset: clamp(8px, 2vmin, 24px);
-  width: auto;
-  height: auto;
+  /* Bounds are pinned to the acknowledged compositor presentation. */
+  right: auto;
+  bottom: auto;
+  box-sizing: border-box;
   z-index: 100;
   border: 2px solid var(--accent);
   border-radius: 12px;
@@ -961,4 +962,11 @@ body.compositor-hosted .pane-shell.native-backed .pane-content {
   letter-spacing: 0.09em;
   text-transform: uppercase;
   backdrop-filter: blur(14px);
+}
+
+.pane-presentation-pending .pane-content,
+.pane-presentation-pending .pane-scroll,
+.pane-presentation-pending .annotation-canvas,
+.pane-presentation-pending .annotation-shield {
+  pointer-events: none;
 }

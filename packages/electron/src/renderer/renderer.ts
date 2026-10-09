@@ -123,6 +123,7 @@ type PaneContentValue =
   | VideoContent;
 
 type RendererPaneState = {
+  paneLineageId: string;
   activeKeyboardPane: boolean;
   annotationBorderVisible: boolean;
   canGoBack: boolean;
@@ -549,6 +550,7 @@ function collectMarkedOverlayRegions(pane: RendererPaneState, view: PaneView): O
       return [];
     }
     const marker = element.getAttribute(OVERLAY_MARKER_ATTRIBUTE) ?? undefined;
+    if (panePresentationResizePending && view.paneId === poppedOutPaneId && marker !== "pane-pop-out") return [];
     const metadata = overlayMetadataForMarker(marker);
     const region = overlayRegionForElement(
       pane,
@@ -1400,6 +1402,16 @@ function applyPanePopOut(): void {
     const expanded = view.paneId === poppedOutPaneId;
     const covered = poppedOutPaneId !== null && !expanded;
     view.rootEl.classList.toggle("pane-popped-out", expanded);
+    view.rootEl.classList.toggle("pane-presentation-pending", expanded && panePresentationResizePending);
+    for (const element of [view.contentEl, view.scrollEl, view.controlsEl, view.annotationCanvas, view.annotationShield]) {
+      element.toggleAttribute("inert", expanded && panePresentationResizePending);
+    }
+    const bounds = expanded ? acknowledgedPopOutBounds : null;
+    for (const [property, value] of Object.entries({ left: bounds?.x, top: bounds?.y,
+      width: bounds?.width, height: bounds?.height })) {
+      if (value === undefined) view.rootEl.style.removeProperty(property);
+      else view.rootEl.style.setProperty(property, `${value}px`);
+    }
     view.slotEl.classList.toggle("pane-covered", covered);
     view.rootEl.toggleAttribute("inert", covered);
     if (covered) view.rootEl.setAttribute("aria-hidden", "true");
@@ -1413,12 +1425,18 @@ function applyPanePopOut(): void {
 }
 
 let panePresentationIntent = 0;
+let acknowledgedPopOutBounds: { x: number; y: number; width: number; height: number } | null = null;
+let panePresentationResizePending = false;
 async function togglePanePopOut(view: PaneView): Promise<void> {
+  await requestPanePopOut(view, poppedOutPaneId === view.paneId ? null : view.paneId);
+}
+
+async function requestPanePopOut(view: PaneView, selected: number | null): Promise<void> {
   if (!latestState) return;
   const intent = ++panePresentationIntent;
   const identity = paneSnapshotGeometryIdentity();
   const surfaceId = latestState.surfaceId;
-  const selected = poppedOutPaneId === view.paneId ? null : view.paneId;
+  const selectedLineage = paneStateFor(view)?.paneLineageId;
   const width = latestState.viewport.width;
   const height = latestState.viewport.height;
   const inset = Math.max(8, Math.min(24, Math.min(width, height) * 0.02));
@@ -1435,10 +1453,12 @@ async function togglePanePopOut(view: PaneView): Promise<void> {
   }
   if (intent !== panePresentationIntent || !latestState || latestState.surfaceId !== surfaceId ||
       JSON.stringify(paneSnapshotGeometryIdentity()) !== JSON.stringify(identity) ||
-      paneViews.get(view.paneId) !== view) return;
+      paneViews.get(view.paneId) !== view || paneStateFor(view)?.paneLineageId !== selectedLineage) return;
   if (!response.ok) {
     if (response.presentationCleared) {
       poppedOutPaneId = null;
+      acknowledgedPopOutBounds = null;
+      panePresentationResizePending = false;
       applyPanePopOut();
       setAllPaneChromeMetrics();
       refreshDynamicPaneFrames();
@@ -1449,6 +1469,8 @@ async function togglePanePopOut(view: PaneView): Promise<void> {
     return;
   }
   poppedOutPaneId = selected;
+  acknowledgedPopOutBounds = selected === null ? null : bounds;
+  panePresentationResizePending = false;
   applyPanePopOut();
   // Focusing the pane changes input ownership, never the split tree or content.
   rememberPaneContext(view.paneId);
@@ -3153,7 +3175,13 @@ function patchSameLayoutWindow(previousState: RendererWindowState, state: Render
     }
   }
   latestChromeKey = nextChromeKey;
-  if (viewportChanged) {
+  if (viewportChanged || previousState.geometryRevision !== state.geometryRevision) {
+    if (poppedOutPaneId !== null) {
+      const selected = paneViews.get(poppedOutPaneId);
+      panePresentationResizePending = true;
+      applyPanePopOut();
+      if (selected) void requestPanePopOut(selected, selected.paneId);
+    }
     setAllPaneChromeMetrics();
     refreshDynamicPaneFrames();
     reportAllPaneSnapshots();
@@ -3192,8 +3220,11 @@ function renderWindow(state: RendererWindowState): void {
       previousState.surfaceEpoch !== state.surfaceEpoch ||
       previousState.topologyRevision !== state.topologyRevision ||
       layoutKey(previousState) !== layoutKey(state) ||
-      !state.panes.some((pane) => pane.paneId === poppedOutPaneId))) {
+      (poppedOutPaneId !== null && !state.panes.some((pane) => pane.paneId === poppedOutPaneId &&
+        pane.paneLineageId === previousState.panes.find((previous) => previous.paneId === poppedOutPaneId)?.paneLineageId)))) {
     poppedOutPaneId = null;
+    acknowledgedPopOutBounds = null;
+    panePresentationResizePending = false;
     panePresentationIntent++;
     applyPanePopOut();
   }
@@ -3273,6 +3304,7 @@ async function init(): Promise<void> {
   });
 
   window.surfAce.onKeyboardIntent((intent) => {
+    if (panePresentationResizePending) return;
     if (poppedOutPaneId !== null && intent && typeof intent === "object" &&
         "paneId" in intent && intent.paneId !== poppedOutPaneId) return;
     if (isKeyboardScrollIntent(intent)) {
@@ -3298,6 +3330,11 @@ async function init(): Promise<void> {
   });
 
   window.addEventListener("resize", () => {
+    if (poppedOutPaneId !== null) {
+      panePresentationResizePending = true;
+      panePresentationIntent++; // Retire any ack for the preceding window size.
+      applyPanePopOut();
+    }
     refreshProvenanceWidths();
     if (!latestState) {
       return;
