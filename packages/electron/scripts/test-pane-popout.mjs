@@ -8,7 +8,7 @@ import { app, BrowserWindow, session } from "electron";
 
 const scratch = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-popout-fixture-"));
 app.setPath("userData", path.join(scratch, "profile"));
-const html = '<input id="input" value="retained"><script>window.token=Math.random();window.ticks=0;setInterval(()=>window.ticks++,20)</script>';
+const html = '<input id="input" value="retained"><script>window.token=Math.random();window.ticks=0;window.clicks=0;document.addEventListener("click",()=>window.clicks++);setInterval(()=>window.ticks++,20)</script>';
 const panes = [1, 2, 3].map((paneId) => ({
   paneId, label: String(paneId), displayId: `a${paneId}`, visibleAddress: `a${paneId}`,
   activeKeyboardPane: paneId === 1, annotationBorderVisible: false, drawings: [],
@@ -44,6 +44,10 @@ reportDiagnostics(){},reportOverlayRegions(){},reportRendererDiagnostic(){},clea
 async function run() {
 let win;
 const blockedRequests = [];
+const watchdog = setTimeout(() => {
+  console.error("FAIL private fixture exceeded its 60-second bound");
+  app.exit(1);
+}, 60_000);
 try {
   await app.whenReady();
   session.defaultSession.webRequest.onBeforeRequest((details, callback) => {
@@ -63,13 +67,14 @@ try {
     throw new Error(`Timed out: ${code}`);
   };
   await win.loadFile(fileURLToPath(new URL("../dist/renderer/index.html", import.meta.url)));
-  await wait("document.querySelectorAll('webview').length===3 && [...document.querySelectorAll('webview')].every(v=>{try{return v.getWebContentsId()>0&&!v.isLoading()}catch{return false}})");
+  await wait("document.querySelectorAll('webview').length===3 && [...document.querySelectorAll('webview')].every(v=>{try{return v.getWebContentsId()>0&&v.getURL().startsWith('data:text/html')&&!v.isLoading()}catch{return false}})");
   await evaluate(`window.hosts=[...document.querySelectorAll('webview')];
     window.roots=[...document.querySelectorAll('.pane-shell')];
     window.slots=roots.map(r=>r.parentElement);
     window.rects=()=>roots.map(r=>{const b=r.getBoundingClientRect();return [b.x,b.y,b.width,b.height]});`);
   const initial = await evaluate("rects()");
   const identities = await evaluate("Promise.all(hosts.map(v=>v.executeJavaScript('window.token'))) ");
+  assert.ok(identities.every(token => typeof token === "number"));
   await evaluate("hosts[1].executeJavaScript(\"document.querySelector('input').value='edited';history.pushState({},'', '#retained')\")");
   for (let i = 0; i < 3; i++) {
     const beforeTick = await evaluate("hosts[0].executeJavaScript('window.ticks')");
@@ -86,6 +91,12 @@ try {
     assert.deepEqual(await evaluate("Promise.all(hosts.map(v=>v.executeJavaScript('window.token')))"), identities);
     assert.equal(await evaluate("hosts[1].executeJavaScript(\"document.querySelector('input').value+'|'+location.hash\")"), "edited|#retained");
     assert.equal(await evaluate("document.elementFromPoint(500,10)?.closest('.pane-shell')===roots[0]"), false);
+    const siblingClicks = await evaluate("hosts[0].executeJavaScript('window.clicks')");
+    // This is outside the overlay, on the retained first pane's original slot.
+    win.webContents.sendInputEvent({ type: "mouseDown", x: 2, y: 2, button: "left", clickCount: 1 });
+    win.webContents.sendInputEvent({ type: "mouseUp", x: 2, y: 2, button: "left", clickCount: 1 });
+    await new Promise(resolve => setTimeout(resolve, 50));
+    assert.equal(await evaluate("hosts[0].executeJavaScript('window.clicks')"), siblingClicks);
     await evaluate("roots[1].querySelector('.pane-pop-out').click()");
     assert.deepEqual(await evaluate("rects()"), initial);
     assert.equal(await evaluate("roots.some(r=>r.inert)"), false);
@@ -104,6 +115,7 @@ try {
   console.error(error);
   process.exitCode = 1;
 } finally {
+  clearTimeout(watchdog);
   win?.destroy();
   app.quit();
 }
