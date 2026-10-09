@@ -396,13 +396,16 @@ struct SurfAceWindowView: View {
     }
 
     var body: some View {
-        @Bindable var presentation = presentation
         GeometryReader { proxy in
             let surfaceBounds = CGRect(origin: .zero, size: proxy.size)
             ZStack {
                 SurfAcePaneTreeView(runtime: runtime, surface: surface, node: surface.paneLayout,
                                     surfaceBounds: surfaceBounds, tileBounds: surfaceBounds,
-                                    poppedPaneId: $presentation.paneId)
+                                    poppedPaneId: presentation.paneId,
+                                    onTogglePopout: { paneId in
+                                        runtime.activateKeyboardPane(surfaceId: surface.surfaceId, paneId: paneId)
+                                        presentation.paneId = presentation.paneId == paneId ? nil : paneId
+                                    })
                     .background(surfAceSurfaceBackdropColor())
                     .coordinateSpace(name: surfAceSurfaceCoordinateSpaceName)
                     .onAppear {
@@ -563,7 +566,8 @@ private struct SurfAcePaneTreeView: View {
     let node: SurfAcePaneLayoutNode
     let surfaceBounds: CGRect
     var tileBounds: CGRect? = nil
-    @Binding var poppedPaneId: Int?
+    var poppedPaneId: Int?
+    var onTogglePopout: (Int) -> Void = { _ in }
     var path: [Int] = []
     @State private var splitPreview = SurfAceSplitPreviewState()
 
@@ -579,10 +583,7 @@ private struct SurfAcePaneTreeView: View {
                     let displayed = expanded ? surfAcePanePopoutBounds(in: surfaceBounds) : tile
                     SurfAcePaneView(runtime: runtime, surface: surface, pane: pane,
                                     surfaceBounds: surfaceBounds, isPoppedOut: expanded,
-                                    onTogglePopout: {
-                                        runtime.activateKeyboardPane(surfaceId: surface.surfaceId, paneId: paneId)
-                                        poppedPaneId = expanded ? nil : paneId
-                                    })
+                                    onTogglePopout: { onTogglePopout(paneId) })
                         .frame(width: expanded ? displayed.width : proxy.size.width,
                                height: expanded ? displayed.height : proxy.size.height)
                         .offset(x: expanded ? displayed.minX - tile.minX : 0,
@@ -606,7 +607,7 @@ private struct SurfAcePaneTreeView: View {
                                     surfaceBounds: surfaceBounds,
                                     tileBounds: surfAceSplitChildBounds(parent: tileBounds ?? surfaceBounds,
                                         direction: direction, weights: weights, index: index),
-                                    poppedPaneId: $poppedPaneId, path: path + [index])
+                                    poppedPaneId: poppedPaneId, onTogglePopout: onTogglePopout, path: path + [index])
                                     .frame(width: max(1, proxy.size.width * weights[index] / totalWeight), height: proxy.size.height)
                                     .zIndex(child.paneIDs.contains(poppedPaneId ?? -1) ? 1 : 0)
                             }
@@ -655,7 +656,7 @@ private struct SurfAcePaneTreeView: View {
                                     surfaceBounds: surfaceBounds,
                                     tileBounds: surfAceSplitChildBounds(parent: tileBounds ?? surfaceBounds,
                                         direction: direction, weights: weights, index: index),
-                                    poppedPaneId: $poppedPaneId, path: path + [index])
+                                    poppedPaneId: poppedPaneId, onTogglePopout: onTogglePopout, path: path + [index])
                                     .frame(width: proxy.size.width, height: max(1, proxy.size.height * weights[index] / totalWeight))
                                     .zIndex(child.paneIDs.contains(poppedPaneId ?? -1) ? 1 : 0)
                             }
@@ -937,7 +938,7 @@ struct SurfAceResizeTreeProbeView: View {
                             surface: surface,
                             node: surface.paneLayout,
                             surfaceBounds: CGRect(origin: .zero, size: proxy.size),
-                            poppedPaneId: .constant(nil)
+                            poppedPaneId: nil
                         )
                     }
                     if !showUnsavedStatus {
