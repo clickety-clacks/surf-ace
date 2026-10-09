@@ -28,7 +28,9 @@
         "name": "SurfAceResizeUITests"
       },
       "selectedTests": [
-        "SurfAceResizeUITests/testPopoutRestoreKeepsSessionAndOwnsCoveredPaneInput()"
+        "SurfAceResizeUITests/testPopoutRestoreKeepsSessionAndOwnsCoveredPaneInput()",
+        "SurfAceResizeUITests/testPopoutMovesVoiceOverFocusToRestoreAndHidesCoveredLeaves()",
+        "SurfAceResizeUITests/testKeyboardFocusCanActivateExpandedRestore()"
       ]
     }
   ],

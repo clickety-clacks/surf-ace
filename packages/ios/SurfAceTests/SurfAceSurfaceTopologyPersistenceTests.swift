@@ -149,6 +149,33 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
         XCTAssertEqual(surface.topologyEpoch, originalEpoch)
         selection.paneId = 3
         await waitForPopoutFrame(selected, in: window, expected: surfAcePanePopoutBounds(in: surfaceFrame))
+        // Exercise the production authority-to-mounted-bridge projection while
+        // presentation is active: new content is allowed, host replacement is not.
+        let updated = expectation(description: "authorized revision rendered in expanded host")
+        let updateObservation = selected.observe(\.title, options: [.new]) { view, _ in
+            if view.title == "updated-3" { updated.fulfill() }
+        }
+        var projected = SurfAcePersistedSurfaceTopology(surface: surface)
+        let projectedIndex = try XCTUnwrap(projected.panes.firstIndex { $0.paneId == 3 })
+        projected.panes[projectedIndex].currentEntry = SurfAcePaneEntry.from(frame: SurfAceFrame(
+            contentId: "popout-updated-3", revision: 2, contentType: .html,
+            payload: .html(html: "<html><head><title>updated-3</title></head><body><script>window.counter=100;window.sessionToken='authorized-revision-2';</script>Updated content</body></html>", baseURL: nil),
+            reloadSource: nil, title: "Updated pane", scrollable: true, interactive: true))
+        runtime.project(topology: projected, onto: surface)
+        await fulfillment(of: [updated], timeout: 10)
+        updateObservation.invalidate()
+        XCTAssertEqual(selection.paneId, 3)
+        XCTAssertTrue(popoutWebViews(in: host.view).contains { $0 === selected })
+        await waitForPopoutFrame(selected, in: window, expected: surfAcePanePopoutBounds(in: surfaceFrame))
+        for (view, token) in zip(views, tokens) where view !== selected {
+            let retained = try await view.evaluateJavaScript("window.sessionToken") as? String
+            let counter = try await view.evaluateJavaScript("window.counter") as? Int
+            XCTAssertEqual(retained, token)
+            XCTAssertEqual(counter, 5)
+        }
+        let updatedCounter = try await selected.evaluateJavaScript("window.counter") as? Int
+        XCTAssertEqual(updatedCounter, 100)
+        XCTAssertEqual(surface.topologyEpoch, originalEpoch)
         surface.paneLayout = .leaf(1) // Independently authorized pane close/replacement.
         surface.panesById.removeValue(forKey: 3)
         let closed = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in

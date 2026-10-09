@@ -6,7 +6,10 @@ final class SurfAceResizeUITests: XCTestCase {
         app.launchEnvironment["SURF_ACE_XCTEST_HOST_NO_AUTOSTART"] = "1"
         app.launchEnvironment["SURF_ACE_POPOUT_PROBE"] = "1"
         app.launch()
-        defer { app.terminate() }
+        defer {
+            XCUIDevice.shared.orientation = .portrait
+            app.terminate()
+        }
         let toggle = app.buttons["surf-ace-pane-popout-3"]
         XCTAssertTrue(toggle.waitForExistence(timeout: 10))
         let revision = app.staticTexts["surf-ace-popout-topology"].label
@@ -34,6 +37,84 @@ final class SurfAceResizeUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Pane 3 clicks 2"].exists, "Restore cannot reload the HTML session")
         XCTAssertTrue(app.buttons["surf-ace-pane-popout-1"].isHittable)
         XCTAssertEqual(app.staticTexts["surf-ace-popout-topology"].label, revision)
+        toggle.tap()
+        let expandedAgain = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "value == %@", "Expanded"), object: toggle)
+        XCTAssertEqual(XCTWaiter.wait(for: [expandedAgain], timeout: 5), .completed)
+        XCUIDevice.shared.orientation = .landscapeLeft
+        let rotated = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            app.frame.width > app.frame.height
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [rotated], timeout: 5), .completed)
+        XCTAssertTrue(toggle.isHittable)
+        XCTAssertEqual(toggle.label, "Restore")
+        XCTAssertGreaterThanOrEqual(toggle.frame.width, 44)
+        XCTAssertGreaterThanOrEqual(toggle.frame.height, 44)
+        XCTAssertFalse(app.buttons["surf-ace-pane-popout-1"].isHittable)
+        contentButton.tap()
+        XCTAssertTrue(app.staticTexts["Pane 3 clicks 3"].waitForExistence(timeout: 5))
+        toggle.tap()
+        let restoredAfterRotation = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "value == %@", "Tiled"), object: toggle)
+        XCTAssertEqual(XCTWaiter.wait(for: [restoredAfterRotation], timeout: 5), .completed)
+        XCTAssertGreaterThan(toggle.frame.minY, app.frame.midY,
+                             "Restore uses the current nested lower tile after rotation")
+        XCTAssertEqual(app.staticTexts["surf-ace-popout-topology"].label, revision)
+    }
+
+    @available(iOS 27.0, *)
+    @MainActor
+    func testPopoutMovesVoiceOverFocusToRestoreAndHidesCoveredLeaves() throws {
+        let app = XCUIApplication()
+        app.launchEnvironment["SURF_ACE_XCTEST_HOST_NO_AUTOSTART"] = "1"
+        app.launchEnvironment["SURF_ACE_POPOUT_PROBE"] = "1"
+        let voiceOver = XCUIDevice.shared.voiceOverService
+        let originallyEnabled = voiceOver.isEnabled
+        defer {
+            if !originallyEnabled { try? voiceOver.disable() }
+            app.terminate()
+        }
+        app.launch()
+        let toggle = app.buttons["surf-ace-pane-popout-3"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 10))
+        try voiceOver.enable()
+        toggle.tap() // Select the toggle before the VoiceOver activation gesture.
+        toggle.doubleTap()
+        let expanded = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "value == %@", "Expanded"), object: toggle)
+        XCTAssertEqual(XCTWaiter.wait(for: [expanded], timeout: 5), .completed)
+        XCTAssertTrue(try voiceOver.currentSpeech().utterance.contains("Restore"),
+                      "the accessibility focus binding moves to the same Restore control")
+        for _ in 0..<8 {
+            let utterance = try voiceOver.moveForward().utterance
+            XCTAssertFalse(utterance.contains("Increment pane 1"))
+            XCTAssertFalse(utterance.contains("Increment pane 2"))
+            XCTAssertFalse(utterance.contains("Pop out"), "covered leaf chrome is absent from VoiceOver traversal")
+        }
+        toggle.tap()
+        toggle.doubleTap()
+        let restored = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "value == %@", "Tiled"), object: toggle)
+        XCTAssertEqual(XCTWaiter.wait(for: [restored], timeout: 5), .completed)
+    }
+
+    @MainActor
+    func testKeyboardFocusCanActivateExpandedRestore() {
+        let app = XCUIApplication()
+        app.launchEnvironment["SURF_ACE_XCTEST_HOST_NO_AUTOSTART"] = "1"
+        app.launchEnvironment["SURF_ACE_POPOUT_PROBE"] = "1"
+        app.launch()
+        defer { app.terminate() }
+        let toggle = app.buttons["surf-ace-pane-popout-3"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 10))
+        toggle.tap()
+        let expanded = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "value == %@", "Expanded"), object: toggle)
+        XCTAssertEqual(XCTWaiter.wait(for: [expanded], timeout: 5), .completed)
+        app.typeKey(" ", modifierFlags: [])
+        let restored = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "value == %@", "Tiled"), object: toggle)
+        XCTAssertEqual(XCTWaiter.wait(for: [restored], timeout: 5), .completed)
     }
 
     func testDragAcrossLocalWebContentChangesSplitWeight() {
