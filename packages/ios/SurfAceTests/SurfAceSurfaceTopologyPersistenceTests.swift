@@ -110,23 +110,33 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
             for view in views { _ = try await view.evaluateJavaScript("++window.counter") }
             let currentTokens = try await popoutSessionTokens(views)
             XCTAssertEqual(currentTokens, tokens)
+            if index == 1 {
+                // Resize while expanded: derive both overlay and eventual Restore
+                // from the current surface, never the previous pixel rectangles.
+                let sibling = try XCTUnwrap(views.first { $0 !== selected })
+                let oldWidth = sibling.bounds.width
+                window.frame = CGRect(x: 0, y: 0, width: 900, height: 600)
+                host.view.frame = window.bounds
+                host.view.layoutIfNeeded()
+                let resized = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                    sibling.bounds.width != oldWidth
+                }, object: nil)
+                await fulfillment(of: [resized], timeout: 5)
+                surfaceFrame = views.filter { $0 !== selected }.map { $0.convert($0.bounds, to: window) }
+                    .reduce(CGRect.null) { $0.union($1) }
+                await waitForPopoutFrame(selected, in: window,
+                                        expected: surfAcePanePopoutBounds(in: surfaceFrame))
+                tiledFrames = views.map { view in
+                    if view !== selected { return view.convert(view.bounds, to: window) }
+                    let right = surfAceSplitChildBounds(parent: surfaceFrame, direction: .vertical,
+                                                        weights: [1, 3], index: 1)
+                    return surfAceSplitChildBounds(parent: right, direction: .horizontal,
+                                                   weights: [2, 1], index: 1)
+                }
+            }
             selection.paneId = nil
             await waitForPopoutFrame(selected, in: window,
                                     expected: tiledFrames[try XCTUnwrap(views.firstIndex(of: selected))])
-            if index == 1 {
-                window.frame = CGRect(x: 0, y: 0, width: 900, height: 600)
-                host.view.frame = window.bounds
-            }
-            await Task.yield()
-            host.view.layoutIfNeeded()
-            if index == 1 {
-                let resized = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
-                    views[0].convert(views[0].bounds, to: window).width != tiledFrames[0].width
-                }, object: nil)
-                await fulfillment(of: [resized], timeout: 5)
-                tiledFrames = views.map { $0.convert($0.bounds, to: window) }
-                surfaceFrame = tiledFrames.reduce(CGRect.null) { $0.union($1) }
-            }
         }
         for view in views {
             let counter = try await view.evaluateJavaScript("window.counter") as? Int
@@ -138,10 +148,22 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
                        try encoder.encode(originalLayout))
         XCTAssertEqual(surface.topologyEpoch, originalEpoch)
         selection.paneId = 3
+        await waitForPopoutFrame(selected, in: window, expected: surfAcePanePopoutBounds(in: surfaceFrame))
+        surface.paneLayout = .leaf(1) // Independently authorized pane close/replacement.
+        surface.panesById.removeValue(forKey: 3)
+        let closed = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            selection.paneId == nil
+        }, object: nil)
+        await fulfillment(of: [closed], timeout: 5)
+        XCTAssertNil(selection.paneId)
+        XCTAssertEqual(surface.paneLayout.paneIDs, [1], "Restore must not replay the old tree")
+        selection.paneId = 1
         surface.topologyEpoch += 1
-        await Task.yield()
-        host.view.layoutIfNeeded()
-        XCTAssertNil(selection.paneId, "external topology replacement ends the presentation")
+        let replaced = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            selection.paneId == nil
+        }, object: nil)
+        await fulfillment(of: [replaced], timeout: 5)
+        XCTAssertNil(selection.paneId, "external topology revision ends the presentation")
     }
 
     @MainActor
