@@ -53,6 +53,13 @@ reportOverlayRegions(){},reportRendererDiagnostic(){},clearToast(){}};`);
 
 async function run() {
   let win;
+  let fixtureStage = "setup";
+  const startedAt = Date.now();
+  const markStage = (label) => {
+    if (fixtureStage === label) return;
+    fixtureStage = label;
+    console.log("FIXTURE_STAGE=" + JSON.stringify({ label, elapsedMs: Date.now() - startedAt }));
+  };
   const blockedRequests = [];
   const errors = [];
   const watchdog = setTimeout(() => { console.error("FAIL fixture exceeded 60 seconds"); app.exit(1); }, 60_000);
@@ -67,12 +74,21 @@ async function run() {
       preload, webviewTag: true, contextIsolation: false, sandbox: false, backgroundThrottling: false,
     } });
     win.webContents.on("console-message", (_event, details) => { if (details.level === "error") errors.push(details.message); });
-    const evaluate = (code) => win.webContents.executeJavaScript(code);
+    const evaluate = async (label, code) => {
+      markStage(label);
+      try { return await win.webContents.executeJavaScript(code); }
+      catch (error) {
+        console.error("FIXTURE_EVALUATION_FAILURE=" + JSON.stringify({
+          label, code, error: String(error), elapsedMs: Date.now() - startedAt,
+        }));
+        throw new Error(`Fixture evaluation failed at ${label}`, { cause: error });
+      }
+    };
     const printGuestDiagnostics = async (label) => {
       let timer;
       try {
         const diagnostics = await Promise.race([
-          evaluate(`Promise.all([...document.querySelectorAll('webview')].map(async(v,i)=>{
+          evaluate(`diagnostics:${label}`, `Promise.all([...document.querySelectorAll('webview')].map(async(v,i)=>{
             const result={index:i,connected:v.isConnected,ready:v.dataset.guestReady??null,attachmentCount:window.attachCounts?.[i]??null};
             try{result.webContentsId=v.getWebContentsId();result.loading=v.isLoading();
               result.guest=await v.executeJavaScript('({zoom:document.documentElement.style.zoom,grid:window.grid,refits:window.refits,token:window.token})');
@@ -83,61 +99,70 @@ async function run() {
       } catch (error) { console.log(label + "=" + JSON.stringify({ error: String(error) })); }
       finally { clearTimeout(timer); }
     };
-    const wait = async (code) => {
+    const wait = async (label, code) => {
       for (let i = 0; i < 100; i++) {
-        if (await evaluate(code)) return;
+        if (await evaluate(label, code)) return;
         await new Promise((resolve) => setTimeout(resolve, 50));
       }
       await printGuestDiagnostics("GUEST_TIMEOUT_DIAGNOSTICS");
-      throw new Error(`Timed out: ${code}`);
+      throw new Error(`Timed out at ${label}: ${code}`);
     };
+    markStage("load-renderer");
     await win.loadFile(fileURLToPath(new URL("../dist/renderer/index.html", import.meta.url)));
-    await wait("document.querySelectorAll('webview').length===3&&[...document.querySelectorAll('webview')].every(v=>{try{return v.getWebContentsId()>0&&!v.isLoading()&&v.dataset.guestReady==='true'}catch{return false}})");
-    await evaluate(`window.hosts=[...document.querySelectorAll('webview')];window.roots=[...document.querySelectorAll('.pane-shell')];
+    await wait("initial-ready", "document.querySelectorAll('webview').length===3&&[...document.querySelectorAll('webview')].every(v=>{try{return v.getWebContentsId()>0&&!v.isLoading()&&v.dataset.guestReady==='true'}catch{return false}})");
+    await evaluate("capture-hosts", `window.hosts=[...document.querySelectorAll('webview')];window.roots=[...document.querySelectorAll('.pane-shell')];
       window.hostParents=roots.map(r=>r.parentElement);window.attachCounts=hosts.map(()=>0);
       hosts.forEach((v,i)=>v.addEventListener('did-attach',()=>attachCounts[i]++));void 0`);
     await printGuestDiagnostics("GUEST_INITIAL_DIAGNOSTICS");
-    const ids = await evaluate("hosts.map(v=>v.getWebContentsId())");
-    const tokens = await evaluate("Promise.all(hosts.map(v=>v.executeJavaScript('window.token')))");
+    const ids = await evaluate("initial-ids", "hosts.map(v=>v.getWebContentsId())");
+    const tokens = await evaluate("initial-tokens", "Promise.all(hosts.map(v=>v.executeJavaScript('window.token')))");
+    markStage("assert-initial-tokens");
     assert.ok(tokens.every((token) => typeof token === "number"));
-    await evaluate("hosts[0].executeJavaScript(\"document.querySelector('#input').value='edited';history.pushState({},'', '#retained')\")");
-    const retained = async () => {
-      assert.deepEqual(await evaluate("hosts.map(v=>v.getWebContentsId())"), ids);
-      assert.deepEqual(await evaluate("Promise.all(hosts.map(v=>v.executeJavaScript('window.token')))"), tokens);
-      assert.equal(await evaluate("roots.every((r,i)=>r.parentElement===hostParents[i])&&hosts.every(v=>v.isConnected)"), true);
-      assert.deepEqual(await evaluate("attachCounts"), [0, 0, 0]);
-      assert.equal(await evaluate("hosts[0].executeJavaScript(\"document.querySelector('#input').value+'|'+location.hash\")"), "edited|#retained");
+    await evaluate("edit-history", "hosts[0].executeJavaScript(\"document.querySelector('#input').value='edited';history.pushState({},'', '#retained')\")");
+    const retained = async (label) => {
+      assert.deepEqual(await evaluate(`${label}:ids`, "hosts.map(v=>v.getWebContentsId())"), ids);
+      assert.deepEqual(await evaluate(`${label}:tokens`, "Promise.all(hosts.map(v=>v.executeJavaScript('window.token')))"), tokens);
+      assert.equal(await evaluate(`${label}:ancestry`, "roots.every((r,i)=>r.parentElement===hostParents[i])&&hosts.every(v=>v.isConnected)"), true);
+      assert.deepEqual(await evaluate(`${label}:attachment-count`, "attachCounts"), [0, 0, 0]);
+      assert.equal(await evaluate(`${label}:history`, "hosts[0].executeJavaScript(\"document.querySelector('#input').value+'|'+location.hash\")"), "edited|#retained");
     };
-    const before = await evaluate("Promise.all(hosts.map(v=>v.executeJavaScript('({zoom:document.documentElement.style.zoom,grid,refits,ticks})')))");
-    await evaluate("fixtureKeyboard({action:'increase',paneId:1,type:'content-scale'})");
+    const before = await evaluate("zoom-before", "Promise.all(hosts.map(v=>v.executeJavaScript('({zoom:document.documentElement.style.zoom,grid,refits,ticks})')))");
+    await evaluate("zoom-intent", "fixtureKeyboard({action:'increase',paneId:1,type:'content-scale'})");
     console.log("ZOOM_BEFORE=" + JSON.stringify(before));
     await printGuestDiagnostics("GUEST_AFTER_ZOOM_INTENT");
-    await wait("hosts[0].executeJavaScript(\"Math.abs(Number(document.documentElement.style.zoom)-0.935)<1e-6\")");
-    const zoomed = await evaluate("Promise.all(hosts.map(v=>v.executeJavaScript('({zoom:document.documentElement.style.zoom,grid,refits,ticks})')))");
+    await wait("zoom-ready", "hosts[0].executeJavaScript(\"Math.abs(Number(document.documentElement.style.zoom)-0.935)<1e-6\")");
+    const zoomed = await evaluate("zoom-after", "Promise.all(hosts.map(v=>v.executeJavaScript('({zoom:document.documentElement.style.zoom,grid,refits,ticks})')))");
+    console.log("ZOOM_AFTER=" + JSON.stringify(zoomed));
+    markStage("assert-zoom-refit");
     assert.ok(zoomed[0].refits > before[0].refits);
     assert.ok(zoomed[0].grid.cols < before[0].grid.cols);
     assert.equal(zoomed[1].zoom, before[1].zoom);
-    await retained();
-    const point = await evaluate("(()=>{const r=document.querySelector('.split-resize-handle-horizontal').getBoundingClientRect();return{x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)}})()");
-    win.webContents.sendInputEvent({ type: "mouseDown", ...point, button: "left", clickCount: 1 });
+    await retained("retained-after-zoom");
+    const point = await evaluate("divider-geometry", "(()=>{const handle=document.querySelector('.split-resize-handle-horizontal');if(!handle)return{error:'Missing horizontal divider',handles:[...document.querySelectorAll('.split-resize-handle')].map(h=>h.className)};const r=handle.getBoundingClientRect();return{x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2),width:r.width,height:r.height}})()");
+    markStage("assert-divider-geometry");
+    assert.ok(!point.error && point.width > 0 && point.height > 0, JSON.stringify(point));
+    markStage("drag-input");
+    win.webContents.sendInputEvent({ type: "mouseDown", x: point.x, y: point.y, button: "left", clickCount: 1 });
     for (let i = 1; i <= 20; i++) win.webContents.sendInputEvent({ type: "mouseMove", x: point.x, y: point.y + i * 2, button: "left" });
     await new Promise((resolve) => setTimeout(resolve, 100));
-    assert.equal(await evaluate("fixtureCommits.length"), 0);
+    assert.equal(await evaluate("drag-move-commit-count", "fixtureCommits.length"), 0);
     win.webContents.sendInputEvent({ type: "mouseUp", x: point.x, y: point.y + 40, button: "left", clickCount: 1 });
-    await wait("fixtureCommits.length===1");
-    await retained();
-    await evaluate(`const next=structuredClone(fixtureState);next.panes.push(${JSON.stringify(makePane(4))});
+    await wait("drag-release-commit", "fixtureCommits.length===1");
+    await retained("retained-after-drag");
+    await evaluate("split-projection", `(()=>{const next=structuredClone(fixtureState);next.panes.push(${JSON.stringify(makePane(4))});
       next.layout.children[1]={type:'split',direction:'horizontal',weight:1,children:[{type:'pane',paneId:3},{type:'pane',paneId:4}]};
-      next.topologyRevision++;next.geometryRevision++;window.fixtureState=next;fixtureUpdate(next);void 0`);
-    await wait("document.querySelectorAll('webview').length===4");
-    await retained();
-    await evaluate("const next=structuredClone(fixtureState);next.layout.children.reverse();next.topologyRevision++;window.fixtureState=next;fixtureUpdate(next);void 0");
-    await retained();
+      next.topologyRevision++;next.geometryRevision++;window.fixtureState=next;fixtureUpdate(next);})()`);
+    await wait("split-host-count", "document.querySelectorAll('webview').length===4");
+    await retained("retained-after-split");
+    await evaluate("reorder-projection", "(()=>{const next=structuredClone(fixtureState);next.layout.children.reverse();next.topologyRevision++;window.fixtureState=next;fixtureUpdate(next);})()");
+    await retained("retained-after-reorder");
+    markStage("assert-network-and-console");
     assert.deepEqual(blockedRequests, []);
     assert.deepEqual(errors, []);
     console.log("PASS actual retained guest IDs/DOM/session/history; guest zoom/refit and sibling isolation; 20 drag moves produce one release; split/reorder continuity");
     console.log("FIXTURE_IDS=" + JSON.stringify(ids));
   } catch (error) {
+    console.error("FIXTURE_FAILED_STAGE=" + fixtureStage);
     console.error(error);
     process.exitCode = 1;
   } finally {
