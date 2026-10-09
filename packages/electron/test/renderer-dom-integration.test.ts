@@ -157,6 +157,7 @@ test("renderer DOM integrates authoritative connection states and live scale con
         return { width: units * textMetricScale };
       },
       moveTo() {},
+      setTransform() {},
       stroke() {},
     }),
   });
