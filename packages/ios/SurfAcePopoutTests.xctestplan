@@ -12,11 +12,6 @@
         "key": "SURF_ACE_XCTEST_HOST_NO_AUTOSTART",
         "value": "1",
         "isEnabled": true
-      },
-      {
-        "key": "SURF_ACE_POPOUT_PROBE",
-        "value": "1",
-        "isEnabled": true
       }
     ]
   },
@@ -30,7 +25,19 @@
       "selectedTests": [
         "SurfAceResizeUITests/testPopoutRestoreKeepsSessionAndOwnsCoveredPaneInput()",
         "SurfAceResizeUITests/testPopoutMovesVoiceOverFocusToRestoreAndHidesCoveredLeaves()",
-        "SurfAceResizeUITests/testKeyboardFocusCanActivateExpandedRestore()"
+        "SurfAceResizeUITests/testKeyboardFocusCanActivateExpandedRestore()",
+        "SurfAceResizeUITests/testDragInRealPaneTreeChangesSplitWeight()",
+        "SurfAceResizeUITests/testHorizontalDragInRealPaneTreeChangesSplitWeight()"
+      ]
+    },
+    {
+      "target": {
+        "containerPath": "container:SurfAce.xcodeproj",
+        "identifier": "67A9D8D88698454C7C5A7802",
+        "name": "SurfAceTests"
+      },
+      "selectedTests": [
+        "SurfAceSurfaceTopologyPersistenceTests"
       ]
     }
   ],
