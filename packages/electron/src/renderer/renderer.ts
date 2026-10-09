@@ -240,6 +240,8 @@ type PaneView = {
   dockEl: HTMLButtonElement;
   lastNavigation: NavigationMemo | null;
   paneId: number;
+  slotEl: HTMLDivElement;
+  popOutButton: HTMLButtonElement;
   rootEl: HTMLDivElement;
   scale: number;
   scrollEl: HTMLDivElement;
@@ -272,6 +274,7 @@ const provenanceAnnouncer = document.querySelector(
   "#provenance-announcer",
 ) as HTMLDivElement | null;
 const paneViews = new Map<number, PaneView>();
+let poppedOutPaneId: number | null = null;
 const pendingStrokeDelivery = new Map<number, Promise<void>>();
 const annotationIntentEpoch = new Map<number, number>();
 const pendingHistoryAnnouncements = new Map<number, string>();
@@ -306,6 +309,7 @@ type SurfAceOverlayKind =
   | "pane-label"
   | "pane-handle"
   | "reload"
+  | "pane-pop-out"
   | "duplicate-repush-close";
 
 function errorDiagnosticFields(error: unknown): Record<string, string> {
@@ -570,8 +574,11 @@ function reportCompositorOverlayRegions(updateReason: "layout" | "resize" | "vis
   const regions: OverlayRegionReport[] = [];
   for (const pane of latestState.panes) {
     const view = paneViews.get(pane.paneId);
-    if (view) {
-      regions.push(...collectMarkedOverlayRegions(pane, view));
+    if (view && (poppedOutPaneId === null || pane.paneId === poppedOutPaneId)) {
+      regions.push(...collectMarkedOverlayRegions(pane, view).map((region) => ({
+        ...region,
+        zIndex: region.zIndex + (poppedOutPaneId === null ? 0 : 100),
+      })));
     }
   }
   window.surfAce.reportOverlayRegions({
@@ -1381,7 +1388,36 @@ function bindDrawing(view: PaneView): void {
 }
 
 function isPaneChromeTarget(target: EventTarget | null): boolean {
-  return target instanceof Element && Boolean(target.closest(".control-cluster, .toolbar-dock"));
+  return target instanceof Element && Boolean(target.closest(".control-cluster, .toolbar-dock, .pane-pop-out"));
+}
+
+function applyPanePopOut(): void {
+  for (const view of paneViews.values()) {
+    const expanded = view.paneId === poppedOutPaneId;
+    const covered = poppedOutPaneId !== null && !expanded;
+    view.rootEl.classList.toggle("pane-popped-out", expanded);
+    view.slotEl.classList.toggle("pane-covered", covered);
+    view.rootEl.toggleAttribute("inert", covered);
+    if (covered) view.rootEl.setAttribute("aria-hidden", "true");
+    else view.rootEl.removeAttribute("aria-hidden");
+    view.popOutButton.textContent = expanded ? "Restore" : "Pop out";
+    view.popOutButton.title = expanded ? "Restore pane to its tile" : "Pop out pane within this window";
+    view.popOutButton.setAttribute("aria-label", `${expanded ? "Restore" : "Pop out"} pane ${view.paneId}`);
+    view.popOutButton.setAttribute("aria-expanded", String(expanded));
+  }
+  appRoot.classList.toggle("has-pane-pop-out", poppedOutPaneId !== null);
+}
+
+function togglePanePopOut(view: PaneView): void {
+  poppedOutPaneId = poppedOutPaneId === view.paneId ? null : view.paneId;
+  applyPanePopOut();
+  // Focusing the pane changes input ownership, never the split tree or content.
+  rememberPaneContext(view.paneId);
+  view.popOutButton.focus();
+  setAllPaneChromeMetrics();
+  refreshDynamicPaneFrames();
+  reportAllPaneSnapshots();
+  scheduleCompositorOverlayRegionReport("layout");
 }
 
 function attachCommonEvents(view: PaneView): void {
@@ -1452,6 +1488,19 @@ function ensurePaneView(paneId: number): PaneView {
   });
   const rootEl = document.createElement("div");
   rootEl.className = "pane-shell";
+  const slotEl = document.createElement("div");
+  slotEl.className = "pane-slot";
+  slotEl.appendChild(rootEl);
+  const popOutButton = surfAceOverlay(document.createElement("button"), "pane-pop-out");
+  popOutButton.type = "button";
+  popOutButton.className = "pane-pop-out control-button";
+  popOutButton.textContent = "Pop out";
+  popOutButton.setAttribute("aria-label", `Pop out pane ${paneId}`);
+  popOutButton.setAttribute("aria-expanded", "false");
+  popOutButton.addEventListener("click", (event) => {
+    event.stopPropagation();
+    togglePanePopOut(view);
+  });
   const scrollEl = document.createElement("div");
   scrollEl.className = "pane-scroll";
   const contentEl = document.createElement("div");
@@ -1501,7 +1550,7 @@ function ensurePaneView(paneId: number): PaneView {
   duplicateRepushEl.className = "duplicate-repush-overlay";
   duplicateRepushEl.hidden = true;
 
-  rootEl.append(scrollEl, shieldEl, canvas, focusOverlayEl, labelEl, controlsEl, dockEl, toastEl, duplicateRepushEl);
+  rootEl.append(scrollEl, shieldEl, canvas, focusOverlayEl, labelEl, controlsEl, dockEl, toastEl, duplicateRepushEl, popOutButton);
 
   const view: PaneView = {
     annotationCanvas: canvas,
@@ -1520,6 +1569,8 @@ function ensurePaneView(paneId: number): PaneView {
     duplicateRepushEl,
     lastNavigation: null,
     paneId,
+    slotEl,
+    popOutButton,
     rootEl,
     scale: CONTENT_SCALE_DEFAULT,
     scrollEl,
@@ -2969,8 +3020,8 @@ function renderLayout(node: LayoutNode, panesById: Map<number, RendererPaneState
     }
     const view = ensurePaneView(node.paneId);
     updatePane(view, pane);
-    view.rootEl.style.flexGrow = String(layoutWeight(node));
-    return view.rootEl;
+    view.slotEl.style.flexGrow = String(layoutWeight(node));
+    return view.slotEl;
   }
   const split = document.createElement("div");
   split.className = `layout-split direction-${node.direction}`;
@@ -3098,6 +3149,14 @@ function renderWindow(state: RendererWindowState): void {
   });
   announceReachedHistoryEntries(state);
   const previousState = latestState;
+  if (previousState && (previousState.surfaceId !== state.surfaceId ||
+      previousState.surfaceEpoch !== state.surfaceEpoch ||
+      previousState.topologyRevision !== state.topologyRevision ||
+      layoutKey(previousState) !== layoutKey(state) ||
+      !state.panes.some((pane) => pane.paneId === poppedOutPaneId))) {
+    poppedOutPaneId = null;
+    applyPanePopOut();
+  }
   if (previousState) {
     latestState = state;
     if (patchSameLayoutWindow(previousState, state)) {
@@ -3174,6 +3233,8 @@ async function init(): Promise<void> {
   });
 
   window.surfAce.onKeyboardIntent((intent) => {
+    if (poppedOutPaneId !== null && intent && typeof intent === "object" &&
+        "paneId" in intent && intent.paneId !== poppedOutPaneId) return;
     if (isKeyboardScrollIntent(intent)) {
       scrollPaneByKeyboard(intent);
       return;

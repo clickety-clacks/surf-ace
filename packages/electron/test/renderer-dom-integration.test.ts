@@ -580,4 +580,70 @@ test("renderer DOM integrates authoritative connection states and live scale con
     }
   });
 
+  await test("pop-out keeps nested weighted slots and live hosts through restore and topology races", async () => {
+    focusStateUpdate = null;
+    const next = state("connected", true) as ReturnType<typeof state> & { layout: unknown };
+    const third = pane(3);
+    next.panes.push(third);
+    next.layout = {
+      type: "split", direction: "vertical", children: [
+        { type: "pane", paneId: 1, weight: 2 },
+        { type: "split", direction: "horizontal", weight: 5, children: [
+          { type: "pane", paneId: 2, weight: 3 },
+          { type: "pane", paneId: 3, weight: 7 },
+        ] },
+      ],
+    } as typeof next.layout;
+    Object.assign(next.panes[1]!.content, {
+      content: { html: "<html><body>stateful</body></html>" },
+      contentType: "html", contentId: "pop-out-content", renderVersion: 50, revision: 50,
+    });
+    stateListener!(next);
+    const roots = [...document.querySelectorAll<HTMLElement>(".pane-shell")];
+    const slots = [...document.querySelectorAll<HTMLElement>(".pane-slot")];
+    const selected = roots[1]!;
+    const liveHost = selected.querySelector("webview")! as HTMLElement & { pageCounter: number };
+    liveHost.pageCounter = 9;
+    const siblingContent = roots[0]!.querySelector(".pane-content")!;
+    const topologyBefore = JSON.stringify(next.layout);
+    const slotWeights = slots.map((slot) => slot.style.flexGrow);
+    const toggle = selected.querySelector<HTMLButtonElement>(".pane-pop-out")!;
+    const commandsBefore = commands.length;
+    for (let cycle = 0; cycle < 3; cycle++) {
+      toggle.click();
+      assert.equal(toggle.textContent, "Restore");
+      assert.equal(toggle.getAttribute("aria-expanded"), "true");
+      assert.equal(selected.classList.contains("pane-popped-out"), true);
+      assert.equal(roots[0]!.hasAttribute("inert"), true);
+      assert.equal(roots[2]!.getAttribute("aria-hidden"), "true");
+      assert.equal(selected.parentElement, slots[1]);
+      assert.equal(liveHost.isConnected, true);
+      liveHost.pageCounter++;
+      siblingContent.setAttribute("data-live-tick", String(cycle));
+      window.dispatchEvent(new window.Event("resize"));
+      selected.querySelector(".pane-scroll")!.dispatchEvent(new window.Event("scroll"));
+      assert.equal(toggle.isConnected, true, "toolbar collapse cannot remove Restore");
+      toggle.click();
+      assert.equal(toggle.getAttribute("aria-expanded"), "false");
+      assert.equal(selected.classList.contains("pane-popped-out"), false);
+      assert.equal(roots[0]!.hasAttribute("inert"), false);
+      assert.equal(selected.querySelector("webview"), liveHost);
+      assert.deepEqual(slots.map((slot) => slot.style.flexGrow), slotWeights);
+    }
+    assert.equal(liveHost.pageCounter, 12);
+    assert.equal(roots[0]!.querySelector(".pane-content"), siblingContent);
+    assert.equal(siblingContent.getAttribute("data-live-tick"), "2");
+    assert.equal(JSON.stringify(next.layout), topologyBefore);
+    assert.equal(commands.slice(commandsBefore).some((command) =>
+      ["resize-split", "split-pane", "close-pane", "reload"].includes((command as { type: string }).type)), false);
+    toggle.click();
+    stateListener!({ ...next, topologyRevision: next.topologyRevision + 1 });
+    assert.equal(selected.classList.contains("pane-popped-out"), false, "external topology epoch clears presentation");
+    assert.equal(toggle.textContent, "Pop out");
+    toggle.click();
+    stateListener!(state("connected"));
+    assert.equal(document.querySelector(".pane-popped-out"), null, "closed selected pane cannot be restored");
+    assert.equal(document.querySelector(".pane-slot")?.getAttribute("inert"), null);
+  });
+
 });
