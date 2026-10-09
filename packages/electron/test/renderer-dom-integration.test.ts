@@ -631,6 +631,66 @@ test("renderer DOM integrates authoritative connection states and live scale con
     assert.equal(contexts[0]!.result.columns, 39);
   });
 
+  await test("completed loading restores zoom without dom-ready and fences obsolete readiness probes", async () => {
+    const next = state("connected", true);
+    for (const [index, pane] of next.panes.entries()) Object.assign(pane.content, {
+      content: { url: `https://fixture.invalid/readiness-${index}` }, contentType: "browser_url",
+      contentId: `readiness-${index}`, revision: 45, renderVersion: 45,
+    });
+    stateListener!(next);
+    const guests = [...document.querySelectorAll("webview")] as Array<HTMLElement & {
+      executeJavaScript: (code: string) => Promise<unknown>;
+    }>;
+    const scripts = guests.map(() => [] as string[]);
+    let probe: Promise<unknown> = Promise.resolve("complete");
+    guests.forEach((guest, index) => {
+      guest.executeJavaScript = async (code) => {
+        if (code === "document.readyState") return probe;
+        if (code.includes("document.documentElement.style.zoom")) scripts[index]!.push(code);
+        return null;
+      };
+      guest.dispatchEvent(new window.Event("dom-ready"));
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const guest = guests[0]!;
+    keyboardListener!({ action: "reset", paneId: 1, type: "content-scale" });
+    const siblingScripts = scripts[1]!.length;
+    guest.dispatchEvent(new window.Event("did-start-loading"));
+    const prior = scripts[0]!.length;
+    keyboardListener!({ action: "increase", paneId: 1, type: "content-scale" });
+    assert.equal(scripts[0]!.length, prior, "a loading guest defers the latest zoom intent");
+    guest.dispatchEvent(new window.Event("did-stop-loading"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(guest.dataset.guestReady, "true");
+    assert.ok(scripts[0]!.at(-1)!.includes("0.935"), "completed retained document receives latest zoom");
+    assert.equal(scripts[1]!.length, siblingScripts, "sibling guest remains untouched");
+    assert.deepEqual([...document.querySelectorAll("webview")], guests);
+
+    let finishOldProbe!: (value: unknown) => void;
+    probe = new Promise((resolve) => { finishOldProbe = resolve; });
+    guest.dispatchEvent(new window.Event("did-start-loading"));
+    guest.dispatchEvent(new window.Event("did-stop-loading"));
+    guest.dispatchEvent(new window.Event("did-start-loading"));
+    const beforeStaleProbe = scripts[0]!.length;
+    finishOldProbe("complete");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(guest.dataset.guestReady, undefined, "old completion cannot ready a newer navigation");
+    assert.equal(scripts[0]!.length, beforeStaleProbe);
+    probe = Promise.resolve("loading");
+    guest.dispatchEvent(new window.Event("did-stop-loading"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(guest.dataset.guestReady, undefined, "spinner stop alone is not readiness proof");
+
+    let finishDetachedProbe!: (value: unknown) => void;
+    probe = new Promise((resolve) => { finishDetachedProbe = resolve; });
+    guest.dispatchEvent(new window.Event("did-stop-loading"));
+    stateListener!(state("connected", true));
+    finishDetachedProbe("complete");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(guest.dataset.guestReady, undefined, "retired content cannot recover readiness");
+    assert.equal(scripts[0]!.length, beforeStaleProbe);
+  });
+
   await test("weighted layout, split, reorder and close retain surviving guest ancestry", async () => {
     const next = state("connected", true);
     for (const [index, pane] of next.panes.entries()) Object.assign(pane.content, {

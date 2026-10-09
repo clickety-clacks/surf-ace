@@ -2662,9 +2662,11 @@ function renderBrowserContent(
       // Guest scale initialization runs from dom-ready, when guest methods are available.
     },
   );
+  let guestLoadGeneration = 0;
   browserView.addEventListener(
     "did-start-loading",
     () => {
+      guestLoadGeneration += 1;
       delete browserView.dataset.guestReady;
       syncBrowserControlButtons(view);
       rendererDiagnostic("browser_content_did_start_loading", {
@@ -2740,7 +2742,23 @@ function renderBrowserContent(
   browserView.addEventListener("will-frame-navigate", blockStaticHtmlNavigation);
   browserView.addEventListener("did-navigate", () => syncBrowserControlButtons(view));
   browserView.addEventListener("did-navigate-in-page", () => syncBrowserControlButtons(view));
-  browserView.addEventListener("did-stop-loading", () => syncBrowserControlButtons(view));
+  browserView.addEventListener("did-stop-loading", () => {
+    syncBrowserControlButtons(view);
+    // A loading cycle can finish without replacing the document or emitting
+    // dom-ready. Recover readiness from the guest, never from the spinner alone.
+    const generation = guestLoadGeneration;
+    try {
+      void browserView.executeJavaScript?.("document.readyState").then((readyState) => {
+        if (generation !== guestLoadGeneration || renderToken !== view.currentRenderToken ||
+            currentPaneFrameElement(view) !== browserView || !browserView.isConnected ||
+            (readyState !== "interactive" && readyState !== "complete")) return;
+        browserView.dataset.guestReady = "true";
+        applyBrowserContentScale(view, browserView);
+      }).catch(() => {});
+    } catch {
+      // A detached guest or one still navigating cannot establish readiness.
+    }
+  });
   browserView.addEventListener(
     "did-fail-load",
     (event) => {
