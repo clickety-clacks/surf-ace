@@ -455,9 +455,14 @@ func surfAcePanePopoutBounds(in bounds: CGRect) -> CGRect {
     return bounds.insetBy(dx: min(inset, bounds.width / 4), dy: min(inset, bounds.height / 4))
 }
 
+func surfAceSplitTotalWeight(_ weights: [Double]) -> Double {
+    let total = weights.reduce(0, +)
+    return total.isFinite && total > 0 ? total : 1
+}
+
 func surfAceSplitChildBounds(parent: CGRect, direction: SurfAceLayoutDirection,
                              weights: [Double], index: Int) -> CGRect {
-    let total = max(weights.reduce(0, +), 1)
+    let total = surfAceSplitTotalWeight(weights)
     let prefix = weights.prefix(index).reduce(0, +) / total
     let fraction = weights[index] / total
     if direction == .vertical {
@@ -559,6 +564,15 @@ struct SurfAceSplitPreviewState {
     }
 }
 
+private struct SurfAcePaneTreeChild: Identifiable {
+    let index: Int
+    let node: SurfAcePaneLayoutNode
+
+    // A pane's view state must follow its subtree when a preceding sibling is
+    // closed. An array offset would hand the removed pane's state to the next.
+    var id: String { node.layoutIdentity }
+}
+
 private struct SurfAcePaneTreeView: View {
     @Environment(\.scenePhase) private var scenePhase
     let runtime: SurfAceRuntime
@@ -598,18 +612,18 @@ private struct SurfAcePaneTreeView: View {
             GeometryReader { proxy in
                 let weights = splitPreview.visibleWeights(count: children.count, topologyEpoch: surface.topologyEpoch)
                     ?? children.map(\.layoutWeight)
-                let totalWeight = max(weights.reduce(0, +), 1)
+                let totalWeight = surfAceSplitTotalWeight(weights)
                 if direction == .vertical {
                     ZStack(alignment: .topLeading) {
                         HStack(spacing: 0) {
-                            ForEach(Array(children.enumerated()), id: \.offset) { index, child in
-                                SurfAcePaneTreeView(runtime: runtime, surface: surface, node: child,
+                            ForEach(children.enumerated().map { SurfAcePaneTreeChild(index: $0.offset, node: $0.element) }) { child in
+                                SurfAcePaneTreeView(runtime: runtime, surface: surface, node: child.node,
                                     surfaceBounds: surfaceBounds,
                                     tileBounds: surfAceSplitChildBounds(parent: tileBounds ?? surfaceBounds,
-                                        direction: direction, weights: weights, index: index),
-                                    poppedPaneId: poppedPaneId, onTogglePopout: onTogglePopout, path: path + [index])
-                                    .frame(width: max(1, proxy.size.width * weights[index] / totalWeight), height: proxy.size.height)
-                                    .zIndex(child.paneIDs.contains(poppedPaneId ?? -1) ? 1 : 0)
+                                        direction: direction, weights: weights, index: child.index),
+                                    poppedPaneId: poppedPaneId, onTogglePopout: onTogglePopout, path: path + [child.index])
+                                    .frame(width: max(1, proxy.size.width * weights[child.index] / totalWeight), height: proxy.size.height)
+                                    .zIndex(child.node.paneIDs.contains(poppedPaneId ?? -1) ? 1 : 0)
                             }
                         }
                         ForEach(Array(children.indices.dropLast()), id: \.self) { index in
@@ -651,14 +665,14 @@ private struct SurfAcePaneTreeView: View {
                 } else {
                     ZStack(alignment: .topLeading) {
                         VStack(spacing: 0) {
-                            ForEach(Array(children.enumerated()), id: \.offset) { index, child in
-                                SurfAcePaneTreeView(runtime: runtime, surface: surface, node: child,
+                            ForEach(children.enumerated().map { SurfAcePaneTreeChild(index: $0.offset, node: $0.element) }) { child in
+                                SurfAcePaneTreeView(runtime: runtime, surface: surface, node: child.node,
                                     surfaceBounds: surfaceBounds,
                                     tileBounds: surfAceSplitChildBounds(parent: tileBounds ?? surfaceBounds,
-                                        direction: direction, weights: weights, index: index),
-                                    poppedPaneId: poppedPaneId, onTogglePopout: onTogglePopout, path: path + [index])
-                                    .frame(width: proxy.size.width, height: max(1, proxy.size.height * weights[index] / totalWeight))
-                                    .zIndex(child.paneIDs.contains(poppedPaneId ?? -1) ? 1 : 0)
+                                        direction: direction, weights: weights, index: child.index),
+                                    poppedPaneId: poppedPaneId, onTogglePopout: onTogglePopout, path: path + [child.index])
+                                    .frame(width: proxy.size.width, height: max(1, proxy.size.height * weights[child.index] / totalWeight))
+                                    .zIndex(child.node.paneIDs.contains(poppedPaneId ?? -1) ? 1 : 0)
                             }
                         }
                         ForEach(Array(children.indices.dropLast()), id: \.self) { index in
@@ -782,7 +796,7 @@ private struct SurfAceSplitResizeHandle: View {
               childIndex + 1 < startWeights.count else {
             return weights
         }
-        let totalWeight = max(startWeights.reduce(0, +), 1)
+        let totalWeight = surfAceSplitTotalWeight(startWeights)
         let before = startWeights[childIndex]
         let after = startWeights[childIndex + 1]
         let pairTotal = before + after
@@ -1074,12 +1088,12 @@ private struct SurfAcePaneView: View {
                         SurfAcePaneRepresentable(
                             runtime: runtime,
                             surfaceId: surface.surfaceId,
-                            paneId: pane.paneId,
+                            pane: pane,
                             onInteractionBegan: {
                                 collapseToolbarForPaneInteraction()
                             }
                         )
-                        .id("\(surface.surfaceId):\(pane.paneId)")
+                        .id("\(surface.surfaceId):\(pane.paneInstanceId)")
                         .background(surfAcePaneBackdropColor(isEmpty: showsSpatialEmptyPaneChrome))
                         .contentShape(Rectangle())
                         .simultaneousGesture(
@@ -2034,23 +2048,29 @@ private struct SurfAcePaneNumberText: View {
 private struct SurfAcePaneRepresentable: UIViewRepresentable {
     let runtime: SurfAceRuntime
     let surfaceId: String
-    let paneId: Int
+    let pane: SurfAcePaneModel
     let onInteractionBegan: () -> Void
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(runtime: runtime, surfaceId: surfaceId, paneId: paneId, onInteractionBegan: onInteractionBegan)
+        Coordinator(runtime: runtime, surfaceId: surfaceId, paneId: pane.paneId, onInteractionBegan: onInteractionBegan)
     }
 
     func makeUIView(context: Context) -> SurfAceSurfaceHostView {
-        let view = SurfAceSurfaceHostView()
+        let view = pane.retainedHostView ?? SurfAceSurfaceHostView()
+        let preserveDisplay = pane.retainedHostView != nil && view.displays(entry: pane.currentEntry)
+        if pane.retainedHostView != nil {
+            view.removeFromSuperview()
+        }
+        pane.retainedHostView = view
         context.coordinator.attach(hostView: view)
-        runtime.attachPaneBridge(surfaceId: surfaceId, paneId: paneId, bridge: context.coordinator)
+        runtime.attachPaneBridge(surfaceId: surfaceId, paneId: pane.paneId,
+                                 bridge: context.coordinator, preserveDisplay: preserveDisplay)
         return view
     }
 
     func updateUIView(_ uiView: SurfAceSurfaceHostView, context: Context) {
         context.coordinator.onInteractionBegan = onInteractionBegan
-        context.coordinator.updateBinding(surfaceId: surfaceId, paneId: paneId, hostView: uiView)
+        context.coordinator.updateBinding(surfaceId: surfaceId, paneId: pane.paneId, hostView: uiView)
     }
 
     static func dismantleUIView(_ uiView: SurfAceSurfaceHostView, coordinator: Coordinator) {
@@ -2489,6 +2509,13 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
 
     deinit {
         NotificationCenter.default.removeObserver(self)
+    }
+
+    func displays(entry: SurfAcePaneEntry) -> Bool {
+        let visibleEntry = surfAceEntryIsVisibleEmpty(entry) ? nil : entry
+        return currentEntry?.contentId == visibleEntry?.contentId
+            && currentEntry?.revision == visibleEntry?.revision
+            && currentEntry?.contentType == visibleEntry?.contentType
     }
 
     func render(entry: SurfAcePaneEntry?, restoreViewport: SurfAceViewport?) {

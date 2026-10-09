@@ -178,6 +178,69 @@ final class SurfAceLocklessTopologyOperationsTests: XCTestCase {
         XCTAssertEqual(state, before)
     }
 
+    func testClosingNestedPanesCollapsesBothSplitsWithoutLosingSurvivorSlot() throws {
+        func pane(_ id: Int64, weight: Int64) -> SurfAceLocklessJSON {
+            .object(["paneId": .integer(id), "type": .string("pane"), "weight": .integer(weight)])
+        }
+        func split(_ direction: String, _ weight: Int64, _ children: [SurfAceLocklessJSON]) -> SurfAceLocklessJSON {
+            .object(["children": .array(children), "direction": .string(direction),
+                     "type": .string("split"), "weight": .integer(weight)])
+        }
+
+        var state = try SurfAceLocklessAuthorityState.empty()
+        let surfaceId = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
+            state: &state, expectedSurfaceSetRevision: 0
+        ).surface.surfaceId
+        let created = try TestRegistryTopology.paneSplit(
+            state: &state, surfaceId: surfaceId, paneId: 1, count: 4,
+            direction: "horizontal", expectedTopologyRevision: 0
+        ).newPaneIds
+        let survivor = created[0]
+        let firstClosed = created[1]
+        let secondClosed = created[2]
+        state.liveSurfaces[surfaceId]?.panes[String(survivor)]?.name = "keep this pane"
+
+        let desired: SurfAceLocklessJSON = .object([
+            "children": .array([
+                pane(1, weight: 3),
+                split("vertical", 7, [
+                    pane(survivor, weight: 2),
+                    split("horizontal", 5, [pane(firstClosed, weight: 1), pane(secondClosed, weight: 1)]),
+                ]),
+            ]),
+            "direction": .string("horizontal"), "type": .string("split"),
+        ])
+        // Arrange a weighted authoritative tree; topology.apply intentionally
+        // builds new nodes without caller-selected weights.
+        state.liveSurfaces[surfaceId]?.topology = try SurfAceLocklessTopologyCodec.canonical(desired)
+        try state.validate()
+        let first = try SurfAceLocklessTopologyOperations.paneClose(
+            state: &state, surfaceId: surfaceId, paneId: firstClosed,
+            expectedTopologyRevision: 1
+        )
+        let afterFirst: SurfAceLocklessJSON = .object([
+            "children": .array([
+                pane(1, weight: 3),
+                split("vertical", 7, [pane(survivor, weight: 2), pane(secondClosed, weight: 5)]),
+            ]),
+            "direction": .string("horizontal"), "type": .string("split"),
+        ])
+        XCTAssertEqual(first.topology, afterFirst)
+
+        let second = try SurfAceLocklessTopologyOperations.paneClose(
+            state: &state, surfaceId: surfaceId, paneId: secondClosed,
+            expectedTopologyRevision: first.topologyRevision
+        )
+        let expected: SurfAceLocklessJSON = .object([
+            "children": .array([pane(1, weight: 3), pane(survivor, weight: 7)]),
+            "direction": .string("horizontal"), "type": .string("split"),
+        ])
+        XCTAssertEqual(second.topology, expected)
+        XCTAssertEqual(try SurfAceLocklessTopologyCodec.paneIds(second.topology), [1, survivor])
+        XCTAssertEqual(state.liveSurfaces[surfaceId]?.panes[String(survivor)]?.name, "keep this pane")
+        XCTAssertEqual(state.liveSurfaces[surfaceId]?.paneTombstones.count, 2)
+    }
+
     func testTopologyApplyAllocatesClientIdsAndRequiresExplicitDestruction() throws {
         var state = try SurfAceLocklessAuthorityState.empty()
         let surfaceId = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
