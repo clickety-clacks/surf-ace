@@ -1643,7 +1643,9 @@ function installIpc(): void {
       throw new Error("independently routed compositor window host is unavailable");
     }
     return (request) => sendCompositorControl(socket, request);
-  });
+  }, (surfaceId, error) => clientWarn("pane_presentation_retirement_failed", {
+    surface_id: surfaceId, ...errorDiagnosticFields(error),
+  }));
   ipcMain.handle("surface:pane-presentation", async (event, payload: unknown) => {
     const surfaceId = surfaceIdForSender(event.sender);
     if (!surfaceId) return { ok: false, error: "renderer surface is unavailable" };

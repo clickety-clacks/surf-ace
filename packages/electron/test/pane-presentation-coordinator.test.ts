@@ -113,6 +113,113 @@ test("late acknowledgement cannot re-enter after explicit invalidation", async (
   await assert.rejects(transition, /superseded/);
   assert.deepEqual(f.core.paneBounds(f.surfaceId, f.paneId), f.bounds);
 });
+
+test("acknowledged stale native selection is remotely restored before invalidation settles", async () => {
+  const f = fixture();
+  let release!: () => void;
+  let entered!: () => void;
+  const pending = new Promise<void>((resolve) => { release = resolve; });
+  const sent = new Promise<void>((resolve) => { entered = resolve; });
+  const controls: Array<Extract<CompositorControlRequest, { type: "pane_presentation.set" }>> = [];
+  const coordinator = new PanePresentationCoordinator(f.core, () => async (wire) => {
+    if (wire.type === "get_status") return capability;
+    if (wire.type !== "pane_presentation.set") throw new Error("unexpected request");
+    controls.push(structuredClone(wire));
+    if (wire.request.selected) { entered(); await pending; }
+    return ack(wire);
+  });
+  const transition = coordinator.apply(f.surfaceId, f.presentation, f.identity);
+  await sent;
+  const retired = coordinator.invalidate(f.surfaceId);
+  release();
+  await assert.rejects(transition, /superseded/);
+  await retired;
+  assert.deepEqual(controls.map((wire) => wire.request.request_revision), [1, 2]);
+  assert.equal(controls[1]!.request.selected, null);
+  assert.deepEqual(controls[1]!.request.presentation_generation, controls[0]!.request.presentation_generation);
+  assert.deepEqual(f.core.paneBounds(f.surfaceId, f.paneId), f.bounds);
+});
+
+test("new selection waits for stale acknowledgement retirement and uses a later wire revision", async () => {
+  const f = fixture();
+  let release!: () => void;
+  let entered!: () => void;
+  const pending = new Promise<void>((resolve) => { release = resolve; });
+  const sent = new Promise<void>((resolve) => { entered = resolve; });
+  const revisions: number[] = [];
+  const selected: boolean[] = [];
+  const coordinator = new PanePresentationCoordinator(f.core, () => async (wire) => {
+    if (wire.type === "get_status") return capability;
+    if (wire.type !== "pane_presentation.set") throw new Error("unexpected request");
+    revisions.push(wire.request.request_revision);
+    selected.push(wire.request.selected !== null);
+    if (revisions.length === 1) { entered(); await pending; }
+    return ack(wire);
+  });
+  const first = coordinator.apply(f.surfaceId, f.presentation, f.identity);
+  await sent;
+  const replacement = structuredClone(f.presentation);
+  replacement.snapshot.bounds.width = 960;
+  const second = coordinator.apply(f.surfaceId, replacement, f.identity);
+  release();
+  await assert.rejects(first, /superseded/);
+  await second;
+  assert.deepEqual(revisions, [1, 2, 3]);
+  assert.deepEqual(selected, [true, false, true]);
+  assert.equal(f.core.paneBounds(f.surfaceId, f.paneId)!.width, 960);
+});
+
+test("authoritative topology and surface close automatically retire accepted remote presentation", async () => {
+  for (const change of ["topology", "close"] as const) {
+    const f = fixture();
+    const controls: Array<Extract<CompositorControlRequest, { type: "pane_presentation.set" }>> = [];
+    const failures: unknown[] = [];
+    const coordinator = new PanePresentationCoordinator(f.core, () => async (wire) => {
+      if (wire.type === "get_status") return capability;
+      if (wire.type !== "pane_presentation.set") throw new Error("unexpected request");
+      controls.push(structuredClone(wire));
+      return ack(wire);
+    }, (_surface, error) => failures.push(error));
+    await coordinator.apply(f.surfaceId, f.presentation, f.identity);
+    if (change === "topology") {
+      f.core.paneSplit(f.surfaceId, { count: 2, direction: "horizontal",
+        newPaneIds: [9], newPaneLabels: [9], paneId: f.paneId });
+    } else f.core.removeSurface(f.surfaceId);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(controls.length, 2, change);
+    assert.equal(controls[1]!.request.selected, null, change);
+    assert.deepEqual(controls[1]!.request.presentation_generation,
+      controls[0]!.request.presentation_generation, change);
+    assert.deepEqual(failures, []);
+  }
+});
+
+test("lost mutation reply blocks new selection until exact retirement is acknowledged", async () => {
+  const f = fixture();
+  let allowRestore = false;
+  let first = true;
+  const controls: Array<Extract<CompositorControlRequest, { type: "pane_presentation.set" }>> = [];
+  const failures: unknown[] = [];
+  const coordinator = new PanePresentationCoordinator(f.core, () => async (wire) => {
+    if (wire.type === "get_status") return capability;
+    if (wire.type !== "pane_presentation.set") throw new Error("unexpected request");
+    controls.push(structuredClone(wire));
+    if (wire.request.selected && first) { first = false; throw new Error("lost mutation reply"); }
+    if (!wire.request.selected && !allowRestore) throw new Error("retirement unavailable");
+    return ack(wire);
+  }, (_surface, error) => failures.push(error));
+  await assert.rejects(coordinator.apply(f.surfaceId, f.presentation, f.identity), /lost mutation/);
+  await assert.rejects(coordinator.apply(f.surfaceId, f.presentation, f.identity), /retirement unavailable/);
+  assert.equal(controls.filter((wire) => wire.request.selected).length, 1,
+    "uncertain retirement forbids sending a second selection");
+  assert.equal(failures.length, 1);
+  assert.deepEqual(f.core.paneBounds(f.surfaceId, f.paneId), f.bounds);
+  allowRestore = true;
+  await coordinator.apply(f.surfaceId, f.presentation, f.identity);
+  assert.deepEqual(controls.map((wire) => wire.request.request_revision), [1, 2, 3, 4, 5]);
+  assert.equal(controls[3]!.request.selected, null);
+  assert.equal(f.core.paneBounds(f.surfaceId, f.paneId)!.width, 980);
+});
 test("topology change while acknowledgement is pending prevents display commit", async () => {
   const f = fixture();
   let release!: () => void;
@@ -124,7 +231,7 @@ test("topology change while acknowledgement is pending prevents display commit",
   const transition = coordinator.apply(f.surfaceId, f.presentation, f.identity);
   f.core.setViewport(f.surfaceId, { width: 900, height: 600, scale: 1 });
   release();
-  await assert.rejects(transition, /stale/);
+  await assert.rejects(transition, /stale|superseded/);
 });
 test("invalid bounds and malformed viewports reject before any transport request", async () => {
   const f = fixture();
