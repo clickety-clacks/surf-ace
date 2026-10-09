@@ -1202,12 +1202,16 @@ private struct SurfAcePaneView: View {
                 .buttonStyle(.borderedProminent)
                 .tint(Color(red: 0.04, green: 0.28, blue: 0.20))
                 .foregroundStyle(.white)
+                .focusable(interactions: .activate)
+                .focused($popoutKeyboardFocused)
+                .onKeyPress(keys: [.space, .return], phases: .down) { _ in
+                    onTogglePopout()
+                    return .handled
+                }
                 .accessibilityLabel(isPoppedOut ? "Restore" : "Pop out")
                 .accessibilityIdentifier("surf-ace-pane-popout-\(pane.paneId)")
                 .accessibilityValue(isPoppedOut ? "Expanded" : "Tiled")
                 .accessibilityFocused($popoutControlFocused)
-                .focusable(interactions: .activate)
-                .focused($popoutKeyboardFocused)
                 .padding(8)
             }
             .overlay {
@@ -1224,7 +1228,7 @@ private struct SurfAcePaneView: View {
             }
             .onChange(of: isPoppedOut) { _, _ in
                 popoutControlFocused = true
-                popoutKeyboardFocused = true
+                if !UIAccessibility.isVoiceOverRunning { popoutKeyboardFocused = true }
             }
             .onAppear {
                 publishGeometrySnapshot(paneFrame: paneFrame)
