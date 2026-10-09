@@ -93,7 +93,9 @@ async function run() {
     };
     const before = await evaluate("Promise.all(hosts.map(v=>v.executeJavaScript('({zoom:document.documentElement.style.zoom,grid,refits,ticks})')))");
     await evaluate("fixtureKeyboard({action:'increase',paneId:1,type:'content-scale'})");
-    await wait("hosts[0].executeJavaScript(\"document.documentElement.style.zoom==='0.935'\")");
+    console.log("ZOOM_BEFORE=" + JSON.stringify(before));
+    console.log("ZOOM_AFTER_INTENT=" + JSON.stringify(await evaluate("hosts[0].executeJavaScript('({zoom:document.documentElement.style.zoom,grid,refits})')")));
+    await wait("hosts[0].executeJavaScript(\"Math.abs(Number(document.documentElement.style.zoom)-0.935)<1e-6\")");
     const zoomed = await evaluate("Promise.all(hosts.map(v=>v.executeJavaScript('({zoom:document.documentElement.style.zoom,grid,refits,ticks})')))");
     assert.ok(zoomed[0].refits > before[0].refits);
     assert.ok(zoomed[0].grid.cols < before[0].grid.cols);

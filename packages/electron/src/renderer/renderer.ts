@@ -447,7 +447,7 @@ function paneSnapshotGeometryIdentity(): {
 }
 
 function reportPaneSnapshot(view: PaneView): void {
-  if (resizeGesture) return; // Provisional geometry must never become an authoritative snapshot.
+  if (resizeGesture || resizeCommitPending) return; // Provisional geometry must never become an authoritative snapshot.
   const frame = currentPaneFrameElement(view);
   if (frame?.matches("webview.content-browser-url-frame")) {
     window.surfAce.reportSnapshot({
@@ -556,6 +556,7 @@ function collectMarkedOverlayRegions(pane: RendererPaneState, view: PaneView): O
 }
 
 function reportCompositorOverlayRegions(updateReason: "layout" | "resize" | "visibility"): void {
+  if (resizeGesture || resizeCommitPending) return;
   overlayRevision += 1;
   if (!latestState) {
     window.surfAce.reportOverlayRegions({
@@ -3022,6 +3023,7 @@ function cancelResizeGesture(): void {
   resizeGesture = null;
   gesture.stop();
   restoreCommittedLayout();
+  scheduleCompositorOverlayRegionReport("layout");
 }
 
 function showResizeStatus(): void {
@@ -3031,7 +3033,7 @@ function showResizeStatus(): void {
   if (!resizeStatus) { status?.remove(); return; }
   if (!status) {
     status = document.createElement("div");
-    status.className = "connection-status-banner resize-status";
+    status.className = "resize-status";
     status.setAttribute("role", "status");
     wrapper.appendChild(status);
   }
@@ -3092,15 +3094,20 @@ function attachResizeHandle(handle: HTMLElement, split: HTMLElement, _node: Extr
     const onUp = (upEvent: PointerEvent) => {
       if (upEvent.pointerId !== event.pointerId || resizeGesture !== gesture) return;
       updateWeights(upEvent);
+      // Measure final flex geometry without publishing provisional snapshots or topology.
+      const finalNode = { ...node, children: node.children.map((child, i) => ({ ...child, weight: gesture.weights[i] })) };
+      updateSplitElement(split, finalNode);
+      refreshLayoutGeometry();
+      const geometry = latestState!.panes.map((pane) => ({ paneId: pane.paneId, bounds: paneBounds(paneViews.get(pane.paneId)!) }));
       resizeGesture = null;
       gesture.stop();
       // Restore authoritative bounds before sending the one final mutation.
       restoreCommittedLayout();
       if (gesture.weights.every((weight, i) => Math.abs(weight - weights[i]!) < 1e-9)) return;
       resizeCommitPending = true;
-      void window.surfAce.resizeSplit({ path: gesture.path, weights: gesture.weights, expected: gesture.expected })
-        .then((ok) => { resizeStatus = ok ? "" : "Resize wasn’t saved"; })
-        .catch(() => { resizeStatus = "Resize wasn’t saved"; })
+      void window.surfAce.resizeSplit({ path: gesture.path, weights: gesture.weights, expected: gesture.expected, geometry })
+        .then((ok) => { resizeStatus = ok ? "" : "Resize couldn’t be confirmed"; })
+        .catch(() => { resizeStatus = "Resize couldn’t be confirmed"; })
         .finally(() => {
           resizeCommitPending = false;
           restoreCommittedLayout();

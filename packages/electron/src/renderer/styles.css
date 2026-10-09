@@ -68,7 +68,8 @@ body.compositor-hosted .pane-shell {
   width: 100%;
 }
 
-.connection-status-banner {
+.connection-status-banner,
+.resize-status {
   position: absolute;
   top: 8px;
   right: 8px;
@@ -942,3 +943,5 @@ body.compositor-hosted .pane-shell.native-backed .pane-content {
   text-transform: uppercase;
   backdrop-filter: blur(14px);
 }
+
+.resize-status { top: auto; bottom: 8px; }
