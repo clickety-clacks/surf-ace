@@ -37,7 +37,8 @@ await fs.writeFile(preload, `window.fixtureState=${JSON.stringify(state)};
 window.fixtureCommands=[];window.fixtureSnapshots=[];
 window.surfAce={guestPreloadPath:${JSON.stringify(guest)},
 getBootstrap:async()=>({state:window.fixtureState,surfaceId:'fixture'}),
-onState:f=>window.fixtureUpdate=f,onKeyboardIntent:f=>window.fixtureKeyboard=f,
+onState:f=>window.fixtureUpdate=f,onPanePresentationOwnership: () => () => {},
+      onKeyboardIntent:f=>window.fixtureKeyboard=f,
 command:c=>window.fixtureCommands.push(c),reportSnapshot:s=>window.fixtureSnapshots.push(s),
 setPanePresentation:async()=>({ok:true}),
 reportDiagnostics(){},reportOverlayRegions(){},reportRendererDiagnostic(){},clearToast(){}};`);

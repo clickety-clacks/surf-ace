@@ -18,6 +18,7 @@ function fixture(native = true) {
   const bounds = { x: 0, y: 0, width: 400, height: 300 };
   core.updatePaneSnapshot(surface.surfaceId, paneId, { ...identity, bounds, viewport });
   const paneLineageId = core.panesList(surface.surfaceId).panes[0]!.paneLineageId;
+  assert.ok(typeof paneLineageId === "string" && paneLineageId);
   if (native) core.markNativePaneMaterialized(surface.surfaceId, {
     op: "native_pane.host", focus: core.projectNativePaneFocus(surface.surfaceId),
     panes: [{ id: String(paneId), binding_id: "binding-7", content_id: "content-7", revision: 1 as never,
@@ -37,10 +38,11 @@ function ack(wire: CompositorControlRequest) {
 const host = { host_surface_id: 99, host_incarnation: "host-1", root_geometry_generation: 1,
   source_rect: { x: 0, y: 0, width: 1000, height: 700 }, logical_rect: { x: 0, y: 0, width: 1000, height: 700 } };
 function createCoordinator(core: SurfaceCore, transport: ConstructorParameters<typeof PanePresentationCoordinator>[1],
-  failure?: ConstructorParameters<typeof PanePresentationCoordinator>[2]) {
+  failure?: ConstructorParameters<typeof PanePresentationCoordinator>[2],
+  notice?: ConstructorParameters<typeof PanePresentationCoordinator>[4]) {
   return new PanePresentationCoordinator(core, transport, failure, async (surfaceId) => ({
     window_id: `window:${surfaceId}`, renderer_surface_id: surfaceId, host: structuredClone(host),
-  }));
+  }), notice);
 }
 const capability = { ok: true, status: { pane_presentation_host: host, capabilities: { [PANE_PRESENTATION_CAPABILITY]: 1 } } };
 
@@ -295,4 +297,95 @@ test("native presentation without independently resolved window route cannot mut
   const coordinator = new PanePresentationCoordinator(f.core, () => async () => { calls++; return capability; });
   await assert.rejects(coordinator.apply(f.surfaceId, f.presentation, f.identity), /verified.*route/);
   assert.equal(calls, 0);
+});
+
+
+test("second owned window retires accepted route using original sender and blocks both surfaces", async () => {
+  const f = fixture();
+  const wires: Array<Extract<CompositorControlRequest, { type: "pane_presentation.set" }>> = [];
+  const notices: Array<{ phase: string; revision: number }> = [];
+  const send = async (wire: CompositorControlRequest) => {
+    if (wire.type === "get_status") return capability;
+    if (wire.type !== "pane_presentation.set") throw new Error("unexpected");
+    wires.push(structuredClone(wire)); return ack(wire);
+  };
+  let routeBlocked = false;
+  const coordinator = createCoordinator(f.core, () => {
+    if (routeBlocked) throw new Error("new route must not be used for retirement");
+    return send;
+  }, undefined, (notice) => notices.push(notice));
+  await coordinator.setOwnedWindows([f.surfaceId]);
+  await coordinator.apply(f.surfaceId, f.presentation, f.identity);
+  const other = f.core.createAdditionalSurface("second", { width: 1000, height: 700, scale: 1 });
+  const saved = f.core.getPersistentState();
+  const otherBefore = f.core.getRendererWindowState(other.surfaceId);
+  routeBlocked = true;
+  await coordinator.setOwnedWindows([f.surfaceId, other.surfaceId]);
+  assert.deepEqual(wires.map((wire) => Boolean(wire.request.selected)), [true, false]);
+  assert.deepEqual(wires[1]!.request.window_route, wires[0]!.request.window_route);
+  assert.deepEqual(notices.map((notice) => notice.phase), ["blocked", "cleared"]);
+  assert.equal(notices[0]!.revision, notices[1]!.revision);
+  assert.deepEqual(f.core.paneBounds(f.surfaceId, f.paneId), f.bounds);
+  assert.deepEqual(f.core.getPersistentState(), saved);
+  assert.deepEqual(f.core.getRendererWindowState(other.surfaceId), otherBefore);
+  await assert.rejects(coordinator.apply(f.surfaceId, f.presentation, f.identity), /ownership/);
+  const otherPane = f.core.panesList(other.surfaceId).panes[0]!;
+  assert.ok(typeof otherPane.paneLineageId === "string" && otherPane.paneLineageId);
+  await assert.rejects(coordinator.apply(other.surfaceId, { ...f.presentation, paneId: otherPane.paneId,
+    paneLineageId: otherPane.paneLineageId, snapshot: { ...f.presentation.snapshot,
+      ...f.core.resolvedPaneGeometryIdentity(other.surfaceId) } }, f.core.resolvedPaneGeometryIdentity(other.surfaceId)), /ownership/);
+  assert.equal(wires.length, 2, "neither ambiguous surface may mutate compositor");
+  routeBlocked = false;
+  await coordinator.setOwnedWindows([f.surfaceId]);
+  const revision = await coordinator.apply(f.surfaceId, f.presentation, f.identity);
+  assert.ok(revision > notices[1]!.revision);
+  assert.deepEqual(f.core.paneBounds(f.surfaceId, f.paneId), f.presentation.snapshot.bounds);
+});
+
+test("second window fences a pending ack and confirms clear only after old projection retires", async () => {
+  const f = fixture();
+  let entered!: () => void; let release!: () => void;
+  const sent = new Promise<void>((resolve) => { entered = resolve; });
+  const pending = new Promise<void>((resolve) => { release = resolve; });
+  const notices: string[] = []; const selected: boolean[] = [];
+  const coordinator = createCoordinator(f.core, () => async (wire) => {
+    if (wire.type === "get_status") return capability;
+    if (wire.type !== "pane_presentation.set") throw new Error("unexpected");
+    selected.push(Boolean(wire.request.selected));
+    if (wire.request.selected) { entered(); await pending; }
+    return ack(wire);
+  }, undefined, (notice) => notices.push(notice.phase));
+  await coordinator.setOwnedWindows([f.surfaceId]);
+  const transition = coordinator.apply(f.surfaceId, f.presentation, f.identity);
+  await sent;
+  const rejection = assert.rejects(transition, /superseded/);
+  const ownershipChanged = coordinator.setOwnedWindows([f.surfaceId, "second-window"]);
+  assert.deepEqual(notices, ["blocked"]);
+  release(); await rejection; await ownershipChanged;
+  assert.deepEqual(selected, [true, false]);
+  assert.deepEqual(notices, ["blocked", "cleared"]);
+  assert.deepEqual(f.core.paneBounds(f.surfaceId, f.paneId), f.bounds);
+});
+
+test("failed ownership retirement stays uncertain and Restore retries original sender while blocked", async () => {
+  const f = fixture(); let fail = false;
+  const notices: string[] = []; const restores: number[] = [];
+  const coordinator = createCoordinator(f.core, () => async (wire) => {
+    if (wire.type === "get_status") return capability;
+    if (wire.type !== "pane_presentation.set") throw new Error("unexpected");
+    if (!wire.request.selected) { restores.push(wire.request.request_revision); if (fail) throw new Error("retirement offline"); }
+    return ack(wire);
+  }, undefined, (notice) => notices.push(notice.phase));
+  await coordinator.setOwnedWindows([f.surfaceId]);
+  await coordinator.apply(f.surfaceId, f.presentation, f.identity);
+  fail = true;
+  await assert.rejects(coordinator.setOwnedWindows([f.surfaceId, "second-window"]), /offline/);
+  assert.deepEqual(notices, ["blocked"], "failed retirement must not claim confirmed clear");
+  assert.equal(coordinator.wasPresentationCleared(f.surfaceId), false);
+  assert.deepEqual(f.core.paneBounds(f.surfaceId, f.paneId), f.presentation.snapshot.bounds);
+  fail = false;
+  await coordinator.apply(f.surfaceId, null, f.identity);
+  assert.equal(coordinator.wasPresentationCleared(f.surfaceId), true);
+  assert.deepEqual(f.core.paneBounds(f.surfaceId, f.paneId), f.bounds);
+  assert.ok(restores[1]! > restores[0]!);
 });

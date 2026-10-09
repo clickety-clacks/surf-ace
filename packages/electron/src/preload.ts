@@ -10,6 +10,11 @@ contextBridge.exposeInMainWorld("surfAce", {
   guestPreloadPath,
   getBootstrap: () => ipcRenderer.invoke("surface:get-bootstrap"),
   setPanePresentation: (payload: Record<string, unknown>) => ipcRenderer.invoke("surface:pane-presentation", payload),
+  onPanePresentationOwnership: (listener: (notice: unknown) => void) => {
+    const wrapped = (_event: unknown, notice: unknown) => listener(notice);
+    ipcRenderer.on("surface:pane-presentation-ownership", wrapped);
+    return () => ipcRenderer.removeListener("surface:pane-presentation-ownership", wrapped);
+  },
   onKeyboardIntent: (listener: (intent: unknown) => void) => {
     const wrapped = (_event: unknown, intent: unknown) => listener(intent);
     ipcRenderer.on("surface:keyboard-intent", wrapped);
@@ -35,6 +40,7 @@ declare global {
       guestPreloadPath: string;
       getBootstrap: () => Promise<unknown>;
       setPanePresentation: (payload: Record<string, unknown>) => Promise<{ ok: boolean; error?: string; revision?: number; presentationCleared?: boolean }>;
+      onPanePresentationOwnership: (listener: (notice: unknown) => void) => () => void;
       onKeyboardIntent: (listener: (intent: unknown) => void) => () => void;
       onState: (listener: (state: unknown) => void) => () => void;
       reportOverlayRegions: (payload: Record<string, unknown>) => void;

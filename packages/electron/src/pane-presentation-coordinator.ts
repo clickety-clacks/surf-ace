@@ -5,6 +5,8 @@ import type { CompositorControlRequest, CompositorControlResponse } from "./nati
 
 type Presentation = NonNullable<Parameters<SurfaceCore["setPanePresentation"]>[1]>;
 type Sender = (request: CompositorControlRequest) => Promise<CompositorControlResponse>;
+export type PresentationOwnershipNotice = { surfaceId: string; surfaceEpoch: string;
+  revision: number; phase: "blocked" | "cleared" };
 type Identity = ReturnType<SurfaceCore["resolvedPaneGeometryIdentity"]>;
 
 /** The transport must be independently routed to this renderer window's host. */
@@ -15,11 +17,13 @@ export class PanePresentationCoordinator {
   private readonly accepted = new Map<string, { control: PanePresentationControlRequest; send: Sender; uncertain?: boolean }>();
   private readonly authorities = new Map<string, { identity: Identity; selected: Presentation | null }>();
   private readonly cleared = new Set<string>();
+  private ownedWindows: Set<string> | null = null;
   constructor(
     private readonly core: SurfaceCore,
     private readonly transportForSurface: (surfaceId: string) => Sender | null,
     private readonly onRetirementFailure: (surfaceId: string, error: unknown) => void = () => {},
     private readonly routeForSurface?: (surfaceId: string, send: Sender) => Promise<PresentationWindowRoute>,
+    private readonly onOwnershipNotice: (notice: PresentationOwnershipNotice) => void = () => {},
   ) {
     core.subscribe((event) => {
       if (event.type === "surface-removed") {
@@ -28,6 +32,35 @@ export class PanePresentationCoordinator {
         void this.reconcileAuthority(event.surfaceId).catch((error) => onRetirementFailure(event.surfaceId, error));
       }
     });
+  }
+
+  /** Called after the actual BrowserWindow map changes, not core surface creation. */
+  async setOwnedWindows(surfaceIds: readonly string[] | null): Promise<void> {
+    this.ownedWindows = surfaceIds === null ? null : new Set(surfaceIds);
+    const affected = new Set([...this.accepted.keys(), ...this.authorities.keys()]);
+    const retirements: Promise<void>[] = [];
+    for (const surfaceId of affected) {
+      if (this.windowRouteAvailable(surfaceId)) continue;
+      const authority = this.authorities.get(surfaceId);
+      const surfaceEpoch = authority?.identity.surfaceEpoch ?? this.accepted.get(surfaceId)?.control.request.presentation_generation.surface_epoch;
+      if (!surfaceEpoch) continue;
+      const revision = (this.revisions.get(surfaceId) ?? 0) + 1;
+      if (!Number.isSafeInteger(revision)) throw new Error("pane presentation revision exhausted");
+      this.revisions.set(surfaceId, revision); // Fence an in-flight ack synchronously.
+      this.authorities.delete(surfaceId);
+      this.onOwnershipNotice({ surfaceId, surfaceEpoch, revision, phase: "blocked" });
+      retirements.push(this.enqueue(surfaceId, async () => {
+        await this.retireAccepted(surfaceId); // Uses the original sender even if new routing is blocked.
+        this.core.setPanePresentation(surfaceId, null);
+        this.cleared.add(surfaceId);
+        this.onOwnershipNotice({ surfaceId, surfaceEpoch, revision, phase: "cleared" });
+      }));
+    }
+    await Promise.all(retirements);
+  }
+
+  private windowRouteAvailable(surfaceId: string): boolean {
+    return this.ownedWindows === null || (this.ownedWindows.size === 1 && this.ownedWindows.has(surfaceId));
   }
 
   /** Sender-to-surface routing belongs to main; renderer never supplies surface or lineage authority. */
@@ -46,7 +79,9 @@ export class PanePresentationCoordinator {
       throw new Error("invalid pane presentation pane");
     }
     const pane = this.core.panesList(surfaceId).panes.find((item) => item.paneId === request.paneId);
-    if (!pane) throw new Error("pane presentation pane is absent");
+    if (!pane || typeof pane.paneLineageId !== "string" || !pane.paneLineageId) {
+      throw new Error("pane presentation pane or lineage is absent");
+    }
     return this.apply(surfaceId, {
       paneId: pane.paneId, paneLineageId: pane.paneLineageId,
       snapshot: { ...identity, bounds: request.bounds as never,
@@ -69,6 +104,15 @@ export class PanePresentationCoordinator {
     if (this.revisions.get(surfaceId) !== revision) throw new Error("pane presentation was superseded");
     this.assertCurrent(surfaceId, identity, selected);
     if (this.accepted.get(surfaceId)?.uncertain) await this.retireAccepted(surfaceId);
+    if (!this.windowRouteAvailable(surfaceId)) {
+      if (selected) throw new Error("compositor window ownership is ambiguous or unavailable");
+      // Restore remains usable while ownership is blocked; retry the retained
+      // exact sender and never route to a second/replacement window.
+      await this.retireAccepted(surfaceId);
+      this.core.setPanePresentation(surfaceId, null);
+      this.cleared.add(surfaceId);
+      return revision;
+    }
     const panes = this.core.getRendererWindowState(surfaceId).panes;
     const nativeIds = panes.filter((pane) => pane.externalNative).map((pane) => pane.paneId);
     const send = this.transportForSurface(surfaceId);

@@ -59,6 +59,7 @@ test("renderer DOM integrates authoritative connection states and live scale con
   const { document, window } = parseHTML(
     "<!doctype html><html lang=\"en\"><body><div id=\"app\"></div><div id=\"provenance-announcer\" aria-atomic=\"true\" aria-live=\"polite\"></div></body></html>",
   );
+  let ownershipListener: ((notice: unknown) => void) | null = null;
   let stateListener: ((next: unknown) => void) | null = null;
   let keyboardListener: ((intent: unknown) => void) | null = null;
   let focusStateUpdate: (() => void) | null = null;
@@ -66,7 +67,7 @@ test("renderer DOM integrates authoritative connection states and live scale con
   let textMetricScale = 1;
   const commands: unknown[] = [];
   const presentations: Record<string, unknown>[] = [];
-  let presentationResponse: (() => Promise<{ ok: boolean; error?: string }>) | null = null;
+  let presentationResponse: (() => Promise<{ ok: boolean; error?: string; revision?: number; presentationCleared?: boolean }>) | null = null;
   const resizeCallbacks: Array<() => void> = [];
   const mutationCallbacks: Array<() => void> = [];
   const fontCallbacks: Array<() => void> = [];
@@ -79,6 +80,7 @@ test("renderer DOM integrates authoritative connection states and live scale con
       }
     },
     getBootstrap: async () => ({ state: state("disconnected"), surfaceId: "surface-1" }),
+    onPanePresentationOwnership(listener: (notice: unknown) => void) { ownershipListener = listener; },
     onKeyboardIntent(listener: (intent: unknown) => void) { keyboardListener = listener; },
     onState(listener: (next: unknown) => void) { stateListener = listener; },
     reportDiagnostics() {},
@@ -590,7 +592,7 @@ test("renderer DOM integrates authoritative connection states and live scale con
 
   await test("pop-out keeps nested weighted slots and live hosts through restore and topology races", async () => {
     focusStateUpdate = null;
-    const next = state("connected", true) as ReturnType<typeof state> & { layout: unknown };
+    const next: Omit<ReturnType<typeof state>, "layout"> & { layout: unknown } = state("connected", true);
     const third = pane(3);
     next.panes.push(third);
     next.layout = {
@@ -601,7 +603,7 @@ test("renderer DOM integrates authoritative connection states and live scale con
           { type: "pane", paneId: 3, weight: 7 },
         ] },
       ],
-    } as typeof next.layout;
+    };
     Object.assign(next.panes[1]!.content, {
       content: { html: "<html><body>stateful</body></html>" },
       contentType: "html", contentId: "pop-out-content", renderVersion: 50, revision: 50,
@@ -693,6 +695,35 @@ test("renderer DOM integrates authoritative connection states and live scale con
     assert.equal(Boolean(selected.style.width), false);
     assert.equal(selected.querySelector("webview"), liveHost);
     stateListener!(next);
+    toggle.click();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const ownership = { surfaceId: next.surfaceId, surfaceEpoch: next.surfaceEpoch, revision: 100 };
+    ownershipListener!({ ...ownership, phase: "blocked" });
+    assert.equal(selected.classList.contains("pane-popped-out"), true, "pending retirement does not claim Restore");
+    assert.equal(selected.querySelector(".pane-content")!.hasAttribute("inert"), true);
+    assert.equal(toggle.hasAttribute("inert"), false);
+    ownershipListener!({ ...ownership, phase: "cleared" });
+    assert.equal(selected.classList.contains("pane-popped-out"), false);
+    assert.equal(selected.querySelector("webview"), liveHost);
+    assert.deepEqual(slots.map((slot) => slot.style.flexGrow), slotWeights);
+    ownershipListener!({ ...ownership, phase: "blocked" });
+    assert.equal(selected.querySelector(".pane-content")!.hasAttribute("inert"), false,
+      "late blocked notice cannot reverse confirmed clear");
+    presentationResponse = async () => ({ ok: true, revision: 99 });
+    toggle.click();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(selected.classList.contains("pane-popped-out"), false,
+      "older main response cannot re-enter after confirmed ownership clear");
+    presentationResponse = async () => ({ ok: true, revision: 101 });
+    toggle.click();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    ownershipListener!({ ...ownership, revision: 99, phase: "cleared" });
+    ownershipListener!({ ...ownership, surfaceId: "foreign", revision: 200, phase: "cleared" });
+    ownershipListener!({ ...ownership, surfaceEpoch: "old-epoch", revision: 200, phase: "cleared" });
+    assert.equal(selected.classList.contains("pane-popped-out"), true, "stale or foreign clear cannot collapse a later presentation");
+    toggle.click();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    presentationResponse = null;
     assert.equal(liveHost.pageCounter, 12);
     assert.equal(roots[0]!.querySelector(".pane-content"), siblingContent);
     assert.equal(siblingContent.getAttribute("data-live-tick"), "2");

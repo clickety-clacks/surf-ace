@@ -168,6 +168,12 @@ function configurePlatformWebAuthn(): void {
 configurePlatformWebAuthn();
 
 const windows = new Map<string, BrowserWindow>();
+let panePresentation: PanePresentationCoordinator | null = null;
+function reconcilePresentationWindowOwnership(): void {
+  const owned = resolveCompositorControlSocketPath()
+    ? [...windows.entries()].filter(([, window]) => !window.isDestroyed()).map(([surfaceId]) => surfaceId) : null;
+  void panePresentation?.setOwnedWindows(owned).catch((error) => clientWarn("pane_presentation_ownership_retirement_failed", errorDiagnosticFields(error)));
+}
 const programmaticSurfaceCloses = new Set<string>();
 const pendingWindowStates = new Map<string, RendererWindowState>();
 const browserUrlWebContentsPanes = new Map<number, { paneId: number; surfaceId: string }>();
@@ -1324,6 +1330,7 @@ async function createWindowForSurface(surfaceId: string): Promise<BrowserWindow>
   }
 
   windows.set(surfaceId, window);
+  reconcilePresentationWindowOwnership();
   clientInfo("window_created", {
     pane_ids: core.activePaneIds(surfaceId).join(","),
     surface_id: surfaceId,
@@ -1381,6 +1388,7 @@ async function createWindowForSurface(surfaceId: string): Promise<BrowserWindow>
     const programmaticClose = programmaticSurfaceCloses.delete(surfaceId);
     if (programmaticClose) {
       windows.delete(surfaceId);
+      reconcilePresentationWindowOwnership();
       pendingWindowStates.delete(surfaceId);
       readyWindows.delete(surfaceId);
       setTimeout(
@@ -1400,6 +1408,7 @@ async function createWindowForSurface(surfaceId: string): Promise<BrowserWindow>
       window_label: core.surfaceWindowLabel(surfaceId),
     });
     windows.delete(surfaceId);
+    reconcilePresentationWindowOwnership();
     pendingWindowStates.delete(surfaceId);
     readyWindows.delete(surfaceId);
     if (!isQuitting) {
@@ -1634,7 +1643,7 @@ function installWebAuthnAccountSelection(): void {
 }
 
 function installIpc(): void {
-  const panePresentation = new PanePresentationCoordinator(core, (surfaceId) => {
+  const coordinator = new PanePresentationCoordinator(core, (surfaceId) => {
     const socket = resolveCompositorControlSocketPath();
     if (!socket) return null;
     // The current compositor transport binds one main-app host. Never infer
@@ -1659,15 +1668,20 @@ function installIpc(): void {
       throw new Error("renderer window viewport does not match current native content bounds");
     }
     return panePresentationWindowRoute(response, `electron-window:${window.id}`, surfaceId, viewport);
+  }, (notice) => {
+    const window = windows.get(notice.surfaceId);
+    if (window && !window.isDestroyed()) window.webContents.send("surface:pane-presentation-ownership", notice);
   });
+  panePresentation = coordinator;
+  reconcilePresentationWindowOwnership();
   ipcMain.handle("surface:pane-presentation", async (event, payload: unknown) => {
     const surfaceId = surfaceIdForSender(event.sender);
     if (!surfaceId) return { ok: false, error: "renderer surface is unavailable" };
     try {
-      const revision = await panePresentation.applyRendererRequest(surfaceId, payload);
+      const revision = await coordinator.applyRendererRequest(surfaceId, payload);
       return { ok: true, revision };
     } catch (error) {
-      return { ok: false, presentationCleared: panePresentation.wasPresentationCleared(surfaceId),
+      return { ok: false, presentationCleared: coordinator.wasPresentationCleared(surfaceId),
         error: error instanceof Error ? error.message : "pane presentation failed" };
     }
   });

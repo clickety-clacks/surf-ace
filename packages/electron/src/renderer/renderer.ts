@@ -583,7 +583,7 @@ function reportCompositorOverlayRegions(updateReason: "layout" | "resize" | "vis
     if (view && (poppedOutPaneId === null || pane.paneId === poppedOutPaneId)) {
       regions.push(...collectMarkedOverlayRegions(pane, view).map((region) => ({
         ...region,
-        zIndex: region.zIndex + (poppedOutPaneId === null ? 0 : 100),
+        zIndex: (region.zIndex ?? 0) + (poppedOutPaneId === null ? 0 : 100),
       })));
     }
   }
@@ -1425,6 +1425,8 @@ function applyPanePopOut(): void {
 }
 
 let panePresentationIntent = 0;
+let panePresentationMainRevision = 0;
+let panePresentationConfirmedClearRevision = 0;
 let acknowledgedPopOutBounds: { x: number; y: number; width: number; height: number } | null = null;
 let panePresentationResizePending = false;
 async function togglePanePopOut(view: PaneView): Promise<void> {
@@ -1444,7 +1446,7 @@ async function requestPanePopOut(view: PaneView, selected: number | null): Promi
   const viewport = currentViewport(view);
   viewport.visibleRect.width = Math.max(0, bounds.width - 4);
   viewport.visibleRect.height = Math.max(0, bounds.height - 4);
-  let response: { ok: boolean; error?: string; presentationCleared?: boolean };
+  let response: { ok: boolean; error?: string; presentationCleared?: boolean; revision?: number };
   try {
     response = await window.surfAce.setPanePresentation({ identity, paneId: selected,
       ...(selected === null ? {} : { bounds, viewport }) });
@@ -1467,6 +1469,10 @@ async function requestPanePopOut(view: PaneView, selected: number | null): Promi
     }
     view.popOutButton.title = response.error ?? "Pane presentation is unavailable";
     return;
+  }
+  if (response.revision !== undefined) {
+    if (!Number.isSafeInteger(response.revision) || response.revision < panePresentationMainRevision) return;
+    panePresentationMainRevision = response.revision;
   }
   poppedOutPaneId = selected;
   acknowledgedPopOutBounds = selected === null ? null : bounds;
@@ -3301,6 +3307,31 @@ async function init(): Promise<void> {
 
   window.surfAce.onState((nextState) => {
     renderWindow(nextState as RendererWindowState);
+  });
+
+  window.surfAce.onPanePresentationOwnership((payload) => {
+    if (!payload || typeof payload !== "object" || !latestState) return;
+    const notice = payload as { surfaceId?: unknown; surfaceEpoch?: unknown; revision?: unknown; phase?: unknown };
+    if (notice.surfaceId !== latestState.surfaceId || notice.surfaceEpoch !== latestState.surfaceEpoch ||
+        !Number.isSafeInteger(notice.revision) || Number(notice.revision) <= 0 ||
+        Number(notice.revision) < panePresentationMainRevision ||
+        (notice.phase !== "blocked" && notice.phase !== "cleared")) return;
+    if (notice.phase === "blocked" && Number(notice.revision) <= panePresentationConfirmedClearRevision) return;
+    panePresentationMainRevision = Number(notice.revision);
+    panePresentationIntent++;
+    if (notice.phase === "cleared") {
+      panePresentationConfirmedClearRevision = Number(notice.revision);
+      poppedOutPaneId = null;
+      acknowledgedPopOutBounds = null;
+      panePresentationResizePending = false;
+    } else {
+      panePresentationResizePending = poppedOutPaneId !== null;
+    }
+    applyPanePopOut();
+    setAllPaneChromeMetrics();
+    refreshDynamicPaneFrames();
+    reportAllPaneSnapshots();
+    scheduleCompositorOverlayRegionReport("layout");
   });
 
   window.surfAce.onKeyboardIntent((intent) => {
