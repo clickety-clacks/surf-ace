@@ -218,6 +218,39 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
         XCTAssertEqual(repeatedActual, repeatedRevision + 1)
         XCTAssertEqual(afterRepeatedResize.scopes["surface:\(surfaceId)"]?.records.count, repeatedRecordCount + 1)
 
+        // Scene interruption after gesture end can arrive while that end
+        // request waits behind an earlier durable commit and event fanout.
+        // The interrupted request must not make a second topology record.
+        let beforeInterruptedResize = await restartedAdapter.snapshot()
+        let firstQueuedEnd = expectation(description: "first resize end completed")
+        let interruptedEnd = expectation(description: "interrupted resize end completed")
+        var sceneStillActive = true
+        restarted.resizeSplit(surfaceId: surfaceId, path: [], weights: [1.15, 0.85]) {
+            firstQueuedEnd.fulfill()
+        }
+        restarted.resizeSplit(
+            surfaceId: surfaceId, path: [], weights: [1.1, 0.9],
+            shouldCommit: { sceneStillActive }
+        ) {
+            interruptedEnd.fulfill()
+        }
+        sceneStillActive = false
+        await fulfillment(of: [firstQueuedEnd, interruptedEnd], timeout: 5)
+        let afterInterruptedResize = await restartedAdapter.snapshot()
+        XCTAssertEqual(afterInterruptedResize.generation, beforeInterruptedResize.generation + 1)
+        XCTAssertEqual(
+            afterInterruptedResize.liveSurfaces[surfaceId]?.topologyRevision,
+            (beforeInterruptedResize.liveSurfaces[surfaceId]?.topologyRevision ?? -1) + 1
+        )
+        XCTAssertEqual(
+            afterInterruptedResize.scopes["surface:\(surfaceId)"]?.records.count,
+            (beforeInterruptedResize.scopes["surface:\(surfaceId)"]?.records.count ?? -1) + 1
+        )
+        guard case .split(_, let afterInterruptedChildren, _) = restoredSurface.paneLayout else {
+            return XCTFail("Expected first end commit to remain visible")
+        }
+        XCTAssertEqual(afterInterruptedChildren.map(\.layoutWeight), [1.15, 0.85])
+
         let afterFailureRevision = (await restartedAdapter.snapshot()).liveSurfaces[surfaceId]?.topologyRevision ?? -1
         let failed = expectation(description: "invalid predecessor completed")
         let recovered = expectation(description: "valid successor completed")

@@ -398,16 +398,17 @@ private struct SurfAceWindowView: View {
                 }
 
                 if runtime.resizeSaveFailures.contains(surface.surfaceId) {
-                    Text("Last pane resize was not saved")
+                    Text("Pane resize not saved")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.white)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 6)
                         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
                         .accessibilityIdentifier("surf-ace-resize-unsaved-status")
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
-                        .padding(.trailing, 16)
-                        .padding(.bottom, 62)
+                        .frame(maxWidth: 180, alignment: .leading)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                        .padding(.leading, 16)
+                        .padding(.top, 80)
                         .allowsHitTesting(false)
                 }
             }
@@ -537,7 +538,12 @@ private struct SurfAcePaneTreeView: View {
                                 }
                                 runtime.resizeSplit(
                                     surfaceId: surface.surfaceId, path: path, weights: completed.weights,
-                                    expectedTopologyRevision: completed.revision
+                                    expectedTopologyRevision: completed.revision,
+                                    shouldCommit: {
+                                        scenePhase == .active && splitPreview.completedWeights(
+                                            token: token, topologyEpoch: surface.topologyEpoch
+                                        ) != nil
+                                    }
                                 ) {
                                     splitPreview.cancel(token: token)
                                 }
@@ -575,7 +581,12 @@ private struct SurfAcePaneTreeView: View {
                                 }
                                 runtime.resizeSplit(
                                     surfaceId: surface.surfaceId, path: path, weights: completed.weights,
-                                    expectedTopologyRevision: completed.revision
+                                    expectedTopologyRevision: completed.revision,
+                                    shouldCommit: {
+                                        scenePhase == .active && splitPreview.completedWeights(
+                                            token: token, topologyEpoch: surface.topologyEpoch
+                                        ) != nil
+                                    }
                                 ) {
                                     splitPreview.cancel(token: token)
                                 }
@@ -733,12 +744,18 @@ private struct SurfAceResizeProbeWebView: UIViewRepresentable {
 struct SurfAceResizeTreeProbeView: View {
     var direction: SurfAceLayoutDirection = .vertical
     var authority = false
+    var showUnsavedStatus = false
     @State private var runtime: SurfAceRuntime
     @State private var surface: SurfAceSurfaceModel?
 
-    init(direction: SurfAceLayoutDirection = .vertical, authority: Bool = false) {
+    init(
+        direction: SurfAceLayoutDirection = .vertical,
+        authority: Bool = false,
+        showUnsavedStatus: Bool = false
+    ) {
         self.direction = direction
         self.authority = authority
+        self.showUnsavedStatus = showUnsavedStatus
         let runtime: SurfAceRuntime
         if authority {
             let name = "SurfAceResizeAuthorityProbe.\(UUID().uuidString)"
@@ -760,30 +777,36 @@ struct SurfAceResizeTreeProbeView: View {
         GeometryReader { proxy in
             if let surface {
                 ZStack(alignment: .topLeading) {
-                    SurfAcePaneTreeView(
-                        runtime: runtime,
-                        surface: surface,
-                        node: surface.paneLayout,
-                        surfaceBounds: CGRect(origin: .zero, size: proxy.size)
-                    )
-                    Text(weightLabel(surface.paneLayout))
-                        .accessibilityIdentifier("surf-ace-resize-tree-weight")
-                        .padding(12)
-                        .background(.black)
-                        .foregroundStyle(.white)
-                    Text("topology revision \(surface.topologyEpoch)")
-                        .accessibilityIdentifier("surf-ace-resize-tree-revision")
-                        .padding(12)
-                        .background(.black)
-                        .foregroundStyle(.white)
-                        .offset(y: 48)
                     if authority {
-                        Text(authorityContentLabel(surface))
-                            .accessibilityIdentifier("surf-ace-resize-authority-content")
+                        SurfAceWindowView(runtime: runtime, surface: surface)
+                    } else {
+                        SurfAcePaneTreeView(
+                            runtime: runtime,
+                            surface: surface,
+                            node: surface.paneLayout,
+                            surfaceBounds: CGRect(origin: .zero, size: proxy.size)
+                        )
+                    }
+                    if !showUnsavedStatus {
+                        Text(weightLabel(surface.paneLayout))
+                            .accessibilityIdentifier("surf-ace-resize-tree-weight")
                             .padding(12)
                             .background(.black)
                             .foregroundStyle(.white)
-                            .offset(y: 96)
+                        Text("topology revision \(surface.topologyEpoch)")
+                            .accessibilityIdentifier("surf-ace-resize-tree-revision")
+                            .padding(12)
+                            .background(.black)
+                            .foregroundStyle(.white)
+                            .offset(y: 48)
+                        if authority {
+                            Text(authorityContentLabel(surface))
+                                .accessibilityIdentifier("surf-ace-resize-authority-content")
+                                .padding(12)
+                                .background(.black)
+                                .foregroundStyle(.white)
+                                .offset(y: 96)
+                        }
                     }
                 }
                 .coordinateSpace(name: surfAceSurfaceCoordinateSpaceName)
@@ -853,6 +876,9 @@ struct SurfAceResizeTreeProbeView: View {
                     direction: direction,
                     children: [.leaf(1, weight: 1), .leaf(2, weight: 1)]
                 )
+            }
+            if showUnsavedStatus {
+                runtime.resizeSaveFailures.insert(local.surfaceId)
             }
             surface = local
         }

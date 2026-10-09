@@ -132,6 +132,8 @@ struct SurfAceApp: App {
                 SurfAceResizeTreeProbeView(direction: .horizontal)
             } else if ProcessInfo.processInfo.environment["SURF_ACE_RESIZE_PROBE"] == "tree-authority" {
                 SurfAceResizeTreeProbeView(authority: true)
+            } else if ProcessInfo.processInfo.environment["SURF_ACE_RESIZE_PROBE"] == "tree-authority-unsaved" {
+                SurfAceResizeTreeProbeView(authority: true, showUnsavedStatus: true)
             } else {
                 normalRoot
             }

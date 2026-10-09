@@ -17,6 +17,17 @@ final class SurfAceResizeUITests: XCTestCase {
         checkDrag(probe: "tree-authority", weightIdentifier: "surf-ace-resize-tree-weight")
     }
 
+    func testUnsavedResizeStatusStaysAwayFromBottomPaneIdentity() {
+        let app = XCUIApplication()
+        app.launchEnvironment["SURF_ACE_RESIZE_PROBE"] = "tree-authority-unsaved"
+        app.launch()
+        let status = app.staticTexts["surf-ace-resize-unsaved-status"]
+        XCTAssertTrue(status.waitForExistence(timeout: 10))
+        XCTAssertTrue(app.images["surf-ace-split-resize-handle"].exists)
+        XCTAssertLessThan(status.frame.maxX, app.frame.midX)
+        XCTAssertLessThan(status.frame.maxY, app.frame.midY)
+    }
+
     @available(iOS 26.0, *)
     @MainActor
     func testAuthorityBackedDragCPUAndHitches() {

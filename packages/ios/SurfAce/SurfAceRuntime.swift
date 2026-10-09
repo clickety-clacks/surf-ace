@@ -4409,6 +4409,19 @@ final class SurfAceRuntime {
         expectedTopologyRevision: Int64? = nil,
         onComplete: @escaping () -> Void = {}
     ) {
+        resizeSplit(
+            surfaceId: surfaceId, path: path, weights: weights,
+            expectedTopologyRevision: expectedTopologyRevision,
+            shouldCommit: { true }, onComplete: onComplete
+        )
+    }
+
+    func resizeSplit(
+        surfaceId: String, path: [Int], weights: [Double],
+        expectedTopologyRevision: Int64? = nil,
+        shouldCommit: @escaping @MainActor () -> Bool,
+        onComplete: @escaping () -> Void
+    ) {
         guard let surface = surfaceById[surfaceId] else {
             onComplete()
             return
@@ -4423,6 +4436,12 @@ final class SurfAceRuntime {
             let priorResizeCommit = resizeCommitTail
             resizeCommitTail = Task { @MainActor in
                 await priorResizeCommit?.value
+                // The scene may have become inactive while this end request
+                // waited for an earlier resize's durable commit and fanout.
+                guard shouldCommit() else {
+                    onComplete()
+                    return
+                }
                 await commitLocalResize(
                     adapter: adapter,
                     surfaceId: surfaceId,
@@ -4433,6 +4452,10 @@ final class SurfAceRuntime {
                 )
                 onComplete()
             }
+            return
+        }
+        guard shouldCommit() else {
+            onComplete()
             return
         }
         guard children.map(\.layoutWeight) != weights else {
