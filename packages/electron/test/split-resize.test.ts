@@ -14,13 +14,13 @@ async function stopUnstartedServer(server: SurfaceWsServer): Promise<void> {
   }
 }
 
-function fixture(persist?: (core: SurfaceCore) => Promise<void>) {
+function fixture(persist?: (core: SurfaceCore) => Promise<void>, nativeNotification?: () => void) {
   const core = new SurfaceCore();
   const { surfaceId } = core.ensurePrimarySurface("isolated resize", { width: 1200, height: 800, scale: 1 });
   core.resetProviderBootstrapTopology(surfaceId, { initialPaneId: 1, initialPaneLabel: 1, windowLabel: "a" });
   core.paneSplit(surfaceId, { paneId: 1, count: 2, direction: "vertical", newPaneIds: [2], newPaneLabels: [2] });
   const server = new SurfaceWsServer({ core, port: 0, bindAddress: "127.0.0.1", compositorSocketPath: null,
-    persistLocklessState: persist ? () => persist(core) : undefined,
+    persistLocklessState: persist ? () => persist(core) : undefined, onNativeMaterialized: nativeNotification,
     endpointName: "private", hostName: "private", capturePaneImage: async () => null,
     viewport: () => ({ width: 1200, height: 800, scale: 1 }) });
   // Never call start(): no HTTP/WebSocket listener, discovery, compositor or process.
@@ -172,4 +172,101 @@ test("acknowledged resize rejects incomplete, duplicate and nonfinite geometry b
       assert.deepEqual(events, []);
     }
   } finally { unsubscribe(); await stopUnstartedServer(server); }
+});
+
+
+test("durable resize survives post-save native callback and subscriber exceptions", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-resize-postsave-"));
+  const { core, surfaceId, server, resolveGeometry, geometry } = fixture(async (core) => {
+    await writePersistentStateFile(dir, "state.json", core.getPersistentState());
+  }, () => { throw new Error("post-save native callback failed"); });
+  resolveGeometry();
+  const pane = core.panesList(surfaceId).panes[0]!;
+  core.markNativePaneMaterialized(surfaceId, { focus: core.projectNativePaneFocus(surfaceId), op: "native_pane.host", panes: [{
+    id: String(pane.paneId), binding_id: "private-binding", content_id: "private-content", revision: 1 as never, target: "terminal",
+    process: { command: "never-launched", args: [] }, geometry: { coordinateSpace: "compositor_logical",
+      ...pane.geometry.contentViewport, geometryRevision: pane.geometry.geometryRevision, paneInstanceId: pane.geometry.paneInstanceId,
+      surfaceEpoch: pane.geometry.surfaceEpoch, topologyEpoch: pane.geometry.topologyEpoch },
+  }] });
+  const expected = core.getRendererWindowState(surfaceId);
+  const seam = server as unknown as { applyResolvedNativePaneGeometry: (...args: unknown[]) => Promise<void>; rollbackNativePaneGeometry: (...args: unknown[]) => Promise<void> };
+  // Inject native transport only; real projection/validation/bookkeeping still runs.
+  seam.applyResolvedNativePaneGeometry = async () => {};
+  let rollbacks = 0;
+  seam.rollbackNativePaneGeometry = async () => { rollbacks++; };
+  const badSubscriber = core.subscribe(() => { throw new Error("post-save subscriber failed"); });
+  const events: string[] = [];
+  let rendererReadback = expected;
+  const goodSubscriber = core.subscribe((event) => {
+    events.push(event.type);
+    if (event.type === "surface-changed") rendererReadback = core.getRendererWindowState(surfaceId);
+  });
+  try {
+    assert.equal(await server.resizeSplit(surfaceId, [], [3, 1], expected, geometry), true);
+    assert.equal(rollbacks, 0);
+    assert.equal(rendererReadback.topologyRevision, expected.topologyRevision + 1);
+    assert.equal(events.filter((type) => type === "topology-changed").length, 1);
+    const loaded = await loadPersistentStateFile(dir, "state.json");
+    assert.equal(loaded.writeGuard, false);
+    assert.deepEqual(loaded.state, core.getPersistentState());
+    const restored = new SurfaceCore({ persistentState: loaded.state });
+    restored.restorePersistedSurfaces("reload", { width: 1200, height: 800, scale: 1 });
+    assert.deepEqual(restored.getRendererWindowState(surfaceId).layout, rendererReadback.layout);
+  } finally { badSubscriber(); goodSubscriber(); await stopUnstartedServer(server); await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test("uncertain save reconciliation publishes captured topology once and fresh retries have no native effects", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-resize-reconcile-"));
+  const { core, surfaceId, server, expected, geometry } = fixture(async () => { throw new PersistentStateOutcomeUnknownError(new Error("selector uncertain")); });
+  let nativeApplications = 0;
+  const seam = server as unknown as { applyResolvedNativePaneGeometry: (...args: unknown[]) => Promise<void> };
+  seam.applyResolvedNativePaneGeometry = async () => { nativeApplications++; };
+  const topologies: unknown[] = [];
+  const unsubscribe = core.subscribe((event) => { if (event.type === "topology-changed") topologies.push(event.topology); });
+  try {
+    assert.equal(await server.resizeSplit(surfaceId, [], [3, 1], expected, geometry), false);
+    const candidate = core.getPersistentState();
+    const fresh = core.getRendererWindowState(surfaceId);
+    assert.equal(await server.resizeSplit(surfaceId, [], [1, 3], fresh, geometry), false);
+    assert.equal(nativeApplications, 1, "fresh expectation is fenced before materialization");
+    assert.deepEqual(core.getPersistentState(), candidate);
+    assert.deepEqual(topologies, []);
+    await writePersistentStateFile(dir, "state.json", candidate);
+    const loaded = await loadPersistentStateFile(dir, "state.json");
+    assert.equal(loaded.writeGuard, false);
+    assert.ok(loaded.state);
+    server.resumeAfterVerifiedPersistence();
+    assert.equal(core.publishVerifiedTransactionEvents(loaded.state, () => {}), true);
+    assert.equal(core.publishVerifiedTransactionEvents(loaded.state, () => {}), false);
+    assert.equal(topologies.length, 1);
+    assert.deepEqual(topologies[0], core.publicTopologyState(surfaceId));
+  } finally { unsubscribe(); await stopUnstartedServer(server); await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test("held core transaction, network-equivalent mutation and same-surface renderer resize settle without queue inversion", async () => {
+  const { core, surfaceId, server, expected, geometry } = fixture();
+  let release!: () => void;
+  let started!: () => void;
+  const barrier = new Promise<void>((resolve) => { release = resolve; });
+  const entered = new Promise<void>((resolve) => { started = resolve; });
+  const earlier = core.transactionAsync(async () => { started(); await barrier; });
+  await entered;
+  const seam = server as unknown as { runSurfaceMutation: <T>(id: string, op: () => T) => Promise<T> };
+  const network = core.transactionAsync(() => seam.runSurfaceMutation(surfaceId, () => {
+    core.paneSplit(surfaceId, { paneId: 1, count: 2, direction: "horizontal", newPaneIds: [3], newPaneLabels: [3] });
+    return true;
+  }));
+  const resize = server.resizeSplit(surfaceId, [], [3, 1], expected, geometry);
+  await Promise.resolve();
+  release();
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const result = await Promise.race([Promise.all([earlier, network, resize]), new Promise<never>((_, reject) => {
+      timeout = setTimeout(() => reject(new Error("queue inversion blocked both legitimate operations")), 1000);
+    })]);
+    assert.equal(result[1], true);
+    assert.equal(result[2], false, "resize revalidates after legitimate network topology change");
+    assert.deepEqual(core.activePaneIds(surfaceId).sort(), [1, 2, 3]);
+    assert.equal(core.getRendererWindowState(surfaceId).topologyRevision, expected.topologyRevision + 1);
+  } finally { clearTimeout(timeout); release(); await stopUnstartedServer(server); }
 });

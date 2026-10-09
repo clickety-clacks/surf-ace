@@ -957,7 +957,7 @@ export class SurfaceWsServer {
         });
         return;
       case "topology-changed": {
-        const topology = this.core.publicTopologyState(event.surfaceId);
+        const topology = event.topology ?? this.core.publicTopologyState(event.surfaceId);
         await this.ingestLocklessSurfaceConsumable(
           event.surfaceId,
           "topology",
@@ -3605,43 +3605,7 @@ export class SurfaceWsServer {
   }
 
   async resizeSplit(surfaceId: string, path: number[], weights: number[], expected?: SplitResizeExpectation, geometry?: SplitResizeGeometry[]): Promise<boolean> {
-    return await this.runSurfaceMutation(surfaceId, async () => {
-      // Validate after earlier surface mutations, at the authority boundary.
-      const current = this.core.getRendererWindowState(surfaceId);
-      if (expected && !splitResizeMatches(current, expected)) return false;
-      if (splitResizeIsNoOp(current.layout, path, weights)) return true;
-      if (expected) {
-        if (!splitResizeGeometryIsValid(geometry, this.core.activePaneIds(surfaceId))) return false;
-        const nativeIds = this.core.panesList(surfaceId).panes.filter((pane) => pane.externalNative).map((pane) => Number(pane.paneId));
-        const rollbackNativeGeometry = nativeIds.length ? this.core.projectCurrentNativePaneGeometry(surfaceId, nativeIds) : null;
-        let appliedNative = false;
-        try {
-          // Existing transaction boundary defers subscriber/event delivery until the
-          // candidate geometry is accepted and its exact state is durably saved.
-          await this.core.transactionAsync(async () => {
-            this.core.resizeSplit(surfaceId, path, weights);
-            const identity = this.core.resolvedPaneGeometryIdentity(surfaceId);
-            for (const entry of geometry) this.core.updatePaneSnapshot(surfaceId, entry.paneId, { ...identity, bounds: entry.bounds });
-            if (this.core.missingResolvedPaneGeometry(surfaceId, this.core.activePaneIds(surfaceId), identity).length) {
-              throw new SurfaceCoreError("render_failed", "Resize geometry is unresolved");
-            }
-            const materialization = nativeIds.length ? this.core.projectCurrentNativePaneGeometry(surfaceId, nativeIds) : null;
-            await this.applyResolvedNativePaneGeometry(surfaceId, materialization, "pane.resize", rollbackNativeGeometry);
-            appliedNative = true;
-            await this.persistLocklessState();
-            this.markUpdatedNativePaneGeometry(surfaceId, materialization);
-          });
-          return true;
-        } catch (error) {
-          // Unknown selector outcome retains the candidate for reconciliation.
-          // A definite rejection restores authority through transactionAsync.
-          if (appliedNative && !(error instanceof PersistentStateOutcomeUnknownError)) {
-            await this.rollbackNativePaneGeometry(surfaceId, rollbackNativeGeometry, "pane.resize", "persistence rejected");
-          }
-          persistentServerDiagnostic("warn", "pane_resize_commit_failed", { surface_id: surfaceId, ...errorDiagnosticFields(error) });
-          return false;
-        }
-      }
+    if (!expected) return await this.runSurfaceMutation(surfaceId, async () => {
       const nativePaneIds = this.core.panesList(surfaceId).panes
         .filter((pane) => pane.externalNative)
         .map((pane) => Number(pane.paneId));
@@ -3667,6 +3631,47 @@ export class SurfaceWsServer {
         return false;
       }
     });
+    let rollbackNativeGeometry: NativePaneMaterialization | null = null;
+    let materialization: NativePaneMaterialization | null = null;
+    let appliedNative = false;
+    try {
+      // Match network/lifecycle order: global core transaction, then surface queue.
+      const accepted = await this.core.transactionAsync(() => this.runSurfaceMutation(surfaceId, async () => {
+        if (this.persistenceOutcomeUnknown) return false;
+        const current = this.core.getRendererWindowState(surfaceId);
+        if (!splitResizeMatches(current, expected)) return false;
+        if (splitResizeIsNoOp(current.layout, path, weights)) return true;
+        if (!splitResizeGeometryIsValid(geometry, this.core.activePaneIds(surfaceId))) return false;
+        const nativeIds = this.core.panesList(surfaceId).panes.filter((pane) => pane.externalNative).map((pane) => Number(pane.paneId));
+        rollbackNativeGeometry = nativeIds.length ? this.core.projectCurrentNativePaneGeometry(surfaceId, nativeIds) : null;
+        this.core.resizeSplit(surfaceId, path, weights);
+        const identity = this.core.resolvedPaneGeometryIdentity(surfaceId);
+        for (const entry of geometry) this.core.updatePaneSnapshot(surfaceId, entry.paneId, { ...identity, bounds: entry.bounds });
+        if (this.core.missingResolvedPaneGeometry(surfaceId, this.core.activePaneIds(surfaceId), identity).length) {
+          throw new SurfaceCoreError("render_failed", "Resize geometry is unresolved");
+        }
+        materialization = nativeIds.length ? this.core.projectCurrentNativePaneGeometry(surfaceId, nativeIds) : null;
+        await this.applyResolvedNativePaneGeometry(surfaceId, materialization, "pane.resize", rollbackNativeGeometry);
+        appliedNative = true;
+        // All persistent native bookkeeping is finalized before saving. Callback
+        // notification is post-commit and cannot turn a saved resize into rejection.
+        this.markUpdatedNativePaneGeometry(surfaceId, materialization, false);
+        await this.persistLocklessState();
+        return true;
+      }), { retainUncertainEvents: true,
+        onNotificationError: (error) => persistentServerDiagnostic("warn", "pane_resize_notification_failed", { surface_id: surfaceId, ...errorDiagnosticFields(error) }) });
+      if (accepted && materialization) {
+        try { this.onNativeMaterialized?.(surfaceId, materialization); }
+        catch (error) { persistentServerDiagnostic("warn", "pane_resize_notification_failed", { surface_id: surfaceId, ...errorDiagnosticFields(error) }); }
+      }
+      return accepted;
+    } catch (error) {
+      if (appliedNative && !(error instanceof PersistentStateOutcomeUnknownError)) {
+        await this.rollbackNativePaneGeometry(surfaceId, rollbackNativeGeometry, "pane.resize", "pre-commit failure");
+      }
+      persistentServerDiagnostic("warn", "pane_resize_commit_failed", { surface_id: surfaceId, ...errorDiagnosticFields(error) });
+      return false;
+    }
   }
 
   async navigateHistoryAfterNativeRelease(
@@ -4755,6 +4760,7 @@ export class SurfaceWsServer {
   private markUpdatedNativePaneGeometry(
     surfaceId: string,
     materialization: NativePaneMaterialization | null,
+    notify = true,
   ): void {
     if (!materialization) {
       return;
@@ -4764,7 +4770,7 @@ export class SurfaceWsServer {
       throw new SurfaceCoreError("render_failed", layoutFailure);
     }
     this.core.markNativePaneMaterialized(surfaceId, materialization);
-    this.onNativeMaterialized?.(surfaceId, materialization);
+    if (notify) this.onNativeMaterialized?.(surfaceId, materialization);
   }
 
   private async releaseNativePaneAfterFailedHost(

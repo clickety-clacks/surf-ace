@@ -336,7 +336,7 @@ export type CoreEvent =
   | { name: string | null; paneId: number; surfaceId: string; type: "pane-renamed" }
   | { paneId: number; surfaceId: string; type: "annotation-committed" }
   | { contentId: string | null; direction: "back" | "forward"; paneId: number; revision: number; surfaceId: string; type: "history-navigated" }
-  | { surfaceId: string; type: "topology-changed" }
+  | { surfaceId: string; type: "topology-changed"; topology?: ReturnType<SurfaceCore["publicTopologyState"]> }
   | { paneId: number; surfaceId: string; type: "drawing-dirty" };
 
 export class SurfaceCoreError extends Error {
@@ -666,6 +666,7 @@ export class SurfaceCore {
   private readonly confirmedPaneLabels = new Map<string, { pane: PaneState; label: number }>();
   private readonly listeners = new Set<(event: CoreEvent) => void>();
   private pendingEvents: CoreEvent[] | null = null;
+  private deferredVerifiedEvents: { state: string; events: CoreEvent[] } | null = null;
   private readonly transactionContext = new AsyncLocalStorage<symbol>();
   private activeAsyncTransaction: symbol | null = null;
   private transactionTail: Promise<void> = Promise.resolve();
@@ -764,7 +765,10 @@ export class SurfaceCore {
     }
   }
 
-  async transactionAsync<T>(operation: () => Promise<T>): Promise<T> {
+  async transactionAsync<T>(operation: () => Promise<T>, committed?: {
+    retainUncertainEvents: boolean;
+    onNotificationError: (error: unknown) => void;
+  }): Promise<T> {
     if (this.activeAsyncTransaction !== null &&
         this.transactionContext.getStore() === this.activeAsyncTransaction) {
       return await operation();
@@ -784,31 +788,59 @@ export class SurfaceCore {
     const token = Symbol("surface transaction");
     this.activeAsyncTransaction = token;
     try {
-      return await this.transactionContext.run(token, () => this.transactionAsyncExclusive(operation));
+      return await this.transactionContext.run(token, () => this.transactionAsyncExclusive(operation, committed));
     } finally {
       this.activeAsyncTransaction = null;
       release();
     }
   }
 
-  private async transactionAsyncExclusive<T>(operation: () => Promise<T>): Promise<T> {
+  private async transactionAsyncExclusive<T>(operation: () => Promise<T>, committed?: {
+    retainUncertainEvents: boolean;
+    onNotificationError: (error: unknown) => void;
+  }): Promise<T> {
     const before = this.getPersistentState();
     this.pendingEvents = [];
+    let result: T;
     try {
-      const result = await operation();
-      const events = this.pendingEvents;
-      this.pendingEvents = null;
-      for (const event of events) this.deliver(event);
-      return result;
+      result = await operation();
     } catch (error) {
-      // An ambiguous selector commit may already contain the new generation.
-      // Keep the exact candidate in memory for read-only display and later
-      // reconciliation; rolling it back here would erase operation identity.
       if ((error as { name?: string } | null)?.name !== "PersistentStateOutcomeUnknownError") {
         this.restorePersistentState(before);
+      } else if (committed?.retainUncertainEvents) {
+        this.deferredVerifiedEvents = { state: JSON.stringify(this.getPersistentState()), events: this.pendingEvents };
       }
       this.pendingEvents = null;
       throw error;
+    }
+    // The operation has crossed its commit boundary. A subscriber exception
+    // cannot undo an already durable generation.
+    const events = this.pendingEvents;
+    this.pendingEvents = null;
+    if (committed) {
+      for (const event of events) this.deliverCommitted(event, committed.onNotificationError);
+    } else {
+      // Preserve the legacy notification/rollback policy for other callers.
+      try { for (const event of events) this.deliver(event); }
+      catch (error) { this.restorePersistentState(before); throw error; }
+    }
+    return result;
+  }
+
+  publishVerifiedTransactionEvents(state: PersistentSurfaceState, onError: (error: unknown) => void): boolean {
+    const pending = this.deferredVerifiedEvents;
+    if (!pending || pending.state !== JSON.stringify(state)) return false;
+    // Retire before invoking callbacks: repeated reconciliation cannot duplicate.
+    this.deferredVerifiedEvents = null;
+    for (const event of pending.events) this.deliverCommitted(event, onError);
+    return true;
+  }
+
+  private deliverCommitted(event: CoreEvent, onError: (error: unknown) => void): void {
+    for (const listener of this.listeners) {
+      try { listener(event); } catch (error) {
+        try { onError(error); } catch { /* notification reporting cannot reject a commit */ }
+      }
     }
   }
 
@@ -3147,7 +3179,7 @@ export class SurfaceCore {
     surface.topologyRevision = Math.max(1, surface.topologyRevision + 1);
     bumpGeometryRevision(surface);
     this.emit({ surfaceId, type: "surface-changed" });
-    this.emit({ surfaceId, type: "topology-changed" });
+    this.emit({ surfaceId, type: "topology-changed", topology: this.publicTopologyState(surfaceId) });
   }
 
   paneClose(surfaceId: string, paneId: number): PaneCloseResponse["payload"] {

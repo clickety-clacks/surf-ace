@@ -519,12 +519,15 @@ async function reconcilePersistence(): Promise<void> {
     // durable. Independent local interaction may have advanced in-memory
     // state meanwhile; queue its save after reopening the persistence seam.
     const changedWhilePaused = JSON.stringify(core.getPersistentState()) !== JSON.stringify(uncertainStateCandidate);
+    const verifiedCandidate = uncertainStateCandidate;
     persistentStateOutcomeUnknown = null;
     uncertainStateCandidate = null;
     persistentStateWriteGuard = false;
     persistenceRetryDelayMs = 1_000;
     core.resumeAdmissionAfterVerifiedPersistence();
     server.resumeAfterVerifiedPersistence();
+    core.publishVerifiedTransactionEvents(verifiedCandidate, (error) =>
+      clientWarn("state_reconciliation_notification_failed", errorDiagnosticFields(error)));
     clientInfo("state_persistence_reconciled");
     for (const surface of core.listSurfaces()) broadcastSurfaceState(surface.surfaceId);
     if (changedWhilePaused) void persistState().catch((error) => {
