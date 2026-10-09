@@ -1559,7 +1559,7 @@ export class SurfaceWsServer {
           this.core.locklessAuthority.admitTargetApplyWorkItem({
             controllerInstanceId: session.controllerInstanceId,
             currentSurfaceBase:
-              this.core.captureSurfaceTombstonePayload(
+              this.core.captureSurfaceRecoverableBase(
                 request.payload.surfaceId,
               ),
             intentCommitSequence: audit.commitSequence,
