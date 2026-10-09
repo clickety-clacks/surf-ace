@@ -68,11 +68,27 @@ async function run() {
     } });
     win.webContents.on("console-message", (_event, details) => { if (details.level === "error") errors.push(details.message); });
     const evaluate = (code) => win.webContents.executeJavaScript(code);
+    const printGuestDiagnostics = async (label) => {
+      let timer;
+      try {
+        const diagnostics = await Promise.race([
+          evaluate(`Promise.all([...document.querySelectorAll('webview')].map(async(v,i)=>{
+            const result={index:i,connected:v.isConnected,ready:v.dataset.guestReady??null,attachmentCount:window.attachCounts?.[i]??null};
+            try{result.webContentsId=v.getWebContentsId();result.loading=v.isLoading();
+              result.guest=await v.executeJavaScript('({zoom:document.documentElement.style.zoom,grid:window.grid,refits:window.refits,token:window.token})');
+            }catch(error){result.error=String(error)}return result}))`),
+          new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("diagnostics exceeded 2 seconds")), 2000); }),
+        ]);
+        console.log(label + "=" + JSON.stringify(diagnostics));
+      } catch (error) { console.log(label + "=" + JSON.stringify({ error: String(error) })); }
+      finally { clearTimeout(timer); }
+    };
     const wait = async (code) => {
       for (let i = 0; i < 100; i++) {
         if (await evaluate(code)) return;
         await new Promise((resolve) => setTimeout(resolve, 50));
       }
+      await printGuestDiagnostics("GUEST_TIMEOUT_DIAGNOSTICS");
       throw new Error(`Timed out: ${code}`);
     };
     await win.loadFile(fileURLToPath(new URL("../dist/renderer/index.html", import.meta.url)));
@@ -80,6 +96,7 @@ async function run() {
     await evaluate(`window.hosts=[...document.querySelectorAll('webview')];window.roots=[...document.querySelectorAll('.pane-shell')];
       window.hostParents=roots.map(r=>r.parentElement);window.attachCounts=hosts.map(()=>0);
       hosts.forEach((v,i)=>v.addEventListener('did-attach',()=>attachCounts[i]++));void 0`);
+    await printGuestDiagnostics("GUEST_INITIAL_DIAGNOSTICS");
     const ids = await evaluate("hosts.map(v=>v.getWebContentsId())");
     const tokens = await evaluate("Promise.all(hosts.map(v=>v.executeJavaScript('window.token')))");
     assert.ok(tokens.every((token) => typeof token === "number"));
@@ -94,7 +111,7 @@ async function run() {
     const before = await evaluate("Promise.all(hosts.map(v=>v.executeJavaScript('({zoom:document.documentElement.style.zoom,grid,refits,ticks})')))");
     await evaluate("fixtureKeyboard({action:'increase',paneId:1,type:'content-scale'})");
     console.log("ZOOM_BEFORE=" + JSON.stringify(before));
-    console.log("ZOOM_AFTER_INTENT=" + JSON.stringify(await evaluate("hosts[0].executeJavaScript('({zoom:document.documentElement.style.zoom,grid,refits})')")));
+    await printGuestDiagnostics("GUEST_AFTER_ZOOM_INTENT");
     await wait("hosts[0].executeJavaScript(\"Math.abs(Number(document.documentElement.style.zoom)-0.935)<1e-6\")");
     const zoomed = await evaluate("Promise.all(hosts.map(v=>v.executeJavaScript('({zoom:document.documentElement.style.zoom,grid,refits,ticks})')))");
     assert.ok(zoomed[0].refits > before[0].refits);
