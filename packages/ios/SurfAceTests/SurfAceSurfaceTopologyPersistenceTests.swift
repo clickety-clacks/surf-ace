@@ -28,6 +28,78 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
     }
 
     @MainActor
+    func testMountedPaneCloseFillsVacatedRegionWithoutReloadingSurvivors() async throws {
+        let name = "SurfAcePaneCloseFixture.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        defer { defaults.removePersistentDomain(forName: name) }
+        let runtime = SurfAceRuntime(userDefaults: defaults, enableFleetDiscovery: false,
+                                     isolatedTestLoopback: true)
+        let surface = runtime.registerSurface(sceneKey: name)
+        let panes = (1...4).map { SurfAcePaneModel(paneId: $0, paneLabel: $0) }
+        for pane in panes {
+            pane.currentEntry = SurfAcePaneEntry.from(frame: SurfAceFrame(
+                contentId: "close-\(pane.paneId)", revision: 1, contentType: .html,
+                payload: .html(html: "<html><head><title>close-\(pane.paneId)</title></head><body><script>window.sessionToken=Math.random().toString();</script>Pane \(pane.paneId)</body></html>", baseURL: nil),
+                reloadSource: nil, title: "Pane", scrollable: true, interactive: true))
+        }
+        surface.panesById = Dictionary(uniqueKeysWithValues: panes.map { ($0.paneId, $0) })
+        surface.paneLayout = .split(direction: .vertical, children: [
+            .leaf(1, weight: 0.24), .leaf(2, weight: 0.26),
+            .split(direction: .horizontal,
+                   children: [.leaf(3, weight: 0.5), .leaf(4, weight: 0.5)], weight: 0.5),
+        ])
+
+        let host = UIHostingController(rootView: SurfAceWindowView(runtime: runtime, surface: surface))
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previousKeyWindow = scene.windows.first(where: \.isKeyWindow)
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 1000, height: 800)
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+            previousKeyWindow?.makeKey()
+        }
+        host.view.frame = window.bounds
+        host.view.layoutIfNeeded()
+        let initialViews = popoutWebViews(in: host.view)
+        XCTAssertEqual(initialViews.count, 4)
+        let ready = initialViews.map { _ in expectation(description: "local pane page loaded") }
+        let observations = zip(initialViews, ready).map { view, signal in
+            view.observe(\.title, options: [.initial, .new]) { view, _ in
+                if view.title?.hasPrefix("close-") == true { signal.fulfill() }
+            }
+        }
+        await fulfillment(of: ready, timeout: 10)
+        observations.forEach { $0.invalidate() }
+        let first = try XCTUnwrap(initialViews.first { $0.title == "close-1" })
+        let second = try XCTUnwrap(initialViews.first { $0.title == "close-2" })
+        let firstToken = try XCTUnwrap(try await first.evaluateJavaScript("window.sessionToken") as? String)
+        let secondToken = try XCTUnwrap(try await second.evaluateJavaScript("window.sessionToken") as? String)
+        let available = initialViews.map { $0.convert($0.bounds, to: window) }
+            .reduce(CGRect.null) { $0.union($1) }
+
+        // Project the accepted close result: panes 3 and 4 and their obsolete
+        // split are gone; surviving relative weights still sum to only 0.5.
+        surface.panesById.removeValue(forKey: 3)
+        surface.panesById.removeValue(forKey: 4)
+        surface.paneLayout = .split(direction: .vertical,
+                                    children: [.leaf(1, weight: 0.24), .leaf(2, weight: 0.26)])
+        surface.topologyEpoch += 1
+        await waitForPopoutFrame(first, in: window,
+                                expected: surfAceSplitChildBounds(parent: available, direction: .vertical,
+                                                                  weights: [0.24, 0.26], index: 0))
+        await waitForPopoutFrame(second, in: window,
+                                expected: surfAceSplitChildBounds(parent: available, direction: .vertical,
+                                                                  weights: [0.24, 0.26], index: 1))
+        XCTAssertEqual(Set(popoutWebViews(in: host.view).map(ObjectIdentifier.init)),
+                       Set([first, second].map(ObjectIdentifier.init)))
+        XCTAssertEqual(try await first.evaluateJavaScript("window.sessionToken") as? String, firstToken)
+        XCTAssertEqual(try await second.evaluateJavaScript("window.sessionToken") as? String, secondToken)
+    }
+
+    @MainActor
     func testPopoutGeometryAndReconciliationDoNotReplayTopology() {
         let portrait = CGRect(x: 0, y: 0, width: 600, height: 900)
         let right = surfAceSplitChildBounds(parent: portrait, direction: .vertical,
