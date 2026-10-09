@@ -1,0 +1,92 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { compositorPaneIdForSurface, type NativePaneMaterialization } from "../src/native-pane-bridge.js";
+import {
+  acknowledgePanePresentation, assertPanePresentationAcknowledged,
+  panePresentationRequest, PANE_PRESENTATION_CAPABILITY,
+  type PanePresentationControlRequest,
+} from "../src/pane-presentation.js";
+
+function materialization(): NativePaneMaterialization {
+  return {
+    op: "native_pane.update",
+    focus: { surfaceId: "s", surfaceEpoch: "s:1", topologyEpoch: 2 as never,
+      geometryRevision: 3 as never, focusRevision: 4, focusedPaneId: "7", focusedPaneInstanceId: "lineage-7" },
+    panes: [{ id: "7", revision: 1 as never, binding_id: "binding-7",
+      geometry: { coordinateSpace: "compositor_logical", x: 0, y: 0, width: 400, height: 300,
+        geometryRevision: 3 as never, topologyEpoch: 2 as never, surfaceEpoch: "s:1", paneInstanceId: "lineage-7" } }],
+  };
+}
+const overlay = { x: 10, y: 10, width: 980, height: 680 };
+const content = { x: 12, y: 42, width: 976, height: 646 };
+function nativeRequest() {
+  return panePresentationRequest(materialization(), 1, { paneId: 7, paneLineageId: "lineage-7" }, overlay, content);
+}
+function acknowledged(request: PanePresentationControlRequest) {
+  const { version, request_revision, presentation_generation, selected } = request.request;
+  return { ok: true, pane_presentation: structuredClone({ version, request_revision, presentation_generation, selected }) };
+}
+test("presentation native wire separates generation lineage from live host binding", () => {
+  const request = nativeRequest();
+  const id = compositorPaneIdForSurface("s", "7");
+  assert.equal(request.type, "pane_presentation.set");
+  assert.equal(request.request.presentation_generation.pane_instances![id], "lineage-7");
+  assert.deepEqual(request.request.selected, { host: "native", renderer_pane_id: 7,
+    pane_lineage_id: "lineage-7", native_pane_id: id, native_pane_instance_id: "binding-7" });
+  assert.equal(materialization().panes[0]!.geometry.width, 400);
+  assert.doesNotThrow(() => assertPanePresentationAcknowledged(acknowledged(request), request));
+});
+test("mixed renderer selection and Restore have distinct explicit acknowledged identities", () => {
+  const mixed = panePresentationRequest(materialization(), 2, { paneId: 9, paneLineageId: "lineage-9" }, overlay, content);
+  assert.deepEqual(mixed.request.selected, { host: "renderer", renderer_pane_id: 9, pane_lineage_id: "lineage-9" });
+  const restore = panePresentationRequest(materialization(), 3, null, null, null);
+  assert.equal(restore.request.selected, null);
+  assert.throws(() => assertPanePresentationAcknowledged(acknowledged(mixed), restore), /exact/);
+  assert.throws(() => panePresentationRequest(materialization(), 4, null, overlay, null), /Restore/);
+});
+test("unsupported capability never sends a mutating presentation request", async () => {
+  for (const capabilities of [{}, { [PANE_PRESENTATION_CAPABILITY]: 2 }, { [PANE_PRESENTATION_CAPABILITY]: "1" }]) {
+    const sent: unknown[] = [];
+    await assert.rejects(acknowledgePanePresentation(async (request) => {
+      sent.push(request); return { ok: true, status: { capabilities } };
+    }, nativeRequest()), /unavailable/);
+    assert.deepEqual(sent, [{ type: "get_status" }]);
+  }
+});
+test("ok without exact version revision selection and generation acknowledgement fails closed", () => {
+  const request = nativeRequest();
+  assert.throws(() => assertPanePresentationAcknowledged({ ok: true }, request), /exact/);
+  for (const field of ["version", "request_revision", "selected", "presentation_generation"] as const) {
+    const response = acknowledged(request);
+    (response.pane_presentation as Record<string, unknown>)[field] = null;
+    assert.throws(() => assertPanePresentationAcknowledged(response, request), /exact/);
+  }
+  const foreign = acknowledged(request);
+  foreign.pane_presentation.presentation_generation.surface_epoch = "foreign";
+  assert.throws(() => assertPanePresentationAcknowledged(foreign, request), /exact/);
+});
+test("pending request is copied before capability await and transport cannot mutate acknowledgement authority", async () => {
+  const request = nativeRequest();
+  const expected = structuredClone(request);
+  await acknowledgePanePresentation(async (wire) => {
+    if (wire.type === "get_status") {
+      request.request.request_revision = 99;
+      return { ok: true, status: { capabilities: { [PANE_PRESENTATION_CAPABILITY]: 1 } } };
+    }
+    assert.deepEqual(wire, expected);
+    return acknowledged(expected);
+  }, request);
+  await assert.rejects(acknowledgePanePresentation(async (wire) => {
+    if (wire.type === "get_status") return { ok: true, status: { capabilities: { [PANE_PRESENTATION_CAPABILITY]: 1 } } };
+    if (wire.type !== "pane_presentation.set") throw new Error("unexpected command");
+    wire.request.request_revision += 1;
+    return acknowledged(wire);
+  }, nativeRequest()), /exact/);
+});
+test("foreign native lineage stale cohort and invalid rectangles are rejected before transport", () => {
+  assert.throws(() => panePresentationRequest(materialization(), 1, { paneId: 7, paneLineageId: "foreign" }, overlay, content), /lineage/);
+  const stale = materialization();
+  stale.panes[0]!.geometry.geometryRevision = 2 as never;
+  assert.throws(() => panePresentationRequest(stale, 1, { paneId: 9, paneLineageId: "lineage-9" }, overlay, content), /cohort/);
+  assert.throws(() => panePresentationRequest(materialization(), 1, { paneId: 7, paneLineageId: "lineage-7" }, overlay, { ...content, width: NaN }), /rectangles/);
+});
