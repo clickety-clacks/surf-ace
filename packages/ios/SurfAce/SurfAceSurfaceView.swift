@@ -559,6 +559,15 @@ struct SurfAceSplitPreviewState {
     }
 }
 
+private struct SurfAcePaneTreeChild: Identifiable {
+    let index: Int
+    let node: SurfAcePaneLayoutNode
+
+    // A pane's view state must follow its subtree when a preceding sibling is
+    // closed. An array offset would hand the removed pane's state to the next.
+    var id: String { node.layoutIdentity }
+}
+
 private struct SurfAcePaneTreeView: View {
     @Environment(\.scenePhase) private var scenePhase
     let runtime: SurfAceRuntime
@@ -602,14 +611,14 @@ private struct SurfAcePaneTreeView: View {
                 if direction == .vertical {
                     ZStack(alignment: .topLeading) {
                         HStack(spacing: 0) {
-                            ForEach(Array(children.enumerated()), id: \.offset) { index, child in
-                                SurfAcePaneTreeView(runtime: runtime, surface: surface, node: child,
+                            ForEach(children.enumerated().map { SurfAcePaneTreeChild(index: $0.offset, node: $0.element) }) { child in
+                                SurfAcePaneTreeView(runtime: runtime, surface: surface, node: child.node,
                                     surfaceBounds: surfaceBounds,
                                     tileBounds: surfAceSplitChildBounds(parent: tileBounds ?? surfaceBounds,
-                                        direction: direction, weights: weights, index: index),
-                                    poppedPaneId: poppedPaneId, onTogglePopout: onTogglePopout, path: path + [index])
-                                    .frame(width: max(1, proxy.size.width * weights[index] / totalWeight), height: proxy.size.height)
-                                    .zIndex(child.paneIDs.contains(poppedPaneId ?? -1) ? 1 : 0)
+                                        direction: direction, weights: weights, index: child.index),
+                                    poppedPaneId: poppedPaneId, onTogglePopout: onTogglePopout, path: path + [child.index])
+                                    .frame(width: max(1, proxy.size.width * weights[child.index] / totalWeight), height: proxy.size.height)
+                                    .zIndex(child.node.paneIDs.contains(poppedPaneId ?? -1) ? 1 : 0)
                             }
                         }
                         ForEach(Array(children.indices.dropLast()), id: \.self) { index in
@@ -651,14 +660,14 @@ private struct SurfAcePaneTreeView: View {
                 } else {
                     ZStack(alignment: .topLeading) {
                         VStack(spacing: 0) {
-                            ForEach(Array(children.enumerated()), id: \.offset) { index, child in
-                                SurfAcePaneTreeView(runtime: runtime, surface: surface, node: child,
+                            ForEach(children.enumerated().map { SurfAcePaneTreeChild(index: $0.offset, node: $0.element) }) { child in
+                                SurfAcePaneTreeView(runtime: runtime, surface: surface, node: child.node,
                                     surfaceBounds: surfaceBounds,
                                     tileBounds: surfAceSplitChildBounds(parent: tileBounds ?? surfaceBounds,
-                                        direction: direction, weights: weights, index: index),
-                                    poppedPaneId: poppedPaneId, onTogglePopout: onTogglePopout, path: path + [index])
-                                    .frame(width: proxy.size.width, height: max(1, proxy.size.height * weights[index] / totalWeight))
-                                    .zIndex(child.paneIDs.contains(poppedPaneId ?? -1) ? 1 : 0)
+                                        direction: direction, weights: weights, index: child.index),
+                                    poppedPaneId: poppedPaneId, onTogglePopout: onTogglePopout, path: path + [child.index])
+                                    .frame(width: proxy.size.width, height: max(1, proxy.size.height * weights[child.index] / totalWeight))
+                                    .zIndex(child.node.paneIDs.contains(poppedPaneId ?? -1) ? 1 : 0)
                             }
                         }
                         ForEach(Array(children.indices.dropLast()), id: \.self) { index in

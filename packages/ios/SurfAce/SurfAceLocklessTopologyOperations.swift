@@ -813,7 +813,14 @@ private extension SurfAceLocklessTopologyOperations {
         if case .string("pane") = object["type"], case .integer(paneId) = object["paneId"] { return nil }
         guard case .string("split") = object["type"], case .array(let children) = object["children"] else { return node }
         let remaining = children.compactMap { removingPane(from: $0, paneId: paneId) }
-        if remaining.count == 1 { return remaining[0] }
+        if remaining.count == 1 {
+            guard case .object(var survivor) = remaining[0] else { return remaining[0] }
+            // The surviving node now occupies this split's slot in its parent.
+            // Its former weight was relative to its removed siblings, not to
+            // the parent's other children.
+            survivor["weight"] = object["weight"]
+            return .object(survivor)
+        }
         object["children"] = .array(remaining)
         return .object(object)
     }
