@@ -58,10 +58,17 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
         let selection = SurfAcePanePopoutPresentation()
         let host = UIHostingController(rootView: SurfAceWindowView(
             runtime: runtime, surface: surface, presentation: selection))
-        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 600, height: 900))
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previousKeyWindow = scene.windows.first(where: \.isKeyWindow)
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 600, height: 900)
         window.rootViewController = host
         window.makeKeyAndVisible()
-        defer { window.isHidden = true; window.rootViewController = nil }
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+            previousKeyWindow?.makeKey()
+        }
         host.view.frame = window.bounds
         host.view.layoutIfNeeded()
         await Task.yield()
@@ -84,6 +91,7 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
             selection.paneId = 3
             await Task.yield()
             host.view.layoutIfNeeded()
+            XCTAssertEqual(selection.paneId, 3)
             let expandedFrame = surfAcePanePopoutBounds(in: surfaceFrame)
             await waitForPopoutFrame(selected, in: window, expected: expandedFrame)
             for (view, original) in zip(views, tiledFrames) where view !== selected {
