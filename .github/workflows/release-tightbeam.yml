@@ -71,6 +71,9 @@ jobs:
     runs-on: ubuntu-24.04
     container:
       image: rust:1.89.0-bookworm@sha256:948f9b08a66e7fe01b03a98ef1c7568292e07ec2e4fe90d88c07bb14563c84ff
+      credentials:
+        username: ${{ secrets.SURF_ACE_DOCKERHUB_USERNAME }}
+        password: ${{ secrets.SURF_ACE_DOCKERHUB_PULL_TOKEN }}
     defaults:
       run:
         shell: bash
