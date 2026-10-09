@@ -1206,6 +1206,7 @@ private struct SurfAcePaneView: View {
                 .accessibilityIdentifier("surf-ace-pane-popout-\(pane.paneId)")
                 .accessibilityValue(isPoppedOut ? "Expanded" : "Tiled")
                 .accessibilityFocused($popoutControlFocused)
+                .focusable(interactions: .activate)
                 .focused($popoutKeyboardFocused)
                 .padding(8)
             }
