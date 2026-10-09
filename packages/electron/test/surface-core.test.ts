@@ -518,7 +518,8 @@ test("pane presentation exposes displayed geometry but persists and restores til
   const paneId = applyProviderBootstrap(core, surface.surfaceId, 7);
   const tiled = { height: 300, width: 400, x: 0, y: 0 };
   updateResolvedPaneSnapshot(core, surface.surfaceId, paneId, {
-    bounds: tiled, viewport: { height: 300, width: 400, scale: 2 },
+    bounds: tiled, viewport: { contentSize: { height: 300, width: 400 },
+      visibleRect: { height: 300, width: 400, x: 0, y: 0 }, scrollOffset: { x: 0, y: 0 }, zoomLevel: 1 },
   });
   const identity = core.resolvedPaneGeometryIdentity(surface.surfaceId);
   const paneLineageId = core.panesList(surface.surfaceId).panes[0]!.paneLineageId;
@@ -539,12 +540,13 @@ test("pane presentation exposes displayed geometry but persists and restores til
   const presentation = {
     paneId, paneLineageId,
     snapshot: { ...identity, bounds: displayed, selection: null,
-      viewport: { height: 760, width: 1160, scale: 2 } },
+      viewport: { contentSize: { height: 760, width: 1160 },
+        visibleRect: { height: 760, width: 1160, x: 0, y: 0 }, scrollOffset: { x: 0, y: 0 }, zoomLevel: 1 } },
   };
   core.setPanePresentation(surface.surfaceId, presentation);
   assert.deepEqual(core.paneBounds(surface.surfaceId, paneId), displayed);
   assert.deepEqual(core.panesList(surface.surfaceId).panes[0]!.geometry.paneFrame, displayed);
-  assert.equal(core.captureSnapshot(surface.surfaceId, paneId).viewport.width, 1160);
+  assert.equal(core.captureSnapshot(surface.surfaceId, paneId).viewport.visibleRect.width, 1160);
   assert.deepEqual(nativePlan(), tiledPlan, "host plan must retain tiled geometry while compositor displays pop-out");
   assert.equal(core.validateNativePaneMaterializationLayout(surface.surfaceId, tiledPlan), null);
   assert.deepEqual(core.getPersistentState(), saved);
@@ -571,7 +573,8 @@ test("pane presentation is window-local and stale topology or lineage cannot re-
     paneId, paneLineageId: core.panesList(primary.surfaceId).panes[0]!.paneLineageId,
     snapshot: { ...core.resolvedPaneGeometryIdentity(primary.surfaceId),
       bounds: { height: 760, width: 1160, x: 20, y: 20 }, selection: null,
-      viewport: { height: 760, width: 1160, scale: 2 } },
+      viewport: { contentSize: { height: 760, width: 1160 },
+        visibleRect: { height: 760, width: 1160, x: 0, y: 0 }, scrollOffset: { x: 0, y: 0 }, zoomLevel: 1 } },
   };
   assert.throws(() => core.setPanePresentation(primary.surfaceId, {
     ...presentation, paneLineageId: "foreign-lineage",

@@ -3639,6 +3639,14 @@ export class SurfaceCore {
       this.panePresentations.delete(surfaceId);
       return;
     }
+    this.validatePanePresentation(surfaceId, presentation);
+    this.panePresentations.set(surfaceId, structuredClone(presentation));
+  }
+
+  validatePanePresentation(
+    surfaceId: string,
+    presentation: NonNullable<Parameters<SurfaceCore["setPanePresentation"]>[1]>,
+  ): void {
     const surface = this.getSurface(surfaceId);
     const pane = this.expectPane(surfaceId, presentation.paneId);
     const bounds = presentation.snapshot.bounds;
@@ -3650,7 +3658,15 @@ export class SurfaceCore {
         bounds.y + bounds.height > surface.viewport.height) {
       throw new SurfaceCoreError("invalid_payload", "Pane presentation identity or bounds are stale or invalid");
     }
-    this.panePresentations.set(surfaceId, structuredClone(presentation));
+    const viewport = presentation.snapshot.viewport;
+    const numbers = [viewport?.contentSize?.width, viewport?.contentSize?.height,
+      viewport?.visibleRect?.width, viewport?.visibleRect?.height, viewport?.visibleRect?.x,
+      viewport?.visibleRect?.y, viewport?.scrollOffset?.x, viewport?.scrollOffset?.y, viewport?.zoomLevel];
+    if (!numbers.every((value) => typeof value === "number" && Number.isFinite(value)) ||
+        viewport.zoomLevel <= 0 || viewport.contentSize.width < 0 || viewport.contentSize.height < 0 ||
+        viewport.visibleRect.width < 0 || viewport.visibleRect.height < 0) {
+      throw new SurfaceCoreError("invalid_payload", "Pane presentation viewport is invalid");
+    }
   }
 
   private currentPanePresentation(surface: SurfaceState) {

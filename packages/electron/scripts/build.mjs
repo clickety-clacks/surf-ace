@@ -70,6 +70,7 @@ await build({
     path.join(rootDir, "test", "lockless-ws-server.test.ts"),
     path.join(rootDir, "test", "native-pane-bridge.test.ts"),
     path.join(rootDir, "test", "pane-presentation.test.ts"),
+    path.join(rootDir, "test", "pane-presentation-coordinator.test.ts"),
     path.join(rootDir, "test", "overlay-rects.test.ts"),
     path.join(rootDir, "test", "persistent-state-file.test.ts"),
     path.join(rootDir, "test", "port-selection.test.ts"),
