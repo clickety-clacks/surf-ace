@@ -523,6 +523,7 @@ test("pane presentation exposes displayed geometry but persists and restores til
   });
   const identity = core.resolvedPaneGeometryIdentity(surface.surfaceId);
   const paneLineageId = core.panesList(surface.surfaceId).panes[0]!.paneLineageId;
+  assert.ok(paneLineageId, "the bootstrapped pane must have a confirmed lineage");
   const saved = core.getPersistentState();
   const nativePlan = () => core.projectNativePaneMaterialization(surface.surfaceId, {
     paneLineageId, requestId: "presentation-test", restoreReason: "resume_restore",
@@ -569,8 +570,10 @@ test("pane presentation is window-local and stale topology or lineage cannot re-
   resolvePaneSnapshot(core, primary.surfaceId, paneId);
   resolvePaneSnapshot(core, secondary.surfaceId, otherPaneId);
   const otherBounds = core.paneBounds(secondary.surfaceId, otherPaneId);
+  const paneLineageId = core.panesList(primary.surfaceId).panes[0]!.paneLineageId;
+  assert.ok(paneLineageId, "the bootstrapped pane must have a confirmed lineage");
   const presentation = {
-    paneId, paneLineageId: core.panesList(primary.surfaceId).panes[0]!.paneLineageId,
+    paneId, paneLineageId,
     snapshot: { ...core.resolvedPaneGeometryIdentity(primary.surfaceId),
       bounds: { height: 760, width: 1160, x: 20, y: 20 }, selection: null,
       viewport: { contentSize: { height: 760, width: 1160 },
