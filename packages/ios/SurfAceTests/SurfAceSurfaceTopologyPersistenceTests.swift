@@ -1,7 +1,229 @@
 import XCTest
+import SwiftUI
+import WebKit
 @testable import SurfAce
 
 final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
+    @MainActor
+    func testPopoutGeometryAndReconciliationDoNotReplayTopology() {
+        let portrait = CGRect(x: 0, y: 0, width: 600, height: 900)
+        let right = surfAceSplitChildBounds(parent: portrait, direction: .vertical,
+                                            weights: [1, 3], index: 1)
+        let nested = surfAceSplitChildBounds(parent: right, direction: .horizontal,
+                                             weights: [2, 1], index: 1)
+        XCTAssertEqual(nested, CGRect(x: 150, y: 600, width: 450, height: 300))
+        XCTAssertEqual(surfAcePanePopoutBounds(in: portrait),
+                       CGRect(x: 20, y: 20, width: 560, height: 860))
+        let landscape = CGRect(x: 0, y: 0, width: 900, height: 600)
+        XCTAssertEqual(surfAceSplitChildBounds(parent: landscape, direction: .vertical,
+                                              weights: [1, 3], index: 1).width, 675)
+        XCTAssertEqual(surfAcePanePopoutBounds(in: landscape).size, CGSize(width: 860, height: 560))
+        let selection = SurfAcePanePopoutPresentation()
+        let otherWindow = SurfAcePanePopoutPresentation()
+        selection.paneId = 3
+        otherWindow.paneId = 2
+        selection.reconcile(paneIds: [1, 2, 3], topologyChanged: false)
+        XCTAssertEqual(selection.paneId, 3)
+        selection.reconcile(paneIds: [1, 2], topologyChanged: false)
+        XCTAssertNil(selection.paneId)
+        XCTAssertEqual(otherWindow.paneId, 2)
+        selection.paneId = 2
+        selection.reconcile(paneIds: [1, 2], topologyChanged: true)
+        XCTAssertNil(selection.paneId)
+    }
+
+    @MainActor
+    func testMountedWebKitPopoutRetainsNestedPaneAndSiblingSessions() async throws {
+        let name = "SurfAcePopoutFixture.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        defer { defaults.removePersistentDomain(forName: name) }
+        // Never start this runtime: this fixture owns only local view state.
+        let runtime = SurfAceRuntime(userDefaults: defaults, enableFleetDiscovery: false,
+                                     isolatedTestLoopback: true)
+        let surface = runtime.registerSurface(sceneKey: name)
+        let panes = (1...3).map { SurfAcePaneModel(paneId: $0, paneLabel: $0) }
+        for pane in panes {
+            pane.currentEntry = SurfAcePaneEntry.from(frame: SurfAceFrame(
+                contentId: "popout-\(pane.paneId)", revision: 1, contentType: .html,
+                payload: .html(html: "<html><head><title>ready-\(pane.paneId)</title></head><body><script>window.counter=1;window.sessionToken=Math.random().toString();</script>Pane \(pane.paneId)</body></html>", baseURL: nil),
+                reloadSource: nil, title: "Pane", scrollable: true, interactive: true))
+        }
+        surface.panesById = Dictionary(uniqueKeysWithValues: panes.map { ($0.paneId, $0) })
+        surface.paneLayout = .split(direction: .vertical, children: [
+            .leaf(1, weight: 1), .split(direction: .horizontal,
+                children: [.leaf(2, weight: 2), .leaf(3, weight: 1)], weight: 3),
+        ])
+        let originalLayout = SurfAcePersistedPaneLayoutNode(from: surface.paneLayout)
+        let originalEpoch = surface.topologyEpoch
+        let selection = SurfAcePanePopoutPresentation()
+        let host = UIHostingController(rootView: SurfAceWindowView(
+            runtime: runtime, surface: surface, presentation: selection))
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previousKeyWindow = scene.windows.first(where: \.isKeyWindow)
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 600, height: 900)
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+            previousKeyWindow?.makeKey()
+        }
+        host.view.frame = window.bounds
+        host.view.layoutIfNeeded()
+        await Task.yield()
+        host.view.layoutIfNeeded()
+        let views = popoutWebViews(in: host.view)
+        XCTAssertEqual(views.count, 3)
+        let ready = views.map { _ in expectation(description: "WebKit initial page ready") }
+        let observations = zip(views, ready).map { view, signal in
+            view.observe(\.title, options: [.initial, .new]) { view, _ in
+                if view.title?.hasPrefix("ready-") == true { signal.fulfill() }
+            }
+        }
+        await fulfillment(of: ready, timeout: 10)
+        observations.forEach { $0.invalidate() }
+        let tokens = try await popoutSessionTokens(views)
+        let selected = try XCTUnwrap(views.first { $0.title == "ready-3" })
+        var tiledFrames = views.map { $0.convert($0.bounds, to: window) }
+        var surfaceFrame = tiledFrames.reduce(CGRect.null) { $0.union($1) }
+        for index in 0..<4 {
+            selection.paneId = 3
+            await Task.yield()
+            host.view.layoutIfNeeded()
+            XCTAssertEqual(selection.paneId, 3)
+            let expandedFrame = surfAcePanePopoutBounds(in: surfaceFrame)
+            await waitForPopoutFrame(selected, in: window, expected: expandedFrame)
+            for (view, original) in zip(views, tiledFrames) where view !== selected {
+                XCTAssertEqual(view.convert(view.bounds, to: window), original,
+                               "covered sibling stays in its original tile")
+            }
+            // These points include territory outside pane 3's original tile.
+            for point in [CGPoint(x: expandedFrame.minX + 30, y: expandedFrame.minY + 80),
+                          CGPoint(x: expandedFrame.midX, y: expandedFrame.midY)] {
+                let hit = window.hitTest(point, with: nil)
+                XCTAssertTrue(hit === selected || hit?.isDescendant(of: selected) == true,
+                              "expanded pane owns input across covered sibling tiles")
+            }
+            XCTAssertEqual(Set(popoutWebViews(in: host.view).map(ObjectIdentifier.init)),
+                           Set(views.map(ObjectIdentifier.init)))
+            for view in views { _ = try await view.evaluateJavaScript("++window.counter") }
+            let currentTokens = try await popoutSessionTokens(views)
+            XCTAssertEqual(currentTokens, tokens)
+            if index == 1 {
+                // Resize while expanded: derive both overlay and eventual Restore
+                // from the current surface, never the previous pixel rectangles.
+                let sibling = try XCTUnwrap(views.first { $0 !== selected })
+                let oldWidth = sibling.bounds.width
+                window.frame = CGRect(x: 0, y: 0, width: 900, height: 600)
+                host.view.frame = window.bounds
+                host.view.layoutIfNeeded()
+                let resized = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                    sibling.bounds.width != oldWidth
+                }, object: nil)
+                await fulfillment(of: [resized], timeout: 5)
+                surfaceFrame = views.filter { $0 !== selected }.map { $0.convert($0.bounds, to: window) }
+                    .reduce(CGRect.null) { $0.union($1) }
+                await waitForPopoutFrame(selected, in: window,
+                                        expected: surfAcePanePopoutBounds(in: surfaceFrame))
+                tiledFrames = views.map { view in
+                    if view !== selected { return view.convert(view.bounds, to: window) }
+                    let right = surfAceSplitChildBounds(parent: surfaceFrame, direction: .vertical,
+                                                        weights: [1, 3], index: 1)
+                    return surfAceSplitChildBounds(parent: right, direction: .horizontal,
+                                                   weights: [2, 1], index: 1)
+                }
+            }
+            selection.paneId = nil
+            await waitForPopoutFrame(selected, in: window,
+                                    expected: tiledFrames[try XCTUnwrap(views.firstIndex(of: selected))])
+        }
+        for view in views {
+            let counter = try await view.evaluateJavaScript("window.counter") as? Int
+            XCTAssertEqual(counter, 5, "covered sibling content stays live without reload")
+        }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        XCTAssertEqual(try encoder.encode(SurfAcePersistedPaneLayoutNode(from: surface.paneLayout)),
+                       try encoder.encode(originalLayout))
+        XCTAssertEqual(surface.topologyEpoch, originalEpoch)
+        selection.paneId = 3
+        await waitForPopoutFrame(selected, in: window, expected: surfAcePanePopoutBounds(in: surfaceFrame))
+        // Exercise the production authority-to-mounted-bridge projection while
+        // presentation is active: new content is allowed, host replacement is not.
+        let updated = expectation(description: "authorized revision rendered in expanded host")
+        let updateObservation = selected.observe(\.title, options: [.new]) { view, _ in
+            if view.title == "updated-3" { updated.fulfill() }
+        }
+        var projected = SurfAcePersistedSurfaceTopology(surface: surface)
+        let projectedIndex = try XCTUnwrap(projected.panes.firstIndex { $0.paneId == 3 })
+        projected.panes[projectedIndex].currentEntry = SurfAcePaneEntry.from(frame: SurfAceFrame(
+            contentId: "popout-updated-3", revision: 2, contentType: .html,
+            payload: .html(html: "<html><head><title>updated-3</title></head><body><script>window.counter=100;window.sessionToken='authorized-revision-2';</script>Updated content</body></html>", baseURL: nil),
+            reloadSource: nil, title: "Updated pane", scrollable: true, interactive: true))
+        runtime.project(topology: projected, onto: surface)
+        await fulfillment(of: [updated], timeout: 10)
+        updateObservation.invalidate()
+        XCTAssertEqual(selection.paneId, 3)
+        XCTAssertTrue(popoutWebViews(in: host.view).contains { $0 === selected })
+        await waitForPopoutFrame(selected, in: window, expected: surfAcePanePopoutBounds(in: surfaceFrame))
+        for (view, token) in zip(views, tokens) where view !== selected {
+            let retained = try await view.evaluateJavaScript("window.sessionToken") as? String
+            let counter = try await view.evaluateJavaScript("window.counter") as? Int
+            XCTAssertEqual(retained, token)
+            XCTAssertEqual(counter, 5)
+        }
+        let updatedCounter = try await selected.evaluateJavaScript("window.counter") as? Int
+        XCTAssertEqual(updatedCounter, 100)
+        XCTAssertEqual(surface.topologyEpoch, originalEpoch)
+        surface.paneLayout = .leaf(1) // Independently authorized pane close/replacement.
+        surface.panesById.removeValue(forKey: 3)
+        let closed = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            selection.paneId == nil
+        }, object: nil)
+        await fulfillment(of: [closed], timeout: 5)
+        XCTAssertNil(selection.paneId)
+        XCTAssertEqual(surface.paneLayout.paneIDs, [1], "Restore must not replay the old tree")
+        selection.paneId = 1
+        surface.topologyEpoch += 1
+        let replaced = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            selection.paneId == nil
+        }, object: nil)
+        await fulfillment(of: [replaced], timeout: 5)
+        XCTAssertNil(selection.paneId, "external topology revision ends the presentation")
+    }
+
+    @MainActor
+    private func waitForPopoutFrame(_ view: WKWebView, in window: UIWindow,
+                                   expected: CGRect) async {
+        let resized = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            let actual = view.convert(view.bounds, to: window)
+            return abs(actual.minX - expected.minX) < 1 && abs(actual.minY - expected.minY) < 1
+                && abs(actual.width - expected.width) < 1 && abs(actual.height - expected.height) < 1
+        }, object: nil)
+        await fulfillment(of: [resized], timeout: 5)
+        let actual = view.convert(view.bounds, to: window)
+        XCTAssertEqual(actual.minX, expected.minX, accuracy: 1)
+        XCTAssertEqual(actual.minY, expected.minY, accuracy: 1)
+        XCTAssertEqual(actual.width, expected.width, accuracy: 1)
+        XCTAssertEqual(actual.height, expected.height, accuracy: 1)
+    }
+
+    @MainActor
+    private func popoutWebViews(in view: UIView) -> [WKWebView] {
+        (view as? WKWebView).map { [$0] } ?? view.subviews.flatMap { popoutWebViews(in: $0) }
+    }
+
+    @MainActor
+    private func popoutSessionTokens(_ views: [WKWebView]) async throws -> [String] {
+        var result: [String] = []
+        for view in views {
+            let token = try await view.evaluateJavaScript("window.sessionToken") as? String
+            result.append(try XCTUnwrap(token))
+        }
+        return result
+    }
+
     func testLocalResizePreviewCancelsAndNeverReplaysAcrossRevisionOrRestart() {
         var preview = SurfAceSplitPreviewState()
         let interruptedToken = UUID()

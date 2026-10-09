@@ -1,0 +1,45 @@
+{
+  "configurations": [
+    {
+      "id": "9678C8A7-BD01-4010-BF38-C20533481B06",
+      "name": "Default",
+      "options": {}
+    }
+  ],
+  "defaultOptions": {
+    "environmentVariableEntries": [
+      {
+        "key": "SURF_ACE_XCTEST_HOST_NO_AUTOSTART",
+        "value": "1",
+        "isEnabled": true
+      }
+    ]
+  },
+  "testTargets": [
+    {
+      "target": {
+        "containerPath": "container:SurfAce.xcodeproj",
+        "identifier": "A9A100000000000000000005",
+        "name": "SurfAceResizeUITests"
+      },
+      "selectedTests": [
+        "SurfAceResizeUITests/testPopoutRestoreKeepsSessionAndOwnsCoveredPaneInput()",
+        "SurfAceResizeUITests/testPopoutMovesVoiceOverFocusToRestoreAndHidesCoveredLeaves()",
+        "SurfAceResizeUITests/testKeyboardFocusCanActivateExpandedRestore()",
+        "SurfAceResizeUITests/testDragInRealPaneTreeChangesSplitWeight()",
+        "SurfAceResizeUITests/testHorizontalDragInRealPaneTreeChangesSplitWeight()"
+      ]
+    },
+    {
+      "target": {
+        "containerPath": "container:SurfAce.xcodeproj",
+        "identifier": "67A9D8D88698454C7C5A7802",
+        "name": "SurfAceTests"
+      },
+      "selectedTests": [
+        "SurfAceSurfaceTopologyPersistenceTests"
+      ]
+    }
+  ],
+  "version": 1
+}
