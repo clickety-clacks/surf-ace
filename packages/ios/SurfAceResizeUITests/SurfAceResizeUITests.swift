@@ -23,6 +23,10 @@ final class SurfAceResizeUITests: XCTestCase {
         XCTAssertTrue(weight.waitForExistence(timeout: 10))
         XCTAssertTrue(handle.waitForExistence(timeout: 10))
         XCTAssertEqual(weight.label, "first weight 1.000")
+        let revision = app.staticTexts["surf-ace-resize-tree-revision"]
+        let initialRevision = probe.hasPrefix("tree")
+            ? Int(revision.label.replacingOccurrences(of: "topology revision ", with: "")) : nil
+        if probe.hasPrefix("tree") { XCTAssertNotNil(initialRevision) }
 
         let start = handle.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
         let end = start.withOffset(CGVector(dx: horizontal ? 0 : 100, dy: horizontal ? 100 : 0))
@@ -36,5 +40,12 @@ final class SurfAceResizeUITests: XCTestCase {
         let value = Double(weight.label.replacingOccurrences(of: "first weight ", with: ""))
         XCTAssertNotNil(value)
         XCTAssertGreaterThan(value ?? 0, 1.10, "The full drag must persist, not just the first touch movement")
+        if let initialRevision {
+            XCTAssertEqual(
+                Int(revision.label.replacingOccurrences(of: "topology revision ", with: "")),
+                initialRevision + 1,
+                "One completed drag must make one committed topology change"
+            )
+        }
     }
 }

@@ -127,10 +127,27 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
         )
         await restarted.restoreLocklessAuthority(reason: "resize-test-restart")
         let restored = await restarted.registerSurfaceForScene(sceneKey: suiteName)
-        guard case .split(_, let restoredChildren, _) = try XCTUnwrap(restored).paneLayout else {
+        let restoredSurface = try XCTUnwrap(restored)
+        guard case .split(_, let restoredChildren, _) = restoredSurface.paneLayout else {
             return XCTFail("Expected split after restart")
         }
         XCTAssertEqual(restoredChildren.map(\.layoutWeight), [1.4, 0.6])
+
+        let restartedAdapter = try restarted.locklessAuthorityForLocalMutation()
+        let revisionBefore = (await restartedAdapter.snapshot()).liveSurfaces[surfaceId]?.topologyRevision ?? -1
+        restarted.resizeSplit(surfaceId: surfaceId, path: [], weights: [1.3, 0.7])
+        restarted.resizeSplit(surfaceId: surfaceId, path: [], weights: [1.2, 0.8])
+        var revisionAfter = revisionBefore
+        for _ in 0..<100 {
+            revisionAfter = (await restartedAdapter.snapshot()).liveSurfaces[surfaceId]?.topologyRevision ?? -1
+            if revisionAfter == revisionBefore + 2 { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertEqual(revisionAfter, revisionBefore + 2)
+        guard case .split(_, let orderedChildren, _) = restoredSurface.paneLayout else {
+            return XCTFail("Expected split after ordered commits")
+        }
+        XCTAssertEqual(orderedChildren.map(\.layoutWeight), [1.2, 0.8])
     }
 
     func testKeyboardFocusOutlineIsSuppressedForSinglePaneSurfaces() {

@@ -445,6 +445,8 @@ private struct SurfAcePaneTreeView: View {
     let node: SurfAcePaneLayoutNode
     let surfaceBounds: CGRect
     var path: [Int] = []
+    @State private var splitPreview: [Double]?
+    @State private var splitPreviewToken: UUID?
 
     var body: some View {
         switch node {
@@ -458,24 +460,33 @@ private struct SurfAcePaneTreeView: View {
             }
         case .split(let direction, let children, _):
             GeometryReader { proxy in
-                let totalWeight = max(children.reduce(0) { $0 + $1.layoutWeight }, 1)
+                let weights = splitPreview.flatMap { $0.count == children.count ? $0 : nil }
+                    ?? children.map(\.layoutWeight)
+                let totalWeight = max(weights.reduce(0, +), 1)
                 if direction == .vertical {
                     ZStack(alignment: .topLeading) {
                         HStack(spacing: 0) {
                             ForEach(Array(children.enumerated()), id: \.offset) { index, child in
                                 SurfAcePaneTreeView(runtime: runtime, surface: surface, node: child, surfaceBounds: surfaceBounds, path: path + [index])
-                                    .frame(width: max(1, proxy.size.width * child.layoutWeight / totalWeight), height: proxy.size.height)
+                                    .frame(width: max(1, proxy.size.width * weights[index] / totalWeight), height: proxy.size.height)
                             }
                         }
                         ForEach(Array(children.indices.dropLast()), id: \.self) { index in
-                            let offset = proxy.size.width * children.prefix(index + 1).reduce(0) { $0 + $1.layoutWeight } / totalWeight
+                            let offset = proxy.size.width * weights.prefix(index + 1).reduce(0, +) / totalWeight
                             SurfAceSplitResizeHandle(
                                 direction: direction,
-                                weights: children.map(\.layoutWeight),
+                                weights: weights,
                                 childIndex: index,
                                 extent: proxy.size.width
-                            ) { weights in
-                                runtime.resizeSplit(surfaceId: surface.surfaceId, path: path, weights: weights)
+                            ) { weights, token in
+                                splitPreview = weights
+                                splitPreviewToken = token
+                            } onCommit: { weights, token in
+                                runtime.resizeSplit(surfaceId: surface.surfaceId, path: path, weights: weights) {
+                                    guard splitPreviewToken == token else { return }
+                                    splitPreview = nil
+                                    splitPreviewToken = nil
+                                }
                             }
                             .position(x: offset, y: proxy.size.height / 2)
                         }
@@ -485,18 +496,25 @@ private struct SurfAcePaneTreeView: View {
                         VStack(spacing: 0) {
                             ForEach(Array(children.enumerated()), id: \.offset) { index, child in
                                 SurfAcePaneTreeView(runtime: runtime, surface: surface, node: child, surfaceBounds: surfaceBounds, path: path + [index])
-                                    .frame(width: proxy.size.width, height: max(1, proxy.size.height * child.layoutWeight / totalWeight))
+                                    .frame(width: proxy.size.width, height: max(1, proxy.size.height * weights[index] / totalWeight))
                             }
                         }
                         ForEach(Array(children.indices.dropLast()), id: \.self) { index in
-                            let offset = proxy.size.height * children.prefix(index + 1).reduce(0) { $0 + $1.layoutWeight } / totalWeight
+                            let offset = proxy.size.height * weights.prefix(index + 1).reduce(0, +) / totalWeight
                             SurfAceSplitResizeHandle(
                                 direction: direction,
-                                weights: children.map(\.layoutWeight),
+                                weights: weights,
                                 childIndex: index,
                                 extent: proxy.size.height
-                            ) { weights in
-                                runtime.resizeSplit(surfaceId: surface.surfaceId, path: path, weights: weights)
+                            ) { weights, token in
+                                splitPreview = weights
+                                splitPreviewToken = token
+                            } onCommit: { weights, token in
+                                runtime.resizeSplit(surfaceId: surface.surfaceId, path: path, weights: weights) {
+                                    guard splitPreviewToken == token else { return }
+                                    splitPreview = nil
+                                    splitPreviewToken = nil
+                                }
                             }
                             .position(x: proxy.size.width / 2, y: offset)
                         }
@@ -513,9 +531,11 @@ private struct SurfAceSplitResizeHandle: View {
     let weights: [Double]
     let childIndex: Int
     let extent: CGFloat
-    let onResize: ([Double]) -> Void
+    let onPreview: ([Double], UUID) -> Void
+    let onCommit: ([Double], UUID) -> Void
     @State private var dragStartLocation: CGFloat?
     @State private var dragStartWeights: [Double]?
+    @State private var dragToken: UUID?
 
     var body: some View {
         Image(systemName: "line.3.horizontal")
@@ -538,13 +558,24 @@ private struct SurfAceSplitResizeHandle: View {
                     .onChanged { value in
                         let startLocation = dragStartLocation ?? axisLocation(value.startLocation)
                         let startWeights = dragStartWeights ?? weights
+                        let token = dragToken ?? UUID()
                         dragStartLocation = startLocation
                         dragStartWeights = startWeights
-                        onResize(resizedWeights(from: startWeights, startLocation: startLocation, currentLocation: axisLocation(value.location)))
+                        dragToken = token
+                        onPreview(resizedWeights(from: startWeights, startLocation: startLocation, currentLocation: axisLocation(value.location)), token)
                     }
-                    .onEnded { _ in
+                    .onEnded { value in
+                        let token = dragToken ?? UUID()
+                        let finalWeights = resizedWeights(
+                            from: dragStartWeights ?? weights,
+                            startLocation: dragStartLocation ?? axisLocation(value.startLocation),
+                            currentLocation: axisLocation(value.location)
+                        )
+                        onPreview(finalWeights, token)
+                        onCommit(finalWeights, token)
                         dragStartLocation = nil
                         dragStartWeights = nil
+                        dragToken = nil
                     }
             )
     }
@@ -593,7 +624,9 @@ struct SurfAceResizeProbeView: View {
                     weights: weights,
                     childIndex: 0,
                     extent: proxy.size.width
-                ) { weights = $0 }
+                ) { weights, _ in
+                    self.weights = weights
+                } onCommit: { _, _ in }
                     .position(x: proxy.size.width * weights[0] / 2, y: proxy.size.height / 2)
                 Text(String(format: "first weight %.3f", weights[0]))
                     .accessibilityIdentifier("surf-ace-resize-probe-weight")
@@ -637,6 +670,12 @@ struct SurfAceResizeTreeProbeView: View {
                         .padding(12)
                         .background(.black)
                         .foregroundStyle(.white)
+                    Text("topology revision \(surface.topologyEpoch)")
+                        .accessibilityIdentifier("surf-ace-resize-tree-revision")
+                        .padding(12)
+                        .background(.black)
+                        .foregroundStyle(.white)
+                        .offset(y: 48)
                 }
                 .coordinateSpace(name: surfAceSurfaceCoordinateSpaceName)
             }
