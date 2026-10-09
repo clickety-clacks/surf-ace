@@ -460,6 +460,7 @@ struct SurfAceSplitPreviewState {
     private(set) var weights: [Double]?
     private(set) var token: UUID?
     private(set) var topologyEpoch: Int?
+    private(set) var pendingCommits: Set<UUID> = []
 
     mutating func update(weights: [Double], token: UUID, topologyEpoch: Int) {
         if self.token != token { self.topologyEpoch = topologyEpoch }
@@ -478,10 +479,31 @@ struct SurfAceSplitPreviewState {
         return (weights, Int64(topologyEpoch))
     }
 
+    mutating func queueCommit(token: UUID) {
+        pendingCommits.insert(token)
+    }
+
+    func mayCommit(token: UUID) -> Bool {
+        pendingCommits.contains(token)
+    }
+
+    mutating func finishCommit(token: UUID) {
+        pendingCommits.remove(token)
+        cancel(token: token)
+    }
+
     mutating func cancel(token: UUID) {
+        pendingCommits.remove(token)
         guard self.token == token else { return }
         weights = nil
         self.token = nil
+        topologyEpoch = nil
+    }
+
+    mutating func cancelAll() {
+        pendingCommits.removeAll()
+        weights = nil
+        token = nil
         topologyEpoch = nil
     }
 }
@@ -536,16 +558,15 @@ private struct SurfAcePaneTreeView: View {
                                     splitPreview.cancel(token: token)
                                     return
                                 }
+                                splitPreview.queueCommit(token: token)
                                 runtime.resizeSplit(
                                     surfaceId: surface.surfaceId, path: path, weights: completed.weights,
                                     expectedTopologyRevision: completed.revision,
                                     shouldCommit: {
-                                        scenePhase == .active && splitPreview.completedWeights(
-                                            token: token, topologyEpoch: surface.topologyEpoch
-                                        ) != nil
+                                        scenePhase == .active && splitPreview.mayCommit(token: token)
                                     }
                                 ) {
-                                    splitPreview.cancel(token: token)
+                                    splitPreview.finishCommit(token: token)
                                 }
                             } onCancel: { token in
                                 splitPreview.cancel(token: token)
@@ -579,16 +600,15 @@ private struct SurfAcePaneTreeView: View {
                                     splitPreview.cancel(token: token)
                                     return
                                 }
+                                splitPreview.queueCommit(token: token)
                                 runtime.resizeSplit(
                                     surfaceId: surface.surfaceId, path: path, weights: completed.weights,
                                     expectedTopologyRevision: completed.revision,
                                     shouldCommit: {
-                                        scenePhase == .active && splitPreview.completedWeights(
-                                            token: token, topologyEpoch: surface.topologyEpoch
-                                        ) != nil
+                                        scenePhase == .active && splitPreview.mayCommit(token: token)
                                     }
                                 ) {
-                                    splitPreview.cancel(token: token)
+                                    splitPreview.finishCommit(token: token)
                                 }
                             } onCancel: { token in
                                 splitPreview.cancel(token: token)
@@ -600,8 +620,8 @@ private struct SurfAcePaneTreeView: View {
             }
             .background(surfAceSplitBackdropColor())
             .onChange(of: scenePhase) { _, phase in
-                guard phase != .active, let token = splitPreview.token else { return }
-                splitPreview.cancel(token: token)
+                guard phase != .active else { return }
+                splitPreview.cancelAll()
             }
         }
     }

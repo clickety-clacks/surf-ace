@@ -19,6 +19,21 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
         preview.cancel(token: interruptedToken) // A delayed callback cannot erase the next drag.
         XCTAssertEqual(preview.completedWeights(token: nextToken, topologyEpoch: 8)?.weights, [1.2, 0.8])
 
+        // A completed drag A remains eligible while a newer displayed drag B
+        // starts and cancels; the pending end request is not the view preview.
+        preview.queueCommit(token: nextToken)
+        let newerToken = UUID()
+        preview.update(weights: [1.3, 0.7], token: newerToken, topologyEpoch: 8)
+        preview.cancel(token: newerToken)
+        XCTAssertTrue(preview.mayCommit(token: nextToken))
+        preview.finishCommit(token: nextToken)
+        XCTAssertFalse(preview.mayCommit(token: nextToken))
+
+        preview.update(weights: [1.4, 0.6], token: newerToken, topologyEpoch: 8)
+        preview.queueCommit(token: newerToken)
+        preview.cancelAll() // Scene interruption invalidates every queued end.
+        XCTAssertFalse(preview.mayCommit(token: newerToken))
+
         // Process recreation has no preview state to replay; durable topology
         // comes from the generation store, exercised by the restart test below.
         preview = SurfAceSplitPreviewState()
@@ -250,6 +265,37 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
             return XCTFail("Expected first end commit to remain visible")
         }
         XCTAssertEqual(afterInterruptedChildren.map(\.layoutWeight), [1.15, 0.85])
+
+        // An unrelated/new preview must not revoke completed A while A waits
+        // behind a predecessor. Only explicit interruption revokes A.
+        let beforeOverlappingGestures = await restartedAdapter.snapshot()
+        let predecessorEnd = expectation(description: "predecessor no-op completed")
+        let completedA = expectation(description: "completed A committed")
+        var pending = SurfAceSplitPreviewState()
+        let tokenA = UUID()
+        let tokenB = UUID()
+        pending.update(weights: [1.18, 0.82], token: tokenA, topologyEpoch: Int(beforeOverlappingGestures.liveSurfaces[surfaceId]?.topologyRevision ?? -1))
+        pending.queueCommit(token: tokenA)
+        restarted.resizeSplit(surfaceId: surfaceId, path: [], weights: [1.15, 0.85]) {
+            predecessorEnd.fulfill()
+        }
+        restarted.resizeSplit(
+            surfaceId: surfaceId, path: [], weights: [1.18, 0.82],
+            shouldCommit: { pending.mayCommit(token: tokenA) }
+        ) {
+            pending.finishCommit(token: tokenA)
+            completedA.fulfill()
+        }
+        pending.update(weights: [1.25, 0.75], token: tokenB, topologyEpoch: pending.topologyEpoch ?? -1)
+        pending.cancel(token: tokenB)
+        await fulfillment(of: [predecessorEnd, completedA], timeout: 5)
+        let afterOverlappingGestures = await restartedAdapter.snapshot()
+        XCTAssertEqual(afterOverlappingGestures.generation, beforeOverlappingGestures.generation + 1)
+        XCTAssertEqual(
+            afterOverlappingGestures.liveSurfaces[surfaceId]?.topologyRevision,
+            (beforeOverlappingGestures.liveSurfaces[surfaceId]?.topologyRevision ?? -1) + 1
+        )
+        XCTAssertFalse(pending.mayCommit(token: tokenA))
 
         let afterFailureRevision = (await restartedAdapter.snapshot()).liveSurfaces[surfaceId]?.topologyRevision ?? -1
         let failed = expectation(description: "invalid predecessor completed")
