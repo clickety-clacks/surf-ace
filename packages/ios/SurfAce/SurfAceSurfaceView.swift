@@ -1075,8 +1075,6 @@ private struct SurfAcePaneView: View {
     var isPoppedOut = false
     var onTogglePopout: () -> Void = {}
     @State private var toolbarCollapsed = false
-    @AccessibilityFocusState private var popoutControlFocused: Bool
-    @FocusState private var popoutKeyboardFocused: Bool
 
     var body: some View {
         GeometryReader { proxy in
@@ -1147,9 +1145,7 @@ private struct SurfAcePaneView: View {
                             if !toolbarCollapsed || isPoppedOut {
                                 SurfAcePaneControls(
                                     runtime: runtime, surface: surface, pane: pane,
-                                    isPoppedOut: isPoppedOut, onTogglePopout: onTogglePopout,
-                                    popoutControlFocused: $popoutControlFocused,
-                                    popoutKeyboardFocused: $popoutKeyboardFocused
+                                    isPoppedOut: isPoppedOut, onTogglePopout: onTogglePopout
                                 )
                                     .padding(.bottom, SurfAcePaneChromeLayout.bottomInset)
                                     .surfAceSpatialChromeDepthOffset()
@@ -1222,17 +1218,6 @@ private struct SurfAcePaneView: View {
             }
             .onChange(of: isPoppedOut) { _, _ in
                 toolbarCollapsed = false
-            }
-            .task(id: isPoppedOut) {
-                // The toggle now lives in the toolbar. Request focus after the
-                // expanded/restored toolbar has been laid out, including when
-                // restoring a previously collapsed toolbar.
-                popoutControlFocused = false
-                popoutKeyboardFocused = false
-                await Task.yield()
-                guard !Task.isCancelled else { return }
-                popoutControlFocused = true
-                if !UIAccessibility.isVoiceOverRunning { popoutKeyboardFocused = true }
             }
             .onAppear {
                 publishGeometrySnapshot(paneFrame: paneFrame)
@@ -1668,8 +1653,8 @@ private struct SurfAcePaneControls: View {
     @Bindable var pane: SurfAcePaneModel
     let isPoppedOut: Bool
     let onTogglePopout: () -> Void
-    @AccessibilityFocusState.Binding var popoutControlFocused: Bool
-    @FocusState.Binding var popoutKeyboardFocused: Bool
+    @AccessibilityFocusState private var popoutControlFocused: Bool
+    @FocusState private var popoutKeyboardFocused: Bool
     @Environment(\.colorScheme) private var colorScheme
     @State private var fontSizePopoverVisible = false
 
@@ -1736,6 +1721,19 @@ private struct SurfAcePaneControls: View {
                 .accessibilityIdentifier("surf-ace-pane-popout-\(pane.paneId)")
                 .accessibilityValue(isPoppedOut ? "Expanded" : "Tiled")
                 .accessibilityFocused($popoutControlFocused)
+                .task(id: isPoppedOut) {
+                guard isPoppedOut else { return }
+                // The toggle now lives in the toolbar. Request focus after the
+                // expanded/restored toolbar has been laid out, including when
+                // restoring a previously collapsed toolbar.
+                popoutControlFocused = false
+                popoutKeyboardFocused = false
+                await Task.yield()
+                guard !Task.isCancelled else { return }
+                popoutControlFocused = true
+                if !UIAccessibility.isVoiceOverRunning { popoutKeyboardFocused = true }
+            }
+
 
                 Button {
                     runtime.activateKeyboardPane(surfaceId: surface.surfaceId, paneId: pane.paneId)

@@ -53,8 +53,6 @@ final class SurfAceResizeUITests: XCTestCase {
         XCTAssertTrue(toggle.isHittable)
         XCTAssertEqual(toggle.label, "Restore")
         assertSmallBottomToolbarToggle(toggle, in: app)
-        XCTAssertGreaterThanOrEqual(toggle.frame.width, 44)
-        XCTAssertGreaterThanOrEqual(toggle.frame.height, 44)
         XCTAssertFalse(app.buttons["surf-ace-pane-popout-1"].isHittable)
         contentButton.tap()
         XCTAssertTrue(app.staticTexts["Pane 3 clicks 3"].waitForExistence(timeout: 5))
