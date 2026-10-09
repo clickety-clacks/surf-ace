@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { SURF_ACE_LOCKLESS_V1_CAPABILITY } from "../../protocol/src/lockless.js";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -269,4 +270,135 @@ test("held core transaction, network-equivalent mutation and same-surface render
     assert.deepEqual(core.activePaneIds(surfaceId).sort(), [1, 2, 3]);
     assert.equal(core.getRendererWindowState(surfaceId).topologyRevision, expected.topologyRevision + 1);
   } finally { clearTimeout(timeout); release(); await stopUnstartedServer(server); }
+});
+
+
+async function drainActualPublications(server: SurfaceWsServer): Promise<void> {
+  const tasks = (server as unknown as { coreEventPublications: Set<Promise<void>> }).coreEventPublications;
+  while (tasks.size) await Promise.all([...tasks]);
+}
+
+function surfaceTopologyRecords(core: SurfaceCore, surfaceId: string) {
+  return core.locklessAuthority.exportState().scopes[`surface:${encodeURIComponent(surfaceId)}`]?.records
+    .filter((record) => record.recordClass === "topology") ?? [];
+}
+
+test("resize occurrence is atomically durable despite async fanout failure and survives reload without duplicate append-save", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-resize-occurrence-"));
+  let writes = 0;
+  const { core, surfaceId, server, expected, geometry } = fixture(async (core) => {
+    if (++writes > 1) throw new Error("post-commit event save forbidden/injected failure");
+    await writePersistentStateFile(dir, "state.json", core.getPersistentState());
+  });
+  core.locklessAuthority.admit({ controllerInstanceId: "controller-resize", projectionCapacityBytes: 8 * 1024 * 1024,
+    protocolFeatures: [SURF_ACE_LOCKLESS_V1_CAPABILITY] }, "private-token", "private-admit");
+  const packets: unknown[] = [];
+  let rejectFanout = true;
+  const transport = server as unknown as { broadcastLockless: (event: unknown) => Promise<void>; handleCoreEvent: (event: unknown) => Promise<void> };
+  transport.broadcastLockless = async (event) => {
+    packets.push(event);
+    if (rejectFanout) throw new Error("injected post-commit async socket failure");
+  };
+  let committedEvent: unknown;
+  const unsubscribe = core.subscribe((event) => { if (event.type === "topology-changed") committedEvent = event; });
+  try {
+    assert.equal(await server.resizeSplit(surfaceId, [], [3, 1], expected, geometry), true);
+    await drainActualPublications(server);
+    assert.equal(writes, 1, "real async topology handler must not need a second event-generation save");
+    const records = surfaceTopologyRecords(core, surfaceId);
+    assert.equal(records.length, 1);
+    assert.deepEqual(records[0]!.payload, core.publicTopologyState(surfaceId));
+    const loaded = await loadPersistentStateFile(dir, "state.json");
+    assert.equal(loaded.writeGuard, false);
+    const restarted = new SurfaceCore({ persistentState: loaded.state });
+    restarted.restorePersistedSurfaces("restart", { width: 1200, height: 800, scale: 1 });
+    assert.deepEqual(surfaceTopologyRecords(restarted, surfaceId), records, "occurrence ID/sequence/payload survive process loss");
+    const scope = restarted.locklessAuthority.scopeSnapshot("controller-resize", `surface:${encodeURIComponent(surfaceId)}`);
+    assert.deepEqual(scope.records, records, "restored controller cursor can recover the matching durable occurrence");
+    rejectFanout = false;
+    await transport.handleCoreEvent(committedEvent);
+    assert.equal(writes, 1);
+    assert.deepEqual(surfaceTopologyRecords(core, surfaceId), records, "retry fans out saved identity without re-appending");
+    assert.ok(packets.length >= 2);
+  } finally { unsubscribe(); await stopUnstartedServer(server); await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test("uncertain atomic topology occurrence survives proven candidate reload and real async reconciliation fanout", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-resize-atomic-uncertain-"));
+  let attempts = 0;
+  const { core, surfaceId, server, expected, geometry } = fixture(async () => {
+    attempts++; throw new PersistentStateOutcomeUnknownError(new Error("ambiguous atomic save"));
+  });
+  const packets: unknown[] = [];
+  (server as unknown as { broadcastLockless: (event: unknown) => Promise<void> }).broadcastLockless = async (event) => { packets.push(event); };
+  try {
+    assert.equal(await server.resizeSplit(surfaceId, [], [3, 1], expected, geometry), false);
+    const candidate = core.getPersistentState();
+    const records = surfaceTopologyRecords(core, surfaceId);
+    assert.equal(records.length, 1);
+    await writePersistentStateFile(dir, "state.json", candidate);
+    const loaded = await loadPersistentStateFile(dir, "state.json");
+    assert.ok(loaded.state);
+    server.resumeAfterVerifiedPersistence();
+    assert.equal(core.publishVerifiedTransactionEvents(loaded.state, () => {}), true);
+    await drainActualPublications(server);
+    assert.equal(attempts, 1, "reconciled real event path performs no additional failing append-save");
+    assert.equal(core.publishVerifiedTransactionEvents(loaded.state, () => {}), false);
+    const restarted = new SurfaceCore({ persistentState: loaded.state });
+    restarted.restorePersistedSurfaces("restart", { width: 1200, height: 800, scale: 1 });
+    assert.deepEqual(surfaceTopologyRecords(restarted, surfaceId), records);
+    assert.ok(packets.some((packet) => (packet as { op: string }).op === "event.lockless_consumable_delta"));
+  } finally { await stopUnstartedServer(server); await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test("actual local close queued behind held-core resize settles and preserves a valid tombstone", async () => {
+  const { core, surfaceId, server, expected, geometry } = fixture();
+  let release!: () => void, entered!: () => void;
+  const barrier = new Promise<void>((resolve) => { release = resolve; });
+  const started = new Promise<void>((resolve) => { entered = resolve; });
+  const held = core.transactionAsync(async () => { entered(); await barrier; });
+  await started;
+  let queued!: () => void;
+  const resizeQueued = new Promise<void>((resolve) => { queued = resolve; });
+  const original = core.transactionAsync.bind(core);
+  core.transactionAsync = ((...args: Parameters<SurfaceCore["transactionAsync"]>) => {
+    const result = original(...args); queued(); return result;
+  }) as SurfaceCore["transactionAsync"];
+  const resize = server.resizeSplit(surfaceId, [], [3, 1], expected, geometry);
+  await resizeQueued;
+  const close = server.closeSurfaceFromLocalUser(surfaceId);
+  await Promise.resolve(); release();
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const results = await Promise.race([Promise.all([held, resize, close]), new Promise<never>((_, reject) => {
+      timeout = setTimeout(() => reject(new Error("local-close/resize queue inversion")), 1000);
+    })]);
+    assert.equal(results[1], true);
+    assert.equal(results[2].surfaceId, surfaceId);
+    assert.equal(core.listSurfaces().some((surface) => surface.surfaceId === surfaceId), false);
+    assert.ok(core.locklessAuthority.listTombstones("surface").some((entry) => entry.tombstoneId === results[2].tombstoneId));
+  } finally { clearTimeout(timeout); release(); core.transactionAsync = original; await stopUnstartedServer(server); }
+});
+
+test("definite native compensation completes before newer same-surface resize can materialize", async () => {
+  let reject = true;
+  const { core, surfaceId, server, expected, geometry } = fixture(async () => { if (reject) throw new Error("definite save rejection"); });
+  let entered!: () => void, release!: () => void;
+  const compensating = new Promise<void>((resolve) => { entered = resolve; });
+  const barrier = new Promise<void>((resolve) => { release = resolve; });
+  const trace: string[] = [];
+  const seam = server as unknown as { applyResolvedNativePaneGeometry: (...args: unknown[]) => Promise<void>; rollbackNativePaneGeometry: (...args: unknown[]) => Promise<void> };
+  seam.applyResolvedNativePaneGeometry = async () => { trace.push("apply"); };
+  seam.rollbackNativePaneGeometry = async () => { trace.push("rollback-start"); entered(); await barrier; trace.push("rollback-end"); };
+  const first = server.resizeSplit(surfaceId, [], [3, 1], expected, geometry);
+  await compensating;
+  const newer = server.resizeSplit(surfaceId, [], [1, 3], expected, geometry);
+  await Promise.resolve();
+  assert.deepEqual(trace, ["apply", "rollback-start"]);
+  reject = false; release();
+  try {
+    assert.equal(await first, false);
+    assert.equal(await newer, true);
+    assert.deepEqual(trace, ["apply", "rollback-start", "rollback-end", "apply"]);
+  } finally { release(); await stopUnstartedServer(server); }
 });

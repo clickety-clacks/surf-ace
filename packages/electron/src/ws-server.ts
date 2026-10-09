@@ -269,11 +269,11 @@ export class SurfaceWsServer {
   private nativePaneStatusPollTimer: NodeJS.Timeout | null = null;
   private nativePaneStatusPollingStopped = false;
   private nativePaneStatusFailureReported = false;
-  private lifecycleMutationQueue: Promise<void> = Promise.resolve();
   private providerWindowLabelQueue: Promise<void> = Promise.resolve();
   private ignoreInitialSurfaceEvents = true;
   private persistenceOutcomeUnknown: PersistentStateOutcomeUnknownError | null = null;
   private annotationCompletionManaged: ((surfaceId: string, paneId: number) => boolean) | null = null;
+  private readonly coreEventPublications = new Set<Promise<void>>();
   private readonly annotationCompletionTasks = new Map<string, Promise<boolean>>();
   private activePaneMutation: { surfaceId: string; paneId: number } | null = null;
 
@@ -406,7 +406,11 @@ export class SurfaceWsServer {
     });
 
     this.core.subscribe((event) => {
-      void this.handleCoreEvent(event).catch(() => {});
+      const task = this.handleCoreEvent(event).catch((error) => {
+        persistentServerDiagnostic("warn", "core_event_publication_failed", { event_type: event.type, ...errorDiagnosticFields(error) });
+      });
+      this.coreEventPublications.add(task);
+      void task.finally(() => this.coreEventPublications.delete(task));
     });
     this.core.locklessAuthority.subscribe((event) => {
       void this.sendLocklessAuthorityEvent(event).catch(() => {});
@@ -958,12 +962,14 @@ export class SurfaceWsServer {
         return;
       case "topology-changed": {
         const topology = event.topology ?? this.core.publicTopologyState(event.surfaceId);
-        await this.ingestLocklessSurfaceConsumable(
-          event.surfaceId,
-          "topology",
-          topology,
-          "client.topology",
-        );
+        if (event.admittedOccurrence) {
+          // The occurrence and resized topology were already saved atomically.
+          // Fanout can fail without losing the reloadable consumable or re-appending.
+          if (event.admittedOccurrence.record) await this.broadcastLocklessDelta(
+            `surface:${encodeURIComponent(event.surfaceId)}`, [event.admittedOccurrence.record]);
+        } else {
+          await this.ingestLocklessSurfaceConsumable(event.surfaceId, "topology", topology, "client.topology");
+        }
         await this.broadcastLifecycleEvent({
           eventId: makeEventId(),
           op: "event.topology_changed",
@@ -3425,54 +3431,16 @@ export class SurfaceWsServer {
   ): Promise<T> {
     return await operation();
   }
-  private async runLifecycleTransaction<T>(
-    operation: () => T,
-    surfaceId?: string,
-  ): Promise<T> {
-    const previous = this.lifecycleMutationQueue;
-    let releaseQueue = (): void => {};
-    const current = new Promise<void>((resolve) => {
-      releaseQueue = resolve;
+  private async runLifecycleTransaction<T>(operation: () => T, surfaceId?: string): Promise<T> {
+    return await this.core.transactionAsync(async () => {
+      const mutate = () => this.core.locklessAuthority.transaction(operation);
+      return surfaceId ? await this.runSurfaceMutation(surfaceId, mutate) : mutate();
     });
-    const queued = previous.catch(() => undefined).then(() => current);
-    this.lifecycleMutationQueue = queued;
-    await previous.catch(() => undefined);
-    try {
-      const transact = () =>
-        this.core.transactionAsync(async () =>
-          this.core.locklessAuthority.transaction(operation),
-        );
-      return surfaceId
-        ? await this.runSurfaceMutation(surfaceId, transact)
-        : await transact();
-    } finally {
-      releaseQueue();
-      if (this.lifecycleMutationQueue === queued) {
-        this.lifecycleMutationQueue = Promise.resolve();
-      }
-    }
   }
 
-  private async runLifecycleTransactionAsync<T>(
-    operation: () => Promise<T>,
-    surfaceId: string,
-  ): Promise<T> {
-    const previous = this.lifecycleMutationQueue;
-    let releaseQueue = (): void => {};
-    const current = new Promise<void>((resolve) => { releaseQueue = resolve; });
-    const queued = previous.catch(() => undefined).then(() => current);
-    this.lifecycleMutationQueue = queued;
-    await previous.catch(() => undefined);
-    try {
-      return await this.runSurfaceMutation(surfaceId, () =>
-        this.core.locklessAuthority.transactionAsync(() =>
-          this.core.transactionAsync(operation),
-        ),
-      );
-    } finally {
-      releaseQueue();
-      if (this.lifecycleMutationQueue === queued) this.lifecycleMutationQueue = Promise.resolve();
-    }
+  private async runLifecycleTransactionAsync<T>(operation: () => Promise<T>, surfaceId: string): Promise<T> {
+    return await this.core.locklessAuthority.transactionAsync(() =>
+      this.core.transactionAsync(() => this.runSurfaceMutation(surfaceId, operation)));
   }
 
   private assertLocklessRecoverableCapacity(
@@ -3631,44 +3599,45 @@ export class SurfaceWsServer {
         return false;
       }
     });
-    let rollbackNativeGeometry: NativePaneMaterialization | null = null;
-    let materialization: NativePaneMaterialization | null = null;
-    let appliedNative = false;
+    const onNotificationError = (error: unknown) => persistentServerDiagnostic("warn", "pane_resize_notification_failed", { surface_id: surfaceId, ...errorDiagnosticFields(error) });
     try {
-      // Match network/lifecycle order: global core transaction, then surface queue.
-      const accepted = await this.core.transactionAsync(() => this.runSurfaceMutation(surfaceId, async () => {
-        if (this.persistenceOutcomeUnknown) return false;
-        const current = this.core.getRendererWindowState(surfaceId);
-        if (!splitResizeMatches(current, expected)) return false;
-        if (splitResizeIsNoOp(current.layout, path, weights)) return true;
-        if (!splitResizeGeometryIsValid(geometry, this.core.activePaneIds(surfaceId))) return false;
-        const nativeIds = this.core.panesList(surfaceId).panes.filter((pane) => pane.externalNative).map((pane) => Number(pane.paneId));
-        rollbackNativeGeometry = nativeIds.length ? this.core.projectCurrentNativePaneGeometry(surfaceId, nativeIds) : null;
-        this.core.resizeSplit(surfaceId, path, weights);
-        const identity = this.core.resolvedPaneGeometryIdentity(surfaceId);
-        for (const entry of geometry) this.core.updatePaneSnapshot(surfaceId, entry.paneId, { ...identity, bounds: entry.bounds });
-        if (this.core.missingResolvedPaneGeometry(surfaceId, this.core.activePaneIds(surfaceId), identity).length) {
-          throw new SurfaceCoreError("render_failed", "Resize geometry is unresolved");
-        }
-        materialization = nativeIds.length ? this.core.projectCurrentNativePaneGeometry(surfaceId, nativeIds) : null;
-        await this.applyResolvedNativePaneGeometry(surfaceId, materialization, "pane.resize", rollbackNativeGeometry);
-        appliedNative = true;
-        // All persistent native bookkeeping is finalized before saving. Callback
-        // notification is post-commit and cannot turn a saved resize into rejection.
-        this.markUpdatedNativePaneGeometry(surfaceId, materialization, false);
-        await this.persistLocklessState();
-        return true;
-      }), { retainUncertainEvents: true,
-        onNotificationError: (error) => persistentServerDiagnostic("warn", "pane_resize_notification_failed", { surface_id: surfaceId, ...errorDiagnosticFields(error) }) });
-      if (accepted && materialization) {
-        try { this.onNativeMaterialized?.(surfaceId, materialization); }
-        catch (error) { persistentServerDiagnostic("warn", "pane_resize_notification_failed", { surface_id: surfaceId, ...errorDiagnosticFields(error) }); }
-      }
-      return accepted;
+      // Authority -> core -> surface matches paired network and local-close paths.
+      return await this.core.locklessAuthority.transactionAsync(() => this.core.transactionAsync(() =>
+        this.runSurfaceMutation(surfaceId, async () => {
+          if (this.persistenceOutcomeUnknown) return false;
+          const current = this.core.getRendererWindowState(surfaceId);
+          if (!splitResizeMatches(current, expected)) return false;
+          if (splitResizeIsNoOp(current.layout, path, weights)) return true;
+          if (!splitResizeGeometryIsValid(geometry, this.core.activePaneIds(surfaceId))) return false;
+          const nativeIds = this.core.panesList(surfaceId).panes.filter((pane) => pane.externalNative).map((pane) => Number(pane.paneId));
+          const rollbackNativeGeometry = nativeIds.length ? this.core.projectCurrentNativePaneGeometry(surfaceId, nativeIds) : null;
+          let appliedNative = false;
+          try {
+            // Occurrence ingress shares the topology's exact saved generation.
+            this.core.resizeSplit(surfaceId, path, weights, true);
+            const identity = this.core.resolvedPaneGeometryIdentity(surfaceId);
+            for (const entry of geometry) this.core.updatePaneSnapshot(surfaceId, entry.paneId, { ...identity, bounds: entry.bounds });
+            if (this.core.missingResolvedPaneGeometry(surfaceId, this.core.activePaneIds(surfaceId), identity).length) {
+              throw new SurfaceCoreError("render_failed", "Resize geometry is unresolved");
+            }
+            const materialization = nativeIds.length ? this.core.projectCurrentNativePaneGeometry(surfaceId, nativeIds) : null;
+            await this.applyResolvedNativePaneGeometry(surfaceId, materialization, "pane.resize", rollbackNativeGeometry);
+            appliedNative = true;
+            this.markUpdatedNativePaneGeometry(surfaceId, materialization, false);
+            await this.persistLocklessState();
+            if (materialization) {
+              try { this.onNativeMaterialized?.(surfaceId, materialization); } catch (error) { onNotificationError(error); }
+            }
+            return true;
+          } catch (error) {
+            // Compensation finishes while all mutation queues are still owned.
+            if (appliedNative && !(error instanceof PersistentStateOutcomeUnknownError)) {
+              await this.rollbackNativePaneGeometry(surfaceId, rollbackNativeGeometry, "pane.resize", "pre-commit failure");
+            }
+            throw error;
+          }
+        }), { retainUncertainEvents: true, onNotificationError }), { onNotificationError });
     } catch (error) {
-      if (appliedNative && !(error instanceof PersistentStateOutcomeUnknownError)) {
-        await this.rollbackNativePaneGeometry(surfaceId, rollbackNativeGeometry, "pane.resize", "pre-commit failure");
-      }
       persistentServerDiagnostic("warn", "pane_resize_commit_failed", { surface_id: surfaceId, ...errorDiagnosticFields(error) });
       return false;
     }

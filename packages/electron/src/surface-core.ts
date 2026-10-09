@@ -66,6 +66,7 @@ import {
   validLocklessSurfaceAdmissionAttempt,
   validLocklessSurfaceId,
   locklessRecoverableSurfaceMinimumBytes,
+  type ConsumableRecord,
   type LocklessContentCommit,
   type LocklessContentPush,
   type LocklessEntryProvenance,
@@ -336,7 +337,7 @@ export type CoreEvent =
   | { name: string | null; paneId: number; surfaceId: string; type: "pane-renamed" }
   | { paneId: number; surfaceId: string; type: "annotation-committed" }
   | { contentId: string | null; direction: "back" | "forward"; paneId: number; revision: number; surfaceId: string; type: "history-navigated" }
-  | { surfaceId: string; type: "topology-changed"; topology?: ReturnType<SurfaceCore["publicTopologyState"]> }
+  | { surfaceId: string; type: "topology-changed"; topology?: ReturnType<SurfaceCore["publicTopologyState"]>; admittedOccurrence?: { record: ConsumableRecord | null } }
   | { paneId: number; surfaceId: string; type: "drawing-dirty" };
 
 export class SurfaceCoreError extends Error {
@@ -3170,7 +3171,7 @@ export class SurfaceCore {
     return { ...result, topologyRevision: surface.topologyRevision };
   }
 
-  resizeSplit(surfaceId: string, path: number[], weights: number[]): void {
+  resizeSplit(surfaceId: string, path: number[], weights: number[], admitOccurrence = false): void {
     const surface = this.getSurface(surfaceId);
     if (!surface.layout) {
       throw new SurfaceCoreError("invalid_payload", "Cannot resize a surface without layout");
@@ -3178,8 +3179,13 @@ export class SurfaceCore {
     surface.layout = updateSplitWeights(surface.layout, path, weights);
     surface.topologyRevision = Math.max(1, surface.topologyRevision + 1);
     bumpGeometryRevision(surface);
+    const topology = this.publicTopologyState(surfaceId);
+    const admittedOccurrence = admitOccurrence ? { record: this.locklessAuthority.appendConsumable({
+      payload: topology, recordClass: "topology", scopeId: `surface:${encodeURIComponent(surfaceId)}`,
+      scopeKind: "surface", triggerOperation: "client.topology",
+    }) } : undefined;
     this.emit({ surfaceId, type: "surface-changed" });
-    this.emit({ surfaceId, type: "topology-changed", topology: this.publicTopologyState(surfaceId) });
+    this.emit({ surfaceId, type: "topology-changed", topology, ...(admittedOccurrence ? { admittedOccurrence } : {}) });
   }
 
   paneClose(surfaceId: string, paneId: number): PaneCloseResponse["payload"] {
