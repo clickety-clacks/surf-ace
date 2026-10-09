@@ -1088,12 +1088,12 @@ private struct SurfAcePaneView: View {
                         SurfAcePaneRepresentable(
                             runtime: runtime,
                             surfaceId: surface.surfaceId,
-                            paneId: pane.paneId,
+                            pane: pane,
                             onInteractionBegan: {
                                 collapseToolbarForPaneInteraction()
                             }
                         )
-                        .id("\(surface.surfaceId):\(pane.paneId)")
+                        .id("\(surface.surfaceId):\(pane.paneInstanceId)")
                         .background(surfAcePaneBackdropColor(isEmpty: showsSpatialEmptyPaneChrome))
                         .contentShape(Rectangle())
                         .simultaneousGesture(
@@ -2048,23 +2048,29 @@ private struct SurfAcePaneNumberText: View {
 private struct SurfAcePaneRepresentable: UIViewRepresentable {
     let runtime: SurfAceRuntime
     let surfaceId: String
-    let paneId: Int
+    let pane: SurfAcePaneModel
     let onInteractionBegan: () -> Void
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(runtime: runtime, surfaceId: surfaceId, paneId: paneId, onInteractionBegan: onInteractionBegan)
+        Coordinator(runtime: runtime, surfaceId: surfaceId, paneId: pane.paneId, onInteractionBegan: onInteractionBegan)
     }
 
     func makeUIView(context: Context) -> SurfAceSurfaceHostView {
-        let view = SurfAceSurfaceHostView()
+        let view = pane.retainedHostView ?? SurfAceSurfaceHostView()
+        let preserveDisplay = pane.retainedHostView != nil && view.displays(entry: pane.currentEntry)
+        if pane.retainedHostView != nil {
+            view.removeFromSuperview()
+        }
+        pane.retainedHostView = view
         context.coordinator.attach(hostView: view)
-        runtime.attachPaneBridge(surfaceId: surfaceId, paneId: paneId, bridge: context.coordinator)
+        runtime.attachPaneBridge(surfaceId: surfaceId, paneId: pane.paneId,
+                                 bridge: context.coordinator, preserveDisplay: preserveDisplay)
         return view
     }
 
     func updateUIView(_ uiView: SurfAceSurfaceHostView, context: Context) {
         context.coordinator.onInteractionBegan = onInteractionBegan
-        context.coordinator.updateBinding(surfaceId: surfaceId, paneId: paneId, hostView: uiView)
+        context.coordinator.updateBinding(surfaceId: surfaceId, paneId: pane.paneId, hostView: uiView)
     }
 
     static func dismantleUIView(_ uiView: SurfAceSurfaceHostView, coordinator: Coordinator) {
@@ -2503,6 +2509,13 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
 
     deinit {
         NotificationCenter.default.removeObserver(self)
+    }
+
+    func displays(entry: SurfAcePaneEntry) -> Bool {
+        let visibleEntry = surfAceEntryIsVisibleEmpty(entry) ? nil : entry
+        return currentEntry?.contentId == visibleEntry?.contentId
+            && currentEntry?.revision == visibleEntry?.revision
+            && currentEntry?.contentType == visibleEntry?.contentType
     }
 
     func render(entry: SurfAcePaneEntry?, restoreViewport: SurfAceViewport?) {

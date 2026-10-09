@@ -1189,10 +1189,13 @@ final class SurfAceRuntime {
         pane.geometrySnapshot = candidate.withGeometryRevision(surface.geometryRevision)
     }
 
-    func attachPaneBridge(surfaceId: String, paneId: Int, bridge: any SurfAcePaneBridging) {
+    func attachPaneBridge(surfaceId: String, paneId: Int, bridge: any SurfAcePaneBridging,
+                          preserveDisplay: Bool = false) {
         guard let pane = pane(surfaceId: surfaceId, paneId: paneId) else { return }
         pane.bridge = bridge
-        bridge.render(entry: renderableEntry(pane.currentEntry), restoreViewport: nil)
+        if !preserveDisplay {
+            bridge.render(entry: renderableEntry(pane.currentEntry), restoreViewport: nil)
+        }
         surfAceLifecycleLog(
             "event=pane_bridge_attach \(surfAceDiagnosticFields([("content_id", pane.currentEntry.contentId), ("content_type", pane.currentEntry.contentType?.rawValue), ("pane_id", paneId), ("revision", pane.currentEntry.revision), ("surface_id", surfaceId)]))"
         )
