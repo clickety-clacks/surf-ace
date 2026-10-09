@@ -1,0 +1,36 @@
+{
+  "configurations": [
+    {
+      "id": "9678C8A7-BD01-4010-BF38-C20533481B06",
+      "name": "Default",
+      "options": {}
+    }
+  ],
+  "defaultOptions": {
+    "environmentVariableEntries": [
+      {
+        "key": "SURF_ACE_XCTEST_HOST_NO_AUTOSTART",
+        "value": "1",
+        "isEnabled": true
+      },
+      {
+        "key": "SURF_ACE_POPOUT_PROBE",
+        "value": "1",
+        "isEnabled": true
+      }
+    ]
+  },
+  "testTargets": [
+    {
+      "target": {
+        "containerPath": "container:SurfAce.xcodeproj",
+        "identifier": "A9A100000000000000000005",
+        "name": "SurfAceResizeUITests"
+      },
+      "selectedTests": [
+        "SurfAceResizeUITests/testPopoutRestoreKeepsSessionAndOwnsCoveredPaneInput()"
+      ]
+    }
+  ],
+  "version": 1
+}

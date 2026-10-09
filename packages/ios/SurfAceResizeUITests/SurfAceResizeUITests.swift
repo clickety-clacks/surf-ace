@@ -1,6 +1,41 @@
 import XCTest
 
 final class SurfAceResizeUITests: XCTestCase {
+    func testPopoutRestoreKeepsSessionAndOwnsCoveredPaneInput() {
+        let app = XCUIApplication()
+        app.launchEnvironment["SURF_ACE_XCTEST_HOST_NO_AUTOSTART"] = "1"
+        app.launchEnvironment["SURF_ACE_POPOUT_PROBE"] = "1"
+        app.launch()
+        defer { app.terminate() }
+        let toggle = app.buttons["surf-ace-pane-popout-3"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 10))
+        let revision = app.staticTexts["surf-ace-popout-topology"].label
+        let tiled = toggle.frame
+        let contentButton = app.buttons["Increment pane 3"]
+        XCTAssertTrue(contentButton.waitForExistence(timeout: 10))
+        contentButton.tap()
+        XCTAssertTrue(app.staticTexts["Pane 3 clicks 1"].waitForExistence(timeout: 5))
+        toggle.tap()
+        let expanded = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "value == %@ AND label == %@", "Expanded", "Restore"), object: toggle)
+        XCTAssertEqual(XCTWaiter.wait(for: [expanded], timeout: 5), .completed)
+        XCTAssertTrue(toggle.isHittable, "Restore stays reachable after content collapses other chrome")
+        XCTAssertFalse(app.buttons["surf-ace-pane-popout-1"].isHittable)
+        XCTAssertFalse(app.buttons["surf-ace-pane-popout-2"].isHittable)
+        XCTAssertLessThan(toggle.frame.minY, tiled.minY, "the selected leaf moves out of its lower tile")
+        contentButton.tap()
+        XCTAssertTrue(app.staticTexts["Pane 3 clicks 2"].waitForExistence(timeout: 5))
+        toggle.tap()
+        let restored = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "value == %@ AND label == %@", "Tiled", "Pop out"), object: toggle)
+        XCTAssertEqual(XCTWaiter.wait(for: [restored], timeout: 5), .completed)
+        XCTAssertEqual(toggle.frame.minX, tiled.minX, accuracy: 1)
+        XCTAssertEqual(toggle.frame.minY, tiled.minY, accuracy: 1)
+        XCTAssertTrue(app.staticTexts["Pane 3 clicks 2"].exists, "Restore cannot reload the HTML session")
+        XCTAssertTrue(app.buttons["surf-ace-pane-popout-1"].isHittable)
+        XCTAssertEqual(app.staticTexts["surf-ace-popout-topology"].label, revision)
+    }
+
     func testDragAcrossLocalWebContentChangesSplitWeight() {
         checkDrag(probe: "1", weightIdentifier: "surf-ace-resize-probe-weight")
     }

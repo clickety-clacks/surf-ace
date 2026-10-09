@@ -124,7 +124,9 @@ struct SurfAceApp: App {
     var body: some Scene {
         WindowGroup(id: SurfAceSceneID.mainWindow) {
             #if DEBUG
-            if ProcessInfo.processInfo.environment["SURF_ACE_RESIZE_PROBE"] == "1" {
+            if ProcessInfo.processInfo.environment["SURF_ACE_POPOUT_PROBE"] == "1" {
+                SurfAcePopoutProbeView()
+            } else if ProcessInfo.processInfo.environment["SURF_ACE_RESIZE_PROBE"] == "1" {
                 SurfAceResizeProbeView()
             } else if ProcessInfo.processInfo.environment["SURF_ACE_RESIZE_PROBE"] == "tree" {
                 SurfAceResizeTreeProbeView()

@@ -68,7 +68,7 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
         host.view.layoutIfNeeded()
         let views = popoutWebViews(in: host.view)
         XCTAssertEqual(views.count, 3)
-        let ready = views.map { view in expectation(description: "WebKit initial page ready") }
+        let ready = views.map { _ in expectation(description: "WebKit initial page ready") }
         let observations = zip(views, ready).map { view, signal in
             view.observe(\.title, options: [.initial, .new]) { view, _ in
                 if view.title?.hasPrefix("ready-") == true { signal.fulfill() }
@@ -77,35 +77,79 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
         await fulfillment(of: ready, timeout: 10)
         observations.forEach { $0.invalidate() }
         let tokens = try await popoutSessionTokens(views)
+        let selected = try XCTUnwrap(views.first { $0.title == "ready-3" })
+        var tiledFrames = views.map { $0.convert($0.bounds, to: window) }
+        var surfaceFrame = tiledFrames.reduce(CGRect.null) { $0.union($1) }
         for index in 0..<4 {
             selection.paneId = 3
             await Task.yield()
             host.view.layoutIfNeeded()
+            let expandedFrame = surfAcePanePopoutBounds(in: surfaceFrame)
+            await waitForPopoutFrame(selected, in: window, expected: expandedFrame)
+            for (view, original) in zip(views, tiledFrames) where view !== selected {
+                XCTAssertEqual(view.convert(view.bounds, to: window), original,
+                               "covered sibling stays in its original tile")
+            }
+            // These points include territory outside pane 3's original tile.
+            for point in [CGPoint(x: expandedFrame.minX + 30, y: expandedFrame.minY + 80),
+                          CGPoint(x: expandedFrame.midX, y: expandedFrame.midY)] {
+                let hit = window.hitTest(point, with: nil)
+                XCTAssertTrue(hit === selected || hit?.isDescendant(of: selected) == true,
+                              "expanded pane owns input across covered sibling tiles")
+            }
             XCTAssertEqual(Set(popoutWebViews(in: host.view).map(ObjectIdentifier.init)),
                            Set(views.map(ObjectIdentifier.init)))
             for view in views { _ = try await view.evaluateJavaScript("++window.counter") }
             let currentTokens = try await popoutSessionTokens(views)
             XCTAssertEqual(currentTokens, tokens)
             selection.paneId = nil
+            await waitForPopoutFrame(selected, in: window,
+                                    expected: tiledFrames[try XCTUnwrap(views.firstIndex(of: selected))])
             if index == 1 {
                 window.frame = CGRect(x: 0, y: 0, width: 900, height: 600)
                 host.view.frame = window.bounds
             }
             await Task.yield()
             host.view.layoutIfNeeded()
+            if index == 1 {
+                let resized = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                    views[0].convert(views[0].bounds, to: window).width != tiledFrames[0].width
+                }, object: nil)
+                await fulfillment(of: [resized], timeout: 5)
+                tiledFrames = views.map { $0.convert($0.bounds, to: window) }
+                surfaceFrame = tiledFrames.reduce(CGRect.null) { $0.union($1) }
+            }
         }
         for view in views {
             let counter = try await view.evaluateJavaScript("window.counter") as? Int
             XCTAssertEqual(counter, 5, "covered sibling content stays live without reload")
         }
-        XCTAssertEqual(try JSONEncoder().encode(SurfAcePersistedPaneLayoutNode(from: surface.paneLayout)),
-                       try JSONEncoder().encode(originalLayout))
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        XCTAssertEqual(try encoder.encode(SurfAcePersistedPaneLayoutNode(from: surface.paneLayout)),
+                       try encoder.encode(originalLayout))
         XCTAssertEqual(surface.topologyEpoch, originalEpoch)
         selection.paneId = 3
         surface.topologyEpoch += 1
         await Task.yield()
         host.view.layoutIfNeeded()
         XCTAssertNil(selection.paneId, "external topology replacement ends the presentation")
+    }
+
+    @MainActor
+    private func waitForPopoutFrame(_ view: WKWebView, in window: UIWindow,
+                                   expected: CGRect) async {
+        let resized = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            let actual = view.convert(view.bounds, to: window)
+            return abs(actual.minX - expected.minX) < 1 && abs(actual.minY - expected.minY) < 1
+                && abs(actual.width - expected.width) < 1 && abs(actual.height - expected.height) < 1
+        }, object: nil)
+        await fulfillment(of: [resized], timeout: 5)
+        let actual = view.convert(view.bounds, to: window)
+        XCTAssertEqual(actual.minX, expected.minX, accuracy: 1)
+        XCTAssertEqual(actual.minY, expected.minY, accuracy: 1)
+        XCTAssertEqual(actual.width, expected.width, accuracy: 1)
+        XCTAssertEqual(actual.height, expected.height, accuracy: 1)
     }
 
     @MainActor

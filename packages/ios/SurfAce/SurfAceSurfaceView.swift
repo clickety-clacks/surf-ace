@@ -841,6 +841,58 @@ private struct SurfAceResizeProbeWebView: UIViewRepresentable {
 
 // Exercises the shipping pane tree and resizeSplit path with a local runtime.
 // The app's normal startup is bypassed, so this never opens a listener.
+// Local UI fixture: no runtime.start, transport, registry or discovery.
+struct SurfAcePopoutProbeView: View {
+    @State private var runtime: SurfAceRuntime
+    @State private var surface: SurfAceSurfaceModel?
+
+    init() {
+        let name = "SurfAcePopoutUI.\(UUID().uuidString)"
+        _runtime = State(initialValue: SurfAceRuntime(
+            userDefaults: UserDefaults(suiteName: name)!,
+            locklessStateURL: FileManager.default.temporaryDirectory
+                .appendingPathComponent(name).appendingPathComponent("authority.json"),
+            enableFleetDiscovery: false, isolatedTestLoopback: true))
+    }
+
+    var body: some View {
+        if let surface {
+            SurfAceWindowView(runtime: runtime, surface: surface)
+                .overlay(alignment: .bottomLeading) {
+                    Text("topology revision \(surface.topologyEpoch)")
+                        .accessibilityIdentifier("surf-ace-popout-topology")
+                        .padding(4).background(.black).foregroundStyle(.white)
+                        .allowsHitTesting(false)
+                }
+        } else {
+            Color.clear.task {
+                let local = runtime.registerSurface(sceneKey: "popout-ui")
+                let panes = (1...3).map { SurfAcePaneModel(paneId: $0, paneLabel: $0) }
+                for pane in panes {
+                    let id = pane.paneId
+                    let html = """
+                    <html><head><meta name='viewport' content='width=device-width,initial-scale=1'></head>
+                    <body style='background:#183047;color:white'>
+                    <button style='margin:80px 8px 0;padding:20px' onclick='++window.clicks;document.getElementById("count").textContent="Pane \(id) clicks "+window.clicks'>Increment pane \(id)</button>
+                    <p id='count'>Pane \(id) clicks 0</p><script>window.clicks=0;</script>
+                    </body></html>
+                    """
+                    pane.currentEntry = SurfAcePaneEntry.from(frame: SurfAceFrame(
+                        contentId: "popout-ui-\(id)", revision: 1, contentType: .html,
+                        payload: .html(html: html, baseURL: nil), reloadSource: nil,
+                        title: "Pane \(id)", scrollable: true, interactive: true))
+                }
+                local.panesById = Dictionary(uniqueKeysWithValues: panes.map { ($0.paneId, $0) })
+                local.paneLayout = .split(direction: .vertical, children: [
+                    .leaf(1, weight: 1), .split(direction: .horizontal,
+                        children: [.leaf(2, weight: 2), .leaf(3, weight: 1)], weight: 3),
+                ])
+                surface = local
+            }
+        }
+    }
+}
+
 struct SurfAceResizeTreeProbeView: View {
     var direction: SurfAceLayoutDirection = .vertical
     var authority = false
@@ -1009,6 +1061,7 @@ private struct SurfAcePaneView: View {
     var onTogglePopout: () -> Void = {}
     @State private var toolbarCollapsed = false
     @AccessibilityFocusState private var popoutControlFocused: Bool
+    @FocusState private var popoutKeyboardFocused: Bool
 
     var body: some View {
         GeometryReader { proxy in
@@ -1139,7 +1192,7 @@ private struct SurfAcePaneView: View {
                 Button(action: onTogglePopout) {
                     Label(isPoppedOut ? "Restore" : "Pop out",
                           systemImage: isPoppedOut ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
-                        .font(.callout.weight(.semibold))
+                        .font(.custom(SurfAceChromeFont.boldName, size: 17))
                         .padding(.horizontal, 10)
                         .frame(minWidth: 44, minHeight: 44)
                 }
@@ -1147,6 +1200,7 @@ private struct SurfAcePaneView: View {
                 .accessibilityIdentifier("surf-ace-pane-popout-\(pane.paneId)")
                 .accessibilityValue(isPoppedOut ? "Expanded" : "Tiled")
                 .accessibilityFocused($popoutControlFocused)
+                .focused($popoutKeyboardFocused)
                 .padding(8)
             }
             .overlay {
@@ -1157,8 +1211,9 @@ private struct SurfAcePaneView: View {
             .onChange(of: proxy.size) { _, newSize in
                 pane.lastMeasuredSize = newSize
             }
-            .onChange(of: isPoppedOut) { _, expanded in
-                if expanded { popoutControlFocused = true }
+            .onChange(of: isPoppedOut) { _, _ in
+                popoutControlFocused = true
+                popoutKeyboardFocused = true
             }
             .onAppear {
                 publishGeometrySnapshot(paneFrame: paneFrame)
