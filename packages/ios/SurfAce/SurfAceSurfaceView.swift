@@ -370,16 +370,42 @@ struct SurfAceRootView: View {
     }
 }
 
-private struct SurfAceWindowView: View {
+@MainActor
+@Observable
+final class SurfAcePanePopoutPresentation {
+    var paneId: Int?
+
+    func reconcile(paneIds: [Int], topologyChanged: Bool) {
+        if topologyChanged || (paneId.map { !paneIds.contains($0) } ?? false) {
+            paneId = nil
+        }
+    }
+}
+
+struct SurfAceWindowView: View {
     let runtime: SurfAceRuntime
     @Bindable var surface: SurfAceSurfaceModel
     @Environment(\.displayScale) private var displayScale
+    @State private var presentation: SurfAcePanePopoutPresentation
+
+    init(runtime: SurfAceRuntime, surface: SurfAceSurfaceModel,
+         presentation: SurfAcePanePopoutPresentation = SurfAcePanePopoutPresentation()) {
+        self.runtime = runtime
+        self.surface = surface
+        _presentation = State(initialValue: presentation)
+    }
 
     var body: some View {
         GeometryReader { proxy in
             let surfaceBounds = CGRect(origin: .zero, size: proxy.size)
             ZStack {
-                SurfAcePaneTreeView(runtime: runtime, surface: surface, node: surface.paneLayout, surfaceBounds: surfaceBounds)
+                SurfAcePaneTreeView(runtime: runtime, surface: surface, node: surface.paneLayout,
+                                    surfaceBounds: surfaceBounds, tileBounds: surfaceBounds,
+                                    poppedPaneId: presentation.paneId,
+                                    onTogglePopout: { paneId in
+                                        runtime.activateKeyboardPane(surfaceId: surface.surfaceId, paneId: paneId)
+                                        presentation.paneId = presentation.paneId == paneId ? nil : paneId
+                                    })
                     .background(surfAceSurfaceBackdropColor())
                     .coordinateSpace(name: surfAceSurfaceCoordinateSpaceName)
                     .onAppear {
@@ -414,7 +440,32 @@ private struct SurfAceWindowView: View {
             }
         }
         .focusedSceneValue(\.surfAceCommandTargetSurfaceId, surface.surfaceId)
+        .onChange(of: surface.topologyEpoch) { _, _ in
+            presentation.reconcile(paneIds: surface.paneLayout.paneIDs, topologyChanged: true)
+        }
+        .onChange(of: surface.paneLayout.paneIDs) { _, paneIds in
+            presentation.reconcile(paneIds: paneIds, topologyChanged: false)
+        }
     }
+}
+
+// Presentation geometry never writes a split or stores old restore bounds.
+func surfAcePanePopoutBounds(in bounds: CGRect) -> CGRect {
+    let inset = min(20, max(8, min(bounds.width, bounds.height) * 0.04))
+    return bounds.insetBy(dx: min(inset, bounds.width / 4), dy: min(inset, bounds.height / 4))
+}
+
+func surfAceSplitChildBounds(parent: CGRect, direction: SurfAceLayoutDirection,
+                             weights: [Double], index: Int) -> CGRect {
+    let total = max(weights.reduce(0, +), 1)
+    let prefix = weights.prefix(index).reduce(0, +) / total
+    let fraction = weights[index] / total
+    if direction == .vertical {
+        return CGRect(x: parent.minX + parent.width * prefix, y: parent.minY,
+                      width: parent.width * fraction, height: parent.height)
+    }
+    return CGRect(x: parent.minX, y: parent.minY + parent.height * prefix,
+                  width: parent.width, height: parent.height * fraction)
 }
 
 private struct SurfAceCentralConnectionBanner: View {
@@ -514,6 +565,9 @@ private struct SurfAcePaneTreeView: View {
     @Bindable var surface: SurfAceSurfaceModel
     let node: SurfAcePaneLayoutNode
     let surfaceBounds: CGRect
+    var tileBounds: CGRect? = nil
+    var poppedPaneId: Int?
+    var onTogglePopout: (Int) -> Void = { _ in }
     var path: [Int] = []
     @State private var splitPreview = SurfAceSplitPreviewState()
 
@@ -523,7 +577,20 @@ private struct SurfAcePaneTreeView: View {
             surfAceSurfaceBackdropColor()
         case .leaf(let paneId, _):
             if let pane = surface.panesById[paneId] {
-                SurfAcePaneView(runtime: runtime, surface: surface, pane: pane, surfaceBounds: surfaceBounds)
+                GeometryReader { proxy in
+                    let tile = tileBounds ?? surfaceBounds
+                    let expanded = poppedPaneId == paneId
+                    let displayed = expanded ? surfAcePanePopoutBounds(in: surfaceBounds) : tile
+                    SurfAcePaneView(runtime: runtime, surface: surface, pane: pane,
+                                    surfaceBounds: surfaceBounds, isPoppedOut: expanded,
+                                    onTogglePopout: { onTogglePopout(paneId) })
+                        .frame(width: expanded ? displayed.width : proxy.size.width,
+                               height: expanded ? displayed.height : proxy.size.height)
+                        .offset(x: expanded ? displayed.minX - tile.minX : 0,
+                                y: expanded ? displayed.minY - tile.minY : 0)
+                        .allowsHitTesting(poppedPaneId == nil || expanded)
+                        .accessibilityHidden(poppedPaneId != nil && !expanded)
+                }
             } else {
                 Color.clear
             }
@@ -536,8 +603,13 @@ private struct SurfAcePaneTreeView: View {
                     ZStack(alignment: .topLeading) {
                         HStack(spacing: 0) {
                             ForEach(Array(children.enumerated()), id: \.offset) { index, child in
-                                SurfAcePaneTreeView(runtime: runtime, surface: surface, node: child, surfaceBounds: surfaceBounds, path: path + [index])
+                                SurfAcePaneTreeView(runtime: runtime, surface: surface, node: child,
+                                    surfaceBounds: surfaceBounds,
+                                    tileBounds: surfAceSplitChildBounds(parent: tileBounds ?? surfaceBounds,
+                                        direction: direction, weights: weights, index: index),
+                                    poppedPaneId: poppedPaneId, onTogglePopout: onTogglePopout, path: path + [index])
                                     .frame(width: max(1, proxy.size.width * weights[index] / totalWeight), height: proxy.size.height)
+                                    .zIndex(child.paneIDs.contains(poppedPaneId ?? -1) ? 1 : 0)
                             }
                         }
                         ForEach(Array(children.indices.dropLast()), id: \.self) { index in
@@ -572,14 +644,21 @@ private struct SurfAcePaneTreeView: View {
                                 splitPreview.cancel(token: token)
                             }
                             .position(x: offset, y: proxy.size.height / 2)
+                            .allowsHitTesting(poppedPaneId == nil)
+                            .opacity(poppedPaneId == nil ? 1 : 0)
                         }
                     }
                 } else {
                     ZStack(alignment: .topLeading) {
                         VStack(spacing: 0) {
                             ForEach(Array(children.enumerated()), id: \.offset) { index, child in
-                                SurfAcePaneTreeView(runtime: runtime, surface: surface, node: child, surfaceBounds: surfaceBounds, path: path + [index])
+                                SurfAcePaneTreeView(runtime: runtime, surface: surface, node: child,
+                                    surfaceBounds: surfaceBounds,
+                                    tileBounds: surfAceSplitChildBounds(parent: tileBounds ?? surfaceBounds,
+                                        direction: direction, weights: weights, index: index),
+                                    poppedPaneId: poppedPaneId, onTogglePopout: onTogglePopout, path: path + [index])
                                     .frame(width: proxy.size.width, height: max(1, proxy.size.height * weights[index] / totalWeight))
+                                    .zIndex(child.paneIDs.contains(poppedPaneId ?? -1) ? 1 : 0)
                             }
                         }
                         ForEach(Array(children.indices.dropLast()), id: \.self) { index in
@@ -614,6 +693,8 @@ private struct SurfAcePaneTreeView: View {
                                 splitPreview.cancel(token: token)
                             }
                             .position(x: proxy.size.width / 2, y: offset)
+                            .allowsHitTesting(poppedPaneId == nil)
+                            .opacity(poppedPaneId == nil ? 1 : 0)
                         }
                     }
                 }
@@ -761,6 +842,58 @@ private struct SurfAceResizeProbeWebView: UIViewRepresentable {
 
 // Exercises the shipping pane tree and resizeSplit path with a local runtime.
 // The app's normal startup is bypassed, so this never opens a listener.
+// Local UI fixture: no runtime.start, transport, registry or discovery.
+struct SurfAcePopoutProbeView: View {
+    @State private var runtime: SurfAceRuntime
+    @State private var surface: SurfAceSurfaceModel?
+
+    init() {
+        let name = "SurfAcePopoutUI.\(UUID().uuidString)"
+        _runtime = State(initialValue: SurfAceRuntime(
+            userDefaults: UserDefaults(suiteName: name)!,
+            locklessStateURL: FileManager.default.temporaryDirectory
+                .appendingPathComponent(name).appendingPathComponent("authority.json"),
+            enableFleetDiscovery: false, isolatedTestLoopback: true))
+    }
+
+    var body: some View {
+        if let surface {
+            SurfAceWindowView(runtime: runtime, surface: surface)
+                .overlay(alignment: .bottomLeading) {
+                    Text("topology revision \(surface.topologyEpoch)")
+                        .accessibilityIdentifier("surf-ace-popout-topology")
+                        .padding(4).background(.black).foregroundStyle(.white)
+                        .allowsHitTesting(false)
+                }
+        } else {
+            Color.clear.task {
+                let local = runtime.registerSurface(sceneKey: "popout-ui")
+                let panes = (1...3).map { SurfAcePaneModel(paneId: $0, paneLabel: $0) }
+                for pane in panes {
+                    let id = pane.paneId
+                    let html = """
+                    <html><head><meta name='viewport' content='width=device-width,initial-scale=1'></head>
+                    <body style='background:#183047;color:white'>
+                    <button style='margin:80px 8px 0;padding:20px' onclick='++window.clicks;document.getElementById("count").textContent="Pane \(id) clicks "+window.clicks'>Increment pane \(id)</button>
+                    <p id='count'>Pane \(id) clicks 0</p><script>window.clicks=0;</script>
+                    </body></html>
+                    """
+                    pane.currentEntry = SurfAcePaneEntry.from(frame: SurfAceFrame(
+                        contentId: "popout-ui-\(id)", revision: 1, contentType: .html,
+                        payload: .html(html: html, baseURL: nil), reloadSource: nil,
+                        title: "Pane \(id)", scrollable: true, interactive: true))
+                }
+                local.panesById = Dictionary(uniqueKeysWithValues: panes.map { ($0.paneId, $0) })
+                local.paneLayout = .split(direction: .vertical, children: [
+                    .leaf(1, weight: 1), .split(direction: .horizontal,
+                        children: [.leaf(2, weight: 2), .leaf(3, weight: 1)], weight: 3),
+                ])
+                surface = local
+            }
+        }
+    }
+}
+
 struct SurfAceResizeTreeProbeView: View {
     var direction: SurfAceLayoutDirection = .vertical
     var authority = false
@@ -804,7 +937,8 @@ struct SurfAceResizeTreeProbeView: View {
                             runtime: runtime,
                             surface: surface,
                             node: surface.paneLayout,
-                            surfaceBounds: CGRect(origin: .zero, size: proxy.size)
+                            surfaceBounds: CGRect(origin: .zero, size: proxy.size),
+                            poppedPaneId: nil
                         )
                     }
                     if !showUnsavedStatus {
@@ -924,7 +1058,11 @@ private struct SurfAcePaneView: View {
     @Bindable var surface: SurfAceSurfaceModel
     @Bindable var pane: SurfAcePaneModel
     let surfaceBounds: CGRect
+    var isPoppedOut = false
+    var onTogglePopout: () -> Void = {}
     @State private var toolbarCollapsed = false
+    @AccessibilityFocusState private var popoutControlFocused: Bool
+    @FocusState private var popoutKeyboardFocused: Bool
 
     var body: some View {
         GeometryReader { proxy in
@@ -1051,8 +1189,46 @@ private struct SurfAcePaneView: View {
                         .zIndex(1)
                 }
             }
+            .overlay(alignment: .topTrailing) {
+                Button(action: onTogglePopout) {
+                    HStack(spacing: 6) {
+                        Image(systemName: isPoppedOut ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
+                        if isPoppedOut { Text("Restore") }
+                    }
+                    .font(.custom(SurfAceChromeFont.boldName, size: 17))
+                    .padding(.horizontal, isPoppedOut ? 10 : 0)
+                    .frame(minWidth: 44, minHeight: 44)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(Color(red: 0.04, green: 0.28, blue: 0.20))
+                .foregroundStyle(.white)
+                .focusable(interactions: .activate)
+                .focused($popoutKeyboardFocused)
+                .onKeyPress(keys: [.space, .return], phases: .down) { _ in
+                    onTogglePopout()
+                    return .handled
+                }
+                .accessibilityLabel(isPoppedOut ? "Restore" : "Pop out")
+                .accessibilityIdentifier("surf-ace-pane-popout-\(pane.paneId)")
+                .accessibilityValue(isPoppedOut ? "Expanded" : "Tiled")
+                .accessibilityFocused($popoutControlFocused)
+                .padding(8)
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(.black, lineWidth: isPoppedOut ? 5 : 0)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 12)
+                            .strokeBorder(.white, lineWidth: isPoppedOut ? 3 : 0)
+                    }
+                    .allowsHitTesting(false)
+            }
             .onChange(of: proxy.size) { _, newSize in
                 pane.lastMeasuredSize = newSize
+            }
+            .onChange(of: isPoppedOut) { _, _ in
+                popoutControlFocused = true
+                if !UIAccessibility.isVoiceOverRunning { popoutKeyboardFocused = true }
             }
             .onAppear {
                 publishGeometrySnapshot(paneFrame: paneFrame)
