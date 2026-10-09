@@ -450,10 +450,14 @@ function paneSnapshotGeometryIdentity(): {
   };
 }
 
+function reportSnapshot(payload: Record<string, unknown>): void {
+  window.surfAce.reportSnapshot({ ...payload, displayOnly: payload.paneId === poppedOutPaneId });
+}
+
 function reportPaneSnapshot(view: PaneView): void {
   const frame = currentPaneFrameElement(view);
   if (frame?.matches("webview.content-browser-url-frame")) {
-    window.surfAce.reportSnapshot({
+    reportSnapshot({
       bounds: paneBounds(view),
       ...paneSnapshotGeometryIdentity(),
       paneId: view.paneId,
@@ -462,7 +466,7 @@ function reportPaneSnapshot(view: PaneView): void {
   }
   const selection = currentSelectionWithin(view);
   const viewport = currentViewport(view);
-  window.surfAce.reportSnapshot({
+  reportSnapshot({
     bounds: paneBounds(view),
     ...paneSnapshotGeometryIdentity(),
     paneId: view.paneId,
@@ -1408,8 +1412,35 @@ function applyPanePopOut(): void {
   appRoot.classList.toggle("has-pane-pop-out", poppedOutPaneId !== null);
 }
 
-function togglePanePopOut(view: PaneView): void {
-  poppedOutPaneId = poppedOutPaneId === view.paneId ? null : view.paneId;
+let panePresentationIntent = 0;
+async function togglePanePopOut(view: PaneView): Promise<void> {
+  if (!latestState) return;
+  const intent = ++panePresentationIntent;
+  const identity = paneSnapshotGeometryIdentity();
+  const surfaceId = latestState.surfaceId;
+  const selected = poppedOutPaneId === view.paneId ? null : view.paneId;
+  const width = latestState.viewport.width;
+  const height = latestState.viewport.height;
+  const inset = Math.max(8, Math.min(24, Math.min(width, height) * 0.02));
+  const bounds = { x: inset, y: inset, width: width - inset * 2, height: height - inset * 2 };
+  const viewport = currentViewport(view);
+  viewport.visibleRect.width = Math.max(0, bounds.width - 4);
+  viewport.visibleRect.height = Math.max(0, bounds.height - 4);
+  let response: { ok: boolean; error?: string };
+  try {
+    response = await window.surfAce.setPanePresentation({ identity, paneId: selected,
+      ...(selected === null ? {} : { bounds, viewport }) });
+  } catch (error) {
+    response = { ok: false, error: error instanceof Error ? error.message : "Pane presentation failed" };
+  }
+  if (intent !== panePresentationIntent || !latestState || latestState.surfaceId !== surfaceId ||
+      JSON.stringify(paneSnapshotGeometryIdentity()) !== JSON.stringify(identity) ||
+      paneViews.get(view.paneId) !== view) return;
+  if (!response.ok) {
+    view.popOutButton.title = response.error ?? "Pane presentation is unavailable";
+    return;
+  }
+  poppedOutPaneId = selected;
   applyPanePopOut();
   // Focusing the pane changes input ownership, never the split tree or content.
   rememberPaneContext(view.paneId);
@@ -1499,7 +1530,7 @@ function ensurePaneView(paneId: number): PaneView {
   popOutButton.setAttribute("aria-expanded", "false");
   popOutButton.addEventListener("click", (event) => {
     event.stopPropagation();
-    togglePanePopOut(view);
+    void togglePanePopOut(view);
   });
   const scrollEl = document.createElement("div");
   scrollEl.className = "pane-scroll";
@@ -1866,7 +1897,7 @@ function reportBrowserUrlKeyboardScroll(view: PaneView, result: BrowserUrlKeyboa
     viewport: result.viewport,
     visibleText: result.visibleText,
   });
-  window.surfAce.reportSnapshot({
+  reportSnapshot({
     bounds: paneBounds(view),
     ...paneSnapshotGeometryIdentity(),
     paneId: view.paneId,
@@ -2407,7 +2438,7 @@ function wireBrowserContentEvents(view: PaneView, paneId: number, webview: Brows
         viewport: payload.viewport,
         visibleText: payload.visibleText,
       });
-      window.surfAce.reportSnapshot({
+      reportSnapshot({
         bounds: paneBounds(view),
         ...paneSnapshotGeometryIdentity(),
         paneId,
@@ -2438,7 +2469,7 @@ function wireBrowserContentEvents(view: PaneView, paneId: number, webview: Brows
       collapsePaneToolbar(view);
       sendNavigationIntent(view, paneId, String(payload.url ?? ""));
     } else if (payload.type === "ready") {
-      window.surfAce.reportSnapshot({
+      reportSnapshot({
         bounds: paneBounds(view),
         ...paneSnapshotGeometryIdentity(),
         paneId,
@@ -3155,6 +3186,7 @@ function renderWindow(state: RendererWindowState): void {
       layoutKey(previousState) !== layoutKey(state) ||
       !state.panes.some((pane) => pane.paneId === poppedOutPaneId))) {
     poppedOutPaneId = null;
+    panePresentationIntent++;
     applyPanePopOut();
   }
   if (previousState) {

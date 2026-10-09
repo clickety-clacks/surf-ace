@@ -3587,10 +3587,26 @@ export class SurfaceCore {
     surfaceId: string,
     paneId: number,
     snapshot: Partial<PaneSnapshot>,
+    displayOnly = false,
   ): void {
     const surface = this.getSurface(surfaceId);
     const pane = this.requirePane(surfaceId, paneId);
     if (!pane) {
+      return;
+    }
+    // Display reports from an expanded pane must not replace its durable tile
+    // or tiled viewport. Geometry changes require the acknowledged presentation
+    // path; ordinary snapshot reports may refresh only ephemeral viewport data.
+    const presentation = this.currentPanePresentation(surface);
+    if (displayOnly && presentation?.paneId !== paneId) return;
+    if (presentation?.paneId === paneId) {
+      const identity = snapshotGeometryIdentity(snapshot);
+      if (!identity || !sameGeometryIdentity(identity, this.resolvedPaneGeometryIdentity(surfaceId))) return;
+      const updated = structuredClone(presentation);
+      if (snapshot.viewport !== undefined) updated.snapshot.viewport = snapshot.viewport;
+      this.validatePanePresentation(surfaceId, updated);
+      this.panePresentations.set(surfaceId, updated);
+      if (snapshot.selection !== undefined) pane.snapshot.selection = snapshot.selection;
       return;
     }
     const previousBounds = pane.snapshot.bounds;

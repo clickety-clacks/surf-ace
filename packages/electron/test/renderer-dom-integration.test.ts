@@ -64,6 +64,8 @@ test("renderer DOM integrates authoritative connection states and live scale con
   let provenanceWidth = 200;
   let textMetricScale = 1;
   const commands: unknown[] = [];
+  const presentations: Record<string, unknown>[] = [];
+  let presentationResponse: (() => Promise<{ ok: boolean; error?: string }>) | null = null;
   const resizeCallbacks: Array<() => void> = [];
   const mutationCallbacks: Array<() => void> = [];
   const fontCallbacks: Array<() => void> = [];
@@ -82,6 +84,10 @@ test("renderer DOM integrates authoritative connection states and live scale con
     reportOverlayRegions() {},
     reportRendererDiagnostic() {},
     reportSnapshot() {},
+    async setPanePresentation(request: Record<string, unknown>) {
+      presentations.push(request);
+      return presentationResponse ? presentationResponse() : { ok: true };
+    },
   };
 
   Object.assign(window, {
@@ -610,8 +616,16 @@ test("renderer DOM integrates authoritative connection states and live scale con
     const slotWeights = slots.map((slot) => slot.style.flexGrow);
     const toggle = selected.querySelector<HTMLButtonElement>(".pane-pop-out")!;
     const commandsBefore = commands.length;
+    presentationResponse = async () => ({ ok: false, error: "unsupported compositor" });
+    toggle.click();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(selected.classList.contains("pane-popped-out"), false);
+    assert.equal(toggle.title, "unsupported compositor");
+    presentationResponse = null;
     for (let cycle = 0; cycle < 3; cycle++) {
       toggle.click();
+      assert.equal(selected.classList.contains("pane-popped-out"), false, "pending ack retains tiled display");
+      await new Promise<void>((resolve) => setImmediate(resolve));
       assert.equal(toggle.textContent, "Restore");
       assert.equal(toggle.getAttribute("aria-expanded"), "true");
       assert.equal(selected.classList.contains("pane-popped-out"), true);
@@ -625,6 +639,7 @@ test("renderer DOM integrates authoritative connection states and live scale con
       selected.querySelector(".pane-scroll")!.dispatchEvent(new window.Event("scroll"));
       assert.equal(toggle.isConnected, true, "toolbar collapse cannot remove Restore");
       toggle.click();
+      await new Promise<void>((resolve) => setImmediate(resolve));
       assert.equal(toggle.getAttribute("aria-expanded"), "false");
       assert.equal(selected.classList.contains("pane-popped-out"), false);
       assert.equal(roots[0]!.hasAttribute("inert"), false);
@@ -637,8 +652,10 @@ test("renderer DOM integrates authoritative connection states and live scale con
     assert.equal(JSON.stringify(next.layout), topologyBefore);
     assert.equal(commands.slice(commandsBefore).some((command) =>
       ["resize-split", "split-pane", "close-pane", "reload"].includes((command as { type: string }).type)), false);
+    assert.equal(presentations.at(-1)!.paneId, null, "Restore is an acknowledged presentation request");
     toggle.click();
     stateListener!({ ...next, topologyRevision: next.topologyRevision + 1 });
+    await new Promise<void>((resolve) => setImmediate(resolve));
     assert.equal(selected.classList.contains("pane-popped-out"), false, "external topology epoch clears presentation");
     assert.equal(toggle.textContent, "Pop out");
     toggle.click();

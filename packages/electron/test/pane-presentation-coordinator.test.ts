@@ -36,6 +36,40 @@ function ack(wire: CompositorControlRequest) {
 }
 const capability = { ok: true, status: { capabilities: { [PANE_PRESENTATION_CAPABILITY]: 1 } } };
 
+test("renderer request resolves lineage locally and rejects malformed identity before transport", async () => {
+  const f = fixture(false);
+  const coordinator = new PanePresentationCoordinator(f.core, () => null);
+  await assert.rejects(coordinator.applyRendererRequest(f.surfaceId, { paneId: f.paneId }), /identity/);
+  await assert.rejects(coordinator.applyRendererRequest(f.surfaceId, {
+    identity: f.identity, paneId: -1,
+  }), /pane/);
+  await coordinator.applyRendererRequest(f.surfaceId, {
+    identity: f.identity, paneId: f.paneId, paneLineageId: "forged-lineage",
+    bounds: f.presentation.snapshot.bounds, viewport: f.presentation.snapshot.viewport,
+  });
+  assert.deepEqual(f.core.paneBounds(f.surfaceId, f.paneId), f.presentation.snapshot.bounds);
+});
+
+test("expanded ordinary reports cannot overwrite tiled persistence or acknowledged geometry", async () => {
+  const f = fixture(false);
+  const saved = f.core.getPersistentState();
+  await new PanePresentationCoordinator(f.core, () => null).apply(f.surfaceId, f.presentation, f.identity);
+  const viewport = structuredClone(f.presentation.snapshot.viewport);
+  viewport.scrollOffset.y = 17;
+  viewport.visibleRect.height = 676;
+  f.core.updatePaneSnapshot(f.surfaceId, f.paneId, { ...f.identity,
+    bounds: { x: 0, y: 0, width: 1000, height: 700 }, viewport });
+  assert.deepEqual(f.core.getPersistentState(), saved);
+  assert.deepEqual(f.core.paneBounds(f.surfaceId, f.paneId), f.presentation.snapshot.bounds);
+  assert.deepEqual(f.core.captureSnapshot(f.surfaceId, f.paneId).viewport, viewport);
+  f.core.updatePaneSnapshot(f.surfaceId, f.paneId, { viewport: { ...viewport, zoomLevel: 5 } });
+  assert.deepEqual(f.core.captureSnapshot(f.surfaceId, f.paneId).viewport, viewport, "unfenced report is ignored");
+  f.core.setPanePresentation(f.surfaceId, null);
+  f.core.updatePaneSnapshot(f.surfaceId, f.paneId, { ...f.identity,
+    bounds: f.presentation.snapshot.bounds, viewport }, true);
+  assert.deepEqual(f.core.getPersistentState(), saved, "late display-only report after Restore is discarded");
+});
+
 test("native presentation remains tiled until exact acknowledgement and never changes persistence", async () => {
   const f = fixture();
   const saved = f.core.getPersistentState();

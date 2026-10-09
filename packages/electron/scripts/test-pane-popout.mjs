@@ -39,6 +39,7 @@ window.surfAce={guestPreloadPath:${JSON.stringify(guest)},
 getBootstrap:async()=>({state:window.fixtureState,surfaceId:'fixture'}),
 onState:f=>window.fixtureUpdate=f,onKeyboardIntent:f=>window.fixtureKeyboard=f,
 command:c=>window.fixtureCommands.push(c),reportSnapshot:s=>window.fixtureSnapshots.push(s),
+setPanePresentation:async()=>({ok:true}),
 reportDiagnostics(){},reportOverlayRegions(){},reportRendererDiagnostic(){},clearToast(){}};`);
 // Electron waits for its ESM entry to finish loading before emitting ready.
 async function run() {

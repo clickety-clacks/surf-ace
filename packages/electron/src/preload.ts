@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld("surfAce", {
     ipcRenderer.invoke("surface:annotation-open", { paneId, openedAt }) as Promise<boolean>,
   guestPreloadPath,
   getBootstrap: () => ipcRenderer.invoke("surface:get-bootstrap"),
+  setPanePresentation: (payload: Record<string, unknown>) => ipcRenderer.invoke("surface:pane-presentation", payload),
   onKeyboardIntent: (listener: (intent: unknown) => void) => {
     const wrapped = (_event: unknown, intent: unknown) => listener(intent);
     ipcRenderer.on("surface:keyboard-intent", wrapped);
@@ -33,6 +34,7 @@ declare global {
       captureAnnotationOpen: (paneId: number, openedAt: number) => Promise<boolean>;
       guestPreloadPath: string;
       getBootstrap: () => Promise<unknown>;
+      setPanePresentation: (payload: Record<string, unknown>) => Promise<{ ok: boolean; error?: string; revision?: number }>;
       onKeyboardIntent: (listener: (intent: unknown) => void) => () => void;
       onState: (listener: (state: unknown) => void) => () => void;
       reportOverlayRegions: (payload: Record<string, unknown>) => void;

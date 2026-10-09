@@ -71,6 +71,7 @@ import {
 } from "./runtime-identity.js";
 import { isAddressInUse, isPortBoundOnIpv6Any } from "./port-selection.js";
 import { SurfaceWsServer } from "./ws-server.js";
+import { PanePresentationCoordinator } from "./pane-presentation-coordinator.js";
 import { AnnotationRegistryPublisher } from "./annotation-registry-publisher.js";
 import { AnnotationSourceCoordinator } from "./annotation-source-coordinator.js";
 import { restoreWindowPlacement, type WindowPlacement } from "./window-placement.js";
@@ -1632,6 +1633,27 @@ function installWebAuthnAccountSelection(): void {
 }
 
 function installIpc(): void {
+  const panePresentation = new PanePresentationCoordinator(core, (surfaceId) => {
+    const socket = resolveCompositorControlSocketPath();
+    if (!socket) return null;
+    // The current compositor transport binds one main-app host. Never infer
+    // per-window coordinates from a shared socket when multiple windows exist.
+    const owned = [...windows.entries()].filter(([, window]) => !window.isDestroyed());
+    if (owned.length !== 1 || owned[0]![0] !== surfaceId) {
+      throw new Error("independently routed compositor window host is unavailable");
+    }
+    return (request) => sendCompositorControl(socket, request);
+  });
+  ipcMain.handle("surface:pane-presentation", async (event, payload: unknown) => {
+    const surfaceId = surfaceIdForSender(event.sender);
+    if (!surfaceId) return { ok: false, error: "renderer surface is unavailable" };
+    try {
+      const revision = await panePresentation.applyRendererRequest(surfaceId, payload);
+      return { ok: true, revision };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : "pane presentation failed" };
+    }
+  });
   ipcMain.handle("surface:annotation-open", async (event, payload: { paneId?: unknown; openedAt?: unknown }) => {
     const surfaceId = surfaceIdForSender(event.sender);
     const paneId = payload?.paneId;
@@ -1751,7 +1773,7 @@ function installIpc(): void {
       if ("viewport" in payload) {
         snapshot.viewport = payload.viewport as never;
       }
-      core.updatePaneSnapshot(surfaceId, Number(payload.paneId), snapshot);
+      core.updatePaneSnapshot(surfaceId, Number(payload.paneId), snapshot, payload.displayOnly === true);
     } catch {
       // Renderer snapshot updates are best-effort; stale pane ids should not crash the app.
     }

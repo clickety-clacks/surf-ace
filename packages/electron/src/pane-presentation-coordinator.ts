@@ -15,6 +15,30 @@ export class PanePresentationCoordinator {
     private readonly transportForSurface: (surfaceId: string) => Sender | null,
   ) {}
 
+  /** Sender-to-surface routing belongs to main; renderer never supplies surface or lineage authority. */
+  async applyRendererRequest(surfaceId: string, payload: unknown): Promise<number> {
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      throw new Error("invalid pane presentation request");
+    }
+    const request = payload as Record<string, unknown>;
+    const identity = request.identity as Identity;
+    if (!identity || typeof identity.surfaceEpoch !== "string" ||
+        !Number.isSafeInteger(identity.geometryRevision) || !Number.isSafeInteger(identity.topologyRevision)) {
+      throw new Error("invalid pane presentation identity");
+    }
+    if (request.paneId === null) return this.apply(surfaceId, null, identity);
+    if (!Number.isSafeInteger(request.paneId) || Number(request.paneId) <= 0) {
+      throw new Error("invalid pane presentation pane");
+    }
+    const pane = this.core.panesList(surfaceId).panes.find((item) => item.paneId === request.paneId);
+    if (!pane) throw new Error("pane presentation pane is absent");
+    return this.apply(surfaceId, {
+      paneId: pane.paneId, paneLineageId: pane.paneLineageId,
+      snapshot: { ...identity, bounds: request.bounds as never,
+        viewport: request.viewport as never, selection: null },
+    }, identity);
+  }
+
   async apply(surfaceId: string, presentation: Presentation | null, expected: Identity): Promise<number> {
     const selected = presentation === null ? null : structuredClone(presentation);
     const identity = structuredClone(expected);
