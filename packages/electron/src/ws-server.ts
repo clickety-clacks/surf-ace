@@ -1,4 +1,5 @@
 import http from "node:http";
+import { splitResizeMatches, splitResizeIsNoOp, type SplitResizeExpectation } from "./split-resize.js";
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -3603,8 +3604,12 @@ export class SurfaceWsServer {
     });
   }
 
-  async resizeSplit(surfaceId: string, path: number[], weights: number[]): Promise<boolean> {
+  async resizeSplit(surfaceId: string, path: number[], weights: number[], expected?: SplitResizeExpectation): Promise<boolean> {
     return await this.runSurfaceMutation(surfaceId, async () => {
+      // Validate after earlier surface mutations, at the authority boundary.
+      const current = this.core.getRendererWindowState(surfaceId);
+      if (expected && !splitResizeMatches(current, expected)) return false;
+      if (splitResizeIsNoOp(current.layout, path, weights)) return true;
       const nativePaneIds = this.core.panesList(surfaceId).panes
         .filter((pane) => pane.externalNative)
         .map((pane) => Number(pane.paneId));

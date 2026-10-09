@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { runInNewContext } from "node:vm";
 import { pathToFileURL } from "node:url";
 
 import { parseHTML } from "linkedom";
@@ -578,6 +579,219 @@ test("renderer DOM integrates authoritative connection states and live scale con
       assert.ok(scripts.filter((script) => script.includes("document.documentElement.style.zoom")).length > firstScales,
         "navigation reapplies scale after the next dom-ready");
     }
+  });
+
+  await test("zoom refits only the ready guest without shared-origin zoom or remount", async () => {
+    const next = state("connected", true);
+    for (const [index, pane] of next.panes.entries()) Object.assign(pane.content, {
+      content: { url: "https://fixture.invalid/same-origin" }, contentType: "browser_url",
+      contentId: `guest-${index}`, revision: 40, renderVersion: 40,
+    });
+    stateListener!(next);
+    const guests = [...document.querySelectorAll("webview")] as Array<HTMLElement & { executeJavaScript: (code: string) => Promise<unknown> }>;
+    assert.equal(guests.length, 2);
+    const contexts = guests.map(() => {
+      const root = { style: { zoom: "" } };
+      const result = { columns: 40, resizeEvents: 0 };
+      return {
+        document: { documentElement: root, body: { style: { setProperty() {} } } },
+        Event: class { constructor(public type: string) {} },
+        window: { dispatchEvent(event: { type: string }) {
+          if (event.type === "resize") {
+            result.resizeEvents++;
+            result.columns = Math.floor(400 / (10 * (Number(root.style.zoom) || 1)));
+          }
+        } }, result,
+      };
+    });
+    guests.forEach((guest, index) => {
+      guest.executeJavaScript = async (code) => {
+        if (code.includes("document.documentElement.style.zoom")) runInNewContext(code, contexts[index]);
+        return null;
+      };
+      guest.dispatchEvent(new window.Event("dom-ready"));
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(contexts[0]!.document.documentElement.style.zoom, "0.85");
+    assert.equal(contexts[0]!.result.columns, 47, "default base zoom must trigger refitting");
+    const otherEvents = contexts[1]!.result.resizeEvents;
+    keyboardListener!({ action: "increase", paneId: 1, type: "content-scale" });
+    assert.equal(contexts[0]!.document.documentElement.style.zoom, "0.935");
+    assert.equal(contexts[0]!.result.columns, 42);
+    assert.equal(contexts[1]!.document.documentElement.style.zoom, "0.85");
+    assert.equal(contexts[1]!.result.resizeEvents, otherEvents);
+    assert.deepEqual([...document.querySelectorAll("webview")], guests);
+    guests[0]!.dispatchEvent(new window.Event("did-start-loading"));
+    const prior = contexts[0]!.result.resizeEvents;
+    keyboardListener!({ action: "increase", paneId: 1, type: "content-scale" });
+    assert.equal(contexts[0]!.result.resizeEvents, prior, "loading guest cannot run scale methods");
+    guests[0]!.dispatchEvent(new window.Event("dom-ready"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(contexts[0]!.document.documentElement.style.zoom, "1.02");
+    assert.equal(contexts[0]!.result.columns, 39);
+  });
+
+  await test("weighted layout, split, reorder and close retain surviving guest ancestry", async () => {
+    const next = state("connected", true);
+    for (const [index, pane] of next.panes.entries()) Object.assign(pane.content, {
+      content: { url: `https://fixture.invalid/${index}` }, contentType: "browser_url",
+      contentId: `retain-${index}`, revision: 50, renderVersion: 50,
+    });
+    stateListener!(next);
+    const wrapper = document.querySelector(".surface-window")!;
+    const hosts = document.querySelector(".pane-host-layer")!;
+    const guests = [...document.querySelectorAll("webview")];
+    const ancestry = guests.map((guest) => {
+      const chain = [];
+      for (let element: Element | null = guest; element; element = element.parentElement) chain.push(element);
+      return chain;
+    });
+    const check = (remaining = guests) => {
+      assert.equal(document.querySelector(".surface-window"), wrapper);
+      assert.equal(document.querySelector(".pane-host-layer"), hosts);
+      remaining.forEach((guest) => {
+        assert.equal(guest.isConnected, true);
+        const index = guests.indexOf(guest);
+        let element: Element | null = guest;
+        for (const ancestor of ancestry[index]!) { assert.equal(element, ancestor); element = element!.parentElement; }
+      });
+    };
+    const weights = structuredClone(next);
+    assert.ok(weights.layout.children);
+    Object.assign(weights.layout.children[0]!, { weight: 3 });
+    Object.assign(weights.layout.children[1]!, { weight: 1 });
+    weights.topologyRevision++;
+    weights.geometryRevision++;
+    stateListener!(weights);
+    check();
+    const split = structuredClone(weights);
+    split.panes.push(pane(3));
+    Object.assign(split.layout, { children: [
+      { type: "split", direction: "horizontal", weight: 3, children: [{ type: "pane", paneId: 1, weight: 1 }, { type: "pane", paneId: 3, weight: 2 }] },
+      { type: "pane", paneId: 2, weight: 1 },
+    ] });
+    split.topologyRevision++;
+    stateListener!(split);
+    check();
+    const reordered = structuredClone(split);
+    assert.ok(reordered.layout.children);
+    reordered.layout.children.reverse();
+    reordered.topologyRevision++;
+    stateListener!(reordered);
+    check();
+    const closed = structuredClone(next);
+    closed.panes = [closed.panes[0]!];
+    Object.assign(closed, { layout: { type: "pane", paneId: 1 }, topologyRevision: 10 });
+    stateListener!(closed);
+    check([guests[0]!]);
+    assert.equal(guests[1]!.isConnected, false, "only closed guest is removed");
+  });
+
+  await test("separator previews latest frame and sends one fenced release, cancel and failure restore", async () => {
+    const next = state("connected", true);
+    stateListener!(next);
+    const wrapper = document.querySelector(".surface-window");
+    const roots = [...document.querySelectorAll(".pane-shell")];
+    let queued = new Map<number, FrameRequestCallback>();
+    let frameId = 0;
+    window.requestAnimationFrame = (callback: FrameRequestCallback) => { queued.set(++frameId, callback); return frameId; };
+    window.cancelAnimationFrame = (id: number) => { queued.delete(id); };
+    const flush = () => { const callbacks = [...queued.values()]; queued.clear(); callbacks.forEach((callback) => callback(0)); };
+    const commits: Array<any> = [];
+    let finishCommit: ((value: boolean) => void) | null = null;
+    Object.assign(surfAce, { resizeSplit(payload: any) {
+      commits.push(payload);
+      return new Promise<boolean>((resolve) => { finishCommit = resolve; });
+    } });
+    const pointer = (target: EventTarget, type: string, x: number, id = 1) => {
+      const event = new window.Event(type, { bubbles: true, cancelable: true });
+      Object.assign(event, { pointerId: id, clientX: x, clientY: x });
+      target.dispatchEvent(event);
+    };
+    const handle = () => {
+      const element = document.querySelector(".split-resize-handle") as HTMLElement;
+      Object.assign(element, { setPointerCapture() {}, hasPointerCapture: () => false, releasePointerCapture() {} });
+      return element;
+    };
+    pointer(handle(), "pointerdown", 100);
+    pointer(window, "pointermove", 110);
+    pointer(window, "pointermove", 130);
+    pointer(window, "pointermove", 150);
+    assert.equal(commits.length, 0);
+    flush();
+    assert.equal((document.querySelector(".pane-layout-slot") as HTMLElement).style.flexGrow, "1.5");
+    pointer(window, "pointerup", 160);
+    assert.equal(commits.length, 1);
+    assert.deepEqual(commits[0].weights, [1.6, 0.3999999999999999]);
+    assert.equal(commits[0].expected.surfaceEpoch, next.surfaceEpoch);
+    assert.equal(commits[0].expected.topologyRevision, next.topologyRevision);
+    assert.deepEqual(commits[0].expected.layout, next.layout);
+    pointer(handle(), "pointerdown", 100);
+    pointer(window, "pointerup", 150);
+    assert.equal(commits.length, 1, "pending commit shields against backlog of newer gestures");
+    finishCommit!(false);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.match(document.querySelector(".resize-status")!.textContent!, /wasn’t saved/);
+    assert.equal((document.querySelector(".pane-layout-slot") as HTMLElement).style.flexGrow, "1");
+    assert.equal(document.querySelector(".surface-window"), wrapper);
+    assert.deepEqual([...document.querySelectorAll(".pane-shell")], roots);
+    pointer(handle(), "pointerdown", 100);
+    pointer(window, "pointermove", 150);
+    flush();
+    pointer(window, "pointercancel", 150);
+    flush();
+    assert.equal(commits.length, 1);
+    assert.equal((document.querySelector(".pane-layout-slot") as HTMLElement).style.flexGrow, "1");
+    pointer(handle(), "pointerdown", 100);
+    pointer(window, "pointerup", 100);
+    assert.equal(commits.length, 1, "no-op end sends no mutation");
+    pointer(handle(), "pointerdown", 100);
+    pointer(window, "pointermove", 140);
+    const concurrent = structuredClone(next);
+    assert.ok(concurrent.layout.children);
+    concurrent.topologyRevision++;
+    Object.assign(concurrent.layout.children[0]!, { weight: 2 });
+    stateListener!(concurrent);
+    pointer(window, "pointerup", 150);
+    flush();
+    assert.equal(commits.length, 1, "concurrent authoritative layout cancels old gesture");
+    assert.equal((document.querySelector(".pane-layout-slot") as HTMLElement).style.flexGrow, "2");
+    pointer(handle(), "pointerdown", 100);
+    pointer(window, "pointerup", 110);
+    assert.equal(commits.length, 2, "new gesture reads current authoritative weights");
+    assert.equal(commits[1].expected.topologyRevision, concurrent.topologyRevision);
+    finishCommit!(true);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(document.querySelector(".resize-status"), null);
+    const unequal = structuredClone(concurrent);
+    Object.assign(unequal.layout, { direction: "horizontal" });
+    assert.ok(unequal.layout.children);
+    Object.assign(unequal.layout.children[0]!, { weight: 0.01 });
+    Object.assign(unequal.layout.children[1]!, { weight: 0.99 });
+    unequal.topologyRevision++;
+    stateListener!(unequal);
+    pointer(handle(), "pointerdown", 100);
+    pointer(window, "pointerup", 100);
+    assert.equal(commits.length, 2, "a no-op cannot clamp existing unequal weights");
+    pointer(handle(), "pointerdown", 100);
+    pointer(window, "pointermove", 125);
+    flush();
+    assert.equal((document.querySelector(".pane-layout-slot") as HTMLElement).style.flexGrow, "0.26");
+    pointer(window, "pointerup", 125);
+    assert.equal(commits.length, 3);
+    assert.deepEqual(commits[2].weights, [0.26, 0.74]);
+    finishCommit!(true);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    pointer(handle(), "pointerdown", 100);
+    pointer(window, "pointermove", 130);
+    const rotated = structuredClone(unequal);
+    rotated.geometryRevision++;
+    rotated.viewport = { ...rotated.viewport, width: 800, height: 1200 };
+    stateListener!(rotated);
+    pointer(window, "pointerup", 130);
+    flush();
+    assert.equal(commits.length, 3, "resize/rotation cancels captured old coordinates");
+    queued.clear();
   });
 
 });

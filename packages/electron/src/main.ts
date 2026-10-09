@@ -1,4 +1,5 @@
 import { ServerConnection } from "./server-connection.js";
+import { splitResizeMatches, splitResizeIsNoOp } from "./split-resize.js";
 import fs from "node:fs/promises";
 import { createHash } from "node:crypto";
 import os from "node:os";
@@ -1632,6 +1633,26 @@ function installWebAuthnAccountSelection(): void {
 }
 
 function installIpc(): void {
+  ipcMain.handle("surface:resize-split", async (event, payload: unknown) => {
+    const surfaceId = surfaceIdForSender(event.sender);
+    if (!surfaceId || !payload || typeof payload !== "object") return false;
+    const request = payload as { path?: unknown; weights?: unknown; expected?: unknown };
+    if (!Array.isArray(request.path) || request.path.some((index) => !Number.isSafeInteger(index) || index < 0) ||
+        !Array.isArray(request.weights) || request.weights.some((weight) => typeof weight !== "number" || !Number.isFinite(weight) || weight <= 0) ||
+        !request.expected || typeof request.expected !== "object") return false;
+    const expected = request.expected as import("./split-resize.js").SplitResizeExpectation;
+    try {
+      if (server) return await server.resizeSplit(surfaceId, request.path, request.weights, expected);
+      const current = core.getRendererWindowState(surfaceId);
+      if (!splitResizeMatches(current, expected)) return false;
+      if (!splitResizeIsNoOp(current.layout, request.path, request.weights)) {
+        core.resizeSplit(surfaceId, request.path, request.weights);
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  });
   ipcMain.handle("surface:annotation-open", async (event, payload: { paneId?: unknown; openedAt?: unknown }) => {
     const surfaceId = surfaceIdForSender(event.sender);
     const paneId = payload?.paneId;

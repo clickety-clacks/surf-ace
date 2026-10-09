@@ -88,7 +88,34 @@ body.compositor-hosted .pane-shell {
 .layout-root {
   height: 100%;
   width: 100%;
+  pointer-events: none;
 }
+
+.pane-host-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.pane-host-layer > .pane-shell {
+  position: absolute;
+  pointer-events: auto;
+}
+
+.pane-layout-slot {
+  flex: 1 1 0;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+}
+
+.layout-split > .pane-layout-slot {
+  height: auto;
+  width: auto;
+}
+
+.layout-split.direction-horizontal > .pane-layout-slot { width: 100%; }
+.layout-split.direction-vertical > .pane-layout-slot { height: 100%; }
 
 .layout-split {
   display: flex;
@@ -137,6 +164,7 @@ body.compositor-hosted .pane-shell {
 
 .split-resize-handle {
   position: absolute;
+  pointer-events: auto;
   z-index: 18;
   background: rgba(255, 255, 255, 0.08);
   touch-action: none;
