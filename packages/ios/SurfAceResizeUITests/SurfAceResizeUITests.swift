@@ -76,9 +76,11 @@ final class SurfAceResizeUITests: XCTestCase {
         let fonts = app.buttons.matching(identifier: "FontSize").allElementsBoundByIndex
         let sketches = app.buttons.matching(identifier: "hand.draw").allElementsBoundByIndex
         guard let font = fonts.min(by: {
-            abs($0.frame.midY - toggle.frame.midY) < abs($1.frame.midY - toggle.frame.midY)
+            hypot($0.frame.midX - toggle.frame.midX, $0.frame.midY - toggle.frame.midY)
+                < hypot($1.frame.midX - toggle.frame.midX, $1.frame.midY - toggle.frame.midY)
         }), let sketch = sketches.min(by: {
-            abs($0.frame.midY - toggle.frame.midY) < abs($1.frame.midY - toggle.frame.midY)
+            hypot($0.frame.midX - toggle.frame.midX, $0.frame.midY - toggle.frame.midY)
+                < hypot($1.frame.midX - toggle.frame.midX, $1.frame.midY - toggle.frame.midY)
         }) else {
             XCTFail("toggle must share the font-size/annotation toolbar", file: file, line: line)
             return

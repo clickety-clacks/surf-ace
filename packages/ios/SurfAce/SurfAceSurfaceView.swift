@@ -1222,6 +1222,15 @@ private struct SurfAcePaneView: View {
             }
             .onChange(of: isPoppedOut) { _, _ in
                 toolbarCollapsed = false
+            }
+            .task(id: isPoppedOut) {
+                // The toggle now lives in the toolbar. Request focus after the
+                // expanded/restored toolbar has been laid out, including when
+                // restoring a previously collapsed toolbar.
+                popoutControlFocused = false
+                popoutKeyboardFocused = false
+                await Task.yield()
+                guard !Task.isCancelled else { return }
                 popoutControlFocused = true
                 if !UIAccessibility.isVoiceOverRunning { popoutKeyboardFocused = true }
             }
