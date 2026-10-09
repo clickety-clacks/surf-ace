@@ -1144,8 +1144,13 @@ private struct SurfAcePaneView: View {
                     if !showsSpatialEmptyPaneChrome {
                         VStack {
                             Spacer()
-                            if !toolbarCollapsed {
-                                SurfAcePaneControls(runtime: runtime, surface: surface, pane: pane)
+                            if !toolbarCollapsed || isPoppedOut {
+                                SurfAcePaneControls(
+                                    runtime: runtime, surface: surface, pane: pane,
+                                    isPoppedOut: isPoppedOut, onTogglePopout: onTogglePopout,
+                                    popoutControlFocused: $popoutControlFocused,
+                                    popoutKeyboardFocused: $popoutKeyboardFocused
+                                )
                                     .padding(.bottom, SurfAcePaneChromeLayout.bottomInset)
                                     .surfAceSpatialChromeDepthOffset()
                                     .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -1154,7 +1159,7 @@ private struct SurfAcePaneView: View {
                         .zIndex(20_000)
                     }
 
-                    if !showsSpatialEmptyPaneChrome && toolbarCollapsed {
+                    if !showsSpatialEmptyPaneChrome && toolbarCollapsed && !isPoppedOut {
                         VStack {
                             Spacer()
                             HStack {
@@ -1203,31 +1208,6 @@ private struct SurfAcePaneView: View {
                         .zIndex(1)
                 }
             }
-            .overlay(alignment: .topTrailing) {
-                Button(action: onTogglePopout) {
-                    HStack(spacing: 6) {
-                        Image(systemName: isPoppedOut ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
-                        if isPoppedOut { Text("Restore") }
-                    }
-                    .font(.custom(SurfAceChromeFont.boldName, size: 17))
-                    .padding(.horizontal, isPoppedOut ? 10 : 0)
-                    .frame(minWidth: 44, minHeight: 44)
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(Color(red: 0.04, green: 0.28, blue: 0.20))
-                .foregroundStyle(.white)
-                .focusable(interactions: .activate)
-                .focused($popoutKeyboardFocused)
-                .onKeyPress(keys: [.space, .return], phases: .down) { _ in
-                    onTogglePopout()
-                    return .handled
-                }
-                .accessibilityLabel(isPoppedOut ? "Restore" : "Pop out")
-                .accessibilityIdentifier("surf-ace-pane-popout-\(pane.paneId)")
-                .accessibilityValue(isPoppedOut ? "Expanded" : "Tiled")
-                .accessibilityFocused($popoutControlFocused)
-                .padding(8)
-            }
             .overlay {
                 RoundedRectangle(cornerRadius: 12)
                     .strokeBorder(.black, lineWidth: isPoppedOut ? 5 : 0)
@@ -1241,6 +1221,7 @@ private struct SurfAcePaneView: View {
                 pane.lastMeasuredSize = newSize
             }
             .onChange(of: isPoppedOut) { _, _ in
+                toolbarCollapsed = false
                 popoutControlFocused = true
                 if !UIAccessibility.isVoiceOverRunning { popoutKeyboardFocused = true }
             }
@@ -1676,6 +1657,10 @@ private struct SurfAcePaneControls: View {
     let runtime: SurfAceRuntime
     @Bindable var surface: SurfAceSurfaceModel
     @Bindable var pane: SurfAcePaneModel
+    let isPoppedOut: Bool
+    let onTogglePopout: () -> Void
+    @AccessibilityFocusState.Binding var popoutControlFocused: Bool
+    @FocusState.Binding var popoutKeyboardFocused: Bool
     @Environment(\.colorScheme) private var colorScheme
     @State private var fontSizePopoverVisible = false
 
@@ -1728,6 +1713,21 @@ private struct SurfAcePaneControls: View {
             }
 
             HStack(spacing: 4) {
+                Button(action: onTogglePopout) {
+                    Image(systemName: isPoppedOut ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
+                }
+                .buttonStyle(SurfAceGlassButtonStyle())
+                .focusable(interactions: .activate)
+                .focused($popoutKeyboardFocused)
+                .onKeyPress(keys: [.space, .return], phases: .down) { _ in
+                    onTogglePopout()
+                    return .handled
+                }
+                .accessibilityLabel(isPoppedOut ? "Restore" : "Pop out")
+                .accessibilityIdentifier("surf-ace-pane-popout-\(pane.paneId)")
+                .accessibilityValue(isPoppedOut ? "Expanded" : "Tiled")
+                .accessibilityFocused($popoutControlFocused)
+
                 Button {
                     runtime.activateKeyboardPane(surfaceId: surface.surfaceId, paneId: pane.paneId)
                     fontSizePopoverVisible.toggle()

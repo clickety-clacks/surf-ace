@@ -13,25 +13,29 @@ final class SurfAceResizeUITests: XCTestCase {
         let toggle = app.buttons["surf-ace-pane-popout-3"]
         XCTAssertTrue(toggle.waitForExistence(timeout: 10))
         let revision = app.staticTexts["surf-ace-popout-topology"].label
+        assertSmallBottomToolbarToggle(toggle, in: app)
         let tiled = toggle.frame
         let contentButton = app.buttons["Increment pane 3"]
         XCTAssertTrue(contentButton.waitForExistence(timeout: 10))
-        contentButton.tap()
-        XCTAssertTrue(app.staticTexts["Pane 3 clicks 1"].waitForExistence(timeout: 5))
         toggle.tap()
         let expanded = XCTNSPredicateExpectation(
             predicate: NSPredicate(format: "value == %@ AND label == %@", "Expanded", "Restore"), object: toggle)
         XCTAssertEqual(XCTWaiter.wait(for: [expanded], timeout: 5), .completed)
-        XCTAssertTrue(toggle.isHittable, "Restore stays reachable after content collapses other chrome")
+        assertSmallBottomToolbarToggle(toggle, in: app)
+        XCTAssertTrue(toggle.isHittable, "Restore stays reachable in the bottom toolbar")
         XCTAssertFalse(app.buttons["surf-ace-pane-popout-1"].isHittable)
         XCTAssertFalse(app.buttons["surf-ace-pane-popout-2"].isHittable)
         XCTAssertLessThan(toggle.frame.minY, tiled.minY, "the selected leaf moves out of its lower tile")
+        contentButton.tap()
+        XCTAssertTrue(app.staticTexts["Pane 3 clicks 1"].waitForExistence(timeout: 5))
+        XCTAssertTrue(toggle.isHittable, "expanded toolbar keeps the same Restore action reachable after content input")
         contentButton.tap()
         XCTAssertTrue(app.staticTexts["Pane 3 clicks 2"].waitForExistence(timeout: 5))
         toggle.tap()
         let restored = XCTNSPredicateExpectation(
             predicate: NSPredicate(format: "value == %@ AND label == %@", "Tiled", "Pop out"), object: toggle)
         XCTAssertEqual(XCTWaiter.wait(for: [restored], timeout: 5), .completed)
+        assertSmallBottomToolbarToggle(toggle, in: app)
         XCTAssertEqual(toggle.frame.minX, tiled.minX, accuracy: 1)
         XCTAssertEqual(toggle.frame.minY, tiled.minY, accuracy: 1)
         XCTAssertTrue(app.staticTexts["Pane 3 clicks 2"].exists, "Restore cannot reload the HTML session")
@@ -48,6 +52,7 @@ final class SurfAceResizeUITests: XCTestCase {
         XCTAssertEqual(XCTWaiter.wait(for: [rotated], timeout: 5), .completed)
         XCTAssertTrue(toggle.isHittable)
         XCTAssertEqual(toggle.label, "Restore")
+        assertSmallBottomToolbarToggle(toggle, in: app)
         XCTAssertGreaterThanOrEqual(toggle.frame.width, 44)
         XCTAssertGreaterThanOrEqual(toggle.frame.height, 44)
         XCTAssertFalse(app.buttons["surf-ace-pane-popout-1"].isHittable)
@@ -60,6 +65,32 @@ final class SurfAceResizeUITests: XCTestCase {
         XCTAssertGreaterThan(toggle.frame.minY, app.frame.midY,
                              "Restore uses the current nested lower tile after rotation")
         XCTAssertEqual(app.staticTexts["surf-ace-popout-topology"].label, revision)
+    }
+
+    private func assertSmallBottomToolbarToggle(
+        _ toggle: XCUIElement, in app: XCUIApplication,
+        file: StaticString = #filePath, line: UInt = #line
+    ) {
+        // Compare actual accessibility frames with the adjacent shipping controls,
+        // rather than duplicating the production size constants in the fixture.
+        let fonts = app.buttons.matching(identifier: "FontSize").allElementsBoundByIndex
+        let sketches = app.buttons.matching(identifier: "hand.draw").allElementsBoundByIndex
+        guard let font = fonts.min(by: {
+            abs($0.frame.midY - toggle.frame.midY) < abs($1.frame.midY - toggle.frame.midY)
+        }), let sketch = sketches.min(by: {
+            abs($0.frame.midY - toggle.frame.midY) < abs($1.frame.midY - toggle.frame.midY)
+        }) else {
+            XCTFail("toggle must share the font-size/annotation toolbar", file: file, line: line)
+            return
+        }
+        XCTAssertEqual(toggle.frame.midY, font.frame.midY, accuracy: 1, file: file, line: line)
+        XCTAssertEqual(toggle.frame.midY, sketch.frame.midY, accuracy: 1, file: file, line: line)
+        XCTAssertLessThan(toggle.frame.maxX, font.frame.minX + 1, file: file, line: line)
+        XCTAssertEqual(toggle.frame.width, font.frame.width, accuracy: 1, file: file, line: line)
+        XCTAssertEqual(toggle.frame.height, font.frame.height, accuracy: 1, file: file, line: line)
+        XCTAssertGreaterThan(toggle.frame.midY, app.frame.midY, file: file, line: line)
+        XCTAssertFalse(toggle.staticTexts["Restore"].exists, "icon-only control", file: file, line: line)
+        XCTAssertFalse(toggle.staticTexts["Pop out"].exists, "icon-only control", file: file, line: line)
     }
 
     @available(iOS 27.0, *)
