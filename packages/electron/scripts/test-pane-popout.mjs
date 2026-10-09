@@ -71,7 +71,7 @@ try {
   await evaluate(`window.hosts=[...document.querySelectorAll('webview')];
     window.roots=[...document.querySelectorAll('.pane-shell')];
     window.slots=roots.map(r=>r.parentElement);
-    window.rects=()=>roots.map(r=>{const b=r.getBoundingClientRect();return [b.x,b.y,b.width,b.height]});`);
+    window.rects=()=>roots.map(r=>{const b=r.getBoundingClientRect();return [b.x,b.y,b.width,b.height]});void 0;`);
   const initial = await evaluate("rects()");
   const identities = await evaluate("Promise.all(hosts.map(v=>v.executeJavaScript('window.token'))) ");
   assert.ok(identities.every(token => typeof token === "number"));
@@ -115,9 +115,10 @@ try {
   console.error(error);
   process.exitCode = 1;
 } finally {
+  console.log("FIXTURE_EXTERNAL_REQUESTS=" + JSON.stringify(blockedRequests));
   clearTimeout(watchdog);
   win?.destroy();
-  app.quit();
+  app.exit(process.exitCode === 1 ? 1 : 0);
 }
 }
 void run();
