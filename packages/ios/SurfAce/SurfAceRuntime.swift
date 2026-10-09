@@ -4414,32 +4414,26 @@ final class SurfAceRuntime {
             onComplete()
             return
         }
+        if let adapter = locklessAdapter {
+            let priorResizeCommit = resizeCommitTail
+            resizeCommitTail = Task { @MainActor in
+                await priorResizeCommit?.value
+                await commitLocalResize(
+                    adapter: adapter,
+                    surfaceId: surfaceId,
+                    path: path,
+                    weights: weights,
+                    expectedSplitIdentity: target.layoutIdentity
+                )
+                onComplete()
+            }
+            return
+        }
         guard children.map(\.layoutWeight) != weights else {
             onComplete()
             return
         }
         let nextLayout = surface.paneLayout.updatingSplitWeights(path: path, weights: weights)
-        if let adapter = locklessAdapter {
-            do {
-                let topology = try canonicalTopologyJSON(
-                    from: SurfAcePersistedPaneLayoutNode(from: nextLayout)
-                )
-                let priorResizeCommit = resizeCommitTail
-                resizeCommitTail = Task { @MainActor in
-                    await priorResizeCommit?.value
-                    await commitLocalResize(
-                        adapter: adapter,
-                        surfaceId: surfaceId,
-                        topology: topology
-                    )
-                    onComplete()
-                }
-            } catch {
-                endpointError = "Lockless resize encoding failed: \(error.localizedDescription)"
-                onComplete()
-            }
-            return
-        }
         surface.paneLayout = nextLayout
         surface.topologyEpoch += 1
         persistSurfaceTopology(surfaceId: surfaceId)
@@ -4454,31 +4448,27 @@ final class SurfAceRuntime {
     private func commitLocalResize(
         adapter: SurfAceLocklessRuntimeAdapter,
         surfaceId: String,
-        topology: SurfAceLocklessJSON
+        path: [Int],
+        weights: [Double],
+        expectedSplitIdentity: String
     ) async {
         do {
-            _ = try await commitLocalMutation(adapter: adapter, operation: "local.topology.resize") { state, sequence in
-                guard var surface = state.liveSurfaces[surfaceId] else {
-                    throw SurfAceLocklessAuthorityError.invalidState("local_resize_surface")
-                }
-                surface.topology = topology
-                surface.topologyRevision += 1
-                surface.surfaceRevision += 1
-                state.liveSurfaces[surfaceId] = surface
-                return .object([
-                    "commitSequence": .integer(sequence),
-                    "surfaceId": .string(surfaceId),
-                    "topologyRevision": .integer(surface.topologyRevision),
-                ])
-            }
+            guard let commit = try await adapter.commitLocalResize(
+                surfaceId: surfaceId,
+                path: path,
+                weights: weights,
+                expectedSplitIdentity: expectedSplitIdentity
+            ) else { return }
             try projectLocklessAuthorityState(await adapter.snapshot())
-            guard let surface = surfaceById[surfaceId] else { return }
+            guard case .object(let result) = commit.result,
+                  let topology = result["topology"],
+                  case .integer(let revision) = result["topologyRevision"] else { return }
             await fanoutLocklessCommittedEvent(
                 op: "event.topology_changed",
                 payload: .object([
                     "surfaceId": .string(surfaceId),
                     "topology": topology,
-                    "topologyRevision": .integer(Int64(surface.topologyEpoch)),
+                    "topologyRevision": .integer(revision),
                 ])
             )
             await drainControllerRetentionReclamations(adapter: adapter)

@@ -879,6 +879,13 @@ indirect enum SurfAcePaneLayoutNode {
         }
     }
 
+    func node(at path: [Int]) -> SurfAcePaneLayoutNode? {
+        guard let first = path.first else { return self }
+        guard case .split(_, let children, _) = self,
+              children.indices.contains(first) else { return nil }
+        return children[first].node(at: Array(path.dropFirst()))
+    }
+
     func replacingLeaf(paneId: Int, with replacement: SurfAcePaneLayoutNode) -> SurfAcePaneLayoutNode {
         switch self {
         case .empty:

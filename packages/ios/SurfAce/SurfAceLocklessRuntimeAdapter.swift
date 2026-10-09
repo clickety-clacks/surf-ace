@@ -553,9 +553,63 @@ actor SurfAceLocklessRuntimeAdapter {
         operation: String,
         mutate: @escaping Mutation
     ) async throws -> SurfAceLocklessLocalCommit {
-        try await coordinator.transact(trigger: "local_operation:\(operation)") { state in
+        guard let commit = try await commitLocalMutationIfChanged(
+            operation: operation,
+            skipUnchanged: false,
+            mutate: { state, sequence in try mutate(&state, sequence) }
+        ) else {
+            throw SurfAceLocklessAuthorityError.invalidState("local_mutation_missing_result")
+        }
+        return commit
+    }
+
+    func commitLocalResize(
+        surfaceId: String,
+        path: [Int],
+        weights: [Double],
+        expectedSplitIdentity: String
+    ) async throws -> SurfAceLocklessLocalCommit? {
+        try await commitLocalMutationIfChanged(
+            operation: "local.topology.resize", skipUnchanged: true
+        ) { state, sequence in
+            guard var surface = state.liveSurfaces[surfaceId] else {
+                throw SurfAceLocklessAuthorityError.invalidState("local_resize_surface")
+            }
+            let layout = try persistedPaneLayout(fromCanonical: surface.topology).runtimeNode
+            guard let target = layout.node(at: path),
+                  case .split(_, let children, _) = target,
+                  target.layoutIdentity == expectedSplitIdentity,
+                  children.count == weights.count,
+                  weights.allSatisfy({ $0.isFinite && $0 > 0 }) else {
+                throw SurfAceLocklessAuthorityError.invalidState("local_resize_stale_split")
+            }
+            guard children.map(\.layoutWeight) != weights else { return nil }
+            let nextLayout = layout.updatingSplitWeights(path: path, weights: weights)
+            let topology = try canonicalTopologyJSON(from: SurfAcePersistedPaneLayoutNode(from: nextLayout))
+            guard topology != surface.topology else { return nil }
+            surface.topology = topology
+            surface.topologyRevision += 1
+            surface.surfaceRevision += 1
+            state.liveSurfaces[surfaceId] = surface
+            return .object([
+                "commitSequence": .integer(sequence),
+                "surfaceId": .string(surfaceId),
+                "topology": topology,
+                "topologyRevision": .integer(surface.topologyRevision),
+            ])
+        }
+    }
+
+    private func commitLocalMutationIfChanged(
+        operation: String,
+        skipUnchanged: Bool,
+        mutate: @escaping @Sendable (
+            inout SurfAceLocklessAuthorityState, Int64
+        ) throws -> SurfAceLocklessJSON?
+    ) async throws -> SurfAceLocklessLocalCommit? {
+        try await coordinator.transact(trigger: "local_operation:\(operation)", skipUnchanged: skipUnchanged) { state in
             let commitSequence = state.sequences.nextCommitSequence
-            let result = try mutate(&state, commitSequence)
+            guard let result = try mutate(&state, commitSequence) else { return nil }
             if case .object(let object) = result,
                case .string(let surfaceId) = object["surfaceId"],
                state.liveSurfaces[surfaceId] != nil {
