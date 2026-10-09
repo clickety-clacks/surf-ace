@@ -75,8 +75,10 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
         observations.forEach { $0.invalidate() }
         let first = try XCTUnwrap(initialViews.first { $0.title == "close-1" })
         let second = try XCTUnwrap(initialViews.first { $0.title == "close-2" })
-        let firstToken = try XCTUnwrap(try await first.evaluateJavaScript("window.sessionToken") as? String)
-        let secondToken = try XCTUnwrap(try await second.evaluateJavaScript("window.sessionToken") as? String)
+        let firstTokenValue = try await first.evaluateJavaScript("window.sessionToken") as? String
+        let secondTokenValue = try await second.evaluateJavaScript("window.sessionToken") as? String
+        let firstToken = try XCTUnwrap(firstTokenValue)
+        let secondToken = try XCTUnwrap(secondTokenValue)
         let available = initialViews.map { $0.convert($0.bounds, to: window) }
             .reduce(CGRect.null) { $0.union($1) }
 
@@ -95,8 +97,10 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
                                                                   weights: [0.24, 0.26], index: 1))
         XCTAssertEqual(Set(popoutWebViews(in: host.view).map(ObjectIdentifier.init)),
                        Set([first, second].map(ObjectIdentifier.init)))
-        XCTAssertEqual(try await first.evaluateJavaScript("window.sessionToken") as? String, firstToken)
-        XCTAssertEqual(try await second.evaluateJavaScript("window.sessionToken") as? String, secondToken)
+        let retainedFirstToken = try await first.evaluateJavaScript("window.sessionToken") as? String
+        let retainedSecondToken = try await second.evaluateJavaScript("window.sessionToken") as? String
+        XCTAssertEqual(retainedFirstToken, firstToken)
+        XCTAssertEqual(retainedSecondToken, secondToken)
     }
 
     @MainActor
