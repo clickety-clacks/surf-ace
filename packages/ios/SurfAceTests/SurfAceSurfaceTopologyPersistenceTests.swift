@@ -5,6 +5,29 @@ import WebKit
 
 final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
     @MainActor
+    func testFractionalSurvivorWeightsFillSurfaceAfterPaneClose() {
+        let bounds = CGRect(x: 0, y: 0, width: 1000, height: 800)
+        // Closing siblings can leave valid relative weights whose sum is below
+        // one. They still partition the entire available surface.
+        let horizontal = [0.24, 0.26]
+        let left = surfAceSplitChildBounds(parent: bounds, direction: .vertical,
+                                           weights: horizontal, index: 0)
+        let right = surfAceSplitChildBounds(parent: bounds, direction: .vertical,
+                                            weights: horizontal, index: 1)
+        XCTAssertEqual(left.width, 480, accuracy: 0.001)
+        XCTAssertEqual(right.minX, left.maxX, accuracy: 0.001)
+        XCTAssertEqual(right.maxX, bounds.maxX, accuracy: 0.001)
+
+        let vertical = [0.1, 0.2]
+        let top = surfAceSplitChildBounds(parent: bounds, direction: .horizontal,
+                                          weights: vertical, index: 0)
+        let bottom = surfAceSplitChildBounds(parent: bounds, direction: .horizontal,
+                                             weights: vertical, index: 1)
+        XCTAssertEqual(bottom.minY, top.maxY, accuracy: 0.001)
+        XCTAssertEqual(bottom.maxY, bounds.maxY, accuracy: 0.001)
+    }
+
+    @MainActor
     func testPopoutGeometryAndReconciliationDoNotReplayTopology() {
         let portrait = CGRect(x: 0, y: 0, width: 600, height: 900)
         let right = surfAceSplitChildBounds(parent: portrait, direction: .vertical,

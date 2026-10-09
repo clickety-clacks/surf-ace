@@ -455,9 +455,14 @@ func surfAcePanePopoutBounds(in bounds: CGRect) -> CGRect {
     return bounds.insetBy(dx: min(inset, bounds.width / 4), dy: min(inset, bounds.height / 4))
 }
 
+func surfAceSplitTotalWeight(_ weights: [Double]) -> Double {
+    let total = weights.reduce(0, +)
+    return total.isFinite && total > 0 ? total : 1
+}
+
 func surfAceSplitChildBounds(parent: CGRect, direction: SurfAceLayoutDirection,
                              weights: [Double], index: Int) -> CGRect {
-    let total = max(weights.reduce(0, +), 1)
+    let total = surfAceSplitTotalWeight(weights)
     let prefix = weights.prefix(index).reduce(0, +) / total
     let fraction = weights[index] / total
     if direction == .vertical {
@@ -607,7 +612,7 @@ private struct SurfAcePaneTreeView: View {
             GeometryReader { proxy in
                 let weights = splitPreview.visibleWeights(count: children.count, topologyEpoch: surface.topologyEpoch)
                     ?? children.map(\.layoutWeight)
-                let totalWeight = max(weights.reduce(0, +), 1)
+                let totalWeight = surfAceSplitTotalWeight(weights)
                 if direction == .vertical {
                     ZStack(alignment: .topLeading) {
                         HStack(spacing: 0) {
@@ -791,7 +796,7 @@ private struct SurfAceSplitResizeHandle: View {
               childIndex + 1 < startWeights.count else {
             return weights
         }
-        let totalWeight = max(startWeights.reduce(0, +), 1)
+        let totalWeight = surfAceSplitTotalWeight(startWeights)
         let before = startWeights[childIndex]
         let after = startWeights[childIndex + 1]
         let pairTotal = before + after
