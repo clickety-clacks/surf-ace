@@ -396,6 +396,21 @@ private struct SurfAceWindowView: View {
                         .padding(.top, 14)
                         .allowsHitTesting(false)
                 }
+
+                if runtime.resizeSaveFailures.contains(surface.surfaceId) {
+                    Text("Pane resize not saved")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+                        .accessibilityIdentifier("surf-ace-resize-unsaved-status")
+                        .frame(maxWidth: 180, alignment: .leading)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                        .padding(.leading, 16)
+                        .padding(.top, 80)
+                        .allowsHitTesting(false)
+                }
             }
         }
         .focusedSceneValue(\.surfAceCommandTargetSurfaceId, surface.surfaceId)
@@ -439,12 +454,68 @@ private struct SurfAceCentralConnectionBanner: View {
     }
 }
 
+// The preview is deliberately view-local. Only a successful gesture end may
+// request a durable topology transaction from SurfAceRuntime.
+struct SurfAceSplitPreviewState {
+    private(set) var weights: [Double]?
+    private(set) var token: UUID?
+    private(set) var topologyEpoch: Int?
+    private(set) var pendingCommits: Set<UUID> = []
+
+    mutating func update(weights: [Double], token: UUID, topologyEpoch: Int) {
+        if self.token != token { self.topologyEpoch = topologyEpoch }
+        self.weights = weights
+        self.token = token
+    }
+
+    func visibleWeights(count: Int, topologyEpoch: Int) -> [Double]? {
+        guard self.topologyEpoch == topologyEpoch, weights?.count == count else { return nil }
+        return weights
+    }
+
+    func completedWeights(token: UUID, topologyEpoch: Int) -> (weights: [Double], revision: Int64)? {
+        guard self.token == token, self.topologyEpoch == topologyEpoch,
+              let weights else { return nil }
+        return (weights, Int64(topologyEpoch))
+    }
+
+    mutating func queueCommit(token: UUID) {
+        pendingCommits.insert(token)
+    }
+
+    func mayCommit(token: UUID) -> Bool {
+        pendingCommits.contains(token)
+    }
+
+    mutating func finishCommit(token: UUID) {
+        pendingCommits.remove(token)
+        cancel(token: token)
+    }
+
+    mutating func cancel(token: UUID) {
+        pendingCommits.remove(token)
+        guard self.token == token else { return }
+        weights = nil
+        self.token = nil
+        topologyEpoch = nil
+    }
+
+    mutating func cancelAll() {
+        pendingCommits.removeAll()
+        weights = nil
+        token = nil
+        topologyEpoch = nil
+    }
+}
+
 private struct SurfAcePaneTreeView: View {
+    @Environment(\.scenePhase) private var scenePhase
     let runtime: SurfAceRuntime
     @Bindable var surface: SurfAceSurfaceModel
     let node: SurfAcePaneLayoutNode
     let surfaceBounds: CGRect
     var path: [Int] = []
+    @State private var splitPreview = SurfAceSplitPreviewState()
 
     var body: some View {
         switch node {
@@ -458,24 +529,47 @@ private struct SurfAcePaneTreeView: View {
             }
         case .split(let direction, let children, _):
             GeometryReader { proxy in
-                let totalWeight = max(children.reduce(0) { $0 + $1.layoutWeight }, 1)
+                let weights = splitPreview.visibleWeights(count: children.count, topologyEpoch: surface.topologyEpoch)
+                    ?? children.map(\.layoutWeight)
+                let totalWeight = max(weights.reduce(0, +), 1)
                 if direction == .vertical {
                     ZStack(alignment: .topLeading) {
                         HStack(spacing: 0) {
                             ForEach(Array(children.enumerated()), id: \.offset) { index, child in
                                 SurfAcePaneTreeView(runtime: runtime, surface: surface, node: child, surfaceBounds: surfaceBounds, path: path + [index])
-                                    .frame(width: max(1, proxy.size.width * child.layoutWeight / totalWeight), height: proxy.size.height)
+                                    .frame(width: max(1, proxy.size.width * weights[index] / totalWeight), height: proxy.size.height)
                             }
                         }
                         ForEach(Array(children.indices.dropLast()), id: \.self) { index in
-                            let offset = proxy.size.width * children.prefix(index + 1).reduce(0) { $0 + $1.layoutWeight } / totalWeight
+                            let offset = proxy.size.width * weights.prefix(index + 1).reduce(0, +) / totalWeight
                             SurfAceSplitResizeHandle(
                                 direction: direction,
-                                weights: children.map(\.layoutWeight),
+                                weights: weights,
                                 childIndex: index,
                                 extent: proxy.size.width
-                            ) { weights in
-                                runtime.resizeSplit(surfaceId: surface.surfaceId, path: path, weights: weights)
+                            ) { weights, token in
+                                guard scenePhase == .active else { return }
+                                splitPreview.update(weights: weights, token: token, topologyEpoch: surface.topologyEpoch)
+                            } onCommit: { _, token in
+                                guard scenePhase == .active,
+                                      let completed = splitPreview.completedWeights(
+                                    token: token, topologyEpoch: surface.topologyEpoch
+                                ) else {
+                                    splitPreview.cancel(token: token)
+                                    return
+                                }
+                                splitPreview.queueCommit(token: token)
+                                runtime.resizeSplit(
+                                    surfaceId: surface.surfaceId, path: path, weights: completed.weights,
+                                    expectedTopologyRevision: completed.revision,
+                                    shouldCommit: {
+                                        scenePhase == .active && splitPreview.mayCommit(token: token)
+                                    }
+                                ) {
+                                    splitPreview.finishCommit(token: token)
+                                }
+                            } onCancel: { token in
+                                splitPreview.cancel(token: token)
                             }
                             .position(x: offset, y: proxy.size.height / 2)
                         }
@@ -485,18 +579,39 @@ private struct SurfAcePaneTreeView: View {
                         VStack(spacing: 0) {
                             ForEach(Array(children.enumerated()), id: \.offset) { index, child in
                                 SurfAcePaneTreeView(runtime: runtime, surface: surface, node: child, surfaceBounds: surfaceBounds, path: path + [index])
-                                    .frame(width: proxy.size.width, height: max(1, proxy.size.height * child.layoutWeight / totalWeight))
+                                    .frame(width: proxy.size.width, height: max(1, proxy.size.height * weights[index] / totalWeight))
                             }
                         }
                         ForEach(Array(children.indices.dropLast()), id: \.self) { index in
-                            let offset = proxy.size.height * children.prefix(index + 1).reduce(0) { $0 + $1.layoutWeight } / totalWeight
+                            let offset = proxy.size.height * weights.prefix(index + 1).reduce(0, +) / totalWeight
                             SurfAceSplitResizeHandle(
                                 direction: direction,
-                                weights: children.map(\.layoutWeight),
+                                weights: weights,
                                 childIndex: index,
                                 extent: proxy.size.height
-                            ) { weights in
-                                runtime.resizeSplit(surfaceId: surface.surfaceId, path: path, weights: weights)
+                            ) { weights, token in
+                                guard scenePhase == .active else { return }
+                                splitPreview.update(weights: weights, token: token, topologyEpoch: surface.topologyEpoch)
+                            } onCommit: { _, token in
+                                guard scenePhase == .active,
+                                      let completed = splitPreview.completedWeights(
+                                    token: token, topologyEpoch: surface.topologyEpoch
+                                ) else {
+                                    splitPreview.cancel(token: token)
+                                    return
+                                }
+                                splitPreview.queueCommit(token: token)
+                                runtime.resizeSplit(
+                                    surfaceId: surface.surfaceId, path: path, weights: completed.weights,
+                                    expectedTopologyRevision: completed.revision,
+                                    shouldCommit: {
+                                        scenePhase == .active && splitPreview.mayCommit(token: token)
+                                    }
+                                ) {
+                                    splitPreview.finishCommit(token: token)
+                                }
+                            } onCancel: { token in
+                                splitPreview.cancel(token: token)
                             }
                             .position(x: proxy.size.width / 2, y: offset)
                         }
@@ -504,6 +619,10 @@ private struct SurfAcePaneTreeView: View {
                 }
             }
             .background(surfAceSplitBackdropColor())
+            .onChange(of: scenePhase) { _, phase in
+                guard phase != .active else { return }
+                splitPreview.cancelAll()
+            }
         }
     }
 }
@@ -513,9 +632,13 @@ private struct SurfAceSplitResizeHandle: View {
     let weights: [Double]
     let childIndex: Int
     let extent: CGFloat
-    let onResize: ([Double]) -> Void
+    let onPreview: ([Double], UUID) -> Void
+    let onCommit: ([Double], UUID) -> Void
+    let onCancel: (UUID) -> Void
+    @GestureState private var isDragging = false
     @State private var dragStartLocation: CGFloat?
     @State private var dragStartWeights: [Double]?
+    @State private var dragToken: UUID?
 
     var body: some View {
         Image(systemName: "line.3.horizontal")
@@ -535,18 +658,37 @@ private struct SurfAceSplitResizeHandle: View {
             .accessibilityIdentifier("surf-ace-split-resize-handle")
             .gesture(
                 DragGesture(minimumDistance: 0, coordinateSpace: .global)
+                    .updating($isDragging) { _, state, _ in state = true }
                     .onChanged { value in
                         let startLocation = dragStartLocation ?? axisLocation(value.startLocation)
                         let startWeights = dragStartWeights ?? weights
+                        let token = dragToken ?? UUID()
                         dragStartLocation = startLocation
                         dragStartWeights = startWeights
-                        onResize(resizedWeights(from: startWeights, startLocation: startLocation, currentLocation: axisLocation(value.location)))
+                        dragToken = token
+                        onPreview(resizedWeights(from: startWeights, startLocation: startLocation, currentLocation: axisLocation(value.location)), token)
                     }
-                    .onEnded { _ in
+                    .onEnded { value in
+                        let token = dragToken ?? UUID()
+                        let finalWeights = resizedWeights(
+                            from: dragStartWeights ?? weights,
+                            startLocation: dragStartLocation ?? axisLocation(value.startLocation),
+                            currentLocation: axisLocation(value.location)
+                        )
+                        onPreview(finalWeights, token)
+                        onCommit(finalWeights, token)
                         dragStartLocation = nil
                         dragStartWeights = nil
+                        dragToken = nil
                     }
             )
+            .onChange(of: isDragging) { wasDragging, dragging in
+                guard wasDragging, !dragging, let token = dragToken else { return }
+                onCancel(token)
+                dragStartLocation = nil
+                dragStartWeights = nil
+                dragToken = nil
+            }
     }
 
     private func axisLocation(_ point: CGPoint) -> CGFloat {
@@ -593,7 +735,9 @@ struct SurfAceResizeProbeView: View {
                     weights: weights,
                     childIndex: 0,
                     extent: proxy.size.width
-                ) { weights = $0 }
+                ) { weights, _ in
+                    self.weights = weights
+                } onCommit: { _, _ in } onCancel: { _ in }
                     .position(x: proxy.size.width * weights[0] / 2, y: proxy.size.height / 2)
                 Text(String(format: "first weight %.3f", weights[0]))
                     .accessibilityIdentifier("surf-ace-resize-probe-weight")
@@ -619,50 +763,143 @@ private struct SurfAceResizeProbeWebView: UIViewRepresentable {
 // The app's normal startup is bypassed, so this never opens a listener.
 struct SurfAceResizeTreeProbeView: View {
     var direction: SurfAceLayoutDirection = .vertical
-    @State private var runtime = SurfAceRuntime()
+    var authority = false
+    var showUnsavedStatus = false
+    @State private var runtime: SurfAceRuntime
     @State private var surface: SurfAceSurfaceModel?
+
+    init(
+        direction: SurfAceLayoutDirection = .vertical,
+        authority: Bool = false,
+        showUnsavedStatus: Bool = false
+    ) {
+        self.direction = direction
+        self.authority = authority
+        self.showUnsavedStatus = showUnsavedStatus
+        let runtime: SurfAceRuntime
+        if authority {
+            let name = "SurfAceResizeAuthorityProbe.\(UUID().uuidString)"
+            runtime = SurfAceRuntime(
+                userDefaults: UserDefaults(suiteName: name)!,
+                locklessStateURL: FileManager.default.temporaryDirectory
+                    .appendingPathComponent(name, isDirectory: true)
+                    .appendingPathComponent("authority-v1.json"),
+                enableFleetDiscovery: false,
+                isolatedTestLoopback: true
+            )
+        } else {
+            runtime = SurfAceRuntime()
+        }
+        _runtime = State(initialValue: runtime)
+    }
 
     var body: some View {
         GeometryReader { proxy in
             if let surface {
                 ZStack(alignment: .topLeading) {
-                    SurfAcePaneTreeView(
-                        runtime: runtime,
-                        surface: surface,
-                        node: surface.paneLayout,
-                        surfaceBounds: CGRect(origin: .zero, size: proxy.size)
-                    )
-                    Text(weightLabel(surface.paneLayout))
-                        .accessibilityIdentifier("surf-ace-resize-tree-weight")
-                        .padding(12)
-                        .background(.black)
-                        .foregroundStyle(.white)
+                    if authority {
+                        SurfAceWindowView(runtime: runtime, surface: surface)
+                    } else {
+                        SurfAcePaneTreeView(
+                            runtime: runtime,
+                            surface: surface,
+                            node: surface.paneLayout,
+                            surfaceBounds: CGRect(origin: .zero, size: proxy.size)
+                        )
+                    }
+                    if !showUnsavedStatus {
+                        Text(weightLabel(surface.paneLayout))
+                            .accessibilityIdentifier("surf-ace-resize-tree-weight")
+                            .padding(12)
+                            .background(.black)
+                            .foregroundStyle(.white)
+                        Text("topology revision \(surface.topologyEpoch)")
+                            .accessibilityIdentifier("surf-ace-resize-tree-revision")
+                            .padding(12)
+                            .background(.black)
+                            .foregroundStyle(.white)
+                            .offset(y: 48)
+                        if authority {
+                            Text(authorityContentLabel(surface))
+                                .accessibilityIdentifier("surf-ace-resize-authority-content")
+                                .padding(12)
+                                .background(.black)
+                                .foregroundStyle(.white)
+                                .offset(y: 96)
+                        }
+                    }
                 }
                 .coordinateSpace(name: surfAceSurfaceCoordinateSpaceName)
             }
         }
         .task {
             guard surface == nil else { return }
-            let local = runtime.registerSurface(sceneKey: "resize-ui-probe")
+            let local: SurfAceSurfaceModel
+            if authority {
+                await runtime.restoreLocklessAuthority(reason: "resize-ui-authority-probe")
+                guard let registered = await runtime.registerSurfaceForScene(sceneKey: "resize-ui-authority-probe") else { return }
+                let adapter: SurfAceLocklessRuntimeAdapter
+                do {
+                    adapter = try runtime.locklessAuthorityForLocalMutation()
+                    let surfaceId = registered.surfaceId
+                    let splitDirection = direction == .vertical ? "vertical" : "horizontal"
+                    _ = try await adapter.commitLocalMutation(operation: "test.resize.ui_split") { state, _ in
+                        let split = try SurfAceLocklessTopologyOperations.paneSplit(
+                            state: &state, surfaceId: surfaceId,
+                            paneId: 1, count: 2,
+                            direction: splitDirection,
+                            expectedTopologyRevision: state.liveSurfaces[surfaceId]?.topologyRevision ?? -1
+                        )
+                        for paneId in [Int64(1), split.newPaneIds[0]] {
+                            _ = try SurfAceLocklessContentOperations.set(
+                                state: &state,
+                                intent: .init(
+                                    content: .object(["html": .string(
+                                        "<html><body style='height:200vh;background:#183047'>Local pane</body></html>"
+                                    )]),
+                                    contentId: "ct_resize_probe_\(paneId)",
+                                    contentType: "html",
+                                    controllerProductName: nil,
+                                    friendlyChatName: nil,
+                                    paneId: paneId,
+                                    surfaceId: surfaceId
+                                )
+                            )
+                        }
+                        return .integer(split.newPaneIds[0])
+                    }
+                    await runtime.restoreLocklessAuthority(reason: "resize-ui-authority-split")
+                } catch {
+                    return
+                }
+                local = registered
+            } else {
+                local = runtime.registerSurface(sceneKey: "resize-ui-probe")
+            }
             let left = SurfAcePaneModel(paneId: 1, paneLabel: 1)
             let right = SurfAcePaneModel(paneId: 2, paneLabel: 2)
-            for pane in [left, right] {
-                pane.currentEntry = SurfAcePaneEntry.from(frame: SurfAceFrame(
-                    contentId: "ct_resize_probe_\(pane.paneId)",
-                    revision: 1,
-                    contentType: .html,
-                    payload: .html(html: "<html><body style='height:200vh;background:#183047'>Local pane</body></html>", baseURL: nil),
-                    reloadSource: nil,
-                    title: "Local pane",
-                    scrollable: true,
-                    interactive: true
-                ))
+            if !authority {
+                for pane in [left, right] {
+                    pane.currentEntry = SurfAcePaneEntry.from(frame: SurfAceFrame(
+                        contentId: "ct_resize_probe_\(pane.paneId)",
+                        revision: 1,
+                        contentType: .html,
+                        payload: .html(html: "<html><body style='height:200vh;background:#183047'>Local pane</body></html>", baseURL: nil),
+                        reloadSource: nil,
+                        title: "Local pane",
+                        scrollable: true,
+                        interactive: true
+                    ))
+                }
+                local.panesById = [1: left, 2: right]
+                local.paneLayout = .split(
+                    direction: direction,
+                    children: [.leaf(1, weight: 1), .leaf(2, weight: 1)]
+                )
             }
-            local.panesById = [1: left, 2: right]
-            local.paneLayout = .split(
-                direction: direction,
-                children: [.leaf(1, weight: 1), .leaf(2, weight: 1)]
-            )
+            if showUnsavedStatus {
+                runtime.resizeSaveFailures.insert(local.surfaceId)
+            }
             surface = local
         }
     }
@@ -671,6 +908,13 @@ struct SurfAceResizeTreeProbeView: View {
         guard case .split(_, let children, _) = layout,
               let first = children.first else { return "first weight missing" }
         return String(format: "first weight %.3f", first.layoutWeight)
+    }
+
+    private func authorityContentLabel(_ surface: SurfAceSurfaceModel) -> String {
+        let retained = [1, 2].allSatisfy { paneId in
+            surface.panesById[paneId]?.currentEntry.contentId == "ct_resize_probe_\(paneId)"
+        }
+        return retained ? "authority content retained" : "authority content missing"
     }
 }
 #endif

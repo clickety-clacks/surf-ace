@@ -2,6 +2,44 @@ import XCTest
 @testable import SurfAce
 
 final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
+    func testLocalResizePreviewCancelsAndNeverReplaysAcrossRevisionOrRestart() {
+        var preview = SurfAceSplitPreviewState()
+        let interruptedToken = UUID()
+        preview.update(weights: [1.5, 0.5], token: interruptedToken, topologyEpoch: 7)
+        XCTAssertEqual(preview.visibleWeights(count: 2, topologyEpoch: 7), [1.5, 0.5])
+        XCTAssertNil(preview.visibleWeights(count: 2, topologyEpoch: 8))
+        XCTAssertNil(preview.completedWeights(token: interruptedToken, topologyEpoch: 8))
+
+        preview.cancel(token: interruptedToken)
+        XCTAssertNil(preview.visibleWeights(count: 2, topologyEpoch: 7))
+        XCTAssertNil(preview.completedWeights(token: interruptedToken, topologyEpoch: 7))
+
+        let nextToken = UUID()
+        preview.update(weights: [1.2, 0.8], token: nextToken, topologyEpoch: 8)
+        preview.cancel(token: interruptedToken) // A delayed callback cannot erase the next drag.
+        XCTAssertEqual(preview.completedWeights(token: nextToken, topologyEpoch: 8)?.weights, [1.2, 0.8])
+
+        // A completed drag A remains eligible while a newer displayed drag B
+        // starts and cancels; the pending end request is not the view preview.
+        preview.queueCommit(token: nextToken)
+        let newerToken = UUID()
+        preview.update(weights: [1.3, 0.7], token: newerToken, topologyEpoch: 8)
+        preview.cancel(token: newerToken)
+        XCTAssertTrue(preview.mayCommit(token: nextToken))
+        preview.finishCommit(token: nextToken)
+        XCTAssertFalse(preview.mayCommit(token: nextToken))
+
+        preview.update(weights: [1.4, 0.6], token: newerToken, topologyEpoch: 8)
+        preview.queueCommit(token: newerToken)
+        preview.cancelAll() // Scene interruption invalidates every queued end.
+        XCTAssertFalse(preview.mayCommit(token: newerToken))
+
+        // Process recreation has no preview state to replay; durable topology
+        // comes from the generation store, exercised by the restart test below.
+        preview = SurfAceSplitPreviewState()
+        XCTAssertNil(preview.visibleWeights(count: 2, topologyEpoch: 8))
+    }
+
     func testPaneLayoutIdentityIgnoresWeightOnlyChanges() {
         let initial = SurfAcePaneLayoutNode.split(
             direction: .vertical,
@@ -120,6 +158,41 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
             committed,
             "Resize must commit and project back into the visible tree; generation \(generationBefore)->\(after.generation), endpointError=\(runtime.endpointError ?? "none"), topology=\(after.liveSurfaces[surfaceId]?.topology ?? .null)"
         )
+        let committedSurface = try XCTUnwrap(after.liveSurfaces[surfaceId])
+        let committedRecord = try XCTUnwrap(after.scopes["surface:\(surfaceId)"]?.records.last)
+        XCTAssertEqual(committedRecord.recordClass, .topology)
+        guard case .object(let event) = committedRecord.payload else {
+            return XCTFail("Expected committed topology record payload")
+        }
+        XCTAssertEqual(event["topology"], committedSurface.topology)
+        XCTAssertEqual(event["topologyRevision"], .integer(committedSurface.topologyRevision))
+
+        // Force the generation store's atomic temporary write to fail. Neither
+        // memory nor disk may report the uncommitted resize as successful.
+        let blockedTemporaryURL = directory.appendingPathComponent(".authority-v1.json.next", isDirectory: true)
+        try FileManager.default.createDirectory(at: blockedTemporaryURL, withIntermediateDirectories: true)
+        let beforeFailedSave = await adapter.snapshot()
+        let failedSave = expectation(description: "failed resize save completed")
+        runtime.resizeSplit(surfaceId: surfaceId, path: [], weights: [1.25, 0.75]) { failedSave.fulfill() }
+        await fulfillment(of: [failedSave], timeout: 5)
+        XCTAssertNotNil(runtime.endpointError)
+        XCTAssertTrue(runtime.resizeSaveFailures.contains(surfaceId))
+        let afterFailedSave = await adapter.snapshot()
+        XCTAssertEqual(afterFailedSave, beforeFailedSave)
+        XCTAssertEqual(try SurfAceLocklessGenerationStore(stateURL: stateURL).load(), beforeFailedSave)
+        guard case .split(_, let afterFailedSaveChildren, _) = surface.paneLayout else {
+            return XCTFail("Expected last committed split after failed save")
+        }
+        XCTAssertEqual(afterFailedSaveChildren.map(\.layoutWeight), [1.4, 0.6])
+        try FileManager.default.removeItem(at: blockedTemporaryURL)
+
+        let recoveredSave = expectation(description: "recovered resize save completed")
+        runtime.resizeSplit(surfaceId: surfaceId, path: [], weights: [1.25, 0.75]) { recoveredSave.fulfill() }
+        await fulfillment(of: [recoveredSave], timeout: 5)
+        XCTAssertFalse(runtime.resizeSaveFailures.contains(surfaceId))
+        let restorePriorWeights = expectation(description: "restore original committed weights")
+        runtime.resizeSplit(surfaceId: surfaceId, path: [], weights: [1.4, 0.6]) { restorePriorWeights.fulfill() }
+        await fulfillment(of: [restorePriorWeights], timeout: 5)
 
         let restarted = SurfAceRuntime(
             userDefaults: defaults, locklessStateURL: stateURL,
@@ -127,10 +200,175 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
         )
         await restarted.restoreLocklessAuthority(reason: "resize-test-restart")
         let restored = await restarted.registerSurfaceForScene(sceneKey: suiteName)
-        guard case .split(_, let restoredChildren, _) = try XCTUnwrap(restored).paneLayout else {
+        let restoredSurface = try XCTUnwrap(restored)
+        guard case .split(_, let restoredChildren, _) = restoredSurface.paneLayout else {
             return XCTFail("Expected split after restart")
         }
         XCTAssertEqual(restoredChildren.map(\.layoutWeight), [1.4, 0.6])
+
+        let restartedAdapter = try restarted.locklessAuthorityForLocalMutation()
+        let changeAndReturnRevision = (await restartedAdapter.snapshot()).liveSurfaces[surfaceId]?.topologyRevision ?? -1
+        let changed = expectation(description: "first queued resize completed")
+        let returned = expectation(description: "return to original weights completed")
+        restarted.resizeSplit(surfaceId: surfaceId, path: [], weights: [1.2, 0.8]) { changed.fulfill() }
+        restarted.resizeSplit(surfaceId: surfaceId, path: [], weights: [1.4, 0.6]) { returned.fulfill() }
+        await fulfillment(of: [changed, returned], timeout: 5)
+        let changeAndReturnActual = (await restartedAdapter.snapshot()).liveSurfaces[surfaceId]?.topologyRevision
+        XCTAssertEqual(changeAndReturnActual, changeAndReturnRevision + 2)
+        guard case .split(_, let returnedChildren, _) = restoredSurface.paneLayout else {
+            return XCTFail("Expected projected split after change and return")
+        }
+        XCTAssertEqual(returnedChildren.map(\.layoutWeight), [1.4, 0.6])
+
+        let beforeRepeatedResize = await restartedAdapter.snapshot()
+        let repeatedRevision = beforeRepeatedResize.liveSurfaces[surfaceId]?.topologyRevision ?? -1
+        let repeatedRecordCount = beforeRepeatedResize.scopes["surface:\(surfaceId)"]?.records.count ?? -1
+        let repeatedFirst = expectation(description: "first repeated resize completed")
+        let repeatedSecond = expectation(description: "second repeated resize completed")
+        restarted.resizeSplit(surfaceId: surfaceId, path: [], weights: [1.3, 0.7]) { repeatedFirst.fulfill() }
+        restarted.resizeSplit(surfaceId: surfaceId, path: [], weights: [1.3, 0.7]) { repeatedSecond.fulfill() }
+        await fulfillment(of: [repeatedFirst, repeatedSecond], timeout: 5)
+        let afterRepeatedResize = await restartedAdapter.snapshot()
+        let repeatedActual = afterRepeatedResize.liveSurfaces[surfaceId]?.topologyRevision
+        XCTAssertEqual(repeatedActual, repeatedRevision + 1)
+        XCTAssertEqual(afterRepeatedResize.scopes["surface:\(surfaceId)"]?.records.count, repeatedRecordCount + 1)
+
+        // Scene interruption after gesture end can arrive while that end
+        // request waits behind an earlier durable commit and event fanout.
+        // The interrupted request must not make a second topology record.
+        let beforeInterruptedResize = await restartedAdapter.snapshot()
+        let firstQueuedEnd = expectation(description: "first resize end completed")
+        let interruptedEnd = expectation(description: "interrupted resize end completed")
+        var sceneStillActive = true
+        restarted.resizeSplit(surfaceId: surfaceId, path: [], weights: [1.15, 0.85]) {
+            firstQueuedEnd.fulfill()
+        }
+        restarted.resizeSplit(
+            surfaceId: surfaceId, path: [], weights: [1.1, 0.9],
+            shouldCommit: { sceneStillActive }
+        ) {
+            interruptedEnd.fulfill()
+        }
+        sceneStillActive = false
+        await fulfillment(of: [firstQueuedEnd, interruptedEnd], timeout: 5)
+        let afterInterruptedResize = await restartedAdapter.snapshot()
+        XCTAssertEqual(afterInterruptedResize.generation, beforeInterruptedResize.generation + 1)
+        XCTAssertEqual(
+            afterInterruptedResize.liveSurfaces[surfaceId]?.topologyRevision,
+            (beforeInterruptedResize.liveSurfaces[surfaceId]?.topologyRevision ?? -1) + 1
+        )
+        XCTAssertEqual(
+            afterInterruptedResize.scopes["surface:\(surfaceId)"]?.records.count,
+            (beforeInterruptedResize.scopes["surface:\(surfaceId)"]?.records.count ?? -1) + 1
+        )
+        guard case .split(_, let afterInterruptedChildren, _) = restoredSurface.paneLayout else {
+            return XCTFail("Expected first end commit to remain visible")
+        }
+        XCTAssertEqual(afterInterruptedChildren.map(\.layoutWeight), [1.15, 0.85])
+
+        // An unrelated/new preview must not revoke completed A while A waits
+        // behind a predecessor. Only explicit interruption revokes A.
+        let beforeOverlappingGestures = await restartedAdapter.snapshot()
+        let predecessorEnd = expectation(description: "predecessor no-op completed")
+        let completedA = expectation(description: "completed A committed")
+        var pending = SurfAceSplitPreviewState()
+        let tokenA = UUID()
+        let tokenB = UUID()
+        pending.update(weights: [1.18, 0.82], token: tokenA, topologyEpoch: Int(beforeOverlappingGestures.liveSurfaces[surfaceId]?.topologyRevision ?? -1))
+        pending.queueCommit(token: tokenA)
+        restarted.resizeSplit(surfaceId: surfaceId, path: [], weights: [1.15, 0.85]) {
+            predecessorEnd.fulfill()
+        }
+        restarted.resizeSplit(
+            surfaceId: surfaceId, path: [], weights: [1.18, 0.82],
+            shouldCommit: { pending.mayCommit(token: tokenA) }
+        ) {
+            pending.finishCommit(token: tokenA)
+            completedA.fulfill()
+        }
+        pending.update(weights: [1.25, 0.75], token: tokenB, topologyEpoch: pending.topologyEpoch ?? -1)
+        pending.cancel(token: tokenB)
+        await fulfillment(of: [predecessorEnd, completedA], timeout: 5)
+        let afterOverlappingGestures = await restartedAdapter.snapshot()
+        XCTAssertEqual(afterOverlappingGestures.generation, beforeOverlappingGestures.generation + 1)
+        XCTAssertEqual(
+            afterOverlappingGestures.liveSurfaces[surfaceId]?.topologyRevision,
+            (beforeOverlappingGestures.liveSurfaces[surfaceId]?.topologyRevision ?? -1) + 1
+        )
+        XCTAssertFalse(pending.mayCommit(token: tokenA))
+
+        let afterFailureRevision = (await restartedAdapter.snapshot()).liveSurfaces[surfaceId]?.topologyRevision ?? -1
+        let failed = expectation(description: "invalid predecessor completed")
+        let recovered = expectation(description: "valid successor completed")
+        restarted.resizeSplit(surfaceId: surfaceId, path: [], weights: [.nan, 0.7]) { failed.fulfill() }
+        restarted.resizeSplit(surfaceId: surfaceId, path: [], weights: [1.2, 0.8]) { recovered.fulfill() }
+        await fulfillment(of: [failed, recovered], timeout: 5)
+        let afterFailureActual = (await restartedAdapter.snapshot()).liveSurfaces[surfaceId]?.topologyRevision
+        XCTAssertEqual(afterFailureActual, afterFailureRevision + 1)
+        guard case .split(_, let recoveredChildren, _) = restoredSurface.paneLayout else {
+            return XCTFail("Expected projected split after invalid predecessor")
+        }
+        XCTAssertEqual(recoveredChildren.map(\.layoutWeight), [1.2, 0.8])
+
+        // Another commit to the same split leaves its structural identity
+        // unchanged. A drag based on the older revision must still fail closed.
+        let beforeCompetingResize = await restartedAdapter.snapshot()
+        let competingRevision = try XCTUnwrap(beforeCompetingResize.liveSurfaces[surfaceId]?.topologyRevision)
+        let competingIdentity = restoredSurface.paneLayout.layoutIdentity
+        _ = try await restartedAdapter.commitLocalResize(
+            surfaceId: surfaceId, path: [], weights: [1.35, 0.65],
+            expectedSplitIdentity: competingIdentity,
+            expectedTopologyRevision: competingRevision
+        )
+        let afterCompetingResize = await restartedAdapter.snapshot()
+        do {
+            _ = try await restartedAdapter.commitLocalResize(
+                surfaceId: surfaceId, path: [], weights: [1.4, 0.6],
+                expectedSplitIdentity: competingIdentity,
+                expectedTopologyRevision: competingRevision
+            )
+            XCTFail("A stale gesture must not replace newer weights on the same split")
+        } catch {
+            let afterStaleWeights = await restartedAdapter.snapshot()
+            XCTAssertEqual(afterStaleWeights, afterCompetingResize)
+        }
+        await restarted.restoreLocklessAuthority(reason: "resize-test-competing-weights")
+
+        let supersededRootIdentity = restoredSurface.paneLayout.layoutIdentity
+        _ = try await restartedAdapter.commitLocalMutation(operation: "test.resize.nested_split") { state, _ in
+            let split = try TestRegistryTopology.paneSplit(
+                state: &state, surfaceId: surfaceId, paneId: 1,
+                count: 2, direction: "horizontal",
+                expectedTopologyRevision: state.liveSurfaces[surfaceId]?.topologyRevision ?? -1
+            )
+            return .integer(split.newPaneIds[0])
+        }
+        await restarted.restoreLocklessAuthority(reason: "resize-test-nested-split")
+        let beforeStaleResize = await restartedAdapter.snapshot()
+        do {
+            _ = try await restartedAdapter.commitLocalResize(
+                surfaceId: surfaceId, path: [], weights: [1.6, 0.4],
+                expectedSplitIdentity: supersededRootIdentity
+            )
+            XCTFail("A superseded split identity must refuse stale preview commit")
+        } catch {
+            let afterStaleResize = await restartedAdapter.snapshot()
+            XCTAssertEqual(afterStaleResize, beforeStaleResize)
+        }
+        let nestedRevision = (await restartedAdapter.snapshot()).liveSurfaces[surfaceId]?.topologyRevision ?? -1
+        let nestedDone = expectation(description: "nested resize completed")
+        let rootDone = expectation(description: "root resize completed")
+        restarted.resizeSplit(surfaceId: surfaceId, path: [0], weights: [1.3, 0.7]) { nestedDone.fulfill() }
+        restarted.resizeSplit(surfaceId: surfaceId, path: [], weights: [1.1, 0.9]) { rootDone.fulfill() }
+        await fulfillment(of: [nestedDone, rootDone], timeout: 5)
+        let nestedActual = (await restartedAdapter.snapshot()).liveSurfaces[surfaceId]?.topologyRevision
+        XCTAssertEqual(nestedActual, nestedRevision + 2)
+        guard case .split(_, let rootChildren, _) = restoredSurface.paneLayout,
+              case .split(_, let nestedChildren, _) = rootChildren[0] else {
+            return XCTFail("Expected nested projected split after two different resize paths")
+        }
+        XCTAssertEqual(rootChildren.map(\.layoutWeight), [1.1, 0.9])
+        XCTAssertEqual(nestedChildren.map(\.layoutWeight), [1.3, 0.7])
     }
 
     func testKeyboardFocusOutlineIsSuppressedForSinglePaneSurfaces() {
