@@ -1190,13 +1190,18 @@ private struct SurfAcePaneView: View {
             }
             .overlay(alignment: .topTrailing) {
                 Button(action: onTogglePopout) {
-                    Label(isPoppedOut ? "Restore" : "Pop out",
-                          systemImage: isPoppedOut ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
-                        .font(.custom(SurfAceChromeFont.boldName, size: 17))
-                        .padding(.horizontal, 10)
-                        .frame(minWidth: 44, minHeight: 44)
+                    HStack(spacing: 6) {
+                        Image(systemName: isPoppedOut ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
+                        if isPoppedOut { Text("Restore") }
+                    }
+                    .font(.custom(SurfAceChromeFont.boldName, size: 17))
+                    .padding(.horizontal, isPoppedOut ? 10 : 0)
+                    .frame(minWidth: 44, minHeight: 44)
                 }
                 .buttonStyle(.borderedProminent)
+                .tint(Color(red: 0.04, green: 0.28, blue: 0.20))
+                .foregroundStyle(.white)
+                .accessibilityLabel(isPoppedOut ? "Restore" : "Pop out")
                 .accessibilityIdentifier("surf-ace-pane-popout-\(pane.paneId)")
                 .accessibilityValue(isPoppedOut ? "Expanded" : "Tiled")
                 .accessibilityFocused($popoutControlFocused)
@@ -1205,7 +1210,11 @@ private struct SurfAcePaneView: View {
             }
             .overlay {
                 RoundedRectangle(cornerRadius: 12)
-                    .strokeBorder(Color.accentColor, lineWidth: isPoppedOut ? 3 : 0)
+                    .strokeBorder(.black, lineWidth: isPoppedOut ? 5 : 0)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 12)
+                            .strokeBorder(.white, lineWidth: isPoppedOut ? 3 : 0)
+                    }
                     .allowsHitTesting(false)
             }
             .onChange(of: proxy.size) { _, newSize in
