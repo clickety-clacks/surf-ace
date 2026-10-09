@@ -12,7 +12,7 @@ v0.2.5 tags, URLs, and bytes retain their legacy names unchanged.
 ## Immutable identity
 
 - Product source: tag `surf-ace-v0.2.7-r3` at product commit
-  `0c4f0927844e5aba740ff690aedf8bceb5611a84`.
+  `800d0ea77eb030eea1eb8e690dfb431651e67414`.
 - Product version: `0.2.7`.
 - Tooling: proposed tag `surf-ace-release-tooling-v0.2.7-r7` at the
   exact reviewed tooling commit.

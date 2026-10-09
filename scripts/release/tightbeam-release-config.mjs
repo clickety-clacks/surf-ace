@@ -20,7 +20,7 @@ export const TOOLCHAINS = Object.freeze({
 });
 
 export const TIGHTBEAM = Object.freeze({
-  candidateCommit: "0c4f0927844e5aba740ff690aedf8bceb5611a84",
+  candidateCommit: "800d0ea77eb030eea1eb8e690dfb431651e67414",
   sourceTag: RELEASE_NAMES.sourceTag,
   version: RELEASE_NAMES.version,
   channel: RELEASE_NAMES.channel,
