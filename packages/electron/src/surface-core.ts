@@ -648,6 +648,12 @@ function assertAdmissionAttemptLedgerWithinCapacity(
 }
 
 export class SurfaceCore {
+  // Presentation is local to this incarnation and deliberately outside SurfaceState.
+  private readonly panePresentations = new Map<string, {
+    paneId: number;
+    paneLineageId: string;
+    snapshot: PaneSnapshot;
+  }>();
   readonly locklessAuthority: LocklessClientAuthority;
   // Admission evidence is a write-ahead ledger. Transaction rollback restores
   // surface and authority state, but must never erase or rewind these records.
@@ -1642,6 +1648,7 @@ export class SurfaceCore {
       return;
     }
     this.surfaces.delete(surfaceId);
+    this.panePresentations.delete(surfaceId);
     this.emit({ surfaceId, type: "surface-removed" });
   }
 
@@ -1856,7 +1863,7 @@ export class SurfaceCore {
     if (activePaneId === null) {
       return null;
     }
-    const paneGeometry = resolvePaneGeometrySnapshots(surface);
+    const paneGeometry = this.resolveDisplayedPaneGeometrySnapshots(surface);
     const active = paneGeometry.get(activePaneId)?.paneFrame;
     if (!active) {
       return null;
@@ -1957,7 +1964,7 @@ export class SurfaceCore {
 
   panesList(surfaceId: string): PanesListResponse["payload"] {
     const surface = this.getSurface(surfaceId);
-    const paneGeometry = resolvePaneGeometrySnapshots(surface);
+    const paneGeometry = this.resolveDisplayedPaneGeometrySnapshots(surface);
     return {
       panes: surface.paneOrder.map((paneId) => {
         const pane = surface.panes.get(paneId)!;
@@ -1992,7 +1999,7 @@ export class SurfaceCore {
     expectedIdentity: ResolvedPaneGeometryIdentity = this.resolvedPaneGeometryIdentity(surfaceId),
   ): number[] {
     const surface = this.getSurface(surfaceId);
-    const paneGeometry = resolvePaneGeometrySnapshots(surface);
+    const paneGeometry = this.resolveDisplayedPaneGeometrySnapshots(surface);
     const seen = new Set<number>();
     const missing: number[] = [];
     for (const paneId of paneIds) {
@@ -2201,7 +2208,7 @@ export class SurfaceCore {
 
   markNativePaneWindowGroups(surfaceId: string, groups: NativePaneWindowGroupStatus[]): void {
     const surface = this.getSurface(surfaceId);
-    const paneGeometry = resolvePaneGeometrySnapshots(surface);
+    const paneGeometry = this.resolveDisplayedPaneGeometrySnapshots(surface);
     let didChange = false;
     const trustedGroups = new Map<number, NativePaneWindowGroupStatus>();
     for (const group of groups) {
@@ -3620,21 +3627,76 @@ export class SurfaceCore {
     }
   }
 
+  setPanePresentation(
+    surfaceId: string,
+    presentation: {
+      paneId: number;
+      paneLineageId: string;
+      snapshot: PaneSnapshot;
+    } | null,
+  ): void {
+    if (presentation === null) {
+      this.panePresentations.delete(surfaceId);
+      return;
+    }
+    const surface = this.getSurface(surfaceId);
+    const pane = this.expectPane(surfaceId, presentation.paneId);
+    const bounds = presentation.snapshot.bounds;
+    const identity = paneSnapshotIdentity(presentation.snapshot);
+    if (pane.paneLineageId !== presentation.paneLineageId || identity === null ||
+        !sameGeometryIdentity(identity, this.resolvedPaneGeometryIdentity(surfaceId)) ||
+        bounds === null || !isRenderableRect(bounds) || bounds.x < 0 || bounds.y < 0 ||
+        bounds.x + bounds.width > surface.viewport.width ||
+        bounds.y + bounds.height > surface.viewport.height) {
+      throw new SurfaceCoreError("invalid_payload", "Pane presentation identity or bounds are stale or invalid");
+    }
+    this.panePresentations.set(surfaceId, structuredClone(presentation));
+  }
+
+  private currentPanePresentation(surface: SurfaceState) {
+    const presentation = this.panePresentations.get(surface.surfaceId);
+    if (!presentation) return null;
+    const pane = surface.panes.get(presentation.paneId);
+    const identity = paneSnapshotIdentity(presentation.snapshot);
+    if (!pane || pane.paneLineageId !== presentation.paneLineageId || !identity ||
+        !sameGeometryIdentity(identity, this.resolvedPaneGeometryIdentity(surface.surfaceId))) {
+      this.panePresentations.delete(surface.surfaceId);
+      return null;
+    }
+    return presentation;
+  }
+
+  private resolveDisplayedPaneGeometrySnapshots(surface: SurfaceState): Map<number, PaneGeometryProjection> {
+    const presentation = this.currentPanePresentation(surface);
+    if (!presentation) return resolvePaneGeometrySnapshots(surface);
+    const pane = surface.panes.get(presentation.paneId)!;
+    const panes = new Map(surface.panes);
+    panes.set(pane.paneId, { ...pane, snapshot: presentation.snapshot });
+    return resolvePaneGeometrySnapshots({ ...surface, panes });
+  }
+
   captureSnapshot(surfaceId: string, paneId: number): SnapshotResponse["payload"] {
     const pane = this.expectPane(surfaceId, paneId);
     const current = currentEntry(pane);
+    const presentation = this.currentPanePresentation(this.getSurface(surfaceId));
     return {
       contentId: protocolContentId(current),
       contentType: protocolContentType(current),
       paneId: pane.paneId as PaneId,
       revision: current.revision as Revision,
       selection: pane.snapshot.selection,
-      viewport: structuredClone(pane.snapshot.viewport),
+      viewport: structuredClone(
+        presentation?.paneId === paneId
+          ? presentation.snapshot.viewport
+          : pane.snapshot.viewport,
+      ),
     };
   }
 
   paneBounds(surfaceId: string, paneId: number): { height: number; width: number; x: number; y: number } | null {
     const pane = this.requirePane(surfaceId, paneId);
+    const presentation = this.currentPanePresentation(this.getSurface(surfaceId));
+    if (presentation?.paneId === paneId) return structuredClone(presentation.snapshot.bounds);
     return pane?.snapshot.bounds ?? null;
   }
 
