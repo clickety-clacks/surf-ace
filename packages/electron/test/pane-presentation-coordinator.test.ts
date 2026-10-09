@@ -31,14 +31,22 @@ function fixture(native = true) {
 }
 function ack(wire: CompositorControlRequest) {
   if (wire.type !== "pane_presentation.set") throw new Error("unexpected mutation");
-  const { version, request_revision, presentation_generation, selected } = wire.request;
-  return { ok: true, pane_presentation: { version, request_revision, presentation_generation, selected } };
+  const { version, request_revision, presentation_generation, window_route, selected, overlay_rect, content_rect } = wire.request;
+  return { ok: true, pane_presentation: { version, request_revision, presentation_generation, window_route, selected, overlay_rect, content_rect } };
 }
-const capability = { ok: true, status: { capabilities: { [PANE_PRESENTATION_CAPABILITY]: 1 } } };
+const host = { host_surface_id: 99, host_incarnation: "host-1", root_geometry_generation: 1,
+  source_rect: { x: 0, y: 0, width: 1000, height: 700 }, logical_rect: { x: 0, y: 0, width: 1000, height: 700 } };
+function createCoordinator(core: SurfaceCore, transport: ConstructorParameters<typeof PanePresentationCoordinator>[1],
+  failure?: ConstructorParameters<typeof PanePresentationCoordinator>[2]) {
+  return new PanePresentationCoordinator(core, transport, failure, async (surfaceId) => ({
+    window_id: `window:${surfaceId}`, renderer_surface_id: surfaceId, host: structuredClone(host),
+  }));
+}
+const capability = { ok: true, status: { pane_presentation_host: host, capabilities: { [PANE_PRESENTATION_CAPABILITY]: 1 } } };
 
 test("renderer request resolves lineage locally and rejects malformed identity before transport", async () => {
   const f = fixture(false);
-  const coordinator = new PanePresentationCoordinator(f.core, () => null);
+  const coordinator = createCoordinator(f.core, () => null);
   await assert.rejects(coordinator.applyRendererRequest(f.surfaceId, { paneId: f.paneId }), /identity/);
   await assert.rejects(coordinator.applyRendererRequest(f.surfaceId, {
     identity: f.identity, paneId: -1,
@@ -53,7 +61,7 @@ test("renderer request resolves lineage locally and rejects malformed identity b
 test("expanded ordinary reports cannot overwrite tiled persistence or acknowledged geometry", async () => {
   const f = fixture(false);
   const saved = f.core.getPersistentState();
-  await new PanePresentationCoordinator(f.core, () => null).apply(f.surfaceId, f.presentation, f.identity);
+  await createCoordinator(f.core, () => null).apply(f.surfaceId, f.presentation, f.identity);
   const viewport = structuredClone(f.presentation.snapshot.viewport);
   viewport.scrollOffset.y = 17;
   viewport.visibleRect.height = 676;
@@ -75,7 +83,7 @@ test("native presentation remains tiled until exact acknowledgement and never ch
   const saved = f.core.getPersistentState();
   let release!: () => void;
   const pending = new Promise<void>((resolve) => { release = resolve; });
-  const coordinator = new PanePresentationCoordinator(f.core, () => async (wire) => {
+  const coordinator = createCoordinator(f.core, () => async (wire) => {
     if (wire.type === "get_status") return capability;
     await pending;
     return ack(wire);
@@ -92,10 +100,10 @@ test("native presentation remains tiled until exact acknowledgement and never ch
 });
 test("rejected acknowledgement or missing native transport preserves tile", async () => {
   const f = fixture();
-  const rejected = new PanePresentationCoordinator(f.core, () => async (wire) =>
+  const rejected = createCoordinator(f.core, () => async (wire) =>
     wire.type === "get_status" ? capability : { ok: true });
   await assert.rejects(rejected.apply(f.surfaceId, f.presentation, f.identity), /exact/);
-  const missing = new PanePresentationCoordinator(f.core, () => null);
+  const missing = createCoordinator(f.core, () => null);
   await assert.rejects(missing.apply(f.surfaceId, f.presentation, f.identity), /routed/);
   assert.deepEqual(f.core.paneBounds(f.surfaceId, f.paneId), f.bounds);
 });
@@ -103,7 +111,7 @@ test("late acknowledgement cannot re-enter after explicit invalidation", async (
   const f = fixture();
   let release!: () => void;
   const pending = new Promise<void>((resolve) => { release = resolve; });
-  const coordinator = new PanePresentationCoordinator(f.core, () => async (wire) => {
+  const coordinator = createCoordinator(f.core, () => async (wire) => {
     if (wire.type === "get_status") return capability;
     await pending; return ack(wire);
   });
@@ -121,7 +129,7 @@ test("acknowledged stale native selection is remotely restored before invalidati
   const pending = new Promise<void>((resolve) => { release = resolve; });
   const sent = new Promise<void>((resolve) => { entered = resolve; });
   const controls: Array<Extract<CompositorControlRequest, { type: "pane_presentation.set" }>> = [];
-  const coordinator = new PanePresentationCoordinator(f.core, () => async (wire) => {
+  const coordinator = createCoordinator(f.core, () => async (wire) => {
     if (wire.type === "get_status") return capability;
     if (wire.type !== "pane_presentation.set") throw new Error("unexpected request");
     controls.push(structuredClone(wire));
@@ -148,7 +156,7 @@ test("new selection waits for stale acknowledgement retirement and uses a later 
   const sent = new Promise<void>((resolve) => { entered = resolve; });
   const revisions: number[] = [];
   const selected: boolean[] = [];
-  const coordinator = new PanePresentationCoordinator(f.core, () => async (wire) => {
+  const coordinator = createCoordinator(f.core, () => async (wire) => {
     if (wire.type === "get_status") return capability;
     if (wire.type !== "pane_presentation.set") throw new Error("unexpected request");
     revisions.push(wire.request.request_revision);
@@ -174,7 +182,7 @@ test("authoritative topology and surface close automatically retire accepted rem
     const f = fixture();
     const controls: Array<Extract<CompositorControlRequest, { type: "pane_presentation.set" }>> = [];
     const failures: unknown[] = [];
-    const coordinator = new PanePresentationCoordinator(f.core, () => async (wire) => {
+    const coordinator = createCoordinator(f.core, () => async (wire) => {
       if (wire.type === "get_status") return capability;
       if (wire.type !== "pane_presentation.set") throw new Error("unexpected request");
       controls.push(structuredClone(wire));
@@ -200,7 +208,7 @@ test("lost mutation reply blocks new selection until exact retirement is acknowl
   let first = true;
   const controls: Array<Extract<CompositorControlRequest, { type: "pane_presentation.set" }>> = [];
   const failures: unknown[] = [];
-  const coordinator = new PanePresentationCoordinator(f.core, () => async (wire) => {
+  const coordinator = createCoordinator(f.core, () => async (wire) => {
     if (wire.type === "get_status") return capability;
     if (wire.type !== "pane_presentation.set") throw new Error("unexpected request");
     controls.push(structuredClone(wire));
@@ -224,7 +232,7 @@ test("topology change while acknowledgement is pending prevents display commit",
   const f = fixture();
   let release!: () => void;
   const pending = new Promise<void>((resolve) => { release = resolve; });
-  const coordinator = new PanePresentationCoordinator(f.core, () => async (wire) => {
+  const coordinator = createCoordinator(f.core, () => async (wire) => {
     if (wire.type === "get_status") return capability;
     await pending; return ack(wire);
   });
@@ -236,7 +244,7 @@ test("topology change while acknowledgement is pending prevents display commit",
 test("invalid bounds and malformed viewports reject before any transport request", async () => {
   const f = fixture();
   let calls = 0;
-  const coordinator = new PanePresentationCoordinator(f.core, () => async () => { calls++; return capability; });
+  const coordinator = createCoordinator(f.core, () => async () => { calls++; return capability; });
   f.presentation.snapshot.bounds.width = Infinity;
   await assert.rejects(coordinator.apply(f.surfaceId, f.presentation, f.identity), /bounds/);
   f.presentation.snapshot.bounds.width = 980;
@@ -246,12 +254,12 @@ test("invalid bounds and malformed viewports reject before any transport request
 });
 test("renderer-only local window needs no native transport", async () => {
   const f = fixture(false);
-  await new PanePresentationCoordinator(f.core, () => null).apply(f.surfaceId, f.presentation, f.identity);
+  await createCoordinator(f.core, () => null).apply(f.surfaceId, f.presentation, f.identity);
   assert.equal(f.core.paneBounds(f.surfaceId, f.paneId)!.width, 980);
 });
 test("native binding replacement during acknowledgement cannot apply old display authority", async () => {
   const f = fixture();
-  const coordinator = new PanePresentationCoordinator(f.core, () => async (wire) => {
+  const coordinator = createCoordinator(f.core, () => async (wire) => {
     if (wire.type === "get_status") return capability;
     const replacement = f.core.projectCurrentNativePaneGeometry(f.surfaceId, [f.paneId]);
     replacement.panes[0]!.binding_id = "replacement-binding";
@@ -260,4 +268,31 @@ test("native binding replacement during acknowledgement cannot apply old display
   });
   await assert.rejects(coordinator.apply(f.surfaceId, f.presentation, f.identity), /exact/);
   assert.deepEqual(f.core.paneBounds(f.surfaceId, f.paneId), f.bounds);
+});
+
+test("host incarnation replacement before ack display commit rejects and never restores onto replacement", async () => {
+  const f = fixture();
+  let currentHost = structuredClone(host);
+  const selected: boolean[] = [];
+  const coordinator = new PanePresentationCoordinator(f.core, () => async (wire) => {
+    if (wire.type === "get_status") return { ...capability, status: { ...capability.status, pane_presentation_host: currentHost } };
+    if (wire.type !== "pane_presentation.set") throw new Error("unexpected request");
+    selected.push(wire.request.selected !== null);
+    const response = ack(wire);
+    currentHost = { ...host, host_incarnation: "replacement-host" };
+    return response;
+  }, undefined, async (surfaceId) => ({ window_id: `window:${surfaceId}`, renderer_surface_id: surfaceId,
+    host: structuredClone(currentHost) }));
+  await assert.rejects(coordinator.apply(f.surfaceId, f.presentation, f.identity), /exact/);
+  assert.deepEqual(selected, [true], "old Restore cannot mutate replacement host");
+  assert.deepEqual(f.core.paneBounds(f.surfaceId, f.paneId), f.bounds);
+  assert.equal(coordinator.wasPresentationCleared(f.surfaceId), true);
+});
+
+test("native presentation without independently resolved window route cannot mutate", async () => {
+  const f = fixture();
+  let calls = 0;
+  const coordinator = new PanePresentationCoordinator(f.core, () => async () => { calls++; return capability; });
+  await assert.rejects(coordinator.apply(f.surfaceId, f.presentation, f.identity), /verified.*route/);
+  assert.equal(calls, 0);
 });

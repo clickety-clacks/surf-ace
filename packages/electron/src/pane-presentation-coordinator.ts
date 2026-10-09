@@ -1,6 +1,6 @@
 import { SurfaceCore } from "./surface-core.js";
 import { acknowledgePanePresentation, assertPanePresentationAcknowledged, panePresentationRequest,
-  type PanePresentationControlRequest } from "./pane-presentation.js";
+  type PanePresentationControlRequest, type PresentationWindowRoute } from "./pane-presentation.js";
 import type { CompositorControlRequest, CompositorControlResponse } from "./native-pane-bridge.js";
 
 type Presentation = NonNullable<Parameters<SurfaceCore["setPanePresentation"]>[1]>;
@@ -14,10 +14,12 @@ export class PanePresentationCoordinator {
   private readonly queues = new Map<string, Promise<unknown>>();
   private readonly accepted = new Map<string, { control: PanePresentationControlRequest; send: Sender; uncertain?: boolean }>();
   private readonly authorities = new Map<string, { identity: Identity; selected: Presentation | null }>();
+  private readonly cleared = new Set<string>();
   constructor(
     private readonly core: SurfaceCore,
     private readonly transportForSurface: (surfaceId: string) => Sender | null,
     private readonly onRetirementFailure: (surfaceId: string, error: unknown) => void = () => {},
+    private readonly routeForSurface?: (surfaceId: string, send: Sender) => Promise<PresentationWindowRoute>,
   ) {
     core.subscribe((event) => {
       if (event.type === "surface-removed") {
@@ -72,6 +74,8 @@ export class PanePresentationCoordinator {
     const send = this.transportForSurface(surfaceId);
     let acknowledged: PanePresentationControlRequest | null = null;
     if (send) {
+      if (!this.routeForSurface) throw new Error("verified compositor window route is unavailable");
+      const route = await this.routeForSurface(surfaceId, send);
       const materialization = this.core.projectCurrentNativePaneGeometry(surfaceId, nativeIds);
       const bounds = selected?.snapshot.bounds ?? null;
       const content = bounds ? { x: bounds.x + 2, y: bounds.y + 2,
@@ -79,7 +83,7 @@ export class PanePresentationCoordinator {
       acknowledged = panePresentationRequest(
         materialization, this.nextWireRevision(surfaceId),
         selected ? { paneId: selected.paneId, paneLineageId: selected.paneLineageId } : null,
-        bounds, content,
+        bounds, content, route,
       );
       let attempted = false;
       try {
@@ -111,10 +115,11 @@ export class PanePresentationCoordinator {
           this.core.projectCurrentNativePaneGeometry(surfaceId, currentNativeIds), acknowledged.request.request_revision,
           selected ? { paneId: selected.paneId, paneLineageId: selected.paneLineageId } : null,
           acknowledged.request.overlay_rect, acknowledged.request.content_rect,
+          await this.routeForSurface!(surfaceId, send!),
         ).request;
-        const { version, request_revision, presentation_generation, selected: currentSelection } = current;
+        const { version, request_revision, presentation_generation, window_route, selected: currentSelection, overlay_rect, content_rect } = current;
         assertPanePresentationAcknowledged({ ok: true, pane_presentation: {
-          version, request_revision, presentation_generation, selected: currentSelection,
+          version, request_revision, presentation_generation, window_route, selected: currentSelection, overlay_rect, content_rect,
         } }, acknowledged);
       }
     } catch (error) {
@@ -122,8 +127,12 @@ export class PanePresentationCoordinator {
       throw error;
     }
     this.core.setPanePresentation(surfaceId, selected);
+    if (selected) this.cleared.delete(surfaceId);
+    else this.cleared.add(surfaceId);
     return revision;
   }
+
+  wasPresentationCleared(surfaceId: string): boolean { return this.cleared.has(surfaceId); }
 
   invalidate(surfaceId: string): Promise<void> {
     this.revisions.set(surfaceId, (this.revisions.get(surfaceId) ?? 0) + 1);
@@ -161,6 +170,23 @@ export class PanePresentationCoordinator {
   private async retireAccepted(surfaceId: string): Promise<void> {
     const accepted = this.accepted.get(surfaceId);
     if (!accepted) return;
+    const status = await accepted.send({ type: "get_status" });
+    const body = status.status as Record<string, unknown> | undefined;
+    if (status.ok === true && body && Object.hasOwn(body, "pane_presentation_host")) {
+      const observed = body.pane_presentation_host as PresentationWindowRoute["host"] | null;
+      const previous = accepted.control.request.window_route.host;
+      // The compositor clears all presentation/owner state when the observed
+      // Wayland ObjectId changes or disappears. Never send an old host's Restore
+      // to a replacement host; require an explicit typed observation first.
+      if (observed === null || (observed && Number.isSafeInteger(observed.host_surface_id) &&
+          observed.host_surface_id > 0 && typeof observed.host_incarnation === "string" && observed.host_incarnation &&
+          (observed.host_surface_id !== previous.host_surface_id || observed.host_incarnation !== previous.host_incarnation))) {
+        this.accepted.delete(surfaceId);
+        this.core.setPanePresentation(surfaceId, null);
+        this.cleared.add(surfaceId);
+        return;
+      }
+    }
     const restore = structuredClone(accepted.control);
     restore.request.request_revision = this.nextWireRevision(surfaceId);
     restore.request.selected = null;
@@ -171,6 +197,8 @@ export class PanePresentationCoordinator {
     accepted.uncertain = true;
     await acknowledgePanePresentation(accepted.send, restore);
     this.accepted.delete(surfaceId);
+    this.core.setPanePresentation(surfaceId, null);
+    this.cleared.add(surfaceId);
   }
 
   private assertCurrent(surfaceId: string, expected: Identity, selected: Presentation | null): void {

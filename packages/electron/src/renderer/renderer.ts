@@ -1426,7 +1426,7 @@ async function togglePanePopOut(view: PaneView): Promise<void> {
   const viewport = currentViewport(view);
   viewport.visibleRect.width = Math.max(0, bounds.width - 4);
   viewport.visibleRect.height = Math.max(0, bounds.height - 4);
-  let response: { ok: boolean; error?: string };
+  let response: { ok: boolean; error?: string; presentationCleared?: boolean };
   try {
     response = await window.surfAce.setPanePresentation({ identity, paneId: selected,
       ...(selected === null ? {} : { bounds, viewport }) });
@@ -1437,6 +1437,14 @@ async function togglePanePopOut(view: PaneView): Promise<void> {
       JSON.stringify(paneSnapshotGeometryIdentity()) !== JSON.stringify(identity) ||
       paneViews.get(view.paneId) !== view) return;
   if (!response.ok) {
+    if (response.presentationCleared) {
+      poppedOutPaneId = null;
+      applyPanePopOut();
+      setAllPaneChromeMetrics();
+      refreshDynamicPaneFrames();
+      reportAllPaneSnapshots();
+      scheduleCompositorOverlayRegionReport("layout");
+    }
     view.popOutButton.title = response.error ?? "Pane presentation is unavailable";
     return;
   }

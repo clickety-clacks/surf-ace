@@ -72,6 +72,7 @@ import {
 import { isAddressInUse, isPortBoundOnIpv6Any } from "./port-selection.js";
 import { SurfaceWsServer } from "./ws-server.js";
 import { PanePresentationCoordinator } from "./pane-presentation-coordinator.js";
+import { panePresentationWindowRoute } from "./pane-presentation.js";
 import { AnnotationRegistryPublisher } from "./annotation-registry-publisher.js";
 import { AnnotationSourceCoordinator } from "./annotation-source-coordinator.js";
 import { restoreWindowPlacement, type WindowPlacement } from "./window-placement.js";
@@ -1645,7 +1646,20 @@ function installIpc(): void {
     return (request) => sendCompositorControl(socket, request);
   }, (surfaceId, error) => clientWarn("pane_presentation_retirement_failed", {
     surface_id: surfaceId, ...errorDiagnosticFields(error),
-  }));
+  }), async (surfaceId, send) => {
+    const response = await send({ type: "get_status" });
+    const owned = [...windows.entries()].filter(([, window]) => !window.isDestroyed());
+    if (owned.length !== 1 || owned[0]![0] !== surfaceId) {
+      throw new Error("compositor host window ownership changed");
+    }
+    const window = owned[0]![1];
+    const bounds = window.getContentBounds();
+    const viewport = core.getRendererWindowState(surfaceId).viewport;
+    if (bounds.width !== viewport.width || bounds.height !== viewport.height) {
+      throw new Error("renderer window viewport does not match current native content bounds");
+    }
+    return panePresentationWindowRoute(response, `electron-window:${window.id}`, surfaceId, viewport);
+  });
   ipcMain.handle("surface:pane-presentation", async (event, payload: unknown) => {
     const surfaceId = surfaceIdForSender(event.sender);
     if (!surfaceId) return { ok: false, error: "renderer surface is unavailable" };
@@ -1653,7 +1667,8 @@ function installIpc(): void {
       const revision = await panePresentation.applyRendererRequest(surfaceId, payload);
       return { ok: true, revision };
     } catch (error) {
-      return { ok: false, error: error instanceof Error ? error.message : "pane presentation failed" };
+      return { ok: false, presentationCleared: panePresentation.wasPresentationCleared(surfaceId),
+        error: error instanceof Error ? error.message : "pane presentation failed" };
     }
   });
   ipcMain.handle("surface:annotation-open", async (event, payload: { paneId?: unknown; openedAt?: unknown }) => {

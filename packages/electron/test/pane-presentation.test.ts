@@ -4,7 +4,7 @@ import { compositorPaneIdForSurface, type NativePaneMaterialization } from "../s
 import {
   acknowledgePanePresentation, assertPanePresentationAcknowledged,
   panePresentationRequest, PANE_PRESENTATION_CAPABILITY,
-  type PanePresentationControlRequest,
+  type PanePresentationControlRequest, panePresentationWindowRoute, type PresentationWindowRoute,
 } from "../src/pane-presentation.js";
 
 function materialization(): NativePaneMaterialization {
@@ -17,14 +17,17 @@ function materialization(): NativePaneMaterialization {
         geometryRevision: 3 as never, topologyEpoch: 2 as never, surfaceEpoch: "s:1", paneInstanceId: "lineage-7" } }],
   };
 }
+const host = { host_surface_id: 99, host_incarnation: "host-1", root_geometry_generation: 1,
+  source_rect: { x: 0, y: 0, width: 1000, height: 700 }, logical_rect: { x: 0, y: 0, width: 1000, height: 700 } };
+const route: PresentationWindowRoute = { window_id: "electron-window:1", renderer_surface_id: "s", host };
 const overlay = { x: 10, y: 10, width: 980, height: 680 };
 const content = { x: 12, y: 42, width: 976, height: 646 };
 function nativeRequest() {
-  return panePresentationRequest(materialization(), 1, { paneId: 7, paneLineageId: "lineage-7" }, overlay, content);
+  return panePresentationRequest(materialization(), 1, { paneId: 7, paneLineageId: "lineage-7" }, overlay, content, route);
 }
 function acknowledged(request: PanePresentationControlRequest) {
-  const { version, request_revision, presentation_generation, selected } = request.request;
-  return { ok: true, pane_presentation: structuredClone({ version, request_revision, presentation_generation, selected }) };
+  const { version, request_revision, presentation_generation, window_route, selected, overlay_rect, content_rect } = request.request;
+  return { ok: true, pane_presentation: structuredClone({ version, request_revision, presentation_generation, window_route, selected, overlay_rect, content_rect }) };
 }
 test("presentation native wire separates generation lineage from live host binding", () => {
   const request = nativeRequest();
@@ -37,12 +40,12 @@ test("presentation native wire separates generation lineage from live host bindi
   assert.doesNotThrow(() => assertPanePresentationAcknowledged(acknowledged(request), request));
 });
 test("mixed renderer selection and Restore have distinct explicit acknowledged identities", () => {
-  const mixed = panePresentationRequest(materialization(), 2, { paneId: 9, paneLineageId: "lineage-9" }, overlay, content);
+  const mixed = panePresentationRequest(materialization(), 2, { paneId: 9, paneLineageId: "lineage-9" }, overlay, content, route);
   assert.deepEqual(mixed.request.selected, { host: "renderer", renderer_pane_id: 9, pane_lineage_id: "lineage-9" });
-  const restore = panePresentationRequest(materialization(), 3, null, null, null);
+  const restore = panePresentationRequest(materialization(), 3, null, null, null, route);
   assert.equal(restore.request.selected, null);
   assert.throws(() => assertPanePresentationAcknowledged(acknowledged(mixed), restore), /exact/);
-  assert.throws(() => panePresentationRequest(materialization(), 4, null, overlay, null), /Restore/);
+  assert.throws(() => panePresentationRequest(materialization(), 4, null, overlay, null, route), /Restore/);
 });
 test("unsupported capability never sends a mutating presentation request", async () => {
   for (const capabilities of [{}, { [PANE_PRESENTATION_CAPABILITY]: 2 }, { [PANE_PRESENTATION_CAPABILITY]: "1" }]) {
@@ -56,7 +59,7 @@ test("unsupported capability never sends a mutating presentation request", async
 test("ok without exact version revision selection and generation acknowledgement fails closed", () => {
   const request = nativeRequest();
   assert.throws(() => assertPanePresentationAcknowledged({ ok: true }, request), /exact/);
-  for (const field of ["version", "request_revision", "selected", "presentation_generation"] as const) {
+  for (const field of ["version", "request_revision", "selected", "presentation_generation", "window_route", "overlay_rect", "content_rect"] as const) {
     const response = acknowledged(request);
     (response.pane_presentation as Record<string, unknown>)[field] = null;
     assert.throws(() => assertPanePresentationAcknowledged(response, request), /exact/);
@@ -71,22 +74,54 @@ test("pending request is copied before capability await and transport cannot mut
   await acknowledgePanePresentation(async (wire) => {
     if (wire.type === "get_status") {
       request.request.request_revision = 99;
-      return { ok: true, status: { capabilities: { [PANE_PRESENTATION_CAPABILITY]: 1 } } };
+      return { ok: true, status: { pane_presentation_host: host, capabilities: { [PANE_PRESENTATION_CAPABILITY]: 1 } } };
     }
     assert.deepEqual(wire, expected);
     return acknowledged(expected);
   }, request);
   await assert.rejects(acknowledgePanePresentation(async (wire) => {
-    if (wire.type === "get_status") return { ok: true, status: { capabilities: { [PANE_PRESENTATION_CAPABILITY]: 1 } } };
+    if (wire.type === "get_status") return { ok: true, status: { pane_presentation_host: host, capabilities: { [PANE_PRESENTATION_CAPABILITY]: 1 } } };
     if (wire.type !== "pane_presentation.set") throw new Error("unexpected command");
     wire.request.request_revision += 1;
     return acknowledged(wire);
   }, nativeRequest()), /exact/);
+  await assert.rejects(acknowledgePanePresentation(async (wire) => {
+    if (wire.type === "get_status") return { ok: true, status: { pane_presentation_host: host,
+      capabilities: { [PANE_PRESENTATION_CAPABILITY]: 1 } } };
+    if (wire.type !== "pane_presentation.set") throw new Error("unexpected command");
+    wire.request.content_rect!.width -= 1;
+    return acknowledged(wire);
+  }, nativeRequest()), /exact/, "rectangle changes cannot masquerade as exact acceptance");
 });
 test("foreign native lineage stale cohort and invalid rectangles are rejected before transport", () => {
-  assert.throws(() => panePresentationRequest(materialization(), 1, { paneId: 7, paneLineageId: "foreign" }, overlay, content), /lineage/);
+  assert.throws(() => panePresentationRequest(materialization(), 1, { paneId: 7, paneLineageId: "foreign" }, overlay, content, route), /lineage/);
   const stale = materialization();
   stale.panes[0]!.geometry.geometryRevision = 2 as never;
-  assert.throws(() => panePresentationRequest(stale, 1, { paneId: 9, paneLineageId: "lineage-9" }, overlay, content), /cohort/);
-  assert.throws(() => panePresentationRequest(materialization(), 1, { paneId: 7, paneLineageId: "lineage-7" }, overlay, { ...content, width: NaN }), /rectangles/);
+  assert.throws(() => panePresentationRequest(stale, 1, { paneId: 9, paneLineageId: "lineage-9" }, overlay, content, route), /cohort/);
+  assert.throws(() => panePresentationRequest(materialization(), 1, { paneId: 7, paneLineageId: "lineage-7" }, overlay, { ...content, width: NaN }, route), /rectangles/);
+});
+
+test("observed window route requires exact host incarnation and full-host identity transform", async () => {
+  const status = { ok: true, status: { pane_presentation_host: host } };
+  const resolved = panePresentationWindowRoute(status, route.window_id, "s", { width: 1000, height: 700 });
+  assert.deepEqual(resolved, route);
+  resolved.host.source_rect.width = 12;
+  assert.equal(host.source_rect.width, 1000, "route cannot mutate observed authority");
+  assert.throws(() => panePresentationWindowRoute(status, route.window_id, "s", { width: 999, height: 700 }), /identity/);
+  for (const changed of [{ ...host, host_incarnation: "" }, { ...host, host_surface_id: 0 },
+    { ...host, logical_rect: { ...host.logical_rect, x: 1 } },
+    { ...host, logical_rect: { ...host.logical_rect, width: 2000 } }]) {
+    assert.throws(() => panePresentationWindowRoute({ ok: true, status: { pane_presentation_host: changed } },
+      route.window_id, "s", { width: 1000, height: 700 }), /identity/);
+  }
+  let mutations = 0;
+  await assert.rejects(acknowledgePanePresentation(async (wire) => {
+    if (wire.type === "get_status") return { ok: true, status: { pane_presentation_host: { ...host, host_incarnation: "replacement-host" },
+      capabilities: { [PANE_PRESENTATION_CAPABILITY]: 1 } } };
+    mutations++; return acknowledged(nativeRequest());
+  }, nativeRequest()), /changed before mutation/);
+  assert.equal(mutations, 0);
+  const changedAck = acknowledged(nativeRequest());
+  changedAck.pane_presentation.window_route.host.host_incarnation = "replacement-host";
+  assert.throws(() => assertPanePresentationAcknowledged(changedAck, nativeRequest()), /exact/);
 });

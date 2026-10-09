@@ -654,6 +654,16 @@ test("renderer DOM integrates authoritative connection states and live scale con
       ["resize-split", "split-pane", "close-pane", "reload"].includes((command as { type: string }).type)), false);
     assert.equal(presentations.at(-1)!.paneId, null, "Restore is an acknowledged presentation request");
     toggle.click();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(selected.classList.contains("pane-popped-out"), true);
+    presentationResponse = async () => ({ ok: false, presentationCleared: true, error: "host incarnation replaced" });
+    toggle.click();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(selected.classList.contains("pane-popped-out"), false, "confirmed native retirement clears stale DOM mode");
+    assert.equal(selected.querySelector("webview"), liveHost);
+    assert.deepEqual(slots.map((slot) => slot.style.flexGrow), slotWeights);
+    presentationResponse = null;
+    toggle.click();
     stateListener!({ ...next, topologyRevision: next.topologyRevision + 1 });
     await new Promise<void>((resolve) => setImmediate(resolve));
     assert.equal(selected.classList.contains("pane-popped-out"), false, "external topology epoch clears presentation");

@@ -9,6 +9,18 @@ import {
 
 export const PANE_PRESENTATION_CAPABILITY = "pane_pop_out_presentation";
 type Rect = { x: number; y: number; width: number; height: number };
+export type ObservedPresentationHost = {
+  host_surface_id: number;
+  host_incarnation: string;
+  root_geometry_generation: number;
+  source_rect: Rect;
+  logical_rect: Rect;
+};
+export type PresentationWindowRoute = {
+  window_id: string;
+  renderer_surface_id: string;
+  host: ObservedPresentationHost;
+};
 export type PanePresentationSelection = {
   host: "renderer";
   renderer_pane_id: number;
@@ -24,6 +36,7 @@ export type PanePresentationRequest = {
   version: 1;
   request_revision: number;
   presentation_generation: NativePanePresentationGeneration;
+  window_route: PresentationWindowRoute;
   selected: PanePresentationSelection | null;
   overlay_rect: Rect | null;
   content_rect: Rect | null;
@@ -34,8 +47,25 @@ export type PanePresentationControlRequest = {
 };
 
 function rectIsValid(rect: Rect): boolean {
-  return Object.values(rect).every(Number.isFinite) && rect.x >= 0 && rect.y >= 0 &&
+  return Boolean(rect) && Object.keys(rect).length === 4 && Object.values(rect).every(Number.isFinite) && rect.x >= 0 && rect.y >= 0 &&
     rect.width > 0 && rect.height > 0;
+}
+
+export function panePresentationWindowRoute(
+  response: CompositorControlResponse, windowId: string, surfaceId: string,
+  viewport: { width: number; height: number },
+): PresentationWindowRoute {
+  const host = (response.status as { pane_presentation_host?: ObservedPresentationHost } | undefined)?.pane_presentation_host;
+  if (response.ok !== true || !windowId || !surfaceId || !host || Object.keys(host).length !== 5 ||
+      !Number.isSafeInteger(host.host_surface_id) || host.host_surface_id < 1 || host.host_surface_id > 0xffffffff ||
+      typeof host.host_incarnation !== "string" || !host.host_incarnation ||
+      !Number.isSafeInteger(host.root_geometry_generation) || host.root_geometry_generation < 0 ||
+      !rectIsValid(host.source_rect) || !rectIsValid(host.logical_rect) ||
+      host.source_rect.x !== 0 || host.source_rect.y !== 0 || !sameValue(host.source_rect, host.logical_rect) ||
+      host.source_rect.width !== viewport.width || host.source_rect.height !== viewport.height) {
+    throw new Error("compositor window host coordinate identity is unavailable or stale");
+  }
+  return { window_id: windowId, renderer_surface_id: surfaceId, host: structuredClone(host) };
 }
 
 export function panePresentationRequest(
@@ -44,8 +74,12 @@ export function panePresentationRequest(
   selected: { paneId: number; paneLineageId: string } | null,
   overlay: Rect | null,
   content: Rect | null,
+  route: PresentationWindowRoute,
 ): PanePresentationControlRequest {
   const focus = materialization.focus;
+  const validated = panePresentationWindowRoute({ ok: true, status: { pane_presentation_host: route?.host } },
+    route?.window_id, String(focus.surfaceId), route?.host?.source_rect ?? { width: 0, height: 0 });
+  if (!sameValue(route, validated)) throw new Error("presentation window route does not own its renderer surface");
   const ids = new Set<string>();
   for (const pane of materialization.panes) {
     const id = String(pane.id);
@@ -85,6 +119,7 @@ export function panePresentationRequest(
     type: "pane_presentation.set",
     request: {
       version: 1, request_revision: revision,
+      window_route: structuredClone(route),
       presentation_generation: {
         surface_id: String(focus.surfaceId), surface_epoch: focus.surfaceEpoch,
         topology_epoch: Number(focus.topologyEpoch), geometry_revision: Number(focus.geometryRevision),
@@ -122,9 +157,9 @@ export function assertPanePresentationAcknowledged(
   response: CompositorControlResponse,
   control: PanePresentationControlRequest,
 ): void {
-  const { version, request_revision, presentation_generation, selected } = control.request;
+  const { version, request_revision, presentation_generation, window_route, selected, overlay_rect, content_rect } = control.request;
   if (response.ok !== true || !sameValue(response.pane_presentation, {
-    version, request_revision, presentation_generation, selected,
+    version, request_revision, presentation_generation, window_route, selected, overlay_rect, content_rect,
   })) throw new Error("compositor did not acknowledge the exact pane presentation");
 }
 
@@ -137,6 +172,11 @@ export async function acknowledgePanePresentation(
   const capabilities = (status.status as { capabilities?: Record<string, unknown> } | undefined)?.capabilities;
   if (status.ok !== true || capabilities?.[PANE_PRESENTATION_CAPABILITY] !== 1) {
     throw new Error("compositor pane pop-out presentation is unavailable");
+  }
+  if (request.request.selected !== null) {
+    const route = panePresentationWindowRoute(status, request.request.window_route.window_id,
+      request.request.window_route.renderer_surface_id, request.request.window_route.host.source_rect);
+    if (!sameValue(route, request.request.window_route)) throw new Error("compositor presentation host changed before mutation");
   }
   assertPanePresentationAcknowledged(await send(structuredClone(request)), request);
 }
