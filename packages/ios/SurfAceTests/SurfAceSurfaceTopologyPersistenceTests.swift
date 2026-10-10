@@ -320,20 +320,20 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
                 var ancestor: UIView? = view
                 while let current = ancestor {
                     ancestors.append(["class": String(describing: type(of: current)),
-                                      "bounds": NSStringFromCGRect(current.bounds),
-                                      "windowFrame": NSStringFromCGRect(current.convert(current.bounds, to: window))])
+                                      "bounds": NSCoder.string(for: current.bounds),
+                                      "windowFrame": NSCoder.string(for: current.convert(current.bounds, to: window))])
                     ancestor = current.superview
                 }
                 let controls = popoutToolbarButtons(in: host.view).filter {
                     $0.accessibilityIdentifier == "surf-ace-pane-popout-\(id)"
-                }.map { ["frame": NSStringFromCGRect($0.convert($0.bounds, to: window)),
-                         "superviewBounds": NSStringFromCGRect($0.superview?.bounds ?? .zero)] }
+                }.map { ["frame": NSCoder.string(for: $0.convert($0.bounds, to: window)),
+                         "superviewBounds": NSCoder.string(for: $0.superview?.bounds ?? .zero)] }
                 let diagnostic: [String: Any] = [
                     "step": step + 1, "paneId": id, "expectedTileWidth": width,
-                    "authoritativePaneFrame": NSStringFromCGRect(geometry.paneFrame),
-                    "publishedContentViewport": NSStringFromCGRect(geometry.contentViewport),
-                    "measuredProxySize": NSStringFromCGSize(model.lastMeasuredSize),
-                    "webViewWindowFrame": NSStringFromCGRect(view.convert(view.bounds, to: window)),
+                    "authoritativePaneFrame": NSCoder.string(for: geometry.paneFrame),
+                    "publishedContentViewport": NSCoder.string(for: geometry.contentViewport),
+                    "measuredProxySize": NSCoder.string(for: model.lastMeasuredSize),
+                    "webViewWindowFrame": NSCoder.string(for: view.convert(view.bounds, to: window)),
                     "nativeAncestors": ancestors, "popoutControl": controls,
                 ]
                 let diagnosticAttachment = XCTAttachment(data: try JSONSerialization.data(
