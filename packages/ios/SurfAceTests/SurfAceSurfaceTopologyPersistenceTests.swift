@@ -1427,7 +1427,7 @@ final class SurfAceHostZoomViewportTests: XCTestCase {
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
         let previous = scene.windows.first(where: \.isKeyWindow)
         let window = UIWindow(windowScene: scene)
-        window.frame = CGRect(x: 0, y: 0, width: 600, height: 820)
+        window.frame = CGRect(x: 0, y: 0, width: 1024, height: 820)
         let controller = UIViewController()
         let host = SurfAceSurfaceHostView(frame: window.bounds)
         controller.view = host; window.rootViewController = controller; window.makeKeyAndVisible()
@@ -1496,7 +1496,7 @@ final class SurfAceHostZoomViewportTests: XCTestCase {
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
         let previous = scene.windows.first(where: \.isKeyWindow)
         let window = UIWindow(windowScene: scene)
-        window.frame = CGRect(x: 0, y: 0, width: 600, height: 820)
+        window.frame = CGRect(x: 0, y: 0, width: 1024, height: 820)
         let controller = UIViewController()
         let host = SurfAceSurfaceHostView(frame: window.bounds)
         controller.view = host
@@ -1505,9 +1505,10 @@ final class SurfAceHostZoomViewportTests: XCTestCase {
         defer { window.isHidden = true; window.rootViewController = nil; previous?.makeKey() }
         let web = try XCTUnwrap(host.subviews.compactMap { $0 as? WKWebView }.first)
         for pattern in ["fixed", "percent"] {
-            for multiplier in [0.5, 1.0, 1.5, 2.0] {
+            var defaultFontPixelWidth: Int?
+            for multiplier in [1.0, 0.5, 1.5, 2.0] {
                 let fill = pattern == "fixed" ? "position:fixed;inset:0" : "width:100%;height:100%"
-                let inner = "<html style='height:100%'><body style='margin:0;height:100%'><main id='fill' style='\(fill);background:rgb(0,200,0)'><span id='font' style='font-size:20px'>Scale</span></main></body></html>"
+                let inner = "<html style='height:100%'><body style='margin:0;height:100%'><main id='fill' style='\(fill);background:rgb(0,200,0)'><span id='font' style='font-size:20px'>Scale</span><span id='scale-marker' style='position:fixed;top:40px;left:40px;width:20px;height:20px;background:rgb(200,0,0)'></span></main></body></html>"
                 let encoded = inner.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "\"", with: "&quot;")
                 let html = "<html style='height:100%;background:#101720'><head><meta name='viewport' content='width=device-width,initial-scale=1'></head><body style='margin:0;height:100%;overflow:hidden'><iframe style='display:block;border:0;width:100%;height:100%' srcdoc=\"\(encoded)\"></iframe></body></html>"
                 host.setContentScale(CGFloat(multiplier))
@@ -1524,7 +1525,7 @@ final class SurfAceHostZoomViewportTests: XCTestCase {
                   return {outer:{width:innerWidth,height:innerHeight,zoom:getComputedStyle(document.documentElement).zoom},
                     iframe:rect(f),inner:{width:w.innerWidth,height:w.innerHeight,dpr:w.devicePixelRatio,
                     clientWidth:d.documentElement.clientWidth,clientHeight:d.documentElement.clientHeight,
-                    fill:rect(d.querySelector('#fill')),fontSize:w.getComputedStyle(d.querySelector('#font')).fontSize}};
+                    fill:rect(d.querySelector('#fill')),fontBounds:rect(d.querySelector('#font')),scaleMarker:rect(d.querySelector('#scale-marker')),fontSize:w.getComputedStyle(d.querySelector('#font')).fontSize}};
                 })()
                 """)
                 let snapshot = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<UIImage, Error>) in
@@ -1559,6 +1560,37 @@ final class SurfAceHostZoomViewportTests: XCTestCase {
                     context.draw(image, in: CGRect(x: 0, y: 0, width: CGFloat(image.width), height: CGFloat(image.height))); return true
                 }
                 XCTAssertTrue(painted)
+                var markerMinX = image.width, markerMaxX = -1
+                var fontMinX = image.width, fontMaxX = -1
+                for y in 0..<image.height {
+                    for x in 0..<image.width {
+                        let i = (y * image.width + x) * 4
+                        if pixels[i + 3] > 200 && pixels[i] > 150 && pixels[i + 1] < 40 && pixels[i + 2] < 40 {
+                            markerMinX = min(markerMinX, x); markerMaxX = max(markerMaxX, x)
+                        }
+                        // The fixture's only opaque black pixels are its font glyphs.
+                        if pixels[i + 3] > 200 && pixels[i] < 40 && pixels[i + 1] < 40 && pixels[i + 2] < 40 {
+                            fontMinX = min(fontMinX, x); fontMaxX = max(fontMaxX, x)
+                        }
+                    }
+                }
+                XCTAssertGreaterThanOrEqual(markerMaxX, markerMinX, "Physical scale marker must be painted")
+                let nativePixelsPerPoint = Double(image.width) / Double(host.bounds.width)
+                let expectedMarkerWidth = 20 * 0.85 * multiplier * nativePixelsPerPoint
+                XCTAssertEqual(Double(markerMaxX - markerMinX + 1), expectedMarkerWidth, accuracy: 1.5,
+                               "Preserve intended 0.85 base times pane multiplier in physical paint")
+                XCTAssertGreaterThanOrEqual(fontMaxX, fontMinX, "Font glyphs must be painted")
+                let fontWidth = fontMaxX - fontMinX + 1
+                if multiplier == 1 { defaultFontPixelWidth = fontWidth }
+                else if let reference = defaultFontPixelWidth {
+                    XCTAssertEqual(Double(fontWidth), Double(reference) * multiplier, accuracy: 3,
+                                   "Physical glyph sizing must follow the pane's font scale")
+                }
+                let paintMetrics = XCTAttachment(data: try JSONSerialization.data(withJSONObject: [
+                    "markerWidthPixels": markerMaxX - markerMinX + 1, "expectedMarkerWidthPixels": expectedMarkerWidth,
+                    "fontGlyphWidthPixels": fontWidth, "nativePixelsPerPoint": nativePixelsPerPoint
+                ], options: [.sortedKeys]), uniformTypeIdentifier: "public.json")
+                paintMetrics.name = "physical-font-scale-\(label)"; paintMetrics.lifetime = .keepAlways; add(paintMetrics)
                 // Both vertical orientations are sampled; no white/dark margin can pass.
                 for x in [image.width / 2, image.width - 4] {
                     for y in [4, image.height - 4] {
