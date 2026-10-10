@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { app, BrowserWindow, session } from "electron";
-import { assertPopOutControl, readPopOutControl } from "./private-popout-hit.mjs";
+import { assertPopOutControl, readPopOutControl, waitForPopOutState } from "./private-popout-hit.mjs";
 
 const scratch = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-popout-fixture-"));
 app.setPath("userData", path.join(scratch, "profile"));
@@ -69,7 +69,8 @@ try {
     win.webContents.sendInputEvent({ type: "mouseMove", x: evidence.x, y: evidence.y });
     win.webContents.sendInputEvent({ type: "mouseDown", x: evidence.x, y: evidence.y, button: "left", clickCount: 1 });
     win.webContents.sendInputEvent({ type: "mouseUp", x: evidence.x, y: evidence.y, button: "left", clickCount: 1 });
-    await new Promise(resolve => setTimeout(resolve, 50));
+    const completed = await waitForPopOutState(evaluate, action === "Solo");
+    console.log("FIXTURE_COMPLETED=" + JSON.stringify({ action, ...completed }));
   };
   const wait = async (code) => {
     for (let i = 0; i < 100; i++) {
@@ -127,10 +128,12 @@ try {
   win.setContentSize(1100, 800);
   await evaluate("(()=>{const next=structuredClone(fixtureState);next.viewport={width:1100,height:800,scale:1};next.geometryRevision++;window.fixtureState=next;fixtureUpdate(next);})()");
   await wait("roots[1].getBoundingClientRect().width>1000");
+  await waitForPopOutState(evaluate, true);
   await clickControl("Restore");
   assert.equal(await evaluate("slots.map(s=>s.style.flexGrow).join(',')"), "2,3,7");
   await clickControl("Solo");
   await evaluate("(()=>{const next=structuredClone(fixtureState);next.topologyRevision++;fixtureUpdate(next)})()");
+  await waitForPopOutState(evaluate, false);
   assert.equal(await evaluate("document.querySelectorAll('.pane-popped-out').length"), 0);
   assert.equal(await evaluate("fixtureCommands.some(c=>['resize-split','split-pane','close-pane','reload'].includes(c.type))"), false);
   assert.deepEqual(blockedRequests, [], "fixture must not attempt external requests");
