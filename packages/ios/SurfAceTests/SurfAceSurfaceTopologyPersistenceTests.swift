@@ -1384,11 +1384,13 @@ final class SurfAcePaneGeometrySnapshotTests: XCTestCase {
 
 @MainActor
 final class SurfAceHostZoomViewportTests: XCTestCase {
-    // Frozen operational inputs are staged only into the isolated test bundle,
-    // not committed to the source repository or fetched from a live origin.
+    // Frozen operational inputs live only in the owned simulator app's cache,
+    // not in the source repository, signed bundle, or a live-origin fetch.
     private func frozenInput(_ name: String, sha256: String) throws -> Data {
-        guard let url = Bundle(for: Self.self).url(forResource: name, withExtension: nil) else {
-            throw XCTSkip("Hash-bound offline taskboard inputs were not staged")
+        let cache = try XCTUnwrap(FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first)
+        let url = cache.appendingPathComponent("HostZoomFixture", isDirectory: true).appendingPathComponent(name)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw XCTSkip("Hash-bound offline taskboard inputs were not staged in the owned test app")
         }
         let data = try Data(contentsOf: url)
         let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
