@@ -6,7 +6,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { app, BrowserWindow, session, webContents } from "electron";
 import { assertPopOutControl, readPopOutControl, waitForPopOutState } from "./private-popout-hit.mjs";
-import { referencePixel, waitForPaintedFrame } from "./private-popout-pixels.mjs";
+import { assertPaintReferences, paintedFrameEvidence, paintedSoloBeforeResize,
+  referencePixel, waitForPaintedFrame } from "./private-popout-pixels.mjs";
 
 const scratch = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-popout-fixture-"));
 app.setPath("userData", path.join(scratch, "profile"));
@@ -94,10 +95,9 @@ try {
   // dependent. Distinct guest backgrounds identify paint ownership, not DOM boxes.
   const references = await Promise.all(guestIds.map(async id =>
     referencePixel(await webContents.fromId(id).capturePage(), 20, 60)));
-  assert.equal(new Set(references.map(p => p.join(","))).size, 3,
-    "guest paint references must be distinct; blank/stale calibration cannot pass");
+  assertPaintReferences(references);
   console.log("FIXTURE_PIXEL_REFERENCES=" + JSON.stringify(references));
-  const capturePaint = async (expanded, filename) => {
+  const capturePaint = async (expanded, filename, staleTiledImage) => {
     const bounds = await evaluate("rects()");
     const viewport = await evaluate("({width:innerWidth,height:innerHeight})");
     const checks = expanded
@@ -106,11 +106,17 @@ try {
           expected: references[1],
         })))
       : bounds.map((b, i) => ({ x: b[0] + 40, y: b[1] + 60, expected: references[i] }));
+    if (staleTiledImage) {
+      const stale = paintedFrameEvidence(staleTiledImage, checks, viewport);
+      assert.equal(stale.matches, false, "actual tiled pixels cannot admit selected expansion");
+      console.log("FIXTURE_PIXEL_STALE_NEGATIVE=" + JSON.stringify(stale));
+    }
     const captured = await waitForPaintedFrame(() => win.webContents.capturePage(), checks, viewport);
     console.log("FIXTURE_PAINTED=" + JSON.stringify({ expanded, attempts: captured.attempts, ...captured.evidence }));
     if (filename) await fs.writeFile(path.join(scratch, filename), captured.image.toPNG());
+    return captured;
   };
-  await capturePaint(false, "tiled.png");
+  const tiledPaint = await capturePaint(false, "tiled.png");
   const identities = await evaluate("Promise.all(hosts.map(v=>v.executeJavaScript('window.token'))) ");
   assert.ok(identities.every(token => typeof token === "number"));
   await evaluate("hosts[1].executeJavaScript(\"document.querySelector('input').value='edited';history.pushState({},'', '#retained')\")");
@@ -123,7 +129,7 @@ try {
     assert.equal(await evaluate("roots.every((r,i)=>r.parentElement===hostParents[i])&&hosts.every(v=>v.isConnected)"), true);
     const expanded = await evaluate("rects()");
     console.log("FIXTURE_EXPANDED=" + JSON.stringify({ cycle: i, bounds: expanded }));
-    await capturePaint(true, i === 0 ? "expanded.png" : undefined);
+    await capturePaint(true, i === 0 ? "expanded.png" : undefined, i === 0 ? tiledPaint.image : undefined);
     assert.deepEqual(await evaluate("hosts.map(v=>v.getWebContentsId())"), guestIds);
     assert.ok(expanded[1][2] > initial[1][2]);
     assert.ok(expanded[1][3] > initial[1][3]);
@@ -145,12 +151,16 @@ try {
     await capturePaint(false, i === 0 ? "restored.png" : undefined);
     assert.equal(await evaluate("roots.some(r=>r.inert)"), false);
   }
-  await clickControl("Solo");
-  win.setContentSize(1100, 800);
-  await evaluate("(()=>{const next=structuredClone(fixtureState);next.viewport={width:1100,height:800,scale:1};next.geometryRevision++;window.fixtureState=next;fixtureUpdate(next);})()");
-  await wait("roots[1].getBoundingClientRect().width>1000");
-  await waitForPopOutState(evaluate, true);
-  await capturePaint(true);
+  await paintedSoloBeforeResize({
+    enter: () => clickControl("Solo"),
+    paint: () => capturePaint(true),
+    resize: async () => {
+      win.setContentSize(1100, 800);
+      await evaluate("(()=>{const next=structuredClone(fixtureState);next.viewport={width:1100,height:800,scale:1};next.geometryRevision++;window.fixtureState=next;fixtureUpdate(next);})()");
+      await wait("roots[1].getBoundingClientRect().width>1000");
+      await waitForPopOutState(evaluate, true);
+    },
+  });
   await clickControl("Restore");
   await capturePaint(false);
   assert.equal(await evaluate("slots.map(s=>s.style.flexGrow).join(',')"), "2,3,7");

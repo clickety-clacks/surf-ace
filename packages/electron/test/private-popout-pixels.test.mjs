@@ -1,15 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { paintedFrameEvidence, referencePixel, waitForPaintedFrame } from "../scripts/private-popout-pixels.mjs";
+import fs from "node:fs/promises";
+import { runInNewContext } from "node:vm";
+import { assertPaintReferences, paintedFrameEvidence, paintedSoloBeforeResize,
+  referencePixel, waitForPaintedFrame } from "../scripts/private-popout-pixels.mjs";
 
 const colors = [[31, 61, 91, 255], [41, 151, 101, 255], [171, 51, 121, 255]];
 const viewport = { width: 100, height: 70 };
-function image(expanded, scale = 1, order = [0, 1, 2, 3]) {
+function image(expanded, scale = 1, order = [0, 1, 2, 3], palette = colors) {
   const width = viewport.width * scale, height = viewport.height * scale;
   const bytes = Buffer.alloc(width * height * 4);
   for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
     const owner = expanded ? 1 : x < 30 * scale ? 0 : y < 21 * scale ? 1 : 2;
-    bytes.set(order.map(channel => colors[owner][channel]), (y * width + x) * 4);
+    bytes.set(order.map(channel => palette[owner][channel]), (y * width + x) * 4);
   }
   return { getSize: () => ({ width, height }), toBitmap: () => bytes };
 }
@@ -64,4 +67,57 @@ test("unsupported or absent capture data and out-of-viewport samples fail closed
   assert.throws(() => paintedFrameEvidence({ getSize: () => ({ width: 100, height: 70 }), toBitmap: () => Buffer.alloc(1) },
     expandedChecks(colors), viewport), /unsupported capture bitmap/);
   assert.throws(() => paintedFrameEvidence(image(true), [{ x: -1, y: 10, expected: colors[1] }], viewport), /outside viewport/);
+});
+
+test("close-but-distinct references cannot admit stale tiled or uniform paint", () => {
+  const close = [[10, 10, 10, 255], [11, 10, 10, 255], [12, 10, 10, 255]];
+  // These inputs demonstrate why the old exact-inequality guard was unsafe.
+  assert.equal(paintedFrameEvidence(image(false, 1, undefined, close), expandedChecks(close), viewport).matches, true);
+  assert.equal(paintedFrameEvidence(image(true, 1, undefined, close), tiledChecks(close), viewport).matches, true);
+  for (const capture of [image(false, 1, undefined, close), image(true, 1, undefined, close)]) {
+    let admissions = 0;
+    assert.throws(() => { assertPaintReferences(close); paintedFrameEvidence(capture, expandedChecks(close), viewport); admissions++; },
+      /ambiguous paint calibration/);
+    assert.equal(admissions, 0);
+  }
+  assert.throws(() => assertPaintReferences([[10, 10, 10, 255], [14, 10, 10, 255]]), /overlap/);
+  assertPaintReferences([[10, 10, 10, 255], [15, 10, 10, 255]]);
+});
+
+test("separated calibration rejects uniform host paint as the retained tiled negative", () => {
+  assertPaintReferences(colors);
+  assert.equal(paintedFrameEvidence(image(true), tiledChecks(colors), viewport).matches, false);
+  assert.equal(paintedFrameEvidence(image(false), expandedChecks(colors), viewport).matches, false);
+  assert.throws(() => assertPaintReferences([[10, 10, 10, 255], [10, 10, 10, 255]]), /ambiguous/);
+});
+
+test("actual fixture pre-resize block cannot mutate window or geometry while Solo paint stays stale", async () => {
+  const source = await fs.readFile(new URL("../scripts/test-pane-popout.mjs", import.meta.url), "utf8");
+  const start = source.indexOf("  await paintedSoloBeforeResize({");
+  const end = source.indexOf('  await clickControl("Restore");', start);
+  assert.ok(start > 0 && end > start, "prepared fixture must route this scenario through paint admission");
+  const block = source.slice(start, end);
+  for (const stale of [true, false]) {
+    const calls = [];
+    const run = runInNewContext(`(async () => { ${block} })`, {
+      paintedSoloBeforeResize,
+      clickControl: async () => { calls.push("enter"); },
+      capturePaint: async () => {
+        calls.push("paint");
+        return waitForPaintedFrame(async () => image(!stale), expandedChecks(colors), viewport,
+          { attempts: 3, pause: async () => {} });
+      },
+      win: { setContentSize: () => { calls.push("resize"); } },
+      evaluate: async () => { calls.push("geometry"); },
+      wait: async () => { calls.push("bounds"); },
+      waitForPopOutState: async () => { calls.push("settled"); },
+    });
+    if (stale) {
+      await assert.rejects(run(), /Timed out awaiting captured guest pixels/);
+      assert.deepEqual(calls, ["enter", "paint"], "no resize or authority mutation before paint admission");
+    } else {
+      await run();
+      assert.deepEqual(calls, ["enter", "paint", "resize", "geometry", "bounds", "settled", "paint"]);
+    }
+  }
 });
