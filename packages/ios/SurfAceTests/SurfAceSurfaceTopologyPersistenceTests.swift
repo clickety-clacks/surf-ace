@@ -269,6 +269,12 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
         observations.forEach { $0.invalidate() }
         let tokens = try await popoutSessionTokens(views)
         let selected = try XCTUnwrap(views.first { $0.title == "ready-3" })
+        let toggle = try XCTUnwrap(popoutToolbarButtons(in: host.view).first {
+            $0.accessibilityIdentifier == "surf-ace-pane-popout-3"
+        })
+        XCTAssertTrue(toggle.isAccessibilityElement,
+                      "the mounted native toggle provides its own accessibility target")
+        XCTAssertFalse(toggle.accessibilityElementsHidden)
         var tiledFrames = views.map { $0.convert($0.bounds, to: window) }
         var surfaceFrame = tiledFrames.reduce(CGRect.null) { $0.union($1) }
         for index in 0..<4 {
@@ -278,6 +284,13 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
             XCTAssertEqual(selection.paneId, 3)
             let expandedFrame = surfAcePanePopoutBounds(in: surfaceFrame)
             await waitForPopoutFrame(selected, in: window, expected: expandedFrame)
+            let focused = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                toggle.isFirstResponder
+            }, object: nil)
+            await fulfillment(of: [focused], timeout: 5)
+            XCTAssertTrue(toggle.isFirstResponder, "the mounted toolbar button owns keyboard input after expansion")
+            XCTAssertTrue(popoutToolbarButtons(in: host.view).contains { $0 === toggle },
+                          "enter/Restore retains the same native toggle")
             for (view, original) in zip(views, tiledFrames) where view !== selected {
                 XCTAssertEqual(view.convert(view.bounds, to: window), original,
                                "covered sibling stays in its original tile")
@@ -322,6 +335,16 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
             await waitForPopoutFrame(selected, in: window,
                                     expected: tiledFrames[try XCTUnwrap(views.firstIndex(of: selected))])
         }
+        XCTAssertTrue(toggle.accessibilityActivate(), "native accessibility invokes the same pop-out action")
+        await waitForPopoutFrame(selected, in: window,
+                                expected: surfAcePanePopoutBounds(in: surfaceFrame))
+        XCTAssertEqual(selection.paneId, 3)
+        XCTAssertTrue(toggle.accessibilityActivate(), "the same accessibility action restores the tile")
+        await waitForPopoutFrame(selected, in: window,
+                                expected: tiledFrames[try XCTUnwrap(views.firstIndex(of: selected))])
+        XCTAssertNil(selection.paneId)
+        let accessibilityTokens = try await popoutSessionTokens(views)
+        XCTAssertEqual(accessibilityTokens, tokens)
         for view in views {
             let counter = try await view.evaluateJavaScript("window.counter") as? Int
             XCTAssertEqual(counter, 5, "covered sibling content stays live without reload")
@@ -391,6 +414,12 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
         XCTAssertEqual(actual.minY, expected.minY, accuracy: 1)
         XCTAssertEqual(actual.width, expected.width, accuracy: 1)
         XCTAssertEqual(actual.height, expected.height, accuracy: 1)
+    }
+
+    @MainActor
+    private func popoutToolbarButtons(in view: UIView) -> [UIButton] {
+        (view as? UIButton).map { [$0] }
+            ?? view.subviews.flatMap { popoutToolbarButtons(in: $0) }
     }
 
     @MainActor

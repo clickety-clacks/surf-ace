@@ -1075,8 +1075,6 @@ private struct SurfAcePaneView: View {
     var isPoppedOut = false
     var onTogglePopout: () -> Void = {}
     @State private var toolbarCollapsed = false
-    @AccessibilityFocusState private var popoutControlFocused: Bool
-    @FocusState private var popoutKeyboardFocused: Bool
 
     var body: some View {
         GeometryReader { proxy in
@@ -1144,8 +1142,11 @@ private struct SurfAcePaneView: View {
                     if !showsSpatialEmptyPaneChrome {
                         VStack {
                             Spacer()
-                            if !toolbarCollapsed {
-                                SurfAcePaneControls(runtime: runtime, surface: surface, pane: pane)
+                            if !toolbarCollapsed || isPoppedOut {
+                                SurfAcePaneControls(
+                                    runtime: runtime, surface: surface, pane: pane,
+                                    isPoppedOut: isPoppedOut, onTogglePopout: onTogglePopout
+                                )
                                     .padding(.bottom, SurfAcePaneChromeLayout.bottomInset)
                                     .surfAceSpatialChromeDepthOffset()
                                     .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -1154,7 +1155,7 @@ private struct SurfAcePaneView: View {
                         .zIndex(20_000)
                     }
 
-                    if !showsSpatialEmptyPaneChrome && toolbarCollapsed {
+                    if !showsSpatialEmptyPaneChrome && toolbarCollapsed && !isPoppedOut {
                         VStack {
                             Spacer()
                             HStack {
@@ -1203,31 +1204,6 @@ private struct SurfAcePaneView: View {
                         .zIndex(1)
                 }
             }
-            .overlay(alignment: .topTrailing) {
-                Button(action: onTogglePopout) {
-                    HStack(spacing: 6) {
-                        Image(systemName: isPoppedOut ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
-                        if isPoppedOut { Text("Restore") }
-                    }
-                    .font(.custom(SurfAceChromeFont.boldName, size: 17))
-                    .padding(.horizontal, isPoppedOut ? 10 : 0)
-                    .frame(minWidth: 44, minHeight: 44)
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(Color(red: 0.04, green: 0.28, blue: 0.20))
-                .foregroundStyle(.white)
-                .focusable(interactions: .activate)
-                .focused($popoutKeyboardFocused)
-                .onKeyPress(keys: [.space, .return], phases: .down) { _ in
-                    onTogglePopout()
-                    return .handled
-                }
-                .accessibilityLabel(isPoppedOut ? "Restore" : "Pop out")
-                .accessibilityIdentifier("surf-ace-pane-popout-\(pane.paneId)")
-                .accessibilityValue(isPoppedOut ? "Expanded" : "Tiled")
-                .accessibilityFocused($popoutControlFocused)
-                .padding(8)
-            }
             .overlay {
                 RoundedRectangle(cornerRadius: 12)
                     .strokeBorder(.black, lineWidth: isPoppedOut ? 5 : 0)
@@ -1241,8 +1217,7 @@ private struct SurfAcePaneView: View {
                 pane.lastMeasuredSize = newSize
             }
             .onChange(of: isPoppedOut) { _, _ in
-                popoutControlFocused = true
-                if !UIAccessibility.isVoiceOverRunning { popoutKeyboardFocused = true }
+                toolbarCollapsed = false
             }
             .onAppear {
                 publishGeometrySnapshot(paneFrame: paneFrame)
@@ -1676,6 +1651,8 @@ private struct SurfAcePaneControls: View {
     let runtime: SurfAceRuntime
     @Bindable var surface: SurfAceSurfaceModel
     @Bindable var pane: SurfAcePaneModel
+    let isPoppedOut: Bool
+    let onTogglePopout: () -> Void
     @Environment(\.colorScheme) private var colorScheme
     @State private var fontSizePopoverVisible = false
 
@@ -1728,6 +1705,14 @@ private struct SurfAcePaneControls: View {
             }
 
             HStack(spacing: 4) {
+                SurfAcePanePopoutButton(
+                    paneId: pane.paneId, isPoppedOut: isPoppedOut,
+                    foregroundColor: UIColor(surfAceToolbarForegroundColor(for: colorScheme)),
+                    onToggle: onTogglePopout
+                )
+                .frame(width: SurfAcePaneChromeLayout.controlHitSize,
+                       height: SurfAcePaneChromeLayout.controlHitSize)
+
                 Button {
                     runtime.activateKeyboardPane(surfaceId: surface.surfaceId, paneId: pane.paneId)
                     fontSizePopoverVisible.toggle()
@@ -1804,6 +1789,106 @@ private struct SurfAcePaneControls: View {
     private var hasNavigationContext: Bool {
         pane.currentEntry.contentId != nil || pane.currentEntry.payload != nil || pane.canGoBack || pane.canGoForward
     }
+}
+
+// Keep the same native toolbar control mounted across enter/Restore. Explicit
+// responder/accessibility ownership avoids leaving focus inside the covered
+// WebKit content when SwiftUI relocates the pane's bottom toolbar.
+private struct SurfAcePanePopoutButton: UIViewRepresentable {
+    let paneId: Int
+    let isPoppedOut: Bool
+    let foregroundColor: UIColor
+    let onToggle: () -> Void
+
+    func makeUIView(context: Context) -> SurfAcePanePopoutControl {
+        SurfAcePanePopoutControl()
+    }
+
+    func updateUIView(_ button: SurfAcePanePopoutControl, context: Context) {
+        button.configure(paneId: paneId, expanded: isPoppedOut,
+                         foregroundColor: foregroundColor, onToggle: onToggle)
+    }
+}
+
+private final class SurfAcePanePopoutControl: UIButton {
+    private let chrome = UIVisualEffectView(effect: UIBlurEffect(style: .systemMaterial))
+    private var expanded = false
+    private var focusPending = false
+    private var focusGeneration = 0
+    private var onToggle: () -> Void = {}
+
+    init() {
+        super.init(frame: .zero)
+        chrome.isUserInteractionEnabled = false
+        chrome.layer.cornerRadius = SurfAcePaneChromeLayout.controlVisualSize / 2
+        chrome.clipsToBounds = true
+        chrome.layer.borderWidth = 1
+        insertSubview(chrome, at: 0)
+        // UIButton is the sole accessibility and keyboard target.
+        isAccessibilityElement = true
+        addTarget(self, action: #selector(activateToggle), for: .touchUpInside)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override var canBecomeFirstResponder: Bool { true }
+
+    override var keyCommands: [UIKeyCommand]? {
+        [" ", "\r"].map { input in
+            let command = UIKeyCommand(input: input, modifierFlags: [], action: #selector(activateToggle))
+            command.wantsPriorityOverSystemBehavior = true
+            return command
+        }
+    }
+
+    func configure(paneId: Int, expanded: Bool, foregroundColor: UIColor,
+                   onToggle: @escaping () -> Void) {
+        self.onToggle = onToggle
+        if self.expanded != expanded {
+            self.expanded = expanded
+            focusGeneration += 1
+            focusPending = true
+        }
+        setImage(UIImage(
+            systemName: expanded ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right",
+            withConfiguration: UIImage.SymbolConfiguration(pointSize: 12)
+        ), for: .normal)
+        tintColor = foregroundColor
+        chrome.layer.borderColor = foregroundColor.withAlphaComponent(0.18).cgColor
+        accessibilityLabel = expanded ? "Restore" : "Pop out"
+        accessibilityValue = expanded ? "Expanded" : "Tiled"
+        accessibilityIdentifier = "surf-ace-pane-popout-\(paneId)"
+        setNeedsLayout()
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        let size = SurfAcePaneChromeLayout.controlVisualSize
+        chrome.frame = CGRect(x: (bounds.width - size) / 2,
+                              y: (bounds.height - size) / 2, width: size, height: size)
+        guard focusPending, window != nil, !bounds.isEmpty else { return }
+        focusPending = false
+        let generation = focusGeneration
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let window = self.window,
+                  self.focusGeneration == generation else { return }
+            // Ancestors move the retained toolbar without changing this
+            // button's bounds. Finish their layout before targeting its new
+            // accessibility frame, rather than focusing during local layout.
+            window.layoutIfNeeded()
+            guard self.window === window, self.focusGeneration == generation else { return }
+            self.becomeFirstResponder()
+            UIAccessibility.post(notification: .layoutChanged, argument: self)
+        }
+    }
+
+    override func accessibilityActivate() -> Bool {
+        // Use exactly the same action as touch and keyboard activation.
+        onToggle()
+        return true
+    }
+
+    @objc private func activateToggle() { onToggle() }
 }
 
 private struct SurfAceCompositeProvenanceView: View {
