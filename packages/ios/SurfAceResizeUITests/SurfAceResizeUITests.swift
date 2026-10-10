@@ -69,10 +69,15 @@ final class SurfAceResizeUITests: XCTestCase {
         XCTAssertEqual(app.staticTexts["surf-ace-popout-topology"].label, revision)
     }
 
+    @MainActor
     private func assertSmallBottomToolbarToggle(
         _ toggle: XCUIElement, in app: XCUIApplication,
         file: StaticString = #filePath, line: UInt = #line
     ) {
+        let visual = XCTAttachment(image: toggle.screenshot().image)
+        visual.name = "popout-control-\(toggle.label)-\(String(describing: toggle.value))"
+        visual.lifetime = .keepAlways
+        add(visual)
         // Compare actual accessibility frames with the adjacent shipping controls,
         // rather than duplicating the production size constants in the fixture.
         let fonts = app.buttons.matching(identifier: "FontSize").allElementsBoundByIndex

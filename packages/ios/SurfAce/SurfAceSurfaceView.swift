@@ -1863,6 +1863,9 @@ private final class SurfAcePanePopoutControl: UIButton {
 
     override func layoutSubviews() {
         super.layoutSubviews()
+        // UIButton creates and orders its image view lazily. Keep material
+        // behind that image after UIKit has completed its own layout.
+        sendSubviewToBack(chrome)
         let size = SurfAcePaneChromeLayout.controlVisualSize
         chrome.frame = CGRect(x: (bounds.width - size) / 2,
                               y: (bounds.height - size) / 2, width: size, height: size)
