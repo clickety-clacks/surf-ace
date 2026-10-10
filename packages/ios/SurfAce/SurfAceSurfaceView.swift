@@ -1724,6 +1724,9 @@ private struct SurfAcePaneControls: View {
                 .accessibilityAction { onTogglePopout() }
                 .accessibilityFocused($popoutControlFocused)
                 .onChange(of: isPoppedOut) { _, _ in
+                    // Do not let the accessibility wrapper replace the native
+                    // keyboard responder when no screen reader is active.
+                    guard UIAccessibility.isVoiceOverRunning else { return }
                     popoutControlFocused = true
                 }
 
