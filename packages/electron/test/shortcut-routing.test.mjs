@@ -6,7 +6,11 @@ import { transformSync } from 'esbuild';
 
 // Execute the production wiring and handler without importing Electron's startup.
 const source = readFileSync(process.env.SURF_ACE_SHORTCUT_SOURCE ?? new URL('../src/main.ts', import.meta.url), 'utf8');
-const section = (start, end) => source.slice(source.indexOf(start), source.indexOf(end));
+const section = (start, end) => {
+  const from = source.indexOf(start), to = source.indexOf(end);
+  assert.ok(from >= 0 && to > from, `production section ${start}`);
+  return source.slice(from, to);
+};
 const code = transformSync(section('function keyboardDirectionForVimKey', 'function focusNextWindow') +
   section('function handleShortcutInput', 'function wireWindowDiagnostics'), { loader: 'ts' }).code;
 function fixture({ native = false } = {}) {
@@ -49,6 +53,11 @@ test('focused guest owns ordinary typing, modifiers, arrows and page keys', () =
   assert.deepEqual(f.annotations, []);
   assert.deepEqual(f.sends, []);
   assert.ok(f.activations.every(id => id === 2));
+});
+test('typing A and D in a bound guest never changes annotation mode', () => {
+  const f = fixture();
+  f.key(f.guest, 'a'); f.key(f.guest, 'd');
+  assert.deepEqual(f.annotations, []);
 });
 test('unbound and destroyed guest cannot fall back to another pane', () => {
   const f = fixture();
