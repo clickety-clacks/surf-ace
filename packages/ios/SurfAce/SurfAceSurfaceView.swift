@@ -1092,6 +1092,9 @@ private struct SurfAcePaneView: View {
                             }
                         )
                         .id("\(surface.surfaceId):\(pane.paneInstanceId)")
+                        // Content geometry belongs to the allocated tile, not
+                        // the intrinsic minimum of an overlaid toolbar.
+                        .frame(width: proxy.size.width, height: proxy.size.height)
                         .background(surfAcePaneBackdropColor(isEmpty: showsSpatialEmptyPaneChrome))
                         .contentShape(Rectangle())
                         .simultaneousGesture(
@@ -1647,6 +1650,64 @@ private extension View {
     }
 }
 
+// Arrange the same control groups in rows when the tile is narrow. Keeping
+// one Layout and one set of subviews preserves native toggle/focus identity;
+// 44pt hit targets are neither scaled down nor clipped to make a row fit.
+private struct SurfAcePaneControlsLayout: Layout {
+    let spacing: CGFloat = 7
+
+    private struct Item {
+        let index: Int
+        let size: CGSize
+    }
+
+    private func rows(width: CGFloat, subviews: Subviews) -> [[Item]] {
+        var result: [[Item]] = []
+        var row: [Item] = []
+        var extent: CGFloat = 0
+        for index in subviews.indices {
+            let size = subviews[index].sizeThatFits(ProposedViewSize(width: width, height: nil))
+            let nextExtent = extent + (row.isEmpty ? 0 : spacing) + size.width
+            if !row.isEmpty && nextExtent > width {
+                result.append(row)
+                row = []
+                extent = 0
+            }
+            row.append(Item(index: index, size: size))
+            extent += (row.count == 1 ? 0 : spacing) + size.width
+        }
+        if !row.isEmpty { result.append(row) }
+        return result
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let idealWidth = subviews.reduce(CGFloat.zero) { $0 + $1.sizeThatFits(.unspecified).width }
+            + spacing * CGFloat(max(0, subviews.count - 1))
+        let width = proposal.width ?? idealWidth
+        let arranged = rows(width: width, subviews: subviews)
+        let height = arranged.reduce(CGFloat.zero) { $0 + ($1.map(\.size.height).max() ?? 0) }
+            + spacing * CGFloat(max(0, arranged.count - 1))
+        return CGSize(width: width, height: height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var y = bounds.minY
+        for row in rows(width: bounds.width, subviews: subviews) {
+            let height = row.map(\.size.height).max() ?? 0
+            let width = row.reduce(CGFloat.zero) { $0 + $1.size.width }
+                + spacing * CGFloat(max(0, row.count - 1))
+            var x = bounds.midX - width / 2
+            for item in row {
+                subviews[item.index].place(
+                    at: CGPoint(x: x, y: y + (height - item.size.height) / 2),
+                    anchor: .topLeading, proposal: ProposedViewSize(item.size))
+                x += item.size.width + spacing
+            }
+            y += height + spacing
+        }
+    }
+}
+
 private struct SurfAcePaneControls: View {
     let runtime: SurfAceRuntime
     @Bindable var surface: SurfAceSurfaceModel
@@ -1657,7 +1718,7 @@ private struct SurfAcePaneControls: View {
     @State private var fontSizePopoverVisible = false
 
     var body: some View {
-        HStack(spacing: 7) {
+        SurfAcePaneControlsLayout {
             if pane.drawingRestoreWarningVisible {
                 SurfAceWarningIndicator()
             }
