@@ -649,6 +649,7 @@ extension SurfAceAnnotationOutboxTests {
         XCTAssertEqual(saved.annotationPublisher?.sourceEpoch, sourceEpoch)
     }
 
+    @MainActor
     func testSuspendedOldHelloCannotAuthorizeReplacementRoute() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("SurfAceAnnotationTransport-\(UUID().uuidString)", isDirectory: true)
