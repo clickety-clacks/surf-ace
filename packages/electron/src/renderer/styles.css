@@ -299,14 +299,7 @@ body.compositor-hosted .pane-shell.native-backed .pane-content {
 }
 
 .pane-pop-out {
-  position: absolute;
-  top: 8px;
-  right: 8px;
-  z-index: 85;
-  padding: 0 12px;
-  border: 1px solid var(--accent);
-  background: #08111f;
-  color: var(--text);
+  flex: 0 0 auto;
 }
 
 .pane-pop-out:focus-visible {

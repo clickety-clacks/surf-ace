@@ -1060,6 +1060,8 @@ function announceReachedHistoryEntries(state: RendererWindowState): void {
 type LucideIconName =
   | "chevron-left"
   | "chevron-right"
+  | "maximize"
+  | "minimize"
   | "minus"
   | "panel-bottom-open"
   | "pen-line"
@@ -1088,6 +1090,8 @@ function createLucideIcon(name: LucideIconName): SVGSVGElement {
     "chevron-right": [
       "m9 18 6-6-6-6",
     ],
+    maximize: ["M8 3H3v5", "M16 3h5v5", "M21 16v5h-5", "M3 16v5h5"],
+    minimize: ["M3 8h5V3", "M21 8h-5V3", "M16 21v-5h5", "M8 21v-5H3"],
     minus: [
       "M5 12h14",
     ],
@@ -1412,9 +1416,19 @@ function applyPanePopOut(): void {
     const pending = panePresentationTransitionsPending > 0 || panePresentationAuthorityBlocked ||
       (expanded && panePresentationResizePending);
     view.rootEl.classList.toggle("pane-presentation-pending", pending);
-    for (const element of [view.contentEl, view.scrollEl, view.controlsEl, view.annotationCanvas, view.annotationShield]) {
+    for (const element of [view.contentEl, view.scrollEl, view.annotationCanvas, view.annotationShield]) {
       element.toggleAttribute("inert", pending);
     }
+    // The retained Solo/Restore toggle stays operable inside the toolbar while
+    // other controls are shielded by pending or uncertain native authority.
+    for (const pill of view.controlsEl.children) {
+      if (!pill.contains(view.popOutButton)) pill.toggleAttribute("inert", pending);
+      else for (const control of pill.children) {
+        control.toggleAttribute("inert", pending && control !== view.popOutButton);
+      }
+    }
+    view.controlsEl.classList.toggle("collapsed", view.toolbarCollapsed && !expanded && !pending);
+    view.dockEl.hidden = !view.toolbarCollapsed || expanded || pending;
     const bounds = expanded ? acknowledgedPopOutBounds : null;
     for (const [property, value] of Object.entries({ left: bounds?.x, top: bounds?.y,
       width: bounds?.width, height: bounds?.height })) {
@@ -1425,10 +1439,12 @@ function applyPanePopOut(): void {
     view.rootEl.toggleAttribute("inert", covered);
     if (covered) view.rootEl.setAttribute("aria-hidden", "true");
     else view.rootEl.removeAttribute("aria-hidden");
-    view.popOutButton.textContent = expanded ? "Restore" : "Pop out";
-    view.popOutButton.title = expanded ? "Restore pane to its tile" : "Pop out pane within this window";
-    view.popOutButton.setAttribute("aria-label", `${expanded ? "Restore" : "Pop out"} pane ${view.paneId}`);
+    const restore = expanded || panePresentationAuthorityBlocked;
+    view.popOutButton.replaceChildren(createLucideIcon(restore ? "minimize" : "maximize"));
+    view.popOutButton.title = restore ? "Restore pane to its tile" : "Solo pane within this window";
+    view.popOutButton.setAttribute("aria-label", `${restore ? "Restore" : "Solo"} pane ${view.paneId}`);
     view.popOutButton.setAttribute("aria-expanded", String(expanded));
+    view.popOutButton.setAttribute("aria-pressed", String(expanded));
   }
   appRoot.classList.toggle("has-pane-pop-out", poppedOutPaneId !== null);
   positionPaneHosts();
@@ -1590,7 +1606,8 @@ function rebuildPaneControls(paneId: number): void {
 }
 
 function collapsePaneToolbar(view: PaneView): void {
-  if (view.toolbarCollapsed || paneStateFor(view)?.annotationBorderVisible) {
+  if (view.toolbarCollapsed || paneStateFor(view)?.annotationBorderVisible ||
+      poppedOutPaneId === view.paneId || panePresentationTransitionsPending > 0 || panePresentationAuthorityBlocked) {
     return;
   }
   view.toolbarCollapsed = true;
@@ -1620,12 +1637,10 @@ function ensurePaneView(paneId: number): PaneView {
   const slotEl = document.createElement("div");
   slotEl.className = "pane-slot";
   // Tiled slot and retained content host live in separate layers.
-  const popOutButton = surfAceOverlay(document.createElement("button"), "pane-pop-out");
+  const popOutButton = surfAceOverlay(createIconButton("maximize", `Solo pane ${paneId}`, "pane-pop-out"), "pane-pop-out");
   popOutButton.type = "button";
-  popOutButton.className = "pane-pop-out control-button";
-  popOutButton.textContent = "Pop out";
-  popOutButton.setAttribute("aria-label", `Pop out pane ${paneId}`);
   popOutButton.setAttribute("aria-expanded", "false");
+  popOutButton.setAttribute("aria-pressed", "false");
   popOutButton.addEventListener("click", (event) => {
     event.stopPropagation();
     void togglePanePopOut(view);
@@ -1679,7 +1694,7 @@ function ensurePaneView(paneId: number): PaneView {
   duplicateRepushEl.className = "duplicate-repush-overlay";
   duplicateRepushEl.hidden = true;
 
-  rootEl.append(scrollEl, shieldEl, canvas, focusOverlayEl, labelEl, controlsEl, dockEl, toastEl, duplicateRepushEl, popOutButton);
+  rootEl.append(scrollEl, shieldEl, canvas, focusOverlayEl, labelEl, controlsEl, dockEl, toastEl, duplicateRepushEl);
 
   const view: PaneView = {
     annotationCanvas: canvas,
@@ -1735,8 +1750,9 @@ function setToast(view: PaneView, message: string | null): void {
 
 function buildControls(view: PaneView, pane: RendererPaneState): void {
   view.controlsEl.replaceChildren();
-  view.controlsEl.classList.toggle("collapsed", view.toolbarCollapsed);
-  view.dockEl.hidden = !view.toolbarCollapsed;
+  const keepRestoreReachable = poppedOutPaneId === view.paneId || panePresentationTransitionsPending > 0 || panePresentationAuthorityBlocked;
+  view.controlsEl.classList.toggle("collapsed", view.toolbarCollapsed && !keepRestoreReachable);
+  view.dockEl.hidden = !view.toolbarCollapsed || keepRestoreReachable;
   view.dockEl.setAttribute("aria-expanded", String(view.toolbarCollapsed));
   const hasPushedContent = pane.content.contentId !== null;
   if (isBrowserUrlPane(pane) && !pane.showDone) {
@@ -1851,6 +1867,7 @@ function buildControls(view: PaneView, pane: RendererPaneState): void {
   });
   annotate.classList.toggle("active", pane.showDone);
   annotationPill.appendChild(annotate);
+  annotationPill.appendChild(view.popOutButton);
 
   if (pane.showDone) {
     const done = surfAceOverlay(createButton("Done", "done"), "annotation-control");

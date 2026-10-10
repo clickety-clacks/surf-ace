@@ -620,6 +620,13 @@ test("renderer DOM integrates authoritative connection states and live scale con
     const topologyBefore = JSON.stringify(next.layout);
     const slotWeights = slots.map((slot) => slot.style.flexGrow);
     const toggle = selected.querySelector<HTMLButtonElement>(".pane-pop-out")!;
+    assert.equal(toggle.closest(".annotation-pill")?.querySelector(".font-size-toggle") !== null, true);
+    assert.equal(toggle.closest(".annotation-pill")?.querySelector(".annotate") !== null, true);
+    assert.equal(toggle.closest(".control-cluster") !== null, true, "Solo belongs to the bottom toolbar");
+    assert.equal(toggle.parentElement !== selected, true, "no root-level oversized top-right control");
+    assert.equal(toggle.textContent, "", "icon-only control");
+    assert.equal(toggle.querySelector("svg")?.getAttribute("aria-hidden"), "true");
+    assert.equal(toggle.getAttribute("aria-label"), "Solo pane 2");
     const commandsBefore = commands.length;
     presentationResponse = async () => ({ ok: false, error: "unsupported compositor" });
     toggle.click();
@@ -631,6 +638,11 @@ test("renderer DOM integrates authoritative connection states and live scale con
     presentationResponse = () => new Promise((resolve) => { acknowledgeInitial = resolve; });
     toggle.click();
     stateListener!({ ...next, providerName: "connection metadata changed" });
+    assert.equal(selected.querySelector(".pane-pop-out"), toggle, "pending state churn retains the same button");
+    assert.equal(toggle.closest("[inert]"), null, "pending toolbar cannot shield Restore itself");
+    assert.equal(toggle.closest(".control-cluster")!.classList.contains("collapsed"), false);
+    assert.ok(selected.querySelector(".font-size-toggle")!.closest("[inert]"), "pending font control stays shielded");
+    assert.ok(selected.querySelector(".annotate")!.closest("[inert]"), "pending annotation control stays shielded");
     acknowledgeInitial({ ok: true });
     await new Promise<void>((resolve) => setImmediate(resolve));
     assert.equal(selected.classList.contains("pane-popped-out"), true,
@@ -643,7 +655,8 @@ test("renderer DOM integrates authoritative connection states and live scale con
       toggle.click();
       assert.equal(selected.classList.contains("pane-popped-out"), false, "pending ack retains tiled display");
       await new Promise<void>((resolve) => setImmediate(resolve));
-      assert.equal(toggle.textContent, "Restore");
+      assert.equal(toggle.textContent, "");
+      assert.equal(toggle.getAttribute("aria-label"), "Restore pane 2");
       assert.equal(toggle.getAttribute("aria-expanded"), "true");
       assert.equal(selected.classList.contains("pane-popped-out"), true);
       assert.equal(roots[0]!.hasAttribute("inert"), true);
@@ -660,9 +673,15 @@ test("renderer DOM integrates authoritative connection states and live scale con
       window.dispatchEvent(new window.Event("resize"));
       selected.querySelector(".pane-scroll")!.dispatchEvent(new window.Event("scroll"));
       assert.equal(toggle.isConnected, true, "toolbar collapse cannot remove Restore");
+      assert.equal(selected.querySelector(".pane-pop-out"), toggle, "same toggle survives control rebuilds");
+      assert.equal(toggle.closest(".control-cluster")!.classList.contains("collapsed"), false,
+        "expanded Restore stays reachable after content/scroll collapse attempts");
+      assert.equal(toggle.getAttribute("aria-label"), "Restore pane 2");
+      assert.equal(toggle.getAttribute("aria-pressed"), "true");
       toggle.click();
       await new Promise<void>((resolve) => setImmediate(resolve));
       assert.equal(toggle.getAttribute("aria-expanded"), "false");
+      assert.equal(toggle.getAttribute("aria-pressed"), "false");
       assert.equal(selected.classList.contains("pane-popped-out"), false);
       assert.equal(roots[0]!.hasAttribute("inert"), false);
       assert.equal(selected.querySelector("webview"), liveHost);
@@ -758,7 +777,8 @@ test("renderer DOM integrates authoritative connection states and live scale con
     stateListener!({ ...next, topologyRevision: next.topologyRevision + 1 });
     await new Promise<void>((resolve) => setImmediate(resolve));
     assert.equal(selected.classList.contains("pane-popped-out"), false, "external topology epoch clears presentation");
-    assert.equal(toggle.textContent, "Pop out");
+    assert.equal(toggle.textContent, "");
+    assert.equal(toggle.getAttribute("aria-label"), "Solo pane 2");
     toggle.click();
     stateListener!(state("connected"));
     assert.equal(document.querySelector(".pane-popped-out"), null, "closed selected pane cannot be restored");
