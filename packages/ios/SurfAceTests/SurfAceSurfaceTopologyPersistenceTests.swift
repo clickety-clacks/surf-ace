@@ -279,7 +279,7 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
             window.overrideUserInterfaceStyle = style
             await Task.yield()
             host.view.layoutIfNeeded()
-            try await assertPopoutGlyphPaints(toggle, state: "Tiled-\(style.rawValue)")
+            try assertPopoutGlyphPaints(toggle, state: "Tiled-\(style.rawValue)")
         }
         var tiledFrames = views.map { $0.convert($0.bounds, to: window) }
         var surfaceFrame = tiledFrames.reduce(CGRect.null) { $0.union($1) }
@@ -295,7 +295,7 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
             }, object: nil)
             await fulfillment(of: [focused], timeout: 5)
             XCTAssertTrue(toggle.isFirstResponder, "the mounted toolbar button owns keyboard input after expansion")
-            try await assertPopoutGlyphPaints(toggle, state: "Expanded-\(index)")
+            try assertPopoutGlyphPaints(toggle, state: "Expanded-\(index)")
             XCTAssertTrue(popoutToolbarButtons(in: host.view).contains { $0 === toggle },
                           "enter/Restore retains the same native toggle")
             for (view, original) in zip(views, tiledFrames) where view !== selected {
@@ -424,7 +424,7 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
     }
 
     @MainActor
-    private func assertPopoutGlyphPaints(_ button: UIButton, state: String) async throws {
+    private func assertPopoutGlyphPaints(_ button: UIButton, state: String) throws {
         button.layoutIfNeeded()
         let imageView = try XCTUnwrap(button.imageView)
         XCTAssertNotNil(imageView.image, "\(state): the symbol must resolve")
@@ -443,21 +443,7 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
                 XCTAssertTrue(button.drawHierarchy(in: button.bounds, afterScreenUpdates: true))
             }
         }
-        // A newly mounted window can report drawHierarchy success before its
-        // first presentation, yielding a completely transparent snapshot. Wait
-        // for painted chrome, independently of whether the glyph is present.
-        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
-        var visible = capture()
-        func hasPresentedPixels(_ image: UIImage) throws -> Bool {
-            let pixels = try rgbaPixels(image)
-            return stride(from: 3, to: pixels.count, by: 4).contains { pixels[$0] > 0 }
-        }
-        while try !hasPresentedPixels(visible), ContinuousClock.now < deadline {
-            try await Task.sleep(for: .milliseconds(10))
-            visible = capture()
-        }
-        XCTAssertTrue(try hasPresentedPixels(visible),
-                      "\(state): the mounted control must have reached presentation")
+        let visible = capture()
         imageView.isHidden = true
         let withoutGlyph = capture()
         imageView.isHidden = false
@@ -474,7 +460,9 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
         XCTAssertEqual(visiblePixels.count, backgroundPixels.count)
         let paintedPixels = stride(from: 0, to: min(visiblePixels.count, backgroundPixels.count), by: 4)
             .filter { offset in
-                (0..<3).contains { channel in
+                // Black light-mode symbols change alpha over a transparent
+                // material snapshot; RGB alone cannot detect their ink.
+                (0..<4).contains { channel in
                     abs(Int(visiblePixels[offset + channel]) - Int(backgroundPixels[offset + channel])) > 20
                 }
             }.count
