@@ -105,9 +105,10 @@ final class SurfAceAnnotationPublisher {
         self.adapter = adapter
         self.endpoint = endpoint
         self.makeTransport = makeTransport ?? { url in
-            SurfAceRegistrationEndpoint.usesLocalNumericTransport(url)
-                ? SurfAceLocalNumericRegistrationWebSocket(url: url)
-                : SurfAceAnnotationURLSessionTransport(url: url)
+            if SurfAceRegistrationEndpoint.usesLocalNumericTransport(url) {
+                return SurfAceLocalNumericRegistrationWebSocket(url: url)
+            }
+            return SurfAceAnnotationURLSessionTransport(url: url)
         }
         self.onError = onError
     }
