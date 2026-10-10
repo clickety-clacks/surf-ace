@@ -1528,7 +1528,10 @@ final class SurfAceHostZoomViewportTests: XCTestCase {
             let height = try XCTUnwrap(dimensions["innerHeight"] as? Double)
             XCTAssertEqual(try XCTUnwrap(dimensions["scrollerWidth"] as? Double), width, accuracy: 1)
             XCTAssertEqual(try XCTUnwrap(dimensions["scrollerHeight"] as? Double), height, accuracy: 1)
-            XCTAssertEqual(web.frame, host.bounds)
+            for (actual, expected) in [(web.frame.minX, host.bounds.minX), (web.frame.minY, host.bounds.minY),
+                                       (web.frame.width, host.bounds.width), (web.frame.height, host.bounds.height)] {
+                XCTAssertEqual(actual, expected, accuracy: 0.001)
+            }
             XCTAssertEqual(web.scrollView.adjustedContentInset, .zero, "Pane already owns its native viewport")
         }
         await server.stop()
@@ -1610,7 +1613,10 @@ final class SurfAceHostZoomViewportTests: XCTestCase {
                 let data = try JSONSerialization.data(withJSONObject: measurements, options: [.sortedKeys, .prettyPrinted])
                 let geometry = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
                 geometry.name = "native-geometry-\(label)"; geometry.lifetime = .keepAlways; add(geometry)
-                XCTAssertEqual(web.frame, host.bounds, "\(label) native edge pinning")
+                for (actual, expected) in [(web.frame.minX, host.bounds.minX), (web.frame.minY, host.bounds.minY),
+                                           (web.frame.width, host.bounds.width), (web.frame.height, host.bounds.height)] {
+                    XCTAssertEqual(actual, expected, accuracy: 0.001, "\(label) native edge pinning")
+                }
                 let image = try XCTUnwrap(nativeComposition.cgImage)
                 var pixels = [UInt8](repeating: 0, count: image.width * image.height * 4)
                 let colorSpace = CGColorSpaceCreateDeviceRGB()

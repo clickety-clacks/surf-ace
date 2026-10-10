@@ -3036,6 +3036,14 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
         // The pane has already resolved its content viewport; safe-area insets
         // must not subtract a second band from the edge-pinned WebKit view.
         webView.scrollView.contentInsetAdjustmentBehavior = .never
+        if #available(iOS 26.0, visionOS 26.0, *) {
+            // Pane chrome is outside this viewport; native scroll-edge fades
+            // would otherwise obscure content in its safe-area bands.
+            webView.scrollView.topEdgeEffect.isHidden = true
+            webView.scrollView.bottomEdgeEffect.isHidden = true
+            webView.scrollView.leftEdgeEffect.isHidden = true
+            webView.scrollView.rightEdgeEffect.isHidden = true
+        }
         #if !os(visionOS)
         webView.scrollView.keyboardDismissMode = .onDrag
         #endif
