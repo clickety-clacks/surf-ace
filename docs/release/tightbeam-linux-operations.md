@@ -1,7 +1,7 @@
 # Surf Ace standalone Linux server operations
 
-This v0.2.7 runbook applies only to product commit
-`800d0ea77eb030eea1eb8e690dfb431651e67414` and PostgreSQL 16. It assumes a
+This v0.2.8 runbook applies only to product commit
+`17480ecc9dd4ad1b696059d000b903fe38e6454a` and PostgreSQL 16. It assumes a
 single configured allocator fleet, one server process at a time, and an
 already-provisioned PostgreSQL primary with its configured synchronous witness.
 The archive never installs a service or provisions, upgrades, or changes a host.
@@ -85,7 +85,7 @@ state version. For an existing v0.2.6 fleet with pane state, apply only 003
 after a verified backup and staged restore. Migration 003 creates the
 annotation journal and independent consumer state; it does not allocate pane
 numbers or advance the allocator's accepted journal head. It refuses an active
-lease, an in-progress restore, or an unsupported state version. The v0.2.7
+lease, an in-progress restore, or an unsupported state version. The v0.2.8
 server does not auto-migrate; annotation watch and publisher operations remain
 unavailable until 003 is verified.
 
@@ -95,7 +95,7 @@ a disposable staging cluster with its own witness and apply 002 there first;
 verify the pre- and post-migration head sequence/hash are identical, the
 accepted-state pane fence starts at 1, pane claims advance it, and restart and
 restore do not reuse a number. Run the two-client smoke against that staging
-allocator. After production migration, preserve the backup until the v0.2.7
+allocator. After production migration, preserve the backup until the v0.2.8
 qualification settles. Stage and verify 003 with the same stopped-writer backup
 and head/fence comparison before applying it to the serving fleet. If a
 migration fails before commit, PostgreSQL rolls it back atomically. If a later
