@@ -1499,6 +1499,11 @@ final class SurfAceHostZoomViewportTests: XCTestCase {
                     else { continuation.resume(throwing: error ?? NSError(domain: "ZoomSnapshot", code: 1)) }
                 }
             }
+            let nativeComposition = UIGraphicsImageRenderer(bounds: host.bounds).image { _ in
+                XCTAssertTrue(host.drawHierarchy(in: host.bounds, afterScreenUpdates: true))
+            }
+            let composed = XCTAttachment(image: nativeComposition)
+            composed.name = "frozen-taskboard-host-composition-\(multiplier)"; composed.lifetime = .keepAlways; add(composed)
             let screenshot = XCTAttachment(image: snapshot)
             screenshot.name = "frozen-taskboard-native-\(multiplier)"; screenshot.lifetime = .keepAlways; add(screenshot)
             let image = try XCTUnwrap(snapshot.cgImage)
@@ -1545,7 +1550,7 @@ final class SurfAceHostZoomViewportTests: XCTestCase {
             var defaultFontPixelWidth: Int?
             for multiplier in [1.0, 0.5, 1.5, 2.0] {
                 let fill = pattern == "fixed" ? "position:fixed;inset:0" : "width:100%;height:100%"
-                let inner = "<html style='height:100%'><body style='margin:0;height:100%'><main id='fill' style='\(fill);background:rgb(0,200,0)'><span id='font' style='font-size:20px'>Scale</span><span id='scale-marker' style='position:fixed;top:40px;left:40px;width:20px;height:20px;background:rgb(200,0,0)'></span></main></body></html>"
+                let inner = "<html style='height:100%'><body style='margin:0;height:100%'><main id='fill' style='\(fill);background:rgb(0,200,0)'><span id='font' style='font-size:20px;color:rgb(0,0,200)'>Scale</span><span id='scale-marker' style='position:fixed;top:40px;left:40px;width:20px;height:20px;background:rgb(200,0,0)'></span></main></body></html>"
                 let encoded = inner.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "\"", with: "&quot;")
                 let html = "<html style='height:100%;background:#101720'><head><meta name='viewport' content='width=device-width,initial-scale=1'></head><body style='margin:0;height:100%;overflow:hidden'><iframe style='display:block;border:0;width:100%;height:100%' srcdoc=\"\(encoded)\"></iframe></body></html>"
                 host.setContentScale(CGFloat(multiplier))
@@ -1572,6 +1577,11 @@ final class SurfAceHostZoomViewportTests: XCTestCase {
                     }
                 }
                 let label = "\(pattern)-\(multiplier)"
+                let nativeComposition = UIGraphicsImageRenderer(bounds: host.bounds).image { _ in
+                    XCTAssertTrue(host.drawHierarchy(in: host.bounds, afterScreenUpdates: true))
+                }
+                let composed = XCTAttachment(image: nativeComposition)
+                composed.name = "native-host-composition-\(label)"; composed.lifetime = .keepAlways; add(composed)
                 let attachment = XCTAttachment(image: snapshot)
                 attachment.name = "native-iframe-\(label)"; attachment.lifetime = .keepAlways; add(attachment)
                 let inset = web.scrollView.adjustedContentInset
@@ -1581,7 +1591,10 @@ final class SurfAceHostZoomViewportTests: XCTestCase {
                     "webBounds": NSCoder.string(for: web.bounds), "safeAreaInsets": NSCoder.string(for: host.safeAreaInsets),
                     "adjustedContentInsets": NSCoder.string(for: inset),
                     "webOpaque": web.isOpaque, "webBackground": String(describing: web.backgroundColor),
-                    "snapshotPoints": [snapshot.size.width, snapshot.size.height], "dom": try XCTUnwrap(metrics)
+                    "snapshotPoints": [snapshot.size.width, snapshot.size.height],
+                    "scrollContentSize": NSCoder.string(for: web.scrollView.contentSize),
+                    "scrollContentOffset": NSCoder.string(for: web.scrollView.contentOffset),
+                    "scrollZoomScale": web.scrollView.zoomScale, "dom": try XCTUnwrap(metrics)
                 ]
                 let data = try JSONSerialization.data(withJSONObject: measurements, options: [.sortedKeys, .prettyPrinted])
                 let geometry = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
@@ -1605,8 +1618,8 @@ final class SurfAceHostZoomViewportTests: XCTestCase {
                         if pixels[i + 3] > 200 && pixels[i] > 150 && pixels[i + 1] < 40 && pixels[i + 2] < 40 {
                             markerMinX = min(markerMinX, x); markerMaxX = max(markerMaxX, x)
                         }
-                        // The fixture's only opaque black pixels are its font glyphs.
-                        if pixels[i + 3] > 200 && pixels[i] < 40 && pixels[i + 1] < 40 && pixels[i + 2] < 40 {
+                        // Blue glyph pixels cannot be confused with an unpainted dark margin.
+                        if pixels[i + 3] > 200 && pixels[i] < 40 && pixels[i + 1] < 40 && pixels[i + 2] > 150 {
                             fontMinX = min(fontMinX, x); fontMaxX = max(fontMaxX, x)
                         }
                     }
