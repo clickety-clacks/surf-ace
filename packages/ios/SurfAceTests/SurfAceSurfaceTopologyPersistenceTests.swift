@@ -275,6 +275,12 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
         XCTAssertTrue(toggle.isAccessibilityElement,
                       "the mounted native toggle provides its own accessibility target")
         XCTAssertFalse(toggle.accessibilityElementsHidden)
+        for style in [UIUserInterfaceStyle.light, .dark] {
+            window.overrideUserInterfaceStyle = style
+            await Task.yield()
+            host.view.layoutIfNeeded()
+            try assertPopoutGlyphPaints(toggle, state: "Tiled-\(style.rawValue)")
+        }
         var tiledFrames = views.map { $0.convert($0.bounds, to: window) }
         var surfaceFrame = tiledFrames.reduce(CGRect.null) { $0.union($1) }
         for index in 0..<4 {
@@ -289,6 +295,7 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
             }, object: nil)
             await fulfillment(of: [focused], timeout: 5)
             XCTAssertTrue(toggle.isFirstResponder, "the mounted toolbar button owns keyboard input after expansion")
+            try assertPopoutGlyphPaints(toggle, state: "Expanded-\(index)")
             XCTAssertTrue(popoutToolbarButtons(in: host.view).contains { $0 === toggle },
                           "enter/Restore retains the same native toggle")
             for (view, original) in zip(views, tiledFrames) where view !== selected {
@@ -414,6 +421,67 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
         XCTAssertEqual(actual.minY, expected.minY, accuracy: 1)
         XCTAssertEqual(actual.width, expected.width, accuracy: 1)
         XCTAssertEqual(actual.height, expected.height, accuracy: 1)
+    }
+
+    @MainActor
+    private func assertPopoutGlyphPaints(_ button: UIButton, state: String) throws {
+        button.layoutIfNeeded()
+        let imageView = try XCTUnwrap(button.imageView)
+        XCTAssertNotNil(imageView.image, "\(state): the symbol must resolve")
+        XCTAssertFalse(imageView.isHidden)
+        XCTAssertGreaterThan(imageView.bounds.width, 0)
+        let imageIndex = try XCTUnwrap(button.subviews.firstIndex(of: imageView))
+        let materialIndex = try XCTUnwrap(button.subviews.firstIndex { $0 is UIVisualEffectView })
+        print("popout_glyph state=\(state) image_index=\(imageIndex) material_index=\(materialIndex) image_frame=\(imageView.frame)")
+        XCTAssertGreaterThan(imageIndex, materialIndex, "material must not occlude the glyph")
+
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 2
+        let renderer = UIGraphicsImageRenderer(bounds: button.bounds, format: format)
+        func capture() -> UIImage {
+            renderer.image { _ in
+                XCTAssertTrue(button.drawHierarchy(in: button.bounds, afterScreenUpdates: true))
+            }
+        }
+        let visible = capture()
+        imageView.isHidden = true
+        let withoutGlyph = capture()
+        imageView.isHidden = false
+        let visibleAttachment = XCTAttachment(image: visible)
+        visibleAttachment.name = "popout-\(state)-visible"
+        visibleAttachment.lifetime = .keepAlways
+        add(visibleAttachment)
+        let backgroundAttachment = XCTAttachment(image: withoutGlyph)
+        backgroundAttachment.name = "popout-\(state)-without-glyph"
+        backgroundAttachment.lifetime = .keepAlways
+        add(backgroundAttachment)
+        let visiblePixels = try rgbaPixels(visible)
+        let backgroundPixels = try rgbaPixels(withoutGlyph)
+        XCTAssertEqual(visiblePixels.count, backgroundPixels.count)
+        let paintedPixels = stride(from: 0, to: min(visiblePixels.count, backgroundPixels.count), by: 4)
+            .filter { offset in
+                (0..<3).contains { channel in
+                    abs(Int(visiblePixels[offset + channel]) - Int(backgroundPixels[offset + channel])) > 20
+                }
+            }.count
+        print("popout_glyph state=\(state) painted_pixels=\(paintedPixels)")
+        XCTAssertGreaterThan(paintedPixels, 8,
+                             "\(state): the actual render must contain a visible glyph over the material")
+    }
+
+    @MainActor
+    private func rgbaPixels(_ image: UIImage) throws -> [UInt8] {
+        let cgImage = try XCTUnwrap(image.cgImage)
+        var pixels = [UInt8](repeating: 0, count: cgImage.width * cgImage.height * 4)
+        try pixels.withUnsafeMutableBytes { bytes in
+            let context = try XCTUnwrap(CGContext(
+                data: bytes.baseAddress, width: cgImage.width, height: cgImage.height,
+                bitsPerComponent: 8, bytesPerRow: cgImage.width * 4,
+                space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+            context.draw(cgImage, in: CGRect(x: 0, y: 0, width: CGFloat(cgImage.width), height: CGFloat(cgImage.height)))
+        }
+        return pixels
     }
 
     @MainActor
