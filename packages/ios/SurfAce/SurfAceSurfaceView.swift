@@ -1870,9 +1870,9 @@ private final class SurfAcePanePopoutControl: UIButton {
         DispatchQueue.main.async { [weak self] in
             guard let self, self.window != nil, self.focusGeneration == generation else { return }
             if !UIAccessibility.isVoiceOverRunning { self.becomeFirstResponder() }
-            // Post regardless of the local status flag: assistive technology
-            // owns whether to consume this explicit layout/focus notification.
-            UIAccessibility.post(notification: .layoutChanged, argument: self)
+            // Enter/Restore changes the accessible modal presentation, not
+            // just a control's layout. Explicitly target the retained toggle.
+            UIAccessibility.post(notification: .screenChanged, argument: self)
         }
     }
 
