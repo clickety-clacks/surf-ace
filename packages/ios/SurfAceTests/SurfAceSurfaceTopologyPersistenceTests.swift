@@ -1430,9 +1430,9 @@ final class SurfAceHostZoomViewportTests: XCTestCase {
                 let inset = web.scrollView.adjustedContentInset
                 let measurements: [String: Any] = [
                     "pattern": pattern, "multiplier": multiplier, "pageZoom": web.pageZoom,
-                    "hostBounds": NSStringFromCGRect(host.bounds), "webFrame": NSStringFromCGRect(web.frame),
-                    "webBounds": NSStringFromCGRect(web.bounds), "safeAreaInsets": NSStringFromUIEdgeInsets(host.safeAreaInsets),
-                    "adjustedContentInsets": NSStringFromUIEdgeInsets(inset),
+                    "hostBounds": NSCoder.string(for: host.bounds), "webFrame": NSCoder.string(for: web.frame),
+                    "webBounds": NSCoder.string(for: web.bounds), "safeAreaInsets": NSCoder.string(for: host.safeAreaInsets),
+                    "adjustedContentInsets": NSCoder.string(for: inset),
                     "webOpaque": web.isOpaque, "webBackground": String(describing: web.backgroundColor),
                     "snapshotPoints": [snapshot.size.width, snapshot.size.height], "dom": try XCTUnwrap(metrics)
                 ]
