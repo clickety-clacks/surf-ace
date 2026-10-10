@@ -773,6 +773,64 @@ test("renderer DOM integrates authoritative connection states and live scale con
     assert.equal(selected.classList.contains("pane-popped-out"), false);
     assert.equal(selected.style.width, `${slots[1]!.getBoundingClientRect().width}px`, "Restore reads authoritative tiled slot geometry");
     assert.equal(selected.querySelector("webview"), liveHost);
+    // Restore remains the desired authority target while the old expanded
+    // display is retained. Exercise both triggers, reply orders and outcomes.
+    let restoreRevision = 20;
+    for (const trigger of ["resize", "geometry"] as const) {
+      for (const firstReply of ["original", "replacement"] as const) {
+        for (const originalOk of [true, false]) for (const replacementOk of [true, false]) {
+          stateListener!(next);
+          presentationResponse = null;
+          toggle.click();
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          const requestsBeforeRestore = presentations.length;
+          type RestoreResponse = { ok: boolean; presentationBlocked?: boolean; revision: number; authorityRevision: number };
+          const restoreAcks: Array<(response: RestoreResponse) => void> = [];
+          presentationResponse = () => new Promise((resolve) => { restoreAcks.push(resolve); });
+          toggle.click(); // Original Restore is deliberately held.
+          if (trigger === "resize") window.dispatchEvent(new window.Event("resize"));
+          else stateListener!({ ...next, geometryRevision: next.geometryRevision + 10 });
+          assert.equal(restoreAcks.length, 2, "viewport transition has its own recovery request");
+          const targets = presentations.slice(requestsBeforeRestore).map((request) => request.paneId);
+          const original = { ok: originalOk, ...(!originalOk ? { presentationBlocked: true } : {}),
+            revision: restoreRevision, authorityRevision: restoreRevision };
+          const replacement = { ok: replacementOk, ...(!replacementOk ? { presentationBlocked: true } : {}),
+            revision: restoreRevision + 1, authorityRevision: restoreRevision + 1 };
+          if (firstReply === "original") {
+            restoreAcks[0]!(original);
+            await new Promise<void>((resolve) => setImmediate(resolve));
+            assert.equal(selected.classList.contains("pane-presentation-pending"), true,
+              "original Restore cannot settle a newer recovery owner");
+            restoreAcks[1]!(replacement);
+          } else {
+            restoreAcks[1]!(replacement);
+            await new Promise<void>((resolve) => setImmediate(resolve));
+            restoreAcks[0]!(original);
+          }
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          const expandedAfterReplies = selected.classList.contains("pane-popped-out");
+          const pendingAfterReplies = selected.classList.contains("pane-presentation-pending");
+          // Resolve failures with an explicit newer Restore, preserving fences.
+          presentationResponse = async () => ({ ok: true, revision: restoreRevision + 2,
+            authorityRevision: restoreRevision + 2 });
+          if (expandedAfterReplies || pendingAfterReplies) {
+            toggle.click();
+            await new Promise<void>((resolve) => setImmediate(resolve));
+          }
+          assert.deepEqual(targets, [null, null], `${trigger} cannot manufacture Solo after held Restore`);
+          assert.equal(expandedAfterReplies, !replacementOk,
+            "latest successful Restore wins both reply orders; failed retirement retains display");
+          assert.equal(pendingAfterReplies, !replacementOk,
+            "latest failed retirement stays shielded even after older success");
+          assert.equal(selected.classList.contains("pane-popped-out"), false);
+          assert.equal(selected.classList.contains("pane-presentation-pending"), false);
+          assert.equal(selected.querySelector("webview"), liveHost);
+          assert.deepEqual(slots.map((slot) => slot.style.flexGrow), slotWeights);
+          restoreRevision += 3;
+        }
+      }
+    }
+    presentationResponse = null;
     stateListener!(next);
     toggle.click();
     await new Promise<void>((resolve) => setImmediate(resolve));

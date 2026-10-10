@@ -1467,6 +1467,9 @@ let panePresentationAuthorityRevision = 0;
 let panePresentationAuthorityClearRevision = 0;
 let acknowledgedPopOutBounds: { x: number; y: number; width: number; height: number } | null = null;
 let panePresentationResizePending = false;
+// Requested user intent is distinct from the last acknowledged display. A
+// resize must preserve an outstanding Restore even while its pane is visible.
+let desiredPopOutPaneId: number | null = null;
 function reacknowledgePanePopOutViewport(): void {
   if (poppedOutPaneId === null) return;
   panePresentationResizePending = true;
@@ -1478,7 +1481,7 @@ function reacknowledgePanePopOutViewport(): void {
   if (!latestState || window.innerWidth !== latestState.viewport.width ||
       window.innerHeight !== latestState.viewport.height) return;
   const selected = paneViews.get(poppedOutPaneId);
-  if (selected) void requestPanePopOut(selected, selected.paneId);
+  if (selected) void requestPanePopOut(selected, desiredPopOutPaneId);
 }
 
 async function togglePanePopOut(view: PaneView): Promise<void> {
@@ -1492,6 +1495,7 @@ async function requestPanePopOut(view: PaneView, selected: number | null): Promi
     return;
   }
   cancelResizeGesture();
+  desiredPopOutPaneId = selected;
   const intent = ++panePresentationIntent;
   panePresentationTransitionsPending++;
   applyPanePopOut();
@@ -1540,6 +1544,7 @@ async function requestPanePopOut(view: PaneView, selected: number | null): Promi
         if (responseRevision !== undefined && !revisionIsCurrent) return;
         panePresentationAuthorityBlocked = false;
         poppedOutPaneId = null;
+        desiredPopOutPaneId = null;
         acknowledgedPopOutBounds = null;
         panePresentationResizePending = false;
         applyPanePopOut();
@@ -3520,6 +3525,7 @@ function renderWindow(state: RendererWindowState): void {
       (poppedOutPaneId !== null && !state.panes.some((pane) => pane.paneId === poppedOutPaneId &&
         pane.paneLineageId === previousState.panes.find((previous) => previous.paneId === poppedOutPaneId)?.paneLineageId)))) {
     poppedOutPaneId = null;
+    desiredPopOutPaneId = null;
     acknowledgedPopOutBounds = null;
     panePresentationResizePending = false;
     panePresentationIntent++;
@@ -3651,6 +3657,7 @@ async function init(): Promise<void> {
     if (notice.phase === "cleared") {
       panePresentationConfirmedClearRevision = Number(notice.revision);
       poppedOutPaneId = null;
+      desiredPopOutPaneId = null;
       acknowledgedPopOutBounds = null;
       panePresentationResizePending = false;
     } else {
