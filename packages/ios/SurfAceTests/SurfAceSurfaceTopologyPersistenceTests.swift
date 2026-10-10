@@ -280,8 +280,39 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
             let token = try await view.evaluateJavaScript("window.sessionToken") as? String
             tokens[id] = try XCTUnwrap(token)
         }
-        let available = initialViews.map { $0.convert($0.bounds, to: window) }
-            .reduce(CGRect.null) { $0.union($1) }
+        // Derive the oracle from the configured host and its safe-area frame,
+        // never from possibly overflowing content views.
+        let available = host.view.safeAreaLayoutGuide.layoutFrame
+        XCTAssertEqual(available.width, 1000, accuracy: 1)
+        XCTAssertEqual(surface.viewportSize.width, available.width, accuracy: 1)
+        XCTAssertEqual(surface.viewportSize.height, available.height, accuracy: 1)
+        let initialFractions: [CGFloat] = [0.24, 0.26, 0.5, 0.5]
+        var initialMeasurements: [[String: Any]] = []
+        for (index, id) in ids.enumerated() {
+            let model = try XCTUnwrap(surface.panesById[Int(id)])
+            let geometry = try XCTUnwrap(model.geometrySnapshot)
+            let view = try XCTUnwrap(views[id])
+            let button = popoutToolbarButtons(in: host.view).first {
+                $0.accessibilityIdentifier == "surf-ace-pane-popout-\(id)"
+            }
+            initialMeasurements.append([
+                "paneId": id, "stage": "before_any_close",
+                "expectedTileWidth": available.width * initialFractions[index],
+                "hostSafeAreaFrame": NSCoder.string(for: available),
+                "authoritativePaneFrame": NSCoder.string(for: geometry.paneFrame),
+                "publishedContentViewport": NSCoder.string(for: geometry.contentViewport),
+                "webViewWindowFrame": NSCoder.string(for: view.convert(view.bounds, to: window)),
+                "webViewParentBounds": NSCoder.string(for: view.superview?.bounds ?? .zero),
+                "popoutControlFrame": NSCoder.string(for: button.map { $0.convert($0.bounds, to: window) } ?? .zero),
+            ])
+            XCTAssertEqual(geometry.paneFrame.width, available.width * initialFractions[index], accuracy: 1)
+        }
+        let initialAttachment = XCTAttachment(data: try JSONSerialization.data(
+            withJSONObject: initialMeasurements, options: [.prettyPrinted, .sortedKeys]),
+            uniformTypeIdentifier: "public.json")
+        initialAttachment.name = "command-close-before-any-close-host-tile-content-chrome"
+        initialAttachment.lifetime = .keepAlways
+        add(initialAttachment)
         var expectedRevision = original.topologyRevision
         var tombstoneIds = Set<String>()
         // Nested collapse must retain its OUTER 0.5 slot, not the child's 0.2.
