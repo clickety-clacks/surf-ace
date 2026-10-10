@@ -584,4 +584,51 @@ extension SurfAceAnnotationOutboxTests {
         XCTAssertEqual(saved.annotationPublisher?.surfaces[surfaceId]?.acceptedCursor?.sequence, "1")
         XCTAssertEqual(saved.annotationPublisher?.pendingSurfaceIds(), [])
     }
+
+    @MainActor
+    func testVerifiedRouteChangeRetriesSamePersistedHeadAfterAmbiguousDisconnect() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SurfAceAnnotationTransport-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = SurfAceLocklessGenerationStore(stateURL: directory.appendingPathComponent("authority-v1.json"))
+        var limits = SurfAceLocklessCapacityLimits.production
+        limits.maxAnnotationPublisherStateBytesPerSurface = Int64(SurfAceAnnotationOutbox.maximumBytes)
+        limits.maxAnnotationPublisherRecordsPerSurface = Int64(SurfAceAnnotationOutbox.maximumRecords)
+        limits.maxRecoverableSurfaceBytes = 704 * 1_024 * 1_024
+        var state = try SurfAceLocklessAuthorityState.empty(limits: limits)
+        state.annotationPublisher = try SurfAceAnnotationOutbox(clientId: "client-1", sourceEpoch: sourceEpoch)
+        let opened = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
+            state: &state, expectedSurfaceSetRevision: state.surfaceSetRevision)
+        let surfaceId = opened.surface.surfaceId
+        _ = try state.annotationPublisher?.append(surfaceId: surfaceId, record: record())
+        let expected = try XCTUnwrap(state.annotationPublisher?.head(surfaceId: surfaceId))
+        try store.save(state)
+        let adapter = try SurfAceLocklessRuntimeAdapter(store: store, annotationClientId: "client-1")
+        let probe = AnnotationWireProbe()
+        var endpoints: [URL] = []
+        let firstPublisher = try SurfAceAnnotationPublisher(
+            adapter: adapter, endpoint: XCTUnwrap(URL(string: "ws://127.0.0.1:19001")),
+            makeTransport: { endpoint in endpoints.append(endpoint); return AnnotationWireProbeTransport(probe) }, onError: { _ in }
+        )
+        do {
+            try await firstPublisher.drain()
+            XCTFail("the first send must lose its response")
+        } catch {
+            XCTAssertEqual((error as? URLError)?.code, .networkConnectionLost)
+        }
+        let afterAmbiguousSend = await adapter.snapshot()
+        XCTAssertNil(afterAmbiguousSend.annotationPublisher?.surfaces[surfaceId]?.acceptedCursor)
+        let selected = try XCTUnwrap(URL(string: "ws://127.0.0.1:29999/ws"))
+        try firstPublisher.reconcileEndpoint(selected)
+        await firstPublisher.awaitIdle()
+        firstPublisher.stop()
+        XCTAssertEqual(endpoints.last, selected)
+        XCTAssertGreaterThanOrEqual(probe.connections, 2)
+        XCTAssertEqual(probe.records, [expected.canonical, expected.canonical])
+        let saved = try XCTUnwrap(store.load())
+        XCTAssertEqual(saved.annotationPublisher?.surfaces[surfaceId]?.acceptedCursor?.sequence, "1")
+        XCTAssertEqual(saved.annotationPublisher?.pendingSurfaceIds(), [])
+        XCTAssertEqual(saved.annotationPublisher?.clientId, "client-1")
+        XCTAssertEqual(saved.annotationPublisher?.sourceEpoch, sourceEpoch)
+    }
 }

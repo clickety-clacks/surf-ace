@@ -120,6 +120,131 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         publisher.stop()
     }
 
+    func testBonjourOnlyLatePublisherDrainsOfflineDoneAndLaterDrawingInOrder() async throws {
+        let suiteName = "SurfAceCapacityDrain-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        let stateURL = FileManager.default.temporaryDirectory.appendingPathComponent("\(suiteName).json")
+        let sendGate = SurfAceAnnotationEventSendGate(op: "event.annotation_committed")
+        addTeardownBlock { await sendGate.release() }
+        addTeardownBlock {
+            defaults.removePersistentDomain(forName: suiteName)
+            try? FileManager.default.removeItem(at: stateURL)
+        }
+        XCTAssertNil(ProcessInfo.processInfo.environment["SURF_ACE_SERVER"], "normal Bonjour launch has no explicit endpoint")
+        let transport = SurfAceAnnotationAcceptingTestTransport()
+        var selectedEndpoints: [URL] = []
+        let runtime = SurfAceRuntime(
+            userDefaults: defaults, locklessStateURL: stateURL,
+            annotationPublisherTransportFactory: { endpoint in
+                selectedEndpoints.append(endpoint)
+                return transport
+            },
+            annotationDirectStageMaxBytesForTesting: 1,
+            enableFleetDiscovery: false, isolatedTestLoopback: true,
+            outboundSendPreparation: { text, priority in
+                await sendGate.prepareSend(text: text, priority: priority)
+            }
+        )
+        await runtime.start()
+        addTeardownBlock { await runtime.stop() }
+        let registeredSurface = await runtime.registerSurfaceForScene(sceneKey: suiteName)
+        let surface = try XCTUnwrap(registeredSurface)
+        let pane = try XCTUnwrap(surface.panes.first)
+        let surfaceId = surface.surfaceId
+        let paneId = pane.paneId
+        let socket = socket(port: try XCTUnwrap(UInt16(exactly: runtime.serverPort)))
+        socket.resume()
+        defer { socket.cancel(with: .normalClosure, reason: nil) }
+        try await assertOwnedRuntimeDiscovery(runtime, socket: socket, surface: surface,
+                                              requestId: "capacity-discovery")
+        let paired = try await pair(socket, id: "capacity-pair", controllerId: "capacity-controller",
+                                    surfaceId: surfaceId)
+        XCTAssertEqual(paired["ok"] as? Bool, true, "pair response: \(paired)")
+        try await send(socket, op: "content.set", id: "capacity-content", payload: [
+            "content": ["html": "<main>capacity drain</main>"],
+            "contentId": "capacity-content-id", "contentType": "html",
+            "friendlyChatName": "Capacity", "paneId": paneId, "surfaceId": surfaceId,
+        ])
+        let contentResponse = try await receive(socket, matchingId: "capacity-content")
+        XCTAssertEqual(contentResponse["ok"] as? Bool, true)
+        let adapter = try runtime.locklessAuthorityForLocalMutation()
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 2, height: 2)).pngData { _ in
+            UIColor.white.setFill()
+            UIRectFill(CGRect(x: 0, y: 0, width: 2, height: 2))
+        }.base64EncodedString()
+        let revision = pane.currentEntry.revision
+        let oldFrameId = try await adapter.transactAnnotationPublisher(surfaceId: surfaceId) { outbox in
+            try outbox.beginFrame(surfaceId: surfaceId, paneId: paneId,
+                                  contextKey: "capacity-content-id", contentId: "capacity-content-id",
+                                  contentType: "html", revision: revision, url: nil,
+                                  scrollOffset: .init(x: 0, y: 0),
+                                  viewport: .init(width: 2, height: 2, scale: 1),
+                                  openedAt: 100, image: image).frameId
+        }
+        runtime.setAnnotationMode(surfaceId: surfaceId, paneId: paneId,
+                                  enabled: true, fingerDrawEnabled: false)
+        await runtime.awaitAnnotationModeTransition(surfaceId: surfaceId, paneId: paneId)
+        runtime.setAnnotationMode(surfaceId: surfaceId, paneId: paneId,
+                                  enabled: false, fingerDrawEnabled: false)
+        let held = expectation(description: "explicit direct commit waits after source loss is persisted")
+        Task { await sendGate.waitUntilHeld(); held.fulfill() }
+        await fulfillment(of: [held], timeout: 5)
+        let beforeSend = await adapter.snapshot().annotationPublisher
+        XCTAssertNil(beforeSend?.openFrame(surfaceId: surfaceId, paneId: paneId))
+        XCTAssertEqual(beforeSend?.surfaces[surfaceId]?.trailingGap?.from, "1")
+        XCTAssertEqual(beforeSend?.surfaces[surfaceId]?.diagnostic?.code,
+                       "annotation_direct_stage_unavailable")
+        XCTAssertNil(beforeSend?.surfaces[surfaceId]?.unhealthy)
+        XCTAssertEqual(beforeSend?.publishableSurfaceIds(), [surfaceId])
+        await sendGate.release()
+        _ = try await receive(socket, matchingOp: "event.annotation_committed")
+        await runtime.awaitAnnotationCommit(surfaceId: surfaceId, paneId: paneId)
+
+        XCTAssertTrue(selectedEndpoints.isEmpty, "no guessed transport before verified selection")
+        let offline = await adapter.snapshot()
+        let sourceEpoch = try XCTUnwrap(offline.annotationPublisher?.sourceEpoch)
+        let sourceClient = try XCTUnwrap(offline.annotationPublisher?.clientId)
+        let selected = try XCTUnwrap(URL(string: "ws://127.0.0.1:29998/ws"))
+        runtime.reconcileVerifiedAnnotationRegistry(selected)
+        await runtime.awaitAnnotationPublisherIdle()
+        XCTAssertEqual(selectedEndpoints, [selected])
+        XCTAssertEqual(transport.kinds, ["source_gap"])
+
+        runtime.annotationDirectStageMaxBytesForTesting = nil
+        let nextStroke = annotationSourceTestStroke("after-capacity-recovery")
+        let nextFrameId = try await adapter.transactAnnotationPublisher(surfaceId: surfaceId) { outbox in
+            let frame = try outbox.beginFrame(surfaceId: surfaceId, paneId: paneId,
+                                              contextKey: "capacity-content-id", contentId: "capacity-content-id",
+                                              contentType: "html", revision: revision, url: nil,
+                                              scrollOffset: .init(x: 0, y: 0),
+                                              viewport: .init(width: 2, height: 2, scale: 1),
+                                              openedAt: 200, image: image)
+            try outbox.recordStroke(surfaceId: surfaceId, paneId: paneId, stroke: nextStroke)
+            return frame.frameId
+        }
+        XCTAssertNotEqual(nextFrameId, oldFrameId)
+        queueAnnotationTestStroke("after-capacity-recovery", on: pane)
+        runtime.setAnnotationMode(surfaceId: surfaceId, paneId: paneId,
+                                  enabled: true, fingerDrawEnabled: false)
+        await runtime.awaitAnnotationModeTransition(surfaceId: surfaceId, paneId: paneId)
+        runtime.setAnnotationMode(surfaceId: surfaceId, paneId: paneId,
+                                  enabled: false, fingerDrawEnabled: false)
+        _ = try await receive(socket, matchingOp: "event.drawing_flush")
+        _ = try await receive(socket, matchingOp: "event.annotation_committed")
+        await runtime.awaitAnnotationCommit(surfaceId: surfaceId, paneId: paneId)
+        await runtime.awaitAnnotationPublisherIdle()
+        XCTAssertEqual(transport.kinds, ["source_gap", "live_delta", "frame_commit"])
+        XCTAssertEqual(transport.frameIds, [nil, nextFrameId, nextFrameId])
+        let drained = await adapter.snapshot()
+        XCTAssertEqual(drained.annotationPublisher?.pendingSurfaceIds(), [])
+        XCTAssertEqual(drained.annotationPublisher?.sourceEpoch, sourceEpoch)
+        XCTAssertEqual(drained.annotationPublisher?.clientId, sourceClient)
+        runtime.reconcileVerifiedAnnotationRegistry(selected)
+        await runtime.awaitAnnotationPublisherIdle()
+        XCTAssertEqual(transport.kinds, ["source_gap", "live_delta", "frame_commit"], "reconnect must not replay accepted records")
+    }
+
     func testFailedPairCannotMutateOwnedRuntime() async throws {
         let suiteName = "SurfAceFailedPair-\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))

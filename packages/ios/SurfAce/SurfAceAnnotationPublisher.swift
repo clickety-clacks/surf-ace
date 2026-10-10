@@ -80,11 +80,11 @@ private final class SurfAceAnnotationURLSessionTransport: SurfAceAnnotationWireT
 
 extension SurfAceLocalNumericRegistrationWebSocket: SurfAceAnnotationWireTransport {}
 
-/// Drains only committed authority-state records to the explicitly configured registry.
+/// Drains committed authority-state records to a configured or verified selected registry.
 @MainActor
 final class SurfAceAnnotationPublisher {
     private let adapter: SurfAceLocklessRuntimeAdapter
-    private let endpoint: URL
+    private var endpoint: URL
     private let makeTransport: @MainActor (URL) -> any SurfAceAnnotationWireTransport
     private let onError: @MainActor (Error) -> Void
     private var transport: (any SurfAceAnnotationWireTransport)?
@@ -96,18 +96,32 @@ final class SurfAceAnnotationPublisher {
     private var lastSurfaceId: String?
 
     init(adapter: SurfAceLocklessRuntimeAdapter, endpoint: URL,
-         makeTransport: @escaping @MainActor (URL) -> any SurfAceAnnotationWireTransport = { url in
-             SurfAceRegistrationEndpoint.usesLocalNumericTransport(url)
-                 ? SurfAceLocalNumericRegistrationWebSocket(url: url)
-                 : SurfAceAnnotationURLSessionTransport(url: url)
-         }, onError: @escaping @MainActor (Error) -> Void) throws {
+         makeTransport: (@MainActor (URL) -> any SurfAceAnnotationWireTransport)? = nil,
+         onError: @escaping @MainActor (Error) -> Void) throws {
         guard ["ws", "wss"].contains(endpoint.scheme?.lowercased() ?? ""), endpoint.host != nil else {
             throw SurfAceAnnotationWireError.invalidResponse
         }
         self.adapter = adapter
         self.endpoint = endpoint
-        self.makeTransport = makeTransport
+        self.makeTransport = makeTransport ?? { url in
+            SurfAceRegistrationEndpoint.usesLocalNumericTransport(url)
+                ? SurfAceLocalNumericRegistrationWebSocket(url: url)
+                : SurfAceAnnotationURLSessionTransport(url: url)
+        }
         self.onError = onError
+    }
+
+    func reconcileEndpoint(_ endpoint: URL) throws {
+        guard ["ws", "wss"].contains(endpoint.scheme?.lowercased() ?? ""), endpoint.host != nil else {
+            throw SurfAceAnnotationWireError.invalidResponse
+        }
+        if self.endpoint != endpoint {
+            self.endpoint = endpoint
+            // Keep the same serialized drain and durable FIFO. Closing an old
+            // exchange may retry its stable record identity on the selected route.
+            disconnect()
+        }
+        notify()
     }
 
     func notify() {
@@ -126,6 +140,8 @@ final class SurfAceAnnotationPublisher {
             if self.wanted && self.retry == nil { self.notify() }
         }
     }
+
+    func awaitIdle() async { await active?.value }
 
     func stop() {
         stopped = true
