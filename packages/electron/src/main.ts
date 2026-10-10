@@ -1122,17 +1122,28 @@ function handleShortcutInput(
   event: ShortcutEvent,
   input: ShortcutInput,
   focusedPaneId?: number | null,
+  guestInput = false,
 ): void {
     if (input.type !== "keyDown") {
       return;
     }
-    if (focusedPaneId && focusedPaneId > 0) {
-      core.setActiveKeyboardPane(surfaceId, focusedPaneId);
+    // A guest without a current binding must never borrow another pane's focus.
+    if (guestInput && (!focusedPaneId || focusedPaneId <= 0)) {
+      return;
     }
     const state = rendererWindowState(surfaceId);
     const activePaneId = focusedPaneId && focusedPaneId > 0 ? focusedPaneId : core.activeKeyboardPaneId(surfaceId);
     const activePane = state.panes.find((pane) => pane.paneId === activePaneId);
     if (!activePaneId || !activePane) {
+      return;
+    }
+    if (focusedPaneId && focusedPaneId > 0) {
+      core.setActiveKeyboardPane(surfaceId, focusedPaneId);
+    }
+    // Content owns ordinary typing and terminal navigation. Keep explicit
+    // Command shortcuts, but reserve unmodified chrome shortcuts for chrome.
+    const contentOwnsInput = guestInput || activePane.externalNative || activePane.content.contentType === "terminal";
+    if (contentOwnsInput && !input.meta) {
       return;
     }
     const command = input.meta;
@@ -1214,7 +1225,7 @@ function wireWebContentsShortcuts(
   focusedPaneId: () => number | null,
 ): void {
   contents.on("before-input-event", (event, input) => {
-    handleShortcutInput(surfaceId, window, event, input, focusedPaneId());
+    handleShortcutInput(surfaceId, window, event, input, focusedPaneId(), contents !== window.webContents);
   });
 }
 
