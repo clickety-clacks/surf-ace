@@ -1721,18 +1721,15 @@ private struct SurfAcePaneControls: View {
                 .accessibilityIdentifier("surf-ace-pane-popout-\(pane.paneId)")
                 .accessibilityValue(isPoppedOut ? "Expanded" : "Tiled")
                 .accessibilityFocused($popoutControlFocused)
-                .task(id: isPoppedOut) {
-                guard isPoppedOut else { return }
-                // The toggle now lives in the toolbar. Request focus after the
-                // expanded/restored toolbar has been laid out, including when
-                // restoring a previously collapsed toolbar.
-                popoutControlFocused = false
-                popoutKeyboardFocused = false
-                await Task.yield()
-                guard !Task.isCancelled else { return }
-                popoutControlFocused = true
-                if !UIAccessibility.isVoiceOverRunning { popoutKeyboardFocused = true }
-            }
+                .onGeometryChange(for: CGRect.self) { proxy in
+                    proxy.frame(in: .global)
+                } action: { _ in
+                    // The layout callback runs after the relocated toolbar
+                    // button has its expanded frame in the focus system.
+                    guard isPoppedOut else { return }
+                    popoutControlFocused = true
+                    if !UIAccessibility.isVoiceOverRunning { popoutKeyboardFocused = true }
+                }
 
 
                 Button {

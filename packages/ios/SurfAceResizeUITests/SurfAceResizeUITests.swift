@@ -114,8 +114,9 @@ final class SurfAceResizeUITests: XCTestCase {
         let expanded = XCTNSPredicateExpectation(
             predicate: NSPredicate(format: "value == %@", "Expanded"), object: toggle)
         XCTAssertEqual(XCTWaiter.wait(for: [expanded], timeout: 5), .completed)
-        XCTAssertTrue(try voiceOver.currentSpeech().utterance.contains("Restore"),
-                      "the accessibility focus binding moves to the same Restore control")
+        let focusedSpeech = try voiceOver.currentSpeech().utterance
+        XCTAssertTrue(focusedSpeech.contains("Restore"),
+                      "expected same Restore control focus, actual speech: \(focusedSpeech)")
         for _ in 0..<8 {
             let utterance = try voiceOver.moveForward().utterance
             XCTAssertFalse(utterance.contains("Increment pane 1"))
@@ -145,7 +146,8 @@ final class SurfAceResizeUITests: XCTestCase {
         app.typeKey(" ", modifierFlags: [])
         let restored = XCTNSPredicateExpectation(
             predicate: NSPredicate(format: "value == %@", "Tiled"), object: toggle)
-        XCTAssertEqual(XCTWaiter.wait(for: [restored], timeout: 5), .completed)
+        XCTAssertEqual(XCTWaiter.wait(for: [restored], timeout: 5), .completed,
+                       "keyboard Restore readback: \(toggle.debugDescription)")
     }
 
     func testDragAcrossLocalWebContentChangesSplitWeight() {
