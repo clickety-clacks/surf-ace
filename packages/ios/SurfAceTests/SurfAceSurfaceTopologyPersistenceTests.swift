@@ -1506,7 +1506,7 @@ final class SurfAceHostZoomViewportTests: XCTestCase {
             composed.name = "frozen-taskboard-host-composition-\(multiplier)"; composed.lifetime = .keepAlways; add(composed)
             let screenshot = XCTAttachment(image: snapshot)
             screenshot.name = "frozen-taskboard-native-\(multiplier)"; screenshot.lifetime = .keepAlways; add(screenshot)
-            let image = try XCTUnwrap(snapshot.cgImage)
+            let image = try XCTUnwrap(nativeComposition.cgImage)
             var pixels = [UInt8](repeating: 0, count: image.width * image.height * 4)
             let painted = pixels.withUnsafeMutableBytes { bytes -> Bool in
                 guard let context = CGContext(data: bytes.baseAddress, width: image.width, height: image.height,
@@ -1561,6 +1561,16 @@ final class SurfAceHostZoomViewportTests: XCTestCase {
                 host.layoutIfNeeded()
                 // Uses the production navigation/scale/paint completion signal.
                 _ = await host.fetchSnapshotMetadata()
+                let tap = expectation(description: "scaled native tap \(pattern)-\(multiplier)")
+                host.onTapEvent = { kind, point, _ in
+                    XCTAssertEqual(kind, "tap")
+                    XCTAssertEqual(point.x, 40 * 0.85 * multiplier, accuracy: 0.01)
+                    XCTAssertEqual(point.y, 40 * 0.85 * multiplier, accuracy: 0.01)
+                    tap.fulfill()
+                }
+                _ = try await web.evaluateJavaScript("document.body.dispatchEvent(new MouseEvent('click', {bubbles:true,clientX:40,clientY:40}))")
+                await fulfillment(of: [tap], timeout: 5)
+                host.onTapEvent = nil
                 let metrics = try await web.evaluateJavaScript("""
                 (() => { const f=document.querySelector('iframe'), w=f.contentWindow, d=w.document;
                   const rect=e=>{const r=e.getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height}};
@@ -1588,7 +1598,8 @@ final class SurfAceHostZoomViewportTests: XCTestCase {
                 let measurements: [String: Any] = [
                     "pattern": pattern, "multiplier": multiplier, "pageZoom": web.pageZoom,
                     "hostBounds": NSCoder.string(for: host.bounds), "webFrame": NSCoder.string(for: web.frame),
-                    "webBounds": NSCoder.string(for: web.bounds), "safeAreaInsets": NSCoder.string(for: host.safeAreaInsets),
+                    "webBounds": NSCoder.string(for: web.bounds),
+                    "webTransform": String(describing: web.transform), "safeAreaInsets": NSCoder.string(for: host.safeAreaInsets),
                     "adjustedContentInsets": NSCoder.string(for: inset),
                     "webOpaque": web.isOpaque, "webBackground": String(describing: web.backgroundColor),
                     "snapshotPoints": [snapshot.size.width, snapshot.size.height],
@@ -1600,7 +1611,7 @@ final class SurfAceHostZoomViewportTests: XCTestCase {
                 let geometry = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
                 geometry.name = "native-geometry-\(label)"; geometry.lifetime = .keepAlways; add(geometry)
                 XCTAssertEqual(web.frame, host.bounds, "\(label) native edge pinning")
-                let image = try XCTUnwrap(snapshot.cgImage)
+                let image = try XCTUnwrap(nativeComposition.cgImage)
                 var pixels = [UInt8](repeating: 0, count: image.width * image.height * 4)
                 let colorSpace = CGColorSpaceCreateDeviceRGB()
                 let painted = pixels.withUnsafeMutableBytes { bytes -> Bool in
