@@ -1401,7 +1401,7 @@ final class SurfAceHostZoomViewportTests: XCTestCase {
                 let inner = "<html style='height:100%'><body style='margin:0;height:100%'><main id='fill' style='\(fill);background:rgb(0,200,0)'><span id='font' style='font-size:20px'>Scale</span></main></body></html>"
                 let encoded = inner.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "\"", with: "&quot;")
                 let html = "<html style='height:100%;background:#101720'><head><meta name='viewport' content='width=device-width,initial-scale=1'></head><body style='margin:0;height:100%;overflow:hidden'><iframe style='display:block;border:0;width:100%;height:100%' srcdoc=\"\(encoded)\"></iframe></body></html>"
-                host.setContentScale(multiplier)
+                host.setContentScale(CGFloat(multiplier))
                 host.render(entry: .from(frame: SurfAceFrame(
                     contentId: "zoom-\(pattern)-\(multiplier)", revision: 1, contentType: .html,
                     payload: .html(html: html, baseURL: nil), reloadSource: nil,
@@ -1434,7 +1434,7 @@ final class SurfAceHostZoomViewportTests: XCTestCase {
                     "webBounds": NSStringFromCGRect(web.bounds), "safeAreaInsets": NSStringFromUIEdgeInsets(host.safeAreaInsets),
                     "adjustedContentInsets": NSStringFromUIEdgeInsets(inset),
                     "webOpaque": web.isOpaque, "webBackground": String(describing: web.backgroundColor),
-                    "snapshotPoints": [snapshot.size.width, snapshot.size.height], "dom": metrics
+                    "snapshotPoints": [snapshot.size.width, snapshot.size.height], "dom": try XCTUnwrap(metrics)
                 ]
                 let data = try JSONSerialization.data(withJSONObject: measurements, options: [.sortedKeys, .prettyPrinted])
                 let geometry = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
@@ -1447,7 +1447,7 @@ final class SurfAceHostZoomViewportTests: XCTestCase {
                     guard let context = CGContext(data: bytes.baseAddress, width: image.width, height: image.height,
                         bitsPerComponent: 8, bytesPerRow: image.width * 4, space: colorSpace,
                         bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue) else { return false }
-                    context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height)); return true
+                    context.draw(image, in: CGRect(x: 0, y: 0, width: CGFloat(image.width), height: CGFloat(image.height))); return true
                 }
                 XCTAssertTrue(painted)
                 // Both vertical orientations are sampled; no white/dark margin can pass.
