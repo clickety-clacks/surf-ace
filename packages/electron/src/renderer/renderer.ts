@@ -1467,6 +1467,20 @@ let panePresentationAuthorityRevision = 0;
 let panePresentationAuthorityClearRevision = 0;
 let acknowledgedPopOutBounds: { x: number; y: number; width: number; height: number } | null = null;
 let panePresentationResizePending = false;
+function reacknowledgePanePopOutViewport(): void {
+  if (poppedOutPaneId === null) return;
+  panePresentationResizePending = true;
+  panePresentationIntent++; // Any preceding viewport request is now obsolete.
+  applyPanePopOut();
+  // Browser resize and authoritative geometry can arrive in either order.
+  // Keep the previous acknowledged projection shielded until both agree, then
+  // give this viewport a request that can actually settle its pending owner.
+  if (!latestState || window.innerWidth !== latestState.viewport.width ||
+      window.innerHeight !== latestState.viewport.height) return;
+  const selected = paneViews.get(poppedOutPaneId);
+  if (selected) void requestPanePopOut(selected, selected.paneId);
+}
+
 async function togglePanePopOut(view: PaneView): Promise<void> {
   await requestPanePopOut(view, panePresentationAuthorityBlocked || poppedOutPaneId === view.paneId ? null : view.paneId);
 }
@@ -3463,12 +3477,7 @@ function patchSameLayoutWindow(previousState: RendererWindowState, state: Render
   latestChromeKey = nextChromeKey;
   if (viewportChanged || layoutChanged || previousState.geometryRevision !== state.geometryRevision) {
     positionPaneHosts();
-    if (poppedOutPaneId !== null) {
-      const selected = paneViews.get(poppedOutPaneId);
-      panePresentationResizePending = true;
-      applyPanePopOut();
-      if (selected) void requestPanePopOut(selected, selected.paneId);
-    }
+    reacknowledgePanePopOutViewport();
     setAllPaneChromeMetrics();
     refreshDynamicPaneFrames();
     reportAllPaneSnapshots();
@@ -3681,11 +3690,7 @@ async function init(): Promise<void> {
   });
 
   window.addEventListener("resize", () => {
-    if (poppedOutPaneId !== null) {
-      panePresentationResizePending = true;
-      panePresentationIntent++; // Retire any ack for the preceding window size.
-      applyPanePopOut();
-    }
+    reacknowledgePanePopOutViewport();
 
     cancelResizeGesture();
     positionPaneHosts();

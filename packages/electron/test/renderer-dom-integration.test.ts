@@ -84,7 +84,12 @@ test("renderer DOM integrates authoritative connection states and live scale con
     getBootstrap: async () => ({ state: state("disconnected"), surfaceId: "surface-1" }),
     onPanePresentationOwnership(listener: (notice: unknown) => void) { ownershipListener = listener; },
     onKeyboardIntent(listener: (intent: unknown) => void) { keyboardListener = listener; },
-    onState(listener: (next: unknown) => void) { stateListener = listener; },
+    onState(listener: (next: unknown) => void) {
+      stateListener = (next: any) => {
+        Object.assign(window, { innerWidth: next.viewport.width, innerHeight: next.viewport.height });
+        listener(next);
+      };
+    },
     reportDiagnostics() {},
     reportOverlayRegions() {},
     reportRendererDiagnostic() {},
@@ -98,6 +103,7 @@ test("renderer DOM integrates authoritative connection states and live scale con
   Object.assign(window, {
     cancelAnimationFrame() {},
     location: { search: "" },
+    innerWidth: 1200, innerHeight: 800,
     getComputedStyle: () => ({
       display: "block",
       fontFamily: "Test",
@@ -698,7 +704,11 @@ test("renderer DOM integrates authoritative connection states and live scale con
     const oldWidth = selected.style.width;
     let acknowledgeResize!: (response: { ok: boolean }) => void;
     presentationResponse = () => new Promise((resolve) => { acknowledgeResize = resolve; });
+    Object.assign(window, { innerWidth: 1000, innerHeight: 700 });
+    const beforeEarlyResize = presentations.length;
     window.dispatchEvent(new window.Event("resize"));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(presentations.length, beforeEarlyResize, "early browser resize cannot request stale authority bounds");
     assert.equal(selected.querySelector(".pane-content")!.hasAttribute("inert"), true);
     assert.equal(toggle.hasAttribute("inert"), false, "Restore remains available during resize");
     const resized = { ...next, viewport: { ...next.viewport, width: 1000, height: 700 },
@@ -713,14 +723,52 @@ test("renderer DOM integrates authoritative connection states and live scale con
     assert.equal(selected.querySelector(".pane-content")!.hasAttribute("inert"), false);
     assert.equal(presentations.at(-1)!.paneId, 2, "resize reselects rather than restoring");
     assert.deepEqual(slots.map((slot) => slot.style.flexGrow), slotWeights);
-    // A subsequent resize ack arriving after Restore cannot expand again.
+    // Chromium may deliver resize after authority state and its reack settle.
+    // The actual listener must acquire a fresh owner rather than leave pending
+    // with no request capable of settling it.
+    const beforeLateResize = presentations.length;
+    presentationResponse = null;
     window.dispatchEvent(new window.Event("resize"));
-    stateListener!({ ...resized, viewport: { ...resized.viewport, width: 900 }, geometryRevision: resized.geometryRevision + 1 });
-    const obsoleteAck = acknowledgeResize;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(presentations.length, beforeLateResize + 1,
+      "late resize owns a replacement acknowledgement");
+    assert.equal(selected.classList.contains("pane-presentation-pending"), false,
+      "late resize settles through its own acknowledgement");
+    assert.equal(selected.querySelector("webview"), liveHost);
+    assert.deepEqual(slots.map((slot) => slot.style.flexGrow), slotWeights);
+    // State-first while its ack is still held: the later resize acquires a
+    // replacement owner. Settling the superseded ack cannot unshield it.
+    const heldResizeAcks: Array<(response: { ok: boolean; presentationBlocked?: boolean }) => void> = [];
+    presentationResponse = () => new Promise((resolve) => { heldResizeAcks.push(resolve); });
+    stateListener!({ ...resized, geometryRevision: resized.geometryRevision + 1 });
+    window.dispatchEvent(new window.Event("resize"));
+    assert.equal(heldResizeAcks.length, 2);
+    heldResizeAcks[0]!({ ok: true });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(selected.classList.contains("pane-presentation-pending"), true,
+      "superseded geometry ack cannot settle the browser resize owner");
+    heldResizeAcks[1]!({ ok: false, presentationBlocked: true });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(selected.querySelector(".pane-content")!.hasAttribute("inert"), true,
+      "failed reack retains native uncertainty independently of pending count");
     presentationResponse = null;
     toggle.click();
     await new Promise<void>((resolve) => setImmediate(resolve));
-    obsoleteAck({ ok: true });
+    assert.equal(selected.classList.contains("pane-popped-out"), false);
+    assert.equal(selected.classList.contains("pane-presentation-pending"), false,
+      "acknowledged Restore is the recovery owner");
+    assert.equal(selected.querySelector("webview"), liveHost);
+    toggle.click();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const obsoleteResizeAcks: Array<(response: { ok: boolean }) => void> = [];
+    presentationResponse = () => new Promise((resolve) => { obsoleteResizeAcks.push(resolve); });
+    // A subsequent resize ack arriving after Restore cannot expand again.
+    window.dispatchEvent(new window.Event("resize"));
+    stateListener!({ ...resized, viewport: { ...resized.viewport, width: 900 }, geometryRevision: resized.geometryRevision + 1 });
+    presentationResponse = null;
+    toggle.click();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    for (const obsoleteAck of obsoleteResizeAcks) obsoleteAck({ ok: true });
     await new Promise<void>((resolve) => setImmediate(resolve));
     assert.equal(selected.classList.contains("pane-popped-out"), false);
     assert.equal(selected.style.width, `${slots[1]!.getBoundingClientRect().width}px`, "Restore reads authoritative tiled slot geometry");
