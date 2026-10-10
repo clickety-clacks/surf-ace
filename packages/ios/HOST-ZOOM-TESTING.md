@@ -19,3 +19,11 @@ The packet-sized native comparison uses a 1024×820-point owned window and four 
 The native layout gives HTML/browser content an inverse-sized logical WK viewport and scales its native presentation back into the pane. Authored document CSS remains intact. Public scroll-edge effects are hidden inside this pane-owned viewport so top-edge content remains legible. Native input/selection geometry is converted to pane coordinates; scroll metadata retains its logical document units. The browser regression uses only an identity-checked private loopback listener, blocks other origins, rotates/resizes the same mounted WK instance and checks selected-text coordinates plus production composite snapshot dimensions.
 
 Passing isolated fixtures establish source behavior, not physical Aleph/live g24 acceptance. Preserve failed before-images and host/pixel evidence; code review, integration and any device delivery remain separate gates.
+
+The review B1 regression scrolls a large browser document on both axes before
+creating a DOM Range and dispatching a DOM MouseEvent through the real bridge.
+Selection callback, fetched snapshot and scroll metadata, plus forwarded tap
+are checked against visible client geometry at nonunit presentation scale.
+Logical document rectangle/scroll fields remain unchanged. Private bridge view
+coordinates account for visualViewport offset and scale in the same JS turn;
+physical pinch/native touch and xterm selection remain untested.

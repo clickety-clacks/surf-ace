@@ -1672,8 +1672,8 @@ final class SurfAceHostZoomViewportTests: XCTestCase {
     func testBrowserResizeRetainsMountedViewSelectionAndSnapshotCoordinates() async throws {
         let html = """
         <html><head><meta name='viewport' content='width=device-width,initial-scale=1'></head>
-        <body style='margin:0;background:rgb(0,200,0)'>
-        <span id='selected' style='position:absolute;left:40px;top:60px;font-size:20px'>Selected text</span>
+        <body style='margin:0;width:3000px;height:3000px;background:rgb(0,200,0)'>
+        <span id='selected' style='position:absolute;left:100px;top:260px;font-size:20px'>Selected text</span>
         </body></html>
         """
         let identity = UUID().uuidString
@@ -1717,14 +1717,39 @@ final class SurfAceHostZoomViewportTests: XCTestCase {
             window.frame.size = size
             host.frame = CGRect(origin: .zero, size: size)
             host.setNeedsLayout(); host.layoutIfNeeded()
+            let selectionEvent = expectation(description: "scrolled selection callback")
+            var callbackRect: CGRect?
+            host.onSelectionChanged = { text, rect in
+                guard callbackRect == nil, text == "Selected text", let rect else { return }
+                callbackRect = rect; selectionEvent.fulfill()
+            }
+            let tapEvent = expectation(description: "scrolled DOM tap bridge (not native touch)")
+            var tapPoint: SurfAcePoint?
+            host.onTapEvent = { _, point, _ in
+                guard tapPoint == nil else { return }
+                tapPoint = point; tapEvent.fulfill()
+            }
             let dimensions = try await web.callAsyncJavaScript("""
+            scrollTo(60,200);
             await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
             const node=document.getElementById('selected'), range=document.createRange();
             range.selectNodeContents(node); const selection=getSelection(); selection.removeAllRanges(); selection.addRange(range);
             const r=range.getBoundingClientRect();
-            return {width:innerWidth,height:innerHeight,x:r.x,y:r.y,rectWidth:r.width,rectHeight:r.height};
+            node.dispatchEvent(new MouseEvent('click',{bubbles:true,clientX:r.x,clientY:r.y}));
+            return {width:innerWidth,height:innerHeight,x:r.x,y:r.y,rectWidth:r.width,rectHeight:r.height,
+                    scrollX:scrollX,scrollY:scrollY,visualScale:visualViewport.scale,
+                    visualX:visualViewport.offsetLeft,visualY:visualViewport.offsetTop};
             """, arguments: [:], in: nil, contentWorld: .page)
             let dom = try XCTUnwrap(dimensions as? [String: Double])
+            await fulfillment(of: [selectionEvent, tapEvent], timeout: 5)
+            XCTAssertEqual(dom["scrollX"], 60); XCTAssertEqual(dom["scrollY"], 200)
+            XCTAssertEqual(dom["visualScale"], 1)
+            let clientX = try XCTUnwrap(dom["x"]), clientY = try XCTUnwrap(dom["y"])
+            XCTAssertEqual(try XCTUnwrap(callbackRect).minX, clientX * 1.275, accuracy: 0.01)
+            XCTAssertEqual(try XCTUnwrap(callbackRect).minY, clientY * 1.275, accuracy: 0.01)
+            XCTAssertEqual(try XCTUnwrap(tapPoint).x, clientX * 1.275, accuracy: 0.01)
+            XCTAssertEqual(try XCTUnwrap(tapPoint).y, clientY * 1.275, accuracy: 0.01)
+            host.onSelectionChanged = nil; host.onTapEvent = nil
             XCTAssertEqual(ObjectIdentifier(web), ownedWeb)
             XCTAssertEqual(web.url, origin.appendingPathComponent("page"))
             XCTAssertEqual(try XCTUnwrap(dom["width"]) * 1.275, Double(size.width), accuracy: 1.3)
@@ -1733,6 +1758,24 @@ final class SurfAceHostZoomViewportTests: XCTestCase {
             let snapshot = try XCTUnwrap(captured)
             let selected = try XCTUnwrap(snapshot.selection?.boundingRect)
             XCTAssertEqual(snapshot.selection?.text, "Selected text")
+            XCTAssertEqual(snapshot.viewport.scrollOffset.x, 60)
+            XCTAssertEqual(snapshot.viewport.scrollOffset.y, 200)
+            let scrollCapture = await host.fetchScrollMetadataForTesting()
+            let scroll = try XCTUnwrap(scrollCapture)
+            XCTAssertEqual(scroll.viewport.scrollOffset, snapshot.viewport.scrollOffset)
+            XCTAssertEqual(scroll.selection?.boundingRect, snapshot.selection?.boundingRect)
+            XCTAssertEqual(scroll.selection?.text, "Selected text")
+            // The document-coordinate bridge fields remain logical; only its
+            // private presentation fields cross into native view conversion.
+            let legacy = try await web.callAsyncJavaScript("""
+            const payload=window.__surfAceSnapshotPayload();
+            return {x:payload.selection.boundingRect.x,y:payload.selection.boundingRect.y,
+                    scrollX:payload.viewport.scrollOffset.x,scrollY:payload.viewport.scrollOffset.y};
+            """, arguments: [:], in: nil, contentWorld: .page)
+            let document = try XCTUnwrap(legacy as? [String: Double])
+            XCTAssertEqual(document["x"], clientX + 60)
+            XCTAssertEqual(document["y"], clientY + 200)
+            XCTAssertEqual(document["scrollX"], 60); XCTAssertEqual(document["scrollY"], 200)
             XCTAssertEqual(selected.x, try XCTUnwrap(dom["x"]) * 1.275, accuracy: 0.01)
             XCTAssertEqual(selected.y, try XCTUnwrap(dom["y"]) * 1.275, accuracy: 0.01)
             XCTAssertEqual(selected.width, try XCTUnwrap(dom["rectWidth"]) * 1.275, accuracy: 0.01)

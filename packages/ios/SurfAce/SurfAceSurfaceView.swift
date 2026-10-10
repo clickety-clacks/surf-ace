@@ -2903,6 +2903,11 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
         )
     }
 
+    func fetchScrollMetadataForTesting() async -> SurfAceSurfaceSnapshot? {
+        guard let payload = await evaluateScrollPayload() else { return nil }
+        return SurfAceSurfaceSnapshot(viewport: payload.viewport, selection: payload.selection, imageBase64: nil)
+    }
+
     var hasPendingWebContentRenderForTesting: Bool {
         pendingHTMLRenderActive
     }
@@ -2985,7 +2990,7 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
         switch message.name {
         case selectionMessageName:
             if let text = body["text"] as? String,
-               let rect = parseRect(body["boundingRect"] as? [String: Any]) {
+               let rect = parseRect(body["viewBoundingRect"] as? [String: Any]) {
                 let presentedRect = webView.convert(rect, to: self)
                 let selection = SurfAceSelection.text(text, boundingRect: presentedRect.surfAceRect)
                 lastSelection = selection
@@ -2998,7 +3003,7 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
             lastVisibleText = visibleText
             onScrollSettled?(viewport, visibleText)
         case tapMessageName:
-            guard let position = parsePoint(body["position"] as? [String: Any]) else { return }
+            guard let position = parsePoint(body["viewPosition"] as? [String: Any]) else { return }
             let nearestContent = (body["nearestContent"] as? String) ?? ""
             let kind = (body["kind"] as? String) == "long_press" ? "long_press" : "tap"
             let presentedPosition = webView.convert(position, to: self)
@@ -3469,7 +3474,7 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
         var selection: SurfAceSelection?
         if let selectionObject = object["selection"] as? [String: Any],
            let text = selectionObject["text"] as? String,
-           let rect = parseRect(selectionObject["boundingRect"] as? [String: Any]) {
+           let rect = parseRect(selectionObject["viewBoundingRect"] as? [String: Any]) {
             selection = .text(text, boundingRect: webView.convert(rect, to: self).surfAceRect)
         }
 
@@ -3487,7 +3492,7 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
         var selection: SurfAceSelection?
         if let selectionObject = object["selection"] as? [String: Any],
            let text = selectionObject["text"] as? String,
-           let rect = parseRect(selectionObject["boundingRect"] as? [String: Any]) {
+           let rect = parseRect(selectionObject["viewBoundingRect"] as? [String: Any]) {
             selection = .text(text, boundingRect: webView.convert(rect, to: self).surfAceRect)
         }
 
@@ -3908,6 +3913,16 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
             return stripCssNoise((document.body && document.body.innerText) || document.documentElement.innerText || '').slice(0, 4096);
           }
 
+          // DOM client coordinates belong to the layout viewport. Keep the existing
+          // document fields for logical metadata, and capture presentation coordinates
+          // in the same JS turn so scrolling cannot race a later native conversion.
+          function viewPoint(x, y) {
+            const viewport = window.visualViewport;
+            const scale = viewport ? viewport.scale : 1;
+            return { x: (x - (viewport ? viewport.offsetLeft : 0)) * scale,
+                     y: (y - (viewport ? viewport.offsetTop : 0)) * scale };
+          }
+
           function currentSelection() {
             const selection = window.getSelection();
             if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return null;
@@ -3915,8 +3930,12 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
             if (!text) return null;
             const range = selection.getRangeAt(0);
             const rect = range.getBoundingClientRect();
+            const point = viewPoint(rect.x, rect.y);
+            const scale = window.visualViewport ? window.visualViewport.scale : 1;
             return {
               kind: 'text',
+              viewBoundingRect: { x: point.x, y: point.y,
+                                  width: rect.width * scale, height: rect.height * scale },
               text: text,
               boundingRect: {
                 x: rect.x + window.scrollX,
@@ -3966,6 +3985,7 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
             if (!event) return;
             const payload = {
               kind: kind,
+              viewPosition: viewPoint(event.clientX || 0, event.clientY || 0),
               position: { x: (event.clientX || 0) + (window.scrollX || 0), y: (event.clientY || 0) + (window.scrollY || 0) },
               nearestContent: cleanText(event.target && event.target.innerText ? event.target.innerText : '').slice(0, 4096)
             };
