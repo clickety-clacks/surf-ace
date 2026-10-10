@@ -421,6 +421,23 @@ private final class AnnotationWireProbeTransport: SurfAceAnnotationWireTransport
 }
 
 @MainActor
+private final class AnnotationSuspendedHelloTransport: SurfAceAnnotationWireTransport {
+    var entered: CheckedContinuation<Void, Never>?
+    var response: CheckedContinuation<Void, Never>?
+    func exchange(_ data: Data) async throws -> Data {
+        entered?.resume()
+        entered = nil
+        await withCheckedContinuation { response = $0 }
+        let request = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        return try JSONSerialization.data(withJSONObject: [
+            "v": 1, "type": "response", "op": request["op"]!, "id": request["id"]!,
+            "ok": true, "payload": ["registryId": "old-registry"]
+        ])
+    }
+    func close() {}
+}
+
+@MainActor
 private final class AnnotationRejectOneSurfaceTransport: SurfAceAnnotationWireTransport {
     let rejectedSurfaceId: String
     let rejectedCode: String
@@ -627,6 +644,71 @@ extension SurfAceAnnotationOutboxTests {
         XCTAssertEqual(probe.records, [expected.canonical, expected.canonical])
         let saved = try XCTUnwrap(store.load())
         XCTAssertEqual(saved.annotationPublisher?.surfaces[surfaceId]?.acceptedCursor?.sequence, "1")
+        XCTAssertEqual(saved.annotationPublisher?.pendingSurfaceIds(), [])
+        XCTAssertEqual(saved.annotationPublisher?.clientId, "client-1")
+        XCTAssertEqual(saved.annotationPublisher?.sourceEpoch, sourceEpoch)
+    }
+
+    func testSuspendedOldHelloCannotAuthorizeReplacementRoute() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SurfAceAnnotationTransport-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = SurfAceLocklessGenerationStore(stateURL: directory.appendingPathComponent("authority-v1.json"))
+        var limits = SurfAceLocklessCapacityLimits.production
+        limits.maxAnnotationPublisherStateBytesPerSurface = Int64(SurfAceAnnotationOutbox.maximumBytes)
+        limits.maxAnnotationPublisherRecordsPerSurface = Int64(SurfAceAnnotationOutbox.maximumRecords)
+        limits.maxRecoverableSurfaceBytes = 704 * 1_024 * 1_024
+        var state = try SurfAceLocklessAuthorityState.empty(limits: limits)
+        state.annotationPublisher = try SurfAceAnnotationOutbox(clientId: "client-1", sourceEpoch: sourceEpoch)
+        let opened = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
+            state: &state, expectedSurfaceSetRevision: state.surfaceSetRevision)
+        let surfaceId = opened.surface.surfaceId
+        _ = try state.annotationPublisher?.append(surfaceId: surfaceId, record: record())
+        let expected = try XCTUnwrap(state.annotationPublisher?.head(surfaceId: surfaceId))
+        try store.save(state)
+        let adapter = try SurfAceLocklessRuntimeAdapter(store: store, annotationClientId: "client-1")
+        let probe = AnnotationWireProbe()
+        let suspended = AnnotationSuspendedHelloTransport()
+        let old = try XCTUnwrap(URL(string: "ws://127.0.0.1:29998/ws"))
+        let selected = try XCTUnwrap(URL(string: "ws://127.0.0.1:29999/ws"))
+        var endpoints: [URL] = []
+        let publisher = try SurfAceAnnotationPublisher(
+            adapter: adapter, endpoint: old,
+            makeTransport: { endpoint in
+                endpoints.append(endpoint)
+                return endpoint == old ? suspended : AnnotationWireProbeTransport(probe)
+            }, onError: { _ in }
+        )
+        var firstDrain: Task<Void, Error>!
+        await withCheckedContinuation { entered in
+            suspended.entered = entered
+            firstDrain = Task { try await publisher.drain() }
+        }
+        try publisher.reconcileEndpoint(selected)
+        suspended.response?.resume()
+        suspended.response = nil
+        do {
+            try await firstDrain.value
+            XCTFail("an old hello must not establish readiness on a replacement route")
+        } catch {
+            XCTAssertEqual((error as? URLError)?.code, .cancelled)
+        }
+        // Reconcile's serialized task may lose its first ingest response. Stop
+        // its scheduled retry, then inspect the durable head before retrying.
+        await publisher.awaitIdle()
+        publisher.stop()
+        var pending = try XCTUnwrap(store.load())
+        XCTAssertEqual(try pending.annotationPublisher?.head(surfaceId: surfaceId)?.canonical, expected.canonical)
+        let retryPublisher = try SurfAceAnnotationPublisher(
+            adapter: adapter, endpoint: selected,
+            makeTransport: { endpoint in endpoints.append(endpoint); return AnnotationWireProbeTransport(probe) },
+            onError: { _ in }
+        )
+        try await retryPublisher.drain()
+        retryPublisher.stop()
+        XCTAssertEqual(endpoints, [old, selected, selected])
+        XCTAssertEqual(probe.records, [expected.canonical, expected.canonical])
+        let saved = try XCTUnwrap(store.load())
         XCTAssertEqual(saved.annotationPublisher?.pendingSurfaceIds(), [])
         XCTAssertEqual(saved.annotationPublisher?.clientId, "client-1")
         XCTAssertEqual(saved.annotationPublisher?.sourceEpoch, sourceEpoch)
