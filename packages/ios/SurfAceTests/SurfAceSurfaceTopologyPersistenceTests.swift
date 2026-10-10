@@ -1466,10 +1466,10 @@ final class SurfAceHostZoomViewportTests: XCTestCase {
         for multiplier in [1.0, 0.5, 1.5, 2.0] {
             host.setContentScale(CGFloat(multiplier))
             let metrics = try await web.callAsyncJavaScript("""
-            if (Number(getComputedStyle(document.documentElement).zoom) !== scale) await new Promise((resolve,reject)=>{
-              const observer=new MutationObserver(()=>{if(Number(getComputedStyle(document.documentElement).zoom)===scale){observer.disconnect();clearTimeout(timer);resolve();}});
+            if (Number(document.body.style.getPropertyValue('--surf-ace-content-scale')) !== scale) await new Promise((resolve,reject)=>{
+              const observer=new MutationObserver(()=>{if(Number(document.body.style.getPropertyValue('--surf-ace-content-scale'))===scale){observer.disconnect();clearTimeout(timer);resolve();}});
               const timer=setTimeout(()=>{observer.disconnect();reject(Error('content scale completion timed out'));},10000);
-              observer.observe(document.documentElement,{attributes:true,attributeFilter:['style']});
+              observer.observe(document.body,{attributes:true,attributeFilter:['style']});
             });
             await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
             const f=document.querySelector('iframe'), d=f.contentDocument;
@@ -1501,6 +1501,24 @@ final class SurfAceHostZoomViewportTests: XCTestCase {
             }
             let screenshot = XCTAttachment(image: snapshot)
             screenshot.name = "frozen-taskboard-native-\(multiplier)"; screenshot.lifetime = .keepAlways; add(screenshot)
+            let image = try XCTUnwrap(snapshot.cgImage)
+            var pixels = [UInt8](repeating: 0, count: image.width * image.height * 4)
+            let painted = pixels.withUnsafeMutableBytes { bytes -> Bool in
+                guard let context = CGContext(data: bytes.baseAddress, width: image.width, height: image.height,
+                    bitsPerComponent: 8, bytesPerRow: image.width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue) else { return false }
+                context.draw(image, in: CGRect(x: 0, y: 0, width: CGFloat(image.width), height: CGFloat(image.height)))
+                return true
+            }
+            XCTAssertTrue(painted)
+            for x in [image.width / 2, image.width - 4] {
+                for y in [4, image.height - 4] {
+                    let i = (y * image.width + x) * 4
+                    XCTAssertGreaterThan(pixels[i + 3], 240, "Frozen board must paint its native viewport edge")
+                    XCTAssertFalse(pixels[i] > 245 && pixels[i + 1] > 245 && pixels[i + 2] > 245,
+                                   "Frozen board must not leave an unpainted white strip")
+                }
+            }
             let width = try XCTUnwrap(dimensions["innerWidth"] as? Double)
             let height = try XCTUnwrap(dimensions["innerHeight"] as? Double)
             XCTAssertEqual(try XCTUnwrap(dimensions["scrollerWidth"] as? Double), width, accuracy: 1)

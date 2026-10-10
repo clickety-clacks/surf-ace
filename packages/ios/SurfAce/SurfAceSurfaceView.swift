@@ -3028,6 +3028,9 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
         webView.isOpaque = false
         webView.backgroundColor = .clear
         webView.scrollView.backgroundColor = .clear
+        // The pane has already resolved its content viewport; safe-area insets
+        // must not subtract a second band from the edge-pinned WebKit view.
+        webView.scrollView.contentInsetAdjustmentBehavior = .never
         #if !os(visionOS)
         webView.scrollView.keyboardDismissMode = .onDrag
         #endif
@@ -3244,10 +3247,18 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
             1
         }
         let effectiveScale = (baseScale * contentScale * 1000).rounded() / 1000
+        let scalesWholePage: Bool = switch currentEntry?.payload {
+        case .html, .browserURL: true
+        default: false
+        }
+        // Native page zoom scales nested browsing contexts as well as the main
+        // document, while preserving the content's authored CSS zoom rules.
+        webView.pageZoom = scalesWholePage ? effectiveScale : 1
+        let documentZoom = scalesWholePage ? "" : "document.documentElement.style.zoom = scale === 1 ? \"\" : String(scale);"
         let script = """
         (() => {
           const scale = \(effectiveScale);
-          document.documentElement.style.zoom = scale === 1 ? "" : String(scale);
+          \(documentZoom)
           document.body?.style.setProperty("--surf-ace-content-scale", String(scale));
         })();
         """
