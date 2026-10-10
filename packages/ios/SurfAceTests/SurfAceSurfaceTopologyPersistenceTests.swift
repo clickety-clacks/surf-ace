@@ -1,6 +1,7 @@
 import XCTest
 import SwiftUI
 import WebKit
+import CryptoKit
 @testable import SurfAce
 
 final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
@@ -1383,6 +1384,112 @@ final class SurfAcePaneGeometrySnapshotTests: XCTestCase {
 
 @MainActor
 final class SurfAceHostZoomViewportTests: XCTestCase {
+    // Frozen operational inputs are staged only into the isolated test bundle,
+    // not committed to the source repository or fetched from a live origin.
+    private func frozenInput(_ name: String, sha256: String) throws -> Data {
+        guard let url = Bundle(for: Self.self).url(forResource: name, withExtension: nil) else {
+            throw XCTSkip("Hash-bound offline taskboard inputs were not staged")
+        }
+        let data = try Data(contentsOf: url)
+        let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        XCTAssertEqual(digest, sha256, "Frozen fixture integrity")
+        guard digest == sha256 else { throw NSError(domain: "ZoomFixtureIntegrity", code: 1) }
+        return data
+    }
+
+    func testFrozenTaskboardKeepsFullNativeViewportAtSupportedFontScales() async throws {
+        let index = try frozenInput("host-zoom-index.html", sha256: "731ce9b945ee5594e162576017a2d01f31b33878fb803676e45f80fc381af809")
+        let board = try frozenInput("host-zoom-board.json", sha256: "371fa9d3c0d49c00f092ed6a8b799d8b5a8e6a5dc928d2eb615ee43293ddeb2f")
+        let wrapperData = try frozenInput("host-zoom-wrapper.json", sha256: "498c1ea9dde6f9b84e65b7c60a805e300cacef210325b770a99959ea80413537")
+        let input = try XCTUnwrap(JSONSerialization.jsonObject(with: wrapperData) as? [String: Any])
+        let content = try XCTUnwrap(input["content"] as? [String: Any])
+        let originalWrapper = try XCTUnwrap(content["html"] as? String)
+        let marker = UUID().uuidString
+        let server = SurfAceHTTPServer()
+        let port = try await server.startIsolatedLoopbackForTesting(
+            httpHandler: { request in
+                switch request.path {
+                case "/identity": return HTTPServerResponse(statusCode: 200, body: Data(marker.utf8))
+                case "/index.html": return HTTPServerResponse(statusCode: 200, headers: ["Content-Type": "text/html"], body: index)
+                case "/board.json": return HTTPServerResponse(statusCode: 200, headers: ["Content-Type": "application/json"], body: board)
+                default: return HTTPServerResponse(statusCode: 404)
+                }
+            }, webSocketHandler: { socket in await socket.close() }
+        )
+        // Only this OS-assigned, no-reuse loopback listener belongs to the fixture.
+        defer { Task { await server.stop() } }
+        XCTAssertNotEqual(port, SurfAceHTTPServer.fixedPort)
+        let baseURL = try XCTUnwrap(URL(string: "http://127.0.0.1:\(port)/"))
+        let (identity, _) = try await URLSession.shared.data(from: baseURL.appendingPathComponent("identity"))
+        XCTAssertEqual(String(decoding: identity, as: UTF8.self), marker)
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previous = scene.windows.first(where: \.isKeyWindow)
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 600, height: 820)
+        let controller = UIViewController()
+        let host = SurfAceSurfaceHostView(frame: window.bounds)
+        controller.view = host; window.rootViewController = controller; window.makeKeyAndVisible()
+        defer { window.isHidden = true; window.rootViewController = nil; previous?.makeKey() }
+        let web = try XCTUnwrap(host.subviews.compactMap { $0 as? WKWebView }.first)
+        let rules = """
+        [{"trigger":{"url-filter":"^https?://"},"action":{"type":"block"}},
+         {"trigger":{"url-filter":"^http://127[.]0[.]0[.]1:\(port)/"},"action":{"type":"ignore-previous-rules"}}]
+        """
+        let ruleList = try await WKContentRuleListStore.default().compileContentRuleList(
+            forIdentifier: "offline-zoom-\(marker)", encodedContentRuleList: rules)
+        web.configuration.userContentController.add(try XCTUnwrap(ruleList))
+        defer { web.configuration.userContentController.removeAllContentRuleLists() }
+        // Preserve the frozen wrapper's layout; substitute only its URL origin.
+        let pattern = try NSRegularExpression(pattern: "src=\"[^\"]*\"")
+        let wrapper = pattern.stringByReplacingMatches(in: originalWrapper,
+            range: NSRange(originalWrapper.startIndex..., in: originalWrapper),
+            withTemplate: "src=\"\(baseURL.appendingPathComponent("index.html").absoluteString)\"")
+        for multiplier in [0.5, 1.0, 1.5, 2.0] {
+            host.setContentScale(CGFloat(multiplier))
+            host.render(entry: .from(frame: SurfAceFrame(contentId: "frozen-taskboard-\(multiplier)",
+                revision: 1, contentType: .html, payload: .html(html: wrapper, baseURL: baseURL.absoluteString),
+                reloadSource: nil, title: "Frozen taskboard", scrollable: true, interactive: true)), restoreViewport: nil)
+            _ = await host.fetchSnapshotMetadata()
+            let metrics = try await web.callAsyncJavaScript("""
+            const f=document.querySelector('iframe'), d=f.contentDocument;
+            if (!d.querySelector('#task-board-scroll')) await new Promise((resolve,reject)=>{
+              const observer=new MutationObserver(()=>{if(d.querySelector('#task-board-scroll')){observer.disconnect();clearTimeout(timer);resolve();}});
+              const timer=setTimeout(()=>{observer.disconnect();reject(Error('frozen board readiness timed out'));},10000);
+              observer.observe(d.documentElement,{childList:true,subtree:true});
+            });
+            const w=f.contentWindow, e=d.querySelector('#task-board-scroll'), r=e.getBoundingClientRect();
+            return {innerWidth:w.innerWidth,innerHeight:w.innerHeight,clientWidth:d.documentElement.clientWidth,
+              clientHeight:d.documentElement.clientHeight,scrollerWidth:r.width,scrollerHeight:r.height,
+              outerWidth:innerWidth,outerHeight:innerHeight,rootZoom:getComputedStyle(document.documentElement).zoom,
+              innerZoom:w.getComputedStyle(d.documentElement).zoom,dpr:w.devicePixelRatio};
+            """, arguments: [:], in: nil, contentWorld: .page)
+            let dimensions = try XCTUnwrap(metrics as? [String: Any])
+            let attachment = XCTAttachment(data: try JSONSerialization.data(withJSONObject: [
+                "multiplier": multiplier, "dom": dimensions, "webFrame": NSCoder.string(for: web.frame),
+                "hostBounds": NSCoder.string(for: host.bounds), "pageZoom": web.pageZoom,
+                "safeAreaInsets": NSCoder.string(for: host.safeAreaInsets),
+                "adjustedContentInsets": NSCoder.string(for: web.scrollView.adjustedContentInset),
+                "webOpaque": web.isOpaque, "webBackground": String(describing: web.backgroundColor)
+            ], options: [.sortedKeys, .prettyPrinted]), uniformTypeIdentifier: "public.json")
+            attachment.name = "frozen-taskboard-geometry-\(multiplier)"; attachment.lifetime = .keepAlways; add(attachment)
+            let snapshot = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<UIImage, Error>) in
+                web.takeSnapshot(with: nil) { image, error in
+                    if let image { continuation.resume(returning: image) }
+                    else { continuation.resume(throwing: error ?? NSError(domain: "ZoomSnapshot", code: 1)) }
+                }
+            }
+            let screenshot = XCTAttachment(image: snapshot)
+            screenshot.name = "frozen-taskboard-native-\(multiplier)"; screenshot.lifetime = .keepAlways; add(screenshot)
+            let width = try XCTUnwrap(dimensions["innerWidth"] as? Double)
+            let height = try XCTUnwrap(dimensions["innerHeight"] as? Double)
+            XCTAssertEqual(try XCTUnwrap(dimensions["scrollerWidth"] as? Double), width, accuracy: 1)
+            XCTAssertEqual(try XCTUnwrap(dimensions["scrollerHeight"] as? Double), height, accuracy: 1)
+            XCTAssertEqual(web.frame, host.bounds)
+            XCTAssertEqual(web.scrollView.adjustedContentInset, .zero, "Pane already owns its native viewport")
+        }
+        await server.stop()
+    }
+
     func testNativeHostKeepsFullIframeViewportAtSupportedFontScales() async throws {
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
         let previous = scene.windows.first(where: \.isKeyWindow)
