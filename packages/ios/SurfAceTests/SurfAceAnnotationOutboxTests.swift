@@ -421,6 +421,35 @@ private final class AnnotationWireProbeTransport: SurfAceAnnotationWireTransport
 }
 
 @MainActor
+private final class AnnotationRoleEnforcingTransport: SurfAceAnnotationWireTransport {
+    var operations: [String] = []
+    var records: [String] = []
+    var roleEstablished = false
+    func exchange(_ data: Data) async throws -> Data {
+        let request = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let op = try XCTUnwrap(request["op"] as? String)
+        operations.append(op)
+        var reply: [String: Any] = ["v": 1, "type": "response", "op": op,
+                                    "id": request["id"]!, "ok": true]
+        if op == "annotation.hello" {
+            roleEstablished = true
+            reply["payload"] = ["registryId": "fixture-registry"]
+        } else if !roleEstablished {
+            reply["ok"] = false
+            reply["error"] = ["code": "annotation_role_operation_invalid", "message": "hello required"]
+        } else {
+            let payload = try XCTUnwrap(request["payload"] as? [String: Any])
+            let record = try XCTUnwrap(payload["record"] as? [String: Any])
+            records.append(String(decoding: try JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]), as: UTF8.self))
+            reply["payload"] = ["serverCursor": ["epoch": "0123456789abcdef0123456789abcdef", "sequence": String(records.count)],
+                                "duplicate": false, "committedAt": "2026-10-10T17:00:00.000Z"]
+        }
+        return try JSONSerialization.data(withJSONObject: reply)
+    }
+    func close() { roleEstablished = false }
+}
+
+@MainActor
 private final class AnnotationSuspendedHelloTransport: SurfAceAnnotationWireTransport {
     var entered: CheckedContinuation<Void, Never>?
     var response: CheckedContinuation<Void, Never>?
@@ -655,6 +684,78 @@ extension SurfAceAnnotationOutboxTests {
         XCTAssertTrue(diagnostics.allSatisfy { $0["at"] != nil && $0["payload"] == nil && $0["canonical"] == nil })
         let secretURL = try XCTUnwrap(URL(string: "wss://name:password@example.test:443/private-token?secret=value#fragment"))
         XCTAssertEqual(SurfAceAnnotationPublisher.safeEndpoint(secretURL), "wss://example.test:443")
+    }
+
+    @MainActor
+    func testHeldDurableHeadRebindRequiresHelloAndPreservesLaterFIFO() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SurfAceAnnotationTransport-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = SurfAceLocklessGenerationStore(stateURL: directory.appendingPathComponent("authority-v1.json"))
+        var limits = SurfAceLocklessCapacityLimits.production
+        limits.maxAnnotationPublisherStateBytesPerSurface = Int64(SurfAceAnnotationOutbox.maximumBytes)
+        limits.maxAnnotationPublisherRecordsPerSurface = Int64(SurfAceAnnotationOutbox.maximumRecords)
+        limits.maxRecoverableSurfaceBytes = 704 * 1_024 * 1_024
+        var state = try SurfAceLocklessAuthorityState.empty(limits: limits)
+        state.annotationPublisher = try SurfAceAnnotationOutbox(clientId: "client-1", sourceEpoch: sourceEpoch)
+        let opened = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
+            state: &state, expectedSurfaceSetRevision: state.surfaceSetRevision)
+        let surfaceId = opened.surface.surfaceId
+        _ = try state.annotationPublisher?.append(surfaceId: surfaceId, record: record())
+        let expected = try XCTUnwrap(state.annotationPublisher?.head(surfaceId: surfaceId))
+        try store.save(state)
+        let adapter = try SurfAceLocklessRuntimeAdapter(store: store, annotationClientId: "client-1")
+        let oldTransport = AnnotationRoleEnforcingTransport()
+        let newTransport = AnnotationRoleEnforcingTransport()
+        let old = try XCTUnwrap(URL(string: "ws://127.0.0.1:29998/ws"))
+        let selected = try XCTUnwrap(URL(string: "ws://127.0.0.1:29999/ws"))
+        let held = expectation(description: "durable head completion held after valid A hello")
+        var release: CheckedContinuation<Void, Never>?
+        var holdOnce = true
+        var errors: [Error] = []
+        let publisher = try SurfAceAnnotationPublisher(
+            adapter: adapter, endpoint: old,
+            makeTransport: { $0 == old ? oldTransport : newTransport },
+            headAcquisitionCompletionForTesting: {
+                guard holdOnce else { return }
+                holdOnce = false
+                await withCheckedContinuation { continuation in
+                    release = continuation
+                    held.fulfill()
+                }
+            }, onError: { errors.append($0) }
+        )
+        publisher.notify()
+        await fulfillment(of: [held], timeout: 5)
+        XCTAssertEqual(oldTransport.operations, ["annotation.hello"])
+        let heldSnapshot = await adapter.snapshot()
+        let canonical = try XCTUnwrap(heldSnapshot.annotationPublisher?.surfaces[surfaceId]?.fifo.first?.canonical)
+        XCTAssertEqual(canonical, expected.canonical)
+        try publisher.reconcileEndpoint(selected)
+        release?.resume()
+        release = nil
+        await publisher.awaitIdle()
+        XCTAssertEqual(newTransport.operations, ["annotation.hello", "annotation.ingest"])
+        XCTAssertEqual(newTransport.records, [expected.canonical])
+        XCTAssertTrue(errors.isEmpty)
+        var saved = try XCTUnwrap(store.load())
+        XCTAssertNil(saved.annotationPublisher?.surfaces[surfaceId]?.unhealthy)
+        XCTAssertEqual(saved.annotationPublisher?.pendingSurfaceIds(), [])
+        let laterRecord = record()
+        let later = try await adapter.transactAnnotationPublisher(surfaceId: surfaceId) { outbox in
+            _ = try outbox.append(surfaceId: surfaceId, record: laterRecord)
+            return try outbox.head(surfaceId: surfaceId)
+        }
+        publisher.notify()
+        await publisher.awaitIdle()
+        publisher.stop()
+        XCTAssertEqual(newTransport.operations, ["annotation.hello", "annotation.ingest", "annotation.ingest"])
+        XCTAssertEqual(newTransport.records, [expected.canonical, try XCTUnwrap(later).canonical])
+        saved = try XCTUnwrap(store.load())
+        XCTAssertNil(saved.annotationPublisher?.surfaces[surfaceId]?.unhealthy)
+        XCTAssertEqual(saved.annotationPublisher?.pendingSurfaceIds(), [])
+        XCTAssertEqual(saved.annotationPublisher?.sourceEpoch, sourceEpoch)
+        XCTAssertEqual(saved.annotationPublisher?.clientId, "client-1")
     }
 
     @MainActor

@@ -88,6 +88,7 @@ final class SurfAceAnnotationPublisher {
     private var endpointGeneration: UInt64 = 0
     private let makeTransport: @MainActor (URL) -> any SurfAceAnnotationWireTransport
     private let onError: @MainActor (Error) -> Void
+    private let headAcquisitionCompletionForTesting: (@MainActor () async -> Void)?
     private let onDiagnostic: @MainActor ([String: String]) -> Void
     private var transport: (any SurfAceAnnotationWireTransport)?
     private var helloDone = false
@@ -100,6 +101,7 @@ final class SurfAceAnnotationPublisher {
 
     init(adapter: SurfAceLocklessRuntimeAdapter, endpoint: URL,
          makeTransport: (@MainActor (URL) -> any SurfAceAnnotationWireTransport)? = nil,
+         headAcquisitionCompletionForTesting: (@MainActor () async -> Void)? = nil,
          onDiagnostic: @escaping @MainActor ([String: String]) -> Void = { _ in },
          onError: @escaping @MainActor (Error) -> Void) throws {
         guard ["ws", "wss"].contains(endpoint.scheme?.lowercased() ?? ""), endpoint.host != nil else {
@@ -115,6 +117,7 @@ final class SurfAceAnnotationPublisher {
         }
         self.onError = onError
         self.onDiagnostic = onDiagnostic
+        self.headAcquisitionCompletionForTesting = headAcquisitionCompletionForTesting
     }
 
     func reconcileEndpoint(_ endpoint: URL) throws {
@@ -253,9 +256,15 @@ final class SurfAceAnnotationPublisher {
                 }
             }
             // head() may seal a trailing gap. The authority transaction finishes before the send.
+            let readyGeneration = endpointGeneration
             guard let head = try await adapter.transactAnnotationPublisher(surfaceId: surfaceId, {
                 try $0.head(surfaceId: surfaceId)
             }) else { continue }
+            await headAcquisitionCompletionForTesting?()
+            // Authority persistence yields after hello. A replacement route
+            // must establish its own socket role before sending this same head.
+            guard !stopped, !Task.isCancelled else { return }
+            guard helloDone, readyGeneration == endpointGeneration else { continue }
             let op = head.kind == "gap" ? "annotation.source_gap" : "annotation.ingest"
             emit("sent", surfaceId: surfaceId, outbox: snapshot.annotationPublisher, head: head)
             let cursor: SurfAceAnnotationServerCursor
