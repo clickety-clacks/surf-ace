@@ -85,6 +85,7 @@ extension SurfAceLocalNumericRegistrationWebSocket: SurfAceAnnotationWireTranspo
 final class SurfAceAnnotationPublisher {
     private let adapter: SurfAceLocklessRuntimeAdapter
     private var endpoint: URL
+    private var endpointGeneration: UInt64 = 0
     private let makeTransport: @MainActor (URL) -> any SurfAceAnnotationWireTransport
     private let onError: @MainActor (Error) -> Void
     private var transport: (any SurfAceAnnotationWireTransport)?
@@ -117,6 +118,7 @@ final class SurfAceAnnotationPublisher {
         }
         if self.endpoint != endpoint {
             self.endpoint = endpoint
+            endpointGeneration &+= 1
             // Keep the same serialized drain and durable FIFO. Closing an old
             // exchange may retry its stable record identity on the selected route.
             disconnect()
@@ -171,7 +173,12 @@ final class SurfAceAnnotationPublisher {
         if transport == nil { transport = makeTransport(endpoint) }
         guard let transport else { throw SurfAceAnnotationWireError.invalidResponse }
         let request = SurfAceAnnotationWire.request(op: op, canonicalRecord: canonicalRecord)
-        return try SurfAceAnnotationWire.response(try await transport.exchange(request.data), id: request.id, op: op)
+        let generation = endpointGeneration
+        let response = try await transport.exchange(request.data)
+        // A suspended old hello/ingest response must not establish readiness
+        // for a newly selected transport. Retry the same durable head instead.
+        guard generation == endpointGeneration else { throw URLError(.cancelled) }
+        return try SurfAceAnnotationWire.response(response, id: request.id, op: op)
     }
 
     func drain() async throws {
