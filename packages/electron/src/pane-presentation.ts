@@ -8,6 +8,38 @@ import {
 } from "./native-pane-bridge.js";
 
 export const PANE_PRESENTATION_CAPABILITY = "pane_pop_out_presentation";
+
+// A sole *current* window is insufficient: an old Wayland host can outlive
+// window A while same-sized window B is created in the same Electron process.
+// This initial implementation admits only the first window of a token-bound
+// process. Replacement/multiple windows require an explicit per-window backend.
+export class NativePresentationWindowBinding {
+  private firstWindow: { windowId: string; surfaceId: string } | null = null;
+  private ambiguous = false;
+
+  constructor(private readonly processId: number, private readonly launchToken: string | undefined) {}
+
+  recordCreatedWindow(windowId: string, surfaceId: string): void {
+    if (this.firstWindow || !windowId || !surfaceId) this.ambiguous = true;
+    else this.firstWindow = { windowId, surfaceId };
+  }
+
+  assertObservedOwner(response: CompositorControlResponse, windowId: string, surfaceId: string): void {
+    const status = response.status as Record<string, unknown> | undefined;
+    const runtime = status?.runtime as Record<string, unknown> | undefined;
+    const attached = runtime?.main_app_launch_state as { state?: unknown; pid?: unknown } | undefined;
+    const evidence = runtime?.main_app_binding_evidence as { launchToken?: unknown } | undefined;
+    const host = status?.pane_presentation_host as { host_surface_id?: unknown } | undefined;
+    if (this.ambiguous || !this.firstWindow || this.firstWindow.windowId !== windowId || this.firstWindow.surfaceId !== surfaceId ||
+        !Number.isSafeInteger(this.processId) || this.processId <= 0 || !this.launchToken || response.ok !== true ||
+        attached?.state !== "attached" || attached.pid !== this.processId ||
+        runtime?.main_app_launch_token !== this.launchToken || evidence?.launchToken !== "matched" ||
+        !Number.isSafeInteger(host?.host_surface_id) || runtime?.main_app_surface_id !== host?.host_surface_id) {
+      throw new Error("native presentation lacks an independently observed initial-window process binding");
+    }
+  }
+}
+
 type Rect = { x: number; y: number; width: number; height: number };
 export type ObservedPresentationHost = {
   host_surface_id: number;

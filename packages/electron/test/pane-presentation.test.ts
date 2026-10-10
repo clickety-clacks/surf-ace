@@ -3,6 +3,7 @@ import test from "node:test";
 import { compositorPaneIdForSurface, type NativePaneMaterialization } from "../src/native-pane-bridge.js";
 import {
   acknowledgePanePresentation, assertPanePresentationAcknowledged,
+  NativePresentationWindowBinding,
   panePresentationRequest, PANE_PRESENTATION_CAPABILITY,
   type PanePresentationControlRequest, panePresentationWindowRoute, type PresentationWindowRoute,
 } from "../src/pane-presentation.js";
@@ -20,6 +21,51 @@ function materialization(): NativePaneMaterialization {
 const host = { host_surface_id: 99, host_incarnation: "host-1", root_geometry_generation: 1,
   source_rect: { x: 0, y: 0, width: 1000, height: 700 }, logical_rect: { x: 0, y: 0, width: 1000, height: 700 } };
 const route: PresentationWindowRoute = { window_id: "electron-window:1", renderer_surface_id: "s", host };
+
+test("initial native window requires backend-observed peer PID, launch token and exact host role", () => {
+  const binding = new NativePresentationWindowBinding(1234, "private-launch");
+  binding.recordCreatedWindow("electron-window:1", "s");
+  const status = { pane_presentation_host: host, runtime: {
+    main_app_launch_state: { state: "attached", pid: 1234 }, main_app_launch_token: "private-launch",
+    main_app_binding_evidence: { launchToken: "matched" }, main_app_surface_id: host.host_surface_id,
+  } };
+  const response = { ok: true, status };
+  binding.assertObservedOwner(response, "electron-window:1", "s");
+  for (const patch of [
+    { main_app_launch_state: { state: "attached", pid: 5678 } },
+    { main_app_launch_state: { state: "launching", pid: 1234 } },
+    { main_app_launch_token: "old-launch" },
+    { main_app_binding_evidence: { launchToken: "missing" } },
+    { main_app_binding_evidence: { launchToken: "unavailable" } },
+    { main_app_surface_id: 100 },
+  ]) assert.throws(() => binding.assertObservedOwner({ ok: true,
+    status: { ...status, runtime: { ...status.runtime, ...patch } } }, "electron-window:1", "s"));
+  assert.throws(() => binding.assertObservedOwner(response, "electron-window:1", "foreign"));
+  assert.throws(() => binding.assertObservedOwner({ ok: true, status: { pane_presentation_host: host } }, "electron-window:1", "s"));
+  const unlaunched = new NativePresentationWindowBinding(1234, undefined);
+  unlaunched.recordCreatedWindow("electron-window:1", "s");
+  assert.throws(() => unlaunched.assertObservedOwner(response, "electron-window:1", "s"));
+});
+
+test("same-process equal-size replacement cannot first-bind to the retained old host", () => {
+  const binding = new NativePresentationWindowBinding(1234, "private-launch");
+  const response = { ok: true, status: { pane_presentation_host: host, runtime: {
+    main_app_launch_state: { state: "attached", pid: 1234 }, main_app_launch_token: "private-launch",
+    main_app_binding_evidence: { launchToken: "matched" }, main_app_surface_id: host.host_surface_id,
+  } } };
+  binding.recordCreatedWindow("electron-window:A", "A");
+  binding.recordCreatedWindow("electron-window:B", "B");
+  assert.throws(() => binding.assertObservedOwner(response, "electron-window:B", "B"));
+  assert.throws(() => binding.assertObservedOwner(response, "electron-window:A", "A"),
+    "closing B must not restore ambiguity to a sole-current-window claim");
+  const restarted = new NativePresentationWindowBinding(2468, "new-private-launch");
+  restarted.recordCreatedWindow("electron-window:B", "B");
+  assert.throws(() => restarted.assertObservedOwner(response, "electron-window:B", "B"));
+  restarted.assertObservedOwner({ ok: true, status: { ...response.status,
+    runtime: { ...response.status.runtime, main_app_launch_state: { state: "attached", pid: 2468 },
+      main_app_launch_token: "new-private-launch" } } }, "electron-window:B", "B");
+});
+
 const overlay = { x: 10, y: 10, width: 980, height: 680 };
 const content = { x: 12, y: 42, width: 976, height: 646 };
 function nativeRequest() {

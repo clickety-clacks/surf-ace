@@ -73,7 +73,7 @@ import {
 import { isAddressInUse, isPortBoundOnIpv6Any } from "./port-selection.js";
 import { SurfaceWsServer } from "./ws-server.js";
 import { PanePresentationCoordinator } from "./pane-presentation-coordinator.js";
-import { panePresentationWindowRoute } from "./pane-presentation.js";
+import { NativePresentationWindowBinding, panePresentationWindowRoute } from "./pane-presentation.js";
 import { AnnotationRegistryPublisher } from "./annotation-registry-publisher.js";
 import { AnnotationSourceCoordinator } from "./annotation-source-coordinator.js";
 import { restoreWindowPlacement, type WindowPlacement } from "./window-placement.js";
@@ -169,6 +169,9 @@ function configurePlatformWebAuthn(): void {
 configurePlatformWebAuthn();
 
 const windows = new Map<string, BrowserWindow>();
+const nativePresentationWindowBinding = new NativePresentationWindowBinding(
+  process.pid, process.env.SURF_ACE_COMPOSITOR_LAUNCH_TOKEN,
+);
 let panePresentation: PanePresentationCoordinator | null = null;
 function reconcilePresentationWindowOwnership(): void {
   const owned = resolveCompositorControlSocketPath()
@@ -1334,6 +1337,7 @@ async function createWindowForSurface(surfaceId: string): Promise<BrowserWindow>
   }
 
   windows.set(surfaceId, window);
+  nativePresentationWindowBinding.recordCreatedWindow(`electron-window:${window.id}`, surfaceId);
   reconcilePresentationWindowOwnership();
   clientInfo("window_created", {
     pane_ids: core.activePaneIds(surfaceId).join(","),
@@ -1671,6 +1675,7 @@ function installIpc(): void {
     if (bounds.width !== viewport.width || bounds.height !== viewport.height) {
       throw new Error("renderer window viewport does not match current native content bounds");
     }
+    nativePresentationWindowBinding.assertObservedOwner(response, `electron-window:${window.id}`, surfaceId);
     return panePresentationWindowRoute(response, `electron-window:${window.id}`, surfaceId, viewport);
   }, (notice) => {
     const window = windows.get(notice.surfaceId);
