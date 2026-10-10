@@ -1446,13 +1446,32 @@ final class SurfAceHostZoomViewportTests: XCTestCase {
         let wrapper = pattern.stringByReplacingMatches(in: originalWrapper,
             range: NSRange(originalWrapper.startIndex..., in: originalWrapper),
             withTemplate: "src=\"\(baseURL.appendingPathComponent("index.html").absoluteString)\"")
-        for multiplier in [0.5, 1.0, 1.5, 2.0] {
+        // Compare scale changes AFTER the asynchronous frozen board has laid out.
+        // Preloading at effective scale 1 is a test control, not a production fix.
+        host.setContentScale(1 / 0.85)
+        host.render(entry: .from(frame: SurfAceFrame(contentId: "frozen-taskboard",
+            revision: 1, contentType: .html, payload: .html(html: wrapper, baseURL: baseURL.absoluteString),
+            reloadSource: nil, title: "Frozen taskboard", scrollable: true, interactive: true)), restoreViewport: nil)
+        _ = await host.fetchSnapshotMetadata()
+        _ = try await web.callAsyncJavaScript("""
+        const d=document.querySelector('iframe').contentDocument;
+        if (!d.querySelector('#task-board-scroll')) await new Promise((resolve,reject)=>{
+          const observer=new MutationObserver(()=>{if(d.querySelector('#task-board-scroll')){observer.disconnect();clearTimeout(timer);resolve();}});
+          const timer=setTimeout(()=>{observer.disconnect();reject(Error('frozen board readiness timed out'));},10000);
+          observer.observe(d.documentElement,{childList:true,subtree:true});
+        });
+        await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+        return true;
+        """, arguments: [:], in: nil, contentWorld: .page)
+        for multiplier in [1.0, 0.5, 1.5, 2.0] {
             host.setContentScale(CGFloat(multiplier))
-            host.render(entry: .from(frame: SurfAceFrame(contentId: "frozen-taskboard-\(multiplier)",
-                revision: 1, contentType: .html, payload: .html(html: wrapper, baseURL: baseURL.absoluteString),
-                reloadSource: nil, title: "Frozen taskboard", scrollable: true, interactive: true)), restoreViewport: nil)
-            _ = await host.fetchSnapshotMetadata()
             let metrics = try await web.callAsyncJavaScript("""
+            if (Number(getComputedStyle(document.documentElement).zoom) !== scale) await new Promise((resolve,reject)=>{
+              const observer=new MutationObserver(()=>{if(Number(getComputedStyle(document.documentElement).zoom)===scale){observer.disconnect();clearTimeout(timer);resolve();}});
+              const timer=setTimeout(()=>{observer.disconnect();reject(Error('content scale completion timed out'));},10000);
+              observer.observe(document.documentElement,{attributes:true,attributeFilter:['style']});
+            });
+            await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
             const f=document.querySelector('iframe'), d=f.contentDocument;
             if (!d.querySelector('#task-board-scroll')) await new Promise((resolve,reject)=>{
               const observer=new MutationObserver(()=>{if(d.querySelector('#task-board-scroll')){observer.disconnect();clearTimeout(timer);resolve();}});
@@ -1464,7 +1483,7 @@ final class SurfAceHostZoomViewportTests: XCTestCase {
               clientHeight:d.documentElement.clientHeight,scrollerWidth:r.width,scrollerHeight:r.height,
               outerWidth:innerWidth,outerHeight:innerHeight,rootZoom:getComputedStyle(document.documentElement).zoom,
               innerZoom:w.getComputedStyle(d.documentElement).zoom,dpr:w.devicePixelRatio};
-            """, arguments: [:], in: nil, contentWorld: .page)
+            """, arguments: ["scale": (0.85 * multiplier * 1000).rounded() / 1000], in: nil, contentWorld: .page)
             let dimensions = try XCTUnwrap(metrics as? [String: Any])
             let attachment = XCTAttachment(data: try JSONSerialization.data(withJSONObject: [
                 "multiplier": multiplier, "dom": dimensions, "webFrame": NSCoder.string(for: web.frame),
