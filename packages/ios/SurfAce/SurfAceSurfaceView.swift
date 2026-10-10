@@ -1653,6 +1653,7 @@ private struct SurfAcePaneControls: View {
     @Bindable var pane: SurfAcePaneModel
     let isPoppedOut: Bool
     let onTogglePopout: () -> Void
+    @AccessibilityFocusState private var popoutControlFocused: Bool
     @Environment(\.colorScheme) private var colorScheme
     @State private var fontSizePopoverVisible = false
 
@@ -1712,6 +1713,16 @@ private struct SurfAcePaneControls: View {
                 )
                 .frame(width: SurfAcePaneChromeLayout.controlHitSize,
                        height: SurfAcePaneChromeLayout.controlHitSize)
+                .accessibilityElement(children: .ignore)
+                .accessibilityAddTraits(.isButton)
+                .accessibilityLabel(isPoppedOut ? "Restore" : "Pop out")
+                .accessibilityValue(isPoppedOut ? "Expanded" : "Tiled")
+                .accessibilityIdentifier("surf-ace-pane-popout-\(pane.paneId)")
+                .accessibilityAction { onTogglePopout() }
+                .accessibilityFocused($popoutControlFocused)
+                .onChange(of: isPoppedOut) { _, _ in
+                    popoutControlFocused = true
+                }
 
                 Button {
                     runtime.activateKeyboardPane(surfaceId: surface.surfaceId, paneId: pane.paneId)
@@ -1824,6 +1835,8 @@ private final class SurfAcePanePopoutControl: UIButton {
         chrome.clipsToBounds = true
         chrome.layer.borderWidth = 1
         insertSubview(chrome, at: 0)
+        // SwiftUI exposes one accessibility element for this control.
+        isAccessibilityElement = false
         addTarget(self, action: #selector(activateToggle), for: .touchUpInside)
     }
 
@@ -1870,9 +1883,6 @@ private final class SurfAcePanePopoutControl: UIButton {
         DispatchQueue.main.async { [weak self] in
             guard let self, self.window != nil, self.focusGeneration == generation else { return }
             if !UIAccessibility.isVoiceOverRunning { self.becomeFirstResponder() }
-            // Enter/Restore changes the accessible modal presentation, not
-            // just a control's layout. Explicitly target the retained toggle.
-            UIAccessibility.post(notification: .screenChanged, argument: self)
         }
     }
 
