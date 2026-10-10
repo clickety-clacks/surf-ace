@@ -6,7 +6,8 @@ import type { CompositorControlRequest, CompositorControlResponse } from "./nati
 type Presentation = NonNullable<Parameters<SurfaceCore["setPanePresentation"]>[1]>;
 type Sender = (request: CompositorControlRequest) => Promise<CompositorControlResponse>;
 export type PresentationOwnershipNotice = { surfaceId: string; surfaceEpoch: string;
-  revision: number; phase: "blocked" | "cleared" };
+  revision: number; authorityRevision: number; phase: "blocked" | "cleared" };
+type AuthorityReceipt = { authorityRevision: number; presentationBlocked: boolean; presentationCleared: boolean };
 type Identity = ReturnType<SurfaceCore["resolvedPaneGeometryIdentity"]>;
 
 /** The transport must be independently routed to this renderer window's host. */
@@ -17,6 +18,7 @@ export class PanePresentationCoordinator {
   private readonly accepted = new Map<string, { control: PanePresentationControlRequest; send: Sender; uncertain?: boolean }>();
   private readonly authorities = new Map<string, { identity: Identity; selected: Presentation | null }>();
   private readonly cleared = new Set<string>();
+  private readonly settledAuthority = new Map<string, AuthorityReceipt>();
   private ownedWindows: Set<string> | null = null;
   constructor(
     private readonly core: SurfaceCore,
@@ -48,12 +50,14 @@ export class PanePresentationCoordinator {
       if (!Number.isSafeInteger(revision)) throw new Error("pane presentation revision exhausted");
       this.revisions.set(surfaceId, revision); // Fence an in-flight ack synchronously.
       this.authorities.delete(surfaceId);
-      this.onOwnershipNotice({ surfaceId, surfaceEpoch, revision, phase: "blocked" });
+      const blocked = this.recordAuthority(surfaceId, true);
+      this.onOwnershipNotice({ surfaceId, surfaceEpoch, revision, authorityRevision: blocked.authorityRevision, phase: "blocked" });
       retirements.push(this.enqueue(surfaceId, async () => {
         await this.retireAccepted(surfaceId); // Uses the original sender even if new routing is blocked.
         this.core.setPanePresentation(surfaceId, null);
         this.cleared.add(surfaceId);
-        this.onOwnershipNotice({ surfaceId, surfaceEpoch, revision, phase: "cleared" });
+        const cleared = this.recordAuthority(surfaceId);
+        this.onOwnershipNotice({ surfaceId, surfaceEpoch, revision, authorityRevision: cleared.authorityRevision, phase: "cleared" });
       }));
     }
     await Promise.all(retirements);
@@ -64,6 +68,18 @@ export class PanePresentationCoordinator {
   }
 
   /** Sender-to-surface routing belongs to main; renderer never supplies surface or lineage authority. */
+  async applyRendererOutcome(surfaceId: string, payload: unknown): Promise<AuthorityReceipt & {
+    ok: boolean; revision?: number; error?: string;
+  }> {
+    try {
+      const revision = await this.applyRendererRequest(surfaceId, payload);
+      return { ok: true, revision, ...this.authorityReceipt(surfaceId) };
+    } catch (error) {
+      return { ok: false, ...this.authorityReceipt(surfaceId),
+        error: error instanceof Error ? error.message : "pane presentation failed" };
+    }
+  }
+
   async applyRendererRequest(surfaceId: string, payload: unknown): Promise<number> {
     if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
       throw new Error("invalid pane presentation request");
@@ -178,7 +194,22 @@ export class PanePresentationCoordinator {
 
   wasPresentationCleared(surfaceId: string): boolean { return this.cleared.has(surfaceId) && !this.accepted.has(surfaceId); }
   hasUnretiredPresentation(surfaceId: string): boolean { return this.accepted.has(surfaceId); }
-  presentationRevision(surfaceId: string): number { return this.revisions.get(surfaceId) ?? 0; }
+  /** Ordered settled authority, never the latest queued request's revision. */
+  authorityReceipt(surfaceId: string): AuthorityReceipt {
+    return { ...(this.settledAuthority.get(surfaceId) ?? {
+      authorityRevision: 0, presentationBlocked: false, presentationCleared: false,
+    }) };
+  }
+
+  private recordAuthority(surfaceId: string, forcedBlocked = false): AuthorityReceipt {
+    const authorityRevision = (this.settledAuthority.get(surfaceId)?.authorityRevision ?? 0) + 1;
+    if (!Number.isSafeInteger(authorityRevision)) throw new Error("pane authority revision exhausted");
+    const receipt = { authorityRevision,
+      presentationBlocked: forcedBlocked || this.hasUnretiredPresentation(surfaceId),
+      presentationCleared: !forcedBlocked && this.wasPresentationCleared(surfaceId) };
+    this.settledAuthority.set(surfaceId, receipt);
+    return receipt;
+  }
 
   invalidate(surfaceId: string): Promise<void> {
     this.revisions.set(surfaceId, (this.revisions.get(surfaceId) ?? 0) + 1);
@@ -201,7 +232,10 @@ export class PanePresentationCoordinator {
   }
 
   private enqueue<T>(surfaceId: string, operation: () => Promise<T>): Promise<T> {
-    const result = (this.queues.get(surfaceId) ?? Promise.resolve()).catch(() => {}).then(operation);
+    const result = (this.queues.get(surfaceId) ?? Promise.resolve()).catch(() => {}).then(async () => {
+      try { return await operation(); }
+      finally { this.recordAuthority(surfaceId); }
+    });
     this.queues.set(surfaceId, result);
     return result;
   }

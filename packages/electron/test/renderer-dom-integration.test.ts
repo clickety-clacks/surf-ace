@@ -4,6 +4,7 @@ import { runInNewContext } from "node:vm";
 import { pathToFileURL } from "node:url";
 
 import { parseHTML } from "linkedom";
+import { queuedAuthorityRace } from "./pane-presentation-authority-race.js";
 
 type ConnectionBar = "connected" | "connecting" | "disconnected";
 
@@ -68,7 +69,7 @@ test("renderer DOM integrates authoritative connection states and live scale con
   let textMetricScale = 1;
   const commands: unknown[] = [];
   const presentations: Record<string, unknown>[] = [];
-  let presentationResponse: (() => Promise<{ ok: boolean; error?: string; revision?: number; presentationCleared?: boolean; presentationBlocked?: boolean }>) | null = null;
+  let presentationResponse: (() => Promise<{ ok: boolean; error?: string; revision?: number; authorityRevision?: number; presentationCleared?: boolean; presentationBlocked?: boolean }>) | null = null;
   const resizeCallbacks: Array<() => void> = [];
   const mutationCallbacks: Array<() => void> = [];
   const fontCallbacks: Array<() => void> = [];
@@ -930,6 +931,58 @@ test("renderer DOM integrates authoritative connection states and live scale con
     assert.equal(guests[1]!.isConnected, false, "only closed guest is removed");
   });
 
+  await test("actual queued-authority receipts keep input blocked in both delivery orders", async () => {
+    // Advance the real coordinator past earlier ownership fixtures (revision101).
+    const cases = await queuedAuthorityRace(2, 102);
+    for (const [index, receipts] of cases.entries()) {
+      const next = state("connected", true);
+      stateListener!(next);
+      const root = document.querySelectorAll<HTMLElement>(".pane-shell")[1]!;
+      const guest = root.querySelector("webview");
+      const toggle = root.querySelector<HTMLButtonElement>(".pane-pop-out")!;
+      const handle = document.querySelector<HTMLElement>(".split-resize-handle")!;
+      Object.assign(handle, { setPointerCapture() {}, hasPointerCapture: () => false, releasePointerCapture() {} });
+      let commits = 0;
+      Object.assign(surfAce, { async resizeSplit() { commits++; return true; } });
+      const pointer = (type: string) => {
+        const event = new window.Event(type, { bubbles: true, cancelable: true });
+        Object.assign(event, { pointerId: 92, clientX: 140, clientY: 140 });
+        (type === "pointerdown" ? handle : window).dispatchEvent(event);
+        return event;
+      };
+      type Outcome = typeof receipts.clear;
+      const releases: Array<(outcome: Outcome) => void> = [];
+      presentationResponse = () => new Promise((resolve) => { releases.push(resolve); });
+      toggle.click(); // A held; a second click registers B without changing display.
+      toggle.click();
+      assert.equal(releases.length, 2);
+      const order = index === 0 ? [0, 1] : [1, 0];
+      for (const reply of order) {
+        releases[reply]!(reply === 0 ? receipts.clear : receipts.blocked);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        assert.equal(pointer("pointerdown").defaultPrevented, false);
+        assert.equal(root.querySelector(".pane-content")!.hasAttribute("inert"), true,
+          "A clear cannot certify B, in either IPC delivery order");
+      }
+      pointer("pointermove"); pointer("pointerup");
+      assert.equal(commits, 0);
+      assert.equal(root.classList.contains("pane-popped-out"), false);
+      assert.equal(root.querySelector("webview"), guest);
+      // The real coordinator's later matched Restore is the recovery fence.
+      toggle.click();
+      releases[2]!(receipts.recovery);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(root.querySelector(".pane-content")!.hasAttribute("inert"), false);
+      assert.equal(pointer("pointerdown").defaultPrevented, true);
+      pointer("pointercancel");
+      presentationResponse = null;
+      // Recovery response is a clear, not an enter acknowledgement.
+      if (root.classList.contains("pane-popped-out")) {
+        toggle.click(); await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+    }
+  });
+
   await test("delayed presentation ack and retirement exclude divider commits and preserve tiled geometry", async () => {
     focusStateUpdate = null;
     const next = state("connected", true);
@@ -1007,8 +1060,6 @@ test("renderer DOM integrates authoritative connection states and live scale con
     presentationResponse = null;
     toggle.click();
     await new Promise<void>((resolve) => setImmediate(resolve));
-    toggle.click();
-    await new Promise<void>((resolve) => setImmediate(resolve));
     assert.equal(pointer(handle, "pointerdown", 100).defaultPrevented, true, "confirmed retirement restores divider admission");
     pointer(window, "pointercancel", 100);
     assert.equal(commits.length, 1);
@@ -1034,14 +1085,14 @@ test("renderer DOM integrates authoritative connection states and live scale con
       (type === "pointerdown" ? handle : window).dispatchEvent(event);
       return event;
     };
-    let finish!: (response: { ok: boolean; revision: number; presentationBlocked?: boolean; presentationCleared?: boolean }) => void;
+    let finish!: (response: { ok: boolean; authorityRevision: number; presentationBlocked?: boolean; presentationCleared?: boolean }) => void;
     presentationResponse = () => new Promise((resolve) => { finish = resolve; });
     toggle.click();
     const changed = { ...next, geometryRevision: next.geometryRevision + 1,
       viewport: { ...next.viewport, width: 1000 } };
     stateListener!(changed);
     const reportsBefore = reports;
-    finish({ ok: false, revision: 200, presentationBlocked: true, presentationCleared: false });
+    finish({ ok: false, authorityRevision: 200, presentationBlocked: true, presentationCleared: false });
     await new Promise<void>((resolve) => setImmediate(resolve));
     assert.equal(root.classList.contains("pane-popped-out"), false, "stale reply cannot apply display pixels");
     assert.equal(root.querySelector(".pane-content")!.hasAttribute("inert"), true,
@@ -1054,11 +1105,11 @@ test("renderer DOM integrates authoritative connection states and live scale con
     assert.deepEqual(changed.layout, next.layout);
     // An obsolete clear cannot reopen input. A current confirmed retirement can.
     toggle.click();
-    finish({ ok: false, revision: 199, presentationCleared: true });
+    finish({ ok: false, authorityRevision: 199, presentationCleared: true });
     await new Promise<void>((resolve) => setImmediate(resolve));
     assert.equal(pointer("pointerdown").defaultPrevented, false);
     toggle.click();
-    finish({ ok: false, revision: 201, presentationCleared: true });
+    finish({ ok: false, authorityRevision: 201, presentationCleared: true });
     await new Promise<void>((resolve) => setImmediate(resolve));
     assert.equal(root.querySelector(".pane-content")!.hasAttribute("inert"), false);
     assert.equal(pointer("pointerdown").defaultPrevented, true);
@@ -1066,8 +1117,8 @@ test("renderer DOM integrates authoritative connection states and live scale con
     // A late blocked reply must not undo a newer independently confirmed clear.
     toggle.click();
     stateListener!({ ...changed, geometryRevision: changed.geometryRevision + 1 });
-    ownershipListener!({ surfaceId: next.surfaceId, surfaceEpoch: next.surfaceEpoch, revision: 203, phase: "cleared" });
-    finish({ ok: false, revision: 202, presentationBlocked: true });
+    ownershipListener!({ surfaceId: next.surfaceId, surfaceEpoch: next.surfaceEpoch, revision: 203, authorityRevision: 203, phase: "cleared" });
+    finish({ ok: false, authorityRevision: 202, presentationBlocked: true });
     await new Promise<void>((resolve) => setImmediate(resolve));
     assert.equal(root.querySelector(".pane-content")!.hasAttribute("inert"), false);
     assert.equal(pointer("pointerdown").defaultPrevented, true);

@@ -1686,16 +1686,7 @@ function installIpc(): void {
   ipcMain.handle("surface:pane-presentation", async (event, payload: unknown) => {
     const surfaceId = surfaceIdForSender(event.sender);
     if (!surfaceId) return { ok: false, error: "renderer surface is unavailable" };
-    try {
-      const revision = await coordinator.applyRendererRequest(surfaceId, payload);
-      return { ok: true, revision };
-    } catch (error) {
-      return { ok: false, presentationCleared: coordinator.wasPresentationCleared(surfaceId),
-        presentationBlocked: coordinator.hasUnretiredPresentation(surfaceId),
-        revision: coordinator.presentationRevision(surfaceId),
-        error: error instanceof Error ? error.message : "pane presentation failed" };
-
-    }
+    return coordinator.applyRendererOutcome(surfaceId, payload);
   });
   ipcMain.handle("surface:resize-split", async (event, payload: unknown) => {
     const surfaceId = surfaceIdForSender(event.sender);

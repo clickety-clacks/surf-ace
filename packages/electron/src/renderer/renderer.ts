@@ -1439,10 +1439,12 @@ let panePresentationAuthorityBlocked = false;
 let panePresentationIntent = 0;
 let panePresentationMainRevision = 0;
 let panePresentationConfirmedClearRevision = 0;
+let panePresentationAuthorityRevision = 0;
+let panePresentationAuthorityClearRevision = 0;
 let acknowledgedPopOutBounds: { x: number; y: number; width: number; height: number } | null = null;
 let panePresentationResizePending = false;
 async function togglePanePopOut(view: PaneView): Promise<void> {
-  await requestPanePopOut(view, poppedOutPaneId === view.paneId ? null : view.paneId);
+  await requestPanePopOut(view, panePresentationAuthorityBlocked || poppedOutPaneId === view.paneId ? null : view.paneId);
 }
 
 async function requestPanePopOut(view: PaneView, selected: number | null): Promise<void> {
@@ -1467,7 +1469,7 @@ async function requestPanePopOut(view: PaneView, selected: number | null): Promi
     const viewport = currentViewport(view);
     viewport.visibleRect.width = Math.max(0, bounds.width - 4);
     viewport.visibleRect.height = Math.max(0, bounds.height - 4);
-    let response: { ok: boolean; error?: string; presentationCleared?: boolean; presentationBlocked?: boolean; revision?: number };
+    let response: { ok: boolean; error?: string; presentationCleared?: boolean; presentationBlocked?: boolean; revision?: number; authorityRevision?: number };
     try {
       response = await window.surfAce.setPanePresentation({ identity, paneId: selected,
         ...(selected === null ? {} : { bounds, viewport }) });
@@ -1478,19 +1480,19 @@ async function requestPanePopOut(view: PaneView, selected: number | null): Promi
     // invalidate this reply's pixels without retiring its acknowledged selection.
     const currentAuthority = latestState?.surfaceId === surfaceId &&
       latestState.surfaceEpoch === identity.surfaceEpoch;
-    const responseRevision = response.revision;
+    const responseRevision = response.authorityRevision;
     const revisionIsCurrent = Number.isSafeInteger(responseRevision) &&
-      Number(responseRevision) >= panePresentationMainRevision;
+      Number(responseRevision) >= panePresentationAuthorityRevision;
     if (currentAuthority && !response.ok) {
       if (response.presentationBlocked && (responseRevision === undefined ||
-          (revisionIsCurrent && Number(responseRevision) > panePresentationConfirmedClearRevision))) {
+          (revisionIsCurrent && Number(responseRevision) > panePresentationAuthorityClearRevision))) {
         panePresentationAuthorityBlocked = true;
         cancelResizeGesture();
       } else if (response.presentationCleared && revisionIsCurrent) {
         panePresentationAuthorityBlocked = false;
-        panePresentationConfirmedClearRevision = Number(responseRevision);
+        panePresentationAuthorityClearRevision = Number(responseRevision);
       }
-      if (revisionIsCurrent) panePresentationMainRevision = Number(responseRevision);
+      if (revisionIsCurrent) panePresentationAuthorityRevision = Number(responseRevision);
     }
     if (intent !== panePresentationIntent || !latestState || latestState.surfaceId !== surfaceId ||
         JSON.stringify(paneSnapshotGeometryIdentity()) !== JSON.stringify(identity) ||
@@ -1515,11 +1517,14 @@ async function requestPanePopOut(view: PaneView, selected: number | null): Promi
       if (!Number.isSafeInteger(response.revision) || response.revision < panePresentationMainRevision) return;
       panePresentationMainRevision = response.revision;
     }
+    if (response.authorityRevision !== undefined && !revisionIsCurrent) return;
+    if (revisionIsCurrent) panePresentationAuthorityRevision = Number(responseRevision);
     cancelResizeGesture(); // Defense against a gesture introduced outside divider admission.
     panePresentationAuthorityBlocked = false;
     if (selected === null && response.revision !== undefined) {
       panePresentationConfirmedClearRevision = response.revision;
     }
+    if (selected === null && revisionIsCurrent) panePresentationAuthorityClearRevision = Number(responseRevision);
     poppedOutPaneId = selected;
     acknowledgedPopOutBounds = selected === null ? null : bounds;
     panePresentationResizePending = false;
@@ -3592,12 +3597,18 @@ async function init(): Promise<void> {
 
   window.surfAce.onPanePresentationOwnership((payload) => {
     if (!payload || typeof payload !== "object" || !latestState) return;
-    const notice = payload as { surfaceId?: unknown; surfaceEpoch?: unknown; revision?: unknown; phase?: unknown };
+    const notice = payload as { surfaceId?: unknown; surfaceEpoch?: unknown; revision?: unknown; authorityRevision?: unknown; phase?: unknown };
     if (notice.surfaceId !== latestState.surfaceId || notice.surfaceEpoch !== latestState.surfaceEpoch ||
         !Number.isSafeInteger(notice.revision) || Number(notice.revision) <= 0 ||
         Number(notice.revision) < panePresentationMainRevision ||
         (notice.phase !== "blocked" && notice.phase !== "cleared")) return;
     if (notice.phase === "blocked" && Number(notice.revision) <= panePresentationConfirmedClearRevision) return;
+    if (notice.authorityRevision !== undefined) {
+      if (!Number.isSafeInteger(notice.authorityRevision) || Number(notice.authorityRevision) < panePresentationAuthorityRevision) return;
+      if (notice.phase === "blocked" && Number(notice.authorityRevision) <= panePresentationAuthorityClearRevision) return;
+      panePresentationAuthorityRevision = Number(notice.authorityRevision);
+      if (notice.phase === "cleared") panePresentationAuthorityClearRevision = Number(notice.authorityRevision);
+    }
     panePresentationMainRevision = Number(notice.revision);
     panePresentationIntent++;
     cancelResizeGesture();

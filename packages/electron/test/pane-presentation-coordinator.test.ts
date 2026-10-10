@@ -4,6 +4,11 @@ import { SurfaceCore } from "../src/surface-core.js";
 import { PanePresentationCoordinator } from "../src/pane-presentation-coordinator.js";
 import { PANE_PRESENTATION_CAPABILITY } from "../src/pane-presentation.js";
 import type { CompositorControlRequest } from "../src/native-pane-bridge.js";
+import { queuedAuthorityRace } from "./pane-presentation-authority-race.js";
+
+test("queued B cannot alias A's settled clear with B's later uncertainty", async () => {
+  await queuedAuthorityRace();
+});
 
 function fixture(native = true) {
   const core = new SurfaceCore({ persistentState: { primarySurfaceId: null, version: 1 }, now: () => 1 });
