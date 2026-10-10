@@ -377,6 +377,57 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         secureTransport.close()
     }
 
+    func testVerifiedEndpointWaitsForDiscoveryIdentityAndDurableApplyThenReconcilesReconnect() async throws {
+        let homeURL = try XCTUnwrap(URL(string: "ws://127.0.0.1:29990/ws"))
+        let nextURL = try XCTUnwrap(URL(string: "ws://127.0.0.1:29991/ws"))
+        let foreignURL = try XCTUnwrap(URL(string: "ws://127.0.0.1:29992/ws"))
+        let home = Transport()
+        let next = Transport()
+        let foreign = Transport()
+        foreign.registryIdentity = .init(allocatorId: "alloc_foreign", fleetId: "foreign")
+        var discovered: [URL] = []
+        var failPersistence = false
+        var selected: [URL] = []
+        var applied = 0
+        let registration = SurfAceCentralRegistration(
+            clientId: "stable-client", configured: nil,
+            discover: { discovered },
+            makeTransport: { $0 == homeURL ? home : ($0 == nextURL ? next : foreign) },
+            snapshot: { [.init(surfaceId: "sf_one", panes: [])] },
+            apply: { _, _ in
+                if failPersistence { throw SurfAceRegistrationError.registryBindingPersistencePending }
+                applied += 1
+            },
+            verifyRegistry: { identity, _ in
+                guard identity == home.registryIdentity else { throw SurfAceRegistrationError.foreignRegistryIdentity }
+            },
+            onVerifiedEndpoint: { endpoint in
+                XCTAssertGreaterThan(applied, selected.count, "selection follows durable label application")
+                selected.append(endpoint)
+            }
+        )
+        defer { registration.stop() }
+        do { try await registration.synchronize(); XCTFail("discovery not available") } catch {}
+        XCTAssertTrue(selected.isEmpty)
+        discovered = [foreignURL]
+        do { try await registration.synchronize(); XCTFail("foreign registry") } catch {}
+        XCTAssertTrue(selected.isEmpty)
+        XCTAssertTrue(foreign.clients.isEmpty)
+        discovered = [homeURL]
+        failPersistence = true
+        do { try await registration.synchronize(); XCTFail("unpersisted registration") } catch {}
+        XCTAssertTrue(selected.isEmpty)
+        failPersistence = false
+        try await registration.synchronize()
+        try await registration.synchronize()
+        XCTAssertEqual(selected, [homeURL, homeURL])
+        home.fails = true
+        discovered = [nextURL]
+        try await registration.synchronize()
+        XCTAssertEqual(selected, [homeURL, homeURL, nextURL])
+        XCTAssertEqual(next.clients, ["stable-client"])
+    }
+
     func testConfiguredLocalNumericSuccessRemainsPinnedAndSkipsDiscovery() async throws {
         let configured = try XCTUnwrap(URL(string: "ws://100.64.12.34:43867/"))
         let transport = Transport()

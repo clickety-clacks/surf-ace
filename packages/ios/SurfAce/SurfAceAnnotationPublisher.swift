@@ -80,13 +80,16 @@ private final class SurfAceAnnotationURLSessionTransport: SurfAceAnnotationWireT
 
 extension SurfAceLocalNumericRegistrationWebSocket: SurfAceAnnotationWireTransport {}
 
-/// Drains only committed authority-state records to the explicitly configured registry.
+/// Drains committed authority-state records to a configured or verified selected registry.
 @MainActor
 final class SurfAceAnnotationPublisher {
     private let adapter: SurfAceLocklessRuntimeAdapter
-    private let endpoint: URL
+    private var endpoint: URL
+    private var endpointGeneration: UInt64 = 0
     private let makeTransport: @MainActor (URL) -> any SurfAceAnnotationWireTransport
     private let onError: @MainActor (Error) -> Void
+    private let headAcquisitionCompletionForTesting: (@MainActor () async -> Void)?
+    private let onDiagnostic: @MainActor ([String: String]) -> Void
     private var transport: (any SurfAceAnnotationWireTransport)?
     private var helloDone = false
     private var active: Task<Void, Never>?
@@ -94,20 +97,42 @@ final class SurfAceAnnotationPublisher {
     private var wanted = false
     private var stopped = false
     private var lastSurfaceId: String?
+    private var lastCorrelation: [String: String] = [:]
 
     init(adapter: SurfAceLocklessRuntimeAdapter, endpoint: URL,
-         makeTransport: @escaping @MainActor (URL) -> any SurfAceAnnotationWireTransport = { url in
-             SurfAceRegistrationEndpoint.usesLocalNumericTransport(url)
-                 ? SurfAceLocalNumericRegistrationWebSocket(url: url)
-                 : SurfAceAnnotationURLSessionTransport(url: url)
-         }, onError: @escaping @MainActor (Error) -> Void) throws {
+         makeTransport: (@MainActor (URL) -> any SurfAceAnnotationWireTransport)? = nil,
+         headAcquisitionCompletionForTesting: (@MainActor () async -> Void)? = nil,
+         onDiagnostic: @escaping @MainActor ([String: String]) -> Void = { _ in },
+         onError: @escaping @MainActor (Error) -> Void) throws {
         guard ["ws", "wss"].contains(endpoint.scheme?.lowercased() ?? ""), endpoint.host != nil else {
             throw SurfAceAnnotationWireError.invalidResponse
         }
         self.adapter = adapter
         self.endpoint = endpoint
-        self.makeTransport = makeTransport
+        self.makeTransport = makeTransport ?? { url in
+            if SurfAceRegistrationEndpoint.usesLocalNumericTransport(url) {
+                return SurfAceLocalNumericRegistrationWebSocket(url: url)
+            }
+            return SurfAceAnnotationURLSessionTransport(url: url)
+        }
         self.onError = onError
+        self.onDiagnostic = onDiagnostic
+        self.headAcquisitionCompletionForTesting = headAcquisitionCompletionForTesting
+    }
+
+    func reconcileEndpoint(_ endpoint: URL) throws {
+        guard ["ws", "wss"].contains(endpoint.scheme?.lowercased() ?? ""), endpoint.host != nil else {
+            throw SurfAceAnnotationWireError.invalidResponse
+        }
+        if self.endpoint != endpoint {
+            self.endpoint = endpoint
+            endpointGeneration &+= 1
+            // Keep the same serialized drain and durable FIFO. Closing an old
+            // exchange may retry its stable record identity on the selected route.
+            disconnect()
+        }
+        emit("route_selected")
+        notify()
     }
 
     func notify() {
@@ -119,6 +144,7 @@ final class SurfAceAnnotationPublisher {
             do { try await self.drain() }
             catch {
                 self.disconnect()
+                self.emit("retry_scheduled", errorCode: Self.safeErrorCode(error))
                 self.onError(error)
                 self.scheduleRetry()
             }
@@ -126,6 +152,8 @@ final class SurfAceAnnotationPublisher {
             if self.wanted && self.retry == nil { self.notify() }
         }
     }
+
+    func awaitIdle() async { await active?.value }
 
     func stop() {
         stopped = true
@@ -151,11 +179,58 @@ final class SurfAceAnnotationPublisher {
         }
     }
 
+    static func safeEndpoint(_ endpoint: URL) -> String {
+        // Never include userinfo, path, query or fragment (all may contain secrets).
+        let host = endpoint.host ?? "unknown"
+        return "\(endpoint.scheme ?? "unknown")://\(host)" + (endpoint.port.map { ":\($0)" } ?? "")
+    }
+
+    static func safeErrorCode(_ error: Error) -> String {
+        if let error = error as? URLError { return "url_\(error.code.rawValue)" }
+        if let wire = error as? SurfAceAnnotationWireError,
+           case .rejected(let code) = wire,
+           code.count <= 96, code.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "_") }) {
+            return code
+        }
+        return "publisher_error"
+    }
+
+    private func emit(_ stage: String, surfaceId: String? = nil,
+                      outbox: SurfAceAnnotationOutbox? = nil,
+                      head: SurfAceAnnotationOutboxEntry? = nil, errorCode: String? = nil) {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        var fields = ["stage": stage, "at": formatter.string(from: Date()),
+                      "endpoint": Self.safeEndpoint(endpoint),
+                      "connection": helloDone ? "ready" : "connecting",
+                      "retry": stage == "retry_scheduled" ? "scheduled" : "none"]
+        fields["surface_id"] = surfaceId
+        fields["client_id"] = outbox?.clientId
+        fields["source_epoch"] = outbox?.sourceEpoch
+        fields["source_event_id"] = head?.sourceEventId
+        fields["source_sequence"] = head?.sourceSequence
+        fields["error_code"] = errorCode
+        if let surfaceId, let surface = outbox?.surfaces[surfaceId] {
+            fields["outbox_depth"] = String(surface.fifo.count + (surface.trailingGap == nil ? 0 : 1))
+        }
+        if head != nil {
+            lastCorrelation = fields.filter { ["client_id", "source_epoch", "source_event_id", "source_sequence", "surface_id"].contains($0.key) }
+        } else if stage == "retry_scheduled" {
+            fields.merge(lastCorrelation) { current, _ in current }
+        }
+        onDiagnostic(fields)
+    }
+
     private func exchange(_ op: String, canonicalRecord: String? = nil) async throws -> SurfAceAnnotationServerCursor? {
         if transport == nil { transport = makeTransport(endpoint) }
         guard let transport else { throw SurfAceAnnotationWireError.invalidResponse }
         let request = SurfAceAnnotationWire.request(op: op, canonicalRecord: canonicalRecord)
-        return try SurfAceAnnotationWire.response(try await transport.exchange(request.data), id: request.id, op: op)
+        let generation = endpointGeneration
+        let response = try await transport.exchange(request.data)
+        // A suspended old hello/ingest response must not establish readiness
+        // for a newly selected transport. Retry the same durable head instead.
+        guard generation == endpointGeneration else { throw URLError(.cancelled) }
+        return try SurfAceAnnotationWire.response(response, id: request.id, op: op)
     }
 
     func drain() async throws {
@@ -170,6 +245,7 @@ final class SurfAceAnnotationPublisher {
                 do {
                     _ = try await exchange("annotation.hello")
                     helloDone = true
+                    emit("connected", surfaceId: surfaceId, outbox: snapshot.annotationPublisher)
                 } catch SurfAceAnnotationWireError.rejected(let code) {
                     if code == "writer_fence_unavailable" { throw SurfAceAnnotationWireError.rejected(code) }
                     try await markUnhealthy(surfaceId: surfaceId, code: code)
@@ -180,16 +256,24 @@ final class SurfAceAnnotationPublisher {
                 }
             }
             // head() may seal a trailing gap. The authority transaction finishes before the send.
+            let readyGeneration = endpointGeneration
             guard let head = try await adapter.transactAnnotationPublisher(surfaceId: surfaceId, {
                 try $0.head(surfaceId: surfaceId)
             }) else { continue }
+            await headAcquisitionCompletionForTesting?()
+            // Authority persistence yields after hello. A replacement route
+            // must establish its own socket role before sending this same head.
+            guard !stopped, !Task.isCancelled else { return }
+            guard helloDone, readyGeneration == endpointGeneration else { continue }
             let op = head.kind == "gap" ? "annotation.source_gap" : "annotation.ingest"
+            emit("sent", surfaceId: surfaceId, outbox: snapshot.annotationPublisher, head: head)
             let cursor: SurfAceAnnotationServerCursor
             do {
                 guard let accepted = try await exchange(op, canonicalRecord: head.canonical) else {
                     throw SurfAceAnnotationWireError.invalidResponse
                 }
                 cursor = accepted
+                emit("registry_accepted", surfaceId: surfaceId, outbox: snapshot.annotationPublisher, head: head)
             } catch SurfAceAnnotationWireError.rejected(let code)
                 where head.kind == "payload" &&
                     (code == "annotation_record_too_large" || code == "annotation_context_image_invalid") {
@@ -212,6 +296,7 @@ final class SurfAceAnnotationPublisher {
                 try await adapter.transactAnnotationPublisher(surfaceId: surfaceId) {
                     try $0.accept(surfaceId: surfaceId, head: head, cursor: cursor)
                 }
+                emit("acceptance_persisted", surfaceId: surfaceId, outbox: (await adapter.snapshot()).annotationPublisher, head: head)
             } catch SurfAceAnnotationOutboxError.staleAcceptance {
                 try await markUnhealthy(surfaceId: surfaceId, code: "annotation_ingest_cursor_conflict")
             }
