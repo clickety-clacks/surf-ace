@@ -76,6 +76,7 @@ await build({
     path.join(rootDir, "test", "markdown-rendering.test.ts"),
     path.join(rootDir, "test", "renderer-sizing.test.ts"),
     path.join(rootDir, "test", "renderer-dom-integration.test.ts"),
+    path.join(rootDir, "test", "split-resize.test.ts"),
     path.join(rootDir, "test", "renderer-ui-projection.test.ts"),
     path.join(rootDir, "test", "runtime-identity.test.ts"),
     path.join(rootDir, "test", "surface-core.test.ts"),

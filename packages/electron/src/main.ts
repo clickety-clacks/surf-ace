@@ -1,4 +1,5 @@
 import { ServerConnection } from "./server-connection.js";
+import { splitResizeMatches, splitResizeIsNoOp } from "./split-resize.js";
 import fs from "node:fs/promises";
 import { createHash } from "node:crypto";
 import os from "node:os";
@@ -518,12 +519,15 @@ async function reconcilePersistence(): Promise<void> {
     // durable. Independent local interaction may have advanced in-memory
     // state meanwhile; queue its save after reopening the persistence seam.
     const changedWhilePaused = JSON.stringify(core.getPersistentState()) !== JSON.stringify(uncertainStateCandidate);
+    const verifiedCandidate = uncertainStateCandidate;
     persistentStateOutcomeUnknown = null;
     uncertainStateCandidate = null;
     persistentStateWriteGuard = false;
     persistenceRetryDelayMs = 1_000;
     core.resumeAdmissionAfterVerifiedPersistence();
     server.resumeAfterVerifiedPersistence();
+    core.publishVerifiedTransactionEvents(verifiedCandidate, (error) =>
+      clientWarn("state_reconciliation_notification_failed", errorDiagnosticFields(error)));
     clientInfo("state_persistence_reconciled");
     for (const surface of core.listSurfaces()) broadcastSurfaceState(surface.surfaceId);
     if (changedWhilePaused) void persistState().catch((error) => {
@@ -1632,6 +1636,26 @@ function installWebAuthnAccountSelection(): void {
 }
 
 function installIpc(): void {
+  ipcMain.handle("surface:resize-split", async (event, payload: unknown) => {
+    const surfaceId = surfaceIdForSender(event.sender);
+    if (!surfaceId || !payload || typeof payload !== "object") return false;
+    const request = payload as { path?: unknown; weights?: unknown; expected?: unknown; geometry?: unknown };
+    if (!Array.isArray(request.path) || request.path.some((index) => !Number.isSafeInteger(index) || index < 0) ||
+        !Array.isArray(request.weights) || request.weights.some((weight) => typeof weight !== "number" || !Number.isFinite(weight) || weight <= 0) ||
+        !request.expected || typeof request.expected !== "object") return false;
+    const expected = request.expected as import("./split-resize.js").SplitResizeExpectation;
+    try {
+      if (!server) return false;
+      return await server.resizeSplit(surfaceId, request.path, request.weights, expected,
+        request.geometry as import("./split-resize.js").SplitResizeGeometry[]);
+    } catch {
+      return false;
+    } finally {
+      // Definite failure reads back the committed state; uncertainty reads back
+      // the retained guarded candidate. Neither uses a stale renderer cache.
+      broadcastSurfaceState(surfaceId);
+    }
+  });
   ipcMain.handle("surface:annotation-open", async (event, payload: { paneId?: unknown; openedAt?: unknown }) => {
     const surfaceId = surfaceIdForSender(event.sender);
     const paneId = payload?.paneId;
