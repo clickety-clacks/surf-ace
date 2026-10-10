@@ -741,8 +741,9 @@ extension SurfAceAnnotationOutboxTests {
         var saved = try XCTUnwrap(store.load())
         XCTAssertNil(saved.annotationPublisher?.surfaces[surfaceId]?.unhealthy)
         XCTAssertEqual(saved.annotationPublisher?.pendingSurfaceIds(), [])
-        let laterRecord = record()
+        let laterRecordData = try JSONSerialization.data(withJSONObject: record())
         let later = try await adapter.transactAnnotationPublisher(surfaceId: surfaceId) { outbox in
+            let laterRecord = try XCTUnwrap(JSONSerialization.jsonObject(with: laterRecordData) as? [String: Any])
             _ = try outbox.append(surfaceId: surfaceId, record: laterRecord)
             return try outbox.head(surfaceId: surfaceId)
         }
