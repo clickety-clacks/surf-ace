@@ -190,6 +190,147 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
     }
 
     @MainActor
+    func testLocalCloseCommandPreservesMountedSurvivorsAndDurableHistory() async throws {
+        let name = "SurfAceCommandCloseFixture.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(name, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer {
+            defaults.removePersistentDomain(forName: name)
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let stateURL = directory.appendingPathComponent("authority.json")
+        // Never start a listener, discovery, registration, or a live client.
+        let runtime = SurfAceRuntime(userDefaults: defaults, locklessStateURL: stateURL,
+                                     enableFleetDiscovery: false, isolatedTestLoopback: true)
+        await runtime.restoreLocklessAuthority(reason: "command-close-fixture")
+        let registered = await runtime.registerSurfaceForScene(sceneKey: name)
+        let surface = try XCTUnwrap(registered)
+        let surfaceId = surface.surfaceId
+        let adapter = try runtime.locklessAuthorityForLocalMutation()
+        _ = try await adapter.commitLocalMutation(operation: "test.command-close.seed") { state, _ in
+            let created = try TestRegistryTopology.paneSplit(
+                state: &state, surfaceId: surfaceId, paneId: 1, count: 4, direction: "vertical",
+                expectedTopologyRevision: state.liveSurfaces[surfaceId]?.topologyRevision ?? -1
+            ).newPaneIds
+            func leaf(_ id: Int64, _ weight: Double) -> SurfAceLocklessJSON {
+                .object(["type": .string("pane"), "paneId": .integer(id), "weight": .double(weight)])
+            }
+            state.liveSurfaces[surfaceId]?.topology = try SurfAceLocklessTopologyCodec.canonical(.object([
+                "type": .string("split"), "direction": .string("vertical"), "weight": .integer(1),
+                "children": .array([leaf(1, 0.24), leaf(created[0], 0.26), .object([
+                    "type": .string("split"), "direction": .string("horizontal"), "weight": .double(0.5),
+                    "children": .array([leaf(created[1], 0.2), leaf(created[2], 0.8)]),
+                ])]),
+            ]))
+            for id in [Int64(1)] + created {
+                var pane = try XCTUnwrap(state.liveSurfaces[surfaceId]?.panes[String(id)])
+                func entry(_ revision: Int64) -> SurfAceLocklessHistoryEntry {
+                    let identity = "command-close-\(id)-\(revision)"
+                    return .init(
+                        annotations: pane.history.visible.annotations,
+                        content: .object(["html": .string("<html><head><title>\(identity)</title></head><body style='margin:0;background:#d4ead4'><script>window.sessionToken=Math.random().toString();</script>\(identity)</body></html>")]),
+                        contentId: identity, contentType: "html", historyEntryId: "he_\(identity)",
+                        lastVisibleSequence: revision,
+                        provenance: .init(friendlyChatName: "isolated fixture", controllerProductName: "XCTest"),
+                        revision: revision
+                    )
+                }
+                pane.history = .init(back: [entry(1)], forward: [entry(3)],
+                                     nextRevision: 4, nextVisibleSequence: 4, visible: entry(2))
+                state.liveSurfaces[surfaceId]?.panes[String(id)] = pane
+            }
+            try state.validate()
+            return .null
+        }
+        await runtime.restoreLocklessAuthority(reason: "command-close-seed-projection")
+        let seededState = await adapter.snapshot()
+        let original = try XCTUnwrap(seededState.liveSurfaces[surfaceId])
+        let ids = original.panes.values.map(\.paneId).sorted()
+        XCTAssertEqual(ids.count, 4)
+        let originalModels = surface.panesById
+
+        let host = UIHostingController(rootView: SurfAceWindowView(runtime: runtime, surface: surface))
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previousKeyWindow = scene.windows.first(where: \.isKeyWindow)
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 1000, height: 800)
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+            previousKeyWindow?.makeKey()
+        }
+        host.view.frame = window.bounds
+        host.view.layoutIfNeeded()
+        let initialViews = popoutWebViews(in: host.view)
+        XCTAssertEqual(initialViews.count, 4)
+        let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            initialViews.allSatisfy { $0.title?.hasPrefix("command-close-") == true }
+        }, object: nil)
+        await fulfillment(of: [ready], timeout: 10)
+        var views: [Int64: WKWebView] = [:]
+        var tokens: [Int64: String] = [:]
+        for id in ids {
+            let view = try XCTUnwrap(initialViews.first { $0.title == "command-close-\(id)-2" })
+            views[id] = view
+            let token = try await view.evaluateJavaScript("window.sessionToken") as? String
+            tokens[id] = try XCTUnwrap(token)
+        }
+        let available = initialViews.map { $0.convert($0.bounds, to: window) }
+            .reduce(CGRect.null) { $0.union($1) }
+        var expectedRevision = original.topologyRevision
+        var tombstoneIds = Set<String>()
+        // Nested collapse must retain its OUTER 0.5 slot, not the child's 0.2.
+        // The next close leaves weights summing to 0.5; the last collapses the root.
+        let transitions: [(closed: Int64, survivors: [Int64], fractions: [CGFloat])] = [
+            (ids[3], [ids[0], ids[1], ids[2]], [0.24, 0.26, 0.5]),
+            (ids[2], [ids[0], ids[1]], [0.48, 0.52]),
+            (ids[0], [ids[1]], [1]),
+        ]
+        for (step, transition) in transitions.enumerated() {
+            let tombstoneId = try await runtime.closePaneLocally(surfaceId: surfaceId, paneId: Int(transition.closed))
+            XCTAssertTrue(tombstoneIds.insert(tombstoneId).inserted)
+            let state = await adapter.snapshot()
+            let persisted = try SurfAceLocklessGenerationStore(stateURL: stateURL).load()
+            XCTAssertEqual(persisted, state, "Command must be durable before projecting its result")
+            let material = try XCTUnwrap(state.liveSurfaces[surfaceId])
+            expectedRevision += 1
+            XCTAssertEqual(material.topologyRevision, expectedRevision)
+            XCTAssertEqual(Set(material.panes.keys), Set(transition.survivors.map(String.init)))
+            let tombstone = try XCTUnwrap(material.paneTombstones.first { $0.tombstoneId == tombstoneId })
+            XCTAssertEqual(tombstone.pane, original.panes[String(transition.closed)])
+            let retainedViews = try transition.survivors.map { try XCTUnwrap(views[$0]) }
+            await waitForMountedWebViews(retainedViews, in: host.view)
+            var x = available.minX
+            for (index, id) in transition.survivors.enumerated() {
+                XCTAssertEqual(material.panes[String(id)], original.panes[String(id)], "Identity, content, annotations, and complete back/forward history must survive")
+                let model = try XCTUnwrap(surface.panesById[Int(id)])
+                XCTAssertTrue(model === originalModels[Int(id)])
+                XCTAssertEqual(model.currentEntry.contentId, "command-close-\(id)-2")
+                XCTAssertEqual(model.backStack.map(\.contentId), ["command-close-\(id)-1"])
+                XCTAssertEqual(model.forwardStack.map(\.contentId), ["command-close-\(id)-3"])
+                let view = try XCTUnwrap(views[id])
+                let width = available.width * transition.fractions[index]
+                await waitForPopoutFrame(view, in: window,
+                                        expected: CGRect(x: x, y: available.minY, width: width, height: available.height))
+                x += width
+                let token = try await view.evaluateJavaScript("window.sessionToken") as? String
+                XCTAssertEqual(token, tokens[id], "A retained WebView must not reload")
+            }
+            XCTAssertEqual(x, available.maxX, accuracy: 0.01, "Survivors fill the complete available width")
+            let image = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
+                window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+            }
+            let attachment = XCTAttachment(image: image)
+            attachment.name = "command-close-step-\(step + 1)-mounted-survivors"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+        }
+    }
+
+    @MainActor
     func testPopoutGeometryAndReconciliationDoNotReplayTopology() {
         let portrait = CGRect(x: 0, y: 0, width: 600, height: 900)
         let right = surfAceSplitChildBounds(parent: portrait, direction: .vertical,
