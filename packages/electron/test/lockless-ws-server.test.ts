@@ -2053,6 +2053,133 @@ test("restart from committed target intent persists materializing and invokes ex
   }
 });
 
+test("target apply charges surface base separately from retained pane history", { timeout: 15_000 }, async (t) => {
+  for (const oversizedBase of [false, true]) {
+    await t.test(oversizedBase ? "genuine oversized base refuses before commit" : "large legal history survives durable intent and application", async () => {
+      const core = new SurfaceCore();
+      const viewport = { height: 800, scale: 2, width: 1200 };
+      const surface = core.ensurePrimarySurface("Partition fixture", viewport);
+      initializeRegistryBootstrapPanes(core);
+      const paneId = Number(core.panesList(surface.surfaceId).panes[0]!.paneId) as never;
+      for (let index = 0; index < 3; index += 1) {
+        core.contentSet(surface.surfaceId, {
+          content: { markdown: `${index}:` + "x".repeat(400_000) },
+          contentId: `partition-history-${index}` as never,
+          contentType: "markdown",
+          historyOwnerToken: `partition-history-owner-${index}` as never,
+          paneId,
+          revision: (index + 1) as never,
+        });
+      }
+      let gatePersistence = false;
+      let savedIntent: ReturnType<SurfaceCore["getPersistentState"]> | null = null;
+      let persistenceStarted!: () => void;
+      const persisting = new Promise<void>((resolve) => { persistenceStarted = resolve; });
+      let releasePersistence!: () => void;
+      const persistenceReleased = new Promise<void>((resolve) => { releasePersistence = resolve; });
+      let materializationStarted!: () => void;
+      const materializing = new Promise<void>((resolve) => { materializationStarted = resolve; });
+      let materializationInvocations = 0;
+      const originalTargetApply = core.targetApply.bind(core);
+      core.targetApply = ((...args: Parameters<SurfaceCore["targetApply"]>) => {
+        materializationInvocations += 1;
+        materializationStarted();
+        return originalTargetApply(...args);
+      }) as SurfaceCore["targetApply"];
+      const server = new SurfaceWsServer({
+        bindAddress: "127.0.0.1",
+        capturePaneImage: async () => null,
+        compositorSocketPath: null,
+        core,
+        endpointName: "Partition fixture",
+        hostName: "localhost",
+        persistLocklessState: async () => {
+          if (!gatePersistence) return;
+          savedIntent = core.getPersistentState();
+          persistenceStarted();
+          await persistenceReleased;
+        },
+        port: 0,
+        viewport: () => viewport,
+      });
+      let socket: WebSocket | null = null;
+      try {
+        await server.start();
+        const address = (server as unknown as { httpServer: { address(): AddressInfo } }).httpServer.address();
+        socket = await connect(`ws://127.0.0.1:${address.port}/ws`);
+        assert.equal((await pair(socket, "partition-controller", surface.surfaceId)).ok, true);
+        if (oversizedBase) core.getSurface(surface.surfaceId).name = "b".repeat(DEFAULT_LOCKLESS_LIMITS.maxSurfaceRecoverableBaseBytes);
+        const before = core.captureSurfaceTombstonePayload(surface.surfaceId);
+        const baseBytes = Buffer.byteLength(JSON.stringify(core.captureSurfaceRecoverableBase(surface.surfaceId)));
+        assert.ok(Buffer.byteLength(JSON.stringify(before)) > DEFAULT_LOCKLESS_LIMITS.maxSurfaceRecoverableBaseBytes);
+        assert.ok(Buffer.byteLength(JSON.stringify(before.panes[0])) < DEFAULT_LOCKLESS_LIMITS.maxPaneRecoverableStateBytes);
+        assert.equal(baseBytes > DEFAULT_LOCKLESS_LIMITS.maxSurfaceRecoverableBaseBytes, oversizedBase);
+        gatePersistence = !oversizedBase;
+        const resultEvent = oversizedBase ? null : nextEvent(socket, "event.target_apply_result");
+        const responsePromise = request(socket, "target.apply", {
+          paneId,
+          requestId: "partition-navigation",
+          restoreReason: "initial",
+          surfaceId: surface.surfaceId,
+          targetEpoch: 1,
+          targetHeader: {
+            payloadSchemaVersion: 1,
+            replaySemantics: "navigate",
+            requiredCapabilities: ["target.browser_url.v1"],
+            safeToLogFields: [],
+            safetyClass: "network",
+            summary: "Partition fixture",
+          },
+          targetId: "partition-target",
+          targetKind: "browser_url",
+          targetPayload: { url: "https://example.invalid/partition" },
+        });
+        if (oversizedBase) {
+          const rejected = await responsePromise;
+          assert.equal(rejected.ok, false);
+          assert.equal(rejected.error.code, "surface_state_capacity");
+          assert.equal(rejected.error.details.currentBytes, baseBytes);
+          assert.equal(rejected.error.details.prospectiveBytes, baseBytes);
+          assert.equal(materializationInvocations, 0);
+          assert.deepEqual(core.locklessAuthority.targetApplyWorkItems(), []);
+          assert.deepEqual(core.captureSurfaceTombstonePayload(surface.surfaceId).panes, before.panes);
+        } else {
+          await Promise.race([
+            persisting,
+            responsePromise.then((response) => assert.equal(response.ok, true, JSON.stringify(response))),
+          ]);
+          assert.equal(materializationInvocations, 0, "materialization waits for durable intent");
+          assert.ok(savedIntent);
+          const recovered = new SurfaceCore({ persistentState: structuredClone(savedIntent) });
+          recovered.restorePersistedSurfaces("Partition fixture", viewport);
+          assert.equal(recovered.locklessAuthority.targetApplyWorkItems()[0]?.state, "intent_committed");
+          assert.deepEqual(recovered.captureSurfaceTombstonePayload(surface.surfaceId).panes[0]!.history, before.panes[0]!.history);
+          gatePersistence = false;
+          releasePersistence();
+          const accepted = await responsePromise;
+          assert.equal(accepted.ok, true, JSON.stringify(accepted));
+          assert.equal(accepted.payload.status, "intent_committed");
+          assert.ok(accepted.payload.operationReceipt.commitSequence > 0);
+          await materializing;
+          server.resolveBrowserUrlNavigation(surface.surfaceId, Number(paneId), {
+            status: "applied", targetId: "partition-target", url: "https://example.invalid/partition",
+          });
+          const result = await resultEvent!;
+          assert.equal(result.payload.status, "applied");
+          assert.equal(result.payload.intentCommitSequence, accepted.payload.operationReceipt.commitSequence);
+          assert.equal(materializationInvocations, 1);
+          assert.deepEqual(core.captureSurfaceTombstonePayload(surface.surfaceId).panes[0]!.history.slice(0, before.panes[0]!.history.length), before.panes[0]!.history);
+        }
+      } finally {
+        gatePersistence = false;
+        releasePersistence();
+        socket?.close();
+        await server.stop();
+      }
+    });
+  }
+});
+
 test("target intent persistence completes before response and materialization callback", async () => {
   const core = new SurfaceCore();
   const surface = core.ensurePrimarySurface("Surf Ace", {

@@ -5,6 +5,190 @@ import WebKit
 
 final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
     @MainActor
+    func testFractionalSurvivorWeightsFillSurfaceAfterPaneClose() {
+        let bounds = CGRect(x: 0, y: 0, width: 1000, height: 800)
+        // Closing siblings can leave valid relative weights whose sum is below
+        // one. They still partition the entire available surface.
+        let horizontal = [0.24, 0.26]
+        let left = surfAceSplitChildBounds(parent: bounds, direction: .vertical,
+                                           weights: horizontal, index: 0)
+        let right = surfAceSplitChildBounds(parent: bounds, direction: .vertical,
+                                            weights: horizontal, index: 1)
+        XCTAssertEqual(left.width, 480, accuracy: 0.001)
+        XCTAssertEqual(right.minX, left.maxX, accuracy: 0.001)
+        XCTAssertEqual(right.maxX, bounds.maxX, accuracy: 0.001)
+
+        let vertical = [0.1, 0.2]
+        let top = surfAceSplitChildBounds(parent: bounds, direction: .horizontal,
+                                          weights: vertical, index: 0)
+        let bottom = surfAceSplitChildBounds(parent: bounds, direction: .horizontal,
+                                             weights: vertical, index: 1)
+        XCTAssertEqual(bottom.minY, top.maxY, accuracy: 0.001)
+        XCTAssertEqual(bottom.maxY, bounds.maxY, accuracy: 0.001)
+    }
+
+    @MainActor
+    func testMountedPaneCloseFillsVacatedRegionWithoutReloadingSurvivors() async throws {
+        let name = "SurfAcePaneCloseFixture.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        defer { defaults.removePersistentDomain(forName: name) }
+        let runtime = SurfAceRuntime(userDefaults: defaults, enableFleetDiscovery: false,
+                                     isolatedTestLoopback: true)
+        let surface = runtime.registerSurface(sceneKey: name)
+        let panes = (1...4).map { SurfAcePaneModel(paneId: $0, paneLabel: $0) }
+        for pane in panes {
+            pane.currentEntry = SurfAcePaneEntry.from(frame: SurfAceFrame(
+                contentId: "close-\(pane.paneId)", revision: 1, contentType: .html,
+                payload: .html(html: "<html><head><title>close-\(pane.paneId)</title></head><body><script>window.sessionToken=Math.random().toString();</script>Pane \(pane.paneId)</body></html>", baseURL: nil),
+                reloadSource: nil, title: "Pane", scrollable: true, interactive: true))
+        }
+        surface.panesById = Dictionary(uniqueKeysWithValues: panes.map { ($0.paneId, $0) })
+        surface.paneLayout = .split(direction: .vertical, children: [
+            .leaf(1, weight: 0.24), .leaf(2, weight: 0.26),
+            .split(direction: .horizontal,
+                   children: [.leaf(3, weight: 0.5), .leaf(4, weight: 0.5)], weight: 0.5),
+        ])
+
+        let host = UIHostingController(rootView: SurfAceWindowView(runtime: runtime, surface: surface))
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previousKeyWindow = scene.windows.first(where: \.isKeyWindow)
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 1000, height: 800)
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+            previousKeyWindow?.makeKey()
+        }
+        host.view.frame = window.bounds
+        host.view.layoutIfNeeded()
+        let initialViews = popoutWebViews(in: host.view)
+        XCTAssertEqual(initialViews.count, 4)
+        let ready = initialViews.map { _ in expectation(description: "local pane page loaded") }
+        let observations = zip(initialViews, ready).map { view, signal in
+            view.observe(\.title, options: [.initial, .new]) { view, _ in
+                if view.title?.hasPrefix("close-") == true { signal.fulfill() }
+            }
+        }
+        await fulfillment(of: ready, timeout: 10)
+        observations.forEach { $0.invalidate() }
+        let first = try XCTUnwrap(initialViews.first { $0.title == "close-1" })
+        let second = try XCTUnwrap(initialViews.first { $0.title == "close-2" })
+        let firstTokenValue = try await first.evaluateJavaScript("window.sessionToken") as? String
+        let secondTokenValue = try await second.evaluateJavaScript("window.sessionToken") as? String
+        let firstToken = try XCTUnwrap(firstTokenValue)
+        let secondToken = try XCTUnwrap(secondTokenValue)
+        let available = initialViews.map { $0.convert($0.bounds, to: window) }
+            .reduce(CGRect.null) { $0.union($1) }
+
+        // Project the accepted close result: panes 3 and 4 and their obsolete
+        // split are gone; surviving relative weights still sum to only 0.5.
+        surface.panesById.removeValue(forKey: 3)
+        surface.panesById.removeValue(forKey: 4)
+        surface.paneLayout = .split(direction: .vertical,
+                                    children: [.leaf(1, weight: 0.24), .leaf(2, weight: 0.26)])
+        surface.topologyEpoch += 1
+        await waitForPopoutFrame(first, in: window,
+                                expected: surfAceSplitChildBounds(parent: available, direction: .vertical,
+                                                                  weights: [0.24, 0.26], index: 0))
+        await waitForPopoutFrame(second, in: window,
+                                expected: surfAceSplitChildBounds(parent: available, direction: .vertical,
+                                                                  weights: [0.24, 0.26], index: 1))
+        XCTAssertEqual(Set(popoutWebViews(in: host.view).map(ObjectIdentifier.init)),
+                       Set([first, second].map(ObjectIdentifier.init)))
+        let retainedFirstToken = try await first.evaluateJavaScript("window.sessionToken") as? String
+        let retainedSecondToken = try await second.evaluateJavaScript("window.sessionToken") as? String
+        XCTAssertEqual(retainedFirstToken, firstToken)
+        XCTAssertEqual(retainedSecondToken, secondToken)
+    }
+
+    @MainActor
+    func testMountedSurvivorsKeepWebViewsThroughNestedCloseAndCollapse() async throws {
+        let name = "SurfAceNestedCloseFixture.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        defer { defaults.removePersistentDomain(forName: name) }
+        let runtime = SurfAceRuntime(userDefaults: defaults, enableFleetDiscovery: false,
+                                     isolatedTestLoopback: true)
+        let surface = runtime.registerSurface(sceneKey: name)
+        let panes = (1...4).map { SurfAcePaneModel(paneId: $0, paneLabel: $0) }
+        for pane in panes {
+            pane.currentEntry = SurfAcePaneEntry.from(frame: SurfAceFrame(
+                contentId: "nested-close-\(pane.paneId)", revision: 1, contentType: .html,
+                payload: .html(html: "<html><head><title>nested-\(pane.paneId)</title></head><body><script>window.sessionToken=Math.random().toString();</script></body></html>", baseURL: nil),
+                reloadSource: nil, title: "Pane", scrollable: true, interactive: true))
+        }
+        surface.panesById = Dictionary(uniqueKeysWithValues: panes.map { ($0.paneId, $0) })
+        surface.paneLayout = .split(direction: .vertical, children: [
+            .leaf(1, weight: 0.5),
+            .split(direction: .horizontal, children: [
+                .leaf(2, weight: 0.2), .leaf(3, weight: 0.3), .leaf(4, weight: 0.5),
+            ], weight: 0.5),
+        ])
+
+        let host = UIHostingController(rootView: SurfAceWindowView(runtime: runtime, surface: surface))
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previousKeyWindow = scene.windows.first(where: \.isKeyWindow)
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 1000, height: 800)
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+            previousKeyWindow?.makeKey()
+        }
+        host.view.frame = window.bounds
+        host.view.layoutIfNeeded()
+        let initialViews = popoutWebViews(in: host.view)
+        XCTAssertEqual(initialViews.count, 4)
+        let ready = initialViews.map { _ in expectation(description: "nested pane page loaded") }
+        let observations = zip(initialViews, ready).map { view, signal in
+            view.observe(\.title, options: [.initial, .new]) { view, _ in
+                if view.title?.hasPrefix("nested-") == true { signal.fulfill() }
+            }
+        }
+        await fulfillment(of: ready, timeout: 10)
+        observations.forEach { $0.invalidate() }
+        let first = try XCTUnwrap(initialViews.first { $0.title == "nested-1" })
+        let second = try XCTUnwrap(initialViews.first { $0.title == "nested-2" })
+        let third = try XCTUnwrap(initialViews.first { $0.title == "nested-3" })
+        let tokens = try await popoutSessionTokens([first, second, third])
+
+        // The nested split survives this close, but its descendants change.
+        surface.panesById.removeValue(forKey: 4)
+        surface.paneLayout = .split(direction: .vertical, children: [
+            .leaf(1, weight: 0.5),
+            .split(direction: .horizontal, children: [
+                .leaf(2, weight: 0.2), .leaf(3, weight: 0.3),
+            ], weight: 0.5),
+        ])
+        surface.topologyEpoch += 1
+        await waitForMountedWebViews([first, second, third], in: host.view)
+        let retainedNestedTokens = try await popoutSessionTokens([first, second, third])
+        XCTAssertEqual(retainedNestedTokens, tokens)
+
+        // Removing the preceding nested sibling collapses its split and
+        // reparents pane 3; neither its view nor its script state may reset.
+        surface.panesById.removeValue(forKey: 2)
+        surface.paneLayout = .split(direction: .vertical, children: [
+            .leaf(1, weight: 0.5), .leaf(3, weight: 0.5),
+        ])
+        surface.topologyEpoch += 1
+        await waitForMountedWebViews([first, third], in: host.view)
+        let retainedCollapsedTokens = try await popoutSessionTokens([first, third])
+        XCTAssertEqual(retainedCollapsedTokens, [tokens[0], tokens[2]])
+
+        // A final preceding-sibling close collapses the root itself.
+        surface.panesById.removeValue(forKey: 1)
+        surface.paneLayout = .leaf(3)
+        surface.topologyEpoch += 1
+        await waitForMountedWebViews([third], in: host.view)
+        let retainedRootToken = try await popoutSessionTokens([third])
+        XCTAssertEqual(retainedRootToken, [tokens[2]])
+    }
+
+    @MainActor
     func testPopoutGeometryAndReconciliationDoNotReplayTopology() {
         let portrait = CGRect(x: 0, y: 0, width: 600, height: 900)
         let right = surfAceSplitChildBounds(parent: portrait, direction: .vertical,
@@ -212,6 +396,16 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
     @MainActor
     private func popoutWebViews(in view: UIView) -> [WKWebView] {
         (view as? WKWebView).map { [$0] } ?? view.subviews.flatMap { popoutWebViews(in: $0) }
+    }
+
+    @MainActor
+    private func waitForMountedWebViews(_ expected: [WKWebView], in root: UIView) async {
+        let expectedIds = Set(expected.map(ObjectIdentifier.init))
+        let mounted = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            Set(self.popoutWebViews(in: root).map(ObjectIdentifier.init)) == expectedIds
+        }, object: nil)
+        await fulfillment(of: [mounted], timeout: 5)
+        XCTAssertEqual(Set(popoutWebViews(in: root).map(ObjectIdentifier.init)), expectedIds)
     }
 
     @MainActor

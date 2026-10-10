@@ -456,6 +456,7 @@ function reportSnapshot(payload: Record<string, unknown>): void {
 }
 
 function reportPaneSnapshot(view: PaneView): void {
+  if (resizeGesture || resizeCommitPending) return; // Provisional geometry must never become an authoritative snapshot.
   const frame = currentPaneFrameElement(view);
   if (frame?.matches("webview.content-browser-url-frame")) {
     reportSnapshot({
@@ -565,6 +566,7 @@ function collectMarkedOverlayRegions(pane: RendererPaneState, view: PaneView): O
 }
 
 function reportCompositorOverlayRegions(updateReason: "layout" | "resize" | "visibility"): void {
+  if (resizeGesture || resizeCommitPending) return;
   overlayRevision += 1;
   if (!latestState) {
     window.surfAce.reportOverlayRegions({
@@ -1422,6 +1424,7 @@ function applyPanePopOut(): void {
     view.popOutButton.setAttribute("aria-expanded", String(expanded));
   }
   appRoot.classList.toggle("has-pane-pop-out", poppedOutPaneId !== null);
+  positionPaneHosts();
 }
 
 let panePresentationIntent = 0;
@@ -1435,6 +1438,11 @@ async function togglePanePopOut(view: PaneView): Promise<void> {
 
 async function requestPanePopOut(view: PaneView, selected: number | null): Promise<void> {
   if (!latestState) return;
+  if (resizeCommitPending) {
+    view.popOutButton.title = "Wait for the divider resize to finish";
+    return;
+  }
+  cancelResizeGesture();
   const intent = ++panePresentationIntent;
   const identity = paneSnapshotGeometryIdentity();
   const surfaceId = latestState.surfaceId;
@@ -1557,7 +1565,7 @@ function ensurePaneView(paneId: number): PaneView {
   rootEl.className = "pane-shell";
   const slotEl = document.createElement("div");
   slotEl.className = "pane-slot";
-  slotEl.appendChild(rootEl);
+  // Tiled slot and retained content host live in separate layers.
   const popOutButton = surfAceOverlay(document.createElement("button"), "pane-pop-out");
   popOutButton.type = "button";
   popOutButton.className = "pane-pop-out control-button";
@@ -1927,6 +1935,7 @@ function isBrowserUrlKeyboardScrollResult(value: unknown): value is BrowserUrlKe
 }
 
 function reportBrowserUrlKeyboardScroll(view: PaneView, result: BrowserUrlKeyboardScrollResult): void {
+  if (resizeGesture) return;
   window.surfAce.command({
     paneId: view.paneId,
     type: "scroll",
@@ -1961,16 +1970,25 @@ function isRendererScalableContentType(pane: RendererPaneState | null): boolean 
   );
 }
 
+function runReadyGuestScript(view: PaneView, webview: BrowserUrlWebViewElement, code: string): void {
+  if (webview.dataset.guestReady !== "true" || !webview.isConnected || currentPaneFrameElement(view) !== webview) return;
+  try {
+    void webview.executeJavaScript?.(code)?.catch(() => {});
+  } catch {
+    // A guest can disappear while its host-side ready notification is queued.
+  }
+}
+
 function applyBrowserContentScale(view: PaneView, webview: BrowserUrlWebViewElement): void {
   const scale = Math.round(WEB_CONTENT_BASE_SCALE * view.scale * 1000) / 1000;
-  const scalePromise = webview.executeJavaScript?.(
+  runReadyGuestScript(view, webview,
     `(() => {
       const scale = ${JSON.stringify(scale)};
       document.documentElement.style.zoom = scale === 1 ? "" : String(scale);
       document.body?.style.setProperty("--surf-ace-content-scale", String(scale));
+      window.dispatchEvent(new Event("resize"));
     })()`,
   );
-  void scalePromise?.catch(() => {});
 }
 
 function applyContentScale(view: PaneView): void {
@@ -2074,6 +2092,7 @@ function applyPaneFrameSize(view: PaneView, element: HTMLElement): boolean {
   const height = Math.max(1, Math.floor(rect.height));
   view.contentEl.style.height = `${height}px`;
   view.contentEl.style.minHeight = `${height}px`;
+  const changed = element.style.width !== `${width}px` || element.style.height !== `${height}px`;
   element.style.width = `${width}px`;
   element.style.height = `${height}px`;
   if (element.matches("webview.content-browser-url-frame")) {
@@ -2082,6 +2101,11 @@ function applyPaneFrameSize(view: PaneView, element: HTMLElement): boolean {
     element.setAttribute("minheight", String(height));
     element.setAttribute("maxwidth", String(width));
     element.setAttribute("maxheight", String(height));
+    if (changed && element.dataset.guestReady === "true") {
+      runReadyGuestScript(view, element as BrowserUrlWebViewElement,
+        `window.dispatchEvent(new Event("resize"))`,
+      );
+    }
   }
   return true;
 }
@@ -2466,6 +2490,7 @@ function wireBrowserContentEvents(view: PaneView, paneId: number, webview: Brows
     if (!payload) {
       return;
     }
+    if (resizeGesture && (payload.type === "scroll" || payload.type === "ready")) return;
     if (payload.type === "scroll") {
       collapsePaneToolbar(view);
       window.surfAce.command({
@@ -2761,9 +2786,12 @@ function renderBrowserContent(
       // Guest scale initialization runs from dom-ready, when guest methods are available.
     },
   );
+  let guestLoadGeneration = 0;
   browserView.addEventListener(
     "did-start-loading",
     () => {
+      guestLoadGeneration += 1;
+      delete browserView.dataset.guestReady;
       syncBrowserControlButtons(view);
       rendererDiagnostic("browser_content_did_start_loading", {
         currentUrl: browserUrlElementCurrentUrl(browserView),
@@ -2805,6 +2833,7 @@ function renderBrowserContent(
   browserView.addEventListener(
     "dom-ready",
     () => {
+      browserView.dataset.guestReady = "true";
       syncBrowserControlButtons(view);
       rendererDiagnostic("browser_content_dom_ready", {
         currentUrl: browserUrlElementCurrentUrl(browserView),
@@ -2837,7 +2866,23 @@ function renderBrowserContent(
   browserView.addEventListener("will-frame-navigate", blockStaticHtmlNavigation);
   browserView.addEventListener("did-navigate", () => syncBrowserControlButtons(view));
   browserView.addEventListener("did-navigate-in-page", () => syncBrowserControlButtons(view));
-  browserView.addEventListener("did-stop-loading", () => syncBrowserControlButtons(view));
+  browserView.addEventListener("did-stop-loading", () => {
+    syncBrowserControlButtons(view);
+    // A loading cycle can finish without replacing the document or emitting
+    // dom-ready. Recover readiness from the guest, never from the spinner alone.
+    const generation = guestLoadGeneration;
+    try {
+      void browserView.executeJavaScript?.("document.readyState").then((readyState) => {
+        if (generation !== guestLoadGeneration || renderToken !== view.currentRenderToken ||
+            currentPaneFrameElement(view) !== browserView || !browserView.isConnected ||
+            (readyState !== "interactive" && readyState !== "complete")) return;
+        browserView.dataset.guestReady = "true";
+        applyBrowserContentScale(view, browserView);
+      }).catch(() => {});
+    } catch {
+      // A detached guest or one still navigating cannot establish readiness.
+    }
+  });
   browserView.addEventListener(
     "did-fail-load",
     (event) => {
@@ -3046,10 +3091,108 @@ function layoutWeight(node: LayoutNode): number {
   return typeof node.weight === "number" && Number.isFinite(node.weight) && node.weight > 0 ? node.weight : 1;
 }
 
-function attachResizeHandle(handle: HTMLElement, split: HTMLElement, node: Extract<LayoutNode, { type: "split" }>, path: number[], index: number): void {
+type ResizeGesture = {
+  expected: { surfaceEpoch: string; topologyRevision: number; geometryRevision: number; layout: LayoutNode | null };
+  path: number[];
+  weights: number[];
+  stop: () => void;
+};
+let resizeGesture: ResizeGesture | null = null;
+let resizeCommitPending = false;
+let resizeStatus = "";
+
+function layoutNodeAt(node: LayoutNode | null, path: number[]): LayoutNode | null {
+  for (const index of path) {
+    if (node?.type !== "split") return null;
+    node = node.children[index] ?? null;
+  }
+  return node;
+}
+
+function layoutIdentity(state: RendererWindowState): string {
+  return JSON.stringify([state.surfaceId, state.surfaceEpoch, state.topologyRevision, state.geometryRevision, state.viewport, state.layout]);
+}
+
+function positionPaneHosts(): void {
+  const wrapper = appRoot.firstElementChild as HTMLElement | null;
+  const layer = wrapper?.querySelector(".pane-host-layer") as HTMLElement | null;
+  if (!layer) return;
+  const origin = layer.getBoundingClientRect();
+  for (const slot of wrapper!.querySelectorAll<HTMLElement>(".pane-layout-slot")) {
+    const view = paneViews.get(Number(slot.dataset.paneId));
+    if (!view || !view.rootEl.isConnected) continue;
+    if (view.paneId === poppedOutPaneId) continue;
+    const rect = slot.getBoundingClientRect();
+    Object.assign(view.rootEl.style, {
+      left: `${rect.left - origin.left}px`, top: `${rect.top - origin.top}px`,
+      width: `${rect.width}px`, height: `${rect.height}px`,
+      borderTop: slot.dataset.borderTop ? "1px solid rgba(116, 141, 182, 0.14)" : "",
+      borderLeft: slot.dataset.borderLeft ? "1px solid rgba(116, 141, 182, 0.14)" : "",
+    });
+  }
+}
+
+function updateSplitElement(split: HTMLElement, node: Extract<LayoutNode, { type: "split" }>): void {
+  const children = [...split.children].filter((child) => !child.classList.contains("split-resize-handle")) as HTMLElement[];
+  const handles = [...split.children].filter((child) => child.classList.contains("split-resize-handle")) as HTMLElement[];
+  const total = node.children.reduce((sum, child) => sum + layoutWeight(child), 0);
+  let cumulative = 0;
+  node.children.forEach((child, index) => {
+    children[index]!.style.flexGrow = String(layoutWeight(child));
+    cumulative += layoutWeight(child);
+    const handle = handles[index];
+    if (handle) handle.style[node.direction === "vertical" ? "left" : "top"] = `${cumulative / total * 100}%`;
+    if (child.type === "split") updateSplitElement(children[index]!, child);
+  });
+}
+
+function refreshLayoutGeometry(): void {
+  positionPaneHosts();
+  setAllPaneChromeMetrics();
+  refreshDynamicPaneFrames();
+  if (!resizeGesture) reportAllPaneSnapshots();
+}
+
+function restoreCommittedLayout(): void {
+  const node = latestState?.layout;
+  const element = appRoot.querySelector(".layout-root")?.firstElementChild as HTMLElement | null;
+  if (node?.type === "split" && element) updateSplitElement(element, node);
+  refreshLayoutGeometry();
+}
+
+function cancelResizeGesture(): void {
+  const gesture = resizeGesture;
+  if (!gesture) return;
+  resizeGesture = null;
+  gesture.stop();
+  restoreCommittedLayout();
+  scheduleCompositorOverlayRegionReport("layout");
+}
+
+function showResizeStatus(): void {
+  const wrapper = appRoot.firstElementChild;
+  if (!wrapper) return;
+  let status = wrapper.querySelector(".resize-status") as HTMLElement | null;
+  if (!resizeStatus) { status?.remove(); return; }
+  if (!status) {
+    status = document.createElement("div");
+    status.className = "resize-status";
+    status.setAttribute("role", "status");
+    wrapper.appendChild(status);
+  }
+  status.textContent = resizeStatus;
+}
+
+function attachResizeHandle(handle: HTMLElement, split: HTMLElement, _node: Extract<LayoutNode, { type: "split" }>, path: number[], index: number): void {
   handle.addEventListener("pointerdown", (event) => {
+    if (poppedOutPaneId !== null || resizeCommitPending || resizeGesture || !latestState) return;
+    const node = layoutNodeAt(latestState.layout, path);
+    if (node?.type !== "split") return;
     event.preventDefault();
     handle.setPointerCapture(event.pointerId);
+    resizeStatus = "";
+    showResizeStatus();
+    const initialIdentity = layoutIdentity(latestState);
     const start = node.direction === "vertical" ? event.clientX : event.clientY;
     const splitRect = split.getBoundingClientRect();
     const extent = node.direction === "vertical" ? splitRect.width : splitRect.height;
@@ -3057,67 +3200,116 @@ function attachResizeHandle(handle: HTMLElement, split: HTMLElement, node: Extra
     const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
     const before = weights[index] ?? 1;
     const after = weights[index + 1] ?? 1;
-    const minWeight = Math.max(0.05, totalWeight * 0.05);
-    const onMove = (moveEvent: PointerEvent) => {
-      const current = node.direction === "vertical" ? moveEvent.clientX : moveEvent.clientY;
-      const deltaWeight = extent > 0 ? ((current - start) / extent) * totalWeight : 0;
-      const pairTotal = before + after;
-      const nextBefore = Math.min(Math.max(minWeight, before + deltaWeight), Math.max(minWeight, pairTotal - minWeight));
-      const nextWeights = [...weights];
-      nextWeights[index] = nextBefore;
-      nextWeights[index + 1] = Math.max(minWeight, pairTotal - nextBefore);
-      window.surfAce.command({ path, type: "resize-split", weights: nextWeights });
+    const pairTotal = before + after;
+    const minWeight = Math.min(pairTotal / 2, Math.max(0.05, totalWeight * 0.05));
+    let frame: number | null = null;
+    const gesture: ResizeGesture = {
+      expected: { surfaceEpoch: latestState.surfaceEpoch, topologyRevision: latestState.topologyRevision, geometryRevision: latestState.geometryRevision,
+        layout: structuredClone(latestState.layout) },
+      path: [...path], weights: [...weights], stop: () => {},
     };
-    const onUp = () => {
+    const updateWeights = (moveEvent: PointerEvent) => {
+      const current = node.direction === "vertical" ? moveEvent.clientX : moveEvent.clientY;
+      if (current === start) {
+        gesture.weights[index] = before;
+        gesture.weights[index + 1] = after;
+        return;
+      }
+      const deltaWeight = extent > 0 ? ((current - start) / extent) * totalWeight : 0;
+      const nextBefore = Math.min(Math.max(minWeight, before + deltaWeight), pairTotal - minWeight);
+      gesture.weights[index] = nextBefore;
+      gesture.weights[index + 1] = pairTotal - nextBefore;
+    };
+    const preview = () => {
+      frame = null;
+      if (resizeGesture !== gesture || !latestState || layoutIdentity(latestState) !== initialIdentity) return;
+      const provisional = { ...node, children: node.children.map((child, i) => ({ ...child, weight: gesture.weights[i] })) };
+      updateSplitElement(split, provisional);
+      refreshLayoutGeometry();
+    };
+    const onMove = (moveEvent: PointerEvent) => {
+      if (moveEvent.pointerId !== event.pointerId) return;
+      updateWeights(moveEvent);
+      if (frame === null) frame = window.requestAnimationFrame(preview);
+    };
+    const cancel = () => cancelResizeGesture();
+    const onKey = (key: KeyboardEvent) => { if (key.key === "Escape") cancel(); };
+    const onUp = (upEvent: PointerEvent) => {
+      if (upEvent.pointerId !== event.pointerId || resizeGesture !== gesture) return;
+      updateWeights(upEvent);
+      // Measure final flex geometry without publishing provisional snapshots or topology.
+      const finalNode = { ...node, children: node.children.map((child, i) => ({ ...child, weight: gesture.weights[i] })) };
+      updateSplitElement(split, finalNode);
+      refreshLayoutGeometry();
+      const geometry = latestState!.panes.map((pane) => ({ paneId: pane.paneId, bounds: paneBounds(paneViews.get(pane.paneId)!) }));
+      resizeGesture = null;
+      gesture.stop();
+      // Restore authoritative bounds before sending the one final mutation.
+      restoreCommittedLayout();
+      if (gesture.weights.every((weight, i) => Math.abs(weight - weights[i]!) < 1e-9)) return;
+      resizeCommitPending = true;
+      void window.surfAce.resizeSplit({ path: gesture.path, weights: gesture.weights, expected: gesture.expected, geometry })
+        .then((ok) => { resizeStatus = ok ? "" : "Resize couldn’t be confirmed"; })
+        .catch(() => { resizeStatus = "Resize couldn’t be confirmed"; })
+        .finally(() => {
+          resizeCommitPending = false;
+          restoreCommittedLayout();
+          showResizeStatus();
+          scheduleCompositorOverlayRegionReport("layout");
+        });
+    };
+    gesture.stop = () => {
+      if (frame !== null) window.cancelAnimationFrame(frame);
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
-      scheduleCompositorOverlayRegionReport("layout");
+      window.removeEventListener("pointercancel", cancel);
+      window.removeEventListener("blur", cancel);
+      window.removeEventListener("keydown", onKey);
+      handle.removeEventListener("lostpointercapture", cancel);
+      if (handle.hasPointerCapture?.(event.pointerId)) handle.releasePointerCapture(event.pointerId);
     };
+    resizeGesture = gesture;
     window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp, { once: true });
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", cancel);
+    window.addEventListener("blur", cancel);
+    window.addEventListener("keydown", onKey);
+    handle.addEventListener("lostpointercapture", cancel);
   });
 }
 
 function renderLayout(node: LayoutNode, panesById: Map<number, RendererPaneState>, path: number[] = []): HTMLElement {
   if (node.type === "pane") {
-    const pane = panesById.get(node.paneId);
-    if (!pane) {
-      const fallback = document.createElement("div");
-      return fallback;
-    }
     const view = ensurePaneView(node.paneId);
-    updatePane(view, pane);
+    view.slotEl.className = "pane-slot pane-layout-slot";
+    view.slotEl.dataset.paneId = String(node.paneId);
     view.slotEl.style.flexGrow = String(layoutWeight(node));
     return view.slotEl;
   }
   const split = document.createElement("div");
   split.className = `layout-split direction-${node.direction}`;
   split.style.flexGrow = String(layoutWeight(node));
-  const totalWeight = node.children.reduce((sum, child) => sum + layoutWeight(child), 0);
-  let cumulativeWeight = 0;
   for (const [index, child] of node.children.entries()) {
     const childEl = renderLayout(child, panesById, [...path, index]);
-    childEl.style.flexGrow = String(layoutWeight(child));
+    if (index > 0 && child.type === "pane") {
+      childEl.dataset[node.direction === "vertical" ? "borderLeft" : "borderTop"] = "true";
+    }
     split.appendChild(childEl);
-    cumulativeWeight += layoutWeight(child);
     if (index < node.children.length - 1) {
       const handle = document.createElement("div");
       handle.className = `split-resize-handle split-resize-handle-${node.direction}`;
-      const percent = totalWeight > 0 ? (cumulativeWeight / totalWeight) * 100 : 0;
-      if (node.direction === "vertical") {
-        handle.style.left = `${percent}%`;
-      } else {
-        handle.style.top = `${percent}%`;
-      }
       attachResizeHandle(handle, split, node, path, index);
       split.appendChild(handle);
     }
   }
+  updateSplitElement(split, node);
   return split;
 }
 
 function layoutKey(state: RendererWindowState): string {
-  return JSON.stringify(state.layout);
+  const shape = (node: LayoutNode | null): unknown => node?.type === "split"
+    ? [node.direction, node.children.map(shape)] : node?.type === "pane" ? node.paneId : null;
+  return JSON.stringify([state.surfaceId, state.surfaceEpoch, shape(state.layout)]);
 }
 
 function chromeKey(state: RendererWindowState): string {
@@ -3159,6 +3351,9 @@ function patchSameLayoutWindow(previousState: RendererWindowState, state: Render
 
   wrapper.className = `surface-window connection-${state.connectionBar}`;
   updateConnectionErrorBanner(wrapper, state);
+  const layoutChanged = JSON.stringify(previousState.layout) !== JSON.stringify(state.layout);
+  const split = wrapper.querySelector(".layout-root")?.firstElementChild as HTMLElement | null;
+  if (state.layout?.type === "split" && split && !resizeGesture) updateSplitElement(split, state.layout);
   const nextChromeKey = chromeKey(state);
   const chromeStateChanged = latestChromeKey !== nextChromeKey;
   const previousPanes = new Map(previousState.panes.map((pane) => [pane.paneId, pane]));
@@ -3181,7 +3376,8 @@ function patchSameLayoutWindow(previousState: RendererWindowState, state: Render
     }
   }
   latestChromeKey = nextChromeKey;
-  if (viewportChanged || previousState.geometryRevision !== state.geometryRevision) {
+  if (viewportChanged || layoutChanged || previousState.geometryRevision !== state.geometryRevision) {
+    positionPaneHosts();
     if (poppedOutPaneId !== null) {
       const selected = paneViews.get(poppedOutPaneId);
       panePresentationResizePending = true;
@@ -3192,6 +3388,7 @@ function patchSameLayoutWindow(previousState: RendererWindowState, state: Render
     refreshDynamicPaneFrames();
     reportAllPaneSnapshots();
     window.requestAnimationFrame(() => {
+      positionPaneHosts();
       setAllPaneChromeMetrics();
       refreshDynamicPaneFrames();
       reportAllPaneSnapshots();
@@ -3234,6 +3431,8 @@ function renderWindow(state: RendererWindowState): void {
     panePresentationIntent++;
     applyPanePopOut();
   }
+
+  if (resizeGesture && previousState && layoutIdentity(previousState) !== layoutIdentity(state)) cancelResizeGesture();
   if (previousState) {
     latestState = state;
     if (patchSameLayoutWindow(previousState, state)) {
@@ -3244,17 +3443,44 @@ function renderWindow(state: RendererWindowState): void {
   latestLayoutKey = layoutKey(state);
   latestChromeKey = chromeKey(state);
   const panesById = new Map(state.panes.map((pane) => [pane.paneId, pane]));
-  const wrapper = document.createElement("div");
+  let wrapper = appRoot.firstElementChild as HTMLDivElement | null;
+  if (!wrapper?.classList.contains("surface-window")) {
+    wrapper = document.createElement("div");
+    wrapper.className = "surface-window";
+    const layoutRoot = document.createElement("div");
+    layoutRoot.className = "layout-root";
+    const hosts = document.createElement("div");
+    hosts.className = "pane-host-layer";
+    wrapper.append(layoutRoot, hosts);
+    appRoot.replaceChildren(wrapper);
+  }
   wrapper.className = `surface-window connection-${state.connectionBar}`;
   updateConnectionErrorBanner(wrapper, state);
-  const layoutRoot = document.createElement("div");
-  layoutRoot.className = "layout-root";
-  if (state.layout) {
-    layoutRoot.appendChild(renderLayout(state.layout, panesById));
-  } else {
+  const layoutRoot = wrapper.querySelector(".layout-root")!;
+  const hosts = wrapper.querySelector(".pane-host-layer")!;
+  // Only the cheap layout skeleton is rebuilt. Guest ancestors never move.
+  layoutRoot.replaceChildren(...(state.layout ? [renderLayout(state.layout, panesById)] : []));
+  for (const [id, view] of paneViews) {
+    if (!panesById.has(id) || (previousState &&
+        (previousState.surfaceEpoch !== state.surfaceEpoch || previousState.surfaceId !== state.surfaceId))) {
+      resetDynamicContent(view);
+      view.rootEl.remove();
+      paneViews.delete(id);
+    }
   }
-  wrapper.append(layoutRoot);
-  appRoot.replaceChildren(wrapper);
+  for (const pane of state.panes) {
+    const view = ensurePaneView(pane.paneId);
+    if (view.rootEl.parentElement !== hosts) hosts.appendChild(view.rootEl);
+    const previousPane = previousState?.panes.find((previous) => previous.paneId === pane.paneId);
+    if (!previousState || !previousPane || view.currentContentKey === "" ||
+        paneRenderKey(previousState, previousPane) !== paneRenderKey(state, pane)) {
+      updatePane(view, pane);
+    } else {
+      view.rootEl.classList.toggle("keyboard-active", pane.activeKeyboardPane);
+    }
+  }
+  positionPaneHosts();
+  showResizeStatus();
   rendererDiagnostic("render_window_committed", {
     appChildCount: appRoot.childElementCount,
     contentHostCount: appRoot.querySelectorAll(".pane-content").length,
@@ -3266,6 +3492,7 @@ function renderWindow(state: RendererWindowState): void {
   refreshDynamicPaneFrames();
   reportAllPaneSnapshots();
   window.requestAnimationFrame(() => {
+    positionPaneHosts();
     setAllPaneChromeMetrics();
     refreshDynamicPaneFrames();
     reportAllPaneSnapshots();
@@ -3366,6 +3593,9 @@ async function init(): Promise<void> {
       panePresentationIntent++; // Retire any ack for the preceding window size.
       applyPanePopOut();
     }
+
+    cancelResizeGesture();
+    positionPaneHosts();
     refreshProvenanceWidths();
     if (!latestState) {
       return;

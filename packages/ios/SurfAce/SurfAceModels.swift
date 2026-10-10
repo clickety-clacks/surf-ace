@@ -1183,6 +1183,10 @@ final class SurfAcePaneModel {
     )
     @ObservationIgnored var pendingFlushTask: Task<Void, Never>?
     @ObservationIgnored weak var bridge: (any SurfAcePaneBridging)?
+    // A topology edit may rebuild SwiftUI ancestors while this pane survives.
+    // Keep its UIKit/WebKit host with the pane model so a reparent does not
+    // discard the live document and its in-page state.
+    @ObservationIgnored var retainedHostView: SurfAceSurfaceHostView?
     let paneInstanceId: String
 
     init(paneId: Int, paneLineageId: String = "pl_\(UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased())", paneLabel: Int? = nil, name: String? = nil) {

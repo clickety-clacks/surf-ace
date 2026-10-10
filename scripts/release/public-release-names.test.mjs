@@ -24,11 +24,11 @@ test("published v0.2.5 download identities remain exact legacy names", () => {
 });
 
 test("future public release names identify Surf Ace without a Tightbeam product prefix", () => {
-  const names = publicReleaseNames({ version: "0.2.7", sourceRevision: "r2", toolingRevision: "r6" });
+  const names = publicReleaseNames({ version: "0.2.7", sourceRevision: "r3", toolingRevision: "r7" });
   assert.equal(names.title, "Surf Ace v0.2.7");
   assert.equal(names.channel, "surf-ace");
-  assert.equal(names.sourceTag, "surf-ace-v0.2.7-r2");
-  assert.equal(names.toolingTag, "surf-ace-release-tooling-v0.2.7-r6");
+  assert.equal(names.sourceTag, "surf-ace-v0.2.7-r3");
+  assert.equal(names.toolingTag, "surf-ace-release-tooling-v0.2.7-r7");
   assert.equal(names.assets[0], "surf-ace-server-linux-x86_64-v0.2.7.tar.gz");
   assert.equal(names.assets[5], "surf-ace-skill-v0.2.7.md");
   assert.equal(names.manifest, "surf-ace-v0.2.7-manifest.json");

@@ -733,8 +733,8 @@ test("renderer exposes split resize handles and reports resize-split commands", 
   const source = await rendererSource();
   const styles = await rendererStyles();
 
-  assert.match(source, /type:\s*"resize-split"/);
-  assert.match(source, /weights:\s*nextWeights/);
+  assert.match(source, /window\.surfAce\.resizeSplit\(/);
+  assert.match(source, /weights:\s*gesture\.weights/);
   assert.match(source, /style\.flexGrow = String\(layoutWeight/);
   assert.match(styles, /\.split-resize-handle\s*\{/);
   assert.match(styles, /cursor:\s*col-resize;/);

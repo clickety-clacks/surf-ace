@@ -5,6 +5,7 @@ const guestPreloadPath = String(ipcRenderer.sendSync("surface:get-guest-preload-
 contextBridge.exposeInMainWorld("surfAce", {
   clearToast: (paneId: number) => ipcRenderer.send("surface:clear-toast", { paneId }),
   command: (payload: Record<string, unknown>) => ipcRenderer.send("surface:command", payload),
+  resizeSplit: (payload: Record<string, unknown>) => ipcRenderer.invoke("surface:resize-split", payload) as Promise<boolean>,
   captureAnnotationOpen: (paneId: number, openedAt: number) =>
     ipcRenderer.invoke("surface:annotation-open", { paneId, openedAt }) as Promise<boolean>,
   guestPreloadPath,
@@ -36,6 +37,7 @@ declare global {
     surfAce: {
       clearToast: (paneId: number) => void;
       command: (payload: Record<string, unknown>) => void;
+      resizeSplit: (payload: Record<string, unknown>) => Promise<boolean>;
       captureAnnotationOpen: (paneId: number, openedAt: number) => Promise<boolean>;
       guestPreloadPath: string;
       getBootstrap: () => Promise<unknown>;

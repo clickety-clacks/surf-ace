@@ -589,14 +589,15 @@ export class LocklessClientAuthority {
     }
   }
 
-  async transactionAsync<T>(operation: () => Promise<T>): Promise<T> {
+  async transactionAsync<T>(operation: () => Promise<T>, committed?: { onNotificationError: (error: unknown) => void }): Promise<T> {
     return await this.serializeAuthorityWork(async () => {
-      return await this.transactionAsyncExclusive(operation);
+      return await this.transactionAsyncExclusive(operation, committed);
     });
   }
 
   private async transactionAsyncExclusive<T>(
     operation: () => Promise<T>,
+    committed?: { onNotificationError: (error: unknown) => void },
   ): Promise<T> {
     const ownsEvents = this.pendingEvents === null;
     const beforeEventCount = this.pendingEvents?.length ?? 0;
@@ -613,7 +614,12 @@ export class LocklessClientAuthority {
       if (ownsEvents) {
         const events = this.pendingEvents!;
         this.pendingEvents = null;
-        for (const event of events) this.deliver(event);
+        for (const event of events) {
+          if (!committed) this.deliver(event);
+          else for (const listener of this.listeners) {
+            try { listener(clone(event)); } catch (error) { try { committed.onNotificationError(error); } catch {} }
+          }
+        }
       }
       return result;
     } catch (error) {
