@@ -450,6 +450,37 @@ private final class AnnotationRoleEnforcingTransport: SurfAceAnnotationWireTrans
 }
 
 @MainActor
+private final class AnnotationRoleSocketServer {
+    let server = SurfAceHTTPServer()
+    let marker = UUID().uuidString
+    var connections: [AnnotationRoleEnforcingTransport] = []
+    func start() async throws -> URL {
+        let marker = self.marker
+        let port = try await server.startIsolatedLoopbackForTesting(
+            httpHandler: { _ in HTTPServerResponse(statusCode: 200, body: Data(marker.utf8)) },
+            webSocketHandler: { [self] socket in await serve(socket) }
+        )
+        XCTAssertNotEqual(port, SurfAceHTTPServer.fixedPort)
+        let identity = try XCTUnwrap(URL(string: "http://127.0.0.1:\(port)/identity"))
+        let (data, _) = try await URLSession.shared.data(from: identity)
+        XCTAssertEqual(String(decoding: data, as: UTF8.self), marker)
+        return try XCTUnwrap(URL(string: "ws://127.0.0.1:\(port)/ws"))
+    }
+    private func serve(_ socket: SurfAceWebSocket) async {
+        let connection = AnnotationRoleEnforcingTransport()
+        connections.append(connection)
+        do {
+            while let message = try await socket.receive() {
+                guard case .text(let text) = message else { break }
+                let reply = try await connection.exchange(Data(text.utf8))
+                try await socket.send(text: String(decoding: reply, as: UTF8.self))
+            }
+        } catch { /* The owned publisher closes its connection during rebind. */ }
+    }
+    func stop() async { await server.stop() }
+}
+
+@MainActor
 private final class AnnotationSuspendedHelloTransport: SurfAceAnnotationWireTransport {
     var entered: CheckedContinuation<Void, Never>?
     var response: CheckedContinuation<Void, Never>?
@@ -735,6 +766,82 @@ extension SurfAceAnnotationOutboxTests {
         release?.resume()
         release = nil
         await publisher.awaitIdle()
+        XCTAssertEqual(newTransport.operations, ["annotation.hello", "annotation.ingest"])
+        XCTAssertEqual(newTransport.records, [expected.canonical])
+        XCTAssertTrue(errors.isEmpty)
+        var saved = try XCTUnwrap(store.load())
+        XCTAssertNil(saved.annotationPublisher?.surfaces[surfaceId]?.unhealthy)
+        XCTAssertEqual(saved.annotationPublisher?.pendingSurfaceIds(), [])
+        let laterRecordData = try JSONSerialization.data(withJSONObject: record())
+        let later = try await adapter.transactAnnotationPublisher(surfaceId: surfaceId) { outbox in
+            let laterRecord = try XCTUnwrap(JSONSerialization.jsonObject(with: laterRecordData) as? [String: Any])
+            _ = try outbox.append(surfaceId: surfaceId, record: laterRecord)
+            return try outbox.head(surfaceId: surfaceId)
+        }
+        publisher.notify()
+        await publisher.awaitIdle()
+        publisher.stop()
+        XCTAssertEqual(newTransport.operations, ["annotation.hello", "annotation.ingest", "annotation.ingest"])
+        XCTAssertEqual(newTransport.records, [expected.canonical, try XCTUnwrap(later).canonical])
+        saved = try XCTUnwrap(store.load())
+        XCTAssertNil(saved.annotationPublisher?.surfaces[surfaceId]?.unhealthy)
+        XCTAssertEqual(saved.annotationPublisher?.pendingSurfaceIds(), [])
+        XCTAssertEqual(saved.annotationPublisher?.sourceEpoch, sourceEpoch)
+        XCTAssertEqual(saved.annotationPublisher?.clientId, "client-1")
+    }
+
+    @MainActor
+    func testRealSocketHeldHeadRebindRequiresPerConnectionHello() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SurfAceAnnotationTransport-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = SurfAceLocklessGenerationStore(stateURL: directory.appendingPathComponent("authority-v1.json"))
+        var limits = SurfAceLocklessCapacityLimits.production
+        limits.maxAnnotationPublisherStateBytesPerSurface = Int64(SurfAceAnnotationOutbox.maximumBytes)
+        limits.maxAnnotationPublisherRecordsPerSurface = Int64(SurfAceAnnotationOutbox.maximumRecords)
+        limits.maxRecoverableSurfaceBytes = 704 * 1_024 * 1_024
+        var state = try SurfAceLocklessAuthorityState.empty(limits: limits)
+        state.annotationPublisher = try SurfAceAnnotationOutbox(clientId: "client-1", sourceEpoch: sourceEpoch)
+        let opened = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
+            state: &state, expectedSurfaceSetRevision: state.surfaceSetRevision)
+        let surfaceId = opened.surface.surfaceId
+        _ = try state.annotationPublisher?.append(surfaceId: surfaceId, record: record())
+        let expected = try XCTUnwrap(state.annotationPublisher?.head(surfaceId: surfaceId))
+        try store.save(state)
+        let adapter = try SurfAceLocklessRuntimeAdapter(store: store, annotationClientId: "client-1")
+        let oldServer = AnnotationRoleSocketServer()
+        let newServer = AnnotationRoleSocketServer()
+        addTeardownBlock { await oldServer.stop(); await newServer.stop() }
+        let old = try await oldServer.start()
+        let selected = try await newServer.start()
+        let held = expectation(description: "durable head completion held after valid A hello")
+        var release: CheckedContinuation<Void, Never>?
+        var holdOnce = true
+        var errors: [Error] = []
+        let publisher = try SurfAceAnnotationPublisher(
+            adapter: adapter, endpoint: old,
+            headAcquisitionCompletionForTesting: {
+                guard holdOnce else { return }
+                holdOnce = false
+                await withCheckedContinuation { continuation in
+                    release = continuation
+                    held.fulfill()
+                }
+            }, onError: { errors.append($0) }
+        )
+        addTeardownBlock { await MainActor.run { publisher.stop() } }
+        publisher.notify()
+        await fulfillment(of: [held], timeout: 5)
+        let oldTransport = try XCTUnwrap(oldServer.connections.first)
+        XCTAssertEqual(oldTransport.operations, ["annotation.hello"])
+        let heldSnapshot = await adapter.snapshot()
+        let canonical = try XCTUnwrap(heldSnapshot.annotationPublisher?.surfaces[surfaceId]?.fifo.first?.canonical)
+        XCTAssertEqual(canonical, expected.canonical)
+        try publisher.reconcileEndpoint(selected)
+        release?.resume()
+        release = nil
+        await publisher.awaitIdle()
+        let newTransport = try XCTUnwrap(newServer.connections.first)
         XCTAssertEqual(newTransport.operations, ["annotation.hello", "annotation.ingest"])
         XCTAssertEqual(newTransport.records, [expected.canonical])
         XCTAssertTrue(errors.isEmpty)
