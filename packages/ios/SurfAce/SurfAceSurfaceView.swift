@@ -1653,7 +1653,6 @@ private struct SurfAcePaneControls: View {
     @Bindable var pane: SurfAcePaneModel
     let isPoppedOut: Bool
     let onTogglePopout: () -> Void
-    @AccessibilityFocusState private var popoutControlFocused: Bool
     @Environment(\.colorScheme) private var colorScheme
     @State private var fontSizePopoverVisible = false
 
@@ -1706,29 +1705,13 @@ private struct SurfAcePaneControls: View {
             }
 
             HStack(spacing: 4) {
-                ZStack {
-                    SurfAcePanePopoutButton(
-                        paneId: pane.paneId, isPoppedOut: isPoppedOut,
-                        foregroundColor: UIColor(surfAceToolbarForegroundColor(for: colorScheme)),
-                        onToggle: onTogglePopout
-                    )
-                    .accessibilityHidden(true)
-                }
+                SurfAcePanePopoutButton(
+                    paneId: pane.paneId, isPoppedOut: isPoppedOut,
+                    foregroundColor: UIColor(surfAceToolbarForegroundColor(for: colorScheme)),
+                    onToggle: onTogglePopout
+                )
                 .frame(width: SurfAcePaneChromeLayout.controlHitSize,
                        height: SurfAcePaneChromeLayout.controlHitSize)
-                .accessibilityElement(children: .ignore)
-                .accessibilityAddTraits(.isButton)
-                .accessibilityLabel(isPoppedOut ? "Restore" : "Pop out")
-                .accessibilityValue(isPoppedOut ? "Expanded" : "Tiled")
-                .accessibilityIdentifier("surf-ace-pane-popout-\(pane.paneId)")
-                .accessibilityAction { onTogglePopout() }
-                .accessibilityFocused($popoutControlFocused)
-                .onChange(of: isPoppedOut) { _, _ in
-                    // Do not let the accessibility wrapper replace the native
-                    // keyboard responder when no screen reader is active.
-                    guard UIAccessibility.isVoiceOverRunning else { return }
-                    popoutControlFocused = true
-                }
 
                 Button {
                     runtime.activateKeyboardPane(surfaceId: surface.surfaceId, paneId: pane.paneId)
@@ -1841,8 +1824,8 @@ private final class SurfAcePanePopoutControl: UIButton {
         chrome.clipsToBounds = true
         chrome.layer.borderWidth = 1
         insertSubview(chrome, at: 0)
-        // SwiftUI exposes one accessibility element for this control.
-        isAccessibilityElement = false
+        // UIButton is the sole accessibility and keyboard target.
+        isAccessibilityElement = true
         addTarget(self, action: #selector(activateToggle), for: .touchUpInside)
     }
 
@@ -1887,8 +1870,15 @@ private final class SurfAcePanePopoutControl: UIButton {
         focusPending = false
         let generation = focusGeneration
         DispatchQueue.main.async { [weak self] in
-            guard let self, self.window != nil, self.focusGeneration == generation else { return }
-            if !UIAccessibility.isVoiceOverRunning { self.becomeFirstResponder() }
+            guard let self, let window = self.window,
+                  self.focusGeneration == generation else { return }
+            // Ancestors move the retained toolbar without changing this
+            // button's bounds. Finish their layout before targeting its new
+            // accessibility frame, rather than focusing during local layout.
+            window.layoutIfNeeded()
+            guard self.window === window, self.focusGeneration == generation else { return }
+            self.becomeFirstResponder()
+            UIAccessibility.post(notification: .layoutChanged, argument: self)
         }
     }
 

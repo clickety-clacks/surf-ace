@@ -12,6 +12,8 @@ final class SurfAceResizeUITests: XCTestCase {
         }
         let toggle = app.buttons["surf-ace-pane-popout-3"]
         XCTAssertTrue(toggle.waitForExistence(timeout: 10))
+        XCTAssertEqual(app.buttons.matching(identifier: "surf-ace-pane-popout-3").count, 1,
+                       "the native toolbar toggle is the sole accessibility target")
         let revision = app.staticTexts["surf-ace-popout-topology"].label
         assertSmallBottomToolbarToggle(toggle, in: app)
         let tiled = toggle.frame
@@ -108,6 +110,8 @@ final class SurfAceResizeUITests: XCTestCase {
         app.launch()
         let toggle = app.buttons["surf-ace-pane-popout-3"]
         XCTAssertTrue(toggle.waitForExistence(timeout: 10))
+        XCTAssertEqual(app.buttons.matching(identifier: "surf-ace-pane-popout-3").count, 1,
+                       "the native toolbar toggle is the sole accessibility target")
         try voiceOver.enable()
         toggle.tap() // Select the toggle before the VoiceOver activation gesture.
         toggle.doubleTap()
@@ -145,6 +149,8 @@ final class SurfAceResizeUITests: XCTestCase {
         defer { app.terminate() }
         let toggle = app.buttons["surf-ace-pane-popout-3"]
         XCTAssertTrue(toggle.waitForExistence(timeout: 10))
+        XCTAssertEqual(app.buttons.matching(identifier: "surf-ace-pane-popout-3").count, 1,
+                       "the native toolbar toggle is the sole accessibility target")
         toggle.tap()
         let expanded = XCTNSPredicateExpectation(
             predicate: NSPredicate(format: "value == %@", "Expanded"), object: toggle)

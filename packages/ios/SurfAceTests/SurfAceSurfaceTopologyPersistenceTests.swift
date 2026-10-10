@@ -272,6 +272,9 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
         let toggle = try XCTUnwrap(popoutToolbarButtons(in: host.view).first {
             $0.accessibilityIdentifier == "surf-ace-pane-popout-3"
         })
+        XCTAssertTrue(toggle.isAccessibilityElement,
+                      "the mounted native toggle provides its own accessibility target")
+        XCTAssertFalse(toggle.accessibilityElementsHidden)
         var tiledFrames = views.map { $0.convert($0.bounds, to: window) }
         var surfaceFrame = tiledFrames.reduce(CGRect.null) { $0.union($1) }
         for index in 0..<4 {
