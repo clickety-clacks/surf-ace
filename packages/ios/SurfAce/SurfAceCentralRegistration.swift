@@ -709,6 +709,7 @@ final class SurfAceCentralRegistration {
     private let apply: Apply
     private let verifyRegistry: VerifyRegistry
     private let onError: @MainActor (Error) -> Void
+    private let onVerifiedEndpoint: @MainActor (URL) -> Void
     private var selected: (url: URL, transport: any SurfAceRegistrationTransport)?
     private var loop: Task<Void, Never>?
     private var stopped = false
@@ -759,7 +760,8 @@ final class SurfAceCentralRegistration {
          verifyRegistry: @escaping VerifyRegistry,
          onError: @escaping @MainActor (Error) -> Void = { _ in },
          onStatusChange: @escaping @MainActor (SurfAceCentralRegistrationStatus) -> Void = { _ in },
-         onConnectionError: @escaping @MainActor (String?) -> Void = { _ in }) {
+         onConnectionError: @escaping @MainActor (String?) -> Void = { _ in },
+         onVerifiedEndpoint: @escaping @MainActor (URL) -> Void = { _ in }) {
         self.clientId = clientId
         self.configured = configured
         self.discover = discover
@@ -772,6 +774,7 @@ final class SurfAceCentralRegistration {
         self.onError = onError
         self.onStatusChange = onStatusChange
         self.onConnectionError = onConnectionError
+        self.onVerifiedEndpoint = onVerifiedEndpoint
     }
 
     func synchronize() async throws {
@@ -796,6 +799,7 @@ final class SurfAceCentralRegistration {
                 setLastError(nil)
                 lastReportedError = nil
                 setStatus(.connected)
+                onVerifiedEndpoint(selected.url)
                 if let configured, selected.url != configured {
                     _ = try await attempt(configured, surfaces: surfaces, failures: failures)
                 }
@@ -894,6 +898,7 @@ final class SurfAceCentralRegistration {
             setLastError(nil)
             lastReportedError = nil
             setStatus(.connected)
+            onVerifiedEndpoint(url)
             return true
         } catch {
             candidate.close()
