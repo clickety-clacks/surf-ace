@@ -1882,6 +1882,12 @@ private final class SurfAcePanePopoutControl: UIButton {
         }
     }
 
+    override func accessibilityActivate() -> Bool {
+        // Use exactly the same action as touch and keyboard activation.
+        onToggle()
+        return true
+    }
+
     @objc private func activateToggle() { onToggle() }
 }
 

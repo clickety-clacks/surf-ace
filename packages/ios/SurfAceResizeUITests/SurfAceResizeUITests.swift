@@ -1,7 +1,9 @@
 import XCTest
 
 final class SurfAceResizeUITests: XCTestCase {
-    func testPopoutRestoreKeepsSessionAndOwnsCoveredPaneInput() {
+    @MainActor
+    func testPopoutRestoreKeepsSessionAndOwnsCoveredPaneInput() throws {
+        try preparePopoutWithoutVoiceOver()
         let app = XCUIApplication()
         app.launchEnvironment["SURF_ACE_XCTEST_HOST_NO_AUTOSTART"] = "1"
         app.launchEnvironment["SURF_ACE_POPOUT_PROBE"] = "1"
@@ -102,9 +104,14 @@ final class SurfAceResizeUITests: XCTestCase {
         app.launchEnvironment["SURF_ACE_XCTEST_HOST_NO_AUTOSTART"] = "1"
         app.launchEnvironment["SURF_ACE_POPOUT_PROBE"] = "1"
         let voiceOver = XCUIDevice.shared.voiceOverService
-        let originallyEnabled = voiceOver.isEnabled
+        try preparePopoutWithoutVoiceOver()
         defer {
-            if !originallyEnabled { try? voiceOver.disable() }
+            do {
+                try voiceOver.disable()
+                XCTAssertFalse(voiceOver.isEnabled, "VoiceOver must not leak into later UI checks")
+            } catch {
+                XCTFail("VoiceOver teardown failed: \(error)")
+            }
             app.terminate()
         }
         app.launch()
@@ -113,6 +120,7 @@ final class SurfAceResizeUITests: XCTestCase {
         XCTAssertEqual(app.buttons.matching(identifier: "surf-ace-pane-popout-3").count, 1,
                        "the native toolbar toggle is the sole accessibility target")
         try voiceOver.enable()
+        XCTAssertTrue(voiceOver.isEnabled)
         toggle.tap() // Select the toggle before the VoiceOver activation gesture.
         toggle.doubleTap()
         let expanded = XCTNSPredicateExpectation(
@@ -141,7 +149,8 @@ final class SurfAceResizeUITests: XCTestCase {
     }
 
     @MainActor
-    func testKeyboardFocusCanActivateExpandedRestore() {
+    func testKeyboardFocusCanActivateExpandedRestore() throws {
+        try preparePopoutWithoutVoiceOver()
         let app = XCUIApplication()
         app.launchEnvironment["SURF_ACE_XCTEST_HOST_NO_AUTOSTART"] = "1"
         app.launchEnvironment["SURF_ACE_POPOUT_PROBE"] = "1"
@@ -164,6 +173,15 @@ final class SurfAceResizeUITests: XCTestCase {
             predicate: NSPredicate(format: "value == %@", "Tiled"), object: toggle)
         XCTAssertEqual(XCTWaiter.wait(for: [restored], timeout: 5), .completed,
                        "keyboard Restore readback: \(toggle.debugDescription)")
+    }
+
+    @MainActor
+    private func preparePopoutWithoutVoiceOver() throws {
+        if #available(iOS 27.0, *) {
+            let voiceOver = XCUIDevice.shared.voiceOverService
+            if voiceOver.isEnabled { try voiceOver.disable() }
+            XCTAssertFalse(voiceOver.isEnabled, "touch/keyboard fixture starts with VoiceOver disabled")
+        }
     }
 
     func testDragAcrossLocalWebContentChangesSplitWeight() {

@@ -335,6 +335,16 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
             await waitForPopoutFrame(selected, in: window,
                                     expected: tiledFrames[try XCTUnwrap(views.firstIndex(of: selected))])
         }
+        XCTAssertTrue(toggle.accessibilityActivate(), "native accessibility invokes the same pop-out action")
+        await waitForPopoutFrame(selected, in: window,
+                                expected: surfAcePanePopoutBounds(in: surfaceFrame))
+        XCTAssertEqual(selection.paneId, 3)
+        XCTAssertTrue(toggle.accessibilityActivate(), "the same accessibility action restores the tile")
+        await waitForPopoutFrame(selected, in: window,
+                                expected: tiledFrames[try XCTUnwrap(views.firstIndex(of: selected))])
+        XCTAssertNil(selection.paneId)
+        let accessibilityTokens = try await popoutSessionTokens(views)
+        XCTAssertEqual(accessibilityTokens, tokens)
         for view in views {
             let counter = try await view.evaluateJavaScript("window.counter") as? Int
             XCTAssertEqual(counter, 5, "covered sibling content stays live without reload")
