@@ -436,6 +436,11 @@ function paneBounds(view: PaneView) {
   };
 }
 
+function tiledPaneBounds(view: PaneView) {
+  const rect = view.slotEl.getBoundingClientRect();
+  return { height: rect.height, width: rect.width, x: rect.x, y: rect.y };
+}
+
 function paneSnapshotGeometryIdentity(): {
   geometryRevision: number;
   surfaceEpoch: string;
@@ -456,7 +461,7 @@ function reportSnapshot(payload: Record<string, unknown>): void {
 }
 
 function reportPaneSnapshot(view: PaneView): void {
-  if (resizeGesture || resizeCommitPending) return; // Provisional geometry must never become an authoritative snapshot.
+  if (resizeGesture || resizeCommitPending || panePresentationTransitionsPending > 0 || panePresentationAuthorityBlocked) return; // Provisional geometry must never become an authoritative snapshot.
   const frame = currentPaneFrameElement(view);
   if (frame?.matches("webview.content-browser-url-frame")) {
     reportSnapshot({
@@ -566,7 +571,7 @@ function collectMarkedOverlayRegions(pane: RendererPaneState, view: PaneView): O
 }
 
 function reportCompositorOverlayRegions(updateReason: "layout" | "resize" | "visibility"): void {
-  if (resizeGesture || resizeCommitPending) return;
+  if (resizeGesture || resizeCommitPending || panePresentationTransitionsPending > 0 || panePresentationAuthorityBlocked) return;
   overlayRevision += 1;
   if (!latestState) {
     window.surfAce.reportOverlayRegions({
@@ -1404,9 +1409,11 @@ function applyPanePopOut(): void {
     const expanded = view.paneId === poppedOutPaneId;
     const covered = poppedOutPaneId !== null && !expanded;
     view.rootEl.classList.toggle("pane-popped-out", expanded);
-    view.rootEl.classList.toggle("pane-presentation-pending", expanded && panePresentationResizePending);
+    const pending = panePresentationTransitionsPending > 0 || panePresentationAuthorityBlocked ||
+      (expanded && panePresentationResizePending);
+    view.rootEl.classList.toggle("pane-presentation-pending", pending);
     for (const element of [view.contentEl, view.scrollEl, view.controlsEl, view.annotationCanvas, view.annotationShield]) {
-      element.toggleAttribute("inert", expanded && panePresentationResizePending);
+      element.toggleAttribute("inert", pending);
     }
     const bounds = expanded ? acknowledgedPopOutBounds : null;
     for (const [property, value] of Object.entries({ left: bounds?.x, top: bounds?.y,
@@ -1427,6 +1434,8 @@ function applyPanePopOut(): void {
   positionPaneHosts();
 }
 
+let panePresentationTransitionsPending = 0;
+let panePresentationAuthorityBlocked = false;
 let panePresentationIntent = 0;
 let panePresentationMainRevision = 0;
 let panePresentationConfirmedClearRevision = 0;
@@ -1444,55 +1453,74 @@ async function requestPanePopOut(view: PaneView, selected: number | null): Promi
   }
   cancelResizeGesture();
   const intent = ++panePresentationIntent;
-  const identity = paneSnapshotGeometryIdentity();
-  const surfaceId = latestState.surfaceId;
-  const selectedLineage = paneStateFor(view)?.paneLineageId;
-  const width = latestState.viewport.width;
-  const height = latestState.viewport.height;
-  const inset = Math.max(8, Math.min(24, Math.min(width, height) * 0.02));
-  const bounds = { x: inset, y: inset, width: width - inset * 2, height: height - inset * 2 };
-  const viewport = currentViewport(view);
-  viewport.visibleRect.width = Math.max(0, bounds.width - 4);
-  viewport.visibleRect.height = Math.max(0, bounds.height - 4);
-  let response: { ok: boolean; error?: string; presentationCleared?: boolean; revision?: number };
+  panePresentationTransitionsPending++;
+  applyPanePopOut();
+  let failureTitle: string | null = null;
   try {
-    response = await window.surfAce.setPanePresentation({ identity, paneId: selected,
-      ...(selected === null ? {} : { bounds, viewport }) });
-  } catch (error) {
-    response = { ok: false, error: error instanceof Error ? error.message : "Pane presentation failed" };
-  }
-  if (intent !== panePresentationIntent || !latestState || latestState.surfaceId !== surfaceId ||
-      JSON.stringify(paneSnapshotGeometryIdentity()) !== JSON.stringify(identity) ||
-      paneViews.get(view.paneId) !== view || paneStateFor(view)?.paneLineageId !== selectedLineage) return;
-  if (!response.ok) {
-    if (response.presentationCleared) {
-      poppedOutPaneId = null;
-      acknowledgedPopOutBounds = null;
-      panePresentationResizePending = false;
-      applyPanePopOut();
-      setAllPaneChromeMetrics();
-      refreshDynamicPaneFrames();
+    const identity = paneSnapshotGeometryIdentity();
+    const surfaceId = latestState.surfaceId;
+    const selectedLineage = paneStateFor(view)?.paneLineageId;
+    const width = latestState.viewport.width;
+    const height = latestState.viewport.height;
+    const inset = Math.max(8, Math.min(24, Math.min(width, height) * 0.02));
+    const bounds = { x: inset, y: inset, width: width - inset * 2, height: height - inset * 2 };
+    const viewport = currentViewport(view);
+    viewport.visibleRect.width = Math.max(0, bounds.width - 4);
+    viewport.visibleRect.height = Math.max(0, bounds.height - 4);
+    let response: { ok: boolean; error?: string; presentationCleared?: boolean; presentationBlocked?: boolean; revision?: number };
+    try {
+      response = await window.surfAce.setPanePresentation({ identity, paneId: selected,
+        ...(selected === null ? {} : { bounds, viewport }) });
+    } catch (error) {
+      response = { ok: false, presentationBlocked: true, error: error instanceof Error ? error.message : "Pane presentation failed" };
+    }
+    if (intent !== panePresentationIntent || !latestState || latestState.surfaceId !== surfaceId ||
+        JSON.stringify(paneSnapshotGeometryIdentity()) !== JSON.stringify(identity) ||
+        paneViews.get(view.paneId) !== view || paneStateFor(view)?.paneLineageId !== selectedLineage) return;
+    if (!response.ok) {
+      panePresentationAuthorityBlocked = response.presentationBlocked === true;
+      if (response.presentationCleared) {
+        panePresentationAuthorityBlocked = false;
+        poppedOutPaneId = null;
+        acknowledgedPopOutBounds = null;
+        panePresentationResizePending = false;
+        applyPanePopOut();
+        setAllPaneChromeMetrics();
+        refreshDynamicPaneFrames();
+        reportAllPaneSnapshots();
+        scheduleCompositorOverlayRegionReport("layout");
+      }
+      failureTitle = response.error ?? "Pane presentation is unavailable";
+      return;
+    }
+    if (response.revision !== undefined) {
+      if (!Number.isSafeInteger(response.revision) || response.revision < panePresentationMainRevision) return;
+      panePresentationMainRevision = response.revision;
+    }
+    cancelResizeGesture(); // Defense against a gesture introduced outside divider admission.
+    panePresentationAuthorityBlocked = false;
+    poppedOutPaneId = selected;
+    acknowledgedPopOutBounds = selected === null ? null : bounds;
+    panePresentationResizePending = false;
+    applyPanePopOut();
+    // Focusing the pane changes input ownership, never the split tree or content.
+    rememberPaneContext(view.paneId);
+    view.popOutButton.focus();
+    setAllPaneChromeMetrics();
+    refreshDynamicPaneFrames();
+    reportAllPaneSnapshots();
+    scheduleCompositorOverlayRegionReport("layout");
+  } finally {
+    panePresentationTransitionsPending--;
+    applyPanePopOut();
+    if (failureTitle && intent === panePresentationIntent && paneViews.get(view.paneId) === view) {
+      view.popOutButton.title = failureTitle;
+    }
+    if (panePresentationTransitionsPending === 0) {
       reportAllPaneSnapshots();
       scheduleCompositorOverlayRegionReport("layout");
     }
-    view.popOutButton.title = response.error ?? "Pane presentation is unavailable";
-    return;
   }
-  if (response.revision !== undefined) {
-    if (!Number.isSafeInteger(response.revision) || response.revision < panePresentationMainRevision) return;
-    panePresentationMainRevision = response.revision;
-  }
-  poppedOutPaneId = selected;
-  acknowledgedPopOutBounds = selected === null ? null : bounds;
-  panePresentationResizePending = false;
-  applyPanePopOut();
-  // Focusing the pane changes input ownership, never the split tree or content.
-  rememberPaneContext(view.paneId);
-  view.popOutButton.focus();
-  setAllPaneChromeMetrics();
-  refreshDynamicPaneFrames();
-  reportAllPaneSnapshots();
-  scheduleCompositorOverlayRegionReport("layout");
 }
 
 function attachCommonEvents(view: PaneView): void {
@@ -3185,7 +3213,8 @@ function showResizeStatus(): void {
 
 function attachResizeHandle(handle: HTMLElement, split: HTMLElement, _node: Extract<LayoutNode, { type: "split" }>, path: number[], index: number): void {
   handle.addEventListener("pointerdown", (event) => {
-    if (poppedOutPaneId !== null || resizeCommitPending || resizeGesture || !latestState) return;
+    if (poppedOutPaneId !== null || panePresentationTransitionsPending > 0 || panePresentationAuthorityBlocked ||
+        resizeCommitPending || resizeGesture || !latestState) return;
     const node = layoutNodeAt(latestState.layout, path);
     if (node?.type !== "split") return;
     event.preventDefault();
@@ -3236,12 +3265,16 @@ function attachResizeHandle(handle: HTMLElement, split: HTMLElement, _node: Extr
     const onKey = (key: KeyboardEvent) => { if (key.key === "Escape") cancel(); };
     const onUp = (upEvent: PointerEvent) => {
       if (upEvent.pointerId !== event.pointerId || resizeGesture !== gesture) return;
+      if (poppedOutPaneId !== null || panePresentationTransitionsPending > 0 || panePresentationAuthorityBlocked) {
+        cancelResizeGesture();
+        return;
+      }
       updateWeights(upEvent);
       // Measure final flex geometry without publishing provisional snapshots or topology.
       const finalNode = { ...node, children: node.children.map((child, i) => ({ ...child, weight: gesture.weights[i] })) };
       updateSplitElement(split, finalNode);
       refreshLayoutGeometry();
-      const geometry = latestState!.panes.map((pane) => ({ paneId: pane.paneId, bounds: paneBounds(paneViews.get(pane.paneId)!) }));
+      const geometry = latestState!.panes.map((pane) => ({ paneId: pane.paneId, bounds: tiledPaneBounds(paneViews.get(pane.paneId)!) }));
       resizeGesture = null;
       gesture.stop();
       // Restore authoritative bounds before sending the one final mutation.
@@ -3546,6 +3579,8 @@ async function init(): Promise<void> {
     if (notice.phase === "blocked" && Number(notice.revision) <= panePresentationConfirmedClearRevision) return;
     panePresentationMainRevision = Number(notice.revision);
     panePresentationIntent++;
+    cancelResizeGesture();
+    panePresentationAuthorityBlocked = notice.phase === "blocked";
     if (notice.phase === "cleared") {
       panePresentationConfirmedClearRevision = Number(notice.revision);
       poppedOutPaneId = null;

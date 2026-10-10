@@ -176,7 +176,8 @@ export class PanePresentationCoordinator {
     return revision;
   }
 
-  wasPresentationCleared(surfaceId: string): boolean { return this.cleared.has(surfaceId); }
+  wasPresentationCleared(surfaceId: string): boolean { return this.cleared.has(surfaceId) && !this.accepted.has(surfaceId); }
+  hasUnretiredPresentation(surfaceId: string): boolean { return this.accepted.has(surfaceId); }
 
   invalidate(surfaceId: string): Promise<void> {
     this.revisions.set(surfaceId, (this.revisions.get(surfaceId) ?? 0) + 1);

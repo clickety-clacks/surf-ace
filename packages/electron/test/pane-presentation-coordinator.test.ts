@@ -230,6 +230,29 @@ test("lost mutation reply blocks new selection until exact retirement is acknowl
   assert.equal(controls[3]!.request.selected, null);
   assert.equal(f.core.paneBounds(f.surfaceId, f.paneId)!.width, 980);
 });
+test("an earlier confirmed clear cannot hide a later unretired native selection", async () => {
+  const f = fixture();
+  let retire = true;
+  const coordinator = createCoordinator(f.core, () => async (wire) => {
+    if (wire.type === "get_status") return capability;
+    if (wire.type !== "pane_presentation.set") throw new Error("unexpected request");
+    if (wire.request.selected) throw new Error("lost selection reply");
+    if (!retire) throw new Error("retirement unavailable");
+    return ack(wire);
+  });
+  await coordinator.apply(f.surfaceId, null, f.identity);
+  assert.equal(coordinator.wasPresentationCleared(f.surfaceId), true);
+  retire = false;
+  await assert.rejects(coordinator.apply(f.surfaceId, f.presentation, f.identity), /lost selection/);
+  assert.equal(coordinator.hasUnretiredPresentation(f.surfaceId), true);
+  assert.equal(coordinator.wasPresentationCleared(f.surfaceId), false,
+    "the renderer must not admit tiled mutation on stale clear evidence");
+  retire = true;
+  await coordinator.apply(f.surfaceId, null, f.identity);
+  assert.equal(coordinator.hasUnretiredPresentation(f.surfaceId), false);
+  assert.equal(coordinator.wasPresentationCleared(f.surfaceId), true);
+});
+
 test("topology change while acknowledgement is pending prevents display commit", async () => {
   const f = fixture();
   let release!: () => void;

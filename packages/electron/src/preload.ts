@@ -41,7 +41,7 @@ declare global {
       captureAnnotationOpen: (paneId: number, openedAt: number) => Promise<boolean>;
       guestPreloadPath: string;
       getBootstrap: () => Promise<unknown>;
-      setPanePresentation: (payload: Record<string, unknown>) => Promise<{ ok: boolean; error?: string; revision?: number; presentationCleared?: boolean }>;
+      setPanePresentation: (payload: Record<string, unknown>) => Promise<{ ok: boolean; error?: string; revision?: number; presentationCleared?: boolean; presentationBlocked?: boolean }>;
       onPanePresentationOwnership: (listener: (notice: unknown) => void) => () => void;
       onKeyboardIntent: (listener: (intent: unknown) => void) => () => void;
       onState: (listener: (state: unknown) => void) => () => void;

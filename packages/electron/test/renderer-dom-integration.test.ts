@@ -68,7 +68,7 @@ test("renderer DOM integrates authoritative connection states and live scale con
   let textMetricScale = 1;
   const commands: unknown[] = [];
   const presentations: Record<string, unknown>[] = [];
-  let presentationResponse: (() => Promise<{ ok: boolean; error?: string; revision?: number; presentationCleared?: boolean }>) | null = null;
+  let presentationResponse: (() => Promise<{ ok: boolean; error?: string; revision?: number; presentationCleared?: boolean; presentationBlocked?: boolean }>) | null = null;
   const resizeCallbacks: Array<() => void> = [];
   const mutationCallbacks: Array<() => void> = [];
   const fontCallbacks: Array<() => void> = [];
@@ -928,6 +928,90 @@ test("renderer DOM integrates authoritative connection states and live scale con
     stateListener!(closed);
     check([guests[0]!]);
     assert.equal(guests[1]!.isConnected, false, "only closed guest is removed");
+  });
+
+  await test("delayed presentation ack and retirement exclude divider commits and preserve tiled geometry", async () => {
+    focusStateUpdate = null;
+    const next = state("connected", true);
+    stateListener!(next);
+    const roots = [...document.querySelectorAll<HTMLElement>(".pane-shell")];
+    const slots = [...document.querySelectorAll<HTMLElement>(".pane-layout-slot")];
+    const toggle = roots[1]!.querySelector<HTMLButtonElement>(".pane-pop-out")!;
+    const commits: Array<any> = [];
+    let finishResize!: (value: boolean) => void;
+    Object.assign(surfAce, { resizeSplit(payload: unknown) {
+      commits.push(payload);
+      return new Promise<boolean>((resolve) => { finishResize = resolve; });
+    } });
+    let finishPresentation!: (response: { ok: boolean; presentationBlocked?: boolean; presentationCleared?: boolean }) => void;
+    presentationResponse = () => new Promise((resolve) => { finishPresentation = resolve; });
+    const handle = document.querySelector<HTMLElement>(".split-resize-handle")!;
+    Object.assign(handle, { setPointerCapture() {}, hasPointerCapture: () => false, releasePointerCapture() {} });
+    const pointer = (target: EventTarget, type: string, x: number) => {
+      const event = new window.Event(type, { bubbles: true, cancelable: true });
+      Object.assign(event, { pointerId: 90, clientX: x, clientY: x });
+      target.dispatchEvent(event);
+      return event;
+    };
+    const layoutBefore = JSON.stringify(next.layout);
+    const commandsBefore = commands.length;
+    toggle.click();
+    assert.equal(pointer(handle, "pointerdown", 100).defaultPrevented, false, "pending enter rejects divider admission");
+    pointer(window, "pointermove", 140);
+    assert.equal(roots[0]!.querySelector(".pane-content")!.hasAttribute("inert"), true);
+    finishPresentation({ ok: true });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    pointer(window, "pointerup", 140);
+    assert.equal(roots[1]!.classList.contains("pane-popped-out"), true);
+    assert.equal(commits.length, 0, "late enter acknowledgement cannot turn the release into mixed durable geometry");
+    assert.equal(JSON.stringify(next.layout), layoutBefore);
+    assert.equal(commands.slice(commandsBefore).some((c) => ["resize-split", "split-pane", "close-pane"].includes((c as any).type)), false);
+    toggle.click();
+    assert.equal(pointer(handle, "pointerdown", 100).defaultPrevented, false, "pending retirement excludes divider admission");
+    finishPresentation({ ok: true });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    // Existing held gestures are canceled before an enter can be sent.
+    assert.equal(pointer(handle, "pointerdown", 100).defaultPrevented, true);
+    pointer(window, "pointermove", 140);
+    toggle.click();
+    finishPresentation({ ok: true });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    pointer(window, "pointerup", 140);
+    assert.equal(commits.length, 0, "cancel-before-enter removes the held release listener");
+    toggle.click();
+    finishPresentation({ ok: true });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    // A candidate comes from tiled slots even if content-host measurements
+    // resemble a display overlay. Root bounds are never resize authority.
+    Object.defineProperty(roots[1]!, "getBoundingClientRect", { configurable: true,
+      value: () => ({ x: 16, y: 16, left: 16, top: 16, width: 1168, height: 768, right: 1184, bottom: 784 }) });
+    pointer(handle, "pointerdown", 100);
+    pointer(window, "pointerup", 140);
+    assert.equal(commits.length, 1);
+    assert.deepEqual(commits[0].geometry, slots.map((slot, i) => {
+      const rect = slot.getBoundingClientRect();
+      return { paneId: next.panes[i]!.paneId, bounds: { x: rect.x, y: rect.y, width: rect.width, height: rect.height } };
+    }));
+    const requestsBefore = presentations.length;
+    toggle.click();
+    assert.equal(presentations.length, requestsBefore, "pending divider commit cannot admit an enter with a late ack");
+    assert.match(toggle.title, /divider resize/);
+    finishResize(true);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    delete (roots[1] as any).getBoundingClientRect;
+    toggle.click();
+    finishPresentation({ ok: false, presentationBlocked: true, presentationCleared: false });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(pointer(handle, "pointerdown", 100).defaultPrevented, false,
+      "unretired native outcome continues to block durable resize after the reply");
+    presentationResponse = null;
+    toggle.click();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    toggle.click();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(pointer(handle, "pointerdown", 100).defaultPrevented, true, "confirmed retirement restores divider admission");
+    pointer(window, "pointercancel", 100);
+    assert.equal(commits.length, 1);
   });
 
   await test("separator previews latest frame and sends one fenced release, cancel and failure restore", async () => {
