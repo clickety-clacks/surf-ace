@@ -1706,11 +1706,14 @@ private struct SurfAcePaneControls: View {
             }
 
             HStack(spacing: 4) {
-                SurfAcePanePopoutButton(
-                    paneId: pane.paneId, isPoppedOut: isPoppedOut,
-                    foregroundColor: UIColor(surfAceToolbarForegroundColor(for: colorScheme)),
-                    onToggle: onTogglePopout
-                )
+                ZStack {
+                    SurfAcePanePopoutButton(
+                        paneId: pane.paneId, isPoppedOut: isPoppedOut,
+                        foregroundColor: UIColor(surfAceToolbarForegroundColor(for: colorScheme)),
+                        onToggle: onTogglePopout
+                    )
+                    .accessibilityHidden(true)
+                }
                 .frame(width: SurfAcePaneChromeLayout.controlHitSize,
                        height: SurfAcePaneChromeLayout.controlHitSize)
                 .accessibilityElement(children: .ignore)
