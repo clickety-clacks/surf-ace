@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { app, BrowserWindow, session } from "electron";
+import { assertPopOutControl, readPopOutControl } from "./private-popout-hit.mjs";
 
 const scratch = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-popout-fixture-"));
 app.setPath("userData", path.join(scratch, "profile"));
@@ -61,6 +62,15 @@ try {
     webPreferences: { preload, webviewTag: true, contextIsolation: false, sandbox: false,
       backgroundThrottling: false } });
   const evaluate = (code) => win.webContents.executeJavaScript(code);
+  const clickControl = async (action) => {
+    const evidence = await evaluate(`(${readPopOutControl.toString()})(roots[1])`);
+    console.log("FIXTURE_CONTROL=" + JSON.stringify({ action, ...evidence }));
+    assertPopOutControl(evidence, action);
+    win.webContents.sendInputEvent({ type: "mouseMove", x: evidence.x, y: evidence.y });
+    win.webContents.sendInputEvent({ type: "mouseDown", x: evidence.x, y: evidence.y, button: "left", clickCount: 1 });
+    win.webContents.sendInputEvent({ type: "mouseUp", x: evidence.x, y: evidence.y, button: "left", clickCount: 1 });
+    await new Promise(resolve => setTimeout(resolve, 50));
+  };
   const wait = async (code) => {
     for (let i = 0; i < 100; i++) {
       if (await evaluate(code)) return;
@@ -84,7 +94,7 @@ try {
   await evaluate("hosts[1].executeJavaScript(\"document.querySelector('input').value='edited';history.pushState({},'', '#retained')\")");
   for (let i = 0; i < 3; i++) {
     const beforeTick = await evaluate("hosts[0].executeJavaScript('window.ticks')");
-    await evaluate("roots[1].querySelector('.pane-pop-out').click()");
+    await clickControl("Solo");
     await wait("roots[1].getBoundingClientRect().width>900");
     assert.equal(await evaluate("document.activeElement===roots[1].querySelector('.pane-pop-out')"), true);
     assert.equal(await evaluate("roots[0].inert&&roots[2].inert&&roots[0].getAttribute('aria-hidden')==='true'"), true);
@@ -106,20 +116,21 @@ try {
     win.webContents.sendInputEvent({ type: "mouseUp", x: 2, y: 2, button: "left", clickCount: 1 });
     await new Promise(resolve => setTimeout(resolve, 50));
     assert.equal(await evaluate("hosts[0].executeJavaScript('window.clicks')"), siblingClicks);
-    await evaluate("roots[1].querySelector('.pane-pop-out').click()");
+    await clickControl("Restore");
     await wait("!roots[1].classList.contains('pane-popped-out')");
     assert.deepEqual(await evaluate("rects()"), initial);
     console.log("FIXTURE_RESTORED=" + JSON.stringify({ cycle: i, bounds: await evaluate("rects()") }));
     if (i === 0) await fs.writeFile(path.join(scratch, "restored.png"), (await win.webContents.capturePage()).toPNG());
     assert.equal(await evaluate("roots.some(r=>r.inert)"), false);
   }
-  await evaluate("roots[1].querySelector('.pane-pop-out').click()");
+  await clickControl("Solo");
   win.setContentSize(1100, 800);
   await evaluate("(()=>{const next=structuredClone(fixtureState);next.viewport={width:1100,height:800,scale:1};next.geometryRevision++;window.fixtureState=next;fixtureUpdate(next);})()");
   await wait("roots[1].getBoundingClientRect().width>1000");
-  await evaluate("roots[1].querySelector('.pane-pop-out').click()");
+  await clickControl("Restore");
   assert.equal(await evaluate("slots.map(s=>s.style.flexGrow).join(',')"), "2,3,7");
-  await evaluate("roots[1].querySelector('.pane-pop-out').click();const next=structuredClone(fixtureState);next.topologyRevision++;fixtureUpdate(next)");
+  await clickControl("Solo");
+  await evaluate("(()=>{const next=structuredClone(fixtureState);next.topologyRevision++;fixtureUpdate(next)})()");
   assert.equal(await evaluate("document.querySelectorAll('.pane-popped-out').length"), 0);
   assert.equal(await evaluate("fixtureCommands.some(c=>['resize-split','split-pane','close-pane','reload'].includes(c.type))"), false);
   assert.deepEqual(blockedRequests, [], "fixture must not attempt external requests");
