@@ -860,6 +860,7 @@ private struct SurfAceResizeProbeWebView: UIViewRepresentable {
 struct SurfAcePopoutProbeView: View {
     @State private var runtime: SurfAceRuntime
     @State private var surface: SurfAceSurfaceModel?
+    private let narrowChrome = ProcessInfo.processInfo.environment["SURF_ACE_NARROW_CHROME_PROBE"] == "1"
 
     init() {
         let name = "SurfAcePopoutUI.\(UUID().uuidString)"
@@ -879,6 +880,9 @@ struct SurfAcePopoutProbeView: View {
                         .padding(4).background(.black).foregroundStyle(.white)
                         .allowsHitTesting(false)
                 }
+                .frame(width: narrowChrome ? 1000 : nil, height: narrowChrome ? 600 : nil)
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("surf-ace-popout-probe-host")
         } else {
             Color.clear.task {
                 let local = runtime.registerSurface(sceneKey: "popout-ui")
@@ -897,11 +901,21 @@ struct SurfAcePopoutProbeView: View {
                         payload: .html(html: html, baseURL: nil), reloadSource: nil,
                         title: "Pane \(id)", scrollable: true, interactive: true))
                 }
+                if narrowChrome {
+                    for pane in panes {
+                        pane.backStack = [pane.currentEntry]
+                        pane.forwardStack = [pane.currentEntry]
+                    }
+                }
                 local.panesById = Dictionary(uniqueKeysWithValues: panes.map { ($0.paneId, $0) })
-                local.paneLayout = .split(direction: .vertical, children: [
-                    .leaf(1, weight: 1), .split(direction: .horizontal,
-                        children: [.leaf(2, weight: 2), .leaf(3, weight: 1)], weight: 3),
-                ])
+                local.paneLayout = narrowChrome
+                    ? .split(direction: .vertical, children: [
+                        .leaf(1, weight: 0.24), .leaf(2, weight: 0.26), .leaf(3, weight: 0.5),
+                    ])
+                    : .split(direction: .vertical, children: [
+                        .leaf(1, weight: 1), .split(direction: .horizontal,
+                            children: [.leaf(2, weight: 2), .leaf(3, weight: 1)], weight: 3),
+                    ])
                 surface = local
             }
         }
@@ -1741,6 +1755,7 @@ private struct SurfAcePaneControls: View {
                         }
                         .buttonStyle(SurfAceGlassButtonStyle())
                         .accessibilityLabel("Back")
+                        .accessibilityIdentifier("surf-ace-pane-history-back-\(pane.paneId)")
                         .accessibilityHint("Shows \(provenance.accessibilityLabel)")
                     }
 
@@ -1756,6 +1771,7 @@ private struct SurfAcePaneControls: View {
                         }
                         .buttonStyle(SurfAceGlassButtonStyle())
                         .accessibilityLabel("Forward")
+                        .accessibilityIdentifier("surf-ace-pane-history-forward-\(pane.paneId)")
                         .accessibilityHint("Shows \(provenance.accessibilityLabel)")
                     }
 
