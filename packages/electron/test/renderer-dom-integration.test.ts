@@ -637,7 +637,11 @@ test("renderer DOM integrates authoritative connection states and live scale con
     let acknowledgeInitial!: (response: { ok: boolean }) => void;
     presentationResponse = () => new Promise((resolve) => { acknowledgeInitial = resolve; });
     toggle.click();
-    stateListener!({ ...next, providerName: "connection metadata changed" });
+    const oldSketch = selected.querySelector(".annotate");
+    const oldFont = selected.querySelector(".font-size-toggle");
+    stateListener!({ ...next, connectionBar: "connecting" });
+    assert.notEqual(selected.querySelector(".annotate"), oldSketch, "chrome change actually rebuilds Sketch");
+    assert.notEqual(selected.querySelector(".font-size-toggle"), oldFont, "chrome change actually rebuilds Font");
     assert.equal(selected.querySelector(".pane-pop-out"), toggle, "pending state churn retains the same button");
     assert.equal(toggle.closest("[inert]"), null, "pending toolbar cannot shield Restore itself");
     assert.equal(toggle.closest(".control-cluster")!.classList.contains("collapsed"), false);
@@ -647,6 +651,7 @@ test("renderer DOM integrates authoritative connection states and live scale con
     await new Promise<void>((resolve) => setImmediate(resolve));
     assert.equal(selected.classList.contains("pane-popped-out"), true,
       "unrelated state refresh cannot discard an acknowledged initial transition");
+    assert.equal(selected.querySelector(".annotate")!.closest("[inert]"), null, "settled enter unshields rebuilt controls");
     presentationResponse = null;
     toggle.click();
     await new Promise<void>((resolve) => setImmediate(resolve));
@@ -728,10 +733,19 @@ test("renderer DOM integrates authoritative connection states and live scale con
     assert.equal(selected.classList.contains("pane-popped-out"), true, "pending retirement does not claim Restore");
     assert.equal(selected.querySelector(".pane-content")!.hasAttribute("inert"), true);
     assert.equal(toggle.hasAttribute("inert"), false);
+    const uncertainSketch = selected.querySelector(".annotate");
+    stateListener!({ ...next, connectionBar: "disconnected" });
+    assert.notEqual(selected.querySelector(".annotate"), uncertainSketch, "uncertain state also rebuilds controls");
+    assert.equal(selected.querySelector(".pane-pop-out"), toggle);
+    assert.equal(toggle.closest("[inert]"), null, "recovery toggle remains reachable after uncertain rebuild");
+    assert.ok(selected.querySelector(".annotate")!.closest("[inert]"), "uncertain rebuilt Sketch is shielded");
+    assert.ok(selected.querySelector(".font-size-toggle")!.closest("[inert]"), "uncertain rebuilt Font is shielded");
     ownershipListener!({ ...ownership, phase: "cleared" });
     assert.equal(selected.classList.contains("pane-popped-out"), false);
     assert.equal(selected.querySelector("webview"), liveHost);
     assert.deepEqual(slots.map((slot) => slot.style.flexGrow), slotWeights);
+    assert.equal(selected.querySelector(".annotate")!.closest("[inert]"), null, "confirmed recovery unshields new controls");
+    stateListener!(next);
     ownershipListener!({ ...ownership, phase: "blocked" });
     assert.equal(selected.querySelector(".pane-content")!.hasAttribute("inert"), false,
       "late blocked notice cannot reverse confirmed clear");

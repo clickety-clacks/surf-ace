@@ -1408,6 +1408,19 @@ function isPaneChromeTarget(target: EventTarget | null): boolean {
   return target instanceof Element && Boolean(target.closest(".control-cluster, .toolbar-dock, .pane-pop-out"));
 }
 
+function shieldPaneToolbar(view: PaneView): void {
+  const pending = panePresentationTransitionsPending > 0 || panePresentationAuthorityBlocked ||
+    (view.paneId === poppedOutPaneId && panePresentationResizePending);
+  // Controls are rebuilt independently of presentation geometry. Derive their
+  // shield each time, keeping the retained recovery toggle outside inert.
+  for (const pill of view.controlsEl.children) {
+    pill.toggleAttribute("inert", pending && !pill.contains(view.popOutButton));
+    if (pill.contains(view.popOutButton)) for (const control of pill.children) {
+      control.toggleAttribute("inert", pending && control !== view.popOutButton);
+    }
+  }
+}
+
 function applyPanePopOut(): void {
   for (const view of paneViews.values()) {
     const expanded = view.paneId === poppedOutPaneId;
@@ -1421,12 +1434,7 @@ function applyPanePopOut(): void {
     }
     // The retained Solo/Restore toggle stays operable inside the toolbar while
     // other controls are shielded by pending or uncertain native authority.
-    for (const pill of view.controlsEl.children) {
-      if (!pill.contains(view.popOutButton)) pill.toggleAttribute("inert", pending);
-      else for (const control of pill.children) {
-        control.toggleAttribute("inert", pending && control !== view.popOutButton);
-      }
-    }
+    shieldPaneToolbar(view);
     view.controlsEl.classList.toggle("collapsed", view.toolbarCollapsed && !expanded && !pending);
     view.dockEl.hidden = !view.toolbarCollapsed || expanded || pending;
     const bounds = expanded ? acknowledgedPopOutBounds : null;
@@ -1884,6 +1892,7 @@ function buildControls(view: PaneView, pane: RendererPaneState): void {
     annotationPill.appendChild(done);
   }
   view.controlsEl.appendChild(annotationPill);
+  shieldPaneToolbar(view);
 }
 
 function sendNavigationIntent(view: PaneView, paneId: number, url: string): void {
