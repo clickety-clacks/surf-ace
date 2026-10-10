@@ -4,8 +4,9 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { app, BrowserWindow, session } from "electron";
+import { app, BrowserWindow, session, webContents } from "electron";
 import { assertPopOutControl, readPopOutControl, waitForPopOutState } from "./private-popout-hit.mjs";
+import { referencePixel, waitForPaintedFrame } from "./private-popout-pixels.mjs";
 
 const scratch = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-popout-fixture-"));
 app.setPath("userData", path.join(scratch, "profile"));
@@ -16,7 +17,7 @@ const panes = [1, 2, 3].map((paneId) => ({
   externalNative: false, flushInFlight: false, showDone: false, toast: null,
   canGoBack: false, canGoForward: false, name: null, ownerName: null,
   provenance: null, provenanceName: null,
-  content: { content: { html }, contentId: `fixture-${paneId}`, contentType: "html",
+  content: { content: { html: `<style>html,body{background:${["#2c486c", "#248c5c", "#9a4478"][paneId - 1]}}</style>${html}` }, contentId: `fixture-${paneId}`, contentType: "html",
     reloadable: false, renderVersion: 1, revision: 1 },
 }));
 const state = {
@@ -89,7 +90,27 @@ try {
   const initial = await evaluate("rects()");
   const guestIds = await evaluate("hosts.map(v=>v.getWebContentsId())");
   console.log("FIXTURE_INITIAL=" + JSON.stringify({ guestIds, bounds: initial }));
-  await fs.writeFile(path.join(scratch, "tiled.png"), (await win.webContents.capturePage()).toPNG());
+  // Calibrate from actual child captures: raw bitmap channel order is platform
+  // dependent. Distinct guest backgrounds identify paint ownership, not DOM boxes.
+  const references = await Promise.all(guestIds.map(async id =>
+    referencePixel(await webContents.fromId(id).capturePage(), 20, 60)));
+  assert.equal(new Set(references.map(p => p.join(","))).size, 3,
+    "guest paint references must be distinct; blank/stale calibration cannot pass");
+  console.log("FIXTURE_PIXEL_REFERENCES=" + JSON.stringify(references));
+  const capturePaint = async (expanded, filename) => {
+    const bounds = await evaluate("rects()");
+    const viewport = await evaluate("({width:innerWidth,height:innerHeight})");
+    const checks = expanded
+      ? [.15, .4, .65].flatMap(y => [.15, .45, .8].map(x => ({
+          x: bounds[1][0] + bounds[1][2] * x, y: bounds[1][1] + bounds[1][3] * y,
+          expected: references[1],
+        })))
+      : bounds.map((b, i) => ({ x: b[0] + 40, y: b[1] + 60, expected: references[i] }));
+    const captured = await waitForPaintedFrame(() => win.webContents.capturePage(), checks, viewport);
+    console.log("FIXTURE_PAINTED=" + JSON.stringify({ expanded, attempts: captured.attempts, ...captured.evidence }));
+    if (filename) await fs.writeFile(path.join(scratch, filename), captured.image.toPNG());
+  };
+  await capturePaint(false, "tiled.png");
   const identities = await evaluate("Promise.all(hosts.map(v=>v.executeJavaScript('window.token'))) ");
   assert.ok(identities.every(token => typeof token === "number"));
   await evaluate("hosts[1].executeJavaScript(\"document.querySelector('input').value='edited';history.pushState({},'', '#retained')\")");
@@ -102,7 +123,7 @@ try {
     assert.equal(await evaluate("roots.every((r,i)=>r.parentElement===hostParents[i])&&hosts.every(v=>v.isConnected)"), true);
     const expanded = await evaluate("rects()");
     console.log("FIXTURE_EXPANDED=" + JSON.stringify({ cycle: i, bounds: expanded }));
-    if (i === 0) await fs.writeFile(path.join(scratch, "expanded.png"), (await win.webContents.capturePage()).toPNG());
+    await capturePaint(true, i === 0 ? "expanded.png" : undefined);
     assert.deepEqual(await evaluate("hosts.map(v=>v.getWebContentsId())"), guestIds);
     assert.ok(expanded[1][2] > initial[1][2]);
     assert.ok(expanded[1][3] > initial[1][3]);
@@ -121,7 +142,7 @@ try {
     await wait("!roots[1].classList.contains('pane-popped-out')");
     assert.deepEqual(await evaluate("rects()"), initial);
     console.log("FIXTURE_RESTORED=" + JSON.stringify({ cycle: i, bounds: await evaluate("rects()") }));
-    if (i === 0) await fs.writeFile(path.join(scratch, "restored.png"), (await win.webContents.capturePage()).toPNG());
+    await capturePaint(false, i === 0 ? "restored.png" : undefined);
     assert.equal(await evaluate("roots.some(r=>r.inert)"), false);
   }
   await clickControl("Solo");
@@ -129,11 +150,15 @@ try {
   await evaluate("(()=>{const next=structuredClone(fixtureState);next.viewport={width:1100,height:800,scale:1};next.geometryRevision++;window.fixtureState=next;fixtureUpdate(next);})()");
   await wait("roots[1].getBoundingClientRect().width>1000");
   await waitForPopOutState(evaluate, true);
+  await capturePaint(true);
   await clickControl("Restore");
+  await capturePaint(false);
   assert.equal(await evaluate("slots.map(s=>s.style.flexGrow).join(',')"), "2,3,7");
   await clickControl("Solo");
+  await capturePaint(true);
   await evaluate("(()=>{const next=structuredClone(fixtureState);next.topologyRevision++;fixtureUpdate(next)})()");
   await waitForPopOutState(evaluate, false);
+  await capturePaint(false);
   assert.equal(await evaluate("document.querySelectorAll('.pane-popped-out').length"), 0);
   assert.equal(await evaluate("fixtureCommands.some(c=>['resize-split','split-pane','close-pane','reload'].includes(c.type))"), false);
   assert.deepEqual(blockedRequests, [], "fixture must not attempt external requests");
