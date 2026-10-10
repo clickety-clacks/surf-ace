@@ -57,7 +57,7 @@ try {
     if (!allowed) blockedRequests.push(details.url);
     callback({ cancel: !allowed });
   });
-  win = new BrowserWindow({ width: 1000, height: 700, show: false,
+  win = new BrowserWindow({ width: 1000, height: 700, useContentSize: true, show: false,
     webPreferences: { preload, webviewTag: true, contextIsolation: false, sandbox: false,
       backgroundThrottling: false } });
   const evaluate = (code) => win.webContents.executeJavaScript(code);
@@ -72,9 +72,13 @@ try {
   await wait("document.querySelectorAll('webview').length===3 && [...document.querySelectorAll('webview')].every(v=>{try{return v.getWebContentsId()>0&&v.getURL().startsWith('data:text/html')&&!v.isLoading()}catch{return false}})");
   await evaluate(`window.hosts=[...document.querySelectorAll('webview')];
     window.roots=[...document.querySelectorAll('.pane-shell')];
-    window.slots=roots.map(r=>r.parentElement);
+    window.hostParents=roots.map(r=>r.parentElement);
+    window.slots=[...document.querySelectorAll('.pane-layout-slot')];
     window.rects=()=>roots.map(r=>{const b=r.getBoundingClientRect();return [b.x,b.y,b.width,b.height]});void 0;`);
   const initial = await evaluate("rects()");
+  const guestIds = await evaluate("hosts.map(v=>v.getWebContentsId())");
+  console.log("FIXTURE_INITIAL=" + JSON.stringify({ guestIds, bounds: initial }));
+  await fs.writeFile(path.join(scratch, "tiled.png"), (await win.webContents.capturePage()).toPNG());
   const identities = await evaluate("Promise.all(hosts.map(v=>v.executeJavaScript('window.token'))) ");
   assert.ok(identities.every(token => typeof token === "number"));
   await evaluate("hosts[1].executeJavaScript(\"document.querySelector('input').value='edited';history.pushState({},'', '#retained')\")");
@@ -84,8 +88,11 @@ try {
     await wait("roots[1].getBoundingClientRect().width>900");
     assert.equal(await evaluate("document.activeElement===roots[1].querySelector('.pane-pop-out')"), true);
     assert.equal(await evaluate("roots[0].inert&&roots[2].inert&&roots[0].getAttribute('aria-hidden')==='true'"), true);
-    assert.equal(await evaluate("roots.every((r,i)=>r.parentElement===slots[i])&&hosts.every(v=>v.isConnected)"), true);
+    assert.equal(await evaluate("roots.every((r,i)=>r.parentElement===hostParents[i])&&hosts.every(v=>v.isConnected)"), true);
     const expanded = await evaluate("rects()");
+    console.log("FIXTURE_EXPANDED=" + JSON.stringify({ cycle: i, bounds: expanded }));
+    if (i === 0) await fs.writeFile(path.join(scratch, "expanded.png"), (await win.webContents.capturePage()).toPNG());
+    assert.deepEqual(await evaluate("hosts.map(v=>v.getWebContentsId())"), guestIds);
     assert.ok(expanded[1][2] > initial[1][2]);
     assert.ok(expanded[1][3] > initial[1][3]);
     await new Promise(resolve => setTimeout(resolve, 100));
@@ -100,11 +107,15 @@ try {
     await new Promise(resolve => setTimeout(resolve, 50));
     assert.equal(await evaluate("hosts[0].executeJavaScript('window.clicks')"), siblingClicks);
     await evaluate("roots[1].querySelector('.pane-pop-out').click()");
+    await wait("!roots[1].classList.contains('pane-popped-out')");
     assert.deepEqual(await evaluate("rects()"), initial);
+    console.log("FIXTURE_RESTORED=" + JSON.stringify({ cycle: i, bounds: await evaluate("rects()") }));
+    if (i === 0) await fs.writeFile(path.join(scratch, "restored.png"), (await win.webContents.capturePage()).toPNG());
     assert.equal(await evaluate("roots.some(r=>r.inert)"), false);
   }
   await evaluate("roots[1].querySelector('.pane-pop-out').click()");
-  win.setSize(1100, 800);
+  win.setContentSize(1100, 800);
+  await evaluate("(()=>{const next=structuredClone(fixtureState);next.viewport={width:1100,height:800,scale:1};next.geometryRevision++;window.fixtureState=next;fixtureUpdate(next);})()");
   await wait("roots[1].getBoundingClientRect().width>1000");
   await evaluate("roots[1].querySelector('.pane-pop-out').click()");
   assert.equal(await evaluate("slots.map(s=>s.style.flexGrow).join(',')"), "2,3,7");
@@ -117,6 +128,7 @@ try {
   console.error(error);
   process.exitCode = 1;
 } finally {
+  console.log("FIXTURE_SCRATCH=" + scratch);
   console.log("FIXTURE_EXTERNAL_REQUESTS=" + JSON.stringify(blockedRequests));
   clearTimeout(watchdog);
   win?.destroy();
