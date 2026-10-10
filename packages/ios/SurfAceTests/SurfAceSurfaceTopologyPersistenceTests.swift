@@ -218,8 +218,8 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
             }
             state.liveSurfaces[surfaceId]?.topology = try SurfAceLocklessTopologyCodec.canonical(.object([
                 "type": .string("split"), "direction": .string("vertical"), "weight": .integer(1),
-                "children": .array([leaf(1, 0.24), leaf(created[0], 0.26), .object([
-                    "type": .string("split"), "direction": .string("horizontal"), "weight": .double(0.5),
+                "children": .array([leaf(1, 0.28), leaf(created[0], 0.32), .object([
+                    "type": .string("split"), "direction": .string("horizontal"), "weight": .double(0.4),
                     "children": .array([leaf(created[1], 0.2), leaf(created[2], 0.8)]),
                 ])]),
             ]))
@@ -254,6 +254,9 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
         let previousKeyWindow = scene.windows.first(where: \.isKeyWindow)
         let window = UIWindow(windowScene: scene)
+        // Keep each initial column above the mounted browser/history toolbar's
+        // intrinsic minimum. The earlier 240pt fixture exposed 259pt overflow;
+        // that narrower-pane behavior is retained as separate failing evidence.
         window.frame = CGRect(x: 0, y: 0, width: 1000, height: 800)
         window.rootViewController = host
         window.makeKeyAndVisible()
@@ -282,11 +285,11 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
             .reduce(CGRect.null) { $0.union($1) }
         var expectedRevision = original.topologyRevision
         var tombstoneIds = Set<String>()
-        // Nested collapse must retain its OUTER 0.5 slot, not the child's 0.2.
-        // The next close leaves weights summing to 0.5; the last collapses the root.
+        // Nested collapse must retain its OUTER 0.4 slot, not the child's 0.2.
+        // The next close leaves weights summing to 0.6; the last collapses the root.
         let transitions: [(closed: Int64, survivors: [Int64], fractions: [CGFloat])] = [
-            (ids[3], [ids[0], ids[1], ids[2]], [0.24, 0.26, 0.5]),
-            (ids[2], [ids[0], ids[1]], [0.48, 0.52]),
+            (ids[3], [ids[0], ids[1], ids[2]], [0.28, 0.32, 0.4]),
+            (ids[2], [ids[0], ids[1]], [7.0 / 15.0, 8.0 / 15.0]),
             (ids[0], [ids[1]], [1]),
         ]
         for (step, transition) in transitions.enumerated() {
