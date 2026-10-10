@@ -114,6 +114,12 @@ final class SurfAceResizeUITests: XCTestCase {
         let expanded = XCTNSPredicateExpectation(
             predicate: NSPredicate(format: "value == %@", "Expanded"), object: toggle)
         XCTAssertEqual(XCTWaiter.wait(for: [expanded], timeout: 5), .completed)
+        let focused = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            (try? voiceOver.currentSpeech().utterance.contains("Restore")) == true
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [focused], timeout: 5), .completed,
+                       "wait for actual VoiceOver focus, not only the Expanded model value")
+        print("popout_post_expansion_hierarchy=\(app.debugDescription)")
         let focusedSpeech = try voiceOver.currentSpeech().utterance
         XCTAssertTrue(focusedSpeech.contains("Restore"),
                       "expected same Restore control focus, actual speech: \(focusedSpeech)")
@@ -143,6 +149,12 @@ final class SurfAceResizeUITests: XCTestCase {
         let expanded = XCTNSPredicateExpectation(
             predicate: NSPredicate(format: "value == %@", "Expanded"), object: toggle)
         XCTAssertEqual(XCTWaiter.wait(for: [expanded], timeout: 5), .completed)
+        let focused = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            toggle.hasFocus
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [focused], timeout: 5), .completed,
+                       "wait for actual toolbar focus before sending keyboard input")
+        print("popout_keyboard_focus=\(toggle.hasFocus) hierarchy=\(app.debugDescription)")
         app.typeKey(" ", modifierFlags: [])
         let restored = XCTNSPredicateExpectation(
             predicate: NSPredicate(format: "value == %@", "Tiled"), object: toggle)

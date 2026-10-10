@@ -269,6 +269,9 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
         observations.forEach { $0.invalidate() }
         let tokens = try await popoutSessionTokens(views)
         let selected = try XCTUnwrap(views.first { $0.title == "ready-3" })
+        let toggle = try XCTUnwrap(popoutToolbarButtons(in: host.view).first {
+            $0.accessibilityIdentifier == "surf-ace-pane-popout-3"
+        })
         var tiledFrames = views.map { $0.convert($0.bounds, to: window) }
         var surfaceFrame = tiledFrames.reduce(CGRect.null) { $0.union($1) }
         for index in 0..<4 {
@@ -278,6 +281,13 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
             XCTAssertEqual(selection.paneId, 3)
             let expandedFrame = surfAcePanePopoutBounds(in: surfaceFrame)
             await waitForPopoutFrame(selected, in: window, expected: expandedFrame)
+            let focused = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                toggle.isFirstResponder
+            }, object: nil)
+            await fulfillment(of: [focused], timeout: 5)
+            XCTAssertTrue(toggle.isFirstResponder, "the mounted toolbar button owns keyboard input after expansion")
+            XCTAssertTrue(popoutToolbarButtons(in: host.view).contains { $0 === toggle },
+                          "enter/Restore retains the same native toggle")
             for (view, original) in zip(views, tiledFrames) where view !== selected {
                 XCTAssertEqual(view.convert(view.bounds, to: window), original,
                                "covered sibling stays in its original tile")
@@ -391,6 +401,12 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
         XCTAssertEqual(actual.minY, expected.minY, accuracy: 1)
         XCTAssertEqual(actual.width, expected.width, accuracy: 1)
         XCTAssertEqual(actual.height, expected.height, accuracy: 1)
+    }
+
+    @MainActor
+    private func popoutToolbarButtons(in view: UIView) -> [UIButton] {
+        (view as? UIButton).map { [$0] }
+            ?? view.subviews.flatMap { popoutToolbarButtons(in: $0) }
     }
 
     @MainActor
