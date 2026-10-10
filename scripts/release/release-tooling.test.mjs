@@ -680,7 +680,7 @@ test("Electron smoke checks the running app version before any CLI request", asy
     },
     stateRoot: path.join(root, "cli-state"),
     waitForEndpoint: async () => undefined,
-  }), /tightbeam_client_app_version_mismatch:0\.1\.0:0\.2\.7/);
+  }), /tightbeam_client_app_version_mismatch:0\.1\.0:0\.2\.8/);
   assert.equal(cliCalls, 0);
 });
 
@@ -3009,8 +3009,8 @@ test("v0.2.8 standalone specification and release gates bind the product and all
   assert.match(specification, /Product source: tag/);
   assert.match(specification, /17480ecc9dd4ad1b696059d000b903fe38e6454a/);
   assert.match(specification, /No old-version participant/);
-  assert.match(specification, /surf-ace-release-tooling-v0\.2\.7/);
-  assert.match(specification, /surf-ace-v0\.2\.7/);
+  assert.match(specification, /surf-ace-release-tooling-v0\.2\.8/);
+  assert.match(specification, /surf-ace-v0\.2\.8/);
   assert.match(specification, /copied byte-for-byte from the pinned tooling checkout/);
   for (const name of TIGHTBEAM_PUBLIC_FILES) assert.ok(specification.includes(name));
   assert.match(specification, /custom-format backup/);
