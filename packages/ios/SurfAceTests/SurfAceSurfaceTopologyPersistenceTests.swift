@@ -1380,3 +1380,85 @@ final class SurfAcePaneGeometrySnapshotTests: XCTestCase {
         XCTAssertEqual(staleContentViewport?["width"], 400)
     }
 }
+
+@MainActor
+final class SurfAceHostZoomViewportTests: XCTestCase {
+    func testNativeHostKeepsFullIframeViewportAtSupportedFontScales() async throws {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previous = scene.windows.first(where: \.isKeyWindow)
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 600, height: 820)
+        let controller = UIViewController()
+        let host = SurfAceSurfaceHostView(frame: window.bounds)
+        controller.view = host
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true; window.rootViewController = nil; previous?.makeKey() }
+        let web = try XCTUnwrap(host.subviews.compactMap { $0 as? WKWebView }.first)
+        for pattern in ["fixed", "percent"] {
+            for multiplier in [0.5, 1.0, 1.5, 2.0] {
+                let fill = pattern == "fixed" ? "position:fixed;inset:0" : "width:100%;height:100%"
+                let inner = "<html style='height:100%'><body style='margin:0;height:100%'><main id='fill' style='\(fill);background:rgb(0,200,0)'><span id='font' style='font-size:20px'>Scale</span></main></body></html>"
+                let encoded = inner.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "\"", with: "&quot;")
+                let html = "<html style='height:100%;background:#101720'><head><meta name='viewport' content='width=device-width,initial-scale=1'></head><body style='margin:0;height:100%;overflow:hidden'><iframe style='display:block;border:0;width:100%;height:100%' srcdoc=\"\(encoded)\"></iframe></body></html>"
+                host.setContentScale(multiplier)
+                host.render(entry: .from(frame: SurfAceFrame(
+                    contentId: "zoom-\(pattern)-\(multiplier)", revision: 1, contentType: .html,
+                    payload: .html(html: html, baseURL: nil), reloadSource: nil,
+                    title: "Zoom fixture", scrollable: true, interactive: true)), restoreViewport: nil)
+                host.layoutIfNeeded()
+                // Uses the production navigation/scale/paint completion signal.
+                _ = await host.fetchSnapshotMetadata()
+                let metrics = try await web.evaluateJavaScript("""
+                (() => { const f=document.querySelector('iframe'), w=f.contentWindow, d=w.document;
+                  const rect=e=>{const r=e.getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height}};
+                  return {outer:{width:innerWidth,height:innerHeight,zoom:getComputedStyle(document.documentElement).zoom},
+                    iframe:rect(f),inner:{width:w.innerWidth,height:w.innerHeight,dpr:w.devicePixelRatio,
+                    clientWidth:d.documentElement.clientWidth,clientHeight:d.documentElement.clientHeight,
+                    fill:rect(d.querySelector('#fill')),fontSize:w.getComputedStyle(d.querySelector('#font')).fontSize}};
+                })()
+                """)
+                let snapshot = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<UIImage, Error>) in
+                    web.takeSnapshot(with: nil) { image, error in
+                        if let image { continuation.resume(returning: image) }
+                        else { continuation.resume(throwing: error ?? NSError(domain: "ZoomSnapshot", code: 1)) }
+                    }
+                }
+                let label = "\(pattern)-\(multiplier)"
+                let attachment = XCTAttachment(image: snapshot)
+                attachment.name = "native-iframe-\(label)"; attachment.lifetime = .keepAlways; add(attachment)
+                let inset = web.scrollView.adjustedContentInset
+                let measurements: [String: Any] = [
+                    "pattern": pattern, "multiplier": multiplier, "pageZoom": web.pageZoom,
+                    "hostBounds": NSStringFromCGRect(host.bounds), "webFrame": NSStringFromCGRect(web.frame),
+                    "webBounds": NSStringFromCGRect(web.bounds), "safeAreaInsets": NSStringFromUIEdgeInsets(host.safeAreaInsets),
+                    "adjustedContentInsets": NSStringFromUIEdgeInsets(inset),
+                    "webOpaque": web.isOpaque, "webBackground": String(describing: web.backgroundColor),
+                    "snapshotPoints": [snapshot.size.width, snapshot.size.height], "dom": metrics
+                ]
+                let data = try JSONSerialization.data(withJSONObject: measurements, options: [.sortedKeys, .prettyPrinted])
+                let geometry = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+                geometry.name = "native-geometry-\(label)"; geometry.lifetime = .keepAlways; add(geometry)
+                XCTAssertEqual(web.frame, host.bounds, "\(label) native edge pinning")
+                let image = try XCTUnwrap(snapshot.cgImage)
+                var pixels = [UInt8](repeating: 0, count: image.width * image.height * 4)
+                let colorSpace = CGColorSpaceCreateDeviceRGB()
+                let painted = pixels.withUnsafeMutableBytes { bytes -> Bool in
+                    guard let context = CGContext(data: bytes.baseAddress, width: image.width, height: image.height,
+                        bitsPerComponent: 8, bytesPerRow: image.width * 4, space: colorSpace,
+                        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue) else { return false }
+                    context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height)); return true
+                }
+                XCTAssertTrue(painted)
+                // Both vertical orientations are sampled; no white/dark margin can pass.
+                for x in [image.width / 2, image.width - 4] {
+                    for y in [4, image.height - 4] {
+                        let i = (y * image.width + x) * 4
+                        XCTAssertTrue(pixels[i + 1] > 150 && pixels[i] < 40 && pixels[i + 2] < 40,
+                                      "\(label) usable iframe must paint native viewport edge (\(x),\(y)); RGBA=\(Array(pixels[i...i+3]))")
+                    }
+                }
+            }
+        }
+    }
+}
