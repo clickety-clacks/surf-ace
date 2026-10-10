@@ -1014,6 +1014,69 @@ test("renderer DOM integrates authoritative connection states and live scale con
     assert.equal(commits.length, 1);
   });
 
+  await test("stale enter failure retains native authority until revision-fenced retirement", async () => {
+    const next = state("connected", true);
+    stateListener!(next);
+    const root = document.querySelectorAll<HTMLElement>(".pane-shell")[1]!;
+    const guest = root.querySelector("webview");
+    const toggle = root.querySelector<HTMLButtonElement>(".pane-pop-out")!;
+    const handle = document.querySelector<HTMLElement>(".split-resize-handle")!;
+    Object.assign(handle, { setPointerCapture() {}, hasPointerCapture: () => false, releasePointerCapture() {} });
+    let reports = 0;
+    let commits = 0;
+    const oldSnapshot = surfAce.reportSnapshot;
+    const oldOverlay = surfAce.reportOverlayRegions;
+    Object.assign(surfAce, { reportSnapshot() { reports++; }, reportOverlayRegions() { reports++; },
+      async resizeSplit() { commits++; return true; } });
+    const pointer = (type: string) => {
+      const event = new window.Event(type, { bubbles: true, cancelable: true });
+      Object.assign(event, { pointerId: 91, clientX: 140, clientY: 140 });
+      (type === "pointerdown" ? handle : window).dispatchEvent(event);
+      return event;
+    };
+    let finish!: (response: { ok: boolean; revision: number; presentationBlocked?: boolean; presentationCleared?: boolean }) => void;
+    presentationResponse = () => new Promise((resolve) => { finish = resolve; });
+    toggle.click();
+    const changed = { ...next, geometryRevision: next.geometryRevision + 1,
+      viewport: { ...next.viewport, width: 1000 } };
+    stateListener!(changed);
+    const reportsBefore = reports;
+    finish({ ok: false, revision: 200, presentationBlocked: true, presentationCleared: false });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(root.classList.contains("pane-popped-out"), false, "stale reply cannot apply display pixels");
+    assert.equal(root.querySelector(".pane-content")!.hasAttribute("inert"), true,
+      "failed native retirement survives stale geometry and finally");
+    assert.equal(pointer("pointerdown").defaultPrevented, false);
+    pointer("pointermove"); pointer("pointerup");
+    assert.equal(commits, 0);
+    assert.equal(reports, reportsBefore, "unresolved authority cannot publish tiled snapshots or overlay regions");
+    assert.equal(root.querySelector("webview"), guest);
+    assert.deepEqual(changed.layout, next.layout);
+    // An obsolete clear cannot reopen input. A current confirmed retirement can.
+    toggle.click();
+    finish({ ok: false, revision: 199, presentationCleared: true });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(pointer("pointerdown").defaultPrevented, false);
+    toggle.click();
+    finish({ ok: false, revision: 201, presentationCleared: true });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(root.querySelector(".pane-content")!.hasAttribute("inert"), false);
+    assert.equal(pointer("pointerdown").defaultPrevented, true);
+    pointer("pointercancel");
+    // A late blocked reply must not undo a newer independently confirmed clear.
+    toggle.click();
+    stateListener!({ ...changed, geometryRevision: changed.geometryRevision + 1 });
+    ownershipListener!({ surfaceId: next.surfaceId, surfaceEpoch: next.surfaceEpoch, revision: 203, phase: "cleared" });
+    finish({ ok: false, revision: 202, presentationBlocked: true });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(root.querySelector(".pane-content")!.hasAttribute("inert"), false);
+    assert.equal(pointer("pointerdown").defaultPrevented, true);
+    pointer("pointercancel");
+    assert.equal(commits, 0);
+    presentationResponse = null;
+    Object.assign(surfAce, { reportSnapshot: oldSnapshot, reportOverlayRegions: oldOverlay });
+  });
+
   await test("separator previews latest frame and sends one fenced release, cancel and failure restore", async () => {
     const next = state("connected", true);
     stateListener!(next);

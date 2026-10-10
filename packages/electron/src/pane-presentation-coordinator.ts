@@ -178,6 +178,7 @@ export class PanePresentationCoordinator {
 
   wasPresentationCleared(surfaceId: string): boolean { return this.cleared.has(surfaceId) && !this.accepted.has(surfaceId); }
   hasUnretiredPresentation(surfaceId: string): boolean { return this.accepted.has(surfaceId); }
+  presentationRevision(surfaceId: string): number { return this.revisions.get(surfaceId) ?? 0; }
 
   invalidate(surfaceId: string): Promise<void> {
     this.revisions.set(surfaceId, (this.revisions.get(surfaceId) ?? 0) + 1);

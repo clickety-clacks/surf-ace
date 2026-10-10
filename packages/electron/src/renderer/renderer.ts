@@ -1474,12 +1474,30 @@ async function requestPanePopOut(view: PaneView, selected: number | null): Promi
     } catch (error) {
       response = { ok: false, presentationBlocked: true, error: error instanceof Error ? error.message : "Pane presentation failed" };
     }
+    // Native authority outlives a stale display request. A geometry change may
+    // invalidate this reply's pixels without retiring its acknowledged selection.
+    const currentAuthority = latestState?.surfaceId === surfaceId &&
+      latestState.surfaceEpoch === identity.surfaceEpoch;
+    const responseRevision = response.revision;
+    const revisionIsCurrent = Number.isSafeInteger(responseRevision) &&
+      Number(responseRevision) >= panePresentationMainRevision;
+    if (currentAuthority && !response.ok) {
+      if (response.presentationBlocked && (responseRevision === undefined ||
+          (revisionIsCurrent && Number(responseRevision) > panePresentationConfirmedClearRevision))) {
+        panePresentationAuthorityBlocked = true;
+        cancelResizeGesture();
+      } else if (response.presentationCleared && revisionIsCurrent) {
+        panePresentationAuthorityBlocked = false;
+        panePresentationConfirmedClearRevision = Number(responseRevision);
+      }
+      if (revisionIsCurrent) panePresentationMainRevision = Number(responseRevision);
+    }
     if (intent !== panePresentationIntent || !latestState || latestState.surfaceId !== surfaceId ||
         JSON.stringify(paneSnapshotGeometryIdentity()) !== JSON.stringify(identity) ||
         paneViews.get(view.paneId) !== view || paneStateFor(view)?.paneLineageId !== selectedLineage) return;
     if (!response.ok) {
-      panePresentationAuthorityBlocked = response.presentationBlocked === true;
       if (response.presentationCleared) {
+        if (responseRevision !== undefined && !revisionIsCurrent) return;
         panePresentationAuthorityBlocked = false;
         poppedOutPaneId = null;
         acknowledgedPopOutBounds = null;
@@ -1499,6 +1517,9 @@ async function requestPanePopOut(view: PaneView, selected: number | null): Promi
     }
     cancelResizeGesture(); // Defense against a gesture introduced outside divider admission.
     panePresentationAuthorityBlocked = false;
+    if (selected === null && response.revision !== undefined) {
+      panePresentationConfirmedClearRevision = response.revision;
+    }
     poppedOutPaneId = selected;
     acknowledgedPopOutBounds = selected === null ? null : bounds;
     panePresentationResizePending = false;

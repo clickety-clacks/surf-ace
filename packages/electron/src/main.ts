@@ -1692,6 +1692,7 @@ function installIpc(): void {
     } catch (error) {
       return { ok: false, presentationCleared: coordinator.wasPresentationCleared(surfaceId),
         presentationBlocked: coordinator.hasUnretiredPresentation(surfaceId),
+        revision: coordinator.presentationRevision(surfaceId),
         error: error instanceof Error ? error.message : "pane presentation failed" };
 
     }
