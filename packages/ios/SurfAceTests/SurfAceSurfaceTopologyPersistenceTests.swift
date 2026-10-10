@@ -313,10 +313,28 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
         initialAttachment.name = "command-close-before-any-close-host-tile-content-chrome"
         initialAttachment.lifetime = .keepAlways
         add(initialAttachment)
-        let originalToggles = Dictionary(uniqueKeysWithValues: ids.map { id in
-            (id, popoutToolbarButtons(in: host.view).first {
+        // SwiftUI chrome belongs to the recursive split/leaf mount path. A
+        // structural collapse can legitimately remount chrome; the live WK host,
+        // session and pane/history identity must survive even that boundary.
+        // Within an unchanged path (including width-driven wrapping), require
+        // the same native toggle. Pop-out/Restore identity is covered separately.
+        func chromeMountPath(_ node: SurfAcePaneLayoutNode, paneId: Int) -> [String]? {
+            switch node {
+            case .empty: return nil
+            case .leaf(let id, _): return id == paneId ? ["leaf:\(id)"] : nil
+            case .split(let direction, let children, _):
+                guard let child = children.first(where: { $0.paneIDs.contains(paneId) }),
+                      let tail = chromeMountPath(child, paneId: paneId) else { return nil }
+                return ["split:\(direction.rawValue)", child.layoutIdentity] + tail
+            }
+        }
+        let originalToggles = try Dictionary(uniqueKeysWithValues: ids.map { id in
+            (id, try XCTUnwrap(popoutToolbarButtons(in: host.view).first {
                 $0.accessibilityIdentifier == "surf-ace-pane-popout-\(id)"
-            })
+            }))
+        })
+        let originalChromePaths = Dictionary(uniqueKeysWithValues: ids.map {
+            ($0, chromeMountPath(surface.paneLayout, paneId: Int($0)))
         })
         var expectedRevision = original.topologyRevision
         var tombstoneIds = Set<String>()
@@ -390,7 +408,14 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
                 let toggle = try XCTUnwrap(popoutToolbarButtons(in: host.view).first {
                     $0.accessibilityIdentifier == "surf-ace-pane-popout-\(id)"
                 })
-                XCTAssertTrue(toggle === (originalToggles[id] ?? nil))
+                let initialPath = originalChromePaths[id] ?? nil
+                let currentPath = chromeMountPath(surface.paneLayout, paneId: Int(id))
+                let sameNativeToggle = toggle === originalToggles[id]
+                print("close_chrome_identity step=\(step + 1) pane=\(id) path_unchanged=\(initialPath == currentPath) same_native_toggle=\(sameNativeToggle)")
+                if initialPath == currentPath {
+                    XCTAssertTrue(sameNativeToggle,
+                                  "Unchanged chrome mount path must retain its toggle: step=\(step + 1) pane=\(id)")
+                }
                 let hitFrame = toggle.convert(toggle.bounds, to: window)
                 XCTAssertGreaterThanOrEqual(hitFrame.minX, x - 1)
                 XCTAssertLessThanOrEqual(hitFrame.maxX, x + width + 1)
