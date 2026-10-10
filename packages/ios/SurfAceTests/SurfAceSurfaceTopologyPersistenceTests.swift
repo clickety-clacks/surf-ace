@@ -313,6 +313,11 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
         initialAttachment.name = "command-close-before-any-close-host-tile-content-chrome"
         initialAttachment.lifetime = .keepAlways
         add(initialAttachment)
+        let originalToggles = Dictionary(uniqueKeysWithValues: ids.map { id in
+            (id, popoutToolbarButtons(in: host.view).first {
+                $0.accessibilityIdentifier == "surf-ace-pane-popout-\(id)"
+            })
+        })
         var expectedRevision = original.topologyRevision
         var tombstoneIds = Set<String>()
         // Nested collapse must retain its OUTER 0.5 slot, not the child's 0.2.
@@ -377,6 +382,22 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
                                "Authoritative outer tile must match accepted topology")
                 await waitForPopoutFrame(view, in: window,
                                         expected: CGRect(x: x, y: available.minY, width: width, height: available.height))
+                let contentHost = try XCTUnwrap(view.superview)
+                let hostFrame = contentHost.convert(contentHost.bounds, to: window)
+                XCTAssertEqual(hostFrame.minX, x, accuracy: 1)
+                XCTAssertEqual(hostFrame.width, width, accuracy: 1,
+                               "UIKit content host must respect its authoritative outer tile")
+                let toggle = try XCTUnwrap(popoutToolbarButtons(in: host.view).first {
+                    $0.accessibilityIdentifier == "surf-ace-pane-popout-\(id)"
+                })
+                XCTAssertTrue(toggle === (originalToggles[id] ?? nil))
+                let hitFrame = toggle.convert(toggle.bounds, to: window)
+                XCTAssertGreaterThanOrEqual(hitFrame.minX, x - 1)
+                XCTAssertLessThanOrEqual(hitFrame.maxX, x + width + 1)
+                XCTAssertGreaterThanOrEqual(hitFrame.width, 43)
+                let hit = window.hitTest(CGPoint(x: hitFrame.midX, y: hitFrame.midY), with: nil)
+                XCTAssertTrue(hit === toggle || hit?.isDescendant(of: toggle) == true,
+                              "retained narrow toggle is actually hit reachable inside its tile")
                 x += width
                 let token = try await view.evaluateJavaScript("window.sessionToken") as? String
                 XCTAssertEqual(token, tokens[id], "A retained WebView must not reload")
