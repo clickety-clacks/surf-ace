@@ -218,8 +218,8 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
             }
             state.liveSurfaces[surfaceId]?.topology = try SurfAceLocklessTopologyCodec.canonical(.object([
                 "type": .string("split"), "direction": .string("vertical"), "weight": .integer(1),
-                "children": .array([leaf(1, 0.28), leaf(created[0], 0.32), .object([
-                    "type": .string("split"), "direction": .string("horizontal"), "weight": .double(0.4),
+                "children": .array([leaf(1, 0.24), leaf(created[0], 0.26), .object([
+                    "type": .string("split"), "direction": .string("horizontal"), "weight": .double(0.5),
                     "children": .array([leaf(created[1], 0.2), leaf(created[2], 0.8)]),
                 ])]),
             ]))
@@ -254,9 +254,8 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
         let previousKeyWindow = scene.windows.first(where: \.isKeyWindow)
         let window = UIWindow(windowScene: scene)
-        // Keep each initial column above the mounted browser/history toolbar's
-        // intrinsic minimum. The earlier 240pt fixture exposed 259pt overflow;
-        // that narrower-pane behavior is retained as separate failing evidence.
+        // Mike87e9be34: 240pt remains supported. Keep the original failed
+        // geometry and measure authoritative tile versus content/chrome bounds.
         window.frame = CGRect(x: 0, y: 0, width: 1000, height: 800)
         window.rootViewController = host
         window.makeKeyAndVisible()
@@ -285,11 +284,11 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
             .reduce(CGRect.null) { $0.union($1) }
         var expectedRevision = original.topologyRevision
         var tombstoneIds = Set<String>()
-        // Nested collapse must retain its OUTER 0.4 slot, not the child's 0.2.
-        // The next close leaves weights summing to 0.6; the last collapses the root.
+        // Nested collapse must retain its OUTER 0.5 slot, not the child's 0.2.
+        // The next close leaves weights summing to 0.5; the last collapses the root.
         let transitions: [(closed: Int64, survivors: [Int64], fractions: [CGFloat])] = [
-            (ids[3], [ids[0], ids[1], ids[2]], [0.28, 0.32, 0.4]),
-            (ids[2], [ids[0], ids[1]], [7.0 / 15.0, 8.0 / 15.0]),
+            (ids[3], [ids[0], ids[1], ids[2]], [0.24, 0.26, 0.5]),
+            (ids[2], [ids[0], ids[1]], [0.48, 0.52]),
             (ids[0], [ids[1]], [1]),
         ]
         for (step, transition) in transitions.enumerated() {
@@ -316,6 +315,35 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
                 XCTAssertEqual(model.forwardStack.map(\.contentId), ["command-close-\(id)-3"])
                 let view = try XCTUnwrap(views[id])
                 let width = available.width * transition.fractions[index]
+                let geometry = try XCTUnwrap(model.geometrySnapshot)
+                var ancestors: [[String: String]] = []
+                var ancestor: UIView? = view
+                while let current = ancestor {
+                    ancestors.append(["class": String(describing: type(of: current)),
+                                      "bounds": NSStringFromCGRect(current.bounds),
+                                      "windowFrame": NSStringFromCGRect(current.convert(current.bounds, to: window))])
+                    ancestor = current.superview
+                }
+                let controls = popoutToolbarButtons(in: host.view).filter {
+                    $0.accessibilityIdentifier == "surf-ace-pane-popout-\(id)"
+                }.map { ["frame": NSStringFromCGRect($0.convert($0.bounds, to: window)),
+                         "superviewBounds": NSStringFromCGRect($0.superview?.bounds ?? .zero)] }
+                let diagnostic: [String: Any] = [
+                    "step": step + 1, "paneId": id, "expectedTileWidth": width,
+                    "authoritativePaneFrame": NSStringFromCGRect(geometry.paneFrame),
+                    "publishedContentViewport": NSStringFromCGRect(geometry.contentViewport),
+                    "measuredProxySize": NSStringFromCGSize(model.lastMeasuredSize),
+                    "webViewWindowFrame": NSStringFromCGRect(view.convert(view.bounds, to: window)),
+                    "nativeAncestors": ancestors, "popoutControl": controls,
+                ]
+                let diagnosticAttachment = XCTAttachment(data: try JSONSerialization.data(
+                    withJSONObject: diagnostic, options: [.prettyPrinted, .sortedKeys]),
+                    uniformTypeIdentifier: "public.json")
+                diagnosticAttachment.name = "command-close-step-\(step + 1)-pane-\(id)-tile-content-chrome"
+                diagnosticAttachment.lifetime = .keepAlways
+                add(diagnosticAttachment)
+                XCTAssertEqual(geometry.paneFrame.width, width, accuracy: 1,
+                               "Authoritative outer tile must match accepted topology")
                 await waitForPopoutFrame(view, in: window,
                                         expected: CGRect(x: x, y: available.minY, width: width, height: available.height))
                 x += width
