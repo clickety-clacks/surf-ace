@@ -1869,11 +1869,10 @@ private final class SurfAcePanePopoutControl: UIButton {
         let generation = focusGeneration
         DispatchQueue.main.async { [weak self] in
             guard let self, self.window != nil, self.focusGeneration == generation else { return }
-            if UIAccessibility.isVoiceOverRunning {
-                UIAccessibility.post(notification: .layoutChanged, argument: self)
-            } else {
-                self.becomeFirstResponder()
-            }
+            if !UIAccessibility.isVoiceOverRunning { self.becomeFirstResponder() }
+            // Post regardless of the local status flag: assistive technology
+            // owns whether to consume this explicit layout/focus notification.
+            UIAccessibility.post(notification: .layoutChanged, argument: self)
         }
     }
 
