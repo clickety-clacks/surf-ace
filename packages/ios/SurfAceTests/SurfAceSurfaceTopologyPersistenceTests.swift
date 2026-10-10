@@ -1669,4 +1669,82 @@ final class SurfAceHostZoomViewportTests: XCTestCase {
             }
         }
     }
+    func testBrowserResizeRetainsMountedViewSelectionAndSnapshotCoordinates() async throws {
+        let html = """
+        <html><head><meta name='viewport' content='width=device-width,initial-scale=1'></head>
+        <body style='margin:0;background:rgb(0,200,0)'>
+        <span id='selected' style='position:absolute;left:40px;top:60px;font-size:20px'>Selected text</span>
+        </body></html>
+        """
+        let identity = UUID().uuidString
+        let server = SurfAceHTTPServer()
+        let port = try await server.startIsolatedLoopbackForTesting(httpHandler: { request in
+            if request.path == "/identity" { return HTTPServerResponse(statusCode: 200, body: Data(identity.utf8)) }
+            if request.path == "/page" {
+                return HTTPServerResponse(statusCode: 200, headers: ["Content-Type": "text/html"], body: Data(html.utf8))
+            }
+            return HTTPServerResponse(statusCode: 404)
+        }, webSocketHandler: { socket in await socket.close() })
+        defer { Task { await server.stop() } }
+        XCTAssertNotEqual(port, SurfAceHTTPServer.fixedPort)
+        let origin = try XCTUnwrap(URL(string: "http://127.0.0.1:\(port)/"))
+        let (ownedIdentity, _) = try await URLSession.shared.data(from: origin.appendingPathComponent("identity"))
+        XCTAssertEqual(String(decoding: ownedIdentity, as: UTF8.self), identity)
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previous = scene.windows.first(where: \.isKeyWindow)
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 1024, height: 820)
+        let controller = UIViewController()
+        let host = SurfAceSurfaceHostView(frame: window.bounds)
+        controller.view = host; window.rootViewController = controller; window.makeKeyAndVisible()
+        defer { window.isHidden = true; window.rootViewController = nil; previous?.makeKey() }
+        let web = try XCTUnwrap(host.subviews.compactMap { $0 as? WKWebView }.first)
+        let rules = """
+        [{"trigger":{"url-filter":"^https?://"},"action":{"type":"block"}},
+         {"trigger":{"url-filter":"^http://127[.]0[.]0[.]1:\(port)/"},"action":{"type":"ignore-previous-rules"}}]
+        """
+        let ruleList = try await WKContentRuleListStore.default().compileContentRuleList(
+            forIdentifier: "browser-zoom-\(identity)", encodedContentRuleList: rules)
+        web.configuration.userContentController.add(try XCTUnwrap(ruleList))
+        defer { web.configuration.userContentController.removeAllContentRuleLists() }
+        host.setContentScale(1.5)
+        let entry = SurfAcePaneEntry.browserURL(targetId: "owned-browser", targetEpoch: 1,
+                                               url: origin.appendingPathComponent("page").absoluteString, title: "Owned browser")
+        let result = await host.renderBrowserURL(entry: entry)
+        XCTAssertEqual(result.status, "applied", result.errorMessage ?? "")
+        let ownedWeb = ObjectIdentifier(web)
+        for size in [CGSize(width: 1024, height: 820), CGSize(width: 820, height: 1024), CGSize(width: 600, height: 400)] {
+            window.frame.size = size
+            host.frame = CGRect(origin: .zero, size: size)
+            host.setNeedsLayout(); host.layoutIfNeeded()
+            let dimensions = try await web.callAsyncJavaScript("""
+            await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+            const node=document.getElementById('selected'), range=document.createRange();
+            range.selectNodeContents(node); const selection=getSelection(); selection.removeAllRanges(); selection.addRange(range);
+            const r=range.getBoundingClientRect();
+            return {width:innerWidth,height:innerHeight,x:r.x,y:r.y,rectWidth:r.width,rectHeight:r.height};
+            """, arguments: [:], in: nil, contentWorld: .page)
+            let dom = try XCTUnwrap(dimensions as? [String: Double])
+            XCTAssertEqual(ObjectIdentifier(web), ownedWeb)
+            XCTAssertEqual(web.url, origin.appendingPathComponent("page"))
+            XCTAssertEqual(try XCTUnwrap(dom["width"]) * 1.275, Double(size.width), accuracy: 1.3)
+            XCTAssertEqual(try XCTUnwrap(dom["height"]) * 1.275, Double(size.height), accuracy: 1.3)
+            let captured = await host.fetchSnapshot()
+            let snapshot = try XCTUnwrap(captured)
+            let selected = try XCTUnwrap(snapshot.selection?.boundingRect)
+            XCTAssertEqual(snapshot.selection?.text, "Selected text")
+            XCTAssertEqual(selected.x, try XCTUnwrap(dom["x"]) * 1.275, accuracy: 0.01)
+            XCTAssertEqual(selected.y, try XCTUnwrap(dom["y"]) * 1.275, accuracy: 0.01)
+            XCTAssertEqual(selected.width, try XCTUnwrap(dom["rectWidth"]) * 1.275, accuracy: 0.01)
+            let imageData = try XCTUnwrap(Data(base64Encoded: try XCTUnwrap(snapshot.imageBase64)))
+            let image = try XCTUnwrap(UIImage(data: imageData))
+            let bitmap = try XCTUnwrap(image.cgImage)
+            XCTAssertEqual(Double(bitmap.width), Double(size.width * window.screen.scale), accuracy: 1)
+            XCTAssertEqual(Double(bitmap.height), Double(size.height * window.screen.scale), accuracy: 1)
+            let attachment = XCTAttachment(image: image); attachment.name = "browser-resize-composite-\(size)"
+            attachment.lifetime = .keepAlways; add(attachment)
+        }
+        await server.stop()
+    }
+
 }
