@@ -1735,9 +1735,15 @@ final class SurfAceHostZoomViewportTests: XCTestCase {
             const node=document.getElementById('selected'), range=document.createRange();
             range.selectNodeContents(node); const selection=getSelection(); selection.removeAllRanges(); selection.addRange(range);
             const r=range.getBoundingClientRect();
-            node.dispatchEvent(new MouseEvent('click',{bubbles:true,clientX:r.x,clientY:r.y}));
+            const tap=new MouseEvent('click',{bubbles:true,clientX:r.x,clientY:r.y});
+            const tapX=tap.clientX,tapY=tap.clientY;
+            const tapVisualX=visualViewport.offsetLeft,tapVisualY=visualViewport.offsetTop;
+            const tapVisualScale=visualViewport.scale;
+            node.dispatchEvent(tap);
             return {width:innerWidth,height:innerHeight,x:r.x,y:r.y,rectWidth:r.width,rectHeight:r.height,
-                    scrollX:scrollX,scrollY:scrollY,visualScale:visualViewport.scale,
+                    scrollX:scrollX,scrollY:scrollY,tapX:tapX,tapY:tapY,
+                    tapVisualX:tapVisualX,tapVisualY:tapVisualY,tapVisualScale:tapVisualScale,
+                    visualScale:visualViewport.scale,
                     visualX:visualViewport.offsetLeft,visualY:visualViewport.offsetTop};
             """, arguments: [:], in: nil, contentWorld: .page)
             let dom = try XCTUnwrap(dimensions as? [String: Double])
@@ -1747,8 +1753,17 @@ final class SurfAceHostZoomViewportTests: XCTestCase {
             let clientX = try XCTUnwrap(dom["x"]), clientY = try XCTUnwrap(dom["y"])
             XCTAssertEqual(try XCTUnwrap(callbackRect).minX, clientX * 1.275, accuracy: 0.01)
             XCTAssertEqual(try XCTUnwrap(callbackRect).minY, clientY * 1.275, accuracy: 0.01)
-            XCTAssertEqual(try XCTUnwrap(tapPoint).x, clientX * 1.275, accuracy: 0.01)
-            XCTAssertEqual(try XCTUnwrap(tapPoint).y, clientY * 1.275, accuracy: 0.01)
+            // MouseEvent construction may quantize its requested client point;
+            // assert the event's actual viewport point, not the Range's point.
+            let tapX = try XCTUnwrap(dom["tapX"]), tapY = try XCTUnwrap(dom["tapY"])
+            let tapScale = try XCTUnwrap(dom["tapVisualScale"])
+            XCTAssertEqual(try XCTUnwrap(tapPoint).x,
+                           (tapX - (try XCTUnwrap(dom["tapVisualX"]))) * tapScale * 1.275, accuracy: 0.01)
+            XCTAssertEqual(try XCTUnwrap(tapPoint).y,
+                           (tapY - (try XCTUnwrap(dom["tapVisualY"]))) * tapScale * 1.275, accuracy: 0.01)
+            let diagnostics = XCTAttachment(data: try JSONSerialization.data(withJSONObject: dom, options: [.sortedKeys]),
+                                            uniformTypeIdentifier: "public.json")
+            diagnostics.name = "scrolled-client-event-geometry-\(size)"; diagnostics.lifetime = .keepAlways; add(diagnostics)
             host.onSelectionChanged = nil; host.onTapEvent = nil
             XCTAssertEqual(ObjectIdentifier(web), ownedWeb)
             XCTAssertEqual(web.url, origin.appendingPathComponent("page"))
