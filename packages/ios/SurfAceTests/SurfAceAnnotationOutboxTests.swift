@@ -623,9 +623,10 @@ extension SurfAceAnnotationOutboxTests {
         let adapter = try SurfAceLocklessRuntimeAdapter(store: store, annotationClientId: "client-1")
         let probe = AnnotationWireProbe()
         var endpoints: [URL] = []
+        var diagnostics: [[String: String]] = []
         let firstPublisher = try SurfAceAnnotationPublisher(
             adapter: adapter, endpoint: XCTUnwrap(URL(string: "ws://127.0.0.1:19001")),
-            makeTransport: { endpoint in endpoints.append(endpoint); return AnnotationWireProbeTransport(probe) }, onError: { _ in }
+            makeTransport: { endpoint in endpoints.append(endpoint); return AnnotationWireProbeTransport(probe) }, onDiagnostic: { diagnostics.append($0) }, onError: { _ in }
         )
         do {
             try await firstPublisher.drain()
@@ -647,6 +648,13 @@ extension SurfAceAnnotationOutboxTests {
         XCTAssertEqual(saved.annotationPublisher?.pendingSurfaceIds(), [])
         XCTAssertEqual(saved.annotationPublisher?.clientId, "client-1")
         XCTAssertEqual(saved.annotationPublisher?.sourceEpoch, sourceEpoch)
+        let sends = diagnostics.filter { $0["stage"] == "sent" }
+        XCTAssertEqual(sends.count, 2)
+        XCTAssertEqual(sends.map { $0["source_event_id"] }, [expected.sourceEventId, expected.sourceEventId])
+        XCTAssertEqual(diagnostics.filter { $0["stage"] == "acceptance_persisted" }.count, 1)
+        XCTAssertTrue(diagnostics.allSatisfy { $0["at"] != nil && $0["payload"] == nil && $0["canonical"] == nil })
+        let secretURL = try XCTUnwrap(URL(string: "wss://name:password@example.test:443/private-token?secret=value#fragment"))
+        XCTAssertEqual(SurfAceAnnotationPublisher.safeEndpoint(secretURL), "wss://example.test:443")
     }
 
     @MainActor
