@@ -1,17 +1,31 @@
-/** Uses ttyd's public terminal interface, preserving independently changed font preferences. */
-export function browserContentScaleScript(scale: number): string {
+/** Uses ttyd's public terminal interface; ordinary documents are scaled by their host view. */
+export function browserContentScaleScript(scale: number, nonce = "", revision = 0): string {
   if (!Number.isFinite(scale) || scale <= 0 || scale > 4) throw new Error("Invalid guest content scale");
+  if (typeof nonce !== "string" || !Number.isSafeInteger(revision) || revision < 0) {
+    throw new Error("Invalid guest content scale revision");
+  }
   return `(() => {
     const key = Symbol.for('surf-ace.public-terminal-font-scale.v2');
     if (window[key] === undefined) Object.defineProperty(window, key, { value: {
-      scale: 1, revision: 0, active: null, states: new WeakMap(), timer: null
+      scale: 1, revision: 0, active: null, states: new WeakMap(), timer: null,
+      observer: null, mode: null, hostNonce: '', hostRevision: 0
     }});
     const c = window[key];
     if (!c || !(c.states instanceof WeakMap)) throw new Error('Terminal scale state unavailable');
     c.scale = ${JSON.stringify(scale)};
+    c.hostNonce = ${JSON.stringify(nonce)};
+    c.hostRevision = ${JSON.stringify(revision)};
     ++c.revision;
     if (c.timer !== null) { clearTimeout(c.timer); c.timer = null; }
     const root = document.documentElement;
+    const reportMode = (mode, force = false) => {
+      if (!force && c.mode === mode) return;
+      c.mode = mode;
+      if (!c.hostNonce) return;
+      window.dispatchEvent(new CustomEvent('surf-ace-scale-mode', { detail: {
+        mode, nonce: c.hostNonce, revision: c.hostRevision
+      }}));
+    };
     const compatible = (t) => t && typeof t === 'object' &&
       t.element instanceof HTMLElement && t.element.ownerDocument === document &&
       t.element.isConnected && t.element.matches('.xterm') &&
@@ -30,12 +44,12 @@ export function browserContentScaleScript(scale: number): string {
       }
       a.applied = null;
     };
-    const reconcile = () => {
+    const reconcile = (forceReport = false) => {
       const t = window.term;
       if (!compatible(t)) {
         retire();
-        root.style.zoom = c.scale === 1 ? '' : String(c.scale);
-        return { mode: 'document-zoom', scale: c.scale };
+        reportMode('host-transform', forceReport);
+        return { mode: 'host-transform', scale: c.scale };
       }
       if (c.active && (c.active.terminal !== t || c.active.options !== t.options || c.active.fit !== t.fit)) retire();
       let a = c.states.get(t);
@@ -45,13 +59,16 @@ export function browserContentScaleScript(scale: number): string {
         c.states.set(t, a);
       }
       c.active = a;
-      if (a.writing) return { mode: 'public-terminal-font', fontSize: a.applied };
+      if (a.writing) {
+        reportMode('public-terminal-font', forceReport);
+        return { mode: 'public-terminal-font', fontSize: a.applied };
+      }
       const previousApplied = a.options.fontSize === a.applied ? a.applied : null;
       if (previousApplied === null) a.base = a.options.fontSize;
       const fontSize = a.base * c.scale;
       if (!Number.isFinite(fontSize) || fontSize <= 0) throw new Error('Invalid terminal font size');
       const previousFont = a.options.fontSize, previousZoom = root.style.zoom;
-      const revision = ++a.revision;
+      const terminalRevision = ++a.revision;
       a.writing = true;
       try {
         a.applied = fontSize;
@@ -78,7 +95,7 @@ export function browserContentScaleScript(scale: number): string {
         });
       }
       requestAnimationFrame(() => {
-        if (c.active !== a || a.revision !== revision) return;
+        if (c.active !== a || a.revision !== terminalRevision) return;
         if (!compatible(t) || window.term !== t || t.options !== a.options || t.fit !== a.fit ||
             a.options.fontSize !== a.applied) {
           try { reconcile(); } catch (error) { console.warn('Terminal ownership reconciliation failed', error); }
@@ -86,12 +103,12 @@ export function browserContentScaleScript(scale: number): string {
         }
         try { a.fit.call(t); } catch (error) { console.warn('Deferred terminal refit failed', error); }
       });
+      reportMode('public-terminal-font', forceReport);
       return { mode: 'public-terminal-font', fontSize };
     };
-    const result = reconcile();
+    const result = reconcile(true);
     // A bounded current-document readiness window covers ttyd's asynchronous initialization.
-    // After expiry an unsupported page retains document zoom until the next host scale request.
-    if (result.mode === 'document-zoom') {
+    if (result.mode === 'host-transform') {
       const revision = c.revision;
       let remaining = 40;
       const poll = () => {
@@ -103,6 +120,18 @@ export function browserContentScaleScript(scale: number): string {
         if (--remaining > 0) c.timer = setTimeout(poll, 50);
       };
       c.timer = setTimeout(poll, 50);
+    }
+    // Keep mode changes observable after readiness, including terminal replacement and teardown.
+    if (!c.observer && typeof MutationObserver === 'function' && root) {
+      c.observer = new MutationObserver(() => {
+        const terminal = window.term;
+        const active = c.active;
+        if (active && terminal === active.terminal && compatible(terminal) &&
+            terminal.options === active.options && terminal.fit === active.fit) return;
+        if (!active && c.mode === 'host-transform' && !compatible(terminal)) return;
+        try { reconcile(); } catch (error) { console.warn('Terminal mode reconciliation failed', error); }
+      });
+      c.observer.observe(root, { childList: true, subtree: true });
     }
     document.body?.style.setProperty('--surf-ace-content-scale', String(c.scale));
     window.dispatchEvent(new Event('resize'));

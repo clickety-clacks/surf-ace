@@ -63,6 +63,7 @@ test("renderer DOM integrates authoritative connection states and live scale con
   let keyboardListener: ((intent: unknown) => void) | null = null;
   let focusStateUpdate: (() => void) | null = null;
   let provenanceWidth = 200;
+  let nonceCounter = 0;
   let textMetricScale = 1;
   const commands: unknown[] = [];
   const resizeCallbacks: Array<() => void> = [];
@@ -100,6 +101,10 @@ test("renderer DOM integrates authoritative connection states and live scale con
     getSelection: () => null,
     requestAnimationFrame: (callback: FrameRequestCallback) => { callback(0); return 1; },
     surfAce,
+  });
+  Object.defineProperty(window, "crypto", {
+    configurable: true,
+    value: { getRandomValues(bytes: Uint8Array) { bytes.fill(++nonceCounter); return bytes; } },
   });
   Object.assign(globalThis, {
     document,
@@ -581,7 +586,7 @@ test("renderer DOM integrates authoritative connection states and live scale con
     }
   });
 
-  await test("zoom refits only the ready guest without shared-origin zoom or remount", async () => {
+  await test("generic page host scale changes only the ready guest without document zoom or remount", async () => {
     const next = state("connected", true);
     for (const [index, pane] of next.panes.entries()) Object.assign(pane.content, {
       content: { url: "https://fixture.invalid/same-origin" }, contentType: "browser_url",
@@ -592,44 +597,91 @@ test("renderer DOM integrates authoritative connection states and live scale con
     assert.equal(guests.length, 2);
     const contexts = guests.map(() => {
       const root = { style: { zoom: "" } };
-      const result = { columns: 40, resizeEvents: 0 };
+      const result = { resizeEvents: 0 };
       return {
         document: { documentElement: root, body: { style: { setProperty() {} } } },
+        CustomEvent: class { constructor(public type: string, public init?: { detail?: unknown }) {} },
+        MutationObserver: class { constructor() {} observe() {} disconnect() {} },
         Event: class { constructor(public type: string) {} },
         setTimeout: () => 1, clearTimeout: () => {},
         window: { dispatchEvent(event: { type: string }) {
           if (event.type === "resize") {
             result.resizeEvents++;
-            result.columns = Math.floor(400 / (10 * (Number(root.style.zoom) || 1)));
           }
         } }, result,
       };
     });
+    const scripts = guests.map(() => [] as string[]);
+    let deferNextModeResult = false;
     guests.forEach((guest, index) => {
       guest.executeJavaScript = async (code) => {
-        if (code.includes("surf-ace.public-terminal-font-scale.v2")) runInNewContext(code, contexts[index]);
+        if (code.includes("surf-ace.public-terminal-font-scale.v2")) {
+          scripts[index]!.push(code);
+          if (index === 0 && deferNextModeResult) {
+            deferNextModeResult = false;
+            return null;
+          }
+          return runInNewContext(code, contexts[index]);
+        }
         return null;
       };
       guest.dispatchEvent(new window.Event("dom-ready"));
     });
+    const identity = (code: string) => {
+      const nonce = code.match(/c\.hostNonce = ("[^"]*")/)?.[1];
+      const revision = code.match(/c\.hostRevision = (\d+)/)?.[1];
+      assert.ok(nonce && revision, "scale script carries its current nonce and revision");
+      return { nonce: JSON.parse(nonce) as string, revision: Number(revision) };
+    };
+    const sendMode = (guest: HTMLElement, mode: "host-transform" | "public-terminal-font", stamp: { nonce: string; revision: number }) => {
+      const event = new window.Event("ipc-message");
+      Object.assign(event, { channel: "surf-ace-content", args: [{ type: "scale-mode", mode, ...stamp }] });
+      guest.dispatchEvent(event);
+    };
     await new Promise((resolve) => setTimeout(resolve, 0));
-    assert.equal(contexts[0]!.document.documentElement.style.zoom, "0.85");
-    assert.equal(contexts[0]!.result.columns, 47, "default base zoom must trigger refitting");
+    const initialWidth = Number.parseFloat(guests[0]!.style.width);
+    assert.equal(guests[0]!.style.transform, "scale(0.85)");
+    assert.equal(guests[0]!.style.transformOrigin, "0 0");
+    assert.ok(Math.abs(initialWidth * 0.85 - guests[0]!.getBoundingClientRect().width) < 0.01);
+    assert.equal(contexts[0]!.document.documentElement.style.zoom, "");
     const otherEvents = contexts[1]!.result.resizeEvents;
     keyboardListener!({ action: "increase", paneId: 1, type: "content-scale" });
-    assert.equal(contexts[0]!.document.documentElement.style.zoom, "0.935");
-    assert.equal(contexts[0]!.result.columns, 42);
-    assert.equal(contexts[1]!.document.documentElement.style.zoom, "0.85");
+    assert.equal(guests[0]!.style.transform, "scale(0.935)");
+    assert.ok(Math.abs(Number.parseFloat(guests[0]!.style.width) * 0.935 - guests[0]!.getBoundingClientRect().width) < 0.01);
+    assert.equal(guests[1]!.style.transform, "scale(0.85)");
+    assert.equal(contexts[0]!.document.documentElement.style.zoom, "");
     assert.equal(contexts[1]!.result.resizeEvents, otherEvents);
     assert.deepEqual([...document.querySelectorAll("webview")], guests);
+    const firstIdentity = identity(scripts[0]![0]!);
+    const currentIdentity = identity(scripts[0]!.at(-1)!);
+    sendMode(guests[0]!, "public-terminal-font", firstIdentity);
+    assert.equal(guests[0]!.style.transform, "scale(0.935)", "obsolete mode event cannot undo a newer host scale");
     guests[0]!.dispatchEvent(new window.Event("did-start-loading"));
     const prior = contexts[0]!.result.resizeEvents;
     keyboardListener!({ action: "increase", paneId: 1, type: "content-scale" });
     assert.equal(contexts[0]!.result.resizeEvents, prior, "loading guest cannot run scale methods");
+    assert.equal(guests[0]!.style.transform, "", "unknown loading document waits for its mode before host scaling");
     guests[0]!.dispatchEvent(new window.Event("dom-ready"));
     await new Promise((resolve) => setTimeout(resolve, 0));
-    assert.equal(contexts[0]!.document.documentElement.style.zoom, "1.02");
-    assert.equal(contexts[0]!.result.columns, 39);
+    assert.equal(guests[0]!.style.transform, "scale(1.02)");
+    assert.equal(contexts[0]!.document.documentElement.style.zoom, "");
+    keyboardListener!({ action: "increase", paneId: 1, type: "content-scale" });
+    keyboardListener!({ action: "increase", paneId: 1, type: "content-scale" });
+    deferNextModeResult = true;
+    keyboardListener!({ action: "increase", paneId: 1, type: "content-scale" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const enlargedScale = 1.275;
+    assert.equal(guests[0]!.style.transform, `scale(${enlargedScale})`);
+    assert.ok(Math.abs(Number.parseFloat(guests[0]!.style.width) * enlargedScale - guests[0]!.getBoundingClientRect().width) < 0.01);
+    assert.ok(Math.abs(Number.parseFloat(guests[0]!.style.minHeight) * enlargedScale - guests[0]!.getBoundingClientRect().height) < 0.01);
+    const delayedIdentity = identity(scripts[0]!.at(-1)!);
+    assert.notEqual(delayedIdentity.nonce, currentIdentity.nonce);
+    sendMode(guests[0]!, "public-terminal-font", currentIdentity);
+    assert.equal(guests[0]!.style.transform, `scale(${enlargedScale})`, "old revision cannot affect the delayed current mode");
+    sendMode(guests[0]!, "public-terminal-font", delayedIdentity);
+    assert.equal(guests[0]!.style.transform, "", "current asynchronous terminal mode restores physical guest bounds");
+    sendMode(guests[0]!, "host-transform", delayedIdentity);
+    assert.equal(guests[0]!.style.transform, `scale(${enlargedScale})`, "current asynchronous generic mode restores the host transform");
   });
 
   await test("ready public terminal scales its font at unit document zoom and retains guest", async () => {
@@ -663,6 +715,8 @@ test("renderer DOM integrates authoritative connection states and live scale con
     const context = {
       document: guestDocument, HTMLElement: GuestElement,
       window: { term, dispatchEvent() {} },
+      CustomEvent: class { constructor(public type: string, public init?: { detail?: unknown }) {} },
+      MutationObserver: class { constructor() {} observe() {} disconnect() {} },
       requestAnimationFrame() {}, setTimeout: () => 1, clearTimeout() {},
       Event: class { constructor(public type: string) {} },
     };
@@ -683,9 +737,14 @@ test("renderer DOM integrates authoritative connection states and live scale con
     await new Promise((resolve) => setTimeout(resolve, 0));
     assert.equal(term.options.fontSize, 13.6);
     assert.equal(root.style.zoom, "", "terminal font scaling must not also scale its document");
+    const terminalWidth = guest.style.width;
+    assert.equal(guest.style.transform, "", "public terminal keeps physical webview bounds without a second host scale");
+    assert.equal(guest.style.minWidth, terminalWidth);
     keyboardListener!({ action: "increase", paneId: 1, type: "content-scale" });
     assert.equal(term.options.fontSize, 14.96);
     assert.equal(root.style.zoom, "");
+    assert.equal(guest.style.transform, "", "terminal fit owns its scale while host bounds remain physical");
+    assert.equal(guest.style.width, terminalWidth);
     keyboardListener!({ action: "reset", paneId: 1, type: "content-scale" });
     assert.equal(term.options.fontSize, 13.6);
     assert.deepEqual(fits, [13.6, 14.96, 13.6]);

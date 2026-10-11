@@ -6,6 +6,7 @@ type ContentEventPayload =
   | { selection: SelectionPayload | null; type: "selection" }
   | { kind: "long_press" | "tap"; nearestContent?: string; position: { x: number; y: number }; type: "tap" }
   | { type: "ready"; viewport: ViewportPayload }
+  | { mode: "host-transform" | "public-terminal-font"; nonce: string; revision: number; type: "scale-mode" }
   | { type: "scroll"; viewport: ViewportPayload; visibleText: string };
 
 type SelectionPayload = {
@@ -105,6 +106,25 @@ window.addEventListener("resize", () => {
   resizeTimer = setTimeout(() => {
     emit({ type: "scroll", viewport: currentViewport(), visibleText: visibleText() });
   }, 120);
+});
+
+window.addEventListener("surf-ace-scale-mode", (event) => {
+  const detail = (event as CustomEvent<unknown>).detail;
+  if (!detail || typeof detail !== "object") {
+    return;
+  }
+  const value = detail as Record<string, unknown>;
+  if ((value.mode !== "host-transform" && value.mode !== "public-terminal-font") ||
+      typeof value.nonce !== "string" || !Number.isSafeInteger(value.revision) ||
+      (value.revision as number) < 0) {
+    return;
+  }
+  emit({
+    mode: value.mode,
+    nonce: value.nonce,
+    revision: value.revision as number,
+    type: "scale-mode",
+  });
 });
 
 document.addEventListener("selectionchange", () => {
