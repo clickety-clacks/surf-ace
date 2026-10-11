@@ -59,6 +59,14 @@ type VideoContent = string;
 type CanvasContent = "" | { color?: string; grid?: boolean };
 type BrowserUrlContent = { url: string };
 type ContentReloadSource = { kind: "file"; path: string };
+type BrowserContentScaleMode = "host-transform" | "public-terminal-font";
+type BrowserContentScaleState = {
+  mode: BrowserContentScaleMode;
+  modeSequence: number;
+  nonce: string;
+  revision: number;
+  scale: number;
+};
 type BrowserUrlWebViewElement = HTMLElement & {
   canGoBack?: () => boolean;
   canGoForward?: () => boolean;
@@ -273,6 +281,7 @@ const provenanceAnnouncer = document.querySelector(
   "#provenance-announcer",
 ) as HTMLDivElement | null;
 const paneViews = new Map<number, PaneView>();
+const browserContentScaleStates = new WeakMap<BrowserUrlWebViewElement, BrowserContentScaleState>();
 const pendingStrokeDelivery = new Map<number, Promise<void>>();
 const annotationIntentEpoch = new Map<number, number>();
 const pendingHistoryAnnouncements = new Map<number, string>();
@@ -1847,25 +1856,97 @@ function isRendererScalableContentType(pane: RendererPaneState | null): boolean 
   );
 }
 
-function runReadyGuestScript(view: PaneView, webview: BrowserUrlWebViewElement, code: string): void {
-  if (webview.dataset.guestReady !== "true" || !webview.isConnected || currentPaneFrameElement(view) !== webview) return;
+function runReadyGuestScript(
+  view: PaneView,
+  webview: BrowserUrlWebViewElement,
+  code: string,
+): Promise<unknown> | null {
+  if (webview.dataset.guestReady !== "true" || !webview.isConnected || currentPaneFrameElement(view) !== webview) return null;
   try {
-    void webview.executeJavaScript?.(code)?.catch(() => {});
+    return webview.executeJavaScript?.(code)?.catch(() => null) ?? null;
   } catch {
     // A guest can disappear while its host-side ready notification is queued.
+    return null;
   }
 }
 
-function applyBrowserContentScale(view: PaneView, webview: BrowserUrlWebViewElement): void {
+function newBrowserScaleNonce(): string {
+  const bytes = new Uint8Array(16);
+  window.crypto.getRandomValues(bytes);
+  return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function isBrowserContentScaleMode(value: unknown): value is BrowserContentScaleMode {
+  return value === "host-transform" || value === "public-terminal-font";
+}
+
+function applyBrowserScaleMode(
+  view: PaneView,
+  webview: BrowserUrlWebViewElement,
+  state: BrowserContentScaleState,
+  mode: BrowserContentScaleMode,
+  sequence: number,
+): boolean {
+  if (browserContentScaleStates.get(webview) !== state || !webview.isConnected ||
+      currentPaneFrameElement(view) !== webview || !Number.isSafeInteger(sequence) ||
+      sequence <= state.modeSequence) return false;
+  state.modeSequence = sequence;
+  if (state.mode !== mode) {
+    state.mode = mode;
+    applyPaneFrameSize(view, webview);
+  }
+  return true;
+}
+
+function applyBrowserContentScale(
+  view: PaneView,
+  webview: BrowserUrlWebViewElement,
+): Promise<BrowserContentScaleMode | null> {
   const scale = Math.round(WEB_CONTENT_BASE_SCALE * view.scale * 1000) / 1000;
-  runReadyGuestScript(view, webview, browserContentScaleScript(scale));
+  const previous = browserContentScaleStates.get(webview);
+  const state: BrowserContentScaleState = {
+    mode: previous?.mode ?? "public-terminal-font",
+    modeSequence: 0,
+    nonce: newBrowserScaleNonce(),
+    revision: (previous?.revision ?? 0) + 1,
+    scale,
+  };
+  browserContentScaleStates.set(webview, state);
+  applyPaneFrameSize(view, webview);
+  const result = runReadyGuestScript(
+    view,
+    webview,
+    browserContentScaleScript(scale, state.nonce, state.revision),
+  );
+  if (!result) return Promise.resolve(null);
+  return result.then((value) => {
+    if (!value || typeof value !== "object") return null;
+    const observation = value as { mode?: unknown; sequence?: unknown };
+    const mode = observation.mode;
+    const sequence = observation.sequence;
+    if (!isBrowserContentScaleMode(mode) || !Number.isSafeInteger(sequence) || (sequence as number) < 1) return null;
+    applyBrowserScaleMode(view, webview, state, mode, sequence as number);
+    return browserContentScaleStates.get(webview) === state ? state.mode : null;
+  });
+}
+
+function resetBrowserContentScaleMode(view: PaneView, webview: BrowserUrlWebViewElement): void {
+  const previous = browserContentScaleStates.get(webview);
+  browserContentScaleStates.set(webview, {
+    mode: "public-terminal-font",
+    modeSequence: 0,
+    nonce: newBrowserScaleNonce(),
+    revision: (previous?.revision ?? 0) + 1,
+    scale: Math.round(WEB_CONTENT_BASE_SCALE * view.scale * 1000) / 1000,
+  });
+  applyPaneFrameSize(view, webview);
 }
 
 function applyContentScale(view: PaneView): void {
   view.contentEl.style.setProperty("--surf-ace-content-scale", String(view.scale));
   const frame = currentPaneFrameElement(view);
   if (frame?.matches("webview.content-browser-url-frame")) {
-    applyBrowserContentScale(view, frame as BrowserUrlWebViewElement);
+    void applyBrowserContentScale(view, frame as BrowserUrlWebViewElement);
   }
   reportPaneSnapshot(view);
 }
@@ -1962,20 +2043,37 @@ function applyPaneFrameSize(view: PaneView, element: HTMLElement): boolean {
   const height = Math.max(1, Math.floor(rect.height));
   view.contentEl.style.height = `${height}px`;
   view.contentEl.style.minHeight = `${height}px`;
-  const changed = element.style.width !== `${width}px` || element.style.height !== `${height}px`;
-  element.style.width = `${width}px`;
-  element.style.height = `${height}px`;
   if (element.matches("webview.content-browser-url-frame")) {
+    const webview = element as BrowserUrlWebViewElement;
+    const scaleState = browserContentScaleStates.get(webview);
+    const hostScale = scaleState?.mode === "host-transform" ? scaleState.scale : 1;
+    const logicalWidth = width / hostScale;
+    const logicalHeight = height / hostScale;
+    const widthCss = `${logicalWidth}px`;
+    const heightCss = `${logicalHeight}px`;
+    const transform = hostScale === 1 ? "" : `scale(${hostScale})`;
+    const changed = element.style.width !== widthCss || element.style.height !== heightCss ||
+      element.style.minWidth !== widthCss || element.style.minHeight !== heightCss ||
+      element.style.transform !== transform ||
+      (element.style.transformOrigin !== "0 0" && element.style.transformOrigin !== "0px 0px");
+    element.style.inset = "0 auto auto 0";
+    element.style.width = widthCss;
+    element.style.height = heightCss;
+    element.style.minWidth = widthCss;
+    element.style.minHeight = heightCss;
+    element.style.transformOrigin = "0 0";
+    element.style.transform = transform;
     element.setAttribute("autosize", "on");
-    element.setAttribute("minwidth", String(width));
-    element.setAttribute("minheight", String(height));
-    element.setAttribute("maxwidth", String(width));
-    element.setAttribute("maxheight", String(height));
+    element.setAttribute("minwidth", String(Math.max(1, Math.ceil(logicalWidth))));
+    element.setAttribute("minheight", String(Math.max(1, Math.ceil(logicalHeight))));
+    element.setAttribute("maxwidth", String(Math.max(1, Math.ceil(logicalWidth))));
+    element.setAttribute("maxheight", String(Math.max(1, Math.ceil(logicalHeight))));
     if (changed && element.dataset.guestReady === "true") {
-      runReadyGuestScript(view, element as BrowserUrlWebViewElement,
-        `window.dispatchEvent(new Event("resize"))`,
-      );
+      runReadyGuestScript(view, webview, `window.dispatchEvent(new Event("resize"))`);
     }
+  } else {
+    element.style.width = `${width}px`;
+    element.style.height = `${height}px`;
   }
   return true;
 }
@@ -2176,8 +2274,9 @@ function browserUrlViewportMismatch(
   if (!isBrowserUrlGuestMetrics(guest)) {
     return null;
   }
-  const hostHeight = webview.clientHeight || Math.round(webview.getBoundingClientRect().height);
-  const hostWidth = webview.clientWidth || Math.round(webview.getBoundingClientRect().width);
+  const coordinateScale = browserHostCoordinateScale(webview);
+  const hostHeight = webview.clientHeight || Math.round(webview.getBoundingClientRect().height / coordinateScale);
+  const hostWidth = webview.clientWidth || Math.round(webview.getBoundingClientRect().width / coordinateScale);
   const tolerance = 2;
   if (hostHeight <= 0 || hostWidth <= 0) {
     return null;
@@ -2205,9 +2304,11 @@ function nudgeBrowserUrlWebViewResize(view: PaneView, webview: BrowserUrlWebView
   }
   const width = Math.max(1, Math.floor(rect.width));
   const height = Math.max(1, Math.floor(rect.height));
+  const scaleState = browserContentScaleStates.get(webview);
+  const hostScale = scaleState?.mode === "host-transform" ? scaleState.scale : 1;
   webview.style.display = "flex";
-  webview.style.width = `${Math.max(1, width - 1)}px`;
-  webview.style.height = `${Math.max(1, height - 1)}px`;
+  webview.style.width = `${Math.max(1, width - 1) / hostScale}px`;
+  webview.style.height = `${Math.max(1, height - 1) / hostScale}px`;
   void webview.offsetHeight;
   applyPaneFrameSize(view, webview);
 }
@@ -2350,6 +2451,37 @@ function htmlDocumentDataUrl(html: HtmlContent): string {
   return `data:text/html;charset=utf-8,${encodeURIComponent(htmlDocumentForBrowser(html))}`;
 }
 
+function browserHostCoordinateScale(webview: BrowserUrlWebViewElement): number {
+  const state = browserContentScaleStates.get(webview);
+  return state?.mode === "host-transform" ? state.scale : 1;
+}
+
+function scaleBrowserPoint(value: unknown, scale: number): unknown {
+  if (scale === 1 || !value || typeof value !== "object") return value;
+  const point = value as Record<string, unknown>;
+  if (typeof point.x !== "number" || typeof point.y !== "number") return value;
+  return { ...point, x: point.x * scale, y: point.y * scale };
+}
+
+function scaleBrowserSelection(value: unknown, scale: number): unknown {
+  if (scale === 1 || !value || typeof value !== "object") return value;
+  const selection = value as Record<string, unknown>;
+  const rect = selection.boundingRect;
+  if (!rect || typeof rect !== "object") return value;
+  const bounds = rect as Record<string, unknown>;
+  if ([bounds.x, bounds.y, bounds.width, bounds.height].some((part) => typeof part !== "number")) return value;
+  return {
+    ...selection,
+    boundingRect: {
+      ...bounds,
+      height: (bounds.height as number) * scale,
+      width: (bounds.width as number) * scale,
+      x: (bounds.x as number) * scale,
+      y: (bounds.y as number) * scale,
+    },
+  };
+}
+
 function wireBrowserContentEvents(view: PaneView, paneId: number, webview: BrowserUrlWebViewElement): void {
   const onIpcMessage = (event: Event) => {
     const message = event as BrowserContentIpcEvent;
@@ -2358,6 +2490,16 @@ function wireBrowserContentEvents(view: PaneView, paneId: number, webview: Brows
     }
     const payload = message.args?.[0] as Record<string, unknown> | undefined;
     if (!payload) {
+      return;
+    }
+    if (payload.type === "scale-mode") {
+      const state = browserContentScaleStates.get(webview);
+      const mode = payload.mode;
+      const sequence = payload.sequence;
+      if (state && payload.nonce === state.nonce && payload.revision === state.revision &&
+          isBrowserContentScaleMode(mode) && Number.isSafeInteger(sequence) && (sequence as number) >= 1) {
+        applyBrowserScaleMode(view, webview, state, mode, sequence as number);
+      }
       return;
     }
     if (resizeGesture && (payload.type === "scroll" || payload.type === "ready")) return;
@@ -2381,7 +2523,7 @@ function wireBrowserContentEvents(view: PaneView, paneId: number, webview: Brows
       collapsePaneToolbar(view);
       window.surfAce.command({
         paneId,
-        selection: payload.selection ?? null,
+        selection: scaleBrowserSelection(payload.selection ?? null, browserHostCoordinateScale(webview)),
         type: "selection",
       });
     } else if (payload.type === "tap") {
@@ -2390,7 +2532,7 @@ function wireBrowserContentEvents(view: PaneView, paneId: number, webview: Brows
         kind: payload.kind,
         nearestContent: payload.nearestContent,
         paneId,
-        position: payload.position,
+        position: scaleBrowserPoint(payload.position, browserHostCoordinateScale(webview)),
         type: "tap",
       });
     } else if (payload.type === "focus") {
@@ -2624,22 +2766,24 @@ function renderBrowserContent(
     void resetBrowserUrlGuestScroll(browserView).finally(() => {
       const eventReason = reason === "dom-ready:guest-viewport" ? "dom-ready" : "did-finish-load";
       reportBrowserUrlDiagnostics(view, browserView, eventReason);
-      applyBrowserContentScale(view, browserView);
-      void verifyBrowserUrlGuestViewport(view, browserView, reason).then(({ mismatch }) => {
-        if (renderToken !== view.currentRenderToken) {
-          return;
-        }
-        if (mismatch) {
-          reportNavigation(
-            "failed",
-            `webview guest viewport stuck at ${mismatch.guestHeight}x${mismatch.guestWidth} for host ${mismatch.hostHeight}x${mismatch.hostWidth}`,
-          );
-          return;
-        }
-        reportNavigation("applied");
-        window.setTimeout(() => {
-          reportPaneSnapshot(view);
-        }, 0);
+      void applyBrowserContentScale(view, browserView).then(() => {
+        if (renderToken !== view.currentRenderToken) return;
+        void verifyBrowserUrlGuestViewport(view, browserView, reason).then(({ mismatch }) => {
+          if (renderToken !== view.currentRenderToken) {
+            return;
+          }
+          if (mismatch) {
+            reportNavigation(
+              "failed",
+              `webview guest viewport stuck at ${mismatch.guestHeight}x${mismatch.guestWidth} for host ${mismatch.hostHeight}x${mismatch.hostWidth}`,
+            );
+            return;
+          }
+          reportNavigation("applied");
+          window.setTimeout(() => {
+            reportPaneSnapshot(view);
+          }, 0);
+        });
       });
     });
   };
@@ -2662,6 +2806,7 @@ function renderBrowserContent(
     () => {
       guestLoadGeneration += 1;
       delete browserView.dataset.guestReady;
+      resetBrowserContentScaleMode(view, browserView);
       syncBrowserControlButtons(view);
       rendererDiagnostic("browser_content_did_start_loading", {
         currentUrl: browserUrlElementCurrentUrl(browserView),
