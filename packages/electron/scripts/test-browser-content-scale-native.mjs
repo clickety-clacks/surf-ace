@@ -4,31 +4,39 @@
 // It opens one temporary BrowserWindow/profile, loads only local renderer assets and a data: guest,
 // and never starts the Surf Ace app, discovery, network services, or an existing user profile.
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import { inflateSync } from "node:zlib";
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { app, BrowserWindow, session } from "electron";
+import { readNativeScalePinManifest, saveNativeScalePng, verifyNativeScalePins } from "./native-scale-runner-guard.mjs";
 
 const packageDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const repoDir = path.resolve(packageDir, "../..");
-const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repoDir, encoding: "utf8" }).trim();
-const pinnedSources = [
-  "packages/electron/src/guest-preload.ts",
-  "packages/electron/src/renderer/browser-content-scale.ts",
-  "packages/electron/src/renderer/renderer.ts",
-];
-const sourceDigests = {};
-for (const relativePath of pinnedSources) {
-  const bytes = await fs.readFile(path.join(repoDir, relativePath));
-  sourceDigests[relativePath] = createHash("sha256").update(bytes).digest("hex");
+const runId = process.env.SURF_ACE_NATIVE_RUN_ID;
+const evidencePath = path.resolve(process.env.SURF_ACE_NATIVE_EVIDENCE_DIR ?? "");
+const scratchPath = path.resolve(process.env.SURF_ACE_NATIVE_SCRATCH_DIR ?? "");
+assert.match(runId ?? "", /^[a-z0-9][a-z0-9._-]{2,95}$/i, "private runner must provide an admitted run identity");
+assert.ok(process.env.SURF_ACE_NATIVE_SLOT_ID, "private runner must provide an admitted slot identity");
+assert.ok(path.isAbsolute(process.env.SURF_ACE_NATIVE_EVIDENCE_DIR ?? ""), "evidence directory must be an absolute path");
+assert.ok(path.isAbsolute(process.env.SURF_ACE_NATIVE_SCRATCH_DIR ?? ""), "scratch directory must be an absolute path");
+const realRepoDir = await fs.realpath(repoDir);
+const evidenceDir = await fs.realpath(evidencePath);
+const scratch = await fs.realpath(scratchPath);
+for (const [label, candidate] of [["evidence", evidenceDir], ["scratch", scratch]]) {
+  const relative = path.relative(realRepoDir, candidate);
+  assert.ok(relative !== "" && (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)),
+    `${label} directory must be external to the source worktree`);
 }
-console.log("NATIVE_SCALE_SOURCE=" + JSON.stringify({ head, sourceDigests }));
-
-const scratch = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-electron-scale-native-"));
+const { pins, sha256: pinsManifestSha256 } = await readNativeScalePinManifest(
+  process.env.SURF_ACE_NATIVE_PINS,
+  process.env.SURF_ACE_NATIVE_PINS_SHA256,
+  repoDir,
+);
+const sourcePin = await verifyNativeScalePins({ repoDir, packageDir, pins, electronVersion: process.versions.electron });
+console.log("NATIVE_SCALE_SOURCE=" + JSON.stringify({ runId, slotId: process.env.SURF_ACE_NATIVE_SLOT_ID,
+  pinsManifestSha256, head: sourcePin.head, tree: sourcePin.tree,
+  distTreeSha256: sourcePin.distTreeSha256, electronVersion: sourcePin.electronVersion }));
 app.setPath("userData", path.join(scratch, "profile"));
 
 const iframeHtml = `<!doctype html><html><head><style>html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#d9e8ff}</style></head>
@@ -106,10 +114,16 @@ let win;
 let stage = "setup";
 const blockedRequests = [];
 const consoleErrors = [];
+const pngEvidence = [];
+const pointerEvidence = [];
+const iframeEvidence = [];
+let captureSequence = 0;
 const watchdog = setTimeout(() => {
-  console.error("FAIL native scale fixture exceeded 90 seconds at " + stage);
-  app.exit(1);
-}, 90_000);
+  console.error("FAIL native scale fixture exceeded 100 seconds at " + stage);
+  process.exitCode = 1;
+  win?.destroy();
+}, 100_000);
+watchdog.unref?.();
 
 async function evaluate(label, code) {
   stage = label;
@@ -191,16 +205,45 @@ function decodePng(bytes) {
 }
 
 async function capturePixel(label, hostX, hostY, predicate) {
-  await new Promise((resolve) => setTimeout(resolve, 80));
+  await new Promise((resolve) => setTimeout(resolve, 100));
   const image = await win.webContents.capturePage();
-  const decoded = decodePng(image.toPNG());
+  const bytes = image.toPNG();
+  const decoded = decodePng(bytes);
   const viewport = await evaluate("capture-viewport", "({width:window.innerWidth,height:window.innerHeight})");
   const pixelX = Math.floor((hostX + 1) * decoded.width / viewport.width);
   const pixelY = Math.floor((hostY + 1) * decoded.height / viewport.height);
   const rgba = decoded.pixel(pixelX, pixelY);
+  const phaseId = `phase-${String(++captureSequence).padStart(3, "0")}-${label.replace(/[^a-z0-9._-]/gi, "-").slice(0, 48)}`;
+  const saved = await saveNativeScalePng({ bytes, evidenceDir, phaseId, label,
+    source: { runId, slotId: process.env.SURF_ACE_NATIVE_SLOT_ID,
+      pinsManifestSha256, head: sourcePin.head, tree: sourcePin.tree } });
+  const record = { ...saved, hostSample: { x: hostX, y: hostY }, png: { width: decoded.width, height: decoded.height },
+    sample: { x: pixelX, y: pixelY, rgba } };
+  pngEvidence.push(record);
+  console.log("NATIVE_CAPTURE_PIXEL=" + JSON.stringify(record));
   assert.ok(predicate(rgba), `${label}: captured pixel ${pixelX},${pixelY} was ${rgba.join(",")}`);
-  console.log("NATIVE_CAPTURE_PIXEL=" + JSON.stringify({ label, png: { width: decoded.width, height: decoded.height },
-    sample: { x: pixelX, y: pixelY, rgba } }));
+  return record;
+}
+
+async function capturePixels(label, points) {
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  const image = await win.webContents.capturePage();
+  const bytes = image.toPNG();
+  const decoded = decodePng(bytes);
+  const viewport = await evaluate("capture-viewport", "({width:window.innerWidth,height:window.innerHeight})");
+  const samples = points.map(({ name, x, y }) => {
+    const pixelX = Math.floor((x + 1) * decoded.width / viewport.width);
+    const pixelY = Math.floor((y + 1) * decoded.height / viewport.height);
+    return { name, host: { x, y }, pixel: { x: pixelX, y: pixelY }, rgba: decoded.pixel(pixelX, pixelY) };
+  });
+  const phaseId = `phase-${String(++captureSequence).padStart(3, "0")}-${label.replace(/[^a-z0-9._-]/gi, "-").slice(0, 48)}`;
+  const saved = await saveNativeScalePng({ bytes, evidenceDir, phaseId, label,
+    source: { runId, slotId: process.env.SURF_ACE_NATIVE_SLOT_ID,
+      pinsManifestSha256, head: sourcePin.head, tree: sourcePin.tree } });
+  const record = { ...saved, png: { width: decoded.width, height: decoded.height }, samples };
+  pngEvidence.push(record);
+  console.log("NATIVE_CAPTURE_PIXELS=" + JSON.stringify(record));
+  return record;
 }
 
 async function paneMetrics() {
@@ -221,7 +264,9 @@ async function guestState() {
       const marker=document.querySelector('#marker'),rect=marker.getBoundingClientRect();
       return {zoom:document.documentElement.style.zoom,innerWidth,innerHeight,
         samples:window.__pointerSamples.length,last:window.__pointerSamples.at(-1)||null,
-        marker:{x:rect.x,y:rect.y},iframePointer:window.__iframePointer,iframeCount:window.__iframePointerCount};
+        marker:{x:rect.x,y:rect.y,width:rect.width,height:rect.height},
+        iframeRect:(()=>{const r=document.querySelector('#edge-frame').getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height}})(),
+        iframePointer:window.__iframePointer,iframeCount:window.__iframePointerCount};
     })()`) + `);
   })()`);
 }
@@ -264,9 +309,95 @@ async function assertPoint(label, relativeX, relativeY, scale) {
     `${label}: fixed marker y ${current.marker.y} * ${scale} should remain under host pointer y ${expectedY}`);
   console.log("NATIVE_POINTER=" + JSON.stringify({ label, host: { x: expectedX, y: expectedY },
     guest: current.last, markerHost: { x: markerX, y: markerY }, scale }));
-  if (label.endsWith("top-left")) {
-    await capturePixel(`${label}-marker`, moved.x + 1, moved.y + 1, ([red, green, blue]) => red > 180 && green < 100 && blue < 100);
+  pointerEvidence.push({ label, scale, host: { x: expectedX, y: expectedY }, guest: current.last,
+    markerHost: { x: markerX, y: markerY } });
+  await capturePixel(`${label}-marker`, moved.x + 1, moved.y + 1,
+    ([red, green, blue]) => red > 180 && green < 100 && blue < 100);
+}
+
+async function assertIframePoint(label, relativeX, relativeY, scale) {
+  const before = await guestState();
+  const metrics = await paneMetrics();
+  const x = Math.round(metrics.rect.left + relativeX);
+  const y = Math.round(metrics.rect.top + relativeY);
+  win.webContents.sendInputEvent({ type: "mouseMove", x, y });
+  const deadline = Date.now() + 5_000;
+  let current = null;
+  while (Date.now() < deadline) {
+    current = await guestState();
+    if (current && current.iframeCount > before.iframeCount) break;
+    await new Promise((resolve) => setTimeout(resolve, 40));
   }
+  assert.ok(current && current.iframeCount > before.iframeCount,
+    `${label}: iframe must report a fresh native pointer message`);
+  assert.ok(current.iframePointer, `${label}: iframe must report native pointer coordinates`);
+  const guestX = (x - metrics.rect.left) / scale;
+  const guestY = (y - metrics.rect.top) / scale;
+  const expectedLocalX = guestX - current.iframeRect.x;
+  const expectedLocalY = guestY - current.iframeRect.y;
+  const { iframePointer, iframeRect } = current;
+  assert.ok(iframePointer.x >= 0 && iframePointer.y >= 0 &&
+    iframePointer.x < iframeRect.width && iframePointer.y < iframeRect.height,
+  `${label}: iframe coordinate must be inside ${JSON.stringify(iframeRect)}: ${JSON.stringify(iframePointer)}`);
+  assert.ok(Math.abs(iframePointer.x - expectedLocalX) <= 2 && Math.abs(iframePointer.y - expectedLocalY) <= 2,
+    `${label}: iframe coordinate ${JSON.stringify(iframePointer)} should match expected local point ${expectedLocalX},${expectedLocalY}`);
+  assert.ok(Math.abs(metrics.rect.right - metrics.clip.right) <= 1.5,
+    `${label}: transformed guest right edge should meet pane clip`);
+  assert.ok(Math.abs(metrics.rect.bottom - metrics.clip.bottom) <= 1.5,
+    `${label}: transformed guest bottom edge should meet pane clip`);
+  iframeEvidence.push({ label, scale, host: { x, y }, guest: { x: guestX, y: guestY },
+    iframeRect, iframePointer, expectedLocal: { x: expectedLocalX, y: expectedLocalY } });
+  await capturePixel(`${label}-iframe-paint`, x - 3, y - 3,
+    ([red, green, blue]) => red < 245 && green > 190 && blue > 220);
+  console.log("NATIVE_IFRAME_POINT=" + JSON.stringify(iframeEvidence.at(-1)));
+}
+
+async function assertLegacyRootZoomRejected() {
+  const originalStyle = await evaluate("legacy-snapshot", `(()=>{const view=document.querySelector('webview');return {
+    style:view.getAttribute('style'),autosize:view.getAttribute('autosize'),minwidth:view.getAttribute('minwidth'),minheight:view.getAttribute('minheight')};})()`);
+  await evaluate("legacy-parent-style", `(()=>{const view=document.querySelector('webview'),clip=view.parentElement.getBoundingClientRect();
+    view.style.transform='none';view.style.transformOrigin='0 0';view.style.width=clip.width+'px';view.style.height=clip.height+'px';
+    view.style.minWidth=clip.width+'px';view.style.minHeight=clip.height+'px';view.style.inset='0px';
+    view.setAttribute('autosize','on');view.setAttribute('minwidth',String(Math.ceil(clip.width)));
+    view.setAttribute('minheight',String(Math.ceil(clip.height)));return true;})()`);
+  await evaluate("legacy-root-zoom-enable", `(async()=>{
+    return document.querySelector('webview').executeJavaScript("document.documentElement.style.zoom='0.85';true");})()`);
+  await waitFor("legacy-root-zoom-enabled", `document.querySelector('webview')?.style.transform==='none'`);
+  const pane = await paneMetrics();
+  const relativeX = Math.round(pane.clip.width * 0.57);
+  const relativeY = Math.round(pane.clip.height * 0.51);
+  const before = await guestState();
+  const moved = await sendMove(relativeX, relativeY, before.samples);
+  const current = moved.current;
+  assert.equal(current.zoom, "0.85", "legacy negative control should apply the old document root zoom");
+  const expectedX = moved.x - moved.metrics.rect.left;
+  const expectedY = moved.y - moved.metrics.rect.top;
+  const driftX = current.marker.x - expectedX;
+  const driftY = current.marker.y - expectedY;
+  assert.ok(Math.hypot(driftX, driftY) > 12,
+    `old root CSS zoom should visibly move the pointer marker away; measured drift ${driftX},${driftY}`);
+  const markerSample = { x: current.marker.x + current.marker.width / 2, y: current.marker.y + current.marker.height / 2 };
+  const negativeCapture = await capturePixels("legacy-root-zoom-negative", [
+    { name: "pointer-target", x: moved.x, y: moved.y },
+    { name: "painted-marker", x: markerSample.x, y: markerSample.y },
+  ]);
+  const pointerPixel = negativeCapture.samples.find(({ name }) => name === "pointer-target").rgba;
+  const markerPixel = negativeCapture.samples.find(({ name }) => name === "painted-marker").rgba;
+  assert.ok(!(pointerPixel[0] > 180 && pointerPixel[1] < 100 && pointerPixel[2] < 100),
+    `legacy root zoom control should leave pointer target unpainted red: ${pointerPixel}`);
+  assert.ok(markerPixel[0] > 180 && markerPixel[1] < 100 && markerPixel[2] < 100,
+    `legacy root zoom control should paint marker at its displaced location: ${markerPixel}`);
+  console.log("NATIVE_LEGACY_ROOT_ZOOM_NEGATIVE=" + JSON.stringify({ host: { x: expectedX, y: expectedY },
+    marker: { x: current.marker.x, y: current.marker.y }, drift: { x: driftX, y: driftY },
+    pointerPixel, markerPixel, phaseId: negativeCapture.phaseId }));
+  await evaluate("legacy-root-zoom-clear", `(async()=>document.querySelector('webview').executeJavaScript("document.documentElement.style.zoom='';true"))()`);
+  await evaluate("legacy-restore-style", `(()=>{const view=document.querySelector('webview');
+    view.setAttribute('style',${JSON.stringify(originalStyle.style)});
+    for(const [key,value] of Object.entries({autosize:${JSON.stringify(originalStyle.autosize)},
+      minwidth:${JSON.stringify(originalStyle.minwidth)},minheight:${JSON.stringify(originalStyle.minheight)}})){
+      if(value===null)view.removeAttribute(key);else view.setAttribute(key,value)}return true;})()`);
+  await waitFor("legacy-control-restored", `document.querySelector('webview')?.style.transform==='scale(1.275)'`);
+  assert.equal((await guestState()).zoom, "", "negative control must restore an unzoomed guest");
 }
 
 async function run() {
@@ -303,7 +434,17 @@ async function run() {
     assert.equal(initialGuest.zoom, "");
     await assertPoint("scale-0.85-top-left", 24, 26, 0.85);
     metrics = await paneMetrics();
+    await assertPoint("scale-0.85-quarter", Math.round(metrics.clip.width * 0.25), Math.round(metrics.clip.height * 0.27), 0.85);
+    metrics = await paneMetrics();
     await assertPoint("scale-0.85-middle", Math.round(metrics.clip.width * 0.45), Math.round(metrics.clip.height * 0.42), 0.85);
+    metrics = await paneMetrics();
+    await assertPoint("scale-0.85-right-upper", Math.round(metrics.clip.width * 0.78), Math.round(metrics.clip.height * 0.19), 0.85);
+    metrics = await paneMetrics();
+    await assertIframePoint("scale-0.85-iframe-center", metrics.clip.width - 0.85 * 65,
+      metrics.clip.height - 0.85 * 50, 0.85);
+    metrics = await paneMetrics();
+    await assertIframePoint("scale-0.85-iframe-bottom-right", metrics.clip.width - 2,
+      metrics.clip.height - 2, 0.85);
 
     for (let index = 0; index < 5; index += 1) {
       await evaluate(`scale-up-${index + 1}`, `window.fixtureKeyboard({action:'increase',paneId:1,type:'content-scale'});true`);
@@ -321,37 +462,22 @@ async function run() {
     assert.ok(metrics.inset.startsWith("0px") && metrics.inset.endsWith("0px"), `webview origin should be zero: ${metrics.inset}`);
     await assertPoint("scale-1.275-top-left", 24, 26, 1.275);
     metrics = await paneMetrics();
-    await assertPoint("scale-1.275-middle", Math.round(metrics.clip.width * 0.45), Math.round(metrics.clip.height * 0.42), 1.275);
-
-    const beforeEdge = await guestState();
+    await assertPoint("scale-1.275-quarter", Math.round(metrics.clip.width * 0.25), Math.round(metrics.clip.height * 0.27), 1.275);
     metrics = await paneMetrics();
-    const edgeX = Math.max(1, metrics.clip.width - 2);
-    const edgeY = Math.max(1, metrics.clip.height - 2);
-    const x = Math.round(metrics.rect.left + edgeX);
-    const y = Math.round(metrics.rect.top + edgeY);
-    win.webContents.sendInputEvent({ type: "mouseMove", x, y });
-    let edgeState = null;
-    const edgeDeadline = Date.now() + 5_000;
-    while (Date.now() < edgeDeadline) {
-      edgeState = await guestState();
-      if (edgeState && edgeState.iframeCount > beforeEdge.iframeCount) break;
-      await new Promise((resolve) => setTimeout(resolve, 40));
-    }
-    assert.ok(edgeState && edgeState.iframeCount > beforeEdge.iframeCount, "iframe should receive a fresh native edge pointer message");
-    assert.ok(edgeState.iframePointer, "native input at the clipped pane corner should reach its bottom-right iframe");
-    assert.ok(edgeState.iframePointer.x >= 0 && edgeState.iframePointer.y >= 0,
-      `iframe edge should receive in-bounds coordinates: ${JSON.stringify(edgeState.iframePointer)}`);
-    assert.ok(Math.abs(metrics.rect.right - metrics.clip.right) <= 1.5);
-    assert.ok(Math.abs(metrics.rect.bottom - metrics.clip.bottom) <= 1.5);
-    await capturePixel("scale-1.275-bottom-right-iframe", x - 3, y - 3,
-      ([red, green, blue]) => red < 245 && green > 190 && blue > 220);
-    console.log("NATIVE_IFRAME_EDGE=" + JSON.stringify({ scale: 1.275,
-      host: { x, y }, guest: edgeState.iframePointer,
-      paneRight: metrics.clip.right, paneBottom: metrics.clip.bottom }));
+    await assertPoint("scale-1.275-middle", Math.round(metrics.clip.width * 0.45), Math.round(metrics.clip.height * 0.42), 1.275);
+    metrics = await paneMetrics();
+    await assertPoint("scale-1.275-right-upper", Math.round(metrics.clip.width * 0.78), Math.round(metrics.clip.height * 0.19), 1.275);
+    metrics = await paneMetrics();
+    await assertIframePoint("scale-1.275-iframe-center", metrics.clip.width - 1.275 * 65,
+      metrics.clip.height - 1.275 * 50, 1.275);
+    metrics = await paneMetrics();
+    await assertIframePoint("scale-1.275-iframe-bottom-right", metrics.clip.width - 2,
+      metrics.clip.height - 2, 1.275);
+    await assertLegacyRootZoomRejected();
 
     assert.deepEqual(blockedRequests, []);
     assert.deepEqual(consoleErrors, []);
-    console.log("PASS Electron guest native host mouse mapping at 0.85 and 1.275, multiple positions, and bottom-right iframe edge");
+    console.log("PASS Electron guest native host mouse mapping at 0.85 and 1.275, multi-position marker/iframe bounds, and legacy root-zoom negative control");
   } catch (error) {
     console.error("NATIVE_SCALE_FAILED_STAGE=" + stage);
     console.error(error);
@@ -361,8 +487,24 @@ async function run() {
     console.log("NATIVE_SCALE_CONSOLE_ERRORS=" + JSON.stringify(consoleErrors));
     clearTimeout(watchdog);
     win?.destroy();
-    await fs.rm(scratch, { recursive: true, force: true });
-    app.exit(process.exitCode === 1 ? 1 : 0);
+    await fs.writeFile(path.join(evidenceDir, "fixture-evidence.json"), JSON.stringify({
+      runId,
+      slotId: process.env.SURF_ACE_NATIVE_SLOT_ID,
+      pinsManifestSha256,
+      source: { head: sourcePin.head, tree: sourcePin.tree, distTreeSha256: sourcePin.distTreeSha256,
+        electronVersion: sourcePin.electronVersion },
+      result: process.exitCode === 1 ? "failed" : "passed",
+      failedStage: process.exitCode === 1 ? stage : null,
+      blockedRequests,
+      consoleErrors,
+      pointers: pointerEvidence,
+      iframePoints: iframeEvidence,
+      pngs: pngEvidence,
+    }, null, 2) + "\n", { flag: "wx" }).catch((error) => {
+      console.error("NATIVE_SCALE_EVIDENCE_WRITE_FAILED=" + String(error));
+      process.exitCode = 1;
+    });
+    app.quit();
   }
 }
 
