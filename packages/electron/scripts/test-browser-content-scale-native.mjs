@@ -40,19 +40,33 @@ console.log("NATIVE_SCALE_SOURCE=" + JSON.stringify({ runId, slotId: process.env
 app.setPath("userData", path.join(scratch, "profile"));
 
 const iframeHtml = `<!doctype html><html><head><style>html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#d9e8ff}</style></head>
-<body onpointermove="parent.postMessage({type:'iframe-pointer',x:event.clientX,y:event.clientY}, '*')"></body></html>`;
+<body><script>
+window.__iframePaintChallenge={challengeId:'boot',rgb:[217,232,255]};
+const rgbText=rgb=>'rgb('+rgb.join(', ')+')';
+window.addEventListener('message',event=>{if(event.data?.type==='iframe-paint-challenge'){
+  window.__iframePaintChallenge={challengeId:event.data.challengeId,rgb:event.data.rgb};
+  document.body.style.backgroundColor=rgbText(event.data.rgb);
+  parent.postMessage({type:'iframe-challenge-painted',challengeId:event.data.challengeId,rgb:event.data.rgb},'*');
+}});
+window.addEventListener('pointermove',event=>parent.postMessage({type:'iframe-pointer',x:event.clientX,y:event.clientY,
+  challengeId:window.__iframePaintChallenge.challengeId,rgb:window.__iframePaintChallenge.rgb},'*'));
+</script></body></html>`;
 const guestHtml = `<!doctype html><html><head><meta charset="utf-8"><style>
 html,body{box-sizing:border-box;margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#fff}
 #marker{position:fixed;left:-20px;top:-20px;width:8px;height:8px;background:#e22;pointer-events:none}
 #edge-frame{position:fixed;right:0;bottom:0;width:130px;height:100px;border:0}
 </style></head><body><div id="marker"></div><iframe id="edge-frame"></iframe><script>
 window.__pointerSamples=[];window.__iframePointer=null;window.__iframePointerCount=0;
+window.__nativeScaleChallenge={challengeId:'boot',rgb:[238,34,34]};window.__iframeChallengeAck=null;
 const marker=document.querySelector('#marker');
 window.addEventListener('pointermove',event=>{
   marker.style.left=event.clientX+'px';marker.style.top=event.clientY+'px';
-  window.__pointerSamples.push({x:event.clientX,y:event.clientY});
+  window.__pointerSamples.push({x:event.clientX,y:event.clientY,challengeId:window.__nativeScaleChallenge.challengeId});
 });
-window.addEventListener('message',event=>{if(event.data?.type==='iframe-pointer'){window.__iframePointer=event.data;window.__iframePointerCount++}});
+window.addEventListener('message',event=>{
+  if(event.data?.type==='iframe-pointer'){window.__iframePointer=event.data;window.__iframePointerCount++}
+  if(event.data?.type==='iframe-challenge-painted')window.__iframeChallengeAck=event.data;
+});
 document.querySelector('#edge-frame').srcdoc=${JSON.stringify(iframeHtml)};
 </script></body></html>`;
 const guestUrl = `data:text/html;charset=utf-8,${encodeURIComponent(guestHtml)}`;
@@ -204,45 +218,92 @@ function decodePng(bytes) {
   };
 }
 
-async function capturePixel(label, hostX, hostY, predicate) {
-  await new Promise((resolve) => setTimeout(resolve, 100));
-  const image = await win.webContents.capturePage();
-  const bytes = image.toPNG();
-  const decoded = decodePng(bytes);
-  const viewport = await evaluate("capture-viewport", "({width:window.innerWidth,height:window.innerHeight})");
-  const pixelX = Math.floor((hostX + 1) * decoded.width / viewport.width);
-  const pixelY = Math.floor((hostY + 1) * decoded.height / viewport.height);
-  const rgba = decoded.pixel(pixelX, pixelY);
-  const phaseId = `phase-${String(++captureSequence).padStart(3, "0")}-${label.replace(/[^a-z0-9._-]/gi, "-").slice(0, 48)}`;
+const challengePalette = [
+  [230, 20, 70], [245, 125, 10], [150, 35, 210], [5, 170, 110], [0, 140, 230],
+  [220, 170, 10], [20, 200, 190], [200, 50, 120], [100, 160, 20], [40, 70, 180],
+  [240, 80, 160], [0, 180, 90], [140, 80, 20],
+];
+
+function nextCapturePhase(label) {
+  captureSequence += 1;
+  const phaseId = `phase-${String(captureSequence).padStart(3, "0")}-${label.replace(/[^a-z0-9._-]/gi, "-").slice(0, 48)}`;
+  const rgb = challengePalette[(captureSequence - 1) % challengePalette.length];
+  return { phaseId, paint: { challengeId: `${runId}/${label}/${phaseId}`, rgb } };
+}
+
+function rgbCss(rgb) { return `rgb(${rgb.join(", ")})`; }
+function sameRgb(actual, expected) {
+  return Array.isArray(actual) && actual.length >= 3 && actual.slice(0, 3).every((channel, index) => channel === expected[index]);
+}
+
+async function installMarkerChallenge(label) {
+  const challenge = nextCapturePhase(label);
+  const guestInstall = `(()=>{const challenge=${JSON.stringify(challenge.paint)};window.__nativeScaleChallenge=challenge;
+    const marker=document.querySelector('#marker');marker.style.backgroundColor=${JSON.stringify(rgbCss(challenge.paint.rgb))};
+    return {challengeId:challenge.challengeId,color:getComputedStyle(marker).backgroundColor};})()`;
+  await evaluate("install-marker-challenge", `(async()=>{const view=document.querySelector('webview');
+    return view.executeJavaScript(${JSON.stringify(guestInstall)});})()`);
+  const guestCheck = `(()=>{const marker=document.querySelector('#marker'),challenge=window.__nativeScaleChallenge;
+    return challenge?.challengeId===${JSON.stringify(challenge.paint.challengeId)}&&
+      getComputedStyle(marker).backgroundColor===${JSON.stringify(rgbCss(challenge.paint.rgb))};})()`;
+  await waitFor("marker-challenge-painted", `(async()=>{const view=document.querySelector('webview');
+    return view.executeJavaScript(${JSON.stringify(guestCheck)});})()`);
+  return challenge;
+}
+
+async function installIframeChallenge(label) {
+  const challenge = nextCapturePhase(label);
+  const payload = JSON.stringify({ ...challenge.paint, type: "iframe-paint-challenge" });
+  await evaluate("install-iframe-challenge", `(async()=>{const view=document.querySelector('webview');
+    return view.executeJavaScript("(()=>{const message=${JSON.stringify(payload)};document.querySelector('#edge-frame').contentWindow.postMessage(message,'*');return true})()");})()`);
+  await waitFor("iframe-challenge-painted", `(async()=>{const view=document.querySelector('webview');const state=await view.executeJavaScript(
+    "(()=>window.__iframeChallengeAck?.challengeId||null)()");return state===${JSON.stringify(challenge.paint.challengeId)}})()`);
+  return challenge;
+}
+
+async function capturePixels(label, points, { phaseId, paint, paintKind, paintSampleName }) {
+  let bytes = null;
+  let decoded = null;
+  let samples = [];
+  let viewport;
+  const deadline = Date.now() + 2_500;
+  while (Date.now() < deadline) {
+    const image = await win.webContents.capturePage();
+    bytes = image.toPNG();
+    decoded = decodePng(bytes);
+    viewport = await evaluate("capture-viewport", "({width:window.innerWidth,height:window.innerHeight})");
+    samples = points.map(({ name, x, y }) => {
+      const pixelX = Math.floor((x + 1) * decoded.width / viewport.width);
+      const pixelY = Math.floor((y + 1) * decoded.height / viewport.height);
+      return { name, host: { x, y }, pixel: { x: pixelX, y: pixelY }, rgba: decoded.pixel(pixelX, pixelY) };
+    });
+    const paintSample = samples.find(({ name }) => name === paintSampleName);
+    if (paintSample && sameRgb(paintSample.rgba, paint.rgb)) break;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.ok(bytes && decoded, `${label}: BrowserWindow capturePage must return an image`);
   const saved = await saveNativeScalePng({ bytes, evidenceDir, phaseId, label,
-    source: { runId, slotId: process.env.SURF_ACE_NATIVE_SLOT_ID,
-      pinsManifestSha256, head: sourcePin.head, tree: sourcePin.tree } });
-  const record = { ...saved, hostSample: { x: hostX, y: hostY }, png: { width: decoded.width, height: decoded.height },
-    sample: { x: pixelX, y: pixelY, rgba } };
+    source: { runId, slotId: process.env.SURF_ACE_NATIVE_SLOT_ID, pinsManifestSha256,
+      head: sourcePin.head, tree: sourcePin.tree, distTreeSha256: sourcePin.distTreeSha256,
+      electronVersion: sourcePin.electronVersion } });
+  const record = { ...saved, paint: { ...paint, kind: paintKind }, png: { width: decoded.width, height: decoded.height }, samples };
+  if (points.length === 1) {
+    const sample = samples[0];
+    record.hostSample = sample.host;
+    record.sample = { x: sample.pixel.x, y: sample.pixel.y, rgba: sample.rgba };
+  }
   pngEvidence.push(record);
-  console.log("NATIVE_CAPTURE_PIXEL=" + JSON.stringify(record));
-  assert.ok(predicate(rgba), `${label}: captured pixel ${pixelX},${pixelY} was ${rgba.join(",")}`);
+  console.log("NATIVE_CAPTURE_PIXELS=" + JSON.stringify(record));
+  const paintSample = samples.find(({ name }) => name === paintSampleName);
+  assert.ok(paintSample && sameRgb(paintSample.rgba, paint.rgb),
+    `${label}: current challenge ${paint.rgb.join(",")} was not painted; sampled ${JSON.stringify(paintSample)}`);
   return record;
 }
 
-async function capturePixels(label, points) {
-  await new Promise((resolve) => setTimeout(resolve, 100));
-  const image = await win.webContents.capturePage();
-  const bytes = image.toPNG();
-  const decoded = decodePng(bytes);
-  const viewport = await evaluate("capture-viewport", "({width:window.innerWidth,height:window.innerHeight})");
-  const samples = points.map(({ name, x, y }) => {
-    const pixelX = Math.floor((x + 1) * decoded.width / viewport.width);
-    const pixelY = Math.floor((y + 1) * decoded.height / viewport.height);
-    return { name, host: { x, y }, pixel: { x: pixelX, y: pixelY }, rgba: decoded.pixel(pixelX, pixelY) };
+async function capturePixel(label, hostX, hostY, challenge, kind) {
+  const record = await capturePixels(label, [{ name: "paint", x: hostX, y: hostY }], {
+    ...challenge, paintKind: kind, paintSampleName: "paint",
   });
-  const phaseId = `phase-${String(++captureSequence).padStart(3, "0")}-${label.replace(/[^a-z0-9._-]/gi, "-").slice(0, 48)}`;
-  const saved = await saveNativeScalePng({ bytes, evidenceDir, phaseId, label,
-    source: { runId, slotId: process.env.SURF_ACE_NATIVE_SLOT_ID,
-      pinsManifestSha256, head: sourcePin.head, tree: sourcePin.tree } });
-  const record = { ...saved, png: { width: decoded.width, height: decoded.height }, samples };
-  pngEvidence.push(record);
-  console.log("NATIVE_CAPTURE_PIXELS=" + JSON.stringify(record));
   return record;
 }
 
@@ -264,7 +325,8 @@ async function guestState() {
       const marker=document.querySelector('#marker'),rect=marker.getBoundingClientRect();
       return {zoom:document.documentElement.style.zoom,innerWidth,innerHeight,
         samples:window.__pointerSamples.length,last:window.__pointerSamples.at(-1)||null,
-        marker:{x:rect.x,y:rect.y,width:rect.width,height:rect.height},
+        marker:{x:rect.x,y:rect.y,width:rect.width,height:rect.height,color:getComputedStyle(marker).backgroundColor},
+        challenge:window.__nativeScaleChallenge,iframeChallengeAck:window.__iframeChallengeAck,
         iframeRect:(()=>{const r=document.querySelector('#edge-frame').getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height}})(),
         iframePointer:window.__iframePointer,iframeCount:window.__iframePointerCount};
     })()`) + `);
@@ -288,11 +350,15 @@ async function sendMove(relativeX, relativeY, previousSamples) {
 }
 
 async function assertPoint(label, relativeX, relativeY, scale) {
+  const capture = await installMarkerChallenge(`${label}-marker`);
   const before = await guestState();
   const moved = await sendMove(relativeX, relativeY, before.samples);
   const { current, metrics } = moved;
   assert.equal(current.zoom, "", `${label}: generic document root zoom remains untouched`);
   assert.ok(current.last, `${label}: guest should report a native pointer event`);
+  assert.equal(current.challenge?.challengeId, capture.paint.challengeId, `${label}: marker must use this phase challenge`);
+  assert.equal(current.last.challengeId, capture.paint.challengeId, `${label}: pointer event must be observed under this phase challenge`);
+  assert.equal(current.marker.color, rgbCss(capture.paint.rgb), `${label}: guest marker must report the current challenge color`);
   const expectedX = moved.x - metrics.rect.left;
   const expectedY = moved.y - metrics.rect.top;
   const actualX = current.last.x * scale;
@@ -309,13 +375,13 @@ async function assertPoint(label, relativeX, relativeY, scale) {
     `${label}: fixed marker y ${current.marker.y} * ${scale} should remain under host pointer y ${expectedY}`);
   console.log("NATIVE_POINTER=" + JSON.stringify({ label, host: { x: expectedX, y: expectedY },
     guest: current.last, markerHost: { x: markerX, y: markerY }, scale }));
-  pointerEvidence.push({ label, scale, host: { x: expectedX, y: expectedY }, guest: current.last,
-    markerHost: { x: markerX, y: markerY } });
-  await capturePixel(`${label}-marker`, moved.x + 1, moved.y + 1,
-    ([red, green, blue]) => red > 180 && green < 100 && blue < 100);
+  pointerEvidence.push({ label, scale, challengeId: capture.paint.challengeId,
+    host: { x: expectedX, y: expectedY }, guest: current.last, markerHost: { x: markerX, y: markerY } });
+  await capturePixel(`${label}-marker`, moved.x + 1, moved.y + 1, capture, "marker");
 }
 
 async function assertIframePoint(label, relativeX, relativeY, scale) {
+  const capture = await installIframeChallenge(`${label}-iframe-paint`);
   const before = await guestState();
   const metrics = await paneMetrics();
   const x = Math.round(metrics.rect.left + relativeX);
@@ -331,6 +397,12 @@ async function assertIframePoint(label, relativeX, relativeY, scale) {
   assert.ok(current && current.iframeCount > before.iframeCount,
     `${label}: iframe must report a fresh native pointer message`);
   assert.ok(current.iframePointer, `${label}: iframe must report native pointer coordinates`);
+  assert.equal(current.iframeChallengeAck?.challengeId, capture.paint.challengeId,
+    `${label}: iframe must acknowledge this phase paint challenge`);
+  assert.equal(current.iframePointer.challengeId, capture.paint.challengeId,
+    `${label}: iframe event must carry this phase challenge`);
+  assert.deepEqual(current.iframePointer.rgb, capture.paint.rgb,
+    `${label}: iframe event must report this phase color`);
   const guestX = (x - metrics.rect.left) / scale;
   const guestY = (y - metrics.rect.top) / scale;
   const expectedLocalX = guestX - current.iframeRect.x;
@@ -345,14 +417,14 @@ async function assertIframePoint(label, relativeX, relativeY, scale) {
     `${label}: transformed guest right edge should meet pane clip`);
   assert.ok(Math.abs(metrics.rect.bottom - metrics.clip.bottom) <= 1.5,
     `${label}: transformed guest bottom edge should meet pane clip`);
-  iframeEvidence.push({ label, scale, host: { x, y }, guest: { x: guestX, y: guestY },
+  iframeEvidence.push({ label, scale, challengeId: capture.paint.challengeId, host: { x, y }, guest: { x: guestX, y: guestY },
     iframeRect, iframePointer, expectedLocal: { x: expectedLocalX, y: expectedLocalY } });
-  await capturePixel(`${label}-iframe-paint`, x - 3, y - 3,
-    ([red, green, blue]) => red < 245 && green > 190 && blue > 220);
+  await capturePixel(`${label}-iframe-paint`, x - 3, y - 3, capture, "iframe");
   console.log("NATIVE_IFRAME_POINT=" + JSON.stringify(iframeEvidence.at(-1)));
 }
 
 async function assertLegacyRootZoomRejected() {
+  const capture = await installMarkerChallenge("legacy-root-zoom-negative");
   const originalStyle = await evaluate("legacy-snapshot", `(()=>{const view=document.querySelector('webview');return {
     style:view.getAttribute('style'),autosize:view.getAttribute('autosize'),minwidth:view.getAttribute('minwidth'),minheight:view.getAttribute('minheight')};})()`);
   await evaluate("legacy-parent-style", `(()=>{const view=document.querySelector('webview'),clip=view.parentElement.getBoundingClientRect();
@@ -370,6 +442,12 @@ async function assertLegacyRootZoomRejected() {
   const moved = await sendMove(relativeX, relativeY, before.samples);
   const current = moved.current;
   assert.equal(current.zoom, "0.85", "legacy negative control should apply the old document root zoom");
+  assert.equal(current.challenge?.challengeId, capture.paint.challengeId,
+    "legacy negative control must retain the current guest paint challenge");
+  assert.equal(current.last?.challengeId, capture.paint.challengeId,
+    "legacy negative control pointer event must use the current challenge");
+  assert.equal(current.marker.color, rgbCss(capture.paint.rgb),
+    "legacy negative control marker must paint its current challenge color");
   const expectedX = moved.x - moved.metrics.rect.left;
   const expectedY = moved.y - moved.metrics.rect.top;
   const driftX = current.marker.x - expectedX;
@@ -380,16 +458,16 @@ async function assertLegacyRootZoomRejected() {
   const negativeCapture = await capturePixels("legacy-root-zoom-negative", [
     { name: "pointer-target", x: moved.x, y: moved.y },
     { name: "painted-marker", x: markerSample.x, y: markerSample.y },
-  ]);
+  ], { ...capture, paintKind: "legacy-negative", paintSampleName: "painted-marker" });
   const pointerPixel = negativeCapture.samples.find(({ name }) => name === "pointer-target").rgba;
   const markerPixel = negativeCapture.samples.find(({ name }) => name === "painted-marker").rgba;
-  assert.ok(!(pointerPixel[0] > 180 && pointerPixel[1] < 100 && pointerPixel[2] < 100),
-    `legacy root zoom control should leave pointer target unpainted red: ${pointerPixel}`);
-  assert.ok(markerPixel[0] > 180 && markerPixel[1] < 100 && markerPixel[2] < 100,
-    `legacy root zoom control should paint marker at its displaced location: ${markerPixel}`);
+  assert.ok(!sameRgb(pointerPixel, capture.paint.rgb),
+    `legacy root zoom control should leave pointer target unpainted with current challenge ${capture.paint.rgb}: ${pointerPixel}`);
+  assert.ok(sameRgb(markerPixel, capture.paint.rgb),
+    `legacy root zoom control should paint the current challenge at its displaced marker: ${markerPixel}`);
   console.log("NATIVE_LEGACY_ROOT_ZOOM_NEGATIVE=" + JSON.stringify({ host: { x: expectedX, y: expectedY },
     marker: { x: current.marker.x, y: current.marker.y }, drift: { x: driftX, y: driftY },
-    pointerPixel, markerPixel, phaseId: negativeCapture.phaseId }));
+    challengeId: capture.paint.challengeId, pointerPixel, markerPixel, phaseId: negativeCapture.phaseId }));
   await evaluate("legacy-root-zoom-clear", `(async()=>document.querySelector('webview').executeJavaScript("document.documentElement.style.zoom='';true"))()`);
   await evaluate("legacy-restore-style", `(()=>{const view=document.querySelector('webview');
     view.setAttribute('style',${JSON.stringify(originalStyle.style)});
@@ -488,6 +566,7 @@ async function run() {
     clearTimeout(watchdog);
     win?.destroy();
     await fs.writeFile(path.join(evidenceDir, "fixture-evidence.json"), JSON.stringify({
+      schemaVersion: 1,
       runId,
       slotId: process.env.SURF_ACE_NATIVE_SLOT_ID,
       pinsManifestSha256,

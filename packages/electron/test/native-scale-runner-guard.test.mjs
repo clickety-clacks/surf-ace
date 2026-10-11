@@ -4,17 +4,25 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { deflateSync } from "node:zlib";
 import {
+  NATIVE_SCALE_EXPECTED_IFRAME_POINTS,
+  NATIVE_SCALE_EXPECTED_POINTERS,
+  NATIVE_SCALE_EXPECTED_PNG_LABELS,
   NATIVE_SCALE_PINNED_SOURCES,
   collectNativeScalePinSnapshot,
+  decodeNativeScalePngPixel,
   digestEvidenceDirectory,
+  nativeScaleRunFailures,
   readNativeScalePinManifest,
   saveNativeScalePng,
   sha256,
+  shouldRemoveNativeScaleScratch,
   validateNativeScaleAdmission,
+  validateNativeScaleFixtureEvidence,
   verifyNativeScalePins,
 } from "../scripts/native-scale-runner-guard.mjs";
-import { processGroupCensus, runOwnedProcess } from "../scripts/native-scale-owned-process.mjs";
+import { processCensus, processGroupCensus, runOwnedProcess } from "../scripts/native-scale-owned-process.mjs";
 
 const sourceOnlyValidation = process.env.SURF_ACE_NATIVE_SOURCE_ONLY === "1";
 
@@ -39,6 +47,97 @@ async function makePinnedFixture() {
     await writeFile(file, `fixture dist ${relative}\n`);
   }
   return { root, packageDir, distDir };
+}
+
+function crc32(bytes) {
+  let crc = 0xffffffff;
+  for (const byte of bytes) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function pngChunk(type, data) {
+  const typeBytes = Buffer.from(type);
+  const length = Buffer.alloc(4);
+  length.writeUInt32BE(data.length);
+  const checksum = Buffer.alloc(4);
+  checksum.writeUInt32BE(crc32(Buffer.concat([typeBytes, data])));
+  return Buffer.concat([length, typeBytes, data, checksum]);
+}
+
+function encodeRgbaPng(width, height, pixelAt) {
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8;
+  ihdr[9] = 6;
+  const rows = [];
+  for (let y = 0; y < height; y += 1) {
+    rows.push(Buffer.from([0]));
+    for (let x = 0; x < width; x += 1) rows.push(Buffer.from(pixelAt(x, y)));
+  }
+  return Buffer.concat([
+    Buffer.from("89504e470d0a1a0a", "hex"),
+    pngChunk("IHDR", ihdr),
+    pngChunk("IDAT", deflateSync(Buffer.concat(rows))),
+    pngChunk("IEND", Buffer.alloc(0)),
+  ]);
+}
+
+async function makeValidNativeEvidence(evidenceDir) {
+  const runId = "semantic-run-001";
+  const slotId = "private-slot-semantic";
+  const pinsSha256 = "a".repeat(64);
+  const pins = { head: "b".repeat(40), tree: "c".repeat(40), distTreeSha256: "d".repeat(64), electronVersion: "42.0.0" };
+  const admission = { runId, slotId };
+  const source = { ...pins };
+  const pointers = NATIVE_SCALE_EXPECTED_POINTERS.map((label) => {
+    const scale = label.includes("1.275") ? 1.275 : 0.85;
+    const host = { x: 24, y: 26 };
+    return { label, scale, host, guest: { x: host.x / scale, y: host.y / scale }, markerHost: host };
+  });
+  const iframePoints = NATIVE_SCALE_EXPECTED_IFRAME_POINTS.map((label) => {
+    const scale = label.includes("1.275") ? 1.275 : 0.85;
+    return { label, scale, iframeRect: { x: 0, y: 0, width: 130, height: 100 },
+      iframePointer: { x: 20, y: 20 }, expectedLocal: { x: 20, y: 20 } };
+  });
+  const pngs = [];
+  for (const [index, label] of NATIVE_SCALE_EXPECTED_PNG_LABELS.entries()) {
+    const phaseId = `phase-${String(index + 1).padStart(3, "0")}-${label}`;
+    const rgb = [20 + index * 13, 30 + index * 7, 40 + index * 5];
+    const negative = label === "legacy-root-zoom-negative";
+    const bytes = encodeRgbaPng(4, 3, (x, y) => {
+      if (negative && x === 2 && y === 1) return [...rgb, 255];
+      if (!negative && x === 1 && y === 1) return [...rgb, 255];
+      return [255, 255, 255, 255];
+    });
+    const saved = await saveNativeScalePng({ bytes, evidenceDir, phaseId, label, source: {
+      runId, slotId, pinsManifestSha256: pinsSha256, head: pins.head, tree: pins.tree,
+      distTreeSha256: pins.distTreeSha256, electronVersion: pins.electronVersion,
+    } });
+    const paint = { challengeId: `${runId}/${label}/${phaseId}`, rgb,
+      kind: negative ? "legacy-negative" : label.endsWith("-marker") ? "marker" : "iframe" };
+    if (negative) {
+      pngs.push({ ...saved, paint, samples: [
+        { name: "pointer-target", pixel: { x: 1, y: 1 }, rgba: [255, 255, 255, 255] },
+        { name: "painted-marker", pixel: { x: 2, y: 1 }, rgba: [...rgb, 255] },
+      ] });
+    } else pngs.push({ ...saved, paint, sample: { x: 1, y: 1, rgba: [...rgb, 255] } });
+  }
+  for (const pointer of pointers) {
+    const png = pngs.find(({ label }) => label === `${pointer.label}-marker`);
+    pointer.challengeId = png.paint.challengeId;
+  }
+  for (const point of iframePoints) {
+    const png = pngs.find(({ label }) => label === `${point.label}-iframe-paint`);
+    point.challengeId = png.paint.challengeId;
+    point.iframePointer.challengeId = png.paint.challengeId;
+  }
+  const evidence = { schemaVersion: 1, runId, slotId, pinsManifestSha256: pinsSha256, source,
+    result: "passed", failedStage: null, blockedRequests: [], consoleErrors: [], pointers, iframePoints, pngs };
+  return { runId, slotId, pinsSha256, pins, admission, evidence };
 }
 
 test("native scale pin manifest binds clean source, Electron version, and every built dist file",
@@ -125,9 +224,76 @@ test("PNG evidence is phase-bound, hashed, and refuses invalid or colliding path
   await assert.rejects(saveNativeScalePng({ bytes, evidenceDir, phaseId: "../escape", label: "escape", source: {} }), /invalid phase identity/);
 });
 
+test("fixture evidence requires all admitted phases and the exact fresh paint pixels", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "native-scale-semantic-evidence-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const fixture = await makeValidNativeEvidence(root);
+  const digestMap = await digestEvidenceDirectory(root);
+  const input = { evidenceDir: root, digestMap, admission: fixture.admission, pins: fixture.pins, pinsSha256: fixture.pinsSha256 };
+  assert.deepEqual(await validateNativeScaleFixtureEvidence({ ...input, evidence: fixture.evidence }), {
+    valid: true, pngCount: 13, pointerCount: 8, iframeCount: 4,
+  });
+  assert.deepEqual(decodeNativeScalePngPixel(await readFile(path.join(root, fixture.evidence.pngs[0].file)), 1, 1).rgba.slice(0, 3),
+    fixture.evidence.pngs[0].paint.rgb);
+
+  await assert.rejects(validateNativeScaleFixtureEvidence({ ...input,
+    evidence: { ...fixture.evidence, runId: "wrong-run" } }), /identity does not match/);
+  await assert.rejects(validateNativeScaleFixtureEvidence({ ...input,
+    evidence: { ...fixture.evidence, result: "failed", failedStage: "pointer" } }), /did not report a passed/);
+  await assert.rejects(validateNativeScaleFixtureEvidence({ ...input,
+    evidence: { ...fixture.evidence, pointers: fixture.evidence.pointers.slice(1) } }), /incomplete or duplicate pointer/);
+
+  const missingImage = fixture.evidence.pngs[0];
+  const missingBytes = await readFile(path.join(root, missingImage.file));
+  await rm(path.join(root, missingImage.file));
+  await assert.rejects(validateNativeScaleFixtureEvidence({ ...input, digestMap: await digestEvidenceDirectory(root),
+    evidence: fixture.evidence }), /PNG set does not match/);
+  await writeFile(path.join(root, missingImage.file), missingBytes, { flag: "wx" });
+
+  const first = fixture.evidence.pngs[0];
+  const second = fixture.evidence.pngs[1];
+  const oldPhaseBytes = await readFile(path.join(root, second.file));
+  await writeFile(path.join(root, first.file), oldPhaseBytes);
+  const staleDigestMap = await digestEvidenceDirectory(root);
+  const staleEvidence = structuredClone(fixture.evidence);
+  staleEvidence.pngs[0].sha256 = staleDigestMap[first.file];
+  await assert.rejects(validateNativeScaleFixtureEvidence({ ...input, digestMap: staleDigestMap, evidence: staleEvidence }),
+    /stale or missing the current phase paint/);
+
+  await writeFile(path.join(root, first.file), missingBytes);
+  const validDigestMap = await digestEvidenceDirectory(root);
+  const wrongGuest = structuredClone(fixture.evidence);
+  wrongGuest.pngs[0].paint.kind = "iframe";
+  await assert.rejects(validateNativeScaleFixtureEvidence({ ...input, digestMap: validDigestMap, evidence: wrongGuest }), /wrong guest paint source/);
+  const missingChallenge = structuredClone(fixture.evidence);
+  delete missingChallenge.pngs[0].paint;
+  await assert.rejects(validateNativeScaleFixtureEvidence({ ...input, digestMap: validDigestMap, evidence: missingChallenge }), /missing its fresh paint challenge/);
+  const wrongPhase = structuredClone(fixture.evidence);
+  wrongPhase.pngs[0].paint.challengeId = `${fixture.runId}/old-phase`;
+  await assert.rejects(validateNativeScaleFixtureEvidence({ ...input, digestMap: validDigestMap, evidence: wrongPhase }), /missing its fresh paint challenge/);
+
+  assert.deepEqual(nativeScaleRunFailures({ processReceipt: { code: 0, ownershipKnown: true },
+    evidenceValidation: null, evidenceDigestError: "missing receipt", unexpectedElectronPids: [],
+    finalCensusKnown: true, groupEmpty: true, executionReceiptPersisted: true }).length > 0, true);
+  assert.equal(shouldRemoveNativeScaleScratch({ processOwnershipKnown: false, finalCensusKnown: true,
+    groupEmpty: true, receiptPersisted: true }), false);
+  assert.equal(shouldRemoveNativeScaleScratch({ processOwnershipKnown: true, finalCensusKnown: false,
+    groupEmpty: false, receiptPersisted: true }), false);
+  assert.equal(shouldRemoveNativeScaleScratch({ processOwnershipKnown: true, finalCensusKnown: true,
+    groupEmpty: true, receiptPersisted: false }), false);
+  assert.equal(shouldRemoveNativeScaleScratch({ processOwnershipKnown: true, finalCensusKnown: true,
+    groupEmpty: true, receiptPersisted: true, launchReceiptPersisted: false }), false);
+  assert.equal(shouldRemoveNativeScaleScratch({ processOwnershipKnown: true, finalCensusKnown: true,
+    groupEmpty: true, receiptPersisted: true }), true);
+});
+
 test("private native runner retains multi-position, iframe, and old root-zoom negative oracles", async () => {
   const runnerPath = new URL("../scripts/test-browser-content-scale-native.mjs", import.meta.url);
+  const supervisorPath = new URL("../scripts/native-scale-process-supervisor.mjs", import.meta.url);
+  const ownedPath = new URL("../scripts/native-scale-owned-process.mjs", import.meta.url);
   const runner = await readFile(runnerPath, "utf8");
+  const supervisor = await readFile(supervisorPath, "utf8");
+  const owned = await readFile(ownedPath, "utf8");
   assert.match(runner, /assertLegacyRootZoomRejected/);
   assert.match(runner, /legacy-root-zoom-negative/);
   assert.match(runner, /iframePointer\.x < iframeRect\.width/);
@@ -135,6 +301,15 @@ test("private native runner retains multi-position, iframe, and old root-zoom ne
   assert.match(runner, /saveNativeScalePng/);
   assert.match(runner, /scale-1\.275-quarter/);
   assert.match(runner, /scale-0\.85-right-upper/);
+  assert.match(runner, /__nativeScaleChallenge/);
+  assert.match(runner, /iframe-paint-challenge/);
+  assert.match(runner, /challengeId/);
+  assert.match(runner, /2_500/);
+  assert.match(supervisor, /process\.kill\(-process\.pid, signal\)/);
+  assert.match(supervisor, /detached: false/);
+  assert.doesNotMatch(owned, /process\.kill\(-pgid/);
+  assert.match(owned, /onLaunch/);
+  assert.match(owned, /censusTimeoutMs/);
   assert.match(runner, /app\.quit\(\)/);
   assert.doesNotMatch(runner, /app\.exit\(/);
   assert.doesNotMatch(runner, /fs\.rm\(scratch/);
@@ -150,8 +325,9 @@ test("owned process wrapper reaps a timed-out process group and an orphaned grou
   assert.equal(quickExit.code, 0, "exit listeners must be installed before waiting for spawn");
   assert.equal(quickExit.timedOut, false);
   assert.equal(quickExit.stdout, "quick-exit-before-parent-await");
+  assert.equal(quickExit.ownershipKnown, true);
   assert.deepEqual(quickExit.remaining, []);
-  assert.deepEqual(processGroupCensus(quickExit.pgid), []);
+  assert.deepEqual(processGroupCensus(quickExit.pgid, await processCensus()), []);
 
   const timeout = await runOwnedProcess({
     command: process.execPath,
@@ -162,8 +338,9 @@ test("owned process wrapper reaps a timed-out process group and an orphaned grou
   });
   assert.equal(timeout.timedOut, true);
   assert.equal(timeout.termSent, true);
+  assert.equal(timeout.ownershipKnown, true);
   assert.deepEqual(timeout.remaining, []);
-  assert.deepEqual(processGroupCensus(timeout.pgid), []);
+  assert.deepEqual(processGroupCensus(timeout.pgid, await processCensus()), []);
 
   const orphan = await runOwnedProcess({
     command: process.execPath,
@@ -180,6 +357,117 @@ test("owned process wrapper reaps a timed-out process group and an orphaned grou
   assert.equal(orphan.code, 0);
   assert.equal(orphan.timedOut, false);
   assert.equal(orphan.termSent, true, "orphaned child should receive owned-group cleanup");
+  assert.equal(orphan.ownershipKnown, true);
   assert.deepEqual(orphan.remaining, []);
-  assert.deepEqual(processGroupCensus(orphan.pgid), []);
+  assert.deepEqual(processGroupCensus(orphan.pgid, await processCensus()), []);
+});
+
+test("owned process launch receipts survive census errors, bounded hangs, and receipt failures",
+  { skip: sourceOnlyValidation ? "source-only mode does not spawn process groups" : false }, async (t) => {
+  let launchReceipt = null;
+  let censusCalls = 0;
+  const transient = await runOwnedProcess({
+    command: process.execPath,
+    args: ["-e", "process.stdout.write('census-recovered')"],
+    deadlineMs: 2_000,
+    onLaunch: (receipt) => { launchReceipt = receipt; },
+    census: async () => {
+      censusCalls += 1;
+      if (censusCalls === 1) throw new Error("injected post-spawn census error");
+      return processCensus();
+    },
+  });
+  assert.equal(launchReceipt.pgid, transient.pgid, "immutable launch receipt must exist before target launch");
+  assert.equal(transient.stdout, "census-recovered");
+  assert.equal(transient.ownershipKnown, true, "temporary census failure should recover before cleanup closes");
+  assert.ok(censusCalls >= 2);
+
+  let hungLaunch = null;
+  const startedAt = Date.now();
+  await assert.rejects(runOwnedProcess({
+    command: process.execPath,
+    args: ["-e", "process.exit(0)"],
+    deadlineMs: 2_000,
+    terminateGraceMs: 50,
+    reapTimeoutMs: 800,
+    censusTimeoutMs: 30,
+    onLaunch: (receipt) => { hungLaunch = receipt; },
+    census: () => new Promise(() => {}),
+  }), (error) => {
+    assert.equal(error.receipt.pid, hungLaunch.pid);
+    assert.equal(error.receipt.pgid, hungLaunch.pgid);
+    assert.equal(error.receipt.ownershipKnown, false);
+    assert.match(error.receipt.censusError ?? error.message, /census|cleanup/i);
+    return true;
+  });
+  assert.ok(Date.now() - startedAt < 2_500, "hung census path must honor cleanup bounds");
+  assert.deepEqual(processGroupCensus(hungLaunch.pgid, await processCensus()), [], "the anchor self-reaps after a bounded owner failure");
+
+  let finalCensusLaunch = null;
+  let finalCensusCalls = 0;
+  await assert.rejects(runOwnedProcess({
+    command: process.execPath,
+    args: ["-e", "process.exit(0)"],
+    deadlineMs: 2_000,
+    onLaunch: (receipt) => { finalCensusLaunch = receipt; },
+    census: async () => {
+      finalCensusCalls += 1;
+      if (finalCensusCalls >= 2) throw new Error("injected final census failure");
+      return processCensus();
+    },
+  }), (error) => {
+    assert.equal(error.receipt.pid, finalCensusLaunch.pid);
+    assert.equal(error.receipt.pgid, finalCensusLaunch.pgid);
+    assert.equal(error.receipt.ownershipKnown, false, "failed final census is not treated as empty");
+    assert.match(error.receipt.censusError, /final census failure/);
+    return true;
+  });
+  assert.deepEqual(processGroupCensus(finalCensusLaunch.pgid, await processCensus()), []);
+
+  let failedReceiptLaunch = null;
+  await assert.rejects(runOwnedProcess({
+    command: process.execPath,
+    args: ["-e", "process.exit(17)"],
+    deadlineMs: 2_000,
+    onLaunch: (receipt) => { failedReceiptLaunch = receipt; throw new Error("injected launch receipt write failure"); },
+  }), (error) => {
+    assert.equal(error.receipt.pid, failedReceiptLaunch.pid);
+    assert.equal(error.receipt.pgid, failedReceiptLaunch.pgid);
+    assert.equal(error.receipt.ownershipKnown, true, "unlaunched target must still leave a durable ownership outcome");
+    return true;
+  });
+  assert.deepEqual(processGroupCensus(failedReceiptLaunch.pgid, await processCensus()), []);
+  assert.equal(shouldRemoveNativeScaleScratch({ processOwnershipKnown: true, finalCensusKnown: true,
+    groupEmpty: true, receiptPersisted: false }), false, "receipt write failure preserves scratch");
+});
+
+test("owned process refuses TERM/KILL when the observed process-group generation loses its owner", {
+  skip: sourceOnlyValidation ? "source-only mode does not spawn process groups" : false,
+}, async () => {
+  for (const lostSignal of ["SIGTERM", "SIGKILL"]) {
+    let launchReceipt;
+    const ownerCommands = [];
+    const error = await runOwnedProcess({
+      command: process.execPath,
+      args: ["-e", "process.exit(0)"],
+      deadlineMs: 2_000,
+      terminateGraceMs: 70,
+      reapTimeoutMs: 1_500,
+      censusTimeoutMs: 100,
+      onLaunch: (receipt) => { launchReceipt = receipt; },
+      census: async () => [{ pid: launchReceipt.pid, pgid: launchReceipt.pgid, command: "owned-anchor" },
+        { pid: 987654, pgid: launchReceipt.pgid, command: "injected-generation-member" }],
+      beforeOwnerCommand: ({ signal }) => {
+        ownerCommands.push(signal);
+        return signal !== lostSignal;
+      },
+    }).then(() => null, (failure) => failure);
+    assert.ok(error, `${lostSignal} generation loss must reject the run`);
+    assert.equal(error.receipt.pid, launchReceipt.pid);
+    assert.equal(error.receipt.pgid, launchReceipt.pgid);
+    assert.equal(error.receipt.ownershipKnown, false, "lost ownership is unknown even when the injected census is not trusted");
+    assert.ok(ownerCommands.includes(lostSignal), `the ${lostSignal} interleaving must be exercised`);
+    assert.deepEqual(processGroupCensus(launchReceipt.pgid, await processCensus()), [],
+      "only the retained supervisor may self-clean after its owner command is refused");
+  }
 });

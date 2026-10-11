@@ -7,6 +7,9 @@ import {
   readNativeScalePinManifest,
   sha256,
   validateNativeScaleAdmission,
+  validateNativeScaleFixtureEvidence,
+  nativeScaleRunFailures,
+  shouldRemoveNativeScaleScratch,
   verifyNativeScalePins,
 } from "./native-scale-runner-guard.mjs";
 import { electronProcessCensus, processCensus, runOwnedProcess } from "./native-scale-owned-process.mjs";
@@ -68,8 +71,19 @@ function displayIdentity(environment) {
   return JSON.stringify({ DISPLAY: environment.DISPLAY ?? "", WAYLAND_DISPLAY: environment.WAYLAND_DISPLAY ?? "" });
 }
 
-function currentElectronPids(electronPath) {
-  return electronProcessCensus(electronPath, processCensus()).map(({ pid }) => pid).sort((left, right) => left - right);
+async function writeWithin(file, contents, options, timeoutMs = 2_000) {
+  let timer;
+  try {
+    await Promise.race([
+      fs.writeFile(file, contents, options),
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`Receipt write exceeded ${timeoutMs} ms`)), timeoutMs); }),
+    ]);
+  } finally { clearTimeout(timer); }
+}
+
+async function currentElectronPids(electronPath) {
+  return electronProcessCensus(electronPath, await processCensus({ timeoutMs: 1_500 }))
+    .map(({ pid }) => pid).sort((left, right) => left - right);
 }
 
 async function main(argv) {
@@ -101,7 +115,7 @@ async function main(argv) {
   await fs.mkdir(path.dirname(evidenceDir), { recursive: true });
   await fs.mkdir(evidenceDir, { recursive: false });
 
-  const baseline = currentElectronPids(electronRealPath);
+  const baseline = await currentElectronPids(electronRealPath);
   if (JSON.stringify(baseline) !== JSON.stringify(admission.baselineElectronPids)) {
     throw new Error(`Electron process census changed since admission: expected ${admission.baselineElectronPids}, found ${baseline}`);
   }
@@ -109,6 +123,9 @@ async function main(argv) {
   const scratch = await fs.mkdtemp(path.join(os.tmpdir(), `surf-ace-native-${admission.runId}-`));
   const runner = path.join(scriptDir, "test-browser-content-scale-native.mjs");
   let processReceipt = null;
+  let launchReceipt = null;
+  let launchReceiptPersisted = false;
+  let launchReceiptPersistenceError = null;
   let thrown = null;
   try {
     await fs.writeFile(path.join(evidenceDir, "preflight.json"), JSON.stringify({
@@ -141,6 +158,28 @@ async function main(argv) {
       },
       deadlineMs: admission.deadlineMs,
       maxOutputBytes: 4_000_000,
+      onLaunch: async (receipt) => {
+        launchReceipt = receipt;
+        try {
+          await writeWithin(path.join(evidenceDir, "launch-receipt.json"), JSON.stringify({
+          runId: admission.runId,
+          slotId: admission.slotId,
+          sourcePinsSha256: pinsSha256,
+          pid: receipt.pid,
+          pgid: receipt.pgid,
+          ownerToken: receipt.ownerToken,
+          startedAt: receipt.startedAt,
+          supervisorPath: receipt.supervisorPath,
+          command: receipt.command,
+          args: receipt.args,
+          startedMonotonic: receipt.startedMonotonic,
+          }, null, 2) + "\n", { flag: "wx" });
+          launchReceiptPersisted = true;
+        } catch (error) {
+          launchReceiptPersistenceError = error;
+          throw error;
+        }
+      },
     });
     await fs.writeFile(path.join(evidenceDir, "electron.stdout.log"), processReceipt.stdout, { flag: "wx" });
     await fs.writeFile(path.join(evidenceDir, "electron.stderr.log"), processReceipt.stderr, { flag: "wx" });
@@ -148,34 +187,93 @@ async function main(argv) {
     if (processReceipt.code !== 0) throw new Error(`Private Electron fixture exited ${processReceipt.code ?? processReceipt.signal}`);
   } catch (error) {
     processReceipt = error?.receipt ?? processReceipt;
+    launchReceipt ??= error?.receipt ?? null;
     thrown = error;
     if (processReceipt?.stdout) await fs.writeFile(path.join(evidenceDir, "electron.stdout.log"), processReceipt.stdout, { flag: "wx" }).catch(() => {});
     if (processReceipt?.stderr) await fs.writeFile(path.join(evidenceDir, "electron.stderr.log"), processReceipt.stderr, { flag: "wx" }).catch(() => {});
-  } finally {
-    const after = currentElectronPids(electronRealPath);
-    const baselineSet = new Set(baseline);
-    const unexpectedElectronPids = after.filter((pid) => !baselineSet.has(pid));
-    const fixtureEvidence = await digestEvidenceDirectory(evidenceDir).catch((error) => ({ evidenceDigestError: String(error) }));
-    const receipt = {
-      runId: admission.runId,
-      slotId: admission.slotId,
-      sourcePinsSha256: pinsSha256,
-      process: processReceipt && { pid: processReceipt.pid, pgid: processReceipt.pgid,
-        code: processReceipt.code, signal: processReceipt.signal, timedOut: processReceipt.timedOut,
-        termSent: processReceipt.termSent, killSent: processReceipt.killSent, remaining: processReceipt.remaining },
-      electronPidsBefore: baseline,
-      electronPidsAfter: after,
-      unexpectedElectronPids,
-      evidenceFiles: fixtureEvidence,
-      error: thrown ? String(thrown.stack ?? thrown) : null,
-    };
-    await fs.writeFile(path.join(evidenceDir, "execution-receipt.json"), JSON.stringify(receipt, null, 2) + "\n", { flag: "wx" });
-    const ownedGroupEmpty = processReceipt ? processCensus().every(({ pgid }) => pgid !== processReceipt.pgid) : true;
-    if (ownedGroupEmpty) await fs.rm(scratch, { recursive: true, force: true });
-    if (unexpectedElectronPids.length) throw new Error(`Unexpected Electron processes remain: ${unexpectedElectronPids}`);
-    if (!ownedGroupEmpty) throw new Error(`Owned Electron process group ${processReceipt?.pgid} remains; scratch was preserved at ${scratch}`);
   }
-  if (thrown) throw thrown;
+
+  const finalizationErrors = [];
+  let after = null;
+  let finalCensusKnown = false;
+  let unexpectedElectronPids = null;
+  try {
+    after = await currentElectronPids(electronRealPath);
+    finalCensusKnown = true;
+    const baselineSet = new Set(baseline);
+    unexpectedElectronPids = after.filter((pid) => !baselineSet.has(pid));
+  } catch (error) { finalizationErrors.push(error); }
+
+  let digestMap = null;
+  let evidenceDigestError = null;
+  let evidenceValidation = null;
+  let fixtureEvidence = null;
+  try {
+    digestMap = await digestEvidenceDirectory(evidenceDir);
+    fixtureEvidence = JSON.parse(await fs.readFile(path.join(evidenceDir, "fixture-evidence.json"), "utf8"));
+    evidenceValidation = await validateNativeScaleFixtureEvidence({ evidenceDir, evidence: fixtureEvidence,
+      digestMap, admission, pins, pinsSha256 });
+  } catch (error) {
+    evidenceDigestError = String(error.stack ?? error);
+    finalizationErrors.push(error);
+  }
+
+  let processRows = null;
+  let ownedGroupEmpty = false;
+  try {
+    processRows = await processCensus({ timeoutMs: 1_500 });
+    ownedGroupEmpty = Boolean(processReceipt?.pgid) && processRows.every(({ pgid }) => pgid !== processReceipt.pgid);
+  } catch (error) { finalizationErrors.push(error); }
+
+  const executionReceipt = {
+    schemaVersion: 1,
+    runId: admission.runId,
+    slotId: admission.slotId,
+    sourcePinsSha256: pinsSha256,
+    launch: launchReceipt && { pid: launchReceipt.pid, pgid: launchReceipt.pgid,
+      ownerToken: launchReceipt.ownerToken, startedAt: launchReceipt.startedAt },
+    launchReceiptPersisted,
+    launchReceiptPersistenceError: launchReceiptPersistenceError && String(launchReceiptPersistenceError.stack ?? launchReceiptPersistenceError),
+    process: processReceipt && { pid: processReceipt.pid, pgid: processReceipt.pgid,
+      code: processReceipt.code, signal: processReceipt.signal, timedOut: processReceipt.timedOut,
+      termSent: processReceipt.termSent, killSent: processReceipt.killSent,
+      ownershipKnown: processReceipt.ownershipKnown, remaining: processReceipt.remaining,
+      censusError: processReceipt.censusError },
+    electronPidsBefore: baseline,
+    electronPidsAfter: after,
+    finalCensusKnown,
+    unexpectedElectronPids,
+    ownedGroupEmpty,
+    evidenceValidation,
+    evidenceDigestError,
+    evidenceFiles: digestMap,
+    fixtureResult: fixtureEvidence?.result ?? null,
+    errors: [...(thrown ? [String(thrown.stack ?? thrown)] : []), ...finalizationErrors.map((error) => String(error.stack ?? error))],
+  };
+  let executionReceiptPersisted = false;
+  try {
+    await writeWithin(path.join(evidenceDir, "execution-receipt.json"), JSON.stringify(executionReceipt, null, 2) + "\n", { flag: "wx" });
+    executionReceiptPersisted = true;
+  } catch (error) { finalizationErrors.push(error); }
+
+  const scratchMayBeRemoved = shouldRemoveNativeScaleScratch({
+    processOwnershipKnown: processReceipt?.ownershipKnown,
+    finalCensusKnown: finalCensusKnown && processRows !== null,
+    groupEmpty: ownedGroupEmpty,
+    receiptPersisted: executionReceiptPersisted,
+    launchReceiptPersisted,
+  });
+  if (scratchMayBeRemoved) {
+    try { await fs.rm(scratch, { recursive: true, force: true }); }
+    catch (error) { finalizationErrors.push(error); }
+  }
+
+  const failures = nativeScaleRunFailures({ processReceipt, evidenceValidation, evidenceDigestError,
+    unexpectedElectronPids, finalCensusKnown: finalCensusKnown && processRows !== null,
+    groupEmpty: ownedGroupEmpty, executionReceiptPersisted, launchReceiptPersisted });
+  const allErrors = [...(thrown ? [thrown] : []), ...finalizationErrors];
+  if (failures.length) allErrors.push(new Error(`${failures.join("; ")}${scratchMayBeRemoved ? "" : `; scratch preserved at ${scratch}`}`));
+  if (allErrors.length) throw new AggregateError(allErrors, "Private native scale run did not produce a complete, safely reaped result");
   process.stdout.write(JSON.stringify({ passed: true, runId: admission.runId, evidenceDir,
     sourcePinsSha256: pinsSha256, processGroup: processReceipt?.pgid }) + "\n");
 }
