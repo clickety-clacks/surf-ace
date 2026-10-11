@@ -75,6 +75,7 @@ test("compatible public terminal scales through fontSize and fit at unit root zo
   const old = s.term;
   const result = s.run(0.935, "nonce-a", 3);
   assert.equal(result.mode, "public-terminal-font");
+  assert.equal(result.sequence, 1);
   assert.equal(s.term.options.fontSize, 14.96);
   assert.equal(s.document.documentElement.style.zoom, "");
   assert.equal(s.window.term, old);
@@ -82,7 +83,7 @@ test("compatible public terminal scales through fontSize and fit at unit root zo
   s.frames.shift()();
   assert.deepEqual(s.fits, [14.96, 14.96]);
   assert.deepEqual(JSON.parse(JSON.stringify(s.events[0].detail)), {
-    mode: "public-terminal-font", nonce: "nonce-a", revision: 3,
+    mode: "public-terminal-font", nonce: "nonce-a", revision: 3, sequence: 1,
   });
   assert.ok(s.events.some((event) => event.type === "resize"));
 });
@@ -93,10 +94,11 @@ test("ordinary pages select host scaling without changing authored root zoom", (
   const result = s.run(0.935, "nonce-generic", 7);
   assert.equal(result.mode, "host-transform");
   assert.equal(result.scale, 0.935);
+  assert.equal(result.sequence, 1);
   assert.equal(s.document.documentElement.style.zoom, "0.85");
   assert.equal(s.fits.length, 0);
   assert.deepEqual(JSON.parse(JSON.stringify(s.events[0].detail)), {
-    mode: "host-transform", nonce: "nonce-generic", revision: 7,
+    mode: "host-transform", nonce: "nonce-generic", revision: 7, sequence: 1,
   });
 });
 
@@ -154,9 +156,9 @@ test("late terminal readiness reports a revision-bound transition from host to f
   assert.equal(s.document.documentElement.style.zoom, "");
   assert.equal(s.timers.size, 0);
   assert.deepEqual(s.events.map((event) => event.detail).filter(Boolean).map((detail) => JSON.parse(JSON.stringify(detail))), [
-    { mode: "host-transform", nonce: "old", revision: 1 },
-    { mode: "host-transform", nonce: "current", revision: 2 },
-    { mode: "public-terminal-font", nonce: "current", revision: 2 },
+    { mode: "host-transform", nonce: "old", revision: 1, sequence: 1 },
+    { mode: "host-transform", nonce: "current", revision: 2, sequence: 1 },
+    { mode: "public-terminal-font", nonce: "current", revision: 2, sequence: 2 },
   ]);
 });
 
@@ -167,7 +169,7 @@ test("terminal removal after readiness unwinds owned font and reports host mode"
   s.mutate();
   assert.equal(s.term.options.fontSize, 16);
   assert.deepEqual(JSON.parse(JSON.stringify(s.events.at(-1).detail)), {
-    mode: "host-transform", nonce: "mode-switch", revision: 4,
+    mode: "host-transform", nonce: "mode-switch", revision: 4, sequence: 2,
   });
 });
 
