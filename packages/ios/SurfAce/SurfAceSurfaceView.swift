@@ -860,6 +860,7 @@ private struct SurfAceResizeProbeWebView: UIViewRepresentable {
 struct SurfAcePopoutProbeView: View {
     @State private var runtime: SurfAceRuntime
     @State private var surface: SurfAceSurfaceModel?
+    private let narrowChrome = ProcessInfo.processInfo.environment["SURF_ACE_NARROW_CHROME_PROBE"] == "1"
 
     init() {
         let name = "SurfAcePopoutUI.\(UUID().uuidString)"
@@ -879,6 +880,9 @@ struct SurfAcePopoutProbeView: View {
                         .padding(4).background(.black).foregroundStyle(.white)
                         .allowsHitTesting(false)
                 }
+                .frame(width: narrowChrome ? 1000 : nil, height: narrowChrome ? 600 : nil)
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("surf-ace-popout-probe-host")
         } else {
             Color.clear.task {
                 let local = runtime.registerSurface(sceneKey: "popout-ui")
@@ -897,11 +901,21 @@ struct SurfAcePopoutProbeView: View {
                         payload: .html(html: html, baseURL: nil), reloadSource: nil,
                         title: "Pane \(id)", scrollable: true, interactive: true))
                 }
+                if narrowChrome {
+                    for pane in panes {
+                        pane.backStack = [pane.currentEntry]
+                        pane.forwardStack = [pane.currentEntry]
+                    }
+                }
                 local.panesById = Dictionary(uniqueKeysWithValues: panes.map { ($0.paneId, $0) })
-                local.paneLayout = .split(direction: .vertical, children: [
-                    .leaf(1, weight: 1), .split(direction: .horizontal,
-                        children: [.leaf(2, weight: 2), .leaf(3, weight: 1)], weight: 3),
-                ])
+                local.paneLayout = narrowChrome
+                    ? .split(direction: .vertical, children: [
+                        .leaf(1, weight: 0.24), .leaf(2, weight: 0.26), .leaf(3, weight: 0.5),
+                    ])
+                    : .split(direction: .vertical, children: [
+                        .leaf(1, weight: 1), .split(direction: .horizontal,
+                            children: [.leaf(2, weight: 2), .leaf(3, weight: 1)], weight: 3),
+                    ])
                 surface = local
             }
         }
@@ -1092,6 +1106,9 @@ private struct SurfAcePaneView: View {
                             }
                         )
                         .id("\(surface.surfaceId):\(pane.paneInstanceId)")
+                        // Content geometry belongs to the allocated tile, not
+                        // the intrinsic minimum of an overlaid toolbar.
+                        .frame(width: proxy.size.width, height: proxy.size.height)
                         .background(surfAcePaneBackdropColor(isEmpty: showsSpatialEmptyPaneChrome))
                         .contentShape(Rectangle())
                         .simultaneousGesture(
@@ -1647,6 +1664,64 @@ private extension View {
     }
 }
 
+// Arrange the same control groups in rows when the tile is narrow. Keeping
+// one Layout and one set of subviews preserves native toggle/focus identity;
+// 44pt hit targets are neither scaled down nor clipped to make a row fit.
+private struct SurfAcePaneControlsLayout: Layout {
+    let spacing: CGFloat = 7
+
+    private struct Item {
+        let index: Int
+        let size: CGSize
+    }
+
+    private func rows(width: CGFloat, subviews: Subviews) -> [[Item]] {
+        var result: [[Item]] = []
+        var row: [Item] = []
+        var extent: CGFloat = 0
+        for index in subviews.indices {
+            let size = subviews[index].sizeThatFits(ProposedViewSize(width: width, height: nil))
+            let nextExtent = extent + (row.isEmpty ? 0 : spacing) + size.width
+            if !row.isEmpty && nextExtent > width {
+                result.append(row)
+                row = []
+                extent = 0
+            }
+            row.append(Item(index: index, size: size))
+            extent += (row.count == 1 ? 0 : spacing) + size.width
+        }
+        if !row.isEmpty { result.append(row) }
+        return result
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let idealWidth = subviews.reduce(CGFloat.zero) { $0 + $1.sizeThatFits(.unspecified).width }
+            + spacing * CGFloat(max(0, subviews.count - 1))
+        let width = proposal.width ?? idealWidth
+        let arranged = rows(width: width, subviews: subviews)
+        let height = arranged.reduce(CGFloat.zero) { $0 + ($1.map(\.size.height).max() ?? 0) }
+            + spacing * CGFloat(max(0, arranged.count - 1))
+        return CGSize(width: width, height: height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var y = bounds.minY
+        for row in rows(width: bounds.width, subviews: subviews) {
+            let height = row.map(\.size.height).max() ?? 0
+            let width = row.reduce(CGFloat.zero) { $0 + $1.size.width }
+                + spacing * CGFloat(max(0, row.count - 1))
+            var x = bounds.midX - width / 2
+            for item in row {
+                subviews[item.index].place(
+                    at: CGPoint(x: x, y: y + (height - item.size.height) / 2),
+                    anchor: .topLeading, proposal: ProposedViewSize(item.size))
+                x += item.size.width + spacing
+            }
+            y += height + spacing
+        }
+    }
+}
+
 private struct SurfAcePaneControls: View {
     let runtime: SurfAceRuntime
     @Bindable var surface: SurfAceSurfaceModel
@@ -1657,7 +1732,7 @@ private struct SurfAcePaneControls: View {
     @State private var fontSizePopoverVisible = false
 
     var body: some View {
-        HStack(spacing: 7) {
+        SurfAcePaneControlsLayout {
             if pane.drawingRestoreWarningVisible {
                 SurfAceWarningIndicator()
             }
@@ -1680,6 +1755,7 @@ private struct SurfAcePaneControls: View {
                         }
                         .buttonStyle(SurfAceGlassButtonStyle())
                         .accessibilityLabel("Back")
+                        .accessibilityIdentifier("surf-ace-pane-history-back-\(pane.paneId)")
                         .accessibilityHint("Shows \(provenance.accessibilityLabel)")
                     }
 
@@ -1695,6 +1771,7 @@ private struct SurfAcePaneControls: View {
                         }
                         .buttonStyle(SurfAceGlassButtonStyle())
                         .accessibilityLabel("Forward")
+                        .accessibilityIdentifier("surf-ace-pane-history-forward-\(pane.paneId)")
                         .accessibilityHint("Shows \(provenance.accessibilityLabel)")
                     }
 

@@ -190,6 +190,255 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
     }
 
     @MainActor
+    func testLocalCloseCommandPreservesMountedSurvivorsAndDurableHistory() async throws {
+        let name = "SurfAceCommandCloseFixture.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(name, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer {
+            defaults.removePersistentDomain(forName: name)
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let stateURL = directory.appendingPathComponent("authority.json")
+        // Never start a listener, discovery, registration, or a live client.
+        let runtime = SurfAceRuntime(userDefaults: defaults, locklessStateURL: stateURL,
+                                     enableFleetDiscovery: false, isolatedTestLoopback: true)
+        await runtime.restoreLocklessAuthority(reason: "command-close-fixture")
+        let registered = await runtime.registerSurfaceForScene(sceneKey: name)
+        let surface = try XCTUnwrap(registered)
+        let surfaceId = surface.surfaceId
+        let adapter = try runtime.locklessAuthorityForLocalMutation()
+        _ = try await adapter.commitLocalMutation(operation: "test.command-close.seed") { state, _ in
+            let created = try TestRegistryTopology.paneSplit(
+                state: &state, surfaceId: surfaceId, paneId: 1, count: 4, direction: "vertical",
+                expectedTopologyRevision: state.liveSurfaces[surfaceId]?.topologyRevision ?? -1
+            ).newPaneIds
+            func leaf(_ id: Int64, _ weight: Double) -> SurfAceLocklessJSON {
+                .object(["type": .string("pane"), "paneId": .integer(id), "weight": .double(weight)])
+            }
+            state.liveSurfaces[surfaceId]?.topology = try SurfAceLocklessTopologyCodec.canonical(.object([
+                "type": .string("split"), "direction": .string("vertical"), "weight": .integer(1),
+                "children": .array([leaf(1, 0.24), leaf(created[0], 0.26), .object([
+                    "type": .string("split"), "direction": .string("horizontal"), "weight": .double(0.5),
+                    "children": .array([leaf(created[1], 0.2), leaf(created[2], 0.8)]),
+                ])]),
+            ]))
+            for id in [Int64(1)] + created {
+                var pane = try XCTUnwrap(state.liveSurfaces[surfaceId]?.panes[String(id)])
+                func entry(_ revision: Int64) -> SurfAceLocklessHistoryEntry {
+                    let identity = "command-close-\(id)-\(revision)"
+                    return .init(
+                        annotations: pane.history.visible.annotations,
+                        content: .object(["html": .string("<html><head><title>\(identity)</title></head><body style='margin:0;background:#d4ead4'><script>window.sessionToken=Math.random().toString();</script>\(identity)</body></html>")]),
+                        contentId: identity, contentType: "html", historyEntryId: "he_\(identity)",
+                        lastVisibleSequence: revision,
+                        provenance: .init(friendlyChatName: "isolated fixture", controllerProductName: "XCTest"),
+                        revision: revision
+                    )
+                }
+                pane.history = .init(back: [entry(1)], forward: [entry(3)],
+                                     nextRevision: 4, nextVisibleSequence: 4, visible: entry(2))
+                state.liveSurfaces[surfaceId]?.panes[String(id)] = pane
+            }
+            try state.validate()
+            return .null
+        }
+        await runtime.restoreLocklessAuthority(reason: "command-close-seed-projection")
+        let seededState = await adapter.snapshot()
+        let original = try XCTUnwrap(seededState.liveSurfaces[surfaceId])
+        let ids = original.panes.values.map(\.paneId).sorted()
+        XCTAssertEqual(ids.count, 4)
+        let originalModels = surface.panesById
+
+        let host = UIHostingController(rootView: SurfAceWindowView(runtime: runtime, surface: surface))
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previousKeyWindow = scene.windows.first(where: \.isKeyWindow)
+        let window = UIWindow(windowScene: scene)
+        // Mike87e9be34: 240pt remains supported. Keep the original failed
+        // geometry and measure authoritative tile versus content/chrome bounds.
+        window.frame = CGRect(x: 0, y: 0, width: 1000, height: 800)
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+            previousKeyWindow?.makeKey()
+        }
+        host.view.frame = window.bounds
+        host.view.layoutIfNeeded()
+        let initialViews = popoutWebViews(in: host.view)
+        XCTAssertEqual(initialViews.count, 4)
+        let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            initialViews.allSatisfy { $0.title?.hasPrefix("command-close-") == true }
+        }, object: nil)
+        await fulfillment(of: [ready], timeout: 10)
+        var views: [Int64: WKWebView] = [:]
+        var tokens: [Int64: String] = [:]
+        for id in ids {
+            let view = try XCTUnwrap(initialViews.first { $0.title == "command-close-\(id)-2" })
+            views[id] = view
+            let token = try await view.evaluateJavaScript("window.sessionToken") as? String
+            tokens[id] = try XCTUnwrap(token)
+        }
+        // Derive the oracle from the configured host and its safe-area frame,
+        // never from possibly overflowing content views.
+        let available = host.view.safeAreaLayoutGuide.layoutFrame
+        XCTAssertEqual(available.width, 1000, accuracy: 1)
+        XCTAssertEqual(surface.viewportSize.width, available.width, accuracy: 1)
+        XCTAssertEqual(surface.viewportSize.height, available.height, accuracy: 1)
+        let initialFractions: [CGFloat] = [0.24, 0.26, 0.5, 0.5]
+        var initialMeasurements: [[String: Any]] = []
+        for (index, id) in ids.enumerated() {
+            let model = try XCTUnwrap(surface.panesById[Int(id)])
+            let geometry = try XCTUnwrap(model.geometrySnapshot)
+            let view = try XCTUnwrap(views[id])
+            let button = popoutToolbarButtons(in: host.view).first {
+                $0.accessibilityIdentifier == "surf-ace-pane-popout-\(id)"
+            }
+            initialMeasurements.append([
+                "paneId": id, "stage": "before_any_close",
+                "expectedTileWidth": available.width * initialFractions[index],
+                "hostSafeAreaFrame": NSCoder.string(for: available),
+                "authoritativePaneFrame": NSCoder.string(for: geometry.paneFrame),
+                "publishedContentViewport": NSCoder.string(for: geometry.contentViewport),
+                "webViewWindowFrame": NSCoder.string(for: view.convert(view.bounds, to: window)),
+                "webViewParentBounds": NSCoder.string(for: view.superview?.bounds ?? .zero),
+                "popoutControlFrame": NSCoder.string(for: button.map { $0.convert($0.bounds, to: window) } ?? .zero),
+            ])
+            XCTAssertEqual(geometry.paneFrame.width, available.width * initialFractions[index], accuracy: 1)
+        }
+        let initialAttachment = XCTAttachment(data: try JSONSerialization.data(
+            withJSONObject: initialMeasurements, options: [.prettyPrinted, .sortedKeys]),
+            uniformTypeIdentifier: "public.json")
+        initialAttachment.name = "command-close-before-any-close-host-tile-content-chrome"
+        initialAttachment.lifetime = .keepAlways
+        add(initialAttachment)
+        // SwiftUI chrome belongs to the recursive split/leaf mount path. A
+        // structural collapse can legitimately remount chrome; the live WK host,
+        // session and pane/history identity must survive even that boundary.
+        // Within an unchanged path (including width-driven wrapping), require
+        // the same native toggle. Pop-out/Restore identity is covered separately.
+        func chromeMountPath(_ node: SurfAcePaneLayoutNode, paneId: Int) -> [String]? {
+            switch node {
+            case .empty: return nil
+            case .leaf(let id, _): return id == paneId ? ["leaf:\(id)"] : nil
+            case .split(let direction, let children, _):
+                guard let child = children.first(where: { $0.paneIDs.contains(paneId) }),
+                      let tail = chromeMountPath(child, paneId: paneId) else { return nil }
+                return ["split:\(direction.rawValue)", child.layoutIdentity] + tail
+            }
+        }
+        let originalToggles = try Dictionary(uniqueKeysWithValues: ids.map { id in
+            (id, try XCTUnwrap(popoutToolbarButtons(in: host.view).first {
+                $0.accessibilityIdentifier == "surf-ace-pane-popout-\(id)"
+            }))
+        })
+        let originalChromePaths = Dictionary(uniqueKeysWithValues: ids.map {
+            ($0, chromeMountPath(surface.paneLayout, paneId: Int($0)))
+        })
+        var expectedRevision = original.topologyRevision
+        var tombstoneIds = Set<String>()
+        // Nested collapse must retain its OUTER 0.5 slot, not the child's 0.2.
+        // The next close leaves weights summing to 0.5; the last collapses the root.
+        let transitions: [(closed: Int64, survivors: [Int64], fractions: [CGFloat])] = [
+            (ids[3], [ids[0], ids[1], ids[2]], [0.24, 0.26, 0.5]),
+            (ids[2], [ids[0], ids[1]], [0.48, 0.52]),
+            (ids[0], [ids[1]], [1]),
+        ]
+        for (step, transition) in transitions.enumerated() {
+            let tombstoneId = try await runtime.closePaneLocally(surfaceId: surfaceId, paneId: Int(transition.closed))
+            XCTAssertTrue(tombstoneIds.insert(tombstoneId).inserted)
+            let state = await adapter.snapshot()
+            let persisted = try SurfAceLocklessGenerationStore(stateURL: stateURL).load()
+            XCTAssertEqual(persisted, state, "Command must be durable before projecting its result")
+            let material = try XCTUnwrap(state.liveSurfaces[surfaceId])
+            expectedRevision += 1
+            XCTAssertEqual(material.topologyRevision, expectedRevision)
+            XCTAssertEqual(Set(material.panes.keys), Set(transition.survivors.map(String.init)))
+            let tombstone = try XCTUnwrap(material.paneTombstones.first { $0.tombstoneId == tombstoneId })
+            XCTAssertEqual(tombstone.pane, original.panes[String(transition.closed)])
+            let retainedViews = try transition.survivors.map { try XCTUnwrap(views[$0]) }
+            await waitForMountedWebViews(retainedViews, in: host.view)
+            var x = available.minX
+            for (index, id) in transition.survivors.enumerated() {
+                XCTAssertEqual(material.panes[String(id)], original.panes[String(id)], "Identity, content, annotations, and complete back/forward history must survive")
+                let model = try XCTUnwrap(surface.panesById[Int(id)])
+                XCTAssertTrue(model === originalModels[Int(id)])
+                XCTAssertEqual(model.currentEntry.contentId, "command-close-\(id)-2")
+                XCTAssertEqual(model.backStack.map(\.contentId), ["command-close-\(id)-1"])
+                XCTAssertEqual(model.forwardStack.map(\.contentId), ["command-close-\(id)-3"])
+                let view = try XCTUnwrap(views[id])
+                let width = available.width * transition.fractions[index]
+                let geometry = try XCTUnwrap(model.geometrySnapshot)
+                var ancestors: [[String: String]] = []
+                var ancestor: UIView? = view
+                while let current = ancestor {
+                    ancestors.append(["class": String(describing: type(of: current)),
+                                      "bounds": NSCoder.string(for: current.bounds),
+                                      "windowFrame": NSCoder.string(for: current.convert(current.bounds, to: window))])
+                    ancestor = current.superview
+                }
+                let controls = popoutToolbarButtons(in: host.view).filter {
+                    $0.accessibilityIdentifier == "surf-ace-pane-popout-\(id)"
+                }.map { ["frame": NSCoder.string(for: $0.convert($0.bounds, to: window)),
+                         "superviewBounds": NSCoder.string(for: $0.superview?.bounds ?? .zero)] }
+                let diagnostic: [String: Any] = [
+                    "step": step + 1, "paneId": id, "expectedTileWidth": width,
+                    "authoritativePaneFrame": NSCoder.string(for: geometry.paneFrame),
+                    "publishedContentViewport": NSCoder.string(for: geometry.contentViewport),
+                    "measuredProxySize": NSCoder.string(for: model.lastMeasuredSize),
+                    "webViewWindowFrame": NSCoder.string(for: view.convert(view.bounds, to: window)),
+                    "nativeAncestors": ancestors, "popoutControl": controls,
+                ]
+                let diagnosticAttachment = XCTAttachment(data: try JSONSerialization.data(
+                    withJSONObject: diagnostic, options: [.prettyPrinted, .sortedKeys]),
+                    uniformTypeIdentifier: "public.json")
+                diagnosticAttachment.name = "command-close-step-\(step + 1)-pane-\(id)-tile-content-chrome"
+                diagnosticAttachment.lifetime = .keepAlways
+                add(diagnosticAttachment)
+                XCTAssertEqual(geometry.paneFrame.width, width, accuracy: 1,
+                               "Authoritative outer tile must match accepted topology")
+                await waitForPopoutFrame(view, in: window,
+                                        expected: CGRect(x: x, y: available.minY, width: width, height: available.height))
+                let contentHost = try XCTUnwrap(view.superview)
+                let hostFrame = contentHost.convert(contentHost.bounds, to: window)
+                XCTAssertEqual(hostFrame.minX, x, accuracy: 1)
+                XCTAssertEqual(hostFrame.width, width, accuracy: 1,
+                               "UIKit content host must respect its authoritative outer tile")
+                let toggle = try XCTUnwrap(popoutToolbarButtons(in: host.view).first {
+                    $0.accessibilityIdentifier == "surf-ace-pane-popout-\(id)"
+                })
+                let initialPath = originalChromePaths[id] ?? nil
+                let currentPath = chromeMountPath(surface.paneLayout, paneId: Int(id))
+                let sameNativeToggle = toggle === originalToggles[id]
+                print("close_chrome_identity step=\(step + 1) pane=\(id) path_unchanged=\(initialPath == currentPath) same_native_toggle=\(sameNativeToggle)")
+                if initialPath == currentPath {
+                    XCTAssertTrue(sameNativeToggle,
+                                  "Unchanged chrome mount path must retain its toggle: step=\(step + 1) pane=\(id)")
+                }
+                let hitFrame = toggle.convert(toggle.bounds, to: window)
+                XCTAssertGreaterThanOrEqual(hitFrame.minX, x - 1)
+                XCTAssertLessThanOrEqual(hitFrame.maxX, x + width + 1)
+                XCTAssertGreaterThanOrEqual(hitFrame.width, 43)
+                let hit = window.hitTest(CGPoint(x: hitFrame.midX, y: hitFrame.midY), with: nil)
+                XCTAssertTrue(hit === toggle || hit?.isDescendant(of: toggle) == true,
+                              "retained narrow toggle is actually hit reachable inside its tile")
+                x += width
+                let token = try await view.evaluateJavaScript("window.sessionToken") as? String
+                XCTAssertEqual(token, tokens[id], "A retained WebView must not reload")
+            }
+            XCTAssertEqual(x, available.maxX, accuracy: 0.01, "Survivors fill the complete available width")
+            let image = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
+                window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+            }
+            let attachment = XCTAttachment(image: image)
+            attachment.name = "command-close-step-\(step + 1)-mounted-survivors"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+        }
+    }
+
+    @MainActor
     func testPopoutGeometryAndReconciliationDoNotReplayTopology() {
         let portrait = CGRect(x: 0, y: 0, width: 600, height: 900)
         let right = surfAceSplitChildBounds(parent: portrait, direction: .vertical,

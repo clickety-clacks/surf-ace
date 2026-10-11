@@ -2,6 +2,65 @@ import XCTest
 
 final class SurfAceResizeUITests: XCTestCase {
     @MainActor
+    func testSupported240PaneKeepsChromeHitRegionsInsideItsTile() throws {
+        try preparePopoutWithoutVoiceOver()
+        let app = XCUIApplication()
+        app.launchEnvironment["SURF_ACE_XCTEST_HOST_NO_AUTOSTART"] = "1"
+        app.launchEnvironment["SURF_ACE_POPOUT_PROBE"] = "1"
+        app.launchEnvironment["SURF_ACE_NARROW_CHROME_PROBE"] = "1"
+        app.launch()
+        defer {
+            XCUIDevice.shared.orientation = .portrait
+            app.terminate()
+        }
+        XCUIDevice.shared.orientation = .landscapeLeft
+        let landscape = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            app.frame.width > app.frame.height
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [landscape], timeout: 5), .completed)
+        let root = app.otherElements["surf-ace-popout-probe-host"]
+        XCTAssertTrue(root.waitForExistence(timeout: 10))
+        XCTAssertEqual(root.frame.width, 1000, accuracy: 1)
+        let tile = CGRect(x: root.frame.minX, y: root.frame.minY,
+                          width: 240, height: root.frame.height)
+        let toggle = app.buttons["surf-ace-pane-popout-1"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 10))
+        func nearest(_ identifier: String) throws -> XCUIElement {
+            try XCTUnwrap(app.buttons.matching(identifier: identifier).allElementsBoundByIndex.min {
+                hypot($0.frame.midX - toggle.frame.midX, $0.frame.midY - toggle.frame.midY)
+                    < hypot($1.frame.midX - toggle.frame.midX, $1.frame.midY - toggle.frame.midY)
+            })
+        }
+        let font = try nearest("FontSize")
+        let sketch = try nearest("hand.draw")
+        let back = app.buttons["surf-ace-pane-history-back-1"]
+        let forward = app.buttons["surf-ace-pane-history-forward-1"]
+        let controls = [toggle, font, sketch, back, forward]
+        for control in controls {
+            XCTAssertTrue(control.isHittable, control.debugDescription)
+            XCTAssertGreaterThanOrEqual(control.frame.width, 43)
+            XCTAssertGreaterThanOrEqual(control.frame.height, 43)
+            XCTAssertGreaterThanOrEqual(control.frame.minX, tile.minX - 1)
+            XCTAssertLessThanOrEqual(control.frame.maxX, tile.maxX + 1)
+            XCTAssertGreaterThanOrEqual(control.frame.minY, tile.minY - 1)
+            XCTAssertLessThanOrEqual(control.frame.maxY, tile.maxY + 1)
+        }
+        for left in controls.indices {
+            for right in controls.indices where right > left {
+                XCTAssertTrue(controls[left].frame.intersection(controls[right].frame).isEmpty,
+                              "required control hit regions must not overlap")
+            }
+        }
+        font.tap()
+        XCTAssertTrue(app.buttons["Reset font size"].waitForExistence(timeout: 5),
+                      "the narrow font control actually opens its reachable popover")
+        let attachment = XCTAttachment(screenshot: app.screenshot())
+        attachment.name = "supported-240-narrow-chrome-and-font-popover"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    @MainActor
     func testPopoutRestoreKeepsSessionAndOwnsCoveredPaneInput() throws {
         try preparePopoutWithoutVoiceOver()
         let app = XCUIApplication()
