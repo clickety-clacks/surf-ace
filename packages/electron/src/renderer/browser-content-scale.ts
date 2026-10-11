@@ -8,23 +8,26 @@ export function browserContentScaleScript(scale: number, nonce = "", revision = 
     const key = Symbol.for('surf-ace.public-terminal-font-scale.v2');
     if (window[key] === undefined) Object.defineProperty(window, key, { value: {
       scale: 1, revision: 0, active: null, states: new WeakMap(), timer: null,
-      observer: null, mode: null, hostNonce: '', hostRevision: 0
+      observer: null, mode: null, modeSequence: 0, hostNonce: '', hostRevision: 0
     }});
     const c = window[key];
     if (!c || !(c.states instanceof WeakMap)) throw new Error('Terminal scale state unavailable');
     c.scale = ${JSON.stringify(scale)};
     c.hostNonce = ${JSON.stringify(nonce)};
     c.hostRevision = ${JSON.stringify(revision)};
+    c.modeSequence = 0;
     ++c.revision;
     if (c.timer !== null) { clearTimeout(c.timer); c.timer = null; }
     const root = document.documentElement;
     const reportMode = (mode, force = false) => {
-      if (!force && c.mode === mode) return;
+      if (!force && c.mode === mode) return c.modeSequence;
       c.mode = mode;
-      if (!c.hostNonce) return;
+      const sequence = ++c.modeSequence;
+      if (!c.hostNonce) return sequence;
       window.dispatchEvent(new CustomEvent('surf-ace-scale-mode', { detail: {
-        mode, nonce: c.hostNonce, revision: c.hostRevision
+        mode, nonce: c.hostNonce, revision: c.hostRevision, sequence
       }}));
+      return sequence;
     };
     const compatible = (t) => t && typeof t === 'object' &&
       t.element instanceof HTMLElement && t.element.ownerDocument === document &&
@@ -48,8 +51,8 @@ export function browserContentScaleScript(scale: number, nonce = "", revision = 
       const t = window.term;
       if (!compatible(t)) {
         retire();
-        reportMode('host-transform', forceReport);
-        return { mode: 'host-transform', scale: c.scale };
+        const sequence = reportMode('host-transform', forceReport);
+        return { mode: 'host-transform', scale: c.scale, sequence };
       }
       if (c.active && (c.active.terminal !== t || c.active.options !== t.options || c.active.fit !== t.fit)) retire();
       let a = c.states.get(t);
@@ -60,8 +63,8 @@ export function browserContentScaleScript(scale: number, nonce = "", revision = 
       }
       c.active = a;
       if (a.writing) {
-        reportMode('public-terminal-font', forceReport);
-        return { mode: 'public-terminal-font', fontSize: a.applied };
+        const sequence = reportMode('public-terminal-font', forceReport);
+        return { mode: 'public-terminal-font', fontSize: a.applied, sequence };
       }
       const previousApplied = a.options.fontSize === a.applied ? a.applied : null;
       if (previousApplied === null) a.base = a.options.fontSize;
@@ -103,8 +106,8 @@ export function browserContentScaleScript(scale: number, nonce = "", revision = 
         }
         try { a.fit.call(t); } catch (error) { console.warn('Deferred terminal refit failed', error); }
       });
-      reportMode('public-terminal-font', forceReport);
-      return { mode: 'public-terminal-font', fontSize };
+      const sequence = reportMode('public-terminal-font', forceReport);
+      return { mode: 'public-terminal-font', fontSize, sequence };
     };
     const result = reconcile(true);
     // A bounded current-document readiness window covers ttyd's asynchronous initialization.

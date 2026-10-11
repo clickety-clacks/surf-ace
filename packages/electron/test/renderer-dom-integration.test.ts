@@ -613,15 +613,17 @@ test("renderer DOM integrates authoritative connection states and live scale con
     });
     const scripts = guests.map(() => [] as string[]);
     let deferNextModeResult = false;
+    let heldModeResult: { resolve: (value: unknown) => void; value: unknown } | null = null;
     guests.forEach((guest, index) => {
       guest.executeJavaScript = async (code) => {
         if (code.includes("surf-ace.public-terminal-font-scale.v2")) {
           scripts[index]!.push(code);
+          const value = runInNewContext(code, contexts[index]);
           if (index === 0 && deferNextModeResult) {
             deferNextModeResult = false;
-            return null;
+            return new Promise((resolve) => { heldModeResult = { resolve, value }; });
           }
-          return runInNewContext(code, contexts[index]);
+          return value;
         }
         return null;
       };
@@ -633,9 +635,14 @@ test("renderer DOM integrates authoritative connection states and live scale con
       assert.ok(nonce && revision, "scale script carries its current nonce and revision");
       return { nonce: JSON.parse(nonce) as string, revision: Number(revision) };
     };
-    const sendMode = (guest: HTMLElement, mode: "host-transform" | "public-terminal-font", stamp: { nonce: string; revision: number }) => {
+    const sendMode = (
+      guest: HTMLElement,
+      mode: "host-transform" | "public-terminal-font",
+      stamp: { nonce: string; revision: number },
+      sequence: number,
+    ) => {
       const event = new window.Event("ipc-message");
-      Object.assign(event, { channel: "surf-ace-content", args: [{ type: "scale-mode", mode, ...stamp }] });
+      Object.assign(event, { channel: "surf-ace-content", args: [{ type: "scale-mode", mode, sequence, ...stamp }] });
       guest.dispatchEvent(event);
     };
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -654,7 +661,7 @@ test("renderer DOM integrates authoritative connection states and live scale con
     assert.deepEqual([...document.querySelectorAll("webview")], guests);
     const firstIdentity = identity(scripts[0]![0]!);
     const currentIdentity = identity(scripts[0]!.at(-1)!);
-    sendMode(guests[0]!, "public-terminal-font", firstIdentity);
+    sendMode(guests[0]!, "public-terminal-font", firstIdentity, 2);
     assert.equal(guests[0]!.style.transform, "scale(0.935)", "obsolete mode event cannot undo a newer host scale");
     guests[0]!.dispatchEvent(new window.Event("did-start-loading"));
     const prior = contexts[0]!.result.resizeEvents;
@@ -676,12 +683,47 @@ test("renderer DOM integrates authoritative connection states and live scale con
     assert.ok(Math.abs(Number.parseFloat(guests[0]!.style.minHeight) * enlargedScale - guests[0]!.getBoundingClientRect().height) < 0.01);
     const delayedIdentity = identity(scripts[0]!.at(-1)!);
     assert.notEqual(delayedIdentity.nonce, currentIdentity.nonce);
-    sendMode(guests[0]!, "public-terminal-font", currentIdentity);
-    assert.equal(guests[0]!.style.transform, `scale(${enlargedScale})`, "old revision cannot affect the delayed current mode");
-    sendMode(guests[0]!, "public-terminal-font", delayedIdentity);
-    assert.equal(guests[0]!.style.transform, "", "current asynchronous terminal mode restores physical guest bounds");
-    sendMode(guests[0]!, "host-transform", delayedIdentity);
-    assert.equal(guests[0]!.style.transform, `scale(${enlargedScale})`, "current asynchronous generic mode restores the host transform");
+    assert.ok(heldModeResult, "initial mode result is held until a newer same-request IPC observation arrives");
+    sendMode(guests[0]!, "public-terminal-font", delayedIdentity, 2);
+    assert.equal(guests[0]!.style.transform, "", "newer terminal observation removes the host transform");
+    heldModeResult!.resolve(heldModeResult!.value);
+    heldModeResult = null;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(guests[0]!.style.transform, "", "late host-transform result cannot roll back a newer terminal observation");
+    sendMode(guests[0]!, "host-transform", delayedIdentity, 2);
+    assert.equal(guests[0]!.style.transform, "", "a duplicate observation cannot switch modes at the same sequence");
+    sendMode(guests[0]!, "public-terminal-font", currentIdentity, 2);
+    assert.equal(guests[0]!.style.transform, "", "old revision cannot affect the delayed current mode");
+    sendMode(guests[0]!, "host-transform", delayedIdentity, 3);
+    assert.equal(guests[0]!.style.transform, `scale(${enlargedScale})`, "newer generic observation restores the host transform");
+
+    deferNextModeResult = true;
+    keyboardListener!({ action: "increase", paneId: 1, type: "content-scale" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const supersededResult = heldModeResult;
+    assert.ok(supersededResult, "a pending initial result is retained across a newer scale request");
+    const supersededIdentity = identity(scripts[0]!.at(-1)!);
+    keyboardListener!({ action: "increase", paneId: 1, type: "content-scale" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const latestTransform = guests[0]!.style.transform;
+    supersededResult!.resolve(supersededResult!.value);
+    heldModeResult = null;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(guests[0]!.style.transform, latestTransform, "a result from a superseded scale request cannot affect the current request");
+    sendMode(guests[0]!, "public-terminal-font", supersededIdentity, 2);
+    assert.equal(guests[0]!.style.transform, latestTransform, "an IPC observation from a superseded request remains fenced");
+
+    deferNextModeResult = true;
+    keyboardListener!({ action: "increase", paneId: 1, type: "content-scale" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const navigationResult = heldModeResult;
+    assert.ok(navigationResult, "navigation fixture holds the initial result before it resolves");
+    guests[0]!.dispatchEvent(new window.Event("did-start-loading"));
+    assert.equal(guests[0]!.style.transform, "", "navigation reset retires the old host transform");
+    navigationResult!.resolve(navigationResult!.value);
+    heldModeResult = null;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(guests[0]!.style.transform, "", "a pending result from the prior document cannot restore its transform after navigation");
   });
 
   await test("ready public terminal scales its font at unit document zoom and retains guest", async () => {
@@ -721,11 +763,36 @@ test("renderer DOM integrates authoritative connection states and live scale con
       Event: class { constructor(public type: string) {} },
     };
     const modes: string[] = [];
+    const modeSequences: number[] = [];
+    const scripts: string[] = [];
+    let deferInitialModeResult = true;
+    let heldInitialModeResult: { resolve: (value: unknown) => void; value: unknown } | null = null;
+    const scaleIdentity = (code: string) => {
+      const nonce = code.match(/c\.hostNonce = ("[^"]*")/)?.[1];
+      const revision = code.match(/c\.hostRevision = (\d+)/)?.[1];
+      assert.ok(nonce && revision, "scale script carries its current nonce and revision");
+      return { nonce: JSON.parse(nonce) as string, revision: Number(revision) };
+    };
+    const sendMode = (
+      mode: "host-transform" | "public-terminal-font",
+      stamp: { nonce: string; revision: number },
+      sequence: number,
+    ) => {
+      const event = new window.Event("ipc-message");
+      Object.assign(event, { channel: "surf-ace-content", args: [{ type: "scale-mode", mode, sequence, ...stamp }] });
+      guest.dispatchEvent(event);
+    };
     guest.executeJavaScript = async (code) => {
       if (code === "document.readyState") return "complete";
       if (code.includes("surf-ace.public-terminal-font-scale.v2")) {
+        scripts.push(code);
         const result = runInNewContext(code, context);
         modes.push(result.mode);
+        modeSequences.push(result.sequence);
+        if (deferInitialModeResult) {
+          deferInitialModeResult = false;
+          return new Promise((resolve) => { heldInitialModeResult = { resolve, value: result }; });
+        }
         return result;
       }
       return null;
@@ -735,6 +802,16 @@ test("renderer DOM integrates authoritative connection states and live scale con
     assert.equal(fits.length, 0, "attach cannot scale an unready public terminal");
     guest.dispatchEvent(new window.Event("dom-ready"));
     await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.ok(heldInitialModeResult, "initial public-terminal result is held for the ordering check");
+    const initialIdentity = scaleIdentity(scripts[0]!);
+    sendMode("host-transform", initialIdentity, 2);
+    assert.equal(guest.style.transform, "scale(0.85)", "newer host observation applies while terminal result is pending");
+    heldInitialModeResult!.resolve(heldInitialModeResult!.value);
+    heldInitialModeResult = null;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(guest.style.transform, "scale(0.85)", "late public-terminal result cannot roll back a newer host observation");
+    sendMode("public-terminal-font", initialIdentity, 3);
+    assert.equal(guest.style.transform, "", "newer terminal observation restores physical guest bounds");
     assert.equal(term.options.fontSize, 13.6);
     assert.equal(root.style.zoom, "", "terminal font scaling must not also scale its document");
     const terminalWidth = guest.style.width;
@@ -749,6 +826,8 @@ test("renderer DOM integrates authoritative connection states and live scale con
     assert.equal(term.options.fontSize, 13.6);
     assert.deepEqual(fits, [13.6, 14.96, 13.6]);
     assert.deepEqual(modes, ["public-terminal-font", "public-terminal-font", "public-terminal-font"]);
+    assert.deepEqual(modeSequences, [1, 1, 1], "each new scale request starts a fresh ordered observation sequence");
+    assert.equal(scripts.length, 3);
     assert.equal(document.querySelector("webview"), guest);
     assert.equal(context.window.term, term);
   });

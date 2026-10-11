@@ -6,7 +6,7 @@ type ContentEventPayload =
   | { selection: SelectionPayload | null; type: "selection" }
   | { kind: "long_press" | "tap"; nearestContent?: string; position: { x: number; y: number }; type: "tap" }
   | { type: "ready"; viewport: ViewportPayload }
-  | { mode: "host-transform" | "public-terminal-font"; nonce: string; revision: number; type: "scale-mode" }
+  | { mode: "host-transform" | "public-terminal-font"; nonce: string; revision: number; sequence: number; type: "scale-mode" }
   | { type: "scroll"; viewport: ViewportPayload; visibleText: string };
 
 type SelectionPayload = {
@@ -116,13 +116,15 @@ window.addEventListener("surf-ace-scale-mode", (event) => {
   const value = detail as Record<string, unknown>;
   if ((value.mode !== "host-transform" && value.mode !== "public-terminal-font") ||
       typeof value.nonce !== "string" || !Number.isSafeInteger(value.revision) ||
-      (value.revision as number) < 0) {
+      (value.revision as number) < 0 || !Number.isSafeInteger(value.sequence) ||
+      (value.sequence as number) < 1) {
     return;
   }
   emit({
     mode: value.mode,
     nonce: value.nonce,
     revision: value.revision as number,
+    sequence: value.sequence as number,
     type: "scale-mode",
   });
 });

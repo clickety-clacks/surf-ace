@@ -62,6 +62,7 @@ type ContentReloadSource = { kind: "file"; path: string };
 type BrowserContentScaleMode = "host-transform" | "public-terminal-font";
 type BrowserContentScaleState = {
   mode: BrowserContentScaleMode;
+  modeSequence: number;
   nonce: string;
   revision: number;
   scale: number;
@@ -1884,11 +1885,17 @@ function applyBrowserScaleMode(
   webview: BrowserUrlWebViewElement,
   state: BrowserContentScaleState,
   mode: BrowserContentScaleMode,
-): void {
+  sequence: number,
+): boolean {
   if (browserContentScaleStates.get(webview) !== state || !webview.isConnected ||
-      currentPaneFrameElement(view) !== webview || state.mode === mode) return;
-  state.mode = mode;
-  applyPaneFrameSize(view, webview);
+      currentPaneFrameElement(view) !== webview || !Number.isSafeInteger(sequence) ||
+      sequence <= state.modeSequence) return false;
+  state.modeSequence = sequence;
+  if (state.mode !== mode) {
+    state.mode = mode;
+    applyPaneFrameSize(view, webview);
+  }
+  return true;
 }
 
 function applyBrowserContentScale(
@@ -1899,6 +1906,7 @@ function applyBrowserContentScale(
   const previous = browserContentScaleStates.get(webview);
   const state: BrowserContentScaleState = {
     mode: previous?.mode ?? "public-terminal-font",
+    modeSequence: 0,
     nonce: newBrowserScaleNonce(),
     revision: (previous?.revision ?? 0) + 1,
     scale,
@@ -1913,10 +1921,12 @@ function applyBrowserContentScale(
   if (!result) return Promise.resolve(null);
   return result.then((value) => {
     if (!value || typeof value !== "object") return null;
-    const mode = (value as { mode?: unknown }).mode;
-    if (!isBrowserContentScaleMode(mode)) return null;
-    applyBrowserScaleMode(view, webview, state, mode);
-    return browserContentScaleStates.get(webview) === state ? mode : null;
+    const observation = value as { mode?: unknown; sequence?: unknown };
+    const mode = observation.mode;
+    const sequence = observation.sequence;
+    if (!isBrowserContentScaleMode(mode) || !Number.isSafeInteger(sequence) || (sequence as number) < 1) return null;
+    applyBrowserScaleMode(view, webview, state, mode, sequence as number);
+    return browserContentScaleStates.get(webview) === state ? state.mode : null;
   });
 }
 
@@ -1924,6 +1934,7 @@ function resetBrowserContentScaleMode(view: PaneView, webview: BrowserUrlWebView
   const previous = browserContentScaleStates.get(webview);
   browserContentScaleStates.set(webview, {
     mode: "public-terminal-font",
+    modeSequence: 0,
     nonce: newBrowserScaleNonce(),
     revision: (previous?.revision ?? 0) + 1,
     scale: Math.round(WEB_CONTENT_BASE_SCALE * view.scale * 1000) / 1000,
@@ -2484,9 +2495,10 @@ function wireBrowserContentEvents(view: PaneView, paneId: number, webview: Brows
     if (payload.type === "scale-mode") {
       const state = browserContentScaleStates.get(webview);
       const mode = payload.mode;
+      const sequence = payload.sequence;
       if (state && payload.nonce === state.nonce && payload.revision === state.revision &&
-          isBrowserContentScaleMode(mode)) {
-        applyBrowserScaleMode(view, webview, state, mode);
+          isBrowserContentScaleMode(mode) && Number.isSafeInteger(sequence) && (sequence as number) >= 1) {
+        applyBrowserScaleMode(view, webview, state, mode, sequence as number);
       }
       return;
     }
