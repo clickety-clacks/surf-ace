@@ -398,6 +398,32 @@ fn help_and_schema_are_json_and_do_not_require_operational_arguments() {
             .count(),
         4
     );
+    let discovery_limits = help_json["result"]["discoveryLimits"].as_array().unwrap();
+    assert!(discovery_limits.iter().any(|limit| limit
+        .as_str()
+        .is_some_and(|text| text.contains("fleet-list") && text.contains("no direct endpoint"))));
+    assert!(discovery_limits
+        .iter()
+        .any(|limit| limit.as_str().is_some_and(|text| {
+            text.contains("pair a controller") && text.contains("not no-pair discovery probes")
+        })));
+    assert!(discovery_limits.iter().any(|limit| limit
+        .as_str()
+        .is_some_and(|text| text.contains("No command resolves a named window"))));
+
+    let list_help = run_native_cli(&["help", "list"]);
+    assert!(list_help.status.success());
+    let list_help_json: Value = serde_json::from_slice(&list_help.stdout).unwrap();
+    assert!(list_help_json["result"]["command"]["effect"]
+        .as_str()
+        .unwrap()
+        .contains("paired_direct_read"));
+    assert!(
+        list_help_json["result"]["command"]["resultSchema"]["properties"]["result"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("pair.request")
+    );
 
     let schema = run_native_cli(&["schema", "topology-realize"]);
     assert!(
