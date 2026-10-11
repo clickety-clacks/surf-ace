@@ -241,7 +241,11 @@ fn foreground_watcher_preserves_ack_written_by_separate_process() {
         .unwrap();
     let state_file = listener_path(root.path(), "reviewer");
     let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
-    assert!(lines.next().unwrap().unwrap().contains("annotation.subscription"));
+    assert!(lines
+        .next()
+        .unwrap()
+        .unwrap()
+        .contains("annotation.subscription"));
     let first: Value = serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
     assert_eq!(first["payload"]["serverCursor"], format!("ann1:{EPOCH}:1"));
     let ack = Command::new(cli_binary())
@@ -282,49 +286,91 @@ fn foreground_watcher_reports_retirement_after_another_process_persists_it() {
         let mut watch_socket = accept(stream).unwrap();
         hello(&mut watch_socket);
         let watch = request(&mut watch_socket, "annotation.watch");
-        respond(&mut watch_socket, &watch, json!({"consumerId":"reviewer",
+        respond(
+            &mut watch_socket,
+            &watch,
+            json!({"consumerId":"reviewer",
             "leaseId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","ackCursor":null,
             "initialFromCursor":{"epoch":EPOCH,"sequence":"1"},
             "availableFromCursor":null,"headCursor":null,"historyCompleteSinceStart":true,
-            "limits":{"replayPolicy":{"targetAcknowledgedHistoryDays":30}}}));
+            "limits":{"replayPolicy":{"targetAcknowledgedHistoryDays":30}}}),
+        );
         let (stream, _) = listener.accept().unwrap();
         let mut retire_socket = accept(stream).unwrap();
         hello(&mut retire_socket);
         let retire = request(&mut retire_socket, "annotation.consumer.retire");
-        respond(&mut retire_socket, &retire, json!({"consumerId":"reviewer",
+        respond(
+            &mut retire_socket,
+            &retire,
+            json!({"consumerId":"reviewer",
             "retired":true,"expectedAckCursor":null,
-            "discardedFromCursor":null,"discardedThroughCursor":null}));
+            "discardedFromCursor":null,"discardedThroughCursor":null}),
+        );
         retired_rx.recv().unwrap();
-        watch_socket.send(Message::Text(json!({"v":1,"type":"event",
+        watch_socket
+            .send(Message::Text(
+                json!({"v":1,"type":"event",
             "op":"annotation.record","eventId":"queued-before-retire","sentAt":2,
             "payload":{"serverCursor":{"epoch":EPOCH,"sequence":"1"},
-            "record":{"kind":"live_delta"},"committedAt":2}}).to_string().into())).unwrap();
-        watch_socket.send(Message::Text(json!({"v":1,"type":"event",
+            "record":{"kind":"live_delta"},"committedAt":2}})
+                .to_string()
+                .into(),
+            ))
+            .unwrap();
+        watch_socket
+            .send(Message::Text(
+                json!({"v":1,"type":"event",
             "op":"annotation.consumer_retired","eventId":"retired","sentAt":2,
             "payload":{"consumerId":"reviewer","retired":true,
             "expectedAckCursor":null,"discardedFromCursor":null,
-            "discardedThroughCursor":null}}).to_string().into())).unwrap();
+            "discardedThroughCursor":null}})
+                .to_string()
+                .into(),
+            ))
+            .unwrap();
     });
     let registry = format!("ws://{address}");
-    let common = ["--registry", registry.as_str(), "--state-root",
-        root.path().to_str().unwrap(), "annotations"];
-    let mut watcher = Command::new(cli_binary()).args(common)
+    let common = [
+        "--registry",
+        registry.as_str(),
+        "--state-root",
+        root.path().to_str().unwrap(),
+        "annotations",
+    ];
+    let mut watcher = Command::new(cli_binary())
+        .args(common)
         .args(["watch", "--consumer-id", "reviewer"])
-        .stdout(Stdio::piped()).spawn().unwrap();
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
     let mut lines = BufReader::new(watcher.stdout.take().unwrap()).lines();
     let subscription: Value = serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
     assert_eq!(subscription["type"], "annotation.subscription");
-    let retired = Command::new(cli_binary()).args(common)
-        .args(["retire", "--consumer-id", "reviewer", "--expect-ack", "none",
-            "--discard-unacknowledged"]).output().unwrap();
-    assert!(retired.status.success(), "{}", String::from_utf8_lossy(&retired.stdout));
+    let retired = Command::new(cli_binary())
+        .args(common)
+        .args([
+            "retire",
+            "--consumer-id",
+            "reviewer",
+            "--expect-ack",
+            "none",
+            "--discard-unacknowledged",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        retired.status.success(),
+        "{}",
+        String::from_utf8_lossy(&retired.stdout)
+    );
     retired_tx.send(()).unwrap();
     let terminal: Value = serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
     assert_eq!(terminal["op"], "annotation.consumer_retired");
     assert!(watcher.wait().unwrap().success());
     server.join().unwrap();
-    let state: Value = serde_json::from_slice(
-        &std::fs::read(listener_path(root.path(), "reviewer")).unwrap()).unwrap();
+    let state: Value =
+        serde_json::from_slice(&std::fs::read(listener_path(root.path(), "reviewer")).unwrap())
+            .unwrap();
     assert_eq!(state["retired"], true);
     assert_eq!(state["leaseId"], Value::Null);
 }
@@ -340,38 +386,75 @@ fn foreground_watcher_reports_replacement_without_erasing_newer_lease() {
         let mut old_socket = accept(stream).unwrap();
         hello(&mut old_socket);
         let watch = request(&mut old_socket, "annotation.watch");
-        let opened = |lease: &str| json!({"consumerId":"reviewer", "leaseId":lease,
+        let opened = |lease: &str| {
+            json!({"consumerId":"reviewer", "leaseId":lease,
             "ackCursor":null,"initialFromCursor":{"epoch":EPOCH,"sequence":"1"},
             "availableFromCursor":null,"headCursor":null,"historyCompleteSinceStart":true,
-            "limits":{"replayPolicy":{"targetAcknowledgedHistoryDays":30}}});
-        respond(&mut old_socket, &watch, opened("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+            "limits":{"replayPolicy":{"targetAcknowledgedHistoryDays":30}}})
+        };
+        respond(
+            &mut old_socket,
+            &watch,
+            opened("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        );
         let (stream, _) = listener.accept().unwrap();
         let mut new_socket = accept(stream).unwrap();
         hello(&mut new_socket);
         let resume = request(&mut new_socket, "annotation.resume");
-        respond(&mut new_socket, &resume, opened("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"));
+        respond(
+            &mut new_socket,
+            &resume,
+            opened("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+        );
         resumed_rx.recv().unwrap();
-        old_socket.send(Message::Text(json!({"v":1,"type":"event",
+        old_socket
+            .send(Message::Text(
+                json!({"v":1,"type":"event",
             "op":"annotation.record","eventId":"queued-before-replacement","sentAt":2,
             "payload":{"serverCursor":{"epoch":EPOCH,"sequence":"1"},
-            "record":{"kind":"live_delta"},"committedAt":2}}).to_string().into())).unwrap();
-        old_socket.send(Message::Text(json!({"v":1,"type":"event",
+            "record":{"kind":"live_delta"},"committedAt":2}})
+                .to_string()
+                .into(),
+            ))
+            .unwrap();
+        old_socket
+            .send(Message::Text(
+                json!({"v":1,"type":"event",
             "op":"annotation.lease_replaced","eventId":"replaced","sentAt":2,
             "payload":{"consumerId":"reviewer",
-            "leaseId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}).to_string().into())).unwrap();
+            "leaseId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}})
+                .to_string()
+                .into(),
+            ))
+            .unwrap();
         new_socket.close(None).unwrap();
     });
     let registry = format!("ws://{address}");
-    let common = ["--registry", registry.as_str(), "--state-root",
-        root.path().to_str().unwrap(), "annotations"];
-    let mut watcher = Command::new(cli_binary()).args(common)
+    let common = [
+        "--registry",
+        registry.as_str(),
+        "--state-root",
+        root.path().to_str().unwrap(),
+        "annotations",
+    ];
+    let mut watcher = Command::new(cli_binary())
+        .args(common)
         .args(["watch", "--consumer-id", "reviewer"])
-        .stdout(Stdio::piped()).spawn().unwrap();
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
     let mut old_lines = BufReader::new(watcher.stdout.take().unwrap()).lines();
-    assert!(old_lines.next().unwrap().unwrap().contains("annotation.subscription"));
-    let mut resumer = Command::new(cli_binary()).args(common)
+    assert!(old_lines
+        .next()
+        .unwrap()
+        .unwrap()
+        .contains("annotation.subscription"));
+    let mut resumer = Command::new(cli_binary())
+        .args(common)
         .args(["resume", "--consumer-id", "reviewer"])
-        .stdout(Stdio::piped()).spawn().unwrap();
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
     let mut new_lines = BufReader::new(resumer.stdout.take().unwrap()).lines();
     let subscription: Value = serde_json::from_str(&new_lines.next().unwrap().unwrap()).unwrap();
     assert_eq!(subscription["leaseId"], "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
@@ -381,8 +464,9 @@ fn foreground_watcher_reports_replacement_without_erasing_newer_lease() {
     assert!(watcher.wait().unwrap().success());
     let _ = resumer.wait();
     server.join().unwrap();
-    let state: Value = serde_json::from_slice(
-        &std::fs::read(listener_path(root.path(), "reviewer")).unwrap()).unwrap();
+    let state: Value =
+        serde_json::from_slice(&std::fs::read(listener_path(root.path(), "reviewer")).unwrap())
+            .unwrap();
     assert_eq!(state["leaseId"], "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
 }
 

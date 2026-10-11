@@ -60,6 +60,33 @@ the runtime check completed before CLI operations. Do not infer the server or
 CLI version from command output; identify those archives through their
 versioned names, manifest, and checksum.
 
+## CLI help and schema
+
+The `help` and `schema` commands are available only in a CLI build whose
+verified release manifest includes this source change. The currently released
+v0.2.8 CLI predates them; its `--help` flag returns an invalid-input error.
+For a matching later build, query the JSON command catalog before constructing
+an invocation:
+
+```sh
+"$CLI" --help
+"$CLI" help topology-realize
+"$CLI" schema clear
+"$CLI" help annotations watch
+"$CLI" schema annotations ack
+```
+
+Command help reports route, side effects, input schema, success result shape,
+and error behavior. The examples below are fixtures; replace every identity,
+revision, endpoint, and destroy list with current values from the intended
+client. The CLI schema and validator tests cover the three-pane replacement
+and pane-specific clear inputs.
+The separate registry annotation commands use the registry journal; `watch`
+and `resume` stream NDJSON until a terminal event, and delivery does not
+acknowledge records. Use `ack` only after durable processing, with the exact
+cursor or gap ID. `retire` requires an explicit expected acknowledgement and
+the discard flag.
+
 ## Discover registered clients, then select a client
 
 For registry-known inventory, query the registry explicitly before choosing a
@@ -78,6 +105,12 @@ unavailable registry is an error. Do not combine `--registry` and
 `--endpoint`, and do not treat a registered client as proof that it is online.
 Always pass the registry URL explicitly; the CLI does not infer one from
 configuration or environment variables.
+
+Registry inventory does not resolve a window label to a direct endpoint or
+prove client reachability. Do not choose an endpoint from the registry URL or
+guess a host or port. The named-window direct discovery operation is not
+available in v0.2.8; use deployment-owned endpoint configuration until a
+verified release adds that capability.
 
 ## Select a client and endpoint
 
@@ -136,6 +169,46 @@ Supported commands are `list`, `push`, `read`, `topology-intent`,
 `topology-realize`, `clear`, `annotations-remove`, `capture-pane`,
 `surface-intent`, `target-register`, and `target-apply`. Bind mutations and
 reads to the exact `surfaceId` and numeric `paneId` required by each command.
+
+To replace a root with three vertical panes, first inspect the current
+topology. Name every pane that the replacement may destroy in
+`allowDestroyPaneIds`, and use the current `topologyRevision`:
+
+```sh
+"$CLI" --state-root "$STATE_ROOT" --endpoint "$CLIENT_WS" \
+  --product-label "Surf Ace CLI" topology-realize --input-json \
+  '{"surfaceId":"sf_fixture","expectedTopologyRevision":7,"target":{"root":true},"desired":{"type":"split","direction":"vertical","children":[{"type":"pane"},{"type":"pane"},{"type":"pane"}]},"allowDestroyPaneIds":[1,2,3]}'
+```
+
+Afterward, read each intended pane's local projection. Use its revision only
+when `cacheStatus` is `current`, `currentContentRecord` is present, and the
+record belongs to that pane. A stale or unsynchronized projection is not
+revision evidence:
+
+```sh
+"$CLI" --state-root "$STATE_ROOT" read \
+  --input-json '{"scopeId":"pane:sf_fixture:1"}'
+"$CLI" --state-root "$STATE_ROOT" read \
+  --input-json '{"scopeId":"pane:sf_fixture:2"}'
+"$CLI" --state-root "$STATE_ROOT" read \
+  --input-json '{"scopeId":"pane:sf_fixture:3"}'
+
+"$CLI" --state-root "$STATE_ROOT" --endpoint "$CLIENT_WS" \
+  --product-label "Surf Ace CLI" clear \
+  --input-json '{"surfaceId":"sf_fixture","paneId":1,"expectedRevision":5}'
+"$CLI" --state-root "$STATE_ROOT" --endpoint "$CLIENT_WS" \
+  --product-label "Surf Ace CLI" clear \
+  --input-json '{"surfaceId":"sf_fixture","paneId":2,"expectedRevision":2}'
+"$CLI" --state-root "$STATE_ROOT" --endpoint "$CLIENT_WS" \
+  --product-label "Surf Ace CLI" clear \
+  --input-json '{"surfaceId":"sf_fixture","paneId":3,"expectedRevision":8}'
+```
+
+These numbers and IDs are test fixtures only. Replace each
+`expectedRevision` with the current `currentContentRecord.payload.revision`
+from that same pane. On `stale_revision`, read again and recompute. On
+`outcome_unknown`, resolve the durable request correlation instead of sending a
+new clear.
 
 Every successful `capture-pane` returns a PNG screenshot and capture metadata;
 there is no option to suppress the screenshot, and it does not extract visible

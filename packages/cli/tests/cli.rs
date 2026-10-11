@@ -373,6 +373,72 @@ fn run_native_cli(arguments: &[&str]) -> std::process::Output {
         .unwrap()
 }
 
+#[test]
+fn help_and_schema_are_json_and_do_not_require_operational_arguments() {
+    let help = run_native_cli(&["--help"]);
+    assert!(
+        help.status.success(),
+        "{}",
+        String::from_utf8_lossy(&help.stdout)
+    );
+    let help_json: Value = serde_json::from_slice(&help.stdout).unwrap();
+    assert_eq!(help_json["command"], "help");
+    assert_eq!(
+        help_json["result"]["commands"].as_array().unwrap().len(),
+        Command::ALL.len() + 4
+    );
+    assert_eq!(
+        help_json["result"]["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|command| command["name"]
+                .as_str()
+                .is_some_and(|name| name.starts_with("annotations ")))
+            .count(),
+        4
+    );
+
+    let schema = run_native_cli(&["schema", "topology-realize"]);
+    assert!(
+        schema.status.success(),
+        "{}",
+        String::from_utf8_lossy(&schema.stdout)
+    );
+    let schema_json: Value = serde_json::from_slice(&schema.stdout).unwrap();
+    assert_eq!(schema_json["command"], "schema");
+    assert_eq!(schema_json["result"]["command"]["name"], "topology-realize");
+    assert_eq!(schema_json["result"]["command"]["route"], "direct-client");
+
+    let annotation_help = run_native_cli(&["annotations", "watch", "--help"]);
+    assert!(
+        annotation_help.status.success(),
+        "{}",
+        String::from_utf8_lossy(&annotation_help.stdout)
+    );
+    let annotation_help_json: Value = serde_json::from_slice(&annotation_help.stdout).unwrap();
+    assert_eq!(
+        annotation_help_json["result"]["command"]["name"],
+        "annotations watch"
+    );
+    assert_eq!(
+        annotation_help_json["result"]["command"]["route"],
+        "registry"
+    );
+
+    let annotation_schema = run_native_cli(&["schema", "annotations", "ack"]);
+    assert!(
+        annotation_schema.status.success(),
+        "{}",
+        String::from_utf8_lossy(&annotation_schema.stdout)
+    );
+    let annotation_schema_json: Value = serde_json::from_slice(&annotation_schema.stdout).unwrap();
+    assert_eq!(
+        annotation_schema_json["result"]["command"]["name"],
+        "annotations ack"
+    );
+}
+
 fn fleet_inventory_fixture() -> Value {
     json!({
         "clients": [

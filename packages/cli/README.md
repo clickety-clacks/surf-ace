@@ -64,6 +64,78 @@ result to standard output. `read` is strictly local and rejects `--endpoint`.
 Every successful `capture-pane` call includes its PNG screenshot; the command
 has no option to suppress it.
 
+## Help and schemas
+
+The native CLI exposes JSON help without requiring an endpoint, registry, or
+state root:
+
+```sh
+surf-ace --help
+surf-ace help topology-realize
+surf-ace schema clear
+surf-ace help annotations watch
+surf-ace schema annotations ack
+```
+
+Command help reports the route, side effects, input JSON Schema, success result
+shape, and error codes. The CLI validator remains authoritative; regression
+tests run the documented layout and clear examples through that validator.
+`fleet-list` still reports inventory only. No command resolves a named window
+to a direct endpoint or reports fresh client reachability; `list` and
+`capture-pane` pair the controller before their direct request.
+
+The separate registry annotation commands also have action-specific help and
+schemas. `annotations watch` and `annotations resume` emit NDJSON in the
+foreground; record delivery does not acknowledge a record. Use `annotations
+ack` only after durable processing, with either the exact cursor or a history
+gap ID. `annotations retire` requires an explicit expected acknowledgement and
+the discard flag.
+
+This fixture example replaces a root layout with three vertical panes. Here
+`sf_fixture`, revision `7`, and pane IDs `1`, `2`, and `3` are test values. In a
+real invocation, use the current surface ID, topology revision, and the full
+explicit list of pane IDs that may be destroyed:
+
+```sh
+surf-ace \
+  --state-root "$STATE_ROOT" \
+  --endpoint "$CLIENT_WS" \
+  --product-label "Surf Ace CLI" \
+  topology-realize --input-json \
+  '{"surfaceId":"sf_fixture","expectedTopologyRevision":7,"target":{"root":true},"desired":{"type":"split","direction":"vertical","children":[{"type":"pane"},{"type":"pane"},{"type":"pane"}]},"allowDestroyPaneIds":[1,2,3]}'
+```
+
+After the layout is committed, read each pane's local projection separately.
+Use a revision only when `cacheStatus` is `current`,
+`currentContentRecord` is present, and the record belongs to that exact pane.
+The projection can be unsynchronized or have a loss gap; in either case, do
+not clear from its revision. Clear examples below use different fixture
+revisions to show that the value is pane-local:
+
+```sh
+surf-ace --state-root "$STATE_ROOT" read \
+  --input-json '{"scopeId":"pane:sf_fixture:1"}'
+surf-ace --state-root "$STATE_ROOT" read \
+  --input-json '{"scopeId":"pane:sf_fixture:2"}'
+surf-ace --state-root "$STATE_ROOT" read \
+  --input-json '{"scopeId":"pane:sf_fixture:3"}'
+
+surf-ace --state-root "$STATE_ROOT" --endpoint "$CLIENT_WS" \
+  --product-label "Surf Ace CLI" clear \
+  --input-json '{"surfaceId":"sf_fixture","paneId":1,"expectedRevision":5}'
+surf-ace --state-root "$STATE_ROOT" --endpoint "$CLIENT_WS" \
+  --product-label "Surf Ace CLI" clear \
+  --input-json '{"surfaceId":"sf_fixture","paneId":2,"expectedRevision":2}'
+surf-ace --state-root "$STATE_ROOT" --endpoint "$CLIENT_WS" \
+  --product-label "Surf Ace CLI" clear \
+  --input-json '{"surfaceId":"sf_fixture","paneId":3,"expectedRevision":8}'
+```
+
+Replace each example revision with the exact `currentContentRecord.payload.revision`
+returned for that pane. A stale-revision refusal requires a fresh read and a
+recomputed request. A mutation result of `outcome_unknown` must be reconciled
+through its durable correlation, never retried as a new request.
+
 The separate registry annotation listener uses `annotations watch`,
 `annotations resume`, `annotations ack`, and `annotations retire` with an
 explicit `--registry` URL and `--state-root`. `watch` and `resume` stay in the
