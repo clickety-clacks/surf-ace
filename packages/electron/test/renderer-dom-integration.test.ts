@@ -570,13 +570,13 @@ test("renderer DOM integrates authoritative connection states and live scale con
       ready = true;
       webview.dispatchEvent(new window.Event("dom-ready"));
       await new Promise((resolve) => setTimeout(resolve, 0));
-      assert.ok(scripts.some((script) => script.includes("document.documentElement.style.zoom")),
+      assert.ok(scripts.some((script) => script.includes("surf-ace.public-terminal-font-scale.v2")),
         "scale initialization still runs after dom-ready");
-      const firstScales = scripts.filter((script) => script.includes("document.documentElement.style.zoom")).length;
+      const firstScales = scripts.filter((script) => script.includes("surf-ace.public-terminal-font-scale.v2")).length;
       webview.dispatchEvent(new window.Event("did-start-loading"));
       webview.dispatchEvent(new window.Event("dom-ready"));
       await new Promise((resolve) => setTimeout(resolve, 0));
-      assert.ok(scripts.filter((script) => script.includes("document.documentElement.style.zoom")).length > firstScales,
+      assert.ok(scripts.filter((script) => script.includes("surf-ace.public-terminal-font-scale.v2")).length > firstScales,
         "navigation reapplies scale after the next dom-ready");
     }
   });
@@ -596,6 +596,7 @@ test("renderer DOM integrates authoritative connection states and live scale con
       return {
         document: { documentElement: root, body: { style: { setProperty() {} } } },
         Event: class { constructor(public type: string) {} },
+        setTimeout: () => 1, clearTimeout: () => {},
         window: { dispatchEvent(event: { type: string }) {
           if (event.type === "resize") {
             result.resizeEvents++;
@@ -606,7 +607,7 @@ test("renderer DOM integrates authoritative connection states and live scale con
     });
     guests.forEach((guest, index) => {
       guest.executeJavaScript = async (code) => {
-        if (code.includes("document.documentElement.style.zoom")) runInNewContext(code, contexts[index]);
+        if (code.includes("surf-ace.public-terminal-font-scale.v2")) runInNewContext(code, contexts[index]);
         return null;
       };
       guest.dispatchEvent(new window.Event("dom-ready"));
@@ -631,6 +632,68 @@ test("renderer DOM integrates authoritative connection states and live scale con
     assert.equal(contexts[0]!.result.columns, 39);
   });
 
+  await test("ready public terminal scales its font at unit document zoom and retains guest", async () => {
+    const next = state("connected");
+    Object.assign(next.panes[0]!.content, {
+      content: { url: "https://fixture.invalid/public-terminal" }, contentType: "browser_url",
+      contentId: "public-terminal", revision: 44, renderVersion: 44,
+    });
+    stateListener!(next);
+    const guest = document.querySelector("webview") as HTMLElement & {
+      executeJavaScript: (code: string) => Promise<unknown>;
+    };
+    const root = { style: { zoom: "" } };
+    const guestDocument = {
+      documentElement: root, body: { style: { setProperty() {} } },
+      querySelectorAll: () => [element],
+    };
+    class GuestElement {
+      isConnected = true;
+      ownerDocument = guestDocument;
+      matches(selector: string) { return selector === ".xterm"; }
+      querySelector(selector: string) { return selector === ".xterm-screen" ? {} : null; }
+    }
+    const element = new GuestElement();
+    const fits: number[] = [];
+    const term = {
+      element, options: { fontSize: 16 },
+      fit() { fits.push(this.options.fontSize); },
+      onRender() { return { dispose() {} }; },
+    };
+    const context = {
+      document: guestDocument, HTMLElement: GuestElement,
+      window: { term, dispatchEvent() {} },
+      requestAnimationFrame() {}, setTimeout: () => 1, clearTimeout() {},
+      Event: class { constructor(public type: string) {} },
+    };
+    const modes: string[] = [];
+    guest.executeJavaScript = async (code) => {
+      if (code === "document.readyState") return "complete";
+      if (code.includes("surf-ace.public-terminal-font-scale.v2")) {
+        const result = runInNewContext(code, context);
+        modes.push(result.mode);
+        return result;
+      }
+      return null;
+    };
+    keyboardListener!({ action: "reset", paneId: 1, type: "content-scale" });
+    guest.dispatchEvent(new window.Event("did-attach"));
+    assert.equal(fits.length, 0, "attach cannot scale an unready public terminal");
+    guest.dispatchEvent(new window.Event("dom-ready"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(term.options.fontSize, 13.6);
+    assert.equal(root.style.zoom, "", "terminal font scaling must not also scale its document");
+    keyboardListener!({ action: "increase", paneId: 1, type: "content-scale" });
+    assert.equal(term.options.fontSize, 14.96);
+    assert.equal(root.style.zoom, "");
+    keyboardListener!({ action: "reset", paneId: 1, type: "content-scale" });
+    assert.equal(term.options.fontSize, 13.6);
+    assert.deepEqual(fits, [13.6, 14.96, 13.6]);
+    assert.deepEqual(modes, ["public-terminal-font", "public-terminal-font", "public-terminal-font"]);
+    assert.equal(document.querySelector("webview"), guest);
+    assert.equal(context.window.term, term);
+  });
+
   await test("completed loading restores zoom without dom-ready and fences obsolete readiness probes", async () => {
     const next = state("connected", true);
     for (const [index, pane] of next.panes.entries()) Object.assign(pane.content, {
@@ -646,7 +709,7 @@ test("renderer DOM integrates authoritative connection states and live scale con
     guests.forEach((guest, index) => {
       guest.executeJavaScript = async (code) => {
         if (code === "document.readyState") return probe;
-        if (code.includes("document.documentElement.style.zoom")) scripts[index]!.push(code);
+        if (code.includes("surf-ace.public-terminal-font-scale.v2")) scripts[index]!.push(code);
         return null;
       };
       guest.dispatchEvent(new window.Event("dom-ready"));
