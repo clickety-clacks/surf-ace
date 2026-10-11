@@ -8,6 +8,44 @@ window.addEventListener('message',event=>{if(event.data?.type==='iframe-paint-ch
 }});`;
 }
 
+export function serializeHtmlScriptString(value) {
+  if (typeof value !== "string") throw new Error("Inline-script JSON value must be a string");
+  return JSON.stringify(value)
+    .replace(/</g, "\\u003c")
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029");
+}
+
+export function buildNativeScaleIframeHtml() {
+  return `<!doctype html><html><head><style>html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#d9e8ff}</style></head>
+<body><script>
+${buildIframeDocumentReceiverScript()}
+window.addEventListener('pointermove',event=>parent.postMessage({type:'iframe-pointer',x:event.clientX,y:event.clientY,
+  challengeId:window.__iframePaintChallenge.challengeId,rgb:window.__iframePaintChallenge.rgb},'*'));
+</script></body></html>`;
+}
+
+export function buildNativeScaleGuestHtml(iframeHtml) {
+  if (typeof iframeHtml !== "string" || !iframeHtml.startsWith("<!doctype html>")) {
+    throw new Error("Iframe document must be a complete HTML document");
+  }
+  return `<!doctype html><html><head><meta charset="utf-8"><style>
+html,body{box-sizing:border-box;margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#fff}
+#marker{position:fixed;left:-20px;top:-20px;width:8px;height:8px;background:#e22;pointer-events:none}
+#edge-frame{position:fixed;right:0;bottom:0;width:130px;height:100px;border:0}
+</style></head><body><div id="marker"></div><iframe id="edge-frame"></iframe><script>
+window.__pointerSamples=[];
+window.__nativeScaleChallenge={challengeId:'boot',rgb:[238,34,34]};window.__iframeChallengeAck=null;
+const marker=document.querySelector('#marker');
+window.addEventListener('pointermove',event=>{
+  marker.style.left=event.clientX+'px';marker.style.top=event.clientY+'px';
+  window.__pointerSamples.push({x:event.clientX,y:event.clientY,challengeId:window.__nativeScaleChallenge.challengeId});
+});
+${buildGuestMessageReceiverScript()}
+document.querySelector('#edge-frame').srcdoc=${serializeHtmlScriptString(iframeHtml)};
+</script></body></html>`;
+}
+
 export function buildGuestMessageReceiverScript() {
   return `window.__iframePointer=null;window.__iframePointerCount=0;window.__iframeChallengeAck=null;
 window.addEventListener('message',event=>{

@@ -12,6 +12,8 @@ import {
   buildIframeChallengeGuestProgram,
   buildIframeChallengeHostProgram,
   buildIframeDocumentReceiverScript,
+  buildNativeScaleGuestHtml,
+  buildNativeScaleIframeHtml,
 } from "../scripts/native-scale-iframe-challenge.mjs";
 import {
   NATIVE_SCALE_EXPECTED_IFRAME_POINTS,
@@ -316,8 +318,8 @@ test("private native runner retains multi-position, iframe, and old root-zoom ne
   assert.match(runner, /scale-0\.85-right-upper/);
   assert.match(runner, /__nativeScaleChallenge/);
   assert.match(challengeBuilder, /iframe-paint-challenge/);
-  assert.match(runner, /buildIframeDocumentReceiverScript\(\)/);
-  assert.match(runner, /buildGuestMessageReceiverScript\(\)/);
+  assert.match(challengeBuilder, /buildIframeDocumentReceiverScript\(\)/);
+  assert.match(challengeBuilder, /buildGuestMessageReceiverScript\(\)/);
   assert.match(runner, /challengeId/);
   assert.match(runner, /buildIframeChallengeGuestProgram\(challenge\.paint\)/);
   assert.match(runner, /buildIframeChallengeHostProgram\(guestProgram\)/);
@@ -406,6 +408,101 @@ test("iframe challenge executes as an object through generated host, guest, and 
   assert.equal(escapedHarness.receiverDataType, "string", "escaping only the old payload still posts JSON text");
   assert.equal(await vm.runInContext(buildIframeChallengeAckHostProgram(paint.challengeId), escapedHarness.hostContext), false,
     "the object-only iframe receiver must not acknowledge the escaped string negative");
+});
+
+test("HTML tokenization preserves the complete guest and nested iframe scripts", async () => {
+  function tokenizeHtmlScriptElements(html) {
+    const lower = html.toLowerCase();
+    const scripts = [];
+    let cursor = 0;
+    while (cursor < html.length) {
+      const opening = lower.indexOf("<script", cursor);
+      if (opening < 0) break;
+      const openingDelimiter = html[opening + 7];
+      assert.ok(openingDelimiter && /[\t\n\f\r />]/.test(openingDelimiter), "script opening tag must be delimited");
+      const openingEnd = html.indexOf(">", opening + 7);
+      assert.notEqual(openingEnd, -1, "script opening tag must close");
+      let closing = lower.indexOf("</script", openingEnd + 1);
+      while (closing >= 0) {
+        const closingDelimiter = html[closing + 8];
+        if (closingDelimiter && /[\t\n\f\r />]/.test(closingDelimiter)) break;
+        closing = lower.indexOf("</script", closing + 8);
+      }
+      assert.notEqual(closing, -1, "raw-text script element must have a matching end tag");
+      const closingEnd = html.indexOf(">", closing + 8);
+      assert.notEqual(closingEnd, -1, "script end tag must close");
+      scripts.push(html.slice(openingEnd + 1, closing));
+      cursor = closingEnd + 1;
+    }
+    return scripts;
+  }
+
+  async function parseHtmlScriptElements(html) {
+    try {
+      const { parseHTML } = await import("linkedom");
+      const { document } = parseHTML(html);
+      return [...document.querySelectorAll("script")].map((script) => script.textContent);
+    } catch (error) {
+      if (error?.code !== "ERR_MODULE_NOT_FOUND" || !String(error.message).includes("linkedom")) throw error;
+      // Minimal raw-text tokenizer fallback keeps source-only validation runnable
+      // when package dependencies are not linked into this isolated worktree.
+      return tokenizeHtmlScriptElements(html);
+    }
+  }
+
+  const iframeHtml = buildNativeScaleIframeHtml();
+  const guestHtml = buildNativeScaleGuestHtml(iframeHtml);
+  assert.ok(iframeHtml.includes("</script>"), "nested iframe document includes its own script end tag");
+  assert.ok(guestHtml.startsWith("<!doctype html>") && guestHtml.endsWith("</html>"));
+  assert.ok(guestHtml.includes("\\u003c/script>"), "nested markup must be escaped inside outer inline JavaScript");
+  const guestScripts = await parseHtmlScriptElements(guestHtml);
+  assert.equal(guestScripts.length, 1, "outer guest must retain one complete inline script");
+  const guestProgram = guestScripts[0];
+  new vm.Script(guestProgram);
+
+  const marker = { style: {} };
+  const frame = { srcdoc: null };
+  const guestWindow = { addEventListener() {} };
+  const guestDocument = { querySelector: (selector) => {
+    if (selector === "#marker") return marker;
+    if (selector === "#edge-frame") return frame;
+    throw new Error(`Unexpected guest selector ${selector}`);
+  } };
+  vm.runInNewContext(guestProgram, { window: guestWindow, document: guestDocument });
+  assert.equal(frame.srcdoc, iframeHtml, "outer JavaScript reconstructs the original complete iframe document");
+
+  const iframeScripts = await parseHtmlScriptElements(frame.srcdoc);
+  assert.equal(iframeScripts.length, 1, "nested iframe must retain one complete receiver script");
+  const iframeProgram = iframeScripts[0];
+  new vm.Script(iframeProgram);
+  let iframeMessageHandler = null;
+  let parentAck = null;
+  const iframeWindow = { addEventListener: (type, callback) => {
+    if (type === "message") iframeMessageHandler = callback;
+  } };
+  const iframeBody = { style: {} };
+  vm.runInNewContext(iframeProgram, {
+    window: iframeWindow,
+    document: { body: iframeBody },
+    parent: { postMessage: (message) => { parentAck = message; } },
+  });
+  assert.equal(typeof iframeMessageHandler, "function", "the nested receiver initialized after document parsing");
+  iframeMessageHandler({ data: { type: "iframe-paint-challenge", challengeId: "html-phase", rgb: [20, 200, 190] } });
+  assert.equal(iframeWindow.__iframePaintChallenge.challengeId, "html-phase");
+  assert.equal(iframeBody.style.backgroundColor, "rgb(20, 200, 190)");
+  assert.deepEqual(JSON.parse(JSON.stringify(parentAck)), {
+    type: "iframe-challenge-painted", challengeId: "html-phase", rgb: [20, 200, 190],
+  });
+
+  // Undo only the new `<` escape to reconstruct the exact 3f8fd58 srcdoc bytes.
+  const exactParentGuestHtml = guestHtml.replaceAll("\\u003c", "<");
+  assert.equal(sha256(Buffer.from(exactParentGuestHtml)), "eaac413a82d49a1b886744cf883feb08122450cbebc02f84bd0961a10c91fb9d",
+    "negative source bytes must match the independently reproduced parent HTML");
+  assert.match(exactParentGuestHtml, /srcdoc="<!doctype html>/);
+  const truncatedParentScripts = await parseHtmlScriptElements(exactParentGuestHtml);
+  assert.equal(truncatedParentScripts.length, 1);
+  assert.throws(() => new vm.Script(truncatedParentScripts[0]), SyntaxError,
+    "the previous HTML-tokenizer output must truncate the outer script and fail JavaScript parsing");
 });
 
 test("owned process wrapper reaps a timed-out process group and an orphaned group member",
