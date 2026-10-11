@@ -2592,6 +2592,7 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
 
     override func layoutSubviews() {
         super.layoutSubviews()
+        layoutWebViewport()
         preserveDrawingAlignmentAfterCanvasResize()
     }
 
@@ -2613,6 +2614,7 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
             url: pendingBrowserNavigationURL
         )
         currentEntry = entry
+        layoutWebViewport()
         reportBrowserNavigationStateIfNeeded()
         pendingViewportRestore = nil
         let html: String
@@ -2786,6 +2788,7 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
 
     func setContentScale(_ scale: CGFloat) {
         contentScale = max(0.5, min(scale, 2))
+        layoutWebViewport()
         applyCurrentContentScale()
     }
 
@@ -2900,6 +2903,11 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
         )
     }
 
+    func fetchScrollMetadataForTesting() async -> SurfAceSurfaceSnapshot? {
+        guard let payload = await evaluateScrollPayload() else { return nil }
+        return SurfAceSurfaceSnapshot(viewport: payload.viewport, selection: payload.selection, imageBase64: nil)
+    }
+
     var hasPendingWebContentRenderForTesting: Bool {
         pendingHTMLRenderActive
     }
@@ -2982,10 +2990,11 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
         switch message.name {
         case selectionMessageName:
             if let text = body["text"] as? String,
-               let rect = parseRect(body["boundingRect"] as? [String: Any]) {
-                let selection = SurfAceSelection.text(text, boundingRect: rect.surfAceRect)
+               let rect = parseRect(body["viewBoundingRect"] as? [String: Any]) {
+                let presentedRect = webView.convert(rect, to: self)
+                let selection = SurfAceSelection.text(text, boundingRect: presentedRect.surfAceRect)
                 lastSelection = selection
-                onSelectionChanged?(text, rect)
+                onSelectionChanged?(text, presentedRect)
             }
         case scrollMessageName:
             guard let viewport = parseViewport(body["viewport"] as? [String: Any]) else { return }
@@ -2994,10 +3003,11 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
             lastVisibleText = visibleText
             onScrollSettled?(viewport, visibleText)
         case tapMessageName:
-            guard let position = parsePoint(body["position"] as? [String: Any]) else { return }
+            guard let position = parsePoint(body["viewPosition"] as? [String: Any]) else { return }
             let nearestContent = (body["nearestContent"] as? String) ?? ""
             let kind = (body["kind"] as? String) == "long_press" ? "long_press" : "tap"
-            onTapEvent?(kind, SurfAcePoint(x: Double(position.x), y: Double(position.y)), nearestContent)
+            let presentedPosition = webView.convert(position, to: self)
+            onTapEvent?(kind, SurfAcePoint(x: Double(presentedPosition.x), y: Double(presentedPosition.y)), nearestContent)
         case navigationMessageName:
             guard let url = body["url"] as? String, !url.isEmpty else { return }
             let sentAt = parseInt64(body["sentAt"]) ?? Int64(Date().timeIntervalSince1970 * 1000)
@@ -3024,10 +3034,21 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
         backgroundColor = .black
 #endif
 
-        webView.translatesAutoresizingMaskIntoConstraints = false
+        webView.translatesAutoresizingMaskIntoConstraints = true
         webView.isOpaque = false
         webView.backgroundColor = .clear
         webView.scrollView.backgroundColor = .clear
+        // The pane has already resolved its content viewport; safe-area insets
+        // must not subtract a second band from the edge-pinned WebKit view.
+        webView.scrollView.contentInsetAdjustmentBehavior = .never
+        if #available(iOS 26.0, visionOS 26.0, *) {
+            // Pane chrome is outside this viewport; native scroll-edge fades
+            // would otherwise obscure content in its safe-area bands.
+            webView.scrollView.topEdgeEffect.isHidden = true
+            webView.scrollView.bottomEdgeEffect.isHidden = true
+            webView.scrollView.leftEdgeEffect.isHidden = true
+            webView.scrollView.rightEdgeEffect.isHidden = true
+        }
         #if !os(visionOS)
         webView.scrollView.keyboardDismissMode = .onDrag
         #endif
@@ -3056,10 +3077,6 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
         addSubview(canvasView)
 
         NSLayoutConstraint.activate([
-            webView.leadingAnchor.constraint(equalTo: leadingAnchor),
-            webView.trailingAnchor.constraint(equalTo: trailingAnchor),
-            webView.topAnchor.constraint(equalTo: topAnchor),
-            webView.bottomAnchor.constraint(equalTo: bottomAnchor),
             pdfView.leadingAnchor.constraint(equalTo: leadingAnchor),
             pdfView.trailingAnchor.constraint(equalTo: trailingAnchor),
             pdfView.topAnchor.constraint(equalTo: topAnchor),
@@ -3235,6 +3252,29 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
         lastViewport = pdfViewport()
     }
 
+    private var webPresentationScale: CGFloat {
+        switch currentEntry?.payload {
+        case .html, .browserURL:
+            (SurfAceWebContentScale.base * contentScale * 1000).rounded() / 1000
+        default:
+            1
+        }
+    }
+
+    private func layoutWebViewport() {
+        let scale = webPresentationScale
+        // Give WebKit the complete logical viewport before scaling its native
+        // presentation. Every nested frame lays out against that viewport; no
+        // document zoom or site-specific sizing changes are needed.
+        let viewport = CGRect(x: 0, y: 0, width: bounds.width / scale, height: bounds.height / scale)
+        let center = CGPoint(x: bounds.midX, y: bounds.midY)
+        let transform = CGAffineTransform(scaleX: scale, y: scale)
+        guard webView.bounds != viewport || webView.center != center || webView.transform != transform else { return }
+        webView.bounds = viewport
+        webView.center = center
+        webView.transform = transform
+    }
+
     private func applyWebContentScale() async {
         guard !webView.isHidden else { return }
         let baseScale: CGFloat = switch currentEntry?.payload {
@@ -3244,10 +3284,17 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
             1
         }
         let effectiveScale = (baseScale * contentScale * 1000).rounded() / 1000
+        let scalesWholePage: Bool = switch currentEntry?.payload {
+        case .html, .browserURL: true
+        default: false
+        }
+        layoutWebViewport()
+        webView.pageZoom = 1
+        let documentZoom = scalesWholePage ? "" : "document.documentElement.style.zoom = scale === 1 ? \"\" : String(scale);"
         let script = """
         (() => {
           const scale = \(effectiveScale);
-          document.documentElement.style.zoom = scale === 1 ? "" : String(scale);
+          \(documentZoom)
           document.body?.style.setProperty("--surf-ace-content-scale", String(scale));
         })();
         """
@@ -3427,8 +3474,8 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
         var selection: SurfAceSelection?
         if let selectionObject = object["selection"] as? [String: Any],
            let text = selectionObject["text"] as? String,
-           let rect = parseRect(selectionObject["boundingRect"] as? [String: Any]) {
-            selection = .text(text, boundingRect: rect.surfAceRect)
+           let rect = parseRect(selectionObject["viewBoundingRect"] as? [String: Any]) {
+            selection = .text(text, boundingRect: webView.convert(rect, to: self).surfAceRect)
         }
 
         return (viewport, selection)
@@ -3445,8 +3492,8 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
         var selection: SurfAceSelection?
         if let selectionObject = object["selection"] as? [String: Any],
            let text = selectionObject["text"] as? String,
-           let rect = parseRect(selectionObject["boundingRect"] as? [String: Any]) {
-            selection = .text(text, boundingRect: rect.surfAceRect)
+           let rect = parseRect(selectionObject["viewBoundingRect"] as? [String: Any]) {
+            selection = .text(text, boundingRect: webView.convert(rect, to: self).surfAceRect)
         }
 
         return (viewport, visibleText, selection)
@@ -3866,6 +3913,16 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
             return stripCssNoise((document.body && document.body.innerText) || document.documentElement.innerText || '').slice(0, 4096);
           }
 
+          // DOM client coordinates belong to the layout viewport. Keep the existing
+          // document fields for logical metadata, and capture presentation coordinates
+          // in the same JS turn so scrolling cannot race a later native conversion.
+          function viewPoint(x, y) {
+            const viewport = window.visualViewport;
+            const scale = viewport ? viewport.scale : 1;
+            return { x: (x - (viewport ? viewport.offsetLeft : 0)) * scale,
+                     y: (y - (viewport ? viewport.offsetTop : 0)) * scale };
+          }
+
           function currentSelection() {
             const selection = window.getSelection();
             if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return null;
@@ -3873,8 +3930,12 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
             if (!text) return null;
             const range = selection.getRangeAt(0);
             const rect = range.getBoundingClientRect();
+            const point = viewPoint(rect.x, rect.y);
+            const scale = window.visualViewport ? window.visualViewport.scale : 1;
             return {
               kind: 'text',
+              viewBoundingRect: { x: point.x, y: point.y,
+                                  width: rect.width * scale, height: rect.height * scale },
               text: text,
               boundingRect: {
                 x: rect.x + window.scrollX,
@@ -3924,6 +3985,7 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
             if (!event) return;
             const payload = {
               kind: kind,
+              viewPosition: viewPoint(event.clientX || 0, event.clientY || 0),
               position: { x: (event.clientX || 0) + (window.scrollX || 0), y: (event.clientY || 0) + (window.scrollY || 0) },
               nearestContent: cleanText(event.target && event.target.innerText ? event.target.innerText : '').slice(0, 4096)
             };

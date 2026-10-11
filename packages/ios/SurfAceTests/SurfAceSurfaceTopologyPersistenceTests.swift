@@ -1,6 +1,7 @@
 import XCTest
 import SwiftUI
 import WebKit
+import CryptoKit
 @testable import SurfAce
 
 final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
@@ -1379,4 +1380,429 @@ final class SurfAcePaneGeometrySnapshotTests: XCTestCase {
         XCTAssertEqual(staleGeometry["topologyEpoch"] as? Int, surface.topologyEpoch)
         XCTAssertEqual(staleContentViewport?["width"], 400)
     }
+}
+
+@MainActor
+final class SurfAceHostZoomViewportTests: XCTestCase {
+    // Frozen operational inputs live only in the owned simulator app's cache,
+    // not in the source repository, signed bundle, or a live-origin fetch.
+    private func frozenInput(_ name: String, sha256: String) throws -> Data {
+        let cache = try XCTUnwrap(FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first)
+        let url = cache.appendingPathComponent("HostZoomFixture", isDirectory: true).appendingPathComponent(name)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw XCTSkip("Hash-bound offline taskboard inputs were not staged in the owned test app")
+        }
+        let data = try Data(contentsOf: url)
+        let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        XCTAssertEqual(digest, sha256, "Frozen fixture integrity")
+        guard digest == sha256 else { throw NSError(domain: "ZoomFixtureIntegrity", code: 1) }
+        return data
+    }
+
+    func testFrozenTaskboardKeepsFullNativeViewportAtSupportedFontScales() async throws {
+        let index = try frozenInput("host-zoom-index.html", sha256: "731ce9b945ee5594e162576017a2d01f31b33878fb803676e45f80fc381af809")
+        let board = try frozenInput("host-zoom-board.json", sha256: "371fa9d3c0d49c00f092ed6a8b799d8b5a8e6a5dc928d2eb615ee43293ddeb2f")
+        let wrapperData = try frozenInput("host-zoom-wrapper.json", sha256: "498c1ea9dde6f9b84e65b7c60a805e300cacef210325b770a99959ea80413537")
+        let input = try XCTUnwrap(JSONSerialization.jsonObject(with: wrapperData) as? [String: Any])
+        let content = try XCTUnwrap(input["content"] as? [String: Any])
+        let originalWrapper = try XCTUnwrap(content["html"] as? String)
+        let marker = UUID().uuidString
+        let server = SurfAceHTTPServer()
+        let port = try await server.startIsolatedLoopbackForTesting(
+            httpHandler: { request in
+                switch request.path {
+                case "/identity": return HTTPServerResponse(statusCode: 200, body: Data(marker.utf8))
+                case "/index.html": return HTTPServerResponse(statusCode: 200, headers: ["Content-Type": "text/html"], body: index)
+                case "/board.json": return HTTPServerResponse(statusCode: 200, headers: ["Content-Type": "application/json"], body: board)
+                default: return HTTPServerResponse(statusCode: 404)
+                }
+            }, webSocketHandler: { socket in await socket.close() }
+        )
+        // Only this OS-assigned, no-reuse loopback listener belongs to the fixture.
+        defer { Task { await server.stop() } }
+        XCTAssertNotEqual(port, SurfAceHTTPServer.fixedPort)
+        let baseURL = try XCTUnwrap(URL(string: "http://127.0.0.1:\(port)/"))
+        let (identity, _) = try await URLSession.shared.data(from: baseURL.appendingPathComponent("identity"))
+        XCTAssertEqual(String(decoding: identity, as: UTF8.self), marker)
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previous = scene.windows.first(where: \.isKeyWindow)
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 1024, height: 820)
+        let controller = UIViewController()
+        let host = SurfAceSurfaceHostView(frame: window.bounds)
+        controller.view = host; window.rootViewController = controller; window.makeKeyAndVisible()
+        defer { window.isHidden = true; window.rootViewController = nil; previous?.makeKey() }
+        let web = try XCTUnwrap(host.subviews.compactMap { $0 as? WKWebView }.first)
+        let rules = """
+        [{"trigger":{"url-filter":"^https?://"},"action":{"type":"block"}},
+         {"trigger":{"url-filter":"^http://127[.]0[.]0[.]1:\(port)/"},"action":{"type":"ignore-previous-rules"}}]
+        """
+        let ruleList = try await WKContentRuleListStore.default().compileContentRuleList(
+            forIdentifier: "offline-zoom-\(marker)", encodedContentRuleList: rules)
+        web.configuration.userContentController.add(try XCTUnwrap(ruleList))
+        defer { web.configuration.userContentController.removeAllContentRuleLists() }
+        // Preserve the frozen wrapper's layout; substitute only its URL origin.
+        let pattern = try NSRegularExpression(pattern: "src=\"[^\"]*\"")
+        let wrapper = pattern.stringByReplacingMatches(in: originalWrapper,
+            range: NSRange(originalWrapper.startIndex..., in: originalWrapper),
+            withTemplate: "src=\"\(baseURL.appendingPathComponent("index.html").absoluteString)\"")
+        // Compare scale changes AFTER the asynchronous frozen board has laid out.
+        // Preloading at effective scale 1 is a test control, not a production fix.
+        host.setContentScale(1 / 0.85)
+        host.render(entry: .from(frame: SurfAceFrame(contentId: "frozen-taskboard",
+            revision: 1, contentType: .html, payload: .html(html: wrapper, baseURL: baseURL.absoluteString),
+            reloadSource: nil, title: "Frozen taskboard", scrollable: true, interactive: true)), restoreViewport: nil)
+        _ = await host.fetchSnapshotMetadata()
+        _ = try await web.callAsyncJavaScript("""
+        const d=document.querySelector('iframe').contentDocument;
+        if (!d.querySelector('#task-board-scroll')) await new Promise((resolve,reject)=>{
+          const observer=new MutationObserver(()=>{if(d.querySelector('#task-board-scroll')){observer.disconnect();clearTimeout(timer);resolve();}});
+          const timer=setTimeout(()=>{observer.disconnect();reject(Error('frozen board readiness timed out'));},10000);
+          observer.observe(d.documentElement,{childList:true,subtree:true});
+        });
+        await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+        return true;
+        """, arguments: [:], in: nil, contentWorld: .page)
+        for multiplier in [1.0, 0.5, 1.5, 2.0] {
+            host.setContentScale(CGFloat(multiplier))
+            let metrics = try await web.callAsyncJavaScript("""
+            if (Number(document.body.style.getPropertyValue('--surf-ace-content-scale')) !== scale) await new Promise((resolve,reject)=>{
+              const observer=new MutationObserver(()=>{if(Number(document.body.style.getPropertyValue('--surf-ace-content-scale'))===scale){observer.disconnect();clearTimeout(timer);resolve();}});
+              const timer=setTimeout(()=>{observer.disconnect();reject(Error('content scale completion timed out'));},10000);
+              observer.observe(document.body,{attributes:true,attributeFilter:['style']});
+            });
+            await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+            const f=document.querySelector('iframe'), d=f.contentDocument;
+            if (!d.querySelector('#task-board-scroll')) await new Promise((resolve,reject)=>{
+              const observer=new MutationObserver(()=>{if(d.querySelector('#task-board-scroll')){observer.disconnect();clearTimeout(timer);resolve();}});
+              const timer=setTimeout(()=>{observer.disconnect();reject(Error('frozen board readiness timed out'));},10000);
+              observer.observe(d.documentElement,{childList:true,subtree:true});
+            });
+            const w=f.contentWindow, e=d.querySelector('#task-board-scroll'), r=e.getBoundingClientRect();
+            return {innerWidth:w.innerWidth,innerHeight:w.innerHeight,clientWidth:d.documentElement.clientWidth,
+              clientHeight:d.documentElement.clientHeight,scrollerWidth:r.width,scrollerHeight:r.height,
+              outerWidth:innerWidth,outerHeight:innerHeight,rootZoom:getComputedStyle(document.documentElement).zoom,
+              innerZoom:w.getComputedStyle(d.documentElement).zoom,dpr:w.devicePixelRatio};
+            """, arguments: ["scale": (0.85 * multiplier * 1000).rounded() / 1000], in: nil, contentWorld: .page)
+            let dimensions = try XCTUnwrap(metrics as? [String: Any])
+            let attachment = XCTAttachment(data: try JSONSerialization.data(withJSONObject: [
+                "multiplier": multiplier, "dom": dimensions, "webFrame": NSCoder.string(for: web.frame),
+                "hostBounds": NSCoder.string(for: host.bounds), "pageZoom": web.pageZoom,
+                "safeAreaInsets": NSCoder.string(for: host.safeAreaInsets),
+                "adjustedContentInsets": NSCoder.string(for: web.scrollView.adjustedContentInset),
+                "webOpaque": web.isOpaque, "webBackground": String(describing: web.backgroundColor)
+            ], options: [.sortedKeys, .prettyPrinted]), uniformTypeIdentifier: "public.json")
+            attachment.name = "frozen-taskboard-geometry-\(multiplier)"; attachment.lifetime = .keepAlways; add(attachment)
+            let snapshot = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<UIImage, Error>) in
+                web.takeSnapshot(with: nil) { image, error in
+                    if let image { continuation.resume(returning: image) }
+                    else { continuation.resume(throwing: error ?? NSError(domain: "ZoomSnapshot", code: 1)) }
+                }
+            }
+            let nativeComposition = UIGraphicsImageRenderer(bounds: host.bounds).image { _ in
+                XCTAssertTrue(host.drawHierarchy(in: host.bounds, afterScreenUpdates: true))
+            }
+            let composed = XCTAttachment(image: nativeComposition)
+            composed.name = "frozen-taskboard-host-composition-\(multiplier)"; composed.lifetime = .keepAlways; add(composed)
+            let screenshot = XCTAttachment(image: snapshot)
+            screenshot.name = "frozen-taskboard-native-\(multiplier)"; screenshot.lifetime = .keepAlways; add(screenshot)
+            let image = try XCTUnwrap(nativeComposition.cgImage)
+            var pixels = [UInt8](repeating: 0, count: image.width * image.height * 4)
+            let painted = pixels.withUnsafeMutableBytes { bytes -> Bool in
+                guard let context = CGContext(data: bytes.baseAddress, width: image.width, height: image.height,
+                    bitsPerComponent: 8, bytesPerRow: image.width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue) else { return false }
+                context.draw(image, in: CGRect(x: 0, y: 0, width: CGFloat(image.width), height: CGFloat(image.height)))
+                return true
+            }
+            XCTAssertTrue(painted)
+            for x in [image.width / 2, image.width - 4] {
+                for y in [4, image.height - 4] {
+                    let i = (y * image.width + x) * 4
+                    XCTAssertGreaterThan(pixels[i + 3], 240, "Frozen board must paint its native viewport edge")
+                    XCTAssertFalse(pixels[i] > 245 && pixels[i + 1] > 245 && pixels[i + 2] > 245,
+                                   "Frozen board must not leave an unpainted white strip")
+                }
+            }
+            let width = try XCTUnwrap(dimensions["innerWidth"] as? Double)
+            let height = try XCTUnwrap(dimensions["innerHeight"] as? Double)
+            XCTAssertEqual(try XCTUnwrap(dimensions["scrollerWidth"] as? Double), width, accuracy: 1)
+            XCTAssertEqual(try XCTUnwrap(dimensions["scrollerHeight"] as? Double), height, accuracy: 1)
+            for (actual, expected) in [(web.frame.minX, host.bounds.minX), (web.frame.minY, host.bounds.minY),
+                                       (web.frame.width, host.bounds.width), (web.frame.height, host.bounds.height)] {
+                XCTAssertEqual(actual, expected, accuracy: 0.001)
+            }
+            XCTAssertEqual(web.scrollView.adjustedContentInset, .zero, "Pane already owns its native viewport")
+        }
+        await server.stop()
+    }
+
+    func testNativeHostKeepsFullIframeViewportAtSupportedFontScales() async throws {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previous = scene.windows.first(where: \.isKeyWindow)
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 1024, height: 820)
+        let controller = UIViewController()
+        let host = SurfAceSurfaceHostView(frame: window.bounds)
+        controller.view = host
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true; window.rootViewController = nil; previous?.makeKey() }
+        let web = try XCTUnwrap(host.subviews.compactMap { $0 as? WKWebView }.first)
+        for pattern in ["fixed", "percent"] {
+            var defaultFontPixelWidth: Int?
+            for multiplier in [1.0, 0.5, 1.5, 2.0] {
+                let fill = pattern == "fixed" ? "position:fixed;inset:0" : "width:100%;height:100%"
+                let inner = "<html style='height:100%'><body style='margin:0;height:100%'><main id='fill' style='\(fill);background:rgb(0,200,0)'><span id='font' style='font-size:20px;color:rgb(0,0,200)'>Scale</span><span id='scale-marker' style='position:fixed;top:40px;left:40px;width:20px;height:20px;background:rgb(200,0,0)'></span></main></body></html>"
+                let encoded = inner.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "\"", with: "&quot;")
+                let html = "<html style='height:100%;background:#101720'><head><meta name='viewport' content='width=device-width,initial-scale=1'></head><body style='margin:0;height:100%;overflow:hidden'><iframe style='display:block;border:0;width:100%;height:100%' srcdoc=\"\(encoded)\"></iframe></body></html>"
+                host.setContentScale(CGFloat(multiplier))
+                host.render(entry: .from(frame: SurfAceFrame(
+                    contentId: "zoom-\(pattern)-\(multiplier)", revision: 1, contentType: .html,
+                    payload: .html(html: html, baseURL: nil), reloadSource: nil,
+                    title: "Zoom fixture", scrollable: true, interactive: true)), restoreViewport: nil)
+                host.layoutIfNeeded()
+                // Uses the production navigation/scale/paint completion signal.
+                _ = await host.fetchSnapshotMetadata()
+                let tap = expectation(description: "scaled native tap \(pattern)-\(multiplier)")
+                host.onTapEvent = { kind, point, _ in
+                    XCTAssertEqual(kind, "tap")
+                    XCTAssertEqual(point.x, 40 * 0.85 * multiplier, accuracy: 0.01)
+                    XCTAssertEqual(point.y, 40 * 0.85 * multiplier, accuracy: 0.01)
+                    tap.fulfill()
+                }
+                _ = try await web.evaluateJavaScript("document.body.dispatchEvent(new MouseEvent('click', {bubbles:true,clientX:40,clientY:40}))")
+                await fulfillment(of: [tap], timeout: 5)
+                host.onTapEvent = nil
+                let metrics = try await web.evaluateJavaScript("""
+                (() => { const f=document.querySelector('iframe'), w=f.contentWindow, d=w.document;
+                  const rect=e=>{const r=e.getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height}};
+                  return {outer:{width:innerWidth,height:innerHeight,zoom:getComputedStyle(document.documentElement).zoom},
+                    iframe:rect(f),inner:{width:w.innerWidth,height:w.innerHeight,dpr:w.devicePixelRatio,
+                    clientWidth:d.documentElement.clientWidth,clientHeight:d.documentElement.clientHeight,
+                    fill:rect(d.querySelector('#fill')),fontBounds:rect(d.querySelector('#font')),scaleMarker:rect(d.querySelector('#scale-marker')),fontSize:w.getComputedStyle(d.querySelector('#font')).fontSize}};
+                })()
+                """)
+                let snapshot = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<UIImage, Error>) in
+                    web.takeSnapshot(with: nil) { image, error in
+                        if let image { continuation.resume(returning: image) }
+                        else { continuation.resume(throwing: error ?? NSError(domain: "ZoomSnapshot", code: 1)) }
+                    }
+                }
+                let label = "\(pattern)-\(multiplier)"
+                let nativeComposition = UIGraphicsImageRenderer(bounds: host.bounds).image { _ in
+                    XCTAssertTrue(host.drawHierarchy(in: host.bounds, afterScreenUpdates: true))
+                }
+                let composed = XCTAttachment(image: nativeComposition)
+                composed.name = "native-host-composition-\(label)"; composed.lifetime = .keepAlways; add(composed)
+                let attachment = XCTAttachment(image: snapshot)
+                attachment.name = "native-iframe-\(label)"; attachment.lifetime = .keepAlways; add(attachment)
+                let inset = web.scrollView.adjustedContentInset
+                let measurements: [String: Any] = [
+                    "pattern": pattern, "multiplier": multiplier, "pageZoom": web.pageZoom,
+                    "hostBounds": NSCoder.string(for: host.bounds), "webFrame": NSCoder.string(for: web.frame),
+                    "webBounds": NSCoder.string(for: web.bounds),
+                    "webTransform": String(describing: web.transform), "safeAreaInsets": NSCoder.string(for: host.safeAreaInsets),
+                    "adjustedContentInsets": NSCoder.string(for: inset),
+                    "webOpaque": web.isOpaque, "webBackground": String(describing: web.backgroundColor),
+                    "snapshotPoints": [snapshot.size.width, snapshot.size.height],
+                    "scrollContentSize": NSCoder.string(for: web.scrollView.contentSize),
+                    "scrollContentOffset": NSCoder.string(for: web.scrollView.contentOffset),
+                    "scrollZoomScale": web.scrollView.zoomScale, "dom": try XCTUnwrap(metrics)
+                ]
+                let data = try JSONSerialization.data(withJSONObject: measurements, options: [.sortedKeys, .prettyPrinted])
+                let geometry = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+                geometry.name = "native-geometry-\(label)"; geometry.lifetime = .keepAlways; add(geometry)
+                for (actual, expected) in [(web.frame.minX, host.bounds.minX), (web.frame.minY, host.bounds.minY),
+                                           (web.frame.width, host.bounds.width), (web.frame.height, host.bounds.height)] {
+                    XCTAssertEqual(actual, expected, accuracy: 0.001, "\(label) native edge pinning")
+                }
+                let image = try XCTUnwrap(nativeComposition.cgImage)
+                var pixels = [UInt8](repeating: 0, count: image.width * image.height * 4)
+                let colorSpace = CGColorSpaceCreateDeviceRGB()
+                let painted = pixels.withUnsafeMutableBytes { bytes -> Bool in
+                    guard let context = CGContext(data: bytes.baseAddress, width: image.width, height: image.height,
+                        bitsPerComponent: 8, bytesPerRow: image.width * 4, space: colorSpace,
+                        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue) else { return false }
+                    context.draw(image, in: CGRect(x: 0, y: 0, width: CGFloat(image.width), height: CGFloat(image.height))); return true
+                }
+                XCTAssertTrue(painted)
+                var markerMinX = image.width, markerMaxX = -1
+                var fontMinX = image.width, fontMaxX = -1
+                for y in 0..<image.height {
+                    for x in 0..<image.width {
+                        let i = (y * image.width + x) * 4
+                        if pixels[i + 3] > 200 && pixels[i] > 150 && pixels[i + 1] < 40 && pixels[i + 2] < 40 {
+                            markerMinX = min(markerMinX, x); markerMaxX = max(markerMaxX, x)
+                        }
+                        // Blue glyph pixels cannot be confused with an unpainted dark margin.
+                        if pixels[i + 3] > 200 && pixels[i] < 40 && pixels[i + 1] < 40 && pixels[i + 2] > 150 {
+                            fontMinX = min(fontMinX, x); fontMaxX = max(fontMaxX, x)
+                        }
+                    }
+                }
+                XCTAssertGreaterThanOrEqual(markerMaxX, markerMinX, "Physical scale marker must be painted")
+                let nativePixelsPerPoint = Double(image.width) / Double(host.bounds.width)
+                let expectedMarkerWidth = 20 * 0.85 * multiplier * nativePixelsPerPoint
+                XCTAssertEqual(Double(markerMaxX - markerMinX + 1), expectedMarkerWidth, accuracy: 1.5,
+                               "Preserve intended 0.85 base times pane multiplier in physical paint")
+                XCTAssertGreaterThanOrEqual(fontMaxX, fontMinX, "Font glyphs must be painted")
+                let fontWidth = fontMaxX - fontMinX + 1
+                if multiplier == 1 { defaultFontPixelWidth = fontWidth }
+                else if let reference = defaultFontPixelWidth {
+                    XCTAssertEqual(Double(fontWidth), Double(reference) * multiplier, accuracy: 3,
+                                   "Physical glyph sizing must follow the pane's font scale")
+                }
+                let paintMetrics = XCTAttachment(data: try JSONSerialization.data(withJSONObject: [
+                    "markerWidthPixels": markerMaxX - markerMinX + 1, "expectedMarkerWidthPixels": expectedMarkerWidth,
+                    "fontGlyphWidthPixels": fontWidth, "nativePixelsPerPoint": nativePixelsPerPoint
+                ], options: [.sortedKeys]), uniformTypeIdentifier: "public.json")
+                paintMetrics.name = "physical-font-scale-\(label)"; paintMetrics.lifetime = .keepAlways; add(paintMetrics)
+                // Both vertical orientations are sampled; no white/dark margin can pass.
+                for x in [image.width / 2, image.width - 4] {
+                    for y in [4, image.height - 4] {
+                        let i = (y * image.width + x) * 4
+                        XCTAssertTrue(pixels[i + 1] > 150 && pixels[i] < 40 && pixels[i + 2] < 40,
+                                      "\(label) usable iframe must paint native viewport edge (\(x),\(y)); RGBA=\(Array(pixels[i...i+3]))")
+                    }
+                }
+            }
+        }
+    }
+    func testBrowserResizeRetainsMountedViewSelectionAndSnapshotCoordinates() async throws {
+        let html = """
+        <html><head><meta name='viewport' content='width=device-width,initial-scale=1'></head>
+        <body style='margin:0;width:3000px;height:3000px;background:rgb(0,200,0)'>
+        <span id='selected' style='position:absolute;left:100px;top:260px;font-size:20px'>Selected text</span>
+        </body></html>
+        """
+        let identity = UUID().uuidString
+        let server = SurfAceHTTPServer()
+        let port = try await server.startIsolatedLoopbackForTesting(httpHandler: { request in
+            if request.path == "/identity" { return HTTPServerResponse(statusCode: 200, body: Data(identity.utf8)) }
+            if request.path == "/page" {
+                return HTTPServerResponse(statusCode: 200, headers: ["Content-Type": "text/html"], body: Data(html.utf8))
+            }
+            return HTTPServerResponse(statusCode: 404)
+        }, webSocketHandler: { socket in await socket.close() })
+        defer { Task { await server.stop() } }
+        XCTAssertNotEqual(port, SurfAceHTTPServer.fixedPort)
+        let origin = try XCTUnwrap(URL(string: "http://127.0.0.1:\(port)/"))
+        let (ownedIdentity, _) = try await URLSession.shared.data(from: origin.appendingPathComponent("identity"))
+        XCTAssertEqual(String(decoding: ownedIdentity, as: UTF8.self), identity)
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previous = scene.windows.first(where: \.isKeyWindow)
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 1024, height: 820)
+        let controller = UIViewController()
+        let host = SurfAceSurfaceHostView(frame: window.bounds)
+        controller.view = host; window.rootViewController = controller; window.makeKeyAndVisible()
+        defer { window.isHidden = true; window.rootViewController = nil; previous?.makeKey() }
+        let web = try XCTUnwrap(host.subviews.compactMap { $0 as? WKWebView }.first)
+        let rules = """
+        [{"trigger":{"url-filter":"^https?://"},"action":{"type":"block"}},
+         {"trigger":{"url-filter":"^http://127[.]0[.]0[.]1:\(port)/"},"action":{"type":"ignore-previous-rules"}}]
+        """
+        let ruleList = try await WKContentRuleListStore.default().compileContentRuleList(
+            forIdentifier: "browser-zoom-\(identity)", encodedContentRuleList: rules)
+        web.configuration.userContentController.add(try XCTUnwrap(ruleList))
+        defer { web.configuration.userContentController.removeAllContentRuleLists() }
+        host.setContentScale(1.5)
+        let entry = SurfAcePaneEntry.browserURL(targetId: "owned-browser", targetEpoch: 1,
+                                               url: origin.appendingPathComponent("page").absoluteString, title: "Owned browser")
+        let result = await host.renderBrowserURL(entry: entry)
+        XCTAssertEqual(result.status, "applied", result.errorMessage ?? "")
+        let ownedWeb = ObjectIdentifier(web)
+        for size in [CGSize(width: 1024, height: 820), CGSize(width: 820, height: 1024), CGSize(width: 600, height: 400)] {
+            window.frame.size = size
+            host.frame = CGRect(origin: .zero, size: size)
+            host.setNeedsLayout(); host.layoutIfNeeded()
+            let selectionEvent = expectation(description: "scrolled selection callback")
+            var callbackRect: CGRect?
+            host.onSelectionChanged = { text, rect in
+                guard callbackRect == nil, text == "Selected text", let rect else { return }
+                callbackRect = rect; selectionEvent.fulfill()
+            }
+            let tapEvent = expectation(description: "scrolled DOM tap bridge (not native touch)")
+            var tapPoint: SurfAcePoint?
+            host.onTapEvent = { _, point, _ in
+                guard tapPoint == nil else { return }
+                tapPoint = point; tapEvent.fulfill()
+            }
+            let dimensions = try await web.callAsyncJavaScript("""
+            scrollTo(60,200);
+            await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+            const node=document.getElementById('selected'), range=document.createRange();
+            range.selectNodeContents(node); const selection=getSelection(); selection.removeAllRanges(); selection.addRange(range);
+            const r=range.getBoundingClientRect();
+            const tap=new MouseEvent('click',{bubbles:true,clientX:r.x,clientY:r.y});
+            const tapX=tap.clientX,tapY=tap.clientY;
+            const tapVisualX=visualViewport.offsetLeft,tapVisualY=visualViewport.offsetTop;
+            const tapVisualScale=visualViewport.scale;
+            node.dispatchEvent(tap);
+            return {width:innerWidth,height:innerHeight,x:r.x,y:r.y,rectWidth:r.width,rectHeight:r.height,
+                    scrollX:scrollX,scrollY:scrollY,tapX:tapX,tapY:tapY,
+                    tapVisualX:tapVisualX,tapVisualY:tapVisualY,tapVisualScale:tapVisualScale,
+                    visualScale:visualViewport.scale,
+                    visualX:visualViewport.offsetLeft,visualY:visualViewport.offsetTop};
+            """, arguments: [:], in: nil, contentWorld: .page)
+            let dom = try XCTUnwrap(dimensions as? [String: Double])
+            await fulfillment(of: [selectionEvent, tapEvent], timeout: 5)
+            XCTAssertEqual(dom["scrollX"], 60); XCTAssertEqual(dom["scrollY"], 200)
+            XCTAssertEqual(dom["visualScale"], 1)
+            let clientX = try XCTUnwrap(dom["x"]), clientY = try XCTUnwrap(dom["y"])
+            XCTAssertEqual(try XCTUnwrap(callbackRect).minX, clientX * 1.275, accuracy: 0.01)
+            XCTAssertEqual(try XCTUnwrap(callbackRect).minY, clientY * 1.275, accuracy: 0.01)
+            // MouseEvent construction may quantize its requested client point;
+            // assert the event's actual viewport point, not the Range's point.
+            let tapX = try XCTUnwrap(dom["tapX"]), tapY = try XCTUnwrap(dom["tapY"])
+            let tapScale = try XCTUnwrap(dom["tapVisualScale"])
+            XCTAssertEqual(try XCTUnwrap(tapPoint).x,
+                           (tapX - (try XCTUnwrap(dom["tapVisualX"]))) * tapScale * 1.275, accuracy: 0.01)
+            XCTAssertEqual(try XCTUnwrap(tapPoint).y,
+                           (tapY - (try XCTUnwrap(dom["tapVisualY"]))) * tapScale * 1.275, accuracy: 0.01)
+            let diagnostics = XCTAttachment(data: try JSONSerialization.data(withJSONObject: dom, options: [.sortedKeys]),
+                                            uniformTypeIdentifier: "public.json")
+            diagnostics.name = "scrolled-client-event-geometry-\(size)"; diagnostics.lifetime = .keepAlways; add(diagnostics)
+            host.onSelectionChanged = nil; host.onTapEvent = nil
+            XCTAssertEqual(ObjectIdentifier(web), ownedWeb)
+            XCTAssertEqual(web.url, origin.appendingPathComponent("page"))
+            XCTAssertEqual(try XCTUnwrap(dom["width"]) * 1.275, Double(size.width), accuracy: 1.3)
+            XCTAssertEqual(try XCTUnwrap(dom["height"]) * 1.275, Double(size.height), accuracy: 1.3)
+            let captured = await host.fetchSnapshot()
+            let snapshot = try XCTUnwrap(captured)
+            let selected = try XCTUnwrap(snapshot.selection?.boundingRect)
+            XCTAssertEqual(snapshot.selection?.text, "Selected text")
+            XCTAssertEqual(snapshot.viewport.scrollOffset.x, 60)
+            XCTAssertEqual(snapshot.viewport.scrollOffset.y, 200)
+            let scrollCapture = await host.fetchScrollMetadataForTesting()
+            let scroll = try XCTUnwrap(scrollCapture)
+            XCTAssertEqual(scroll.viewport.scrollOffset, snapshot.viewport.scrollOffset)
+            XCTAssertEqual(scroll.selection?.boundingRect, snapshot.selection?.boundingRect)
+            XCTAssertEqual(scroll.selection?.text, "Selected text")
+            // The document-coordinate bridge fields remain logical; only its
+            // private presentation fields cross into native view conversion.
+            let legacy = try await web.callAsyncJavaScript("""
+            const payload=window.__surfAceSnapshotPayload();
+            return {x:payload.selection.boundingRect.x,y:payload.selection.boundingRect.y,
+                    scrollX:payload.viewport.scrollOffset.x,scrollY:payload.viewport.scrollOffset.y};
+            """, arguments: [:], in: nil, contentWorld: .page)
+            let document = try XCTUnwrap(legacy as? [String: Double])
+            XCTAssertEqual(document["x"], clientX + 60)
+            XCTAssertEqual(document["y"], clientY + 200)
+            XCTAssertEqual(document["scrollX"], 60); XCTAssertEqual(document["scrollY"], 200)
+            XCTAssertEqual(selected.x, try XCTUnwrap(dom["x"]) * 1.275, accuracy: 0.01)
+            XCTAssertEqual(selected.y, try XCTUnwrap(dom["y"]) * 1.275, accuracy: 0.01)
+            XCTAssertEqual(selected.width, try XCTUnwrap(dom["rectWidth"]) * 1.275, accuracy: 0.01)
+            let imageData = try XCTUnwrap(Data(base64Encoded: try XCTUnwrap(snapshot.imageBase64)))
+            let image = try XCTUnwrap(UIImage(data: imageData))
+            let bitmap = try XCTUnwrap(image.cgImage)
+            XCTAssertEqual(Double(bitmap.width), Double(size.width * window.screen.scale), accuracy: 1)
+            XCTAssertEqual(Double(bitmap.height), Double(size.height * window.screen.scale), accuracy: 1)
+            let attachment = XCTAttachment(image: image); attachment.name = "browser-resize-composite-\(size)"
+            attachment.lifetime = .keepAlways; add(attachment)
+        }
+        await server.stop()
+    }
+
 }
