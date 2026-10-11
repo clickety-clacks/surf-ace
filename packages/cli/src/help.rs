@@ -331,6 +331,9 @@ fn annotation_registry_error_codes() -> &'static [&'static str] {
         "annotation_gap_id_mismatch",
         "annotation_consumer_retire_confirmation_required",
         "annotation_journal_unverified",
+        "writer_fence_unavailable",
+        "persistence_failed",
+        "internal_error",
     ]
 }
 
