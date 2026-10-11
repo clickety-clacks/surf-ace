@@ -64,3 +64,21 @@ test('fallback preserves independently changed page font and never invokes repla
 test('held callback detects ambiguity even before another host request',()=>{
  const s=setup();s.run(.85);s.document.querySelectorAll=()=>[s.term.element,s.term.element];s.frames[0]();assert.equal(s.term.options.fontSize,16);assert.equal(s.document.documentElement.style.zoom,'0.85');assert.equal(s.fits.length,1);
 });
+
+function successfulThenFailed(){
+ const s=setup();let fail=false;s.term.fit=function(){s.fits.push(this.options.fontSize);if(fail){fail=false;throw new Error('transient fit')}};
+ s.run(.85);const held=s.frames[0];fail=true;assert.throws(()=>s.run(.935),/transient fit/);
+ assert.equal(s.term.options.fontSize,13.6);assert.equal(s.document.documentElement.style.zoom,'');return{s,held};
+}
+test('successful scale then failed update preserves baseline across render and Reset',()=>{
+ const {s,held}=successfulThenFailed();const before=s.fits.length;s.render();held();assert.equal(s.fits.length,before);assert.equal(s.term.options.fontSize,13.6);
+ s.run(.85);assert.equal(s.term.options.fontSize,13.6);s.run(.935);assert.equal(s.term.options.fontSize,14.96);
+});
+test('successful scale then failed update still unwinds owned font at fallback',()=>{
+ const {s,held}=successfulThenFailed();s.document.querySelectorAll=()=>[s.term.element,s.term.element];s.run(.935);assert.equal(s.term.options.fontSize,16);assert.equal(s.document.documentElement.style.zoom,'0.935');
+ const before=s.fits.length;held();assert.equal(s.fits.length,before);s.document.querySelectorAll=()=>[s.term.element];s.run(.85);assert.equal(s.term.options.fontSize,13.6);
+});
+test('failed update after independent preference preserves preference instead of old ownership',()=>{
+ const {s}=successfulThenFailed();s.term.options.fontSize=20;let fail=true;s.term.fit=function(){if(fail){fail=false;throw new Error('preference fit')}};
+ assert.throws(()=>s.run(.935),/preference fit/);assert.equal(s.term.options.fontSize,20);s.document.querySelectorAll=()=>[s.term.element,s.term.element];s.run(.935);assert.equal(s.term.options.fontSize,20);s.document.querySelectorAll=()=>[s.term.element];s.run(.85);assert.equal(s.term.options.fontSize,17);
+});

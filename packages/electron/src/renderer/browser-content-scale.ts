@@ -46,7 +46,8 @@ export function browserContentScaleScript(scale: number): string {
       }
       c.active = a;
       if (a.writing) return { mode: 'public-terminal-font', fontSize: a.applied };
-      if (a.applied === null || a.options.fontSize !== a.applied) a.base = a.options.fontSize;
+      const previousApplied = a.options.fontSize === a.applied ? a.applied : null;
+      if (previousApplied === null) a.base = a.options.fontSize;
       const fontSize = a.base * c.scale;
       if (!Number.isFinite(fontSize) || fontSize <= 0) throw new Error('Invalid terminal font size');
       const previousFont = a.options.fontSize, previousZoom = root.style.zoom;
@@ -59,7 +60,9 @@ export function browserContentScaleScript(scale: number): string {
         a.fit.call(t);
       } catch (error) {
         ++a.revision;
-        a.applied = null;
+        // A restored font may still belong to the previous successful scale.
+        // Keep that ownership so render/reset/fallback cannot recapture it as a page baseline.
+        a.applied = previousApplied;
         root.style.zoom = previousZoom;
         a.options.fontSize = previousFont;
         try { a.fit.call(t); } catch (recoveryError) { console.warn('Terminal refit recovery failed', recoveryError); }
