@@ -167,11 +167,16 @@ test("owned process wrapper reaps a timed-out process group and an orphaned grou
 
   const orphan = await runOwnedProcess({
     command: process.execPath,
-    args: ["-e", "const {spawn}=require('node:child_process');spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});"],
+    args: ["-e", "const {spawn}=require('node:child_process');const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});child.once('spawn',()=>{child.unref();process.stdout.write(JSON.stringify({event:'parent-exiting',parentPid:process.pid,childPid:child.pid})+'\\n')});"],
     deadlineMs: 3_000,
     terminateGraceMs: 500,
     reapTimeoutMs: 2_000,
   });
+  const parentExitProof = JSON.parse(orphan.stdout.trim());
+  assert.equal(parentExitProof.event, "parent-exiting");
+  assert.equal(parentExitProof.parentPid, orphan.pid);
+  assert.notEqual(parentExitProof.childPid, orphan.pid);
+  assert.equal(orphan.pgid, orphan.pid, "unref must not detach the child from the owned process group");
   assert.equal(orphan.code, 0);
   assert.equal(orphan.timedOut, false);
   assert.equal(orphan.termSent, true, "orphaned child should receive owned-group cleanup");
