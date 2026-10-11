@@ -142,6 +142,17 @@ test("private native runner retains multi-position, iframe, and old root-zoom ne
 
 test("owned process wrapper reaps a timed-out process group and an orphaned group member",
   { skip: sourceOnlyValidation ? "source-only mode does not spawn process groups" : false }, async () => {
+  const quickExit = await runOwnedProcess({
+    command: process.execPath,
+    args: ["-e", "process.stdout.write('quick-exit-before-parent-await')"],
+    deadlineMs: 3_000,
+  });
+  assert.equal(quickExit.code, 0, "exit listeners must be installed before waiting for spawn");
+  assert.equal(quickExit.timedOut, false);
+  assert.equal(quickExit.stdout, "quick-exit-before-parent-await");
+  assert.deepEqual(quickExit.remaining, []);
+  assert.deepEqual(processGroupCensus(quickExit.pgid), []);
+
   const timeout = await runOwnedProcess({
     command: process.execPath,
     args: ["-e", "const {spawn}=require('node:child_process');spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});setInterval(()=>{},1000)"],

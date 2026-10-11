@@ -62,6 +62,21 @@ export async function runOwnedProcess({
 
   const startedAt = Date.now();
   const child = spawn(command, args, { ...options, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+  let stdout = Buffer.alloc(0);
+  let stderr = Buffer.alloc(0);
+  let timedOut = false;
+  let waitError;
+  const appendBounded = (current, chunk) => {
+    const combined = Buffer.concat([current, chunk]);
+    return combined.length > maxOutputBytes ? combined.subarray(combined.length - maxOutputBytes) : combined;
+  };
+  child.stdout.on("data", (chunk) => { stdout = appendBounded(stdout, chunk); });
+  child.stderr.on("data", (chunk) => { stderr = appendBounded(stderr, chunk); });
+  const exited = new Promise((resolve) => {
+    child.once("error", (error) => { waitError = error; resolve({ code: null, signal: null }); });
+    child.once("exit", (code, signal) => resolve({ code, signal }));
+  });
+  const closed = new Promise((resolve) => child.once("close", (code, signal) => resolve({ code, signal })));
   await new Promise((resolve, reject) => {
     const onSpawn = () => {
       child.off("error", onError);
@@ -77,25 +92,9 @@ export async function runOwnedProcess({
   const pgid = child.pid;
   if (!Number.isSafeInteger(pgid) || pgid <= 1) throw new Error("Could not establish an owned process group");
   const runDeadlineMs = Math.max(1, deadlineMs - (Date.now() - startedAt));
-  let stdout = Buffer.alloc(0);
-  let stderr = Buffer.alloc(0);
-  let timedOut = false;
-  const appendBounded = (current, chunk) => {
-    const combined = Buffer.concat([current, chunk]);
-    return combined.length > maxOutputBytes ? combined.subarray(combined.length - maxOutputBytes) : combined;
-  };
-  child.stdout.on("data", (chunk) => { stdout = appendBounded(stdout, chunk); });
-  child.stderr.on("data", (chunk) => { stderr = appendBounded(stderr, chunk); });
-
   let exitResult;
-  let waitError;
   let termSent = false;
   let killSent = false;
-  const exited = new Promise((resolve) => {
-    child.once("error", (error) => { waitError = error; resolve({ code: null, signal: null }); });
-    child.once("exit", (code, signal) => resolve({ code, signal }));
-  });
-  const closed = new Promise((resolve) => child.once("close", (code, signal) => resolve({ code, signal })));
   let deadlineTimer;
   const deadlineReached = new Promise((resolve) => {
     deadlineTimer = setTimeout(() => resolve({ kind: "deadline" }), runDeadlineMs);
