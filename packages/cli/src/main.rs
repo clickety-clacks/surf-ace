@@ -6,6 +6,26 @@ use surf_ace_cli::{execute, Command, Invocation};
 
 fn main() {
     let arguments: Vec<String> = env::args().skip(1).collect();
+    if let Some(result) = surf_ace_cli::help::handle_arguments(&arguments) {
+        match result {
+            Ok(output) => println!(
+                "{}",
+                serde_json::to_string(&output).expect("help is serializable")
+            ),
+            Err(message) => {
+                println!(
+                    "{}",
+                    serde_json::to_string(&json!({
+                        "error": { "code": "invalid_input", "details": { "message": message } },
+                        "ok": false,
+                    }))
+                    .expect("help error is serializable")
+                );
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     if arguments.windows(2).any(|pair| {
         pair[0] == "annotations"
             && matches!(pair[1].as_str(), "watch" | "resume" | "ack" | "retire")

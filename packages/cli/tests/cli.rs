@@ -1,3 +1,5 @@
+mod common;
+
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 use std::fs;
@@ -371,6 +373,192 @@ fn run_native_cli(arguments: &[&str]) -> std::process::Output {
         .args(arguments)
         .output()
         .unwrap()
+}
+
+#[test]
+fn help_and_schema_are_json_and_do_not_require_operational_arguments() {
+    let help = run_native_cli(&["--help"]);
+    assert!(
+        help.status.success(),
+        "{}",
+        String::from_utf8_lossy(&help.stdout)
+    );
+    let help_json: Value = serde_json::from_slice(&help.stdout).unwrap();
+    assert_eq!(help_json["command"], "help");
+    assert_eq!(
+        help_json["result"]["commands"].as_array().unwrap().len(),
+        Command::ALL.len() + 4
+    );
+    assert_eq!(
+        help_json["result"]["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|command| command["name"]
+                .as_str()
+                .is_some_and(|name| name.starts_with("annotations ")))
+            .count(),
+        4
+    );
+    let discovery_limits = help_json["result"]["discoveryLimits"].as_array().unwrap();
+    assert!(discovery_limits.iter().any(|limit| limit
+        .as_str()
+        .is_some_and(|text| text.contains("fleet-list") && text.contains("no direct endpoint"))));
+    assert!(discovery_limits
+        .iter()
+        .any(|limit| limit.as_str().is_some_and(|text| {
+            text.contains("pair a controller") && text.contains("not no-pair discovery probes")
+        })));
+    assert!(discovery_limits.iter().any(|limit| limit
+        .as_str()
+        .is_some_and(|text| text.contains("No command resolves a named window"))));
+
+    let list_help = run_native_cli(&["help", "list"]);
+    assert!(list_help.status.success());
+    let list_help_json: Value = serde_json::from_slice(&list_help.stdout).unwrap();
+    assert!(list_help_json["result"]["command"]["effect"]
+        .as_str()
+        .unwrap()
+        .contains("paired_direct_read"));
+    assert!(
+        list_help_json["result"]["command"]["resultSchema"]["properties"]["result"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("pair.request")
+    );
+
+    let schema = run_native_cli(&["schema", "topology-realize"]);
+    assert!(
+        schema.status.success(),
+        "{}",
+        String::from_utf8_lossy(&schema.stdout)
+    );
+    let schema_json: Value = serde_json::from_slice(&schema.stdout).unwrap();
+    assert_eq!(schema_json["command"], "schema");
+    assert_eq!(schema_json["result"]["command"]["name"], "topology-realize");
+    assert_eq!(schema_json["result"]["command"]["route"], "direct-client");
+
+    let annotation_help = run_native_cli(&["annotations", "watch", "--help"]);
+    assert!(
+        annotation_help.status.success(),
+        "{}",
+        String::from_utf8_lossy(&annotation_help.stdout)
+    );
+    let annotation_help_json: Value = serde_json::from_slice(&annotation_help.stdout).unwrap();
+    assert_eq!(
+        annotation_help_json["result"]["command"]["name"],
+        "annotations watch"
+    );
+    assert_eq!(
+        annotation_help_json["result"]["command"]["route"],
+        "registry"
+    );
+
+    let annotation_schema = run_native_cli(&["schema", "annotations", "ack"]);
+    assert!(
+        annotation_schema.status.success(),
+        "{}",
+        String::from_utf8_lossy(&annotation_schema.stdout)
+    );
+    let annotation_schema_json: Value = serde_json::from_slice(&annotation_schema.stdout).unwrap();
+    assert_eq!(
+        annotation_schema_json["result"]["command"]["name"],
+        "annotations ack"
+    );
+
+    let watch_schema = run_native_cli(&["schema", "annotations", "watch"]);
+    assert!(watch_schema.status.success());
+    let watch_spec: Value = serde_json::from_slice(&watch_schema.stdout).unwrap();
+    let watch_command = &watch_spec["result"]["command"];
+    let watch_help = run_native_cli(&["help", "annotations", "watch"]);
+    assert!(watch_help.status.success());
+    let watch_help_json: Value = serde_json::from_slice(&watch_help.stdout).unwrap();
+    let watch_help_command = &watch_help_json["result"]["command"];
+    assert_eq!(
+        watch_command["effect"],
+        "registry_consumer_create_and_lease_acquire_and_local_state_write"
+    );
+    assert_eq!(watch_help_command["effect"], watch_command["effect"]);
+    assert!(watch_command["summary"]
+        .as_str()
+        .unwrap()
+        .contains("consumer ID must be unused"));
+    assert!(watch_help_command["summary"]
+        .as_str()
+        .unwrap()
+        .contains("consumer ID must be unused"));
+    assert_eq!(
+        watch_command["consumerLifecycle"]["registryConsumer"],
+        "create"
+    );
+
+    let resume_schema = run_native_cli(&["schema", "annotations", "resume"]);
+    assert!(resume_schema.status.success());
+    let resume_spec: Value = serde_json::from_slice(&resume_schema.stdout).unwrap();
+    let resume_command = &resume_spec["result"]["command"];
+    let resume_help = run_native_cli(&["help", "annotations", "resume"]);
+    assert!(resume_help.status.success());
+    let resume_help_json: Value = serde_json::from_slice(&resume_help.stdout).unwrap();
+    let resume_help_command = &resume_help_json["result"]["command"];
+    assert_eq!(
+        resume_command["effect"],
+        "registry_consumer_lease_replace_and_local_state_write_may_close_prior_listener"
+    );
+    assert_eq!(resume_help_command["effect"], resume_command["effect"]);
+    assert!(resume_command["summary"]
+        .as_str()
+        .unwrap()
+        .contains("may close another live listener"));
+    assert!(resume_help_command["summary"]
+        .as_str()
+        .unwrap()
+        .contains("may close another live listener"));
+    assert_eq!(
+        resume_command["consumerLifecycle"]["lease"],
+        "replace_and_fence_prior"
+    );
+    assert_eq!(
+        resume_command["consumerLifecycle"]["mayClosePriorSameIdListener"],
+        true
+    );
+}
+
+#[test]
+fn topology_realize_published_schema_resolves_recursive_nodes_at_resource_root() {
+    let schema_output = run_native_cli(&["schema", "topology-realize"]);
+    assert!(
+        schema_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&schema_output.stdout)
+    );
+    let schema_response: Value = serde_json::from_slice(&schema_output.stdout).unwrap();
+    let input_schema = &schema_response["result"]["command"]["inputSchema"];
+    assert!(input_schema["$defs"]["topology"].is_object());
+
+    let help_output = run_native_cli(&["help", "topology-realize"]);
+    assert!(help_output.status.success());
+    let help_response: Value = serde_json::from_slice(&help_output.stdout).unwrap();
+    let example = help_response["result"]["command"]["examples"][0]["input"].clone();
+    common::schema::validate(input_schema, input_schema, &example)
+        .expect("the documented three-pane example validates against the published schema");
+
+    let mut nested = example.clone();
+    nested["desired"]["children"][0] = json!({
+        "type": "split", "direction": "horizontal", "children": [
+            { "type": "pane" }, { "type": "pane", "paneId": 17 }
+        ]
+    });
+    common::schema::validate(input_schema, input_schema, &nested)
+        .expect("nested splits resolve the same resource-root definition");
+
+    let mut unknown_descendant = nested.clone();
+    unknown_descendant["desired"]["children"][0]["children"][1]["type"] = json!("unknown");
+    assert!(common::schema::validate(input_schema, input_schema, &unknown_descendant).is_err());
+
+    let mut incomplete_descendant = nested;
+    incomplete_descendant["desired"]["children"][0]["children"][0] =
+        json!({ "type": "split", "direction": "vertical" });
+    assert!(common::schema::validate(input_schema, input_schema, &incomplete_descendant).is_err());
 }
 
 fn fleet_inventory_fixture() -> Value {
