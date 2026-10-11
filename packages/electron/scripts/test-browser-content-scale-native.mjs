@@ -10,6 +10,13 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { app, BrowserWindow, session } from "electron";
 import { readNativeScalePinManifest, saveNativeScalePng, verifyNativeScalePins } from "./native-scale-runner-guard.mjs";
+import {
+  buildGuestMessageReceiverScript,
+  buildIframeChallengeAckHostProgram,
+  buildIframeChallengeGuestProgram,
+  buildIframeChallengeHostProgram,
+  buildIframeDocumentReceiverScript,
+} from "./native-scale-iframe-challenge.mjs";
 
 const packageDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const repoDir = path.resolve(packageDir, "../..");
@@ -41,13 +48,7 @@ app.setPath("userData", path.join(scratch, "profile"));
 
 const iframeHtml = `<!doctype html><html><head><style>html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#d9e8ff}</style></head>
 <body><script>
-window.__iframePaintChallenge={challengeId:'boot',rgb:[217,232,255]};
-const rgbText=rgb=>'rgb('+rgb.join(', ')+')';
-window.addEventListener('message',event=>{if(event.data?.type==='iframe-paint-challenge'){
-  window.__iframePaintChallenge={challengeId:event.data.challengeId,rgb:event.data.rgb};
-  document.body.style.backgroundColor=rgbText(event.data.rgb);
-  parent.postMessage({type:'iframe-challenge-painted',challengeId:event.data.challengeId,rgb:event.data.rgb},'*');
-}});
+${buildIframeDocumentReceiverScript()}
 window.addEventListener('pointermove',event=>parent.postMessage({type:'iframe-pointer',x:event.clientX,y:event.clientY,
   challengeId:window.__iframePaintChallenge.challengeId,rgb:window.__iframePaintChallenge.rgb},'*'));
 </script></body></html>`;
@@ -56,17 +57,14 @@ html,body{box-sizing:border-box;margin:0;padding:0;width:100%;height:100%;overfl
 #marker{position:fixed;left:-20px;top:-20px;width:8px;height:8px;background:#e22;pointer-events:none}
 #edge-frame{position:fixed;right:0;bottom:0;width:130px;height:100px;border:0}
 </style></head><body><div id="marker"></div><iframe id="edge-frame"></iframe><script>
-window.__pointerSamples=[];window.__iframePointer=null;window.__iframePointerCount=0;
+window.__pointerSamples=[];
 window.__nativeScaleChallenge={challengeId:'boot',rgb:[238,34,34]};window.__iframeChallengeAck=null;
 const marker=document.querySelector('#marker');
 window.addEventListener('pointermove',event=>{
   marker.style.left=event.clientX+'px';marker.style.top=event.clientY+'px';
   window.__pointerSamples.push({x:event.clientX,y:event.clientY,challengeId:window.__nativeScaleChallenge.challengeId});
 });
-window.addEventListener('message',event=>{
-  if(event.data?.type==='iframe-pointer'){window.__iframePointer=event.data;window.__iframePointerCount++}
-  if(event.data?.type==='iframe-challenge-painted')window.__iframeChallengeAck=event.data;
-});
+${buildGuestMessageReceiverScript()}
 document.querySelector('#edge-frame').srcdoc=${JSON.stringify(iframeHtml)};
 </script></body></html>`;
 const guestUrl = `data:text/html;charset=utf-8,${encodeURIComponent(guestHtml)}`;
@@ -253,11 +251,9 @@ async function installMarkerChallenge(label) {
 
 async function installIframeChallenge(label) {
   const challenge = nextCapturePhase(label);
-  const payload = JSON.stringify({ ...challenge.paint, type: "iframe-paint-challenge" });
-  await evaluate("install-iframe-challenge", `(async()=>{const view=document.querySelector('webview');
-    return view.executeJavaScript("(()=>{const message=${JSON.stringify(payload)};document.querySelector('#edge-frame').contentWindow.postMessage(message,'*');return true})()");})()`);
-  await waitFor("iframe-challenge-painted", `(async()=>{const view=document.querySelector('webview');const state=await view.executeJavaScript(
-    "(()=>window.__iframeChallengeAck?.challengeId||null)()");return state===${JSON.stringify(challenge.paint.challengeId)}})()`);
+  const guestProgram = buildIframeChallengeGuestProgram(challenge.paint);
+  await evaluate("install-iframe-challenge", buildIframeChallengeHostProgram(guestProgram));
+  await waitFor("iframe-challenge-painted", buildIframeChallengeAckHostProgram(challenge.paint.challengeId));
   return challenge;
 }
 

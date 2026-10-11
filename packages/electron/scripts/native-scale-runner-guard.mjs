@@ -9,6 +9,7 @@ export const NATIVE_SCALE_PINNED_SOURCES = [
   "packages/electron/scripts/native-scale-owned-process.mjs",
   "packages/electron/scripts/native-scale-process-supervisor.mjs",
   "packages/electron/scripts/native-scale-runner-guard.mjs",
+  "packages/electron/scripts/native-scale-iframe-challenge.mjs",
   "packages/electron/scripts/run-browser-content-scale-native-private.mjs",
   "packages/electron/scripts/test-browser-content-scale-native.mjs",
   "packages/electron/src/guest-preload.ts",

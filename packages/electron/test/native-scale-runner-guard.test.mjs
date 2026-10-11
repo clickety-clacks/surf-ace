@@ -4,7 +4,15 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import vm from "node:vm";
 import { deflateSync } from "node:zlib";
+import {
+  buildGuestMessageReceiverScript,
+  buildIframeChallengeAckHostProgram,
+  buildIframeChallengeGuestProgram,
+  buildIframeChallengeHostProgram,
+  buildIframeDocumentReceiverScript,
+} from "../scripts/native-scale-iframe-challenge.mjs";
 import {
   NATIVE_SCALE_EXPECTED_IFRAME_POINTS,
   NATIVE_SCALE_EXPECTED_POINTERS,
@@ -288,12 +296,16 @@ test("fixture evidence requires all admitted phases and the exact fresh paint pi
 });
 
 test("private native runner retains multi-position, iframe, and old root-zoom negative oracles", async () => {
+  assert.ok(NATIVE_SCALE_PINNED_SOURCES.includes("packages/electron/scripts/native-scale-iframe-challenge.mjs"),
+    "iframe program builders and receiver code must be included in the pinned source manifest");
   const runnerPath = new URL("../scripts/test-browser-content-scale-native.mjs", import.meta.url);
   const supervisorPath = new URL("../scripts/native-scale-process-supervisor.mjs", import.meta.url);
   const ownedPath = new URL("../scripts/native-scale-owned-process.mjs", import.meta.url);
+  const challengePath = new URL("../scripts/native-scale-iframe-challenge.mjs", import.meta.url);
   const runner = await readFile(runnerPath, "utf8");
   const supervisor = await readFile(supervisorPath, "utf8");
   const owned = await readFile(ownedPath, "utf8");
+  const challengeBuilder = await readFile(challengePath, "utf8");
   const guardTest = await readFile(new URL(import.meta.url), "utf8");
   assert.match(runner, /assertLegacyRootZoomRejected/);
   assert.match(runner, /legacy-root-zoom-negative/);
@@ -303,8 +315,15 @@ test("private native runner retains multi-position, iframe, and old root-zoom ne
   assert.match(runner, /scale-1\.275-quarter/);
   assert.match(runner, /scale-0\.85-right-upper/);
   assert.match(runner, /__nativeScaleChallenge/);
-  assert.match(runner, /iframe-paint-challenge/);
+  assert.match(challengeBuilder, /iframe-paint-challenge/);
+  assert.match(runner, /buildIframeDocumentReceiverScript\(\)/);
+  assert.match(runner, /buildGuestMessageReceiverScript\(\)/);
   assert.match(runner, /challengeId/);
+  assert.match(runner, /buildIframeChallengeGuestProgram\(challenge\.paint\)/);
+  assert.match(runner, /buildIframeChallengeHostProgram\(guestProgram\)/);
+  assert.match(runner, /buildIframeChallengeAckHostProgram\(challenge\.paint\.challengeId\)/);
+  assert.match(challengeBuilder, /JSON\.stringify\(guestProgram\)/);
+  assert.doesNotMatch(runner, /const payload = JSON\.stringify\(\{ \.\.\.challenge\.paint/);
   assert.match(runner, /2_500/);
   assert.match(supervisor, /process\.kill\(-process\.pid, signal\)/);
   assert.match(supervisor, /detached: false/);
@@ -318,6 +337,75 @@ test("private native runner retains multi-position, iframe, and old root-zoom ne
   assert.match(runner, /app\.quit\(\)/);
   assert.doesNotMatch(runner, /app\.exit\(/);
   assert.doesNotMatch(runner, /fs\.rm\(scratch/);
+});
+
+test("iframe challenge executes as an object through generated host, guest, and receiver programs", async () => {
+  function makeHarness() {
+    const iframeListeners = new Map();
+    const guestListeners = new Map();
+    const iframeWindow = { addEventListener: (type, callback) => iframeListeners.set(type, callback) };
+    const guestWindow = { addEventListener: (type, callback) => guestListeners.set(type, callback) };
+    const iframeDocument = { body: { style: {} } };
+    let receiverDataType = null;
+    const frame = { contentWindow: { postMessage: (data, origin) => {
+      receiverDataType = typeof data;
+      queueMicrotask(() => iframeListeners.get("message")?.({ data, origin, source: guestWindow }));
+    } } };
+    const guestDocument = { querySelector: (selector) => {
+      assert.equal(selector, "#edge-frame");
+      return frame;
+    } };
+    const iframeContext = vm.createContext({
+      window: iframeWindow,
+      document: iframeDocument,
+      parent: { postMessage: (data, origin) => queueMicrotask(() =>
+        guestListeners.get("message")?.({ data, origin, source: iframeWindow })) },
+    });
+    vm.runInContext(buildIframeDocumentReceiverScript(), iframeContext);
+    const guestContext = vm.createContext({ window: guestWindow, document: guestDocument });
+    vm.runInContext(buildGuestMessageReceiverScript(), guestContext);
+    const executedGuestPrograms = [];
+    const webview = { executeJavaScript: async (program) => {
+      executedGuestPrograms.push(program);
+      return vm.runInContext(program, guestContext);
+    } };
+    const hostContext = vm.createContext({ document: { querySelector: (selector) => {
+      assert.equal(selector, "webview");
+      return webview;
+    } } });
+    return { iframeWindow, iframeDocument, guestWindow, hostContext, executedGuestPrograms,
+      get receiverDataType() { return receiverDataType; } };
+  }
+
+  const paint = { challengeId: "fixture-run/scale-1.275-iframe/phase-012", rgb: [40, 70, 180] };
+  const guestProgram = buildIframeChallengeGuestProgram(paint);
+  const hostProgram = buildIframeChallengeHostProgram(guestProgram);
+  const harness = makeHarness();
+  assert.equal(await vm.runInContext(hostProgram, harness.hostContext), true);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(harness.executedGuestPrograms[0], guestProgram,
+    "the host passes the generated guest program as one JSON-serialized argument");
+  assert.equal(harness.receiverDataType, "object", "iframe receiver must receive an object, not JSON text");
+  assert.deepEqual(JSON.parse(JSON.stringify(harness.iframeWindow.__iframePaintChallenge)), paint);
+  assert.equal(harness.iframeDocument.body.style.backgroundColor, "rgb(40, 70, 180)");
+  assert.deepEqual(JSON.parse(JSON.stringify(harness.guestWindow.__iframeChallengeAck)), {
+    type: "iframe-challenge-painted", ...paint,
+  });
+  assert.equal(await vm.runInContext(buildIframeChallengeAckHostProgram(paint.challengeId), harness.hostContext), true,
+    "host acknowledgement predicate observes the receiver-set challenge id");
+
+  const legacyPayload = JSON.stringify({ ...paint, type: "iframe-paint-challenge" });
+  const exactLegacyHostBytes = `(async()=>{const view=document.querySelector('webview');\n    return view.executeJavaScript("(()=>{const message=${JSON.stringify(legacyPayload)};document.querySelector('#edge-frame').contentWindow.postMessage(message,'*');return true})()");})()`;
+  assert.throws(() => new vm.Script(exactLegacyHostBytes), SyntaxError,
+    "the previous host bytes must remain a parse-failure negative control");
+
+  const escapedStringGuestProgram = `(()=>{const message=${JSON.stringify(legacyPayload)};document.querySelector('#edge-frame').contentWindow.postMessage(message,'*');return true})()`;
+  const escapedHarness = makeHarness();
+  assert.equal(await vm.runInContext(buildIframeChallengeHostProgram(escapedStringGuestProgram), escapedHarness.hostContext), true);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(escapedHarness.receiverDataType, "string", "escaping only the old payload still posts JSON text");
+  assert.equal(await vm.runInContext(buildIframeChallengeAckHostProgram(paint.challengeId), escapedHarness.hostContext), false,
+    "the object-only iframe receiver must not acknowledge the escaped string negative");
 });
 
 test("owned process wrapper reaps a timed-out process group and an orphaned group member",
