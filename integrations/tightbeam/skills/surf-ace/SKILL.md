@@ -81,11 +81,17 @@ and error behavior. The examples below are fixtures; replace every identity,
 revision, endpoint, and destroy list with current values from the intended
 client. The CLI schema and validator tests cover the three-pane replacement
 and pane-specific clear inputs.
-The separate registry annotation commands use the registry journal; `watch`
-and `resume` stream NDJSON until a terminal event, and delivery does not
-acknowledge records. Use `ack` only after durable processing, with the exact
-cursor or gap ID. `retire` requires an explicit expected acknowledgement and
-the discard flag.
+The separate registry annotation commands use the registry journal. `watch`
+requires an unused consumer ID and creates a durable registry consumer and
+lease before saving local listener state. Reusing an existing consumer ID is a
+registry refusal (`annotation_consumer_exists`). `resume` requires an existing
+registry consumer ID; it does not require a locally stored lease. It obtains a
+new lease, fences the prior lease, saves the new local state, and can terminate
+another live listener using the same ID. Treat both commands as consumer
+lifecycle operations, not read-only observation. They stream NDJSON until a
+terminal event, and delivery does not acknowledge records. Use `ack` only after
+durable processing, with the exact cursor or gap ID. `retire` requires an
+explicit expected acknowledgement and the discard flag.
 
 ## Discover registered clients, then select a client
 

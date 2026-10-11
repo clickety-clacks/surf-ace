@@ -85,11 +85,16 @@ to a direct endpoint or reports fresh client reachability; `list` and
 `capture-pane` pair the controller before their direct request.
 
 The separate registry annotation commands also have action-specific help and
-schemas. `annotations watch` and `annotations resume` emit NDJSON in the
-foreground; record delivery does not acknowledge a record. Use `annotations
-ack` only after durable processing, with either the exact cursor or a history
-gap ID. `annotations retire` requires an explicit expected acknowledgement and
-the discard flag.
+schemas. `annotations watch` requires an unused consumer ID and creates a
+durable registry consumer and lease before saving local state; an existing ID
+is refused. `annotations resume` requires an existing registry consumer ID,
+not a locally stored lease. It replaces and fences the prior lease, saves the
+new local state, and may close another live listener using that same ID. Treat
+both as consumer lifecycle operations. They emit NDJSON in the foreground;
+record delivery does not acknowledge a record. Use `annotations ack` only
+after durable processing, with either the exact cursor or a history gap ID.
+`annotations retire` requires an explicit expected acknowledgement and the
+discard flag.
 
 This fixture example replaces a root layout with three vertical panes. Here
 `sf_fixture`, revision `7`, and pane IDs `1`, `2`, and `3` are test values. In a

@@ -1,3 +1,5 @@
+mod common;
+
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::io::{BufRead, BufReader};
@@ -44,6 +46,17 @@ fn respond(socket: &mut WebSocket<std::net::TcpStream>, request: &Value, payload
         .unwrap();
 }
 
+fn respond_error(socket: &mut WebSocket<std::net::TcpStream>, request: &Value, error: Value) {
+    socket
+        .send(Message::Text(
+            json!({"v":1,"type":"response","op":request["op"],
+        "id":request["id"],"ok":false,"sentAt":1,"error":error})
+            .to_string()
+            .into(),
+        ))
+        .unwrap();
+}
+
 fn hello(socket: &mut WebSocket<std::net::TcpStream>) {
     let request = request(socket, "annotation.hello");
     assert_eq!(
@@ -56,6 +69,67 @@ fn hello(socket: &mut WebSocket<std::net::TcpStream>) {
         json!({"registryId":"test","journalEpoch":EPOCH,
         "availableFromCursor":null,"headCursor":null,"limits":{},"usage":{}}),
     );
+}
+
+#[test]
+fn forwarded_registry_refusal_matches_exported_annotation_error_schema() {
+    let schema_output = Command::new(cli_binary())
+        .args(["schema", "annotations", "watch"])
+        .output()
+        .unwrap();
+    assert!(schema_output.status.success());
+    let schema_response: Value = serde_json::from_slice(&schema_output.stdout).unwrap();
+    assert_eq!(
+        schema_response["result"]["command"]["errorContract"]["registryCodesForwardedUnchanged"],
+        true
+    );
+    assert!(
+        schema_response["result"]["command"]["errorContract"]["registryCodes"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("annotation_consumer_exists"))
+    );
+    let error_schema = &schema_response["result"]["command"]["errorSchema"];
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut socket = accept(stream).unwrap();
+        hello(&mut socket);
+        let watch = request(&mut socket, "annotation.watch");
+        respond_error(
+            &mut socket,
+            &watch,
+            json!({"code":"annotation_consumer_exists","message":"consumer already exists"}),
+        );
+    });
+
+    let root = TempDir::new().unwrap();
+    let registry = format!("ws://{address}");
+    let output = Command::new(cli_binary())
+        .args([
+            "--registry",
+            registry.as_str(),
+            "--state-root",
+            root.path().to_str().unwrap(),
+            "annotations",
+            "watch",
+            "--consumer-id",
+            "already-registered",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let cli_error: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(cli_error["error"]["code"], "annotation_consumer_exists");
+    assert_eq!(
+        cli_error["error"]["details"]["message"],
+        "consumer already exists"
+    );
+    common::schema::validate(error_schema, error_schema, &cli_error)
+        .expect("forwarded registry refusal matches the exported error schema");
+    server.join().unwrap();
 }
 
 #[test]

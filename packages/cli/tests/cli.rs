@@ -1,3 +1,5 @@
+mod common;
+
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 use std::fs;
@@ -463,6 +465,100 @@ fn help_and_schema_are_json_and_do_not_require_operational_arguments() {
         annotation_schema_json["result"]["command"]["name"],
         "annotations ack"
     );
+
+    let watch_schema = run_native_cli(&["schema", "annotations", "watch"]);
+    assert!(watch_schema.status.success());
+    let watch_spec: Value = serde_json::from_slice(&watch_schema.stdout).unwrap();
+    let watch_command = &watch_spec["result"]["command"];
+    let watch_help = run_native_cli(&["help", "annotations", "watch"]);
+    assert!(watch_help.status.success());
+    let watch_help_json: Value = serde_json::from_slice(&watch_help.stdout).unwrap();
+    let watch_help_command = &watch_help_json["result"]["command"];
+    assert_eq!(
+        watch_command["effect"],
+        "registry_consumer_create_and_lease_acquire_and_local_state_write"
+    );
+    assert_eq!(watch_help_command["effect"], watch_command["effect"]);
+    assert!(watch_command["summary"]
+        .as_str()
+        .unwrap()
+        .contains("consumer ID must be unused"));
+    assert!(watch_help_command["summary"]
+        .as_str()
+        .unwrap()
+        .contains("consumer ID must be unused"));
+    assert_eq!(
+        watch_command["consumerLifecycle"]["registryConsumer"],
+        "create"
+    );
+
+    let resume_schema = run_native_cli(&["schema", "annotations", "resume"]);
+    assert!(resume_schema.status.success());
+    let resume_spec: Value = serde_json::from_slice(&resume_schema.stdout).unwrap();
+    let resume_command = &resume_spec["result"]["command"];
+    let resume_help = run_native_cli(&["help", "annotations", "resume"]);
+    assert!(resume_help.status.success());
+    let resume_help_json: Value = serde_json::from_slice(&resume_help.stdout).unwrap();
+    let resume_help_command = &resume_help_json["result"]["command"];
+    assert_eq!(
+        resume_command["effect"],
+        "registry_consumer_lease_replace_and_local_state_write_may_close_prior_listener"
+    );
+    assert_eq!(resume_help_command["effect"], resume_command["effect"]);
+    assert!(resume_command["summary"]
+        .as_str()
+        .unwrap()
+        .contains("may close another live listener"));
+    assert!(resume_help_command["summary"]
+        .as_str()
+        .unwrap()
+        .contains("may close another live listener"));
+    assert_eq!(
+        resume_command["consumerLifecycle"]["lease"],
+        "replace_and_fence_prior"
+    );
+    assert_eq!(
+        resume_command["consumerLifecycle"]["mayClosePriorSameIdListener"],
+        true
+    );
+}
+
+#[test]
+fn topology_realize_published_schema_resolves_recursive_nodes_at_resource_root() {
+    let schema_output = run_native_cli(&["schema", "topology-realize"]);
+    assert!(
+        schema_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&schema_output.stdout)
+    );
+    let schema_response: Value = serde_json::from_slice(&schema_output.stdout).unwrap();
+    let input_schema = &schema_response["result"]["command"]["inputSchema"];
+    assert!(input_schema["$defs"]["topology"].is_object());
+
+    let help_output = run_native_cli(&["help", "topology-realize"]);
+    assert!(help_output.status.success());
+    let help_response: Value = serde_json::from_slice(&help_output.stdout).unwrap();
+    let example = help_response["result"]["command"]["examples"][0]["input"].clone();
+    common::schema::validate(input_schema, input_schema, &example)
+        .expect("the documented three-pane example validates against the published schema");
+
+    let mut nested = example.clone();
+    nested["desired"]["children"][0] = json!({
+        "type": "split", "direction": "horizontal", "children": [
+            { "type": "pane" }, { "type": "pane", "paneId": 17 }
+        ]
+    });
+    common::schema::validate(input_schema, input_schema, &nested)
+        .expect("nested splits resolve the same resource-root definition");
+
+    let mut unknown_descendant = nested.clone();
+    unknown_descendant["desired"]["children"][0]["children"][1]["type"] = json!("unknown");
+    assert!(common::schema::validate(input_schema, input_schema, &unknown_descendant).is_err());
+
+    let mut incomplete_descendant = nested;
+    incomplete_descendant["desired"]["children"][0]["children"][0] =
+        json!({ "type": "split", "direction": "vertical" });
+    assert!(common::schema::validate(input_schema, input_schema, &incomplete_descendant).is_err());
 }
 
 fn fleet_inventory_fixture() -> Value {

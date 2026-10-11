@@ -66,15 +66,22 @@ fn schema_document(name: &str) -> Result<Value, String> {
     document(Some(name)).map(|value| {
         let mut result = value["result"].clone();
         if let Some(spec) = result.get_mut("command") {
-            *spec = json!({
+            let mut command = json!({
                 "name": spec["name"],
                 "route": spec["route"],
                 "effect": spec["effect"],
+                "summary": spec["summary"],
                 "inputSchema": spec["inputSchema"],
                 "resultSchema": spec["resultSchema"],
                 "errorSchema": spec["errorSchema"],
                 "errors": spec["errors"],
             });
+            for field in ["consumerLifecycle", "errorContract"] {
+                if let Some(value) = spec.get(field) {
+                    command[field] = value.clone();
+                }
+            }
+            *spec = command;
         }
         json!({ "ok": true, "command": "schema", "result": result })
     })
@@ -206,9 +213,11 @@ fn annotation_command_document(action: &str) -> Result<Value, String> {
             ],
             "command": annotation_command_spec(action),
             "errorSchema": annotation_error_schema(),
-            "errorBehavior": "Errors are one JSON object on stdout; nonzero exit indicates failure.",
+            "errorBehavior": "Local validation, response, and transport errors use the listed local codes. Registry refusal codes are forwarded unchanged as error.code, with the full registry error object preserved in error.details. Errors are one JSON object on stdout; nonzero exit indicates failure.",
             "deliveryRules": [
                 "watch and resume remain in the foreground and emit NDJSON; receiving a record does not acknowledge it.",
+                "watch requires a new consumer ID and creates a durable registry consumer and lease; an existing ID is refused.",
+                "resume requires an existing registry consumer ID, replaces and fences its prior lease, and may close another live listener using that same ID; a locally stored lease is not required to request resume.",
                 "Ack only after the record has been durably processed; history gaps require the exact gapId.",
                 "retire requires an explicit expected acknowledgement cursor and --discard-unacknowledged."
             ]
@@ -219,14 +228,14 @@ fn annotation_command_document(action: &str) -> Result<Value, String> {
 fn annotation_command_spec(action: &str) -> Value {
     let (effect, summary, wire_operation, result_description) = match action {
         "watch" => (
-            "registry_stream_read_and_local_state_write",
-            "Open a foreground annotation subscription, optionally from an explicit cursor.",
+            "registry_consumer_create_and_lease_acquire_and_local_state_write",
+            "Create a new durable registry consumer and open its foreground subscription, optionally from an explicit cursor; the consumer ID must be unused.",
             json!("annotation.watch"),
             "NDJSON: one subscription record followed by annotation event records until a terminal event.",
         ),
         "resume" => (
-            "registry_stream_read_and_local_state_write",
-            "Resume the locally stored annotation consumer lease in the foreground.",
+            "registry_consumer_lease_replace_and_local_state_write_may_close_prior_listener",
+            "Resume an existing registry consumer with a replacement lease; this fences its prior lease and may close another live listener using the same ID.",
             json!("annotation.resume"),
             "NDJSON: one subscription record followed by annotation event records until a terminal event.",
         ),
@@ -244,7 +253,7 @@ fn annotation_command_spec(action: &str) -> Value {
         ),
         _ => unreachable!("action checked by caller"),
     };
-    json!({
+    let mut spec = json!({
         "name": format!("annotations {action}"),
         "route": "registry",
         "effect": effect,
@@ -253,9 +262,84 @@ fn annotation_command_spec(action: &str) -> Value {
         "inputSchema": annotation_input_schema(action),
         "resultSchema": annotation_result_schema(action, result_description),
         "errorSchema": annotation_error_schema(),
-        "errors": ["annotation_invalid_request", "annotation_invalid_response", "annotation_transport_failure"],
+        "errors": annotation_error_codes(),
+        "errorContract": {
+            "localCodes": annotation_local_error_codes(),
+            "registryCodes": annotation_registry_error_codes(),
+            "registryCodesForwardedUnchanged": true,
+            "registryErrorObjectPreservedAt": "error.details"
+        },
         "examples": annotation_examples(action),
-    })
+    });
+    match action {
+        "watch" => {
+            spec["consumerLifecycle"] = json!({
+                "consumerIdRequirement": "new_unused_registry_id",
+                "registryConsumer": "create",
+                "lease": "acquire",
+                "localState": "write_after_registry_success",
+                "replacesPriorSameIdLease": false,
+                "mayClosePriorSameIdListener": false
+            });
+        }
+        "resume" => {
+            spec["consumerLifecycle"] = json!({
+                "consumerIdRequirement": "existing_registry_id",
+                "registryConsumer": "reuse",
+                "lease": "replace_and_fence_prior",
+                "localState": "write_after_registry_success",
+                "replacesPriorSameIdLease": true,
+                "mayClosePriorSameIdListener": true
+            });
+        }
+        _ => {}
+    }
+    spec
+}
+
+fn annotation_local_error_codes() -> &'static [&'static str] {
+    &[
+        "annotation_invalid_request",
+        "annotation_invalid_response",
+        "annotation_transport_failure",
+    ]
+}
+
+fn annotation_registry_error_codes() -> &'static [&'static str] {
+    &[
+        "annotation_invalid_request",
+        "annotation_protocol_unsupported",
+        "annotation_role_operation_invalid",
+        "annotation_cursor_invalid",
+        "annotation_context_image_invalid",
+        "annotation_record_too_large",
+        "annotation_source_event_conflict",
+        "annotation_source_sequence_conflict",
+        "annotation_source_gap_required",
+        "annotation_source_gap_invalid",
+        "annotation_source_sequence_exhausted",
+        "annotation_ingest_capacity",
+        "annotation_journal_sequence_exhausted",
+        "annotation_consumer_capacity",
+        "annotation_consumer_exists",
+        "annotation_consumer_not_found",
+        "annotation_consumer_lease_stale",
+        "annotation_ack_regression",
+        "annotation_ack_not_delivered",
+        "annotation_ack_cursor_mismatch",
+        "annotation_gap_ack_required",
+        "annotation_gap_id_mismatch",
+        "annotation_consumer_retire_confirmation_required",
+        "annotation_journal_unverified",
+    ]
+}
+
+fn annotation_error_codes() -> Vec<&'static str> {
+    let mut codes = annotation_local_error_codes().to_vec();
+    codes.extend(annotation_registry_error_codes().iter().copied());
+    codes.sort_unstable();
+    codes.dedup();
+    codes
 }
 
 fn annotation_input_schema(action: &str) -> Value {
@@ -366,7 +450,7 @@ fn annotation_error_schema() -> Value {
         "type": "object", "required": ["ok", "error"],
         "properties": {
             "ok": { "const": false },
-            "error": { "type": "object", "required": ["code", "details"], "properties": { "code": { "enum": ["annotation_invalid_request", "annotation_invalid_response", "annotation_transport_failure"] }, "details": { "type": "object" } }, "additionalProperties": false }
+            "error": { "type": "object", "required": ["code", "details"], "properties": { "code": { "enum": annotation_error_codes() }, "details": { "type": "object" } }, "additionalProperties": false }
         }, "additionalProperties": false
     })
 }
@@ -501,16 +585,24 @@ fn command_spec(command: Command) -> Value {
         "effect": effect,
         "summary": summary,
         "wireOperation": wire_operation(command),
-        "inputSchema": {
-            "$schema": "https://json-schema.org/draft/2020-12/schema",
-            "title": format!("surf-ace {} input", name),
-            "allOf": [input_schema(command)]
-        },
+        "inputSchema": published_input_schema(command),
         "resultSchema": result_schema(command, result_description),
         "errorSchema": error_schema(),
         "errors": errors,
         "examples": examples(command),
     })
+}
+
+fn published_input_schema(command: Command) -> Value {
+    let mut schema = json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": format!("surf-ace {} input", command.name()),
+        "allOf": [input_schema(command)]
+    });
+    if command == Command::TopologyRealize {
+        schema["$defs"] = json!({ "topology": topology_node_schema() });
+    }
+    schema
 }
 
 fn wire_operation(command: Command) -> Value {
@@ -682,15 +774,15 @@ fn object_schema_any() -> Value {
 }
 
 fn desired_topology_schema() -> Value {
+    json!({ "$ref": "#/$defs/topology" })
+}
+
+fn topology_node_schema() -> Value {
     json!({
         "oneOf": [
             { "type": "object", "required": ["type"], "properties": { "type": { "const": "pane" }, "paneId": positive_integer_schema() }, "additionalProperties": true },
             { "type": "object", "required": ["type", "direction", "children"], "properties": { "type": { "const": "split" }, "direction": direction_schema(), "children": { "type": "array", "minItems": 2, "items": { "$ref": "#/$defs/topology" } } }, "additionalProperties": true }
-        ],
-        "$defs": { "topology": { "oneOf": [
-            { "type": "object", "required": ["type"], "properties": { "type": { "const": "pane" }, "paneId": positive_integer_schema() }, "additionalProperties": true },
-            { "type": "object", "required": ["type", "direction", "children"], "properties": { "type": { "const": "split" }, "direction": direction_schema(), "children": { "type": "array", "minItems": 2, "items": { "$ref": "#/$defs/topology" } } }, "additionalProperties": true }
-        ] } }
+        ]
     })
 }
 
