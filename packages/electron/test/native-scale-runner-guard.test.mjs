@@ -294,6 +294,7 @@ test("private native runner retains multi-position, iframe, and old root-zoom ne
   const runner = await readFile(runnerPath, "utf8");
   const supervisor = await readFile(supervisorPath, "utf8");
   const owned = await readFile(ownedPath, "utf8");
+  const guardTest = await readFile(new URL(import.meta.url), "utf8");
   assert.match(runner, /assertLegacyRootZoomRejected/);
   assert.match(runner, /legacy-root-zoom-negative/);
   assert.match(runner, /iframePointer\.x < iframeRect\.width/);
@@ -310,6 +311,10 @@ test("private native runner retains multi-position, iframe, and old root-zoom ne
   assert.doesNotMatch(owned, /process\.kill\(-pgid/);
   assert.match(owned, /onLaunch/);
   assert.match(owned, /censusTimeoutMs/);
+  assert.match(guardTest, /orphanParentGroupObservation\.target\.pgid, orphan\.pgid/);
+  assert.match(guardTest, /orphanChildGroupObservation\?\.pgid, orphan\.pgid/);
+  assert.match(guardTest, /orphan\.termSent, true/);
+  assert.doesNotMatch(guardTest, /assert\.equal\(parentExitProof\.parentPid, orphan\.pid\)/);
   assert.match(runner, /app\.quit\(\)/);
   assert.doesNotMatch(runner, /app\.exit\(/);
   assert.doesNotMatch(runner, /fs\.rm\(scratch/);
@@ -342,18 +347,58 @@ test("owned process wrapper reaps a timed-out process group and an orphaned grou
   assert.deepEqual(timeout.remaining, []);
   assert.deepEqual(processGroupCensus(timeout.pgid, await processCensus()), []);
 
-  const orphan = await runOwnedProcess({
+  const orphanSuffix = `${process.pid}-${Date.now()}`;
+  const orphanParentMarker = `native-scale-orphan-parent-${orphanSuffix}`;
+  const orphanChildMarker = `native-scale-orphan-child-${orphanSuffix}`;
+  const orphanChildSource = `const marker=${JSON.stringify(orphanChildMarker)};setInterval(()=>{},1000)`;
+  const orphanParentSource = `const marker=${JSON.stringify(orphanParentMarker)};const {spawn}=require('node:child_process');const child=spawn(process.execPath,['-e',${JSON.stringify(orphanChildSource)}],{stdio:'ignore'});child.once('spawn',()=>{child.unref();process.stdout.write(JSON.stringify({event:'parent-exiting',parentPid:process.pid,childPid:child.pid})+'\\n');setTimeout(()=>process.exit(0),800)});`;
+  let orphanLaunch = null;
+  let orphanParentGroupObservation = null;
+  let orphanChildGroupObservation = null;
+  const orphanRun = runOwnedProcess({
     command: process.execPath,
-    args: ["-e", "const {spawn}=require('node:child_process');const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});child.once('spawn',()=>{child.unref();process.stdout.write(JSON.stringify({event:'parent-exiting',parentPid:process.pid,childPid:child.pid})+'\\n')});"],
+    args: ["-e", orphanParentSource],
     deadlineMs: 3_000,
     terminateGraceMs: 500,
     reapTimeoutMs: 2_000,
+    onLaunch: (receipt) => { orphanLaunch = receipt; },
+    census: async () => {
+      const rows = await processCensus();
+      if (orphanLaunch) {
+        const group = processGroupCensus(orphanLaunch.pgid, rows);
+        const childMember = group.find(({ command: processCommand }) => processCommand.includes(orphanChildMarker));
+        if (childMember) orphanChildGroupObservation = childMember;
+      }
+      return rows;
+    },
   });
+  const parentObservationDeadline = Date.now() + 2_000;
+  while (!orphanParentGroupObservation && Date.now() < parentObservationDeadline) {
+    if (orphanLaunch) {
+      const rows = await processCensus();
+      const group = processGroupCensus(orphanLaunch.pgid, rows);
+      const target = group.find(({ command: processCommand }) => processCommand.includes(orphanParentMarker));
+      const anchor = group.find(({ pid }) => pid === orphanLaunch.pid);
+      if (target && anchor) orphanParentGroupObservation = { target, anchor };
+    }
+    if (!orphanParentGroupObservation) await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.ok(orphanParentGroupObservation, "target and supervisor must be observed together in the owned group");
+  const orphan = await orphanRun;
   const parentExitProof = JSON.parse(orphan.stdout.trim());
   assert.equal(parentExitProof.event, "parent-exiting");
-  assert.equal(parentExitProof.parentPid, orphan.pid);
+  assert.equal(parentExitProof.parentPid, orphanParentGroupObservation.target.pid);
+  assert.equal(orphanParentGroupObservation.target.pgid, orphan.pgid);
+  assert.equal(orphanParentGroupObservation.anchor.pid, orphan.pid);
+  assert.notEqual(parentExitProof.parentPid, orphanParentGroupObservation.anchor.pid,
+    "the target process is a member, not the process-group anchor");
+  assert.notEqual(parentExitProof.childPid, parentExitProof.parentPid);
   assert.notEqual(parentExitProof.childPid, orphan.pid);
-  assert.equal(orphan.pgid, orphan.pid, "unref must not detach the child from the owned process group");
+  assert.equal(orphan.pgid, orphan.pid, "the retained supervisor is the process-group anchor");
+  assert.equal(orphanChildGroupObservation?.pid, parentExitProof.childPid,
+    "the unref'd orphan must remain observable in the owned group before cleanup");
+  assert.equal(orphanChildGroupObservation?.pgid, orphan.pgid,
+    "the unref'd child must remain in the supervisor-owned process group");
   assert.equal(orphan.code, 0);
   assert.equal(orphan.timedOut, false);
   assert.equal(orphan.termSent, true, "orphaned child should receive owned-group cleanup");
