@@ -448,7 +448,7 @@ test("renderer scales every source-proven scalable content type", async () => {
   assert.match(styles, /\.content-pdf-stack\s*\{[\s\S]*width:\s*calc\(100% \* var\(--surf-ace-content-scale\)\)/);
 });
 
-test("html and browser_url content scale through guest document zoom", async () => {
+test("html and browser_url use the guarded guest scale adapter", async () => {
   const source = await rendererSource();
   const scaleIndex = source.indexOf("function applyBrowserContentScale");
   const renderBrowserIndex = source.indexOf("function renderBrowserContent");
@@ -458,8 +458,7 @@ test("html and browser_url content scale through guest document zoom", async () 
   assert.ok(renderBrowserIndex > scaleIndex);
   assert.match(source, /const WEB_CONTENT_BASE_SCALE = 0\.85/);
   assert.match(source.slice(scaleIndex, renderBrowserIndex), /WEB_CONTENT_BASE_SCALE \* view\.scale/);
-  assert.match(source.slice(scaleIndex, renderBrowserIndex), /document\.documentElement\.style\.zoom = scale === 1 \? "" : String\(scale\)/);
-  assert.match(source.slice(scaleIndex, renderBrowserIndex), /document\.body\?\.style\.setProperty\("--surf-ace-content-scale", String\(scale\)\)/);
+  assert.match(source.slice(scaleIndex, renderBrowserIndex), /runReadyGuestScript\(view, webview, browserContentScaleScript\(scale\)\)/);
   assert.match(source.slice(renderBrowserIndex, renderPaneIndex), /reportBrowserUrlDiagnostics\(view, browserView, eventReason\);[\s\S]*applyBrowserContentScale\(view, browserView\)/);
 });
 

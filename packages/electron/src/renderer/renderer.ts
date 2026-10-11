@@ -1,3 +1,4 @@
+import { browserContentScaleScript } from "./browser-content-scale.js";
 import {
   isMarkedOverlayVisible,
   visibleOverlayRect,
@@ -1857,14 +1858,7 @@ function runReadyGuestScript(view: PaneView, webview: BrowserUrlWebViewElement, 
 
 function applyBrowserContentScale(view: PaneView, webview: BrowserUrlWebViewElement): void {
   const scale = Math.round(WEB_CONTENT_BASE_SCALE * view.scale * 1000) / 1000;
-  runReadyGuestScript(view, webview,
-    `(() => {
-      const scale = ${JSON.stringify(scale)};
-      document.documentElement.style.zoom = scale === 1 ? "" : String(scale);
-      document.body?.style.setProperty("--surf-ace-content-scale", String(scale));
-      window.dispatchEvent(new Event("resize"));
-    })()`,
-  );
+  runReadyGuestScript(view, webview, browserContentScaleScript(scale));
 }
 
 function applyContentScale(view: PaneView): void {
