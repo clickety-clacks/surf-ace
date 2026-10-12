@@ -97,3 +97,12 @@ test('one invalid clock read stays fatal even if subsequent describe clock reads
  const pending=s.describe();await started;const read=s.clock.now;let once=true;s.clock.now=()=>{if(once){once=false;return NaN;}return read();};
  const [key,t]=[...s.timers].find(([,t])=>t.at===2000);s.timers.delete(key);t.cb();const r=await pending;assert.equal(r.ok,false);assert.equal(r.error.code,'internal_error');assert.equal('payload' in r,false);assert.equal(s.service.activeCount(),1);release(s.current);await new Promise(setImmediate);assert.equal(s.service.activeCount(),0);s.service.close(s.connection);
 });
+
+for(const origin of [0,.1,1000.1,100000.1,10000000.123,12345678.123456]) test(`fractional capture origin ${origin} publishes normative relative-offset midpoint`,async()=>{
+ const s=setup();s.advance(origin);const e=await expected(s);
+ s.adapter.capture=async target=>{s.calls.push(target);s.advance(target==='GUEST'?.13:.27);return {target,binding:s.current.binding,png:fixtures.png(),pixelWidth:2,pixelHeight:1};};
+ const q=s.request('fractional-origin',{action:'observe',expected:e,timeoutMs:2000}),r=await s.service.handle(s.connection,q);
+ assert.equal(r.ok,true);assert.equal(r.payload.outcome,'observed');assert.deepEqual([...s.calls],['GUEST','HOST']);
+ const[a,b]=r.payload.captures;assert.equal(r.payload.midpointSkewMs,(b.startedOffsetMs+b.endedOffsetMs-a.startedOffsetMs-a.endedOffsetMs)/2);
+ semanticReply(q,r);s.service.close(s.connection);assert.equal(s.timers.size,0);
+});
