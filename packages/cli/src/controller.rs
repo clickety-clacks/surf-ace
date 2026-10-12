@@ -47,13 +47,15 @@ pub fn execute(invocation: Invocation) -> Result<CliOutput, CliError> {
         .endpoint
         .clone()
         .ok_or_else(|| CliError::Input("missing_endpoint".into()))?;
-    let mut root =
-        LockedStateRoot::open(&invocation.state_root, invocation.projection_capacity_bytes)?;
+    let mut root = open_invocation_state(&invocation)?;
+    validate_expected_controller(&invocation, &root)?;
     let surface_id = operation_surface_id(&invocation)?;
-    if let Some(surface_id) = surface_id.as_deref() {
-        let mut lifecycle = WebSocketWire::connect_direct(&endpoint).map_err(CliError::Wire)?;
-        discover_surface(&invocation, &mut root, &mut lifecycle, surface_id)?;
-        lifecycle.close().map_err(CliError::Wire)?;
+    if invocation.command != crate::command::Command::PaneDescribe {
+        if let Some(surface_id) = surface_id.as_deref() {
+            let mut lifecycle = WebSocketWire::connect_direct(&endpoint).map_err(CliError::Wire)?;
+            discover_surface(&invocation, &mut root, &mut lifecycle, surface_id)?;
+            lifecycle.close().map_err(CliError::Wire)?;
+        }
     }
     let mut operation_wire = WebSocketWire::connect_direct(&endpoint).map_err(CliError::Wire)?;
     execute_locked(
@@ -80,9 +82,42 @@ pub fn execute_with_wire(
         return Err(CliError::Input("read_must_use_local_path".into()));
     }
     let surface_id = operation_surface_id(&invocation)?;
-    let mut root =
-        LockedStateRoot::open(&invocation.state_root, invocation.projection_capacity_bytes)?;
+    let mut root = open_invocation_state(&invocation)?;
+    validate_expected_controller(&invocation, &root)?;
     execute_locked(invocation, &mut root, wire, surface_id.as_deref())
+}
+
+fn open_invocation_state(invocation: &Invocation) -> Result<LockedStateRoot, CliError> {
+    if invocation.command == crate::command::Command::PaneDescribe {
+        Ok(LockedStateRoot::open_existing(
+            &invocation.state_root,
+            invocation.projection_capacity_bytes,
+        )?)
+    } else {
+        Ok(LockedStateRoot::open(
+            &invocation.state_root,
+            invocation.projection_capacity_bytes,
+        )?)
+    }
+}
+
+fn validate_expected_controller(
+    invocation: &Invocation,
+    root: &LockedStateRoot,
+) -> Result<(), CliError> {
+    if invocation.command != crate::command::Command::PaneDescribe {
+        return Ok(());
+    }
+    let expected = invocation
+        .input
+        .get("expectedControllerInstanceId")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| CliError::Input("invalid_input:expectedControllerInstanceId".into()))?;
+    if root.state().controller_instance_id != expected {
+        return Err(CliError::Input("controller_instance_mismatch".into()));
+    }
+    Ok(())
 }
 
 fn validate_invocation_route(invocation: &Invocation) -> Result<(), CliError> {
@@ -269,6 +304,21 @@ fn execute_locked(
     wire: &mut dyn DirectWire,
     surface_id: Option<&str>,
 ) -> Result<CliOutput, CliError> {
+    let pane_target = if invocation.command == crate::command::Command::PaneDescribe {
+        Some((
+            surface_id
+                .ok_or_else(|| CliError::Input("invalid_input:surfaceId".into()))?
+                .to_owned(),
+            invocation
+                .input
+                .get("paneId")
+                .and_then(Value::as_u64)
+                .filter(|value| *value > 0 && *value <= 9_007_199_254_740_991)
+                .ok_or_else(|| CliError::Input("invalid_input:paneId".into()))?,
+        ))
+    } else {
+        None
+    };
     let product_label = invocation
         .product_label
         .as_deref()
@@ -290,7 +340,18 @@ fn execute_locked(
             .insert("surfaceId".into(), Value::String(surface_id.into()));
     }
     let pair = request_without_correlation(wire, "pair.request", pair_payload)?;
-    let pair_payload = successful_payload(&pair.response, "pair.request")?;
+    let pane_describe = invocation.command == crate::command::Command::PaneDescribe;
+    let pair_payload = if pane_describe {
+        match pane_describe_successful_payload(&pair.response, "pair.request") {
+            Ok(payload) => payload,
+            Err(error) => {
+                let _ = wire.close();
+                return Err(error);
+            }
+        }
+    } else {
+        successful_payload(&pair.response, "pair.request")?
+    };
     if pair_payload.get("mode").and_then(Value::as_str) != Some("lockless") {
         return Err(CliError::Protocol(
             "lockless_capability_not_admitted".into(),
@@ -351,7 +412,22 @@ fn execute_locked(
         .command
         .wire_payload(invocation.input.clone())
         .map_err(CliError::Input)?;
-    let result = if invocation.command.is_mutation() {
+    let result = if let Some((surface_id, pane_id)) = pane_target {
+        let pane_result = (|| {
+            let response = request_without_correlation(wire, op, payload)?;
+            let response_payload =
+                pane_describe_successful_payload(&response.response, "panes.list")?;
+            apply_wire_events(root, &response)?;
+            describe_pane(response_payload, &surface_id, pane_id)
+        })();
+        match pane_result {
+            Ok(result) => result,
+            Err(error) => {
+                let _ = wire.close();
+                return Err(error);
+            }
+        }
+    } else if invocation.command.is_mutation() {
         perform_mutation(root, wire, op, payload)?
     } else {
         let response = request_without_correlation(wire, op, payload)?;
@@ -382,6 +458,88 @@ fn execute_locked(
         reconciliations,
         result,
     })
+}
+
+fn describe_pane(
+    payload: &Map<String, Value>,
+    surface_id: &str,
+    pane_id: u64,
+) -> Result<Value, CliError> {
+    let panes = payload
+        .get("panes")
+        .and_then(Value::as_array)
+        .ok_or_else(|| CliError::Protocol("invalid_panes_list_panes".into()))?;
+    let mut selected = None;
+    for pane in panes {
+        if pane.get("paneId").and_then(Value::as_u64) == Some(pane_id) {
+            if selected.is_some() {
+                return Err(CliError::Protocol("duplicate_panes_list_pane_id".into()));
+            }
+            selected = Some(pane);
+        }
+    }
+    let pane = selected.ok_or_else(|| CliError::Protocol("pane_not_found".into()))?;
+    let pane_lineage_id = pane
+        .get("paneLineageId")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| CliError::Protocol("invalid_panes_list_pane_lineage".into()))?;
+    let current_target = match pane.get("currentTarget") {
+        None | Some(Value::Null) => Value::Null,
+        Some(Value::Object(target)) => {
+            let target_epoch = target
+                .get("targetEpoch")
+                .and_then(Value::as_u64)
+                .filter(|value| *value > 0 && *value <= 9_007_199_254_740_991)
+                .ok_or_else(|| CliError::Protocol("invalid_panes_list_target_epoch".into()))?;
+            let target_lineage_id = target
+                .get("paneLineageId")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| CliError::Protocol("invalid_panes_list_target_lineage".into()))?;
+            if target_lineage_id != pane_lineage_id {
+                return Err(CliError::Protocol(
+                    "panes_list_target_lineage_mismatch".into(),
+                ));
+            }
+            if !matches!(
+                target.get("currentState").and_then(Value::as_str),
+                Some("current" | "stale" | "superseded" | "tombstoned")
+            ) {
+                return Err(CliError::Protocol("invalid_panes_list_target_state".into()));
+            }
+            if target
+                .get("targetId")
+                .and_then(Value::as_str)
+                .is_none_or(str::is_empty)
+                || target
+                    .get("targetKind")
+                    .and_then(Value::as_str)
+                    .is_none_or(str::is_empty)
+            {
+                return Err(CliError::Protocol("invalid_panes_list_target".into()));
+            }
+            let mut target = target.clone();
+            target.insert("targetEpoch".into(), Value::from(target_epoch));
+            Value::Object(target)
+        }
+        Some(_) => {
+            return Err(CliError::Protocol(
+                "invalid_panes_list_current_target".into(),
+            ));
+        }
+    };
+    let target_epoch = current_target
+        .get("targetEpoch")
+        .cloned()
+        .unwrap_or(Value::Null);
+    Ok(json!({
+        "currentTarget": current_target,
+        "paneId": pane_id,
+        "paneLineageId": pane_lineage_id,
+        "surfaceId": surface_id,
+        "targetEpoch": target_epoch
+    }))
 }
 
 fn execute_local(invocation: Invocation) -> Result<CliOutput, CliError> {
@@ -1466,6 +1624,49 @@ fn successful_payload<'a>(
             operation: operation.into(),
             code: code.into(),
         });
+    }
+    response
+        .payload
+        .as_ref()
+        .and_then(Value::as_object)
+        .ok_or_else(|| CliError::Protocol(format!("invalid_response:{operation}")))
+}
+
+fn pane_describe_successful_payload<'a>(
+    response: &'a Envelope,
+    operation: &str,
+) -> Result<&'a Map<String, Value>, CliError> {
+    if response.envelope_type != "response" {
+        return Err(CliError::Protocol(format!(
+            "invalid_response_type:{operation}"
+        )));
+    }
+    if response.v != 1 {
+        return Err(CliError::Protocol(format!(
+            "unsupported_response_version:{operation}"
+        )));
+    }
+    if response.op != operation {
+        return Err(CliError::Protocol(format!(
+            "response_operation_mismatch:{operation}"
+        )));
+    }
+    if response.ok == Some(false) {
+        let code = response
+            .error
+            .as_ref()
+            .and_then(|error| error.get("code"))
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        return Err(CliError::Rejected {
+            operation: operation.into(),
+            code: code.into(),
+        });
+    }
+    if response.ok != Some(true) {
+        return Err(CliError::Protocol(format!(
+            "missing_response_success:{operation}"
+        )));
     }
     response
         .payload

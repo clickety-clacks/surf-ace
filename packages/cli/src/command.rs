@@ -9,6 +9,7 @@ const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
 pub enum Command {
     FleetList,
     List,
+    PaneDescribe,
     Push,
     Read,
     TopologyIntent,
@@ -22,9 +23,10 @@ pub enum Command {
 }
 
 impl Command {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::FleetList,
         Self::List,
+        Self::PaneDescribe,
         Self::Push,
         Self::Read,
         Self::TopologyIntent,
@@ -47,6 +49,7 @@ impl Command {
         match self {
             Self::FleetList => "fleet-list",
             Self::List => "list",
+            Self::PaneDescribe => "pane-describe",
             Self::Push => "push",
             Self::Read => "read",
             Self::TopologyIntent => "topology-intent",
@@ -67,7 +70,7 @@ impl Command {
     pub const fn is_mutation(self) -> bool {
         !matches!(
             self,
-            Self::FleetList | Self::List | Self::Read | Self::CapturePane
+            Self::FleetList | Self::List | Self::PaneDescribe | Self::Read | Self::CapturePane
         )
     }
 
@@ -76,6 +79,7 @@ impl Command {
         match self {
             Self::FleetList => Err("fleet_list_requires_registry".into()),
             Self::List => Ok("surfaces.list"),
+            Self::PaneDescribe => Ok("panes.list"),
             Self::Push => Ok("content.set"),
             Self::Read => Err("read_is_local".into()),
             Self::TopologyIntent => match string(input, "action")? {
@@ -128,6 +132,16 @@ impl Command {
             Self::Read => {
                 exact_fields(input, &["scopeId"], &[])?;
                 required_string(input, "scopeId")?;
+            }
+            Self::PaneDescribe => {
+                exact_fields(
+                    input,
+                    &["expectedControllerInstanceId", "paneId", "surfaceId"],
+                    &[],
+                )?;
+                required_string(input, "expectedControllerInstanceId")?;
+                required_string(input, "surfaceId")?;
+                positive_integer(input, "paneId")?;
             }
             Self::TopologyIntent => {
                 required_string(input, "surfaceId")?;
@@ -349,6 +363,10 @@ impl Command {
             }
             Self::SurfaceIntent => {
                 input.remove("action");
+            }
+            Self::PaneDescribe => {
+                input.remove("expectedControllerInstanceId");
+                input.remove("paneId");
             }
             _ => {}
         }

@@ -4,6 +4,7 @@
   "commands": [
     "fleet-list",
     "list",
+    "pane-describe",
     "push",
     "read",
     "topology-intent",
