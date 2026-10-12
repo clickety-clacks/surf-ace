@@ -15,6 +15,15 @@ contextBridge.exposeInMainWorld("surfAce", {
     ipcRenderer.on("surface:keyboard-intent", wrapped);
     return () => ipcRenderer.removeListener("surface:keyboard-intent", wrapped);
   },
+  onPanePaintRead: (listener: (request: unknown) => unknown) => {
+    const wrapped = (_event: unknown, request: unknown) => {
+      let descriptor: unknown = null;
+      try { descriptor = listener(request); } catch { /* No stale fallback. */ }
+      if (request && typeof request === "object") ipcRenderer.send("surface:pane-paint-reply", { ...request, descriptor });
+    };
+    ipcRenderer.on("surface:pane-paint-read", wrapped);
+    return () => ipcRenderer.removeListener("surface:pane-paint-read", wrapped);
+  },
   onState: (listener: (state: unknown) => void) => {
     const wrapped = (_event: unknown, state: unknown) => listener(state);
     ipcRenderer.on("surface:state", wrapped);
@@ -36,6 +45,7 @@ declare global {
       guestPreloadPath: string;
       getBootstrap: () => Promise<unknown>;
       onKeyboardIntent: (listener: (intent: unknown) => void) => () => void;
+      onPanePaintRead?: (listener: (request: unknown) => unknown) => () => void;
       onState: (listener: (state: unknown) => void) => () => void;
       reportOverlayRegions: (payload: Record<string, unknown>) => void;
       reportPage: (payload: Record<string, unknown>) => void;

@@ -1,3 +1,4 @@
+import type { RendererPaintDescriptor, RendererPaintRequest } from "../pane-paint-owner-bridge.js";
 import { browserContentScaleScript } from "./browser-content-scale.js";
 import {
   isMarkedOverlayVisible,
@@ -283,6 +284,7 @@ const provenanceAnnouncer = document.querySelector(
 ) as HTMLDivElement | null;
 const paneViews = new Map<number, PaneView>();
 const browserContentScaleStates = new WeakMap<BrowserUrlWebViewElement, BrowserContentScaleState>();
+const paintRendererFrameIds = new WeakMap<BrowserUrlWebViewElement, string>();
 const pendingStrokeDelivery = new Map<number, Promise<void>>();
 const annotationIntentEpoch = new Map<number, number>();
 const pendingHistoryAnnouncements = new Map<number, string>();
@@ -461,6 +463,55 @@ function paneSnapshotGeometryIdentity(): {
     topologyRevision: latestState.topologyRevision,
   };
 }
+
+/** Synchronous fresh DOM association only; this neither asserts guest paint nor reads caller code. */
+function readPanePaintDescriptor(input: unknown): RendererPaintDescriptor | null {
+  if (!input || typeof input !== "object" || !latestState || resizeGesture || resizeCommitPending) return null;
+  const request = input as RendererPaintRequest;
+  if (!/^[a-f0-9]{32}$/.test(request.nonce) || request.surfaceId !== latestState.surfaceId || !Number.isSafeInteger(request.paneId)) return null;
+  const pane = latestState.panes.find(p => p.paneId === request.paneId), view = paneViews.get(request.paneId);
+  if (!pane || !view || pane.externalNative || !pane.content.contentId || !["html", "browser_url"].includes(pane.content.contentType ?? "") || view.currentContentKey !== contentKey(pane)) return null;
+  const frame = view.currentBrowserFrame, scale = frame && browserContentScaleStates.get(frame);
+  if (!frame || !scale || scale.modeSequence < 1 || frame.dataset.guestReady !== "true" || frame !== currentPaneFrameElement(view) || !frame.isConnected || !view.rootEl.isConnected
+    || !view.contentEl.contains(frame) || !frame.matches("webview.content-browser-url-frame")) return null;
+  let guestId: number;
+  try { guestId = frame.getWebContentsId?.() ?? 0; } catch { return null; }
+  if (!Number.isSafeInteger(guestId) || guestId < 1 || frame.clientWidth <= 0 || frame.clientHeight <= 0) return null;
+  const rectangle = (r: DOMRect): { x: number; y: number; width: number; height: number } => ({ x: r.x, y: r.y, width: r.width, height: r.height });
+  const paneRect = paneBounds(view), frameRect = rectangle(frame.getBoundingClientRect());
+  let clip = { ...frameRect }, opacity = 1, hostVisible = true;
+  for (let element: HTMLElement | null = frame; element; element = element.parentElement) {
+    const style = getComputedStyle(element), alpha = Number(style.opacity);
+    if (Number(style.zoom) !== 1 || (element !== frame && style.transform !== "none") || style.clipPath !== "none"
+      || style.maskImage !== "none" || style.filter !== "none") return null;
+    const clips = [style.overflowX,style.overflowY].some(value=>["hidden","clip","scroll","auto"].includes(value));
+    if (clips && [style.borderTopLeftRadius,style.borderTopRightRadius,style.borderBottomLeftRadius,style.borderBottomRightRadius,
+      style.borderLeftWidth,style.borderRightWidth,style.borderTopWidth,style.borderBottomWidth].some(value=>parseFloat(value)!==0)) return null;
+    if (element === frame && [style.borderLeftWidth,style.borderRightWidth,style.borderTopWidth,style.borderBottomWidth,
+      style.paddingLeft,style.paddingRight,style.paddingTop,style.paddingBottom].some(value => parseFloat(value) !== 0)) return null;
+    if (!Number.isFinite(alpha) || alpha < 0 || alpha > 1) return null;
+    opacity *= alpha;
+    if (style.display === "none" || style.visibility !== "visible") hostVisible = false;
+    if (element !== frame && [style.overflowX, style.overflowY].some(v => ["hidden", "clip", "scroll", "auto"].includes(v))) {
+      const r = element.getBoundingClientRect();
+      const clipX = ["hidden", "clip", "scroll", "auto"].includes(style.overflowX), clipY = ["hidden", "clip", "scroll", "auto"].includes(style.overflowY);
+      const left = clipX ? Math.max(clip.x,r.x) : clip.x, top = clipY ? Math.max(clip.y,r.y) : clip.y;
+      clip = { x: left, y: top, width: (clipX ? Math.min(clip.x+clip.width,r.right) : clip.x+clip.width)-left,
+        height: (clipY ? Math.min(clip.y+clip.height,r.bottom) : clip.y+clip.height)-top };
+    }
+  }
+  if (clip.width <= 0 || clip.height <= 0 || opacity === 0) return null;
+  let rendererFrameInstanceId = paintRendererFrameIds.get(frame);
+  if (!rendererFrameInstanceId) { rendererFrameInstanceId = crypto.randomUUID(); paintRendererFrameIds.set(frame, rendererFrameInstanceId); }
+  const style = getComputedStyle(frame);
+  return { paneId: pane.paneId, surfaceId: latestState.surfaceId, ...paneSnapshotGeometryIdentity(),
+    contentId: pane.content.contentId, contentRevision: pane.content.revision, contentType: pane.content.contentType as "html" | "browser_url",
+    contentKey: view.currentContentKey, rendererFrameInstanceId, renderGeneration: view.currentRenderToken, guestId,
+    paneRect, frameRect, clipRect: clip, frameCssWidth: frame.clientWidth, frameCssHeight: frame.clientHeight,
+    transform: style.transform, transformOrigin: style.transformOrigin, opacity, hostVisible, devicePixelRatio: window.devicePixelRatio,
+    scaleMode: scale.mode, scaleSequence: scale.modeSequence, scaleNonce: scale.nonce, scaleRevision: scale.revision };
+}
+window.surfAce.onPanePaintRead?.(readPanePaintDescriptor);
 
 function reportPaneSnapshot(view: PaneView): void {
   if (resizeGesture || resizeCommitPending) return; // Provisional geometry must never become an authoritative snapshot.
