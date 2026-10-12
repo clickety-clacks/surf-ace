@@ -1,5 +1,5 @@
 import fs from 'node:fs';import path from 'node:path';import {fileURLToPath} from 'node:url';import {createHash} from 'node:crypto';import {build} from 'esbuild';
-const here=path.dirname(fileURLToPath(import.meta.url)),repo=path.resolve(here,'../../../..'),out=path.join(here,'prepared-payload');
+const here=path.dirname(fileURLToPath(import.meta.url)),repo=path.resolve(here,'../../../..'),out=process.env.PRIVATE_NATIVE_BUILD_OUT??path.join(here,'prepared-payload');
 fs.mkdirSync(path.join(out,'app'),{recursive:true});
 const shared={bundle:true,format:'esm',platform:'node',target:'node24',external:['electron'],alias:{'@surf-ace/protocol':path.join(repo,'packages/protocol/src/index.ts')},banner:{js:'import { createRequire as __privateCreateRequire } from "node:module"; const require = __privateCreateRequire(import.meta.url);'}};
 await build({...shared,entryPoints:[path.join(here,'fixture-main.ts')],outfile:path.join(out,'app/fixture-main.mjs')});
