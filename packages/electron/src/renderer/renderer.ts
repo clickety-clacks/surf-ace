@@ -241,6 +241,7 @@ type PaneView = {
   currentContentSignature: DuplicateRepushSignature | null;
   currentDrawingsKey: string;
   currentHtmlFrameCleanup: (() => void) | null;
+  currentBrowserFrame: BrowserUrlWebViewElement | null;
   currentRenderToken: number;
   currentScrollHandler: (() => void) | null;
   currentWebViewResizeObserver: ResizeObserver | null;
@@ -376,6 +377,11 @@ function duplicateRepushSignature(pane: RendererPaneState): DuplicateRepushSigna
 }
 
 function isDuplicateRepush(view: PaneView, pane: RendererPaneState, nextSignature: DuplicateRepushSignature | null): boolean {
+  const frame = currentPaneFrameElement(view);
+  if (!frame || frame !== view.currentBrowserFrame || !frame.isConnected ||
+      !view.contentEl.contains(frame) || !frame.matches("webview.content-browser-url-frame")) {
+    return false;
+  }
   if (!nextSignature || !view.currentContentSignature) {
     return false;
   }
@@ -1524,6 +1530,7 @@ function ensurePaneView(paneId: number): PaneView {
     currentContentSignature: null,
     currentDrawingsKey: "",
     currentHtmlFrameCleanup: null,
+    currentBrowserFrame: null,
     currentRenderToken: 0,
     currentScrollHandler: null,
     currentWebViewResizeObserver: null,
@@ -2679,6 +2686,7 @@ function resetDynamicContent(view: PaneView): number {
   view.currentRenderToken += 1;
   view.currentHtmlFrameCleanup?.();
   view.currentHtmlFrameCleanup = null;
+  view.currentBrowserFrame = null;
   clearWebViewSizer(view);
   view.currentScrollHandler = null;
   view.scrollEl.scrollLeft = 0;
@@ -2705,6 +2713,7 @@ function renderBrowserContent(
   });
   const browserView = document.createElement("webview") as BrowserUrlWebViewElement;
   browserView.className = "content-html-frame content-browser-url-frame";
+  view.currentBrowserFrame = browserView;
   if (options?.allowPopups) {
     browserView.setAttribute("allowpopups", "true");
   }

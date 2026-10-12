@@ -1066,4 +1066,202 @@ test("renderer DOM integrates authoritative connection states and live scale con
     queued.clear();
   });
 
+  // Pane33: same-byte duplicate preservation must not outrank an absent owned guest.
+  window.requestAnimationFrame = (callback: FrameRequestCallback) => { callback(0); return 1; };
+  let duplicateSequence = 1000;
+  const duplicateFixture = () => {
+    const next = state("connected", true);
+    for (const [index, p] of next.panes.entries()) {
+      Object.assign(p.content, {
+        content: { html: `<html><body>guest ${index} fixture ${++duplicateSequence}</body></html>` },
+        contentType: "html", contentId: `duplicate-${duplicateSequence}`, revision: duplicateSequence, renderVersion: duplicateSequence,
+      });
+    }
+    stateListener!(next);
+    const roots = [...document.querySelectorAll(".pane-shell")] as HTMLElement[];
+    const guests = roots.map(root => root.querySelector("webview")!) as Array<HTMLElement & {
+      src?: string; getWebContentsId?: () => number; sessionMarker?: object;
+    }>;
+    assert.equal(guests.length, 2);
+    for (const [index, guest] of guests.entries()) {
+      guest.getWebContentsId = () => 501 + index;
+      guest.sessionMarker = { session: `retained-${index}`, history: ["first", "second"] };
+    }
+    return { next, roots, guests };
+  };
+  const repush = (next: ReturnType<typeof state>, html?: string) => {
+    const changed = structuredClone(next);
+    const p = changed.panes[0]!;
+    p.content.revision = ++duplicateSequence;
+    p.content.renderVersion = duplicateSequence;
+    p.content.contentId = `duplicate-${duplicateSequence}`;
+    if (html !== undefined) Object.assign(p.content, { content: { html } });
+    stateListener!(changed);
+    return changed;
+  };
+  await test("healthy HTML duplicate keeps owned DOM guest, session and siblings", () => {
+    const f = duplicateFixture();
+    const siblingSession = f.guests[1]!.sessionMarker;
+    const firstSession = f.guests[0]!.sessionMarker;
+    const src = f.guests[0]!.src;
+    const beforeCommands = commands.length;
+    const next = repush(f.next);
+    assert.equal(document.querySelectorAll(".pane-shell")[0], f.roots[0]);
+    assert.equal(f.roots[0]!.querySelector("webview"), f.guests[0]);
+    assert.equal(f.guests[0]!.sessionMarker, firstSession);
+    assert.equal(f.guests[0]!.getWebContentsId?.(), 501);
+    assert.equal(f.guests[0]!.src, src);
+    assert.equal(f.roots[1]!.querySelector("webview"), f.guests[1]);
+    assert.equal(f.guests[1]!.sessionMarker, siblingSession);
+    assert.deepEqual(next.layout, f.next.layout);
+    assert.deepEqual(next.panes[1], f.next.panes[1]);
+    assert.deepEqual(commands.slice(beforeCommands), [], "no authority/history mutation command is introduced");
+  });
+  await test("absent owned guest repush runs normal render in same pane host", () => {
+    const f = duplicateFixture();
+    const host = f.roots[0]!.querySelector(".pane-content")!;
+    host.replaceChildren();
+    const next = repush(f.next);
+    const restored = host.querySelector("webview") as HTMLElement & { src?: string };
+    assert.ok(restored);
+    assert.notEqual(restored, f.guests[0]);
+    assert.equal(restored.isConnected, true);
+    assert.equal(document.querySelectorAll(".pane-shell")[0], f.roots[0]);
+    assert.equal(restored.src, f.guests[0]!.src);
+    assert.equal(f.roots[1]!.querySelector("webview"), f.guests[1]);
+    assert.deepEqual(next.layout, f.next.layout);
+    assert.deepEqual(next.panes[1], f.next.panes[1]);
+  });
+  await test("detached retained guest is replaced only for the fresh target key", () => {
+    const f = duplicateFixture(), detached = document.createElement("div");
+    detached.appendChild(f.guests[0]!);
+    assert.equal(f.guests[0]!.isConnected, false);
+    repush(f.next);
+    const restored = f.roots[0]!.querySelector("webview")!;
+    assert.ok(restored); assert.notEqual(restored, f.guests[0]);
+    assert.equal(detached.firstChild, f.guests[0], "retired node is not borrowed into the fresh pane");
+    assert.equal(f.roots[1]!.querySelector("webview"), f.guests[1]);
+  });
+  await test("foreign unowned frame cannot borrow duplicate signature", () => {
+    const f = duplicateFixture(), host = f.roots[0]!.querySelector(".pane-content")!;
+    const foreign = f.guests[0]!.cloneNode(true) as HTMLElement;
+    host.replaceChildren(foreign);
+    assert.equal(foreign.isConnected, true);
+    repush(f.next);
+    const restored = host.querySelector("webview")!;
+    assert.ok(restored); assert.ok(restored !== foreign, "unowned replacement cannot be retained"); assert.notEqual(restored, f.guests[0]);
+    assert.equal(foreign.isConnected, false);
+    assert.equal(f.roots[1]!.querySelector("webview"), f.guests[1]);
+  });
+  await test("unchanged authoritative key with missing guest remains no-op", () => {
+    const f = duplicateFixture(), host = f.roots[0]!.querySelector(".pane-content")!;
+    host.replaceChildren();
+    const churn = structuredClone(f.next);
+    churn.connectionBar = "connecting";
+    stateListener!(churn);
+    assert.equal(host.querySelector("webview"), null);
+    assert.equal(f.roots[1]!.querySelector("webview"), f.guests[1]);
+  });
+  await test("changed HTML creates a fresh guest without changing sibling session", () => {
+    const f = duplicateFixture(), siblingSession = f.guests[1]!.sessionMarker;
+    repush(f.next, "<html><body>changed exact content</body></html>");
+    const changed = f.roots[0]!.querySelector("webview") as HTMLElement & { src?: string };
+    assert.notEqual(changed, f.guests[0]);
+    assert.ok(changed.src?.includes(encodeURIComponent("changed exact content")));
+    assert.equal(f.roots[1]!.querySelector("webview"), f.guests[1]);
+    assert.equal(f.guests[1]!.sessionMarker, siblingSession);
+  });
+  await test("connected loading and unmeasured white guest are not classified dead", () => {
+    const f = duplicateFixture();
+    f.guests[0]!.dispatchEvent(new window.Event("did-start-loading"));
+    delete f.guests[0]!.dataset.guestReady;
+    f.guests[0]!.getWebContentsId = () => { throw new Error("guest temporarily unavailable"); };
+    repush(f.next);
+    assert.equal(f.roots[0]!.querySelector("webview"), f.guests[0]);
+    assert.equal(f.roots[1]!.querySelector("webview"), f.guests[1]);
+  });
+  await test("old deferred navigation cannot overwrite recovered or newer content", () => {
+    const f = duplicateFixture();
+    const queued: FrameRequestCallback[] = [];
+    const immediate = window.requestAnimationFrame;
+    window.requestAnimationFrame = (callback: FrameRequestCallback) => { queued.push(callback); return queued.length; };
+    try {
+      const pending = repush(f.next, "<html><body>held navigation</body></html>");
+      const old = f.roots[0]!.querySelector("webview") as HTMLElement & { src?: string };
+      assert.equal(old.src, undefined);
+      old.remove();
+      const recoveredState = repush(pending);
+      const recovered = f.roots[0]!.querySelector("webview") as HTMLElement & { src?: string };
+      assert.notEqual(recovered, old);
+      const newestState = repush(recoveredState, "<html><body>newest navigation</body></html>");
+      const newest = f.roots[0]!.querySelector("webview") as HTMLElement & { src?: string };
+      assert.notEqual(newest, recovered);
+      let count = 0;
+      while (queued.length) { assert.ok(++count < 100); queued.shift()!(0); }
+      assert.equal(old.src, undefined);
+      assert.equal(recovered.src, undefined);
+      assert.ok(newest.src?.includes(encodeURIComponent("newest navigation")));
+      assert.equal(f.roots[1]!.querySelector("webview"), f.guests[1]);
+      assert.deepEqual(newestState.panes[1], f.next.panes[1]);
+    } finally { window.requestAnimationFrame = immediate; queued.length = 0; }
+  });
+  await test("duplicate during pending initial navigation retains original assignment and session", () => {
+    const f = duplicateFixture();
+    const queued: FrameRequestCallback[] = [];
+    const immediate = window.requestAnimationFrame;
+    window.requestAnimationFrame = (callback: FrameRequestCallback) => { queued.push(callback); return queued.length; };
+    try {
+      const pending = repush(f.next, "<html><body>pending healthy navigation</body></html>");
+      const guest = f.roots[0]!.querySelector("webview") as HTMLElement & { src?: string; sessionMarker?: object };
+      guest.sessionMarker = { history: ["retained before ready"] };
+      const session = guest.sessionMarker;
+      repush(pending);
+      assert.equal(f.roots[0]!.querySelector("webview"), guest);
+      assert.equal(guest.src, undefined);
+      let count = 0;
+      while (queued.length) { assert.ok(++count < 100); queued.shift()!(0); }
+      assert.ok(String(guest.src).includes(encodeURIComponent("pending healthy navigation")));
+      assert.equal(guest.sessionMarker, session);
+      assert.equal(f.roots[1]!.querySelector("webview"), f.guests[1]);
+    } finally { window.requestAnimationFrame = immediate; queued.length = 0; }
+  });
+
+  await test("browser URL duplicate preserves its own frame while absent URL frame renders normally", () => {
+    const f = duplicateFixture();
+    const browserState = structuredClone(f.next);
+    Object.assign(browserState.panes[0]!.content, { contentType: "browser_url", content: { url: "https://example.invalid/isolated-dom-only" }, revision: ++duplicateSequence, renderVersion: duplicateSequence });
+    stateListener!(browserState);
+    const browser = f.roots[0]!.querySelector("webview") as HTMLElement & { src?: string; sessionMarker?: object };
+    browser.sessionMarker = { history: ["url history retained"] };
+    const session = browser.sessionMarker;
+    const repeated = repush(browserState);
+    assert.equal(f.roots[0]!.querySelector("webview"), browser);
+    assert.equal(browser.sessionMarker, session);
+    browser.remove();
+    repush(repeated);
+    const restored = f.roots[0]!.querySelector("webview") as HTMLElement & { src?: string };
+    assert.ok(restored); assert.ok(restored !== browser);
+    assert.equal(restored.src, browser.src);
+    assert.equal(f.roots[1]!.querySelector("webview"), f.guests[1]);
+  });
+  await test("late readiness from retired guest does not mark reconstructed document ready", async () => {
+    const f = duplicateFixture();
+    const old = f.guests[0]! as HTMLElement & { executeJavaScript?: (script: string) => Promise<unknown> };
+    const pendingReady: { resolve?: (value: string) => void } = {};
+    old.executeJavaScript = script => script === "document.readyState"
+      ? new Promise(resolve => { pendingReady.resolve = resolve; })
+      : Promise.resolve(null);
+    old.dispatchEvent(new window.Event("did-stop-loading"));
+    assert.ok(pendingReady.resolve);
+    old.remove();
+    repush(f.next);
+    const current = f.roots[0]!.querySelector("webview") as HTMLElement;
+    assert.ok(current); assert.ok(current !== old);
+    pendingReady.resolve!("complete");
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.notEqual(old.dataset.guestReady, "true");
+    assert.notEqual(current.dataset.guestReady, "true");
+    assert.equal(f.roots[1]!.querySelector("webview"), f.guests[1]);
+  });
+
 });
