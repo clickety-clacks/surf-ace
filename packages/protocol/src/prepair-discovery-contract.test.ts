@@ -301,13 +301,13 @@ function discover(input: {
     return fail("unsupported_protocol", operations, "reachable");
   }
   if (hasForbiddenContent(payload)) {
-    return fail("unsupported_protocol", operations, "reachable", readiness.status, "matched");
+    return fail("unsupported_protocol", operations, "reachable", "unknown", "matched");
   }
   if (!Number.isSafeInteger(payload.observedAtMs) || payload.observedAtMs < 0
       || !Number.isSafeInteger(payload.surfaceSetRevision) || payload.surfaceSetRevision < 0
       || !Number.isSafeInteger(payload.topologyRevision) || payload.topologyRevision < 0
       || !Array.isArray(payload.panes) || payload.panes.length === 0) {
-    return fail("unsupported_protocol", operations, "reachable", readiness.status, "matched");
+    return fail("unsupported_protocol", operations, "reachable", "unknown", "matched");
   }
 
   const paneIds = payload.panes.map((item: any) => item?.paneId);
@@ -326,7 +326,7 @@ function discover(input: {
   if (!paneIdsValid || new Set(paneIds).size !== paneIds.length
       || layoutIds === null || new Set(layoutIds).size !== layoutIds.length
       || JSON.stringify([...paneIds].sort()) !== JSON.stringify([...layoutIds].sort())) {
-    return fail("unsupported_protocol", operations, "reachable", readiness.status, "matched");
+    return fail("unsupported_protocol", operations, "reachable", "unknown", "matched");
   }
 
   operations.push("fleet.topology");
@@ -567,7 +567,11 @@ test("registry lease replacement or expiry during the probe invalidates the resu
       },
     }],
   });
-  assert.equal(discover(validInput({ after: changed }) as any).status, "stale_registration");
+  const changedOutput = discover(validInput({ after: changed }) as any);
+  assert.equal(changedOutput.status, "stale_registration");
+  assert.equal(changedOutput.transportReachability, "reachable");
+  assert.equal(changedOutput.applicationReadiness, "ready", "a valid describe remains a known observation when only the later registry recheck is stale");
+  assert.equal("panes" in changedOutput, false);
 
   const expiredAfter = registry({
     registryServerTimeMs: 19_000,
@@ -592,11 +596,17 @@ test("revision churn is a refusal with no partial topology", () => {
 
 test("layout mismatch, missing pane provenance, and nested body/image output are refused", () => {
   const base = describeResponse();
+  const assertMalformed = (output: ReturnType<typeof discover>) => {
+    assert.equal(output.status, "unsupported_protocol");
+    assert.equal(output.transportReachability, "reachable");
+    assert.equal(output.applicationReadiness, "unknown");
+    assert.equal("layout" in output, false);
+    assert.equal("panes" in output, false);
+  };
   const wrongLayout = describeResponse({
     payload: { ...base.payload, layout: { type: "pane", paneId: 1 } },
   });
-  assert.equal(discover(validInput({ response: wrongLayout }) as any).status,
-    "unsupported_protocol");
+  assertMalformed(discover(validInput({ response: wrongLayout }) as any));
 
   const missingProvenance = describeResponse({
     payload: {
@@ -604,8 +614,7 @@ test("layout mismatch, missing pane provenance, and nested body/image output are
       panes: [pane(1, 7, 22), { ...pane(2, null, null), contentObservation: { revision: null } }],
     },
   });
-  assert.equal(discover(validInput({ response: missingProvenance }) as any).status,
-    "unsupported_protocol");
+  assertMalformed(discover(validInput({ response: missingProvenance }) as any));
 
   const withBody = describeResponse({
     payload: {
@@ -616,8 +625,7 @@ test("layout mismatch, missing pane provenance, and nested body/image output are
       }],
     },
   });
-  assert.equal(discover(validInput({ response: withBody }) as any).status,
-    "unsupported_protocol");
+  assertMalformed(discover(validInput({ response: withBody }) as any));
 });
 
 test("degraded readiness remains distinct from reachable transport and current topology", () => {
