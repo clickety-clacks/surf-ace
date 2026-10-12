@@ -172,7 +172,7 @@ export class PairedPanePaintService<C extends object> {
         const captures = result.captures.map(image => ({ target: image.target, binding: image.binding, coordinateSpace: image.coordinateSpace, pngBase64: Buffer.from(image.png).toString("base64"), sha256: image.sha256, pixelWidth: image.pixelWidth, pixelHeight: image.pixelHeight, startedOffsetMs: image.startedMonotonicMs - origin, endedOffsetMs: image.endedMonotonicMs - origin }));
         const checks = result.stateReads.map(read => ({ stage: read.stage, receivedOffsetMs: read.receivedMonotonicMs - origin, state: { binding: read.state.binding, projection: read.state.projection, hostAttached: read.state.hostAttached, guestAttached: read.state.guestAttached } }));
         if (result.kind === "observed" && elapsed() < budget) {
-          reply = success({ outcome: "observed", captures, checks, elapsedMs: elapsed(), midpointSkewMs: result.midpointSkewMs, consistency: result.consistency }); entry.reason = "observed";
+          reply = success({ outcome: "observed", captures, checks, elapsedMs: elapsed(), midpointSkewMs: (captures[1].startedOffsetMs + captures[1].endedOffsetMs - captures[0].startedOffsetMs - captures[0].endedOffsetMs) / 2, consistency: result.consistency }); entry.reason = "observed";
         } else {
           const rawReason = result.kind === "refused" ? result.reason : "timeout";
           const rawStage = result.kind === "refused" ? result.stage : "publish";
