@@ -17,6 +17,14 @@ type Tombstone = {
   closedSequence: number;
   paneKeys: string[];
   status: "recoverable" | "reclamation-unknown";
+  surfaceLivePaneKeys?: string[];
+  nestedPaneTombstones?: Array<{
+    id: string;
+    kind: "pane";
+    closedSequence: number;
+    paneKeys: string[];
+    status: "recoverable";
+  }>;
 };
 type PaneRecord = PaneIdentity & {
   paneLabel: number;
@@ -235,22 +243,49 @@ class PaneLabelReuseModel {
     assert.equal(new Set(identities.map(identityKey)).size, identities.length);
     assert.equal(this.tombstones.has(tombstoneId), false);
     const records: PaneRecord[] = [];
+    const surfaceLivePaneKeys: string[] = [];
+    const nestedPaneTombstones: NonNullable<Tombstone["nestedPaneTombstones"]> = [];
     for (const identityValue of identities) {
       const record = this.recordFor(identityValue);
       assert.ok(record && ["active", "recoverable"].includes(record.status));
-      if (record.tombstoneId) {
+      if (record.status === "active") {
+        assert.equal(record.tombstoneId, null);
+        surfaceLivePaneKeys.push(identityKey(record));
+      } else {
         const nested = this.tombstones.get(record.tombstoneId);
         assert.ok(nested && nested.kind === "pane" && nested.status === "recoverable");
+        assert.equal(nested.paneKeys.length, 1);
+        assert.equal(nested.paneKeys[0], identityKey(record));
+        nestedPaneTombstones.push({
+          id: nested.id,
+          kind: "pane",
+          closedSequence: nested.closedSequence,
+          paneKeys: [...nested.paneKeys],
+          status: "recoverable",
+        });
       }
       records.push(record);
     }
-    for (const record of records) {
-      if (record.tombstoneId) this.tombstones.delete(record.tombstoneId);
+    for (const nested of nestedPaneTombstones) this.tombstones.delete(nested.id);
+    for (const record of records.filter((pane) => pane.status === "active")) {
       record.status = "recoverable";
       record.tombstoneId = tombstoneId;
       record.closeRevision = closeRevision;
     }
-    this.addTombstone(tombstoneId, "surface", records);
+    this.nextClosedSequence += 1;
+    const closedSequence = Math.min(
+      this.nextClosedSequence,
+      ...nestedPaneTombstones.map((nested) => nested.closedSequence),
+    );
+    this.tombstones.set(tombstoneId, {
+      id: tombstoneId,
+      kind: "surface",
+      closedSequence,
+      paneKeys: records.map(identityKey),
+      surfaceLivePaneKeys,
+      nestedPaneTombstones,
+      status: "recoverable",
+    });
   }
 
   addTombstone(id: string, kind: TombstoneKind, records: PaneRecord[]): void {
@@ -290,13 +325,30 @@ class PaneLabelReuseModel {
       throw new Error("surface tombstone is not restorable");
     }
     const records = tombstone.paneKeys.map((key) => this.byIdentity.get(key));
-    assert.ok(records.every((record) => record && record.status === "recoverable" && record.tombstoneId === tombstoneId));
+    const livePaneKeys = new Set(tombstone.surfaceLivePaneKeys ?? tombstone.paneKeys);
+    const nestedByPane = new Map((tombstone.nestedPaneTombstones ?? [])
+      .flatMap((nested) => nested.paneKeys.map((key) => [key, nested] as const)));
+    assert.ok(records.every((record) => {
+      if (!record || record.status !== "recoverable") return false;
+      if (livePaneKeys.has(identityKey(record))) return record.tombstoneId === tombstoneId;
+      const nested = nestedByPane.get(identityKey(record));
+      return nested !== undefined && record.tombstoneId === nested.id;
+    }));
+    assert.ok((tombstone.nestedPaneTombstones ?? []).every((nested) => !this.tombstones.has(nested.id)));
     this.tombstones.delete(tombstoneId);
     for (const record of records) {
       assert.ok(record);
-      record.status = "active";
-      record.tombstoneId = null;
-      record.closeRevision = null;
+      if (livePaneKeys.has(identityKey(record))) {
+        record.status = "active";
+        record.tombstoneId = null;
+        record.closeRevision = null;
+      }
+    }
+    for (const nested of tombstone.nestedPaneTombstones ?? []) {
+      this.tombstones.set(nested.id, {
+        ...nested,
+        paneKeys: [...nested.paneKeys],
+      });
     }
     return records.map((record) => this.view(record!));
   }
@@ -346,10 +398,15 @@ class PaneLabelReuseModel {
 
   commitRetirement(tombstone: Tombstone, retirementRevision: number): void {
     const records = tombstone.paneKeys.map((key) => this.byIdentity.get(key));
-    assert.ok(records.every((record) => record
-      && ["recoverable", "retirement-unknown"].includes(record.status)
-      && record.tombstoneId === tombstone.id
-      && record.closeRevision !== null));
+    const nestedByPane = new Map((tombstone.nestedPaneTombstones ?? [])
+      .flatMap((nested) => nested.paneKeys.map((key) => [key, nested] as const)));
+    assert.ok(records.every((record) => {
+      if (!record || !["recoverable", "retirement-unknown"].includes(record.status)
+          || record.closeRevision === null) return false;
+      const nested = nestedByPane.get(identityKey(record));
+      const expectedTombstoneId = nested?.id ?? tombstone.id;
+      return record.tombstoneId === expectedTombstoneId;
+    }));
     for (const record of records) {
       assert.ok(record);
       const key = identityKey(record);
@@ -445,7 +502,7 @@ class PaneLabelReuseModel {
     return { status: this.recordsForLabel(label).length ? "single-generation" : "missing" };
   }
 
-  restoreBackup(snapshot: AllocationView): { status: "history-only"; paneLabel: null } | { status: "live"; paneLabel: number; allocationGeneration: number } {
+  restoreBackup(snapshot: AllocationView): { status: "history-only" | "pending-readback"; paneLabel: null } | { status: "live"; paneLabel: number; allocationGeneration: number } {
     const audit = this.retirementAudit.get(identityKey(snapshot));
     if (audit && audit.paneLabel === snapshot.paneLabel && audit.allocationGeneration === snapshot.allocationGeneration) {
       return { status: "history-only", paneLabel: null };
@@ -453,6 +510,9 @@ class PaneLabelReuseModel {
     const records = this.recordsForLabel(snapshot.paneLabel);
     const exact = records.find((record) => identityKey(record) === identityKey(snapshot)
       && record.allocationGeneration === snapshot.allocationGeneration);
+    if (exact?.pendingRetirementReadback || exact?.status === "retirement-unknown") {
+      return { status: "pending-readback", paneLabel: null };
+    }
     if (!exact || exact.status === "released" || exact.status === "terminal-retired") {
       return { status: "history-only", paneLabel: null };
     }
@@ -611,8 +671,22 @@ test("surface tombstone keeps every nested pane reserved until restored or recla
   model.closeSurface(surfaceTombstone, 20, [first, second]);
   assert.equal(model.chooseLabel(), 3, "the surface tombstone reserves all nested pane labels");
   assert.throws(() => model.restore(first), /not restorable from this tombstone/);
+  const retainedSurface = model.tombstones.get(surfaceTombstone);
+  assert.equal(retainedSurface?.closedSequence, 1, "the aggregate retains the oldest nested retention position");
+  assert.deepEqual(retainedSurface?.nestedPaneTombstones, [{
+    id: "nested-pane-tombstone",
+    kind: "pane",
+    closedSequence: 1,
+    paneKeys: [identityKey(first)],
+    status: "recoverable",
+  }]);
   assert.equal(model.restoreSurface(surfaceTombstone).length, 2);
   assert.equal(model.recordFor(first)?.allocationGeneration, first.allocationGeneration);
+  assert.equal(model.recordFor(first)?.status, "recoverable", "surface restore preserves the child's earlier pane close");
+  assert.equal(model.recordFor(first)?.tombstoneId, "nested-pane-tombstone");
+  assert.equal(model.recordFor(first)?.closeRevision, 19);
+  assert.equal(model.recordFor(second)?.status, "active", "the child that was live at surface close is restored");
+  assert.equal(model.tombstones.get("nested-pane-tombstone")?.closedSequence, 1);
   assert.equal(model.chooseLabel(), 3, "restoring a surface preserves both pane allocations");
 
   const reclaimedSurface = "surface-tombstone-b";
@@ -640,10 +714,16 @@ test("unknown client reclamation persistence holds allocation until readback dec
   rolledBack.close(recoverable, recoverableTombstone, 30);
   assert.equal(rolledBack.reclaimTombstone(recoverableTombstone, 31, "unknown"), false);
   assert.equal(rolledBack.chooseLabel(), 2);
+  assert.deepEqual(rolledBack.restoreBackup(recoverable), { status: "pending-readback", paneLabel: null });
   assert.throws(() => rolledBack.restore(recoverable), /not restorable/);
   assert.throws(() => rolledBack.allocate(recoverable), /readback/);
   assert.throws(() => rolledBack.releaseEvidence(rolledBack.recordFor(recoverable)!), /durable terminal retirement/);
   assert.equal(rolledBack.readbackReclamation(recoverableTombstone, false, 31), false);
+  assert.deepEqual(rolledBack.restoreBackup(recoverable), {
+    status: "live",
+    paneLabel: recoverable.paneLabel,
+    allocationGeneration: recoverable.allocationGeneration,
+  });
   assert.equal(rolledBack.restore(recoverable).status, "active");
 
   const committed = new PaneLabelReuseModel();
@@ -651,7 +731,9 @@ test("unknown client reclamation persistence holds allocation until readback dec
   const retiredTombstone = "tombstone-readback-retired";
   committed.close(retired, retiredTombstone, 32);
   assert.equal(committed.reclaimTombstone(retiredTombstone, 33, "unknown"), false);
+  assert.deepEqual(committed.restoreBackup(retired), { status: "pending-readback", paneLabel: null });
   assert.equal(committed.readbackReclamation(retiredTombstone, true, 33), true);
+  assert.deepEqual(committed.restoreBackup(retired), { status: "history-only", paneLabel: null });
   assert.equal(committed.release(retired, committed.releaseEvidence(committed.recordFor(retired)!)), true);
   assert.equal(committed.allocate(identity("after-readback")).paneLabel, 1);
   assert.throws(() => committed.allocate(retired), /terminally retired/);
