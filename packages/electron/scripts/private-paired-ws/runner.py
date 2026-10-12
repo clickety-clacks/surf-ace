@@ -57,6 +57,8 @@ def child_receipt(path,anchor):
     pid=value.get('childPID');code=value.get('childExit')
     if isinstance(pid,bool) or not isinstance(pid,int) or pid<=1 or pid==anchor or isinstance(code,bool) or not isinstance(code,int): raise ValueError('invalid child receipt')
     return value
+def supervisor_command(a,status,seconds,payload):
+    return [sys.executable,'-I',a['supervisor'],'--receipt',str(status),'--hold-seconds',str(seconds+5),a['node'],str(payload/'app/fixture.mjs')]
 def scratch(root):
     total=0
     for p in root.rglob('*'):
@@ -96,7 +98,7 @@ def main():
         admission(a,time.time());seconds=budget(deadline,time.monotonic())
         with (root/'fixture.log').open('wb') as log:
             status=root/'child-receipt.json'
-            proc=subprocess.Popen([sys.executable,'-I',a['supervisor'],'--receipt',str(status),'--hold-seconds',str(seconds+5),a['node'],str(payload/'app/fixture.mjs')],env=env,stdin=subprocess.PIPE,stdout=log,stderr=subprocess.STDOUT,start_new_session=True);r.update(launched=True,pid=proc.pid,pgid=proc.pid,root=str(root));until=min(deadline-15,time.monotonic()+seconds)
+            proc=subprocess.Popen(supervisor_command(a,status,seconds,payload),env=env,stdin=subprocess.PIPE,stdout=log,stderr=subprocess.STDOUT,start_new_session=True);r.update(launched=True,pid=proc.pid,pgid=proc.pid,root=str(root));until=min(deadline-15,time.monotonic()+seconds)
             while time.monotonic()<until and not status.exists() and not leader_exited(proc.pid): scratch(root);time.sleep(.02)
             if status.exists():
                 value=child_receipt(status,proc.pid);r.update(childExit=value['childExit'],fixturePID=value['childPID'],fixtureLaunchConfirmed=True)

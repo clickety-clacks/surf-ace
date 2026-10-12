@@ -1,4 +1,4 @@
-import importlib.util,pathlib,unittest,unittest.mock as mock,tempfile,json,signal,os,time,subprocess,sys
+import ast,importlib.util,pathlib,unittest,unittest.mock as mock,tempfile,json,signal,os,time,subprocess,sys
 def module(name):
     key='PRIVATE_CENSUS_SOURCE' if name=='census' else 'PRIVATE_RUNNER_SOURCE'
     path=pathlib.Path(os.environ.get(key,str(pathlib.Path(__file__).with_name(name+'.py'))))
@@ -68,12 +68,20 @@ class Controls(unittest.TestCase):
             with self.assertRaises(ValueError):r.child_receipt(link,123)
             link.unlink();link.write_text(' '*2049)
             with self.assertRaisesRegex(ValueError,'untrusted'):r.child_receipt(link,123)
+    def test_actual_runner_launch_uses_single_supervisor_command(self):
+        calls=[n for n in ast.walk(ast.parse(pathlib.Path(r.__file__).read_text())) if isinstance(n,ast.Call) and isinstance(n.func,ast.Attribute) and ast.unparse(n.func)=='subprocess.Popen']
+        self.assertEqual(len(calls),1);self.assertEqual(ast.unparse(calls[0].args[0]),'supervisor_command(a, status, seconds, payload)')
+        flags={n.arg:ast.unparse(n.value) for n in calls[0].keywords}
+        self.assertEqual(flags['stdin'],'subprocess.PIPE');self.assertEqual(flags['start_new_session'],'True')
     def actual_anchor(self,release=False):
         # Harmless SOURCE lifecycle control, not a Node/socket/GUI fixture. READY
         # is child receipt publication; parent-held stdin owns the anchor lifetime.
         with tempfile.TemporaryDirectory() as d:
             receipt=pathlib.Path(d)/'receipt.json'
-            p=subprocess.Popen([sys.executable,'-I',str(pathlib.Path(__file__).with_name('supervisor.py')),'--receipt',str(receipt),'--hold-seconds','65','/usr/bin/true'],stdin=subprocess.PIPE,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,start_new_session=True)
+            a=dict(supervisor=str(pathlib.Path(__file__).with_name('supervisor.py')),node='/usr/bin/true')
+            # Execute the actual runner command builder; true is an explicit harmless
+            # stand-in that ignores the fixture path argument, never a Node fixture.
+            p=subprocess.Popen(r.supervisor_command(a,receipt,60,pathlib.Path(d)),stdin=subprocess.PIPE,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,start_new_session=True)
             try:
                 deadline=time.monotonic()+3
                 while not receipt.exists() and time.monotonic()<deadline:
