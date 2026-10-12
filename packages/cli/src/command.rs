@@ -8,6 +8,7 @@ const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
 #[serde(rename_all = "kebab-case")]
 pub enum Command {
     FleetList,
+    WindowDescribe,
     List,
     PaneDescribe,
     Push,
@@ -23,8 +24,9 @@ pub enum Command {
 }
 
 impl Command {
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::FleetList,
+        Self::WindowDescribe,
         Self::List,
         Self::PaneDescribe,
         Self::Push,
@@ -48,6 +50,7 @@ impl Command {
     pub const fn name(self) -> &'static str {
         match self {
             Self::FleetList => "fleet-list",
+            Self::WindowDescribe => "window-describe",
             Self::List => "list",
             Self::PaneDescribe => "pane-describe",
             Self::Push => "push",
@@ -70,7 +73,12 @@ impl Command {
     pub const fn is_mutation(self) -> bool {
         !matches!(
             self,
-            Self::FleetList | Self::List | Self::PaneDescribe | Self::Read | Self::CapturePane
+            Self::FleetList
+                | Self::WindowDescribe
+                | Self::List
+                | Self::PaneDescribe
+                | Self::Read
+                | Self::CapturePane
         )
     }
 
@@ -78,6 +86,7 @@ impl Command {
         self.validate(input)?;
         match self {
             Self::FleetList => Err("fleet_list_requires_registry".into()),
+            Self::WindowDescribe => Err("window_describe_requires_registry".into()),
             Self::List => Ok("surfaces.list"),
             Self::PaneDescribe => Ok("panes.list"),
             Self::Push => Ok("content.set"),
@@ -109,6 +118,13 @@ impl Command {
             Self::FleetList => {
                 if !input.is_empty() {
                     return Err("invalid_input:fleet_list_properties".into());
+                }
+            }
+            Self::WindowDescribe => {
+                exact_fields(input, &["windowLabel"], &[])?;
+                let label = required_string(input, "windowLabel")?;
+                if label.len() > 64 || !label.bytes().all(|byte| byte.is_ascii_lowercase()) {
+                    return Err("invalid_input:windowLabel".into());
                 }
             }
             Self::List => {

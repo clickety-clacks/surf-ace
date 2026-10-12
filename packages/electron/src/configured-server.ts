@@ -1,10 +1,37 @@
 import { createHash, createPublicKey } from "node:crypto";
 import { PublicControllerWireClient, parseRegistryIdentity } from "../../controller/src/wire.js";
 import { matchesProvisionedClaims, type ProvisionedRegistryBinding } from "./registry-binding.js";
-import type { SurfaceCore } from "./surface-core.js";
+import type { PersistentRegistryEndpointLease, SurfaceCore } from "./surface-core.js";
 
 export function registrationClientId(publicKeyPem: string): string {
   return createHash("sha256").update(createPublicKey(publicKeyPem).export({ format: "der", type: "spki" })).digest("hex");
+}
+
+function validateConfiguredDirectEndpoint(address: string | null): string | null {
+  if (address === null || address.length === 0) return null;
+  if (address.length > 2048 || address.includes("#")) throw new Error("invalid_direct_endpoint");
+  let url: URL;
+  try { url = new URL(address); } catch { throw new Error("invalid_direct_endpoint"); }
+  if ((url.protocol !== "ws:" && url.protocol !== "wss:") || !url.hostname ||
+      url.username || url.password || url.hash) throw new Error("invalid_direct_endpoint");
+  return address;
+}
+
+function registrationEndpointLease(payload: unknown): PersistentRegistryEndpointLease | null {
+  const lease = (payload as { endpointLease?: unknown } | null)?.endpointLease;
+  if (lease === null || lease === undefined) return null;
+  if (typeof lease !== "object" || Array.isArray(lease)) throw new Error("invalid_registration_response");
+  const value = lease as Record<string, unknown>;
+  if (!Number.isSafeInteger(value.leaseGeneration) || Number(value.leaseGeneration) < 1 ||
+      !Number.isSafeInteger(value.registrationObservedAtMs) || Number(value.registrationObservedAtMs) < 0 ||
+      !Number.isSafeInteger(value.leaseExpiresAtMs) || Number(value.leaseExpiresAtMs) <= Number(value.registrationObservedAtMs)) {
+    throw new Error("invalid_registration_response");
+  }
+  return {
+    leaseGeneration: Number(value.leaseGeneration),
+    registrationObservedAtMs: Number(value.registrationObservedAtMs),
+    leaseExpiresAtMs: Number(value.leaseExpiresAtMs),
+  };
 }
 
 // The configured route uses normal DNS and WebSocket transport, including LAN,
@@ -23,11 +50,15 @@ export class ConfiguredServerRegistration {
     private readonly onError: (error: unknown) => void = () => undefined,
     requestTimeoutMs = 10_000,
     private readonly provisionedBinding: ProvisionedRegistryBinding | null = null,
+    directEndpoint: string | null = null,
   ) {
     const url = new URL(address);
     if (url.protocol !== "ws:" && url.protocol !== "wss:") throw new Error("server address must use ws or wss");
     this.wire = new PublicControllerWireClient(url.toString(), requestTimeoutMs);
+    this.directEndpoint = validateConfiguredDirectEndpoint(directEndpoint);
   }
+
+  private readonly directEndpoint: string | null;
 
   onClose(listener: () => void): () => void {
     return this.wire.onClose(listener);
@@ -53,6 +84,8 @@ export class ConfiguredServerRegistration {
       for (const surface of this.core.listSurfaces()) this.core.admitSurfaceToLockless(surface.surfaceId);
       const response = await this.wire.request("client.register", {
         clientId: this.clientId,
+        directEndpoint: this.directEndpoint,
+        prePairDescribeV1: true,
         surfaces: this.core.listSurfaces().map((surface) => ({
           surfaceId: surface.surfaceId,
           panes: [...surface.panes.values()].map((pane) => ({
@@ -66,6 +99,24 @@ export class ConfiguredServerRegistration {
         throw new Error("invalid_registration_response");
       }
       const responseIdentity = parseRegistryIdentity(response.payload);
+      const responsePayload = response.payload as {
+        clientId?: unknown;
+        directEndpoint?: unknown;
+        endpointLease?: unknown;
+        prePairDescribeV1?: unknown;
+        surfaces?: unknown;
+      };
+      const endpointLease = registrationEndpointLease(response.payload);
+      if (this.directEndpoint !== null &&
+          (responsePayload.directEndpoint !== this.directEndpoint ||
+           responsePayload.prePairDescribeV1 !== true || endpointLease === null)) {
+        throw new Error("invalid_registration_response");
+      }
+      if (this.directEndpoint === null &&
+          ((responsePayload.directEndpoint !== undefined && responsePayload.directEndpoint !== null) ||
+           endpointLease !== null)) {
+        throw new Error("invalid_registration_response");
+      }
       const binding = this.core.registryBinding();
       if (!binding || binding.clientId !== this.clientId ||
           binding.allocatorId !== responseIdentity.allocatorId || binding.fleetId !== responseIdentity.fleetId) {
@@ -84,6 +135,7 @@ export class ConfiguredServerRegistration {
         this.core.transactionAsync(async () => {
           this.core.applyWindowLabels(payload.surfaces);
           this.core.applyRegistryPaneLabels(payload.surfaces);
+          this.core.setRegistryEndpointLease(endpointLease);
           await this.persist();
         }),
       );

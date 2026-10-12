@@ -380,6 +380,40 @@ export type EventBase<TOp extends string> = {
 
 export type SurfacesListRequest = RequestBase<"surfaces.list">;
 
+export type SurfaceDescribeRequest = RequestBase<"surface.describe"> & {
+  payload: {
+    clientId: string;
+    registryIdentity: { allocatorId: string; fleetId: string };
+    surfaceId: SurfaceId;
+    endpointLeaseGeneration: number;
+    nonce: string;
+  };
+};
+
+export type SurfaceDescribeResponse = ResponseBase<"surface.describe"> & {
+  payload: {
+    nonce: string;
+    clientId: string;
+    registryIdentity: { allocatorId: string; fleetId: string };
+    surfaceId: SurfaceId;
+    endpointLeaseGeneration: number;
+    observedAtMs: EpochMs;
+    applicationReadiness: { status: "ready" | "degraded"; limitationCodes: string[] };
+    surfaceSetRevision: number;
+    topologyRevision: TopologyRevision;
+    layout: TopologyLayoutNode;
+    panes: Array<{
+      paneId: PaneId;
+      paneLabel: number | null;
+      contentObservation: {
+        revision: Revision | null;
+        source: "client-authority";
+        observedAtMs: EpochMs;
+      };
+    }>;
+  };
+};
+
 export type ContentSetPayload = (
   {
       paneId: PaneId;
@@ -871,6 +905,7 @@ export type ErrorResponse = {
   v: 1;
   type: "response";
   op:
+    | "surface.describe"
     | "surfaces.list"
     | "pair.request"
     | "surface.window.open"
@@ -903,6 +938,11 @@ export type ErrorResponse = {
       | "unsupported_protocol_version"
       | "unsupported_content_type"
       | "unsupported_operation_for_content_type"
+      | "prepair_describe_unsupported"
+      | "surface_not_found"
+      | "identity_mismatch"
+      | "revision_churn"
+      | "not_ready"
       | TargetErrorCode
       | "stale_revision"
       | "stale_content"
@@ -1062,6 +1102,7 @@ export type PaneRenamedEvent = EventBase<"event.pane_renamed"> & {
 };
 
 export type Request =
+  | SurfaceDescribeRequest
   | SurfacesListRequest
   | RuntimeAppBindingRequest
   | SurfaceWindowOpenRequest
@@ -1084,6 +1125,7 @@ export type Request =
   | LocklessRequest;
 
 export type Response =
+  | SurfaceDescribeResponse
   | SurfacesListResponse
   | RuntimeAppBindingResponse
   | SurfaceWindowOpenResponse

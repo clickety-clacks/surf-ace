@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 pub mod annotations;
 pub mod command;
 pub mod controller;

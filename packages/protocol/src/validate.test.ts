@@ -57,6 +57,59 @@ test("validateEnvelopeType accepts current request envelopes", () => {
   assert.deepEqual(result, { ok: true });
 });
 
+test("surface.describe schema is a read-only pre-pair request and permits unknown content revisions", () => {
+  const request = validateEnvelopeType("surface.describe", {
+    id: "rq_surface_describe_fixture",
+    op: "surface.describe",
+    payload: {
+      clientId: "a".repeat(64),
+      registryIdentity: { allocatorId: "alloc_fixture", fleetId: "fleet_fixture" },
+      surfaceId: "sf_fixture",
+      endpointLeaseGeneration: 17,
+      nonce: "b".repeat(32),
+    },
+    sentAt: Date.now(),
+    type: "request",
+    v: 1,
+  });
+  assert.deepEqual(request, { ok: true });
+
+  const response = validateEnvelopeType("surface.describe", {
+    id: "rq_surface_describe_fixture",
+    op: "surface.describe",
+    ok: true,
+    payload: {
+      nonce: "b".repeat(32),
+      clientId: "a".repeat(64),
+      registryIdentity: { allocatorId: "alloc_fixture", fleetId: "fleet_fixture" },
+      surfaceId: "sf_fixture",
+      endpointLeaseGeneration: 17,
+      observedAtMs: Date.now(),
+      applicationReadiness: { status: "ready", limitationCodes: [] },
+      surfaceSetRevision: 2,
+      topologyRevision: 3,
+      layout: { paneId: 1, type: "pane" },
+      panes: [{
+        paneId: 1,
+        paneLabel: null,
+        contentObservation: { revision: null, source: "client-authority", observedAtMs: Date.now() },
+      }],
+    },
+    sentAt: Date.now(),
+    type: "response",
+    v: 1,
+  });
+  assert.deepEqual(response, { ok: true });
+
+  const describePaneProperties = (protocolSchemaDefs.SurfaceDescribeResponse as any)
+    .properties.payload.properties.panes.items.properties;
+  assert.deepEqual(Object.keys(describePaneProperties).sort(), [
+    "contentObservation",
+    "paneId",
+    "paneLabel",
+  ]);
+});
+
 test("validateEnvelopeType accepts weighted topology change events", () => {
   const result = validateEnvelopeType("event.topology_changed", {
     eventId: "ev_topology_resize",

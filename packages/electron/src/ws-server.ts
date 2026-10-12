@@ -27,6 +27,7 @@ import type {
   PanesListRequest,
   Request,
   Response,
+  SurfaceDescribeRequest,
   Selection,
   SnapshotGetRequest,
   SurfaceViewport,
@@ -38,6 +39,7 @@ import type {
   TopologyApplyRequest,
   Viewport,
 } from "../../protocol/src/index.js";
+import { validateEnvelopeType } from "../../protocol/src/validate.js";
 import {
   SURF_ACE_LOCKLESS_V1_CAPABILITY,
   locklessPaneScopeId,
@@ -147,6 +149,8 @@ export type SurfaceWsServerOptions = {
   onNativeMaterialized?: (surfaceId: string, materialization: NativePaneMaterialization) => void;
   onNativeReleased?: (surfaceId: string, paneIds: string[]) => Promise<void> | void;
   persistLocklessState?: () => Promise<void>;
+  isApplicationStateReady?: () => boolean;
+  beginApplicationStateMutation?: () => () => void;
   port: number;
   protocolVersion?: number;
   viewport: () => SurfaceViewport;
@@ -255,6 +259,8 @@ export class SurfaceWsServer {
   private port: number;
   private readonly protocolVersion: number;
   private readonly persistLocklessState: () => Promise<void>;
+  private readonly isApplicationStateReady: () => boolean;
+  private readonly beginApplicationStateMutation: () => () => void;
   private readonly capturePaneImage: SurfaceWsServerOptions["capturePaneImage"];
   private readonly viewportProvider: SurfaceWsServerOptions["viewport"];
   private readonly pendingBrowserUrlApplies = new Map<string, PendingBrowserUrlApply>();
@@ -316,6 +322,8 @@ export class SurfaceWsServer {
         throw error;
       }
     };
+    this.isApplicationStateReady = options.isApplicationStateReady ?? (() => true);
+    this.beginApplicationStateMutation = options.beginApplicationStateMutation ?? (() => () => {});
     this.protocolVersion = options.protocolVersion ?? 1;
     this.viewportProvider = options.viewport;
     this.wsPath = options.wsPath ?? "/ws";
@@ -1093,6 +1101,10 @@ export class SurfaceWsServer {
       await this.panePaintRoute.handle(socket, parsedRequest);
       return;
     }
+    if (parsedRequest.op === "surface.describe") {
+      await this.reply(socket, this.handleSurfaceDescribe(parsedRequest as SurfaceDescribeRequest));
+      return;
+    }
     if (
       parsedRequest.op === "surfaces.list" &&
       !this.locklessSessions.has(socket)
@@ -1162,6 +1174,26 @@ export class SurfaceWsServer {
   }
 
   private async handleOrdinaryLocklessMessage(
+    socket: WebSocket,
+    request: LocklessRequest,
+  ): Promise<void> {
+    const session = this.locklessSessions.get(socket);
+    // surface.describe bypasses the authority queue, so fence the full mutation
+    // dispatch through its durable receipt write and response.
+    const changesApplicationState = request.op === "pair.request" ||
+      (session !== undefined && locklessOperationMutates(request.op));
+    if (!changesApplicationState) {
+      return await this.handleOrdinaryLocklessMessageBody(socket, request);
+    }
+    const finishMutation = this.beginApplicationStateMutation();
+    try {
+      await this.handleOrdinaryLocklessMessageBody(socket, request);
+    } finally {
+      finishMutation();
+    }
+  }
+
+  private async handleOrdinaryLocklessMessageBody(
     socket: WebSocket,
     request: LocklessRequest,
   ): Promise<void> {
@@ -3258,6 +3290,131 @@ export class SurfaceWsServer {
     } as unknown as Response;
   }
 
+  private handleSurfaceDescribe(request: SurfaceDescribeRequest): Response {
+    if (request.v !== 1) {
+      return errorResponse("surface.describe", request.id, "unsupported_protocol_version",
+        "surface.describe requires protocol version 1");
+    }
+    const validation = validateEnvelopeType("surface.describe", request);
+    if (!validation.ok || !Number.isSafeInteger(request.sentAt) || request.sentAt < 0 ||
+        !/^[a-f0-9]{32,128}$/.test(request.payload?.nonce ?? "")) {
+      return errorResponse("surface.describe", request.id, "invalid_payload",
+        validation.ok ? "surface.describe payload is invalid" : validation.reason);
+    }
+    if (this.persistenceOutcomeUnknown || !this.isApplicationStateReady()) {
+      return errorResponse("surface.describe", request.id, "not_ready",
+        "Client application state is not ready for an authoritative pre-pair observation");
+    }
+    let binding: ReturnType<SurfaceCore["registryBinding"]>;
+    let lease: ReturnType<SurfaceCore["registryEndpointLease"]>;
+    try {
+      binding = this.core.registryBinding();
+      lease = this.core.registryEndpointLease();
+    } catch {
+      return errorResponse("surface.describe", request.id, "not_ready",
+        "Persisted registry authority is invalid or unavailable");
+    }
+    if (!binding || !lease) {
+      return errorResponse("surface.describe", request.id, "not_ready",
+        "A persisted registry identity and endpoint lease are required");
+    }
+    if (request.payload.clientId !== binding.clientId ||
+        request.payload.registryIdentity.allocatorId !== binding.allocatorId ||
+        request.payload.registryIdentity.fleetId !== binding.fleetId ||
+        request.payload.endpointLeaseGeneration !== lease.leaseGeneration) {
+      return errorResponse("surface.describe", request.id, "identity_mismatch",
+        "Requested registry identity or endpoint lease does not match the persisted client binding");
+    }
+    if (!this.core.listSurfaces().some((surface) => surface.surfaceId === request.payload.surfaceId)) {
+      return errorResponse("surface.describe", request.id, "surface_not_found",
+        "Requested surface is not live on this endpoint");
+    }
+    const surfaceSetBefore = this.core.locklessAuthority.surfaceSetRevision;
+    let before: ReturnType<SurfaceCore["pairState"]>;
+    let snapshot: ReturnType<SurfaceCore["pairState"]>;
+    let surfaceSetAfter: number;
+    try {
+      before = this.core.pairState(request.payload.surfaceId);
+      snapshot = this.core.pairState(request.payload.surfaceId);
+      surfaceSetAfter = this.core.locklessAuthority.surfaceSetRevision;
+    } catch (error) {
+      if (error instanceof SurfaceCoreError && error.code === "invalid_payload") {
+        return errorResponse("surface.describe", request.id, "surface_not_found",
+          "Requested surface is not live on this endpoint");
+      }
+      return errorResponse("surface.describe", request.id, "internal_error",
+        "Client could not read authoritative surface state");
+    }
+    if (surfaceSetBefore !== surfaceSetAfter || before.topologyRevision !== snapshot.topologyRevision) {
+      return errorResponse("surface.describe", request.id, "revision_churn",
+        "Surface set or topology changed while the observation was collected");
+    }
+    const observedAtMs = Date.now();
+    if (!Number.isSafeInteger(observedAtMs) || observedAtMs < 0 ||
+        !Number.isSafeInteger(surfaceSetAfter) || surfaceSetAfter < 0 ||
+        !Number.isSafeInteger(snapshot.topologyRevision) || snapshot.topologyRevision < 0) {
+      return errorResponse("surface.describe", request.id, "not_ready",
+        "Client revision or observation clock is unavailable");
+    }
+    const panes = snapshot.panes.map((pane) => ({
+      paneId: Number(pane.paneId),
+      paneLabel: pane.paneLabel,
+      contentObservation: {
+        revision: Number.isSafeInteger(pane.currentRevision) && pane.currentRevision >= 0
+          ? Number(pane.currentRevision) : null,
+        source: "client-authority" as const,
+        observedAtMs,
+      },
+    }));
+    const layoutPaneIds: number[] = [];
+    const visit = (node: typeof snapshot.layout): boolean => {
+      if (node.type === "pane") {
+        layoutPaneIds.push(Number(node.paneId));
+        return true;
+      }
+      return node.type === "split" && node.children.length > 0 && node.children.every(visit);
+    };
+    const paneIds = panes.map((pane) => pane.paneId);
+    if (!visit(snapshot.layout) || panes.length === 0 ||
+        panes.some((pane) => !Number.isSafeInteger(pane.paneId) || pane.paneId < 1 ||
+          (pane.paneLabel !== null && (!Number.isSafeInteger(pane.paneLabel) || pane.paneLabel < 1)) ||
+          (pane.contentObservation.revision !== null &&
+            (!Number.isSafeInteger(pane.contentObservation.revision) || pane.contentObservation.revision < 0))) ||
+        new Set(paneIds).size !== paneIds.length ||
+        layoutPaneIds.length !== paneIds.length ||
+        new Set(layoutPaneIds).size !== layoutPaneIds.length ||
+        layoutPaneIds.some((paneId) => !paneIds.includes(paneId))) {
+      return errorResponse("surface.describe", request.id, "not_ready",
+        "Client cannot produce a complete authoritative topology observation");
+    }
+    const response: Response = {
+      id: request.id as Request["id"],
+      ok: true,
+      op: "surface.describe",
+      payload: {
+        nonce: request.payload.nonce,
+        clientId: binding.clientId,
+        registryIdentity: { allocatorId: binding.allocatorId, fleetId: binding.fleetId },
+        surfaceId: request.payload.surfaceId,
+        endpointLeaseGeneration: lease.leaseGeneration,
+        observedAtMs,
+        applicationReadiness: { status: "ready", limitationCodes: [] },
+        surfaceSetRevision: surfaceSetAfter,
+        topologyRevision: snapshot.topologyRevision,
+        layout: snapshot.layout,
+        panes,
+      },
+      sentAt: Date.now(),
+      type: "response",
+      v: 1,
+    } as Response;
+    if (Buffer.byteLength(JSON.stringify(response), "utf8") > 65_536) {
+      return errorResponse("surface.describe", request.id, "not_ready",
+        "Authoritative surface observation exceeds the response bound");
+    }
+    return response;
+  }
+
   private async handleRuntimeAppBinding(request: Request): Promise<Response> {
     return {
       id: request.id,
@@ -3456,10 +3613,14 @@ export class SurfaceWsServer {
     });
     const queued = previous.catch(() => undefined).then(() => current);
     this.mutationQueues.set(surfaceId, queued);
-    await previous.catch(() => undefined);
+    // Renderer and lifecycle mutations also need to hide candidate geometry
+    // while they wait for resolution, apply native geometry, or roll back.
+    const finishMutation = this.beginApplicationStateMutation();
     try {
+      await previous.catch(() => undefined);
       return await operation();
     } finally {
+      finishMutation();
       releaseQueue();
       if (this.mutationQueues.get(surfaceId) === queued) {
         this.mutationQueues.delete(surfaceId);
