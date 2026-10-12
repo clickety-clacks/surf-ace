@@ -34,17 +34,23 @@ function seal(f) {
   f.input.selector.acceptedSha256 = createHash('sha256').update(f.input.views.accepted.fileBytesUtf8).digest('hex');
 }
 function closeEvidence(f) {
-  for (const id of ['ad', 'ae', 'af']) {
+  // Three distinct serialized closes consume revisions11,12,13 and produce12,13,14.
+  for (const boundary of [f.input.before, f.input.after, f.expectation.boundary,
+    ...Object.values(f.input.views).map(view => view.boundary)]) boundary.surfaceSetRevision = 14;
+  for (const [index, id] of ['ad', 'ae', 'af'].entries()) {
     for (const name of ['core', 'accepted', 'registry']) {
       f.input.views[name].rows.find(row => row.surfaceId === id).state = 'tombstoned';
     }
     f.input.views.native.rows.find(row => row.surfaceId === id).state = 'absent';
     const request = f.input.requests[id];
+    request.original.surfaceSetRevision = 11 + index;
+    request.original.payload.surfaceSetRevision = 11 + index;
+    request.original.payloadSha256 = evidenceDigest(request.original.payload);
     request.outcome = 'resolved_success';
-    request.receipt = { requestId: request.original.requestId, commitSequence: 50,
+    request.receipt = { requestId: request.original.requestId, commitSequence: 48 + index, surfaceSetRevision: 12 + index,
       originalSha256: evidenceDigest(request.original), terminalResponseSha256: evidenceDigest({ result: 'closed', id }) };
     request.tombstone = { surfaceId: id, surfaceEpoch: `epoch-${id}`, requestId: request.original.requestId,
-      tombstoneId: `tombstone-${id}`, commitSequence: 50,
+      tombstoneId: `tombstone-${id}`, commitSequence: 48 + index, surfaceSetRevision: 12 + index,
       historySha256: f.input.views.core.rows.find(row => row.surfaceId === id).historySha256 };
   }
   seal(f);
@@ -147,6 +153,63 @@ test('pending close intent is distinct from success and still cannot replay', ()
   const f = fixture(); f.input.requests.ad.outcome = 'still_pending';
   const result = inspect(f); assert.equal(result.findings[0].state, 'pending_intent');
   assert.equal(result.replayAllowed, false);
+});
+
+test('pending native absence is a conflict, never ordinary pending intent', () => {
+  const f = fixture(); f.input.requests.ad.outcome = 'still_pending';
+  f.input.views.native.rows[0].state = 'absent';
+  const result = inspect(f);
+  assert.equal(result.findings[0].state, 'conflicting');
+  assert.equal(result.findings[0].productDecisionRequired, true);
+  assert.equal(result.replayAllowed, false);
+});
+
+for (const outcome of ['not_committed', 'still_pending']) {
+  for (const evidence of ['receipt', 'tombstone', 'duplicateReceipts']) {
+    test(`${outcome} with unexpected ${evidence} refuses contradictory evidence`, () => {
+      const f = fixture(); const closed = fixture(); closeEvidence(closed);
+      f.input.requests.ad.outcome = outcome;
+      f.input.requests.ad[evidence] = evidence === 'duplicateReceipts'
+        ? [closed.input.requests.ad.receipt] : closed.input.requests.ad[evidence];
+      assert.equal(inspect(f).reason, 'request_outcome_evidence_conflict');
+    });
+  }
+}
+
+test('success must advance its original set revision exactly once and correlate tombstone', () => {
+  for (const delta of [0, 2]) {
+    const f = fixture(); closeEvidence(f);
+    f.input.requests.ad.receipt.surfaceSetRevision = 11 + delta;
+    f.input.requests.ad.tombstone.surfaceSetRevision = 11 + delta;
+    assert.equal(inspect(f).reason, 'close_revision_unproven');
+  }
+  const f = fixture(); closeEvidence(f);
+  f.input.requests.ad.tombstone.surfaceSetRevision++;
+  assert.equal(inspect(f).reason, 'close_revision_unproven');
+});
+
+test('multiple successful closes cannot consume the same expected revision', () => {
+  const f = fixture(); closeEvidence(f);
+  const request = f.input.requests.ae;
+  request.original.surfaceSetRevision = request.original.payload.surfaceSetRevision = 11;
+  request.original.payloadSha256 = evidenceDigest(request.original.payload);
+  request.receipt.originalSha256 = evidenceDigest(request.original);
+  request.receipt.surfaceSetRevision = request.tombstone.surfaceSetRevision = 12;
+  assert.equal(inspect(f).reason, 'close_revision_sequence_conflict');
+});
+
+test('collected set revision cannot predate a proven successful close', () => {
+  const f = fixture(); closeEvidence(f);
+  for (const boundary of [f.input.before, f.input.after, f.expectation.boundary,
+    ...Object.values(f.input.views).map(view => view.boundary)]) boundary.surfaceSetRevision = 11;
+  assert.equal(inspect(f).reason, 'close_revision_unproven');
+});
+
+test('successful revision ordering follows distinct commit sequence, not target iteration order', () => {
+  const f = fixture(); closeEvidence(f); f.expectation.targets.reverse();
+  assert.equal(inspect(f).status, 'inspection_complete');
+  f.input.requests.ae.receipt.commitSequence = f.input.requests.ae.tombstone.commitSequence = 48;
+  assert.equal(inspect(f).reason, 'close_revision_sequence_conflict');
 });
 
 for (const surfaceId of ['p', 'z', 'aa']) test(`survivor ${surfaceId} history/session fingerprint change refuses`, () => {

@@ -83,6 +83,7 @@ export function inspectEvidence(input, expectation) {
           !equal(current.core, survivor)) return refuse('survivor_changed');
     }
     const findings = [];
+    const successfulCloses = [];
     for (const { surfaceId } of expectation.targets) {
       const current = rows(surfaceId);
       const request = input.requests?.[surfaceId];
@@ -103,6 +104,13 @@ export function inspectEvidence(input, expectation) {
       if (!['not_committed', 'still_pending', 'resolved_success', 'resolved_failure'].includes(request.outcome)) {
         return refuse('request_outcome_unknown');
       }
+      if (['not_committed', 'still_pending'].includes(request.outcome) &&
+          (request.receipt != null || request.tombstone != null || request.duplicateReceipts?.length)) {
+        return refuse('request_outcome_evidence_conflict');
+      }
+      if (request.outcome === 'resolved_failure' && request.tombstone != null) {
+        return refuse('request_outcome_evidence_conflict');
+      }
       if (request.outcome.startsWith('resolved_')) {
         const receipt = request.receipt;
         if (!receipt || receipt.requestId !== original.requestId ||
@@ -115,6 +123,11 @@ export function inspectEvidence(input, expectation) {
       }
       if (request.outcome === 'resolved_success') {
         const tombstone = request.tombstone;
+        if (!tombstone) return refuse('close_commit_unproven');
+        const postRevision = request.receipt.surfaceSetRevision;
+        if (!revision(postRevision) || postRevision !== original.surfaceSetRevision + 1 ||
+            postRevision > input.before.surfaceSetRevision ||
+            tombstone?.surfaceSetRevision !== postRevision) return refuse('close_revision_unproven');
         if (current.native.state !== 'absent' || current.core.state !== 'tombstoned' ||
             !tombstone || tombstone.surfaceId !== surfaceId || tombstone.surfaceEpoch !== original.surfaceEpoch ||
             tombstone.requestId !== original.requestId || !id(tombstone.tombstoneId) ||
@@ -122,13 +135,21 @@ export function inspectEvidence(input, expectation) {
             tombstone.historySha256 !== current.core.historySha256) return refuse('close_commit_unproven');
         findings.push({ surfaceId, state: 'closed_restorable', receipt: structuredClone(request.receipt),
           tombstoneId: tombstone.tombstoneId });
-      } else if (request.outcome === 'still_pending' && current.core.state === 'live' && !request.tombstone) {
+        successfulCloses.push({ commitSequence: request.receipt.commitSequence, postRevision });
+      } else if (request.outcome === 'still_pending' && current.core.state === 'live' && current.native.state === 'live') {
         findings.push({ surfaceId, state: 'pending_intent' });
       } else if (current.core.state === 'live' && current.native.state === 'live') {
         findings.push({ surfaceId, state: 'live' });
       } else {
         // Even exhaustive native absence is a conflict to inspect, not permission to delete.
         findings.push({ surfaceId, state: 'conflicting', productDecisionRequired: true });
+      }
+    }
+    successfulCloses.sort((a, b) => a.commitSequence - b.commitSequence);
+    for (let i = 1; i < successfulCloses.length; i++) {
+      if (successfulCloses[i].commitSequence <= successfulCloses[i - 1].commitSequence ||
+          successfulCloses[i].postRevision <= successfulCloses[i - 1].postRevision) {
+        return refuse('close_revision_sequence_conflict');
       }
     }
     return Object.freeze({ status: 'inspection_complete', effect: 'none', replayAllowed: false,

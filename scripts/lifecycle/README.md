@@ -68,6 +68,17 @@ receipt or original request refuses. A pending request is not a successful
 close. Native absence with retained live core/state is a conflict requiring a
 product decision, even with a complete synthetic native inventory.
 
+Pending/non-committed requests carrying receipts or tombstones refuse as
+contradictory evidence; resolved failure cannot claim a close tombstone either.
+An ordinary pending finding requires live native and core views. Successful
+synthetic receipts and tombstones carry the same post-close set revision,
+exactly original expectation plus one, not newer than the collected boundary.
+Distinct successful closes must have distinct commit sequences and strictly
+increasing post revisions in commit order. The three-close fixture therefore
+consumes expectations11/12/13 and reaches collected revision14; historical
+original payloads/digests remain bound to their own pre-close expectations.
+These synthetic post-revision fields are not a new protocol declaration.
+
 No model outcome mutates or advances a request, history, tombstone, or cursor.
 The entire input is checked for non-mutation in tests; output receipts are
 cloned. Classification is only a review artifact, not an admission capability.
@@ -114,3 +125,9 @@ tombstone/history/survivor checks. They do not prove an actual collector, actual
 transaction, restart recovery or physical window outcome. Existing installed
 Eezo `ad/ae/af` and survivors are untouched. Independent review and separate
 normative/runtime authority remain required.
+
+The successor also covers independent review `art_81c97509` B1/B2 combined
+counterexamples: pending plus absent native, pending/non-commit plus unexpected
+receipt/tombstone, unadvanced/skipped close revision, repeated consumed expected
+revision, collected revision predating success, and conflicting commit ordering.
+The added checks fail against reviewed parent27fc8e4 and pass on the successor.
