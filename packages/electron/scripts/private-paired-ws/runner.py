@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Scope B prepared controller: no native/GUI SDK, no launch without fresh owner grant."""
 import argparse,hashlib,json,math,os,pathlib,signal,stat,subprocess,sys,tempfile,time
+SCHEMA_SHA='2a7043f4d1400ba964fe896ce19241bccc7c1765e64bd9b94696899e535a2ceb'
 PRODUCT='8b667c345ef2f50f57a94aa91d3bdc4e4ec4f28e'
 def digest(p): return hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest()
 def number(v):
@@ -41,6 +42,16 @@ def scratch(root):
         if p.is_file(): total+=p.stat().st_size
         if total>256*1024*1024: raise ValueError('scratch256MiB exceeded')
     return total
+def verify_payload(payload,a):
+    if not payload.is_absolute() or payload.resolve()!=payload: raise ValueError('payload origin')
+    if digest(payload/'manifest.json')!=a['manifestSha256']: raise ValueError('manifest mismatch')
+    manifest=json.loads((payload/'manifest.json').read_text())
+    if set(manifest)!=set(['app/fixture.mjs','collector.mjs','schema.json']): raise ValueError('manifest file set')
+    for name,sha in manifest.items():
+        file=payload/name
+        if file.resolve()!=file or digest(file)!=sha: raise ValueError('payload mismatch')
+    if digest(payload/'schema.json')!=SCHEMA_SHA: raise ValueError('protocol schema source mismatch')
+
 def main():
     parser=argparse.ArgumentParser();parser.add_argument('--admission',required=True);parser.add_argument('--payload',required=True);args=parser.parse_args();root=None;proc=None;a=None
     start=time.monotonic();deadline=start+75;r={'scope':'B-actual-paired-ws-synthetic-capture','outerExit':1,'childExit':None,'launched':False}
@@ -49,13 +60,7 @@ def main():
         p=pathlib.Path(args.admission);info=p.lstat()
         if not stat.S_ISREG(info.st_mode) or info.st_uid!=os.getuid() or info.st_mode&0o077: raise ValueError('own regular0600 admission')
         a=json.loads(p.read_text());admission(a,time.time());payload=pathlib.Path(args.payload)
-        if not payload.is_absolute() or payload.resolve()!=payload: raise ValueError('payload origin')
-        if digest(payload/'manifest.json')!=a['manifestSha256']: raise ValueError('manifest mismatch')
-        manifest=json.loads((payload/'manifest.json').read_text())
-        if set(manifest)!=set(['fixture.mjs','collector.mjs']): raise ValueError('manifest file set')
-        for name,sha in manifest.items():
-            file=payload/name
-            if file.resolve()!=file or digest(file)!=sha: raise ValueError('payload mismatch')
+        verify_payload(payload,a)
         for key in ['node','census']:
             if digest(a[key])!=a[key+'Sha256']: raise ValueError('binary pin mismatch')
         v=subprocess.run([a['node'],'--version'],capture_output=True,text=True,timeout=2)
@@ -68,7 +73,7 @@ def main():
         # Final gate after all preflight/root work; retain cleanup, collector, census and persistence reserve.
         admission(a,time.time());seconds=budget(deadline,time.monotonic())
         with (root/'fixture.log').open('wb') as log:
-            proc=subprocess.Popen([a['node'],str(payload/'fixture.mjs')],env=env,stdout=log,stderr=subprocess.STDOUT,start_new_session=True);r.update(launched=True,pid=proc.pid,pgid=proc.pid,root=str(root));until=min(deadline-15,time.monotonic()+seconds)
+            proc=subprocess.Popen([a['node'],str(payload/'app/fixture.mjs')],env=env,stdout=log,stderr=subprocess.STDOUT,start_new_session=True);r.update(launched=True,pid=proc.pid,pgid=proc.pid,root=str(root));until=min(deadline-15,time.monotonic()+seconds)
             while time.monotonic()<until and not leader_exited(proc.pid): scratch(root);time.sleep(.02)
             r['childExit']=cleanup(proc,min(deadline-10,time.monotonic()+2));proc=None
         if r['childExit']!=0: raise ValueError('fixture failed')
