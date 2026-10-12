@@ -1,4 +1,4 @@
-import importlib.util, pathlib, unittest, unittest.mock as mock, tempfile, hashlib
+import ast, os, importlib.util, pathlib, unittest, unittest.mock as mock, tempfile, hashlib
 spec=importlib.util.spec_from_file_location('census',pathlib.Path(__file__).with_name('census.py'))
 c=importlib.util.module_from_spec(spec);spec.loader.exec_module(c)
 spec2=importlib.util.spec_from_file_location('runner',pathlib.Path(__file__).with_name('runner.py'))
@@ -83,6 +83,14 @@ class Controls(unittest.TestCase):
     def test_final_census_uses_actual_owned_group(self):
         args=r.census_command({'census':'/tmp/helper.py'},'/tmp/owner.json','n',123)
         self.assertEqual(args[-2:],['--owned-pgid','123']);self.assertIn('-I',args);self.assertEqual(args[1],'-I')
+    def test_actual_pre_and_final_runner_callsite_provenance(self):
+        path=pathlib.Path(os.environ.get('PRIVATE_CENSUS_RUNNER_SOURCE',r.__file__))
+        calls=[n for n in ast.walk(ast.parse(path.read_text())) if isinstance(n,ast.Call) and isinstance(n.func,ast.Name) and n.func.id=='census_command']
+        self.assertEqual(len(calls),2,'both real census call sites must carry reviewed policy')
+        self.assertTrue(all(ast.unparse(n.args[1])=='p' for n in calls))
+        self.assertEqual(sorted(len(n.args) for n in calls),[3,4])
+        final=next(n for n in calls if len(n.args)==4)
+        self.assertEqual(ast.unparse(final.args[3]),"r['pgid']")
     def test_stale_failed_and_ambiguous_receipts_refused_by_actual_runner(self):
         good=dict(nonce='n',runtimeQualified=True,clear=True,observedEpoch=99,conflicts=[],ownedRemaining=[])
         for update in [dict(observedEpoch=96),dict(runtimeQualified=False),dict(ownedRemaining=[20]),dict(conflicts=[20]),dict(nonce='wrong')]:
