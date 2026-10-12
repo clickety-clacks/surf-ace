@@ -1,0 +1,10 @@
+import fs from 'node:fs';import path from 'node:path';import {fileURLToPath} from 'node:url';import {createHash} from 'node:crypto';import {build} from 'esbuild';
+const here=path.dirname(fileURLToPath(import.meta.url)),repo=path.resolve(here,'../../../..'),out=path.join(here,'prepared-payload');
+fs.mkdirSync(path.join(out,'app'),{recursive:true});
+const shared={bundle:true,format:'esm',platform:'node',target:'node24',external:['electron'],alias:{'@surf-ace/protocol':path.join(repo,'packages/protocol/src/index.ts')},banner:{js:'import { createRequire as __privateCreateRequire } from "node:module"; const require = __privateCreateRequire(import.meta.url);'}};
+await build({...shared,entryPoints:[path.join(here,'fixture-main.ts')],outfile:path.join(out,'app/fixture-main.mjs')});
+await build({...shared,entryPoints:[path.join(here,'collector.mjs')],outfile:path.join(out,'collector.mjs')});
+fs.copyFileSync(path.join(here,'preload.cjs'),path.join(out,'app/preload.cjs'));fs.copyFileSync(path.join(repo,'packages/protocol/schema.json'),path.join(out,'schema.json'));
+fs.writeFileSync(path.join(out,'app/package.json'),JSON.stringify({name:'private-pane-paint-qualification',version:'0.0.0',type:'module',main:'fixture-main.mjs'}));
+const manifest={};for(const file of ['app/fixture-main.mjs','app/preload.cjs','app/package.json','collector.mjs','schema.json'])manifest[file]=createHash('sha256').update(fs.readFileSync(path.join(out,file))).digest('hex');fs.writeFileSync(path.join(out,'manifest.json'),JSON.stringify(manifest,null,2)+'\n');
+console.log(JSON.stringify({out,manifestSha256:createHash('sha256').update(fs.readFileSync(path.join(out,'manifest.json'))).digest('hex')}));
