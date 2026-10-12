@@ -472,7 +472,7 @@ function readPanePaintDescriptor(input: unknown): RendererPaintDescriptor | null
   const pane = latestState.panes.find(p => p.paneId === request.paneId), view = paneViews.get(request.paneId);
   if (!pane || !view || pane.externalNative || !pane.content.contentId || !["html", "browser_url"].includes(pane.content.contentType ?? "") || view.currentContentKey !== contentKey(pane)) return null;
   const frame = view.currentBrowserFrame, scale = frame && browserContentScaleStates.get(frame);
-  if (!frame || !scale || frame !== currentPaneFrameElement(view) || !frame.isConnected || !view.rootEl.isConnected
+  if (!frame || !scale || scale.modeSequence < 1 || frame.dataset.guestReady !== "true" || frame !== currentPaneFrameElement(view) || !frame.isConnected || !view.rootEl.isConnected
     || !view.contentEl.contains(frame) || !frame.matches("webview.content-browser-url-frame")) return null;
   let guestId: number;
   try { guestId = frame.getWebContentsId?.() ?? 0; } catch { return null; }
@@ -482,6 +482,13 @@ function readPanePaintDescriptor(input: unknown): RendererPaintDescriptor | null
   let clip = { ...frameRect }, opacity = 1, hostVisible = true;
   for (let element: HTMLElement | null = frame; element; element = element.parentElement) {
     const style = getComputedStyle(element), alpha = Number(style.opacity);
+    if (Number(style.zoom) !== 1 || (element !== frame && style.transform !== "none") || style.clipPath !== "none"
+      || style.maskImage !== "none" || style.filter !== "none") return null;
+    const clips = [style.overflowX,style.overflowY].some(value=>["hidden","clip","scroll","auto"].includes(value));
+    if (clips && [style.borderTopLeftRadius,style.borderTopRightRadius,style.borderBottomLeftRadius,style.borderBottomRightRadius,
+      style.borderLeftWidth,style.borderRightWidth,style.borderTopWidth,style.borderBottomWidth].some(value=>parseFloat(value)!==0)) return null;
+    if (element === frame && [style.borderLeftWidth,style.borderRightWidth,style.borderTopWidth,style.borderBottomWidth,
+      style.paddingLeft,style.paddingRight,style.paddingTop,style.paddingBottom].some(value => parseFloat(value) !== 0)) return null;
     if (!Number.isFinite(alpha) || alpha < 0 || alpha > 1) return null;
     opacity *= alpha;
     if (style.display === "none" || style.visibility !== "visible") hostVisible = false;

@@ -1,3 +1,4 @@
+import { createPanePaintCaptureAdapter, PANE_PAINT_DOCUMENT_RECIPE } from "./pane-paint-capture-adapter.js";
 import { FreshPanePaintReads, NativePanePaintOwners, rendererPaintMatchesAuthority, type PanePaintAuthority, type PaintOwner } from "./pane-paint-owner-bridge.js";
 import { ServerConnection } from "./server-connection.js";
 import { splitResizeMatches, splitResizeIsNoOp } from "./split-resize.js";
@@ -172,13 +173,17 @@ const windows = new Map<string, BrowserWindow>();
 // Remains disabled until qualified adapter/WS integration and independent review.
 const panePaintDiagnosticEnabled = false;
 const paintWindowIncarnations = new WeakMap<BrowserWindow, string>();
+function nativePaintFrameKey(frame: WebFrameMain): string {
+  if (frame.isDestroyed() || frame.detached || ![frame.frameTreeNodeId,frame.processId,frame.routingId].every(value=>Number.isSafeInteger(value)&&value>=0) || frame.processId===0) throw Error("native frame unavailable");
+  return `${frame.frameTreeNodeId}:${frame.processId}:${frame.routingId}`;
+}
 function currentPaintOwner(surfaceId: string): PaintOwner<BrowserWindow, WebContents, WebFrameMain> | null {
   try {
     const window = windows.get(surfaceId), incarnation = window && paintWindowIncarnations.get(window);
     if (!window || !incarnation || window.isDestroyed() || window.webContents.isDestroyed()) return null;
     const frame = window.webContents.mainFrame;
     if (frame.isDestroyed() || frame.detached) return null;
-    return { window, host: window.webContents, frame, surfaceId, windowInstanceId: incarnation, hostId: window.webContents.id };
+    return { window, host: window.webContents, frame, surfaceId, windowInstanceId: incarnation, hostId: window.webContents.id, hostFrameKey: nativePaintFrameKey(frame) };
   } catch { return null; }
 }
 const paintRendererReads = new FreshPanePaintReads<BrowserWindow, WebContents, WebFrameMain>({
@@ -190,10 +195,7 @@ const paintRendererReads = new FreshPanePaintReads<BrowserWindow, WebContents, W
 });
 const paintNativeOwners = new NativePanePaintOwners<BrowserWindow, WebContents, WebFrameMain, WebContents>({
   owner: currentPaintOwner, guestId: guest => guest.id, host: guest => guest.hostWebContents,
-  frame: guest => guest.mainFrame, frameKey: frame => {
-    if (frame.isDestroyed() || frame.detached || ![frame.frameTreeNodeId, frame.processId, frame.routingId].every(value => Number.isSafeInteger(value) && value >= 0) || frame.processId === 0) throw Error("native frame unavailable");
-    return `${frame.frameTreeNodeId}:${frame.processId}:${frame.routingId}`;
-  },
+  frame: guest => guest.mainFrame, frameKey: nativePaintFrameKey,
   alive: guest => !guest.isDestroyed(),
 });
 
@@ -602,6 +604,29 @@ async function readOwnedPanePaintAssociation(surfaceId: string, paneId: number, 
   const native = paintNativeOwners.read(surfaceId, renderer.guestId);
   if (!native) return null;
   return { authority: current, renderer, native };
+}
+
+// Prepared private adapter, never supplied to the default-disabled service or public WS dispatcher.
+function makePanePaintCaptureAdapter(surfaceId: string, paneId: number) {
+  if (!panePaintDiagnosticEnabled || resolveCompositorControlSocketPath()) return null;
+  return createPanePaintCaptureAdapter({
+    associate: signal => readOwnedPanePaintAssociation(surfaceId, paneId, signal),
+    document: async (association, signal) => {
+      if (signal.aborted) throw Error("cancelled document read");
+      const facts = await association.native.frame.executeJavaScript(PANE_PAINT_DOCUMENT_RECIPE);
+      if (signal.aborted) throw Error("cancelled document read");
+      return facts;
+    },
+    guestUrl: association => association.native.guest.getURL(),
+    guestZoom: association => association.native.guest.getZoomFactor(),
+    hostFacts: association => {
+      const [width,height] = association.native.owner.window.getContentSize();
+      return { width,height,visible:association.native.owner.window.isVisible(),zoom:association.native.owner.host.getZoomFactor() };
+    },
+    capture: (target, association) => target === "GUEST"
+      ? association.native.guest.capturePage()
+      : association.native.owner.window.capturePage({ ...association.authority.paneRect }),
+  });
 }
 
 function rendererDiagnosticFields(
@@ -1402,7 +1427,9 @@ async function createWindowForSurface(surfaceId: string): Promise<BrowserWindow>
   if (panePaintDiagnosticEnabled) {
     const paintHost = window.webContents;
     const retirePaintOwner = () => { paintRendererReads.invalidate(paintHost); paintNativeOwners.retireHost(paintHost); };
-    window.webContents.on("did-start-navigation", (_event, _url, _inPlace, mainFrame) => { if (mainFrame) retirePaintOwner(); });
+    window.webContents.on("did-start-navigation", (_event, _url, _inPlace, mainFrame) => {
+      if (mainFrame) { retirePaintOwner(); paintWindowIncarnations.set(window, randomBytes(16).toString("hex")); }
+    });
     window.webContents.on("render-process-gone", retirePaintOwner);
     window.once("closed", retirePaintOwner);
   }

@@ -13,7 +13,7 @@ export type RendererPaintDescriptor = {
 };
 export type RendererPaintReply = RendererPaintRequest & { descriptor: RendererPaintDescriptor | null };
 export type PaintOwner<W extends object, H extends object, F extends object> = {
-  window: W; host: H; frame: F; surfaceId: string; windowInstanceId: string; hostId: number;
+  window: W; host: H; frame: F; surfaceId: string; windowInstanceId: string; hostId: number; hostFrameKey: string;
 };
 const defaultClock: PaintClock = { now: () => performance.now(), schedule: (f, ms) => { const t = setTimeout(f, ms); return () => clearTimeout(t); } };
 const number = (v: unknown) => typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= Number.MAX_SAFE_INTEGER;
@@ -40,13 +40,14 @@ export class FreshPanePaintReads<W extends object, H extends object, F extends o
   private pending = new Map<string, { owner: PaintOwner<W,H,F>; paneId: number; finish: (value: RendererPaintDescriptor | null) => void }>();
   constructor(private ports: { owner(surfaceId: string): PaintOwner<W,H,F> | null; send(owner: PaintOwner<W,H,F>, request: RendererPaintRequest): void; clock?: PaintClock; nonce?: () => string }) {}
   private same(a: PaintOwner<W,H,F>, b: PaintOwner<W,H,F> | null): boolean {
-    return !!b && a.window === b.window && a.host === b.host && a.frame === b.frame && a.surfaceId === b.surfaceId && a.windowInstanceId === b.windowInstanceId && a.hostId === b.hostId;
+    return !!b && a.window === b.window && a.host === b.host && a.frame === b.frame && a.surfaceId === b.surfaceId && a.windowInstanceId === b.windowInstanceId && a.hostId === b.hostId && a.hostFrameKey === b.hostFrameKey;
   }
   invalidate(host: H): void { for (const slot of [...this.pending.values()]) if (slot.owner.host === host) slot.finish(null); }
   async read(surfaceId: string, paneId: number, signal: AbortSignal, timeoutMs: number): Promise<RendererPaintDescriptor | null> {
     if (signal.aborted || !integer(paneId) || paneId < 1 || !number(timeoutMs) || timeoutMs <= 0 || timeoutMs > 2000 || this.pending.size >= 2) return null;
     let owner: PaintOwner<W,H,F> | null;
     try { owner = this.ports.owner(surfaceId); } catch { return null; }
+    if (owner) owner = { ...owner };
     if (!owner || [...this.pending.values()].some(p => p.owner.host === owner!.host)) return null;
     const clock = this.ports.clock ?? defaultClock;
     let now: number, nonce: string;
@@ -90,20 +91,27 @@ export class FreshPanePaintReads<W extends object, H extends object, F extends o
 }
 
 /** An attachment event, actual object membership and current native main frame are all mandatory. */
+export const PANE_PAINT_NATIVE_ID_CAPACITY = 4096;
 export class NativePanePaintOwners<W extends object,H extends object,F extends object,G extends object> {
+  private seen = new Map<number, WeakRef<G>>(); // Never recycle a numeric ID into another native object in this app lifetime.
   private entries = new Map<number, { owner: PaintOwner<W,H,F>; guest: G; frame: F; frameKey: string; frameInstanceId: string; documentGeneration: number }>();
   constructor(private ports: { owner(surfaceId: string): PaintOwner<W,H,F> | null; guestId(guest: G): number; host(guest: G): H | null; frame(guest: G): F | null; frameKey(frame: F): string; alive(guest: G): boolean; nonce?: () => string }) {}
   private fresh(owner: PaintOwner<W,H,F>): boolean {
     const current = this.ports.owner(owner.surfaceId);
-    return !!current && current.window === owner.window && current.host === owner.host && current.frame === owner.frame && current.windowInstanceId === owner.windowInstanceId && current.hostId === owner.hostId;
+    return !!current && current.window === owner.window && current.host === owner.host && current.frame === owner.frame && current.windowInstanceId === owner.windowInstanceId && current.hostId === owner.hostId && current.hostFrameKey === owner.hostFrameKey;
   }
   attach(surfaceId: string, guest: G): boolean {
     try {
       const owner = this.ports.owner(surfaceId), frame = this.ports.frame(guest), id = this.ports.guestId(guest);
-      if (!owner || !frame || !integer(id) || id < 1 || !this.ports.alive(guest) || this.ports.host(guest) !== owner.host) return false;
+      if (!owner || !frame || frame === owner.frame || (guest as object) === (owner.host as object) || !integer(id) || id < 1 || id === owner.hostId || !this.ports.alive(guest) || this.ports.host(guest) !== owner.host) return false;
+      const prior = this.seen.get(id);
+      if (prior && prior.deref() !== guest) return false;
+      if (!prior && this.seen.size >= PANE_PAINT_NATIVE_ID_CAPACITY) return false;
+      const frameKey = this.ports.frameKey(frame);
       const existing = this.entries.get(id);
       if (existing?.guest === guest) return !!this.read(surfaceId,id);
-      this.entries.set(id, { owner, guest, frame, frameKey: this.ports.frameKey(frame), frameInstanceId: this.ports.nonce?.() ?? randomBytes(16).toString("hex"), documentGeneration: 0 });
+      if (!prior) this.seen.set(id,new WeakRef(guest));
+      this.entries.set(id, { owner: { ...owner }, guest, frame, frameKey, frameInstanceId: this.ports.nonce?.() ?? randomBytes(16).toString("hex"), documentGeneration: 0 });
       return true;
     } catch { return false; }
   }
