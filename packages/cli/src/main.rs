@@ -6,6 +6,9 @@ use surf_ace_cli::{execute, Command, Invocation};
 
 fn main() {
     let arguments: Vec<String> = env::args().skip(1).collect();
+    if let Some(exit_code) = surf_ace_cli::wire::run_internal_dns_resolver(&arguments) {
+        std::process::exit(exit_code);
+    }
     if let Some(result) = surf_ace_cli::help::handle_arguments(&arguments) {
         match result {
             Ok(output) => println!(

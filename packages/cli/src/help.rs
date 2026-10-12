@@ -152,7 +152,7 @@ pub fn document(target: Option<&str>) -> Result<Value, String> {
             "errorSchema": error_schema(),
             "errorBehavior": "Success and error records are one JSON object on stdout; nonzero exit indicates failure.",
             "discoveryLimits": [
-                "fleet-list reads registry inventory only; it has no direct endpoint, freshness, or reachability evidence.",
+                "fleet-list reads registry inventory and configured endpoint leases; it does not prove endpoint reachability.",
                 "window-describe reads fleet.topology, sends one nonce-correlated surface.describe to the leased direct endpoint before pairing, then rechecks fleet.topology; identity matching is consistency only and does not authenticate either peer.",
                 "list and capture-pane pair a controller before their direct request; they are not no-pair discovery probes.",
                 "window-describe does not pair, create controller state, or authorize later mutations; writes still need their own explicit endpoint and revision guards."
@@ -490,7 +490,7 @@ fn command_spec(command: Command) -> Value {
             "registry",
             "registry_inventory_read",
             "Read registered client, window, and pane labels from the explicitly selected registry.",
-            "Registry fleet.topology payload with clients, registryIdentity, and registrationReady; it does not contain direct endpoints or prove client reachability.",
+            "Registry fleet.topology payload with per-client direct endpoints and leases; it does not prove client reachability.",
             vec!["missing_registry", "invalid_registry", "invalid_fleet_topology_clients"],
         ),
         Command::WindowDescribe => (
@@ -500,9 +500,9 @@ fn command_spec(command: Command) -> Value {
             "Separate registry identity, registration and lease freshness, direct transport reachability, client application readiness, topology/layout, and per-pane content revision evidence. This is consistency only, does not authenticate either peer, and does not authorize a later mutation.",
             vec![
                 "missing_registry", "invalid_registry", "registry_timeout", "registry_unreachable",
-                "registry_response_invalid", "window_not_found", "window_ambiguous", "endpoint_unconfigured", "stale_registration",
+                "registry_response_invalid", "registry_unavailable", "window_not_found", "window_ambiguous", "endpoint_unconfigured", "stale_registration",
                 "endpoint_unreachable", "application_unresponsive", "describe_timeout", "describe_response_too_large",
-                "describe_response_invalid", "prepair_describe_unsupported", "identity_mismatch",
+                "describe_response_invalid", "describe_rejected", "prepair_describe_unsupported", "identity_mismatch",
                 "revision_churn", "client_not_ready", "unsupported_protocol_version", "clock_unavailable",
             ],
         ),
@@ -947,7 +947,7 @@ fn error_schema() -> Value {
         "required": ["ok", "error"],
         "properties": {
             "ok": { "const": false },
-            "error": { "type": "object", "required": ["code", "details"], "properties": { "code": { "enum": ["invalid_input", "outcome_unknown", "protocol_error", "operation_rejected", "state_error", "still_pending", "transport_error", "json_error", "registry_timeout", "registry_unreachable", "registry_response_invalid", "window_not_found", "window_ambiguous", "endpoint_unconfigured", "stale_registration", "endpoint_unreachable", "application_unresponsive", "describe_timeout", "describe_response_too_large", "describe_response_invalid", "prepair_describe_unsupported", "identity_mismatch", "revision_churn", "client_not_ready", "unsupported_protocol_version", "clock_unavailable"] }, "details": { "type": "object" } }, "additionalProperties": false }
+            "error": { "type": "object", "required": ["code", "details"], "properties": { "code": { "enum": ["invalid_input", "outcome_unknown", "protocol_error", "operation_rejected", "state_error", "still_pending", "transport_error", "json_error", "registry_timeout", "registry_unreachable", "registry_response_invalid", "registry_unavailable", "window_not_found", "window_ambiguous", "endpoint_unconfigured", "stale_registration", "endpoint_unreachable", "application_unresponsive", "describe_timeout", "describe_response_too_large", "describe_response_invalid", "describe_rejected", "prepair_describe_unsupported", "identity_mismatch", "revision_churn", "client_not_ready", "unsupported_protocol_version", "clock_unavailable"] }, "details": { "type": "object" } }, "additionalProperties": false }
         },
         "additionalProperties": false
     })
@@ -1083,5 +1083,25 @@ mod tests {
             annotation_command_spec("retire")["effect"],
             "registry_consumer_retirement_and_local_state_write"
         );
+    }
+
+    #[test]
+    fn window_describe_advertises_every_registry_and_direct_refusal_error() {
+        let spec = command_spec(Command::WindowDescribe);
+        let errors = spec["errors"].as_array().unwrap();
+        let schema = error_schema();
+        let schema_codes = schema["properties"]["error"]["properties"]["code"]["enum"]
+            .as_array()
+            .unwrap();
+        for code in ["registry_unavailable", "describe_rejected"] {
+            assert!(
+                errors.contains(&Value::String(code.to_owned())),
+                "missing command error {code}"
+            );
+            assert!(
+                schema_codes.contains(&Value::String(code.to_owned())),
+                "missing schema error {code}"
+            );
+        }
     }
 }

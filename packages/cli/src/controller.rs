@@ -241,19 +241,30 @@ fn execute_window_describe(invocation: &Invocation) -> Result<CliOutput, CliErro
     let selected = select_endpoint_candidate(&before, window_label)?;
     let direct_observed_at_ms = discovery_now_ms()?;
     let probe = probe_surface(&selected, direct_observed_at_ms);
-    let after = read_discovery_registry(registry)?;
+    let after = read_discovery_registry(registry)
+        .map_err(|error| with_probe_observation(error, &selected, direct_observed_at_ms, &probe))?;
     let rechecked = select_endpoint_candidate(&after, window_label).map_err(|error| {
-        discovery_error(
-            "stale_registration",
-            format!(
-                "Registry row did not remain uniquely current after direct observation: {error}"
+        with_probe_observation(
+            discovery_error(
+                "stale_registration",
+                format!(
+                    "Registry row did not remain uniquely current after direct observation: {error}"
+                ),
             ),
+            &selected,
+            direct_observed_at_ms,
+            &probe,
         )
     })?;
     if !selected.same_registration(&rechecked) {
-        return Err(discovery_error(
-            "stale_registration",
-            "Registry identity, client, surface, endpoint, window label, or lease generation changed during observation",
+        return Err(with_probe_observation(
+            discovery_error(
+                "stale_registration",
+                "Registry identity, client, surface, endpoint, window label, or lease generation changed during observation",
+            ),
+            &selected,
+            direct_observed_at_ms,
+            &probe,
         ));
     }
     let surface_observation = probe?;
@@ -444,6 +455,19 @@ fn select_endpoint_candidate(
                 continue;
             }
             label_seen = true;
+            let row_identity = parse_registry_identity(client_object.get("registryIdentity"))
+                .map_err(|message| {
+                    discovery_error(
+                        "registry_response_invalid",
+                        format!("Selected client row has invalid registry identity: {message}"),
+                    )
+                })?;
+            if row_identity != snapshot.identity {
+                return Err(discovery_error(
+                    "registry_response_invalid",
+                    "Selected client row identity differs from fleet.topology identity",
+                ));
+            }
             let Some(surface_id) = surface_object.get("surfaceId").and_then(Value::as_str) else {
                 continue;
             };
@@ -496,7 +520,7 @@ fn select_endpoint_candidate(
                 continue;
             }
             candidates.push(EndpointCandidate {
-                identity: snapshot.identity.clone(),
+                identity: row_identity,
                 client_id: client_id.to_owned(),
                 surface_id: surface_id.to_owned(),
                 window_label: window_label.to_owned(),
@@ -716,6 +740,67 @@ fn with_probe_evidence(
             }
         }
         other => other,
+    }
+}
+
+fn with_probe_observation(
+    error: CliError,
+    candidate: &EndpointCandidate,
+    observed_at_ms: u64,
+    probe: &Result<Value, CliError>,
+) -> CliError {
+    let CliError::Discovery { code, message, .. } = error else {
+        return error;
+    };
+    let (transport_reachability, application_readiness, surface_observation) = match probe {
+        Ok(observation) => (
+            json!({
+                "status": "reachable",
+                "directEndpoint": candidate.direct_endpoint,
+                "observedAtMs": observed_at_ms,
+            }),
+            observation
+                .get("applicationReadiness")
+                .cloned()
+                .unwrap_or(Value::Null),
+            Some(observation.clone()),
+        ),
+        Err(probe_error) => {
+            let details = probe_error.details();
+            let transport = details
+                .get("transportReachability")
+                .cloned()
+                .unwrap_or_else(|| {
+                    json!({
+                        "status": "reachable",
+                        "directEndpoint": candidate.direct_endpoint,
+                        "observedAtMs": observed_at_ms,
+                    })
+                });
+            let readiness = details
+                .get("applicationReadiness")
+                .cloned()
+                .unwrap_or_else(|| {
+                    json!({
+                        "status": "unknown",
+                        "limitationCodes": [probe_error.code()],
+                    })
+                });
+            (transport, readiness, None)
+        }
+    };
+    let mut details = json!({
+        "message": message,
+        "transportReachability": transport_reachability,
+        "applicationReadiness": application_readiness,
+    });
+    if let Some(observation) = surface_observation {
+        details["surfaceObservation"] = observation;
+    }
+    CliError::Discovery {
+        code,
+        message,
+        details,
     }
 }
 

@@ -11,6 +11,18 @@ type LeaseRecord = {
 
 const GENERATIONS_PER_WRITER_EPOCH = 1_000_000;
 
+export function endpointLeaseGenerationRange(writerLeaseGeneration: number): { first: number; last: number } {
+  if (!Number.isSafeInteger(writerLeaseGeneration) || writerLeaseGeneration < 1) {
+    throw new RangeError("endpoint_lease_generation_exhausted");
+  }
+  const first = writerLeaseGeneration * GENERATIONS_PER_WRITER_EPOCH + 1;
+  const last = first + GENERATIONS_PER_WRITER_EPOCH - 1;
+  if (!Number.isSafeInteger(first) || !Number.isSafeInteger(last)) {
+    throw new RangeError("endpoint_lease_generation_exhausted");
+  }
+  return { first, last };
+}
+
 export function validateDirectEndpoint(value: unknown): string | null {
   if (value === null || value === undefined) return null;
   if (typeof value !== "string" || value.length === 0 || value.length > 2048) {
@@ -31,9 +43,9 @@ export function validateDirectEndpoint(value: unknown): string | null {
 
 /**
  * In-memory registrations are deliberately rebuilt after server restart.
- * Writer lease generations provide a durable restart epoch; the bounded
- * per-epoch range ensures a restart cannot reuse a generation issued by the
- * preceding writer while any registration from that writer was current.
+ * Writer lease generations provide a durable restart epoch. Each epoch owns
+ * the disjoint range (generation * 1,000,000, (generation + 1) * 1,000,000],
+ * independent of wall-clock time, so a clock rollback cannot reuse a lease.
  */
 export class EndpointLeaseBook {
   private readonly leases = new Map<string, LeaseRecord>();
@@ -57,10 +69,7 @@ export class EndpointLeaseBook {
     const now = clock();
     if (!Number.isSafeInteger(now) || now < 0) throw new RangeError("invalid_registry_clock");
     this.lastServerTimeMs = now;
-    this.nextGeneration = now + writerLeaseGeneration * GENERATIONS_PER_WRITER_EPOCH;
-    if (!Number.isSafeInteger(this.nextGeneration) || this.nextGeneration < 1) {
-      throw new RangeError("endpoint_lease_generation_exhausted");
-    }
+    this.nextGeneration = endpointLeaseGenerationRange(writerLeaseGeneration).first - 1;
   }
 
   serverTimeMs(): number {
@@ -85,7 +94,7 @@ export class EndpointLeaseBook {
         leaseExpiresAtMs: now + this.maxEndpointLeaseMs,
       };
     } else {
-      if (this.issuedInEpoch >= GENERATIONS_PER_WRITER_EPOCH - 1) {
+      if (this.issuedInEpoch >= GENERATIONS_PER_WRITER_EPOCH) {
         throw new RangeError("endpoint_lease_generation_exhausted");
       }
       this.issuedInEpoch += 1;

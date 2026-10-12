@@ -3,7 +3,7 @@ mod common;
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 use std::fs;
-use std::net::TcpListener;
+use std::net::{SocketAddr, TcpListener};
 use std::process::Command as ProcessCommand;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -438,6 +438,7 @@ fn spawn_registry_server(
             "id": request["id"],
             "op": response_op,
             "payload": payload,
+            "sentAt": epoch_ms(),
             "type": "response",
             "v": 1,
             "ok": response_ok,
@@ -455,11 +456,22 @@ fn spawn_registry_server(
 }
 
 fn spawn_registry_sequence(payloads: Vec<Value>) -> (String, thread::JoinHandle<Vec<Value>>) {
+    spawn_registry_sequence_with_outcomes(
+        payloads
+            .into_iter()
+            .map(|payload| (payload, true))
+            .collect(),
+    )
+}
+
+fn spawn_registry_sequence_with_outcomes(
+    outcomes: Vec<(Value, bool)>,
+) -> (String, thread::JoinHandle<Vec<Value>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let task = thread::spawn(move || {
         let mut requests = Vec::new();
-        for payload in payloads {
+        for (payload, response_ok) in outcomes {
             let (stream, _) = listener.accept().unwrap();
             stream
                 .set_read_timeout(Some(Duration::from_secs(5)))
@@ -471,25 +483,57 @@ fn spawn_registry_sequence(payloads: Vec<Value>) -> (String, thread::JoinHandle<
             };
             assert_eq!(request["op"], "fleet.topology");
             assert_eq!(request["payload"], json!({}));
+            let mut response = json!({
+                "id": request["id"],
+                "op": "fleet.topology",
+                "payload": payload,
+                "sentAt": epoch_ms(),
+                "type": "response",
+                "v": 1,
+                "ok": response_ok,
+            });
+            if !response_ok {
+                response["error"] = json!({ "code": "registry_unavailable" });
+            }
             socket
-                .send(Message::Text(
-                    json!({
-                        "id": request["id"],
-                        "op": "fleet.topology",
-                        "payload": payload,
-                        "sentAt": epoch_ms(),
-                        "type": "response",
-                        "v": 1,
-                        "ok": true,
-                    })
-                    .to_string()
-                    .into(),
-                ))
+                .send(Message::Text(response.to_string().into()))
                 .unwrap();
             let _ = socket.close(None);
             requests.push(request);
         }
         requests
+    });
+    (format!("ws://{address}"), task)
+}
+
+fn spawn_rejected_surface_describe_server(
+    code: &'static str,
+) -> (String, thread::JoinHandle<Value>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let task = thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut socket = accept(stream).unwrap();
+        let request = match socket.read().unwrap() {
+            Message::Text(text) => serde_json::from_str::<Value>(&text).unwrap(),
+            message => panic!("unexpected direct request frame: {message:?}"),
+        };
+        assert_eq!(request["op"], "surface.describe");
+        socket
+            .send(Message::Text(
+                json!({
+                    "id": request["id"], "op": "surface.describe", "error": { "code": code },
+                    "sentAt": epoch_ms(), "type": "response", "v": 1, "ok": false
+                })
+                .to_string()
+                .into(),
+            ))
+            .unwrap();
+        let _ = socket.close(None);
+        request
     });
     (format!("ws://{address}"), task)
 }
@@ -571,6 +615,7 @@ fn discovery_client(
         "clientId": client_id,
         "directEndpoint": endpoint,
         "prePairDescribeV1": supports_describe,
+        "registryIdentity": { "allocatorId": "alloc_fixture", "fleetId": "fleet_fixture" },
         "endpointLease": {
             "leaseGeneration": generation,
             "registrationObservedAtMs": registered_at,
@@ -665,7 +710,8 @@ fn help_and_schema_are_json_and_do_not_require_operational_arguments() {
     let discovery_limits = help_json["result"]["discoveryLimits"].as_array().unwrap();
     assert!(discovery_limits.iter().any(|limit| limit
         .as_str()
-        .is_some_and(|text| text.contains("fleet-list") && text.contains("no direct endpoint"))));
+        .is_some_and(|text| text.contains("fleet-list")
+            && text.contains("does not prove endpoint reachability"))));
     assert!(discovery_limits
         .iter()
         .any(|limit| limit.as_str().is_some_and(|text| {
@@ -902,6 +948,23 @@ fn help_and_schema_are_json_and_do_not_require_operational_arguments() {
 }
 
 #[test]
+fn private_dns_helper_uses_the_platform_resolver_without_starting_cli_state() {
+    let output = ProcessCommand::new(env!("CARGO_BIN_EXE_surf-ace"))
+        .args(["--_surf_ace_internal_resolve_dns", "localhost", "80"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let addresses = String::from_utf8(output.stdout).unwrap();
+    assert!(addresses.lines().any(|line| line
+        .parse::<SocketAddr>()
+        .is_ok_and(|addr| addr.port() == 80)));
+}
+
+#[test]
 fn topology_realize_published_schema_resolves_recursive_nodes_at_resource_root() {
     let schema_output = run_native_cli(&["schema", "topology-realize"]);
     assert!(
@@ -944,6 +1007,7 @@ fn fleet_inventory_fixture() -> Value {
         "clients": [
             {
                 "clientId": "a".repeat(64),
+                "registryIdentity": { "allocatorId": "alloc_fixture", "fleetId": "fleet_fixture" },
                 "surfaces": [
                     {
                         "surfaceId": "sf_primary",
@@ -962,6 +1026,7 @@ fn fleet_inventory_fixture() -> Value {
             },
             {
                 "clientId": "b".repeat(64),
+                "registryIdentity": { "allocatorId": "alloc_fixture", "fleetId": "fleet_fixture" },
                 "surfaces": [{
                     "surfaceId": "sf_other_client",
                     "windowLabel": "c",
@@ -1174,6 +1239,112 @@ fn window_describe_rejects_missing_ambiguous_and_stale_registry_rows() {
 }
 
 #[test]
+fn window_describe_requires_selected_row_identity_to_match_registry_identity() {
+    let now = epoch_ms();
+    let client_id = "6".repeat(64);
+    let endpoint = "ws://127.0.0.1:1";
+    let mut missing = discovery_topology(
+        vec![discovery_client(
+            &client_id,
+            Some(endpoint),
+            vec![discovery_surface("sf_row_missing_identity", "a")],
+            3,
+            now - 10,
+            now + 10_000,
+            true,
+        )],
+        now,
+    );
+    missing["clients"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("registryIdentity");
+
+    let mut foreign_allocator = discovery_topology(
+        vec![discovery_client(
+            &client_id,
+            Some(endpoint),
+            vec![discovery_surface("sf_row_foreign_allocator", "a")],
+            3,
+            now - 10,
+            now + 10_000,
+            true,
+        )],
+        now,
+    );
+    foreign_allocator["clients"][0]["registryIdentity"]["allocatorId"] = json!("alloc_other");
+
+    let mut foreign_fleet = discovery_topology(
+        vec![discovery_client(
+            &client_id,
+            Some(endpoint),
+            vec![discovery_surface("sf_row_foreign_fleet", "a")],
+            3,
+            now - 10,
+            now + 10_000,
+            true,
+        )],
+        now,
+    );
+    foreign_fleet["clients"][0]["registryIdentity"]["fleetId"] = json!("fleet_other");
+
+    for topology in [missing, foreign_allocator, foreign_fleet] {
+        let (registry, server) = spawn_registry_sequence(vec![topology]);
+        let output = run_window_describe(&registry, "a");
+        assert!(!output.status.success());
+        let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(result["error"]["code"], "registry_response_invalid");
+        assert_eq!(
+            server.join().unwrap().len(),
+            1,
+            "must refuse before direct connect"
+        );
+    }
+
+    let now = epoch_ms();
+    let surface_id = "sf_row_identity_recheck";
+    let (direct_endpoint, direct_server) =
+        spawn_surface_describe_server(describe_observation(&client_id, surface_id, 4));
+    let before = discovery_topology(
+        vec![discovery_client(
+            &client_id,
+            Some(&direct_endpoint),
+            vec![discovery_surface(surface_id, "a")],
+            4,
+            now - 10,
+            now + 10_000,
+            true,
+        )],
+        now,
+    );
+    let mut after = before.clone();
+    after["clients"][0]["registryIdentity"]["fleetId"] = json!("fleet_foreign_recheck");
+    after["registryIdentity"]["fleetId"] = json!("fleet_foreign_recheck");
+    let (registry, server) = spawn_registry_sequence(vec![before, after]);
+    let output = run_window_describe(&registry, "a");
+    assert!(!output.status.success());
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        result["error"]["code"], "stale_registration",
+        "result={result}"
+    );
+    assert_eq!(
+        result["error"]["details"]["transportReachability"]["status"],
+        "reachable"
+    );
+    assert_eq!(server.join().unwrap().len(), 2);
+    let request = direct_server.join().unwrap();
+    assert_eq!(
+        request["payload"]["registryIdentity"]["allocatorId"],
+        "alloc_fixture"
+    );
+    assert_eq!(
+        request["payload"]["registryIdentity"]["fleetId"],
+        "fleet_fixture"
+    );
+}
+
+#[test]
 fn window_describe_rejects_unreachable_endpoints_and_stale_rechecks() {
     let now = epoch_ms();
     let client_id = "c".repeat(64);
@@ -1239,9 +1410,159 @@ fn window_describe_rejects_unreachable_endpoints_and_stale_rechecks() {
     assert!(!stale.status.success());
     let stale_json: Value = serde_json::from_slice(&stale.stdout).unwrap();
     assert_eq!(stale_json["error"]["code"], "stale_registration");
+    assert_eq!(
+        stale_json["error"]["details"]["transportReachability"]["status"],
+        "reachable"
+    );
+    assert_eq!(
+        stale_json["error"]["details"]["applicationReadiness"]["status"],
+        "ready"
+    );
+    assert_eq!(
+        stale_json["error"]["details"]["surfaceObservation"]["topologyRevision"],
+        8
+    );
+    assert!(stale_json["error"]["details"]
+        .get("registryAfter")
+        .is_none());
     assert_eq!(server.join().unwrap().len(), 2);
     let direct_request = endpoint_server.join().unwrap();
     assert_eq!(direct_request["op"], "surface.describe");
+}
+
+#[test]
+fn window_describe_preserves_transport_and_unknown_readiness_when_recheck_fails() {
+    let now = epoch_ms();
+    let client_id = "7".repeat(64);
+    let surface_id = "sf_invalid_then_stale";
+    for recheck_kind in ["stale", "ambiguous", "unavailable"] {
+        let mut invalid_observation = describe_observation(&client_id, surface_id, 5);
+        invalid_observation
+            .as_object_mut()
+            .unwrap()
+            .remove("topologyRevision");
+        let (endpoint, endpoint_server) = spawn_surface_describe_server(invalid_observation);
+        let first = discovery_topology(
+            vec![discovery_client(
+                &client_id,
+                Some(&endpoint),
+                vec![discovery_surface(surface_id, "a")],
+                5,
+                now - 10,
+                now + 10_000,
+                true,
+            )],
+            now,
+        );
+        let (second, response_ok, expected_code) = match recheck_kind {
+            "stale" => {
+                let mut changed = first.clone();
+                changed["clients"][0]["endpointLease"]["leaseGeneration"] = json!(6);
+                (changed, true, "stale_registration")
+            }
+            "ambiguous" => (
+                discovery_topology(
+                    vec![
+                        discovery_client(
+                            &client_id,
+                            Some(&endpoint),
+                            vec![discovery_surface(surface_id, "a")],
+                            5,
+                            now - 10,
+                            now + 10_000,
+                            true,
+                        ),
+                        discovery_client(
+                            &"9".repeat(64),
+                            Some("ws://127.0.0.1:2"),
+                            vec![discovery_surface("sf_ambiguous_recheck", "a")],
+                            7,
+                            now - 10,
+                            now + 10_000,
+                            true,
+                        ),
+                    ],
+                    now,
+                ),
+                true,
+                "stale_registration",
+            ),
+            _ => (json!({}), false, "registry_unavailable"),
+        };
+        let outcomes = vec![(first, true), (second, response_ok)];
+        let (registry, registry_server) = spawn_registry_sequence_with_outcomes(outcomes);
+        let output = run_window_describe(&registry, "a");
+        assert!(!output.status.success());
+        let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            result["error"]["code"], expected_code,
+            "recheck_kind={recheck_kind}, result={result}"
+        );
+        assert_eq!(
+            result["error"]["details"]["transportReachability"]["status"],
+            "reachable"
+        );
+        assert_eq!(
+            result["error"]["details"]["applicationReadiness"]["status"],
+            "unknown"
+        );
+        assert_eq!(
+            result["error"]["details"]["transportReachability"]["observedAtMs"]
+                .as_u64()
+                .is_some(),
+            true
+        );
+        assert!(result["error"]["details"]
+            .get("surfaceObservation")
+            .is_none());
+        assert_eq!(registry_server.join().unwrap().len(), 2);
+        assert_eq!(endpoint_server.join().unwrap()["op"], "surface.describe");
+    }
+}
+
+#[test]
+fn window_describe_serialized_discovery_errors_match_advertised_error_schema() {
+    let schema_output = run_native_cli(&["schema", "window-describe"]);
+    assert!(schema_output.status.success());
+    let schema: Value = serde_json::from_slice(&schema_output.stdout).unwrap();
+    let error_schema = schema["result"]["errorSchema"].clone();
+
+    let (registry, server) = spawn_registry_server(json!({}), "fleet.topology", false);
+    let unavailable = run_window_describe(&registry, "a");
+    assert!(!unavailable.status.success());
+    let unavailable_json: Value = serde_json::from_slice(&unavailable.stdout).unwrap();
+    assert_eq!(unavailable_json["error"]["code"], "registry_unavailable");
+    common::schema::validate(&error_schema, &error_schema, &unavailable_json).unwrap();
+    server.join().unwrap();
+
+    let now = epoch_ms();
+    let client_id = "8".repeat(64);
+    let surface_id = "sf_rejected_schema";
+    let (endpoint, endpoint_server) =
+        spawn_rejected_surface_describe_server("unexpected_client_failure");
+    let topology = discovery_topology(
+        vec![discovery_client(
+            &client_id,
+            Some(&endpoint),
+            vec![discovery_surface(surface_id, "a")],
+            5,
+            now - 10,
+            now + 10_000,
+            true,
+        )],
+        now,
+    );
+    let (registry, registry_server) = spawn_registry_sequence(vec![topology.clone(), topology]);
+    let rejected = run_window_describe(&registry, "a");
+    assert!(!rejected.status.success());
+    let rejected_json: Value = serde_json::from_slice(&rejected.stdout).unwrap();
+    assert_eq!(
+        rejected_json["error"]["code"], "describe_rejected",
+        "result={rejected_json}"
+    );
+    common::schema::validate(&error_schema, &error_schema, &rejected_json).unwrap();
+    assert_eq!(registry_server.join().unwrap().len(), 2);
+    assert_eq!(endpoint_server.join().unwrap()["op"], "surface.describe");
 }
 
 #[test]

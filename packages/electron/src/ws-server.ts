@@ -3268,6 +3268,10 @@ export class SurfaceWsServer {
   }
 
   private handleSurfaceDescribe(request: SurfaceDescribeRequest): Response {
+    if (request.v !== 1) {
+      return errorResponse("surface.describe", request.id, "unsupported_protocol_version",
+        "surface.describe requires protocol version 1");
+    }
     const validation = validateEnvelopeType("surface.describe", request);
     if (!validation.ok || !Number.isSafeInteger(request.sentAt) || request.sentAt < 0 ||
         !/^[a-f0-9]{32,128}$/.test(request.payload?.nonce ?? "")) {

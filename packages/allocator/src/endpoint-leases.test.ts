@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { EndpointLeaseBook, validateDirectEndpoint } from "./endpoint-leases.ts";
+import { EndpointLeaseBook, endpointLeaseGenerationRange, validateDirectEndpoint } from "./endpoint-leases.ts";
 
 test("endpoint leases renew in place and advance when the registered route changes", () => {
   let now = 1000;
@@ -21,15 +21,34 @@ test("endpoint leases renew in place and advance when the registered route chang
 });
 
 test("writer restart epoch and monotonic registry time fail closed against lease reuse", () => {
-  let now = 2000;
+  let now = 2_000_000;
   const firstWriter = new EndpointLeaseBook(7, 1000, () => now);
   const oldLease = firstWriter.renew("client-a", "route-a", true)!;
-  now = 1990;
+  now = 1_000;
   const restartedWriter = new EndpointLeaseBook(8, 1000, () => now);
   const newLease = restartedWriter.renew("client-a", "route-a", true)!;
   assert.ok(newLease.leaseGeneration > oldLease.leaseGeneration);
-  assert.ok(newLease.registrationObservedAtMs >= 1990);
+  assert.ok(newLease.registrationObservedAtMs >= 1_000);
   assert.notEqual(newLease.leaseGeneration, oldLease.leaseGeneration);
+});
+
+test("writer epoch ranges are disjoint at their boundary and reject exhausted continuity", () => {
+  assert.deepEqual(endpointLeaseGenerationRange(1), { first: 1_000_001, last: 2_000_000 });
+  assert.deepEqual(endpointLeaseGenerationRange(2), { first: 2_000_001, last: 3_000_000 });
+  assert.equal(endpointLeaseGenerationRange(1).last + 1, endpointLeaseGenerationRange(2).first);
+  const firstEpoch = new EndpointLeaseBook(1, 1000, () => 10);
+  const firstGenerationInEpoch = firstEpoch.renew("client-a", "route", true)!;
+  assert.equal(firstGenerationInEpoch.leaseGeneration, 1_000_001);
+
+  const nextEpoch = new EndpointLeaseBook(2, 1000, () => 0);
+  const firstGenerationInNextEpoch = nextEpoch.renew("client-b", "route", true)!;
+  assert.equal(firstGenerationInNextEpoch.leaseGeneration, 2_000_001);
+  assert.ok(firstGenerationInNextEpoch.leaseGeneration > firstGenerationInEpoch.leaseGeneration);
+
+  assert.throws(
+    () => endpointLeaseGenerationRange(9_007_199_254),
+    /endpoint_lease_generation_exhausted/,
+  );
 });
 
 test("unconfigured endpoint clears the lease and malformed URLs are rejected", () => {

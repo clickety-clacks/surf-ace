@@ -75,6 +75,7 @@ import {
 } from "./runtime-identity.js";
 import { isAddressInUse, isPortBoundOnIpv6Any } from "./port-selection.js";
 import { SurfaceWsServer } from "./ws-server.js";
+import { PersistenceWriteReadiness } from "./persistence-write-readiness.js";
 import { AnnotationRegistryPublisher } from "./annotation-registry-publisher.js";
 import { AnnotationSourceCoordinator } from "./annotation-source-coordinator.js";
 import { restoreWindowPlacement, type WindowPlacement } from "./window-placement.js";
@@ -232,6 +233,7 @@ let isQuitting = false;
 let server: SurfaceWsServer;
 let stateDir = "";
 let stateWrite = Promise.resolve();
+const persistentStateWriteReadiness = new PersistenceWriteReadiness();
 
 function candidatePorts(preferredPort: number): number[] {
   if (EXPLICIT_WS_PORT) {
@@ -257,7 +259,8 @@ function createServer(coreValue: SurfaceCore): SurfaceWsServer {
       hostName: shortHostName(),
       getOverlayDiagnostics: (surfaceId) => overlayDiagnostics.get(surfaceId) ?? null,
       getRuntimeAppBinding: refreshRuntimeAppBindingDiagnostics,
-      isApplicationStateReady: () => !persistentStateWriteGuard && !persistentStateOutcomeUnknown,
+      isApplicationStateReady: () => persistentStateWriteReadiness.isReady &&
+        !persistentStateWriteGuard && !persistentStateOutcomeUnknown,
       onNativeMaterialized: (surfaceId, materialization) => {
         recordNativePaneInstances(surfaceId, materialization);
         broadcastSurfaceState(surfaceId);
@@ -475,34 +478,36 @@ async function persistState(): Promise<void> {
     });
     throw new PersistentStateWriteGuardError(persistentStateWriteGuard);
   }
-  // Bind this write to the state that requested it. A later source mutation
-  // must enqueue its own write before the publisher can send its bytes.
-  const candidate = core.getPersistentState();
-  stateWrite = stateWrite
-    .catch(() => {})
-    .then(async () => {
-      if (persistentStateOutcomeUnknown) throw new Error("Local persistence is paused pending reconciliation");
-      try {
-        await writePersistentStateFile(stateDir, STATE_FILE_NAME, candidate);
-      } catch (error) {
-        if (error instanceof PersistentStateOutcomeUnknownError) {
-          uncertainStateCandidate = candidate;
+  await persistentStateWriteReadiness.track(async () => {
+    // Bind this write to the state that requested it. A later source mutation
+    // must enqueue its own write before the publisher can send its bytes.
+    const candidate = core.getPersistentState();
+    stateWrite = stateWrite
+      .catch(() => {})
+      .then(async () => {
+        if (persistentStateOutcomeUnknown) throw new Error("Local persistence is paused pending reconciliation");
+        try {
+          await writePersistentStateFile(stateDir, STATE_FILE_NAME, candidate);
+        } catch (error) {
+          if (error instanceof PersistentStateOutcomeUnknownError) {
+            uncertainStateCandidate = candidate;
+          }
+          throw error;
         }
-        throw error;
+      });
+    try {
+      await stateWrite;
+    } catch (error) {
+      if (error instanceof PersistentStateOutcomeUnknownError) {
+        persistentStateOutcomeUnknown = error;
+        persistentStateWriteGuard = "ambiguous-persistence";
+        server?.failStopPersistence(error);
+        for (const surface of core.listSurfaces()) broadcastSurfaceState(surface.surfaceId);
+        schedulePersistenceReconciliation();
       }
-    });
-  try {
-    await stateWrite;
-  } catch (error) {
-    if (error instanceof PersistentStateOutcomeUnknownError) {
-      persistentStateOutcomeUnknown = error;
-      persistentStateWriteGuard = "ambiguous-persistence";
-      server?.failStopPersistence(error);
-      for (const surface of core.listSurfaces()) broadcastSurfaceState(surface.surfaceId);
-      schedulePersistenceReconciliation();
+      throw error;
     }
-    throw error;
-  }
+  });
 }
 
 async function persistRegistryState(): Promise<void> {

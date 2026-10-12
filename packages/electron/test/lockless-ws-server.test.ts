@@ -29,6 +29,7 @@ import {
 } from "../src/persistent-state-file.js";
 import { SurfaceWsServer } from "../src/ws-server.js";
 import { ConfiguredServerRegistration } from "../src/configured-server.js";
+import { PersistenceWriteReadiness } from "../src/persistence-write-readiness.js";
 
 let nextPort = 25901;
 let nextTestRegistryPaneLabel = 100_000;
@@ -80,7 +81,7 @@ async function request(
   socket: WebSocket,
   op: string,
   payload: Record<string, unknown>,
-  options?: { id?: string; sentAt?: number },
+  options?: { id?: string; sentAt?: number; version?: number },
 ): Promise<Record<string, any>> {
   const id =
     options?.id ?? `rq_${Math.random().toString(16).slice(2)}`;
@@ -109,7 +110,7 @@ async function request(
       payload,
       sentAt: options?.sentAt ?? Date.now(),
       type: "request",
-      v: 1,
+      v: options?.version ?? 1,
     }),
   );
   return result;
@@ -366,11 +367,101 @@ test("surface.describe fails closed for wrong identity, stale surface, invalid n
     assert.equal(badNonce.ok, false);
     assert.equal(badNonce.error.code, "invalid_payload");
 
+    const unsupportedVersion = await request(socket, "surface.describe", describePayload(fixture), {
+      version: 2,
+    });
+    assert.equal(unsupportedVersion.ok, false);
+    assert.equal(unsupportedVersion.error.code, "unsupported_protocol_version");
+    assert.equal(unsupportedVersion.payload, undefined);
+
     appReady = false;
     const notReady = await request(socket, "surface.describe", describePayload(fixture));
     assert.equal(notReady.ok, false);
     assert.equal(notReady.error.code, "not_ready");
     assert.equal(notReady.payload, undefined);
+  } finally {
+    socket?.close();
+    await server.stop();
+  }
+});
+
+test("surface.describe withholds a changed lease until durable persistence commits", async () => {
+  const fixture = describeFixture();
+  const readiness = new PersistenceWriteReadiness();
+  let persistenceOutcomeUnknown = false;
+  const server = describeServer(fixture.core, () => readiness.isReady && !persistenceOutcomeUnknown);
+  let socket: WebSocket | null = null;
+  try {
+    await server.start();
+    socket = await connect(`ws://127.0.0.1:${server.port}/ws`);
+
+    let signalStarted!: () => void;
+    let resolveDurableWrite!: () => void;
+    const started = new Promise<void>((resolve) => { signalStarted = resolve; });
+    const durableWrite = new Promise<void>((resolve) => { resolveDurableWrite = resolve; });
+    const successfulRegistration = fixture.core.transactionAsync(async () => {
+      fixture.core.setRegistryEndpointLease({
+        leaseGeneration: 18,
+        registrationObservedAtMs: Date.now(),
+        leaseExpiresAtMs: Date.now() + 14_000,
+      });
+      await readiness.track(async () => {
+        signalStarted();
+        await durableWrite;
+      });
+    });
+    await started;
+    const duringSuccessfulWrite = await request(socket, "surface.describe", describePayload(fixture, {
+      endpointLeaseGeneration: 18,
+    }));
+    assert.equal(duringSuccessfulWrite.ok, false);
+    assert.equal(duringSuccessfulWrite.error.code, "not_ready");
+    assert.equal(duringSuccessfulWrite.payload, undefined);
+    resolveDurableWrite();
+    await successfulRegistration;
+    const committed = await request(socket, "surface.describe", describePayload(fixture, {
+      endpointLeaseGeneration: 18,
+    }));
+    assert.equal(committed.ok, true, JSON.stringify(committed));
+    assert.equal(committed.payload.endpointLeaseGeneration, 18);
+
+    let signalFailureStarted!: () => void;
+    let rejectDurableWrite!: (error: Error) => void;
+    const failureStarted = new Promise<void>((resolve) => { signalFailureStarted = resolve; });
+    const failedDurableWrite = new Promise<void>((_resolve, reject) => { rejectDurableWrite = reject; });
+    const failedRegistration = fixture.core.transactionAsync(async () => {
+      fixture.core.setRegistryEndpointLease({
+        leaseGeneration: 19,
+        registrationObservedAtMs: Date.now(),
+        leaseExpiresAtMs: Date.now() + 14_000,
+      });
+      await readiness.track(async () => {
+        signalFailureStarted();
+        await failedDurableWrite;
+      });
+    });
+    await failureStarted;
+    const duringFailedWrite = await request(socket, "surface.describe", describePayload(fixture, {
+      endpointLeaseGeneration: 19,
+    }));
+    assert.equal(duringFailedWrite.ok, false);
+    assert.equal(duringFailedWrite.error.code, "not_ready");
+    rejectDurableWrite(new Error("durable write rejected"));
+    await assert.rejects(failedRegistration, /durable write rejected/);
+    assert.equal(fixture.core.registryEndpointLease()?.leaseGeneration, 18);
+    const rolledBack = await request(socket, "surface.describe", describePayload(fixture, {
+      endpointLeaseGeneration: 18,
+    }));
+    assert.equal(rolledBack.ok, true, JSON.stringify(rolledBack));
+    assert.equal(rolledBack.payload.endpointLeaseGeneration, 18);
+
+    persistenceOutcomeUnknown = true;
+    const uncertain = await request(socket, "surface.describe", describePayload(fixture, {
+      endpointLeaseGeneration: 18,
+    }));
+    assert.equal(uncertain.ok, false);
+    assert.equal(uncertain.error.code, "not_ready");
+    assert.equal(uncertain.payload, undefined);
   } finally {
     socket?.close();
     await server.stop();

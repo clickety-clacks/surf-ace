@@ -71,6 +71,7 @@ await build({
     path.join(rootDir, "test", "native-pane-bridge.test.ts"),
     path.join(rootDir, "test", "overlay-rects.test.ts"),
     path.join(rootDir, "test", "persistent-state-file.test.ts"),
+    path.join(rootDir, "test", "persistence-write-readiness.test.ts"),
     path.join(rootDir, "test", "port-selection.test.ts"),
     path.join(rootDir, "test", "disabled-native-pane-demo.test.ts"),
     path.join(rootDir, "test", "markdown-rendering.test.ts"),
