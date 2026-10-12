@@ -1,4 +1,4 @@
-import { PairedPanePaintService } from "./paired-pane-paint-service.js";
+import { PairedPanePaintService, type PaintPublicationFinish } from "./paired-pane-paint-service.js";
 import { validPanePaintMessage, validPanePaintOutcome, validPanePaintError } from "./pane-paint-contract.js";
 import type { PaintAdapter, PaintClock } from "./pane-painted-observation.js";
 
@@ -9,7 +9,7 @@ type Delivery = { handled: boolean; enqueued: boolean; completed: boolean; reaso
 /** Prepared private routing only. No capability or protocol registration is implied. */
 export class PanePaintWsRoute<C extends object> {
   private readonly service: PairedPanePaintService<C>;
-  private readonly publishing = new WeakSet<C>();
+  private readonly publishing = new WeakMap<C, object>();
   private readonly epochs = new WeakMap<C, object>();
   constructor(private readonly ports: {
     enabled?: boolean;
@@ -67,15 +67,23 @@ export class PanePaintWsRoute<C extends object> {
       last = value; return value;
     };
     const clock = { now, schedule: (callback: () => void, ms: number) => this.ports.clock.schedule(callback, ms) };
-    if (!forceBusy) this.publishing.add(connection);
+    const publicationOwner = {};
+    if (!forceBusy) this.publishing.set(connection, publicationOwner);
     let enqueued = false;
     let cancelSend = () => {};
-    let finishKernel = () => {};
+    let finishKernel: PaintPublicationFinish = () => true;
+    let terminalReply: Reply | null = null;
+    let deliveryAccepted = false;
     let sendDrain: Promise<boolean> | undefined;
-    const stop = (reason: string) => { this.close(connection); this.ports.terminate(connection); return no(reason, enqueued); };
+    const stop = (reason: string) => {
+      if (this.epochs.get(connection) === epoch) { this.close(connection); this.ports.terminate(connection); }
+      return no(reason, enqueued);
+    };
     try {
-      const reply = await this.service.handle(connection, input, { origin, clock, forceBusy, deferCompletion: finish => { finishKernel = finish; } });
-      if (!reply || !current()) return no("closed");
+      const kernelReply = await this.service.handle(connection, input, { origin, clock, forceBusy, deferCompletion: finish => { finishKernel = finish; } });
+      if (!kernelReply || !current()) return no("closed");
+      let reply: Reply = kernelReply;
+      terminalReply = reply;
       // Serialization consumes the same deadline, not a new timeout. No image response enters ordinary cache.
       const prepare = () => {
         if (reply.ok === true) {
@@ -96,11 +104,23 @@ export class PanePaintWsRoute<C extends object> {
       let encoded = prepare();
       // A synchronous encoding overrun changes success into a truthful refusal before queueing.
       if (now() >= deadline && reply.ok === true && (reply.payload as Reply).outcome !== "refused") encoded = prepare();
-      if (!current()) return no("closed");
-      if (Buffer.byteLength(encoded) > this.available(connection)) {
-        encoded = JSON.stringify({ v: 1, type: "response", op: OP, id: request.id, sentAt: Date.now(), ok: false,
-          error: { code: "content_too_large", message: "Diagnostic response exceeds remaining transport capacity" } });
-        if (Buffer.byteLength(encoded) > this.available(connection)) return stop("transport-limit");
+      const fitEgress = () => {
+        if (!current()) return false;
+        if (Buffer.byteLength(encoded) > this.available(connection)) {
+          reply = { v: 1, type: "response", op: OP, id: request.id, sentAt: Date.now(), ok: false,
+            error: { code: "content_too_large", message: "Diagnostic response exceeds remaining transport capacity" } };
+          terminalReply = reply;
+          encoded = JSON.stringify(reply);
+          if (Buffer.byteLength(encoded) > this.available(connection)) return false;
+        }
+        return current();
+      };
+      if (!fitEgress()) return stop("transport-limit");
+      // Final enqueue fence is AFTER all synchronous encoding/size/egress work.
+      if (now() >= deadline && reply.ok === true && (reply.payload as Reply).outcome !== "refused") {
+        encoded = prepare();
+        if (!fitEgress()) return stop("transport-limit");
+        now(); // invalid/backward clock still prevents even a refusal from queueing.
       }
       // Refusal/errors may truthfully overrun the configured budget; native/success cannot be certified late.
       const sent = this.ports.send(connection, encoded); sendDrain = sent; enqueued = true;
@@ -119,15 +139,18 @@ export class PanePaintWsRoute<C extends object> {
       cancelSend();
       if (!completion) {
         // A queued frame cannot be retracted. Stop this private connection; never send a second response.
-        this.close(connection); this.ports.terminate(connection); return no("publication-incomplete", true);
+        return stop("publication-incomplete");
       }
+      deliveryAccepted = finishKernel({ delivered: true, reply: terminalReply });
+      if (!deliveryAccepted) return stop("settlement-incomplete");
       return { handled: true, enqueued: true, completed: true, reason: "published" };
     } catch { return stop("internal_error"); }
     finally {
       cancelSend();
       // Neither timeout nor close proves send/native drain. Retain app capacity until actual settlement.
-      if (sendDrain) void sendDrain.then(finishKernel, finishKernel); else finishKernel();
-      if (!forceBusy) this.publishing.delete(connection);
+      if (sendDrain) void sendDrain.then(() => finishKernel({ delivered: deliveryAccepted, reply: terminalReply }), () => finishKernel({ delivered: false, reply: terminalReply }));
+      else finishKernel({ delivered: false, reply: terminalReply });
+      if (this.publishing.get(connection) === publicationOwner) this.publishing.delete(connection);
     }
   }
 }

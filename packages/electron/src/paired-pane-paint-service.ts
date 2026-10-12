@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { validPanePaintMessage, validPanePaintOutcome } from "./pane-paint-contract.js";
+import { validPanePaintMessage, validPanePaintOutcome, validPanePaintError } from "./pane-paint-contract.js";
 import { observePanePaint, isPaintState, type PaintAdapter, type PaintBinding, type PaintClock, type PaintState } from "./pane-painted-observation.js";
 
 export type PaintExpectation = { observationToken: string; binding: PaintBinding; projection: PaintState["projection"] };
@@ -11,6 +11,8 @@ type Token = { value: PaintExpectation; expires: number; used: boolean; cancel: 
 type Connection = { surfaceId: string; ids: Map<string, RecordEntry>; token?: Token; slot?: Slot; closed: boolean };
 type Slot = { owner: Connection; controller: AbortController; pending: Set<Promise<unknown>>; finished: boolean; released: boolean };
 type Reply = Record<string, unknown>;
+export type PaintPublicationSettlement = { delivered: boolean; reply: Reply | null };
+export type PaintPublicationFinish = (settlement?: PaintPublicationSettlement) => boolean;
 const OP = "diagnostics.pane_paint.get";
 const FLAGS = { atomic: false, paintFreshness: "not-established", physicalDisplay: "not-observed" };
 const PREFLIGHT = 8 * 1024 * 1024;
@@ -59,7 +61,7 @@ export class PairedPanePaintService<C extends object> {
     const drain = () => { slot.pending.delete(promise); this.release(slot); };
     void promise.then(drain, drain); return promise;
   }
-  async handle(connection: C, input: unknown, context?: { origin: number; clock: PaintClock; forceBusy?: boolean; deferCompletion?: (finish: () => void) => void }): Promise<Reply | null> {
+  async handle(connection: C, input: unknown, context?: { origin: number; clock: PaintClock; forceBusy?: boolean; deferCompletion?: (finish: PaintPublicationFinish) => void }): Promise<Reply | null> {
     const clock = context?.clock ?? this.clock;
     const object = input && typeof input === "object" ? input as Record<string, unknown> : null;
     const error = (code: string): Reply => ({ v: 1, type: "response", op: OP, id: typeof object?.id === "string" && /^[A-Za-z0-9._:-]{1,64}$/.test(object.id) ? object.id : "invalid", sentAt: Date.now(), ok: false, error: { code, message: code } });
@@ -123,6 +125,7 @@ export class PairedPanePaintService<C extends object> {
         return adapter.capture(target, frame, AbortSignal.any([signal, slot.controller.signal]));
       }),
     };
+    let stagedToken: PaintExpectation | undefined;
     try {
       let reply: Reply;
       let tokenToIssue: PaintExpectation | undefined;
@@ -194,17 +197,47 @@ export class PairedPanePaintService<C extends object> {
       } else resultPayload.elapsedMs = finalElapsed;
       if (!current()) return null;
       if (!validPanePaintOutcome(reply, request)) { entry.reason = "internal_error"; return error("internal_error"); }
-      if (tokenToIssue) {
-        const issued: Token = { value: structuredClone(tokenToIssue), expires: now() + 5000, used: false, cancel: () => {} };
-        issued.cancel = this.clock.schedule(() => { if (state!.token === issued) state!.token = undefined; }, 5000);
-        state.token?.cancel(); state.token = issued;
-      }
+      stagedToken = tokenToIssue;
       return reply;
     } catch { entry.reason = "internal_error"; return current() ? error("internal_error") : null; }
     finally {
-      const finish = () => { entry.state = "completed"; slot.finished = true; this.release(slot); };
+      let settled = false, accepted = false;
+      const finish: PaintPublicationFinish = settlement => {
+        if (settled) return accepted;
+        settled = true;
+        try {
+          if (!current()) { entry.reason = "closed"; return false; }
+          const delivered = settlement?.delivered ?? !context?.deferCompletion;
+          const terminal = settlement?.reply;
+          const payload = terminal?.payload as Reply | undefined;
+          if (context?.deferCompletion && delivered && (!terminal || terminal.id !== request.id || terminal.op !== OP ||
+              (terminal.ok === true ? !validPanePaintOutcome(terminal, request) : !validPanePaintError(terminal)))) {
+            entry.reason = "internal_error"; return false;
+          }
+          if (terminal) {
+            entry.reason = terminal.ok === false ? String((terminal.error as Reply)?.code ?? "internal_error") : String(payload?.reason ?? payload?.outcome ?? "internal_error");
+          }
+          if (!delivered && (!terminal || payload?.outcome === "described" || payload?.outcome === "observed")) entry.reason = "publication-incomplete";
+          if (delivered && terminal?.ok === true && (payload?.outcome === "observed" || payload?.outcome === "described") && now() >= deadline) {
+            entry.reason = "timeout"; return false;
+          }
+          const commitToken = stagedToken && delivered && (!settlement || terminal?.ok === true && payload?.outcome === "described" && equal(payload.expectation, stagedToken));
+          if (commitToken) {
+            const time = now();
+            if (time >= deadline) { entry.reason = "timeout"; return false; }
+            const issued: Token = { value: structuredClone(stagedToken!), expires: time + 5000, used: false, cancel: () => {} };
+            issued.cancel = this.clock.schedule(() => { if (state!.token === issued) state!.token = undefined; }, 5000);
+            const prior = state.token;
+            state.token = issued;
+            try { prior?.cancel(); } catch { /* old expiry callback is identity-fenced and cannot clear the replacement */ }
+          }
+          accepted = delivered;
+          return accepted;
+        } catch { entry.reason = "internal_error"; return false; }
+        finally { entry.state = "completed"; slot.finished = true; this.release(slot); }
+      };
       if (context?.deferCompletion) {
-        try { context.deferCompletion(finish); } catch { finish(); }
+        try { context.deferCompletion(finish); } catch { finish({ delivered: false, reply: null }); }
       } else finish();
     }
   }
