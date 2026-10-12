@@ -25,9 +25,18 @@ def executable(pid):
     lib.proc_pidpath.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
     lib.proc_pidpath.restype = ctypes.c_int
     buf = ctypes.create_string_buffer(4096)
-    if lib.proc_pidpath(pid, buf, len(buf)) <= 0: raise ValueError('unresolved executable PID ' + str(pid))
+    ctypes.set_errno(0)
+    returned = lib.proc_pidpath(pid, buf, len(buf))
+    kernel_errno = ctypes.get_errno()
+    if returned <= 0:
+        error = ValueError('unresolved executable PID ' + str(pid))
+        error.kernelAPI='proc_pidpath';error.kernelErrno=kernel_errno;error.apiReturn=returned
+        raise error
     value = os.fsdecode(buf.value)
-    if not value.startswith('/') or '\n' in value: raise ValueError('invalid kernel executable path')
+    if not value.startswith('/') or '\n' in value:
+        error=ValueError('invalid kernel executable path')
+        error.kernelAPI='proc_pidpath';error.kernelErrno=kernel_errno;error.apiReturn=returned
+        raise error
     return value
 
 def command(args):
@@ -38,24 +47,39 @@ def command(args):
         if proc.returncode or err: raise ValueError('OS snapshot failed: ' + args[0])
         return out, proc.pid
 
-def process_table(args):
+def process_table(args,trace=None):
     text, census_child = command(args)
     rows = parse_processes(text)
+    if trace is not None:trace.append(dict(queryAPI='ps',queryChildPID=census_child,childPresentInSnapshot=census_child in rows))
     # Exclude only this exact Popen-created snapshot child, not a name/argv match.
     rows.pop(census_child, None)
     return rows
 
+def resolve_process(pid,row,stage,trace):
+    try:return executable(pid)
+    except Exception as error:
+        # Observation only: attach the exact failed call's enumerated identity, not
+        # a later lookup or mutable argv. Omit argv/content from diagnostic output.
+        helper=os.getpid()
+        error.failureContext=dict(operationStage=stage,helperPID=helper,requestedPID=pid,
+            enumeratedPIDMatchesCall=row.get('pid')==pid,
+            enumeratedProcess={key:row.get(key) for key in ['pid','ppid','pgid','uid','state','started']},
+            kernelAPI=getattr(error,'kernelAPI',None),kernelErrno=getattr(error,'kernelErrno',None),
+            apiReturn=getattr(error,'apiReturn',None),snapshotQueries=[dict(q) for q in trace],
+            failedIsHelper=pid==helper,failedIsSnapshotQueryChild=any(q['queryChildPID']==pid for q in trace))
+        raise
+
 def snapshot():
     args = ['/bin/ps', '-axo', 'pid=,ppid=,pgid=,uid=,stat=,lstart=,command=']
-    before = process_table(args)
-    owned = {pid: {**r, 'executable': None if r['state'].startswith('Z') else executable(pid)} for pid, r in before.items() if r['uid'] == os.getuid()}
-    after = process_table(args)
+    trace=[];before = process_table(args,trace)
+    owned = {pid: {**r, 'executable': None if r['state'].startswith('Z') else resolve_process(pid,r,'before_resolution',trace)} for pid, r in before.items() if r['uid'] == os.getuid()}
+    after = process_table(args,trace)
     for pid, row in owned.items():
         latest = after.get(pid)
         if latest is None or {k:v for k,v in latest.items() if k!='state'} != {k:v for k,v in before[pid].items() if k!='state'}:
             raise ValueError('process changed during executable resolution')
         if latest['state'].startswith('Z') != row['state'].startswith('Z'): raise ValueError('zombie state changed during census')
-        if row['executable'] is not None and executable(pid) != row['executable']: raise ValueError('executable changed during census')
+        if row['executable'] is not None and resolve_process(pid,latest,'after_resolution',trace) != row['executable']: raise ValueError('executable changed during census')
     # New same-user processes also require resolution; no mutable-name prefilter.
     if {p for p, r in after.items() if r['uid'] == os.getuid()} != set(owned):
         raise ValueError('process set changed during census')
@@ -137,7 +161,9 @@ def main():
         if time.monotonic() - start > 2: raise ValueError('census snapshot exceeded freshness budget')
         result.update(runtimeQualified=True, clear=not conflicts and not remaining, conflicts=conflicts,
                       ownedRemaining=remaining, listeners=listen, observedEpoch=now, processCount=len(rows))
-    except Exception as error: result.update(error=str(error), observedEpoch=time.time())
+    except Exception as error:
+        result.update(error=str(error), observedEpoch=time.time())
+        if hasattr(error,'failureContext'):result['failureContext']=error.failureContext
     print(json.dumps(result)); return 0 if result['runtimeQualified'] else 1
 
 if __name__ == '__main__': sys.exit(main())
