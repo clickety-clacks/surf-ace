@@ -3,12 +3,14 @@ import { evidenceDigest } from '../../scripts/lifecycle/inspect-evidence.mjs';
 const hex = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 const integer = value => Number.isSafeInteger(value) && value >= 0;
 const text = value => typeof value === 'string' && /^[A-Za-z0-9_.:-]{1,128}$/.test(value);
+const processEpoch = value => typeof value === 'string' && /^[a-f0-9]{32}$/.test(value);
 const exact = (value, keys) => value && typeof value === 'object' && !Array.isArray(value) &&
   Object.keys(value).sort().join('|') === [...keys].sort().join('|');
 const same = (a, b) => evidenceDigest(a) === evidenceDigest(b);
 const identityKeys = ['uid', 'pid', 'birth', 'bootId', 'processEpoch', 'clientId', 'buildSha256'];
 const identity = value => exact(value, identityKeys) && integer(value.uid) && value.uid > 0 &&
-  integer(value.pid) && value.pid > 0 && ['birth', 'bootId', 'processEpoch', 'clientId'].every(key => text(value[key])) &&
+  integer(value.pid) && value.pid > 0 && ['birth', 'bootId', 'clientId'].every(key => text(value[key])) &&
+  processEpoch(value.processEpoch) &&
   hex(value.buildSha256);
 const refuse = reason => Object.freeze({ admitted: false, reason, effect: 'none', replayAllowed: false });
 

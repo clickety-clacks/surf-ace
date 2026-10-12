@@ -151,3 +151,19 @@ test('original request lookup is explicit; absence never triggers inferred enume
   f.response.surfaces[0].request.data.requestId = known('other');
   assert.equal(result(f).reason, 'request_selection_unproven');
 });
+
+for (const epoch of ['..', '.', 'not-hex', 'A'.repeat(32), 'a'.repeat(31), 'a'.repeat(33),
+  '../s', 'a/b', '', '0'.repeat(32) + '\u0000']) {
+  test(`malformed process epoch ${JSON.stringify(epoch)} refuses even with matching endpoint and proofs`, () => {
+    const f = fixture();
+    for (const server of [f.request.expectedServer, f.proof.serverBefore, f.proof.serverAfter]) server.processEpoch = epoch;
+    f.proof.endpoint.path = `/tmp/sa-diag-501/${epoch}/s`;
+    f.proof.capabilityEpoch = epoch;
+    assert.equal(validateRequest(f.request, f.proof).reason, 'invalid_request');
+  });
+}
+
+test('missing selector boundary refuses rather than inventing a hash', () => {
+  const f = fixture(); delete f.response.collection.before.selectorGeneration;
+  assert.equal(result(f).reason, 'collection_claim_unproven');
+});

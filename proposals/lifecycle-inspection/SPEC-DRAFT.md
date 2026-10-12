@@ -121,6 +121,9 @@ collection contains before/after {mutationSequence,surfaceSetRevision,
 selectorGeneration SHA256} and status stable|non_atomic. `stable` claims only
 unchanged client collection boundary, not atomic registry freshness or physical
 pixels. No authoritative orphan/close-success classification is returned.
+If the selected generation digest cannot be established, collection is refused
+as collection_unavailable; do not insert a synthetic hash to satisfy the boundary
+schema. Partial field observations cannot replace a missing collection boundary.
 
 One row per exact scoped surface with native/core/accepted/registry/request/
 tombstone observations. Observation is either `{status:unknown,reason,
