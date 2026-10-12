@@ -1,5 +1,5 @@
 import ast, os, importlib.util, pathlib, unittest, unittest.mock as mock, tempfile, hashlib
-spec=importlib.util.spec_from_file_location('census',pathlib.Path(__file__).with_name('census.py'))
+spec=importlib.util.spec_from_file_location('census',pathlib.Path(os.environ.get('PRIVATE_CENSUS_SOURCE',str(pathlib.Path(__file__).with_name('census.py')))))
 c=importlib.util.module_from_spec(spec);spec.loader.exec_module(c)
 spec2=importlib.util.spec_from_file_location('runner',pathlib.Path(__file__).with_name('runner.py'))
 r=importlib.util.module_from_spec(spec2);spec2.loader.exec_module(r)
@@ -11,6 +11,23 @@ class Controls(unittest.TestCase):
     def test_renamed_argv_node_still_conflicts(self):
         rows=self.base();rows[20]=row(20,exe='/opt/homebrew/bin/node',argv='innocent')
         self.assertEqual(c.evaluate(rows,[],{},10)[0][0]['pid'],20)
+    def test_unapproved_electron_helper_only_without_main_or_marker(self):
+        rows=self.base();rows[20]=row(20,exe='/Applications/Electron.app/Contents/Frameworks/Electron Helper (Renderer).app/Contents/MacOS/Electron Helper (Renderer)',argv='--type=renderer --lang=en-US')
+        self.assertEqual([v['pid'] for v in c.evaluate(rows,[],{},10)[0]],[20])
+    def test_unapproved_renamed_private_main_and_helpers(self):
+        for path in ['/private/tmp/sdk/MyApp.app/Contents/MacOS/MyApp','/private/tmp/sdk/MyApp.app/Contents/Frameworks/MyApp Helper.app/Contents/MacOS/MyApp Helper','/private/tmp/sdk/MyApp.app/Contents/Frameworks/MyApp Helper (GPU).app/Contents/MacOS/MyApp Helper (GPU)','/opt/sdk/Electron Helper (Renderer)']:
+            rows=self.base();rows[20]=row(20,exe=path,argv='--type=utility')
+            self.assertTrue(c.evaluate(rows,[],{},10)[0],path)
+    def test_ambiguous_non_electron_app_bundle_requires_exact_resident(self):
+        rows=self.base();rows[20]=row(20,exe='/Applications/Other.app/Contents/MacOS/Other',argv='Other')
+        self.assertTrue(c.evaluate(rows,[],{},10)[0])
+    def test_approved_helper_retains_exact_resident_exemption(self):
+        with tempfile.TemporaryDirectory() as d:
+            p=pathlib.Path(d)/'App.app/Contents/Frameworks/Helper.app/Contents/MacOS/Helper';p.parent.mkdir(parents=True);p.write_bytes(b'pinned')
+            rows=self.base();rows[20]=row(20,exe=str(p),argv='--type=renderer')
+            resident={**rows[20],'executableSha256':hashlib.sha256(p.read_bytes()).hexdigest()}
+            self.assertEqual(c.evaluate(rows,[],{'residentProcesses':[resident]},10)[0],[])
+            rows[20]['started']='replacement';self.assertTrue(c.evaluate(rows,[],{'residentProcesses':[resident]},10)[0])
     def test_private_argument_with_other_executable_conflicts(self):
         rows=self.base();rows[20]['argv']='other /tmp/private-paired-ws/fixture'
         self.assertTrue(c.evaluate(rows,[],{},10)[0])
@@ -80,6 +97,16 @@ class Controls(unittest.TestCase):
         with mock.patch.object(c.subprocess,'run',return_value=mock.Mock(returncode=1,stdout='',stderr='')):self.assertEqual(c.listeners(),[])
         with mock.patch.object(c.subprocess,'run',return_value=mock.Mock(returncode=0,stdout='p20\nn127.0.0.1:54321\n',stderr='')):
             self.assertEqual(c.listeners(),[dict(pid=20,endpoint='127.0.0.1:54321')])
+    def test_incomplete_final_listener_pid_refuses(self):
+        with mock.patch.object(c.subprocess,'run',return_value=mock.Mock(returncode=0,stdout='p99\n',stderr='')):
+            with self.assertRaisesRegex(ValueError,'incomplete'):c.listeners()
+    def test_incomplete_before_complete_listener_pid_refuses(self):
+        with mock.patch.object(c.subprocess,'run',return_value=mock.Mock(returncode=0,stdout='p99\np20\nn127.0.0.1:12345\n',stderr='')):
+            with self.assertRaisesRegex(ValueError,'incomplete'):c.listeners()
+    def test_multiple_owners_and_multiple_listener_endpoints_retained(self):
+        raw='p20\nn127.0.0.1:12345\nn[::1]:23456\np30\nn*:34567\n'
+        with mock.patch.object(c.subprocess,'run',return_value=mock.Mock(returncode=0,stdout=raw,stderr='')):
+            self.assertEqual(c.listeners(),[dict(pid=20,endpoint='127.0.0.1:12345'),dict(pid=20,endpoint='[::1]:23456'),dict(pid=30,endpoint='*:34567')])
     def test_final_census_uses_actual_owned_group(self):
         args=r.census_command({'census':'/tmp/helper.py'},'/tmp/owner.json','n',123)
         self.assertEqual(args[-2:],['--owned-pgid','123']);self.assertIn('-I',args);self.assertEqual(args[1],'-I')

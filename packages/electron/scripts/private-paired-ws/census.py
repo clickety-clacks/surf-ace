@@ -62,16 +62,27 @@ def listeners():
                             capture_output=True, text=True, timeout=1)
     if result.returncode == 1 and not result.stdout and not result.stderr: return []
     if result.returncode or result.stderr: raise ValueError('listener snapshot failed')
-    rows = []; pid = None
+    rows = []; pid = None; endpoints = 0
     for line in result.stdout.splitlines():
         if line.startswith('p'):
-            if not line[1:].isdigit(): raise ValueError('ambiguous listener PID')
-            pid = int(line[1:])
+            if pid is not None and endpoints == 0: raise ValueError('incomplete listener owner record')
+            if not line[1:].isdigit() or int(line[1:]) <= 0: raise ValueError('ambiguous listener PID')
+            pid = int(line[1:]); endpoints = 0
         elif line.startswith('n'):
-            if pid is None or not line[1:]: raise ValueError('ambiguous listener row')
-            rows.append(dict(pid=pid, endpoint=line[1:]))
+            if pid is None or not line[1:].strip(): raise ValueError('ambiguous listener row')
+            rows.append(dict(pid=pid, endpoint=line[1:])); endpoints += 1
         else: raise ValueError('unexpected listener field')
+    if pid is not None and endpoints == 0: raise ValueError('incomplete listener owner record')
     return rows
+
+def runtime_identity(path):
+    value = pathlib.PurePosixPath(path); name = value.name.lower(); parts = value.parts
+    # Electron supports renamed main/helper bundles: basename alone is insufficient.
+    # Treat every unapproved app-bundle executable as ambiguous, without assuming its
+    # framework files on disk describe the loaded image. Exact resident exemption only.
+    app_bundle = any(parts[i].lower().endswith('.app') and parts[i+1:i+3] == ('Contents', 'MacOS')
+                     for i in range(len(parts)-3))
+    return app_bundle or name == 'node' or name.startswith(('electron', 'python')) or name in ('xcodebuild', 'xctest')
 
 def evaluate(rows, listen, policy, self_pid, owned_pgid=None):
     if self_pid not in rows: raise ValueError('census process absent')
@@ -95,8 +106,7 @@ def evaluate(rows, listen, policy, self_pid, owned_pgid=None):
     conflicts = []
     for pid, row in rows.items():
         if pid in ancestors or pid in exempt: continue
-        name = pathlib.Path(row['executable']).name.lower()
-        runtime = name == 'node' or name == 'electron' or name.startswith('python') or name in ('xcodebuild', 'xctest')
+        runtime = runtime_identity(row['executable'])
         private = any(s in row['argv'] for s in ('private-paired-ws', 'paired-ws-B-', 'private-pane-paint', 'native-scale', 'test-pane-popout'))
         if runtime or private: conflicts.append(dict(pid=pid, executable=row['executable'], argv=row['argv']))
     for item in listen:
