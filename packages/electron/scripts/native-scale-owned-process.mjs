@@ -7,12 +7,13 @@ import { fileURLToPath } from "node:url";
 const supervisorPath = fileURLToPath(new URL("./native-scale-process-supervisor.mjs", import.meta.url));
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
-export async function processCensus({ timeoutMs = 1_000, spawnProcess = spawn } = {}) {
+export async function processCensus({ timeoutMs = 1_000, spawnProcess = spawn, commandField = "args" } = {}) {
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) throw new Error("Process census timeout is invalid");
+  if (!["args", "comm"].includes(commandField)) throw new Error("Process census command field is invalid");
   return new Promise((resolve, reject) => {
     let stdout = "";
     let settled = false;
-    const child = spawnProcess("ps", ["-eo", "pid=,pgid=,args="], { stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawnProcess("ps", ["-eo", `pid=,pgid=,${commandField}=`], { stdio: ["ignore", "pipe", "pipe"] });
     const finish = (error, rows) => {
       if (settled) return;
       settled = true;
@@ -25,11 +26,27 @@ export async function processCensus({ timeoutMs = 1_000, spawnProcess = spawn } 
     child.once("error", (error) => finish(error));
     child.once("close", (code, signal) => {
       if (code !== 0) return finish(new Error(`Process census ps exited ${code ?? signal ?? "without status"}`));
-      const rows = stdout.split("\n").flatMap((line) => {
-        const match = line.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/);
-        return match ? [{ pid: Number(match[1]), pgid: Number(match[2]), command: match[3] }] : [];
-      });
-      finish(null, rows);
+      try {
+        const seen = new Set();
+        const rows = stdout.split("\n").flatMap((line) => {
+          if (!line.trim()) return [];
+          const match = line.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/);
+          if (!match) {
+            if (commandField === "comm") throw new Error("Executable census has an unreadable row");
+            return [];
+          }
+          const row = { pid: Number(match[1]), pgid: Number(match[2]), command: match[3] };
+          if (commandField === "comm") {
+            if (!Number.isSafeInteger(row.pid) || !Number.isSafeInteger(row.pgid) || !row.command || seen.has(row.pid)) {
+              throw new Error("Executable census has an invalid or duplicate identity");
+            }
+            seen.add(row.pid);
+            row.executable = row.command;
+          }
+          return [row];
+        });
+        finish(null, rows);
+      } catch (error) { finish(error); }
     });
     const timer = setTimeout(() => {
       child.kill("SIGKILL");
@@ -40,9 +57,28 @@ export async function processCensus({ timeoutMs = 1_000, spawnProcess = spawn } 
 }
 export function electronProcessCensus(electronPath, census) {
   if (!Array.isArray(census)) throw new Error("A successful process census is required");
-  const resolved = String(electronPath);
-  return census.filter(({ command }) => command.includes(resolved) ||
-    /(?:^|\/)electron(?:\s|$)/i.test(command));
+  if (!path.isAbsolute(electronPath)) throw new Error("An absolute private Electron executable identity is required");
+  const resolved = path.normalize(electronPath);
+  const contents = path.dirname(path.dirname(resolved));
+  const privateBundle = path.basename(contents) === "Contents" && path.basename(path.dirname(contents)).endsWith(".app")
+    ? `${contents}${path.sep}` : null;
+  return census.filter(({ executable }) => {
+    if (typeof executable !== "string" || !executable) throw new Error("Executable census identity is missing");
+    if (!path.isAbsolute(executable)) {
+      // A basename cannot prove which private Electron bundle owns the process.
+      if (/^electron(?:$|[ .-])/i.test(executable) || executable === path.basename(resolved)) {
+        throw new Error("Private Electron executable identity is unresolved");
+      }
+      return false;
+    }
+    const actual = path.normalize(executable);
+    return actual === resolved || Boolean(privateBundle && actual.startsWith(privateBundle));
+  });
+}
+
+export async function electronExecutableCensus(electronPath, options = {}) {
+  // comm reports the executable name/path; args may contain this path merely as data.
+  return electronProcessCensus(electronPath, await processCensus({ ...options, commandField: "comm" }));
 }
 
 export function processGroupCensus(pgid, census) {

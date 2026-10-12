@@ -12,7 +12,7 @@ import {
   shouldRemoveNativeScaleScratch,
   verifyNativeScalePins,
 } from "./native-scale-runner-guard.mjs";
-import { electronProcessCensus, processCensus, runOwnedProcess } from "./native-scale-owned-process.mjs";
+import { electronExecutableCensus, processCensus, runOwnedProcess } from "./native-scale-owned-process.mjs";
 
 function readArgs(argv) {
   const values = new Map();
@@ -82,7 +82,7 @@ async function writeWithin(file, contents, options, timeoutMs = 2_000) {
 }
 
 async function currentElectronPids(electronPath) {
-  return electronProcessCensus(electronPath, await processCensus({ timeoutMs: 1_500 }))
+  return (await electronExecutableCensus(electronPath, { timeoutMs: 1_500 }))
     .map(({ pid }) => pid).sort((left, right) => left - right);
 }
 
