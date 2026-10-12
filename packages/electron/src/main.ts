@@ -1,7 +1,8 @@
+import { FreshPanePaintReads, NativePanePaintOwners, rendererPaintMatchesAuthority, type PanePaintAuthority, type PaintOwner } from "./pane-paint-owner-bridge.js";
 import { ServerConnection } from "./server-connection.js";
 import { splitResizeMatches, splitResizeIsNoOp } from "./split-resize.js";
 import fs from "node:fs/promises";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 
@@ -17,6 +18,7 @@ import {
   type ContextMenuParams,
   type MenuItemConstructorOptions,
   type WebContents,
+  type WebFrameMain,
 } from "electron";
 
 import type { ContentSetRequest, RuntimeAppBindingDiagnostics, Stroke } from "../../protocol/src/index.js";
@@ -167,6 +169,34 @@ function configurePlatformWebAuthn(): void {
 configurePlatformWebAuthn();
 
 const windows = new Map<string, BrowserWindow>();
+// Remains disabled until qualified adapter/WS integration and independent review.
+const panePaintDiagnosticEnabled = false;
+const paintWindowIncarnations = new WeakMap<BrowserWindow, string>();
+function currentPaintOwner(surfaceId: string): PaintOwner<BrowserWindow, WebContents, WebFrameMain> | null {
+  try {
+    const window = windows.get(surfaceId), incarnation = window && paintWindowIncarnations.get(window);
+    if (!window || !incarnation || window.isDestroyed() || window.webContents.isDestroyed()) return null;
+    const frame = window.webContents.mainFrame;
+    if (frame.isDestroyed() || frame.detached) return null;
+    return { window, host: window.webContents, frame, surfaceId, windowInstanceId: incarnation, hostId: window.webContents.id };
+  } catch { return null; }
+}
+const paintRendererReads = new FreshPanePaintReads<BrowserWindow, WebContents, WebFrameMain>({
+  owner: currentPaintOwner,
+  send: (owner, request) => {
+    if (!panePaintDiagnosticEnabled) throw Error("pane paint disabled");
+    owner.host.send("surface:pane-paint-read", request);
+  },
+});
+const paintNativeOwners = new NativePanePaintOwners<BrowserWindow, WebContents, WebFrameMain, WebContents>({
+  owner: currentPaintOwner, guestId: guest => guest.id, host: guest => guest.hostWebContents,
+  frame: guest => guest.mainFrame, frameKey: frame => {
+    if (frame.isDestroyed() || frame.detached || ![frame.frameTreeNodeId, frame.processId, frame.routingId].every(value => Number.isSafeInteger(value) && value >= 0) || frame.processId === 0) throw Error("native frame unavailable");
+    return `${frame.frameTreeNodeId}:${frame.processId}:${frame.routingId}`;
+  },
+  alive: guest => !guest.isDestroyed(),
+});
+
 const programmaticSurfaceCloses = new Set<string>();
 const pendingWindowStates = new Map<string, RendererWindowState>();
 const browserUrlWebContentsPanes = new Map<number, { paneId: number; surfaceId: string }>();
@@ -548,6 +578,30 @@ function surfaceIdForSender(contents: WebContents): string | null {
     }
   }
   return null;
+}
+
+function currentPaintAuthority(surfaceId: string, paneId: number): PanePaintAuthority | null {
+  try {
+    const surface = core.getSurface(surfaceId), pane = surface.panes.get(paneId), entry = pane?.history[pane.historyIndex];
+    if (!pane || pane.externalNative || !entry?.contentId || (entry.contentType !== "html" && entry.contentType !== "browser_url")
+      || !pane.snapshot.bounds || pane.snapshot.surfaceEpoch !== surface.surfaceEpoch
+      || pane.snapshot.topologyRevision !== surface.topologyRevision || pane.snapshot.geometryRevision !== surface.geometryRevision) return null;
+    return { surfaceId, surfaceEpoch: surface.surfaceEpoch, paneId, paneLineageId: pane.paneLineageId,
+      topologyRevision: surface.topologyRevision, geometryRevision: surface.geometryRevision, contentId: entry.contentId,
+      contentType: entry.contentType, contentRevision: entry.revision, renderVersion: pane.latestContentEventAt, paneRect: { ...pane.snapshot.bounds } };
+  } catch { return null; }
+}
+// Not registered with service/WS: pending native document/projection and capture qualification.
+async function readOwnedPanePaintAssociation(surfaceId: string, paneId: number, signal: AbortSignal) {
+  if (!panePaintDiagnosticEnabled || signal.aborted) return null;
+  const before = currentPaintAuthority(surfaceId, paneId);
+  if (!before) return null;
+  const renderer = await paintRendererReads.read(surfaceId, paneId, signal, 2000);
+  const current = currentPaintAuthority(surfaceId, paneId);
+  if (signal.aborted || !renderer || !current || JSON.stringify(current) !== JSON.stringify(before) || !rendererPaintMatchesAuthority(renderer,current)) return null;
+  const native = paintNativeOwners.read(surfaceId, renderer.guestId);
+  if (!native) return null;
+  return { authority: current, renderer, native };
 }
 
 function rendererDiagnosticFields(
@@ -1236,6 +1290,13 @@ function wireWindowShortcuts(surfaceId: string, window: BrowserWindow): void {
 function wireWindowInputMenus(surfaceId: string, window: BrowserWindow): void {
   wireEditableContextMenu(window.webContents, window);
   window.webContents.on("did-attach-webview", (_event, webContents) => {
+    if (panePaintDiagnosticEnabled && paintNativeOwners.attach(surfaceId, webContents)) {
+      webContents.on("did-start-navigation", (_event, _url, _inPlace, mainFrame) => {
+        if (mainFrame) paintNativeOwners.navigation(webContents);
+      });
+      webContents.on("render-process-gone", () => paintNativeOwners.retire(webContents));
+      webContents.once("destroyed", () => paintNativeOwners.retire(webContents));
+    }
     wireEditableContextMenu(webContents, window);
     wireWebContentsShortcuts(surfaceId, window, webContents, () => {
       const binding = browserUrlWebContentsPanes.get(webContents.id);
@@ -1337,6 +1398,14 @@ async function createWindowForSurface(surfaceId: string): Promise<BrowserWindow>
   }
 
   windows.set(surfaceId, window);
+  paintWindowIncarnations.set(window, randomBytes(16).toString("hex"));
+  if (panePaintDiagnosticEnabled) {
+    const paintHost = window.webContents;
+    const retirePaintOwner = () => { paintRendererReads.invalidate(paintHost); paintNativeOwners.retireHost(paintHost); };
+    window.webContents.on("did-start-navigation", (_event, _url, _inPlace, mainFrame) => { if (mainFrame) retirePaintOwner(); });
+    window.webContents.on("render-process-gone", retirePaintOwner);
+    window.once("closed", retirePaintOwner);
+  }
   clientInfo("window_created", {
     pane_ids: core.activePaneIds(surfaceId).join(","),
     surface_id: surfaceId,
@@ -1647,6 +1716,10 @@ function installWebAuthnAccountSelection(): void {
 }
 
 function installIpc(): void {
+  ipcMain.on("surface:pane-paint-reply", (event, reply: unknown) => {
+    if (!panePaintDiagnosticEnabled || !event.senderFrame || !surfaceIdForSender(event.sender)) return;
+    paintRendererReads.accept(event.sender, event.senderFrame, reply);
+  });
   ipcMain.handle("surface:resize-split", async (event, payload: unknown) => {
     const surfaceId = surfaceIdForSender(event.sender);
     if (!surfaceId || !payload || typeof payload !== "object") return false;
