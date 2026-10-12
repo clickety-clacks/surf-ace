@@ -21,6 +21,10 @@ struct FakeWire {
     payloads: Vec<(String, Value)>,
     fail_after_send_on: Option<String>,
     pair_rejection: Option<Envelope>,
+    pair_controller_instance_id_override: Option<Value>,
+    pair_surface_id_override: Option<Value>,
+    panes_list_payload: Value,
+    panes_list_rejection: Option<String>,
     receipt_capacity_on: Option<String>,
     target_precommit_error: Option<(String, Option<String>)>,
     committed_rejection_on: Option<String>,
@@ -38,6 +42,22 @@ impl FakeWire {
             payloads: vec![],
             fail_after_send_on: None,
             pair_rejection: None,
+            pair_controller_instance_id_override: None,
+            pair_surface_id_override: None,
+            panes_list_payload: json!({
+                "panes": [{
+                    "paneId": 1,
+                    "paneLineageId": "pl_1",
+                    "currentTarget": {
+                        "currentState": "current",
+                        "paneLineageId": "pl_1",
+                        "targetEpoch": 3,
+                        "targetId": "tg_1",
+                        "targetKind": "browser_url"
+                    }
+                }]
+            }),
+            panes_list_rejection: None,
             receipt_capacity_on: None,
             target_precommit_error: None,
             committed_rejection_on: None,
@@ -84,6 +104,23 @@ impl DirectWire for FakeWire {
             if let Some(response) = self.pair_rejection.clone() {
                 return Ok(WireResponse {
                     response,
+                    events: vec![],
+                });
+            }
+        }
+        if op == "panes.list" {
+            if let Some(code) = self.panes_list_rejection.clone() {
+                return Ok(WireResponse {
+                    response: Envelope {
+                        id: Some(id.into()),
+                        op: "panes.list.result".into(),
+                        payload: Some(json!({})),
+                        envelope_type: "response".into(),
+                        v: 1,
+                        ok: Some(false),
+                        error: Some(json!({ "code": code })),
+                        sent_at: None,
+                    },
                     events: vec![],
                 });
             }
@@ -151,7 +188,10 @@ impl DirectWire for FakeWire {
                 "pair.response",
                 json!({
                     "capabilities": {},
-                    "controllerInstanceId": payload["controllerInstanceId"],
+                    "controllerInstanceId": self
+                        .pair_controller_instance_id_override
+                        .clone()
+                        .unwrap_or_else(|| payload["controllerInstanceId"].clone()),
                     "limits": {
                         "maxPendingOperationReceiptBytesPerController": 65536,
                         "maxPendingOperationReceiptsPerController": 16
@@ -162,7 +202,10 @@ impl DirectWire for FakeWire {
                     "scopes": self.scopes.clone(),
                     "sessionId": "session_test",
                     "state": null,
-                    "surfaceId": payload.get("surfaceId").cloned().unwrap_or(Value::Null),
+                    "surfaceId": self
+                        .pair_surface_id_override
+                        .clone()
+                        .unwrap_or_else(|| payload.get("surfaceId").cloned().unwrap_or(Value::Null)),
                     "surfaceSetRevision": 1
                 }),
             ),
@@ -184,6 +227,9 @@ impl DirectWire for FakeWire {
                 "surfaces.list.result",
                 json!({ "surfaces": [{ "surfaceId": "sf_1" }] }),
             ),
+            "panes.list" => {
+                Self::response(id, "panes.list.result", self.panes_list_payload.clone())
+            }
             "snapshot.get" => {
                 Self::response(id, "snapshot.result", json!({ "snapshotId": "sn_1" }))
             }
@@ -237,6 +283,14 @@ fn invocation(temp: &TempDir, command: Command, input: Value) -> Invocation {
         projection_capacity_bytes: 1024 * 1024,
         state_root: temp.path().into(),
     }
+}
+
+fn pane_describe_input(controller_id: &str, surface_id: &str, pane_id: u64) -> Value {
+    json!({
+        "expectedControllerInstanceId": controller_id,
+        "surfaceId": surface_id,
+        "paneId": pane_id
+    })
 }
 
 fn event(op: &str, payload: Value) -> Envelope {
@@ -426,6 +480,84 @@ fn help_and_schema_are_json_and_do_not_require_operational_arguments() {
             .unwrap()
             .contains("pair.request")
     );
+
+    let pane_help = run_native_cli(&["help", "pane-describe"]);
+    assert!(pane_help.status.success());
+    let pane_help_json: Value = serde_json::from_slice(&pane_help.stdout).unwrap();
+    let pane_command = &pane_help_json["result"]["command"];
+    assert_eq!(pane_command["effect"], "paired_surface_read_with_admission");
+    assert_eq!(
+        pane_command["wireOperation"],
+        json!(["pair.request", "panes.list"])
+    );
+    assert!(
+        pane_command["resultSchema"]["properties"]["result"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("pending-receipt reconciliation")
+    );
+    let pane_input_schema = &pane_command["inputSchema"];
+    let pane_input_example = pane_command["examples"][0]["input"].clone();
+    common::schema::validate(pane_input_schema, pane_input_schema, &pane_input_example)
+        .expect("the pane-describe example validates against its published input schema");
+    let pane_result_schema = &pane_command["resultSchema"]["properties"]["result"];
+    common::schema::validate(
+        pane_result_schema,
+        pane_result_schema,
+        &json!({
+            "surfaceId": "sf_fixture",
+            "paneId": 1,
+            "paneLineageId": "pl_fixture",
+            "currentTarget": {
+                "paneLineageId": "pl_fixture",
+                "targetEpoch": 7,
+                "currentState": "stale",
+                "targetId": "tg_fixture",
+                "targetKind": "browser_url"
+            },
+            "targetEpoch": 7
+        }),
+    )
+    .expect("a stale target's actual epoch validates without being represented as current");
+    common::schema::validate(
+        pane_result_schema,
+        pane_result_schema,
+        &json!({
+            "surfaceId": "sf_fixture",
+            "paneId": 1,
+            "paneLineageId": "pl_fixture",
+            "currentTarget": null,
+            "targetEpoch": null
+        }),
+    )
+    .expect("an absent current target is represented by null without an invented epoch");
+    assert!(common::schema::validate(
+        pane_result_schema,
+        pane_result_schema,
+        &json!({
+            "surfaceId": "sf_fixture",
+            "paneId": 1,
+            "paneLineageId": "pl_fixture",
+            "currentTarget": {
+                "paneLineageId": "pl_fixture",
+                "currentState": "current",
+                "targetId": "tg_fixture",
+                "targetKind": "browser_url"
+            },
+            "targetEpoch": 1
+        }),
+    )
+    .is_err());
+
+    let pane_schema = run_native_cli(&["schema", "pane-describe"]);
+    assert!(pane_schema.status.success());
+    let pane_schema_json: Value = serde_json::from_slice(&pane_schema.stdout).unwrap();
+    assert_eq!(
+        pane_schema_json["result"]["command"]["name"],
+        "pane-describe"
+    );
+    assert!(pane_schema_json["result"]["command"]["inputSchema"].is_object());
+    assert!(pane_schema_json["result"]["command"]["resultSchema"].is_object());
 
     let schema = run_native_cli(&["schema", "topology-realize"]);
     assert!(
@@ -855,7 +987,7 @@ fn command_surface_is_exact_and_matches_package_and_canonical_vectors() {
         .iter()
         .map(|command| command.name())
         .collect::<Vec<_>>();
-    assert_eq!(expected.len(), 12);
+    assert_eq!(expected.len(), 13);
     assert_eq!(package["commands"], json!(expected));
     assert_eq!(
         package["receiptResolutionOutcomes"],
@@ -1341,6 +1473,30 @@ fn canonical_network_cases() -> Vec<(Command, Value, &'static str)> {
             "target.apply",
         ),
     ]
+}
+
+#[test]
+fn pane_describe_validates_local_guards_and_sends_only_surface_id_to_panes_list() {
+    let input = pane_describe_input("ctl_fixture", "sf_1", 1);
+    let fields = input.as_object().unwrap();
+    assert_eq!(
+        Command::PaneDescribe.wire_operation(fields).unwrap(),
+        "panes.list"
+    );
+    assert_eq!(
+        Command::PaneDescribe.wire_payload(fields.clone()).unwrap(),
+        json!({ "surfaceId": "sf_1" })
+    );
+
+    for invalid in [
+        json!({ "expectedControllerInstanceId": "", "surfaceId": "sf_1", "paneId": 1 }),
+        json!({ "expectedControllerInstanceId": "ctl_fixture", "surfaceId": "sf_1", "paneId": 0 }),
+        json!({ "expectedControllerInstanceId": "ctl_fixture", "surfaceId": "sf_1", "paneId": 1, "extra": true }),
+    ] {
+        assert!(Command::PaneDescribe
+            .validate(invalid.as_object().unwrap())
+            .is_err());
+    }
 }
 
 #[test]
@@ -2045,6 +2201,363 @@ fn sequential_process_model_reuses_identity() {
 }
 
 #[test]
+fn pane_describe_requires_the_existing_controller_root_and_expected_identity() {
+    let expected_root = TempDir::new().unwrap();
+    let mut initialize = FakeWire::ordinary();
+    let expected_id = execute_with_wire(
+        invocation(&expected_root, Command::List, json!({})),
+        &mut initialize,
+    )
+    .unwrap()
+    .controller_instance_id
+    .unwrap();
+
+    let uninitialized_root = TempDir::new().unwrap();
+    let mut uninitialized_wire = FakeWire::ordinary();
+    let error = execute_with_wire(
+        invocation(
+            &uninitialized_root,
+            Command::PaneDescribe,
+            pane_describe_input(&expected_id, "sf_1", 1),
+        ),
+        &mut uninitialized_wire,
+    )
+    .unwrap_err();
+    assert!(matches!(error, CliError::State(_)));
+    assert!(uninitialized_wire.operations.is_empty());
+    assert!(
+        !uninitialized_root.path().exists()
+            || fs::read_dir(uninitialized_root.path())
+                .unwrap()
+                .next()
+                .is_none()
+    );
+
+    let wrong_root = TempDir::new().unwrap();
+    let mut initialize_wrong = FakeWire::ordinary();
+    let wrong_id = execute_with_wire(
+        invocation(&wrong_root, Command::List, json!({})),
+        &mut initialize_wrong,
+    )
+    .unwrap()
+    .controller_instance_id
+    .unwrap();
+    assert_ne!(expected_id, wrong_id);
+
+    let mut wrong_root_wire = FakeWire::ordinary();
+    let error = execute_with_wire(
+        invocation(
+            &wrong_root,
+            Command::PaneDescribe,
+            pane_describe_input(&expected_id, "sf_1", 1),
+        ),
+        &mut wrong_root_wire,
+    )
+    .unwrap_err();
+    assert!(matches!(error, CliError::Input(message) if message == "controller_instance_mismatch"));
+    assert!(wrong_root_wire.operations.is_empty());
+}
+
+#[test]
+fn pane_describe_reuses_one_controller_and_uses_one_surface_scoped_panes_list_response() {
+    let temp = TempDir::new().unwrap();
+    let mut first = FakeWire::ordinary();
+    let first_output =
+        execute_with_wire(invocation(&temp, Command::List, json!({})), &mut first).unwrap();
+    let controller_id = first_output.controller_instance_id.unwrap();
+
+    let mut second = FakeWire::ordinary();
+    let output = execute_with_wire(
+        invocation(
+            &temp,
+            Command::PaneDescribe,
+            pane_describe_input(&controller_id, "sf_1", 1),
+        ),
+        &mut second,
+    )
+    .unwrap();
+    assert_eq!(output.command, "pane-describe");
+    assert_eq!(
+        output.controller_instance_id.as_deref(),
+        Some(controller_id.as_str())
+    );
+    assert_eq!(second.operations, vec!["pair.request", "panes.list"]);
+    let pair = &second.payloads[0].1;
+    assert_eq!(pair["controllerInstanceId"], controller_id);
+    assert_eq!(pair["surfaceId"], "sf_1");
+    let (op, request) = &second.payloads[1];
+    assert_eq!(op, "panes.list");
+    assert_eq!(request, &json!({ "surfaceId": "sf_1" }));
+    assert_eq!(output.result["surfaceId"], "sf_1");
+    assert_eq!(output.result["paneId"], 1);
+    assert_eq!(output.result["paneLineageId"], "pl_1");
+    assert_eq!(output.result["currentTarget"]["targetEpoch"], 3);
+    assert_eq!(output.result["targetEpoch"], 3);
+}
+
+#[test]
+fn pane_describe_preserves_stale_target_and_never_invents_an_epoch() {
+    let temp = TempDir::new().unwrap();
+    let mut initialize = FakeWire::ordinary();
+    let controller_id =
+        execute_with_wire(invocation(&temp, Command::List, json!({})), &mut initialize)
+            .unwrap()
+            .controller_instance_id
+            .unwrap();
+
+    let mut stale = FakeWire::ordinary();
+    stale.panes_list_payload = json!({
+        "panes": [{
+            "paneId": 1,
+            "paneLineageId": "pl_1",
+            "currentTarget": {
+                "currentState": "stale",
+                "paneLineageId": "pl_1",
+                "targetEpoch": 9,
+                "targetId": "tg_stale",
+                "targetKind": "browser_url"
+            }
+        }]
+    });
+    let stale_output = execute_with_wire(
+        invocation(
+            &temp,
+            Command::PaneDescribe,
+            pane_describe_input(&controller_id, "sf_1", 1),
+        ),
+        &mut stale,
+    )
+    .unwrap();
+    assert_eq!(
+        stale_output.result["currentTarget"]["currentState"],
+        "stale"
+    );
+    assert_eq!(stale_output.result["targetEpoch"], 9);
+    assert_eq!(
+        stale
+            .operations
+            .iter()
+            .filter(|op| *op == "panes.list")
+            .count(),
+        1
+    );
+
+    for current_target_is_null in [false, true] {
+        let mut absent = FakeWire::ordinary();
+        let mut pane = json!({ "paneId": 1, "paneLineageId": "pl_1" });
+        if current_target_is_null {
+            pane["currentTarget"] = Value::Null;
+        }
+        absent.panes_list_payload = json!({ "panes": [pane] });
+        let absent_output = execute_with_wire(
+            invocation(
+                &temp,
+                Command::PaneDescribe,
+                pane_describe_input(&controller_id, "sf_1", 1),
+            ),
+            &mut absent,
+        )
+        .unwrap();
+        assert_eq!(absent_output.result["currentTarget"], Value::Null);
+        assert_eq!(absent_output.result["targetEpoch"], Value::Null);
+        assert_eq!(
+            absent
+                .operations
+                .iter()
+                .filter(|op| *op == "panes.list")
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn pane_describe_rejects_missing_lineage_and_missing_target_epoch() {
+    let temp = TempDir::new().unwrap();
+    let mut initialize = FakeWire::ordinary();
+    let controller_id =
+        execute_with_wire(invocation(&temp, Command::List, json!({})), &mut initialize)
+            .unwrap()
+            .controller_instance_id
+            .unwrap();
+
+    let mut missing_lineage = FakeWire::ordinary();
+    missing_lineage.panes_list_payload = json!({ "panes": [{ "paneId": 1 }] });
+    let error = execute_with_wire(
+        invocation(
+            &temp,
+            Command::PaneDescribe,
+            pane_describe_input(&controller_id, "sf_1", 1),
+        ),
+        &mut missing_lineage,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error, CliError::Protocol(message) if message == "invalid_panes_list_pane_lineage")
+    );
+
+    let mut missing_epoch = FakeWire::ordinary();
+    missing_epoch.panes_list_payload = json!({ "panes": [{
+        "paneId": 1,
+        "paneLineageId": "pl_1",
+        "currentTarget": {
+            "currentState": "current",
+            "paneLineageId": "pl_1",
+            "targetId": "tg_1",
+            "targetKind": "browser_url"
+        }
+    }] });
+    let error = execute_with_wire(
+        invocation(
+            &temp,
+            Command::PaneDescribe,
+            pane_describe_input(&controller_id, "sf_1", 1),
+        ),
+        &mut missing_epoch,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error, CliError::Protocol(message) if message == "invalid_panes_list_target_epoch")
+    );
+}
+
+#[test]
+fn pane_describe_rejects_ambiguous_or_inconsistent_pane_identity() {
+    let temp = TempDir::new().unwrap();
+    let mut initialize = FakeWire::ordinary();
+    let controller_id =
+        execute_with_wire(invocation(&temp, Command::List, json!({})), &mut initialize)
+            .unwrap()
+            .controller_instance_id
+            .unwrap();
+
+    let malformed = [
+        (
+            json!({
+                "panes": [
+                    { "paneId": 1, "paneLineageId": "pl_1" },
+                    { "paneId": 1, "paneLineageId": "pl_2" }
+                ]
+            }),
+            "duplicate_panes_list_pane_id",
+        ),
+        (
+            json!({
+                "panes": [{
+                    "paneId": 1,
+                    "paneLineageId": "pl_1",
+                    "currentTarget": {
+                        "currentState": "current",
+                        "paneLineageId": "pl_other",
+                        "targetEpoch": 1,
+                        "targetId": "tg_1",
+                        "targetKind": "browser_url"
+                    }
+                }]
+            }),
+            "panes_list_target_lineage_mismatch",
+        ),
+        (json!({ "panes": [] }), "pane_not_found"),
+    ];
+
+    for (payload, expected_error) in malformed {
+        let mut wire = FakeWire::ordinary();
+        wire.panes_list_payload = payload;
+        let error = execute_with_wire(
+            invocation(
+                &temp,
+                Command::PaneDescribe,
+                pane_describe_input(&controller_id, "sf_1", 1),
+            ),
+            &mut wire,
+        )
+        .unwrap_err();
+        assert!(matches!(error, CliError::Protocol(message) if message == expected_error));
+        assert_eq!(wire.operations, vec!["pair.request", "panes.list"]);
+        assert_eq!(wire.close_count, 1);
+    }
+}
+
+#[test]
+fn pane_describe_refuses_duplicate_live_controller_wrong_surface_unpaired_and_disconnects() {
+    let temp = TempDir::new().unwrap();
+    let mut initialize = FakeWire::ordinary();
+    let controller_id =
+        execute_with_wire(invocation(&temp, Command::List, json!({})), &mut initialize)
+            .unwrap()
+            .controller_instance_id
+            .unwrap();
+    let pane_input = pane_describe_input(&controller_id, "sf_1", 1);
+
+    let mut duplicate = FakeWire::ordinary();
+    duplicate.pair_rejection = Some(Envelope {
+        id: Some("rq_duplicate".into()),
+        op: "pair.response".into(),
+        payload: Some(json!({})),
+        envelope_type: "response".into(),
+        v: 1,
+        ok: Some(false),
+        error: Some(json!({ "code": "duplicate_controller_instance" })),
+        sent_at: None,
+    });
+    let error = execute_with_wire(
+        invocation(&temp, Command::PaneDescribe, pane_input.clone()),
+        &mut duplicate,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error, CliError::Rejected { ref operation, ref code } if operation == "pair.request" && code == "duplicate_controller_instance")
+    );
+    assert_eq!(duplicate.operations, vec!["pair.request"]);
+
+    let mut wrong_surface = FakeWire::ordinary();
+    wrong_surface.pair_surface_id_override = Some(json!("sf_other"));
+    let error = execute_with_wire(
+        invocation(&temp, Command::PaneDescribe, pane_input.clone()),
+        &mut wrong_surface,
+    )
+    .unwrap_err();
+    assert!(matches!(error, CliError::Protocol(message) if message == "surface_pair_mismatch"));
+    assert_eq!(wrong_surface.operations, vec!["pair.request"]);
+
+    let mut wrong_controller = FakeWire::ordinary();
+    wrong_controller.pair_controller_instance_id_override = Some(json!("ctl_other"));
+    let error = execute_with_wire(
+        invocation(&temp, Command::PaneDescribe, pane_input.clone()),
+        &mut wrong_controller,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error, CliError::Protocol(message) if message == "controller_identity_mismatch")
+    );
+    assert_eq!(wrong_controller.operations, vec!["pair.request"]);
+
+    let mut unpaired = FakeWire::ordinary();
+    unpaired.panes_list_rejection = Some("not_paired".into());
+    let error = execute_with_wire(
+        invocation(&temp, Command::PaneDescribe, pane_input.clone()),
+        &mut unpaired,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error, CliError::Rejected { ref operation, ref code } if operation == "panes.list" && code == "not_paired")
+    );
+    assert_eq!(unpaired.operations, vec!["pair.request", "panes.list"]);
+    assert_eq!(unpaired.close_count, 1);
+
+    let mut disconnected = FakeWire::ordinary();
+    disconnected.fail_after_send_on = Some("panes.list".into());
+    let error = execute_with_wire(
+        invocation(&temp, Command::PaneDescribe, pane_input),
+        &mut disconnected,
+    )
+    .unwrap_err();
+    assert!(matches!(error, CliError::Wire(_)));
+    assert_eq!(disconnected.operations, vec!["pair.request", "panes.list"]);
+    assert_eq!(disconnected.close_count, 1);
+}
+
+#[test]
 fn production_path_uses_lifecycle_discovery_then_surface_scoped_connection() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = format!("ws://{}", listener.local_addr().unwrap());
@@ -2142,6 +2655,79 @@ fn production_path_uses_lifecycle_discovery_then_surface_scoped_connection() {
         output.result["payload"]["operationReceipt"]["commitSequence"],
         11
     );
+    server.join().unwrap();
+}
+
+#[test]
+fn pane_describe_production_path_uses_one_sequential_same_root_surface_pair() {
+    let temp = TempDir::new().unwrap();
+    let mut initialize = FakeWire::ordinary();
+    let controller_id =
+        execute_with_wire(invocation(&temp, Command::List, json!({})), &mut initialize)
+            .unwrap()
+            .controller_instance_id
+            .unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("ws://{}", listener.local_addr().unwrap());
+    let server_controller_id = controller_id.clone();
+    let server = thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut socket = accept(stream).unwrap();
+        let pair = read_request(&mut socket);
+        assert_eq!(pair["op"], "pair.request");
+        assert_eq!(
+            pair["payload"]["controllerInstanceId"],
+            server_controller_id
+        );
+        assert_eq!(pair["payload"]["surfaceId"], "sf_1");
+        assert_eq!(pair["payload"]["controllerProductName"], "Clawline");
+        let mut paired = pair_payload(pair["payload"]["controllerInstanceId"].clone());
+        paired["surfaceId"] = json!("sf_1");
+        send_response(
+            &mut socket,
+            pair["id"].as_str().unwrap(),
+            "pair.response",
+            paired,
+        );
+
+        let panes = read_request(&mut socket);
+        assert_eq!(panes["op"], "panes.list");
+        assert_eq!(panes["payload"], json!({ "surfaceId": "sf_1" }));
+        send_response(
+            &mut socket,
+            panes["id"].as_str().unwrap(),
+            "panes.list.result",
+            json!({
+                "panes": [{
+                    "paneId": 1,
+                    "paneLineageId": "pl_1",
+                    "currentTarget": null
+                }]
+            }),
+        );
+        expect_orderly_close(&mut socket);
+    });
+
+    let mut call = invocation(
+        &temp,
+        Command::PaneDescribe,
+        pane_describe_input(&controller_id, "sf_1", 1),
+    );
+    call.endpoint = Some(endpoint);
+    let output = execute(call).unwrap();
+    assert_eq!(
+        output.controller_instance_id.as_deref(),
+        Some(controller_id.as_str())
+    );
+    assert_eq!(output.result["surfaceId"], "sf_1");
+    assert_eq!(output.result["paneId"], 1);
+    assert_eq!(output.result["paneLineageId"], "pl_1");
+    assert_eq!(output.result["currentTarget"], Value::Null);
+    assert_eq!(output.result["targetEpoch"], Value::Null);
     server.join().unwrap();
 }
 

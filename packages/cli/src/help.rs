@@ -499,6 +499,22 @@ fn command_spec(command: Command) -> Value {
             "surfaces.list payload. This command sends pair.request first, which admits the controller and may persist client state.",
             vec!["missing_endpoint", "missing_product_label", "lifecycle_pair_mismatch"],
         ),
+        Command::PaneDescribe => (
+            "direct-client",
+            "paired_surface_read_with_admission",
+            "Describe one pane using the controller identity in an existing state root and a single paired panes.list response.",
+            "Use the same --state-root as the controller whose expectedControllerInstanceId you supply. The selected pane's lineage and currentTarget are taken from one panes.list response; targetEpoch is copied from currentTarget or null when no target is present. The command sends pair.request for the selected surface and may persist admission, synchronization, cursor, acknowledgement, or pending-receipt reconciliation state. It can be refused if that controller identity already has a live session. It does not change pane layout or content, and the observation is not an atomic guarantee of future validity.",
+            vec![
+                "missing_endpoint",
+                "missing_product_label",
+                "state_root_not_initialized",
+                "controller_instance_mismatch",
+                "duplicate_controller_instance",
+                "surface_pair_mismatch",
+                "pane_not_found",
+                "not_paired",
+            ],
+        ),
         Command::Push => (
             "direct-client",
             "client_mutation",
@@ -612,6 +628,7 @@ fn wire_operation(command: Command) -> Value {
     match command {
         Command::FleetList => json!("fleet.topology"),
         Command::List => json!("surfaces.list"),
+        Command::PaneDescribe => json!(["pair.request", "panes.list"]),
         Command::Push => json!("content.set"),
         Command::Read => json!("local projection; no network operation"),
         Command::TopologyIntent => {
@@ -632,6 +649,15 @@ fn wire_operation(command: Command) -> Value {
 fn input_schema(command: Command) -> Value {
     match command {
         Command::FleetList | Command::List => object(&[], json!({}), false),
+        Command::PaneDescribe => object(
+            &["expectedControllerInstanceId", "surfaceId", "paneId"],
+            json!({
+                "expectedControllerInstanceId": string_schema(),
+                "surfaceId": string_schema(),
+                "paneId": positive_integer_schema()
+            }),
+            false,
+        ),
         Command::Push => {
             let common = json!({
                 "surfaceId": string_schema(),
@@ -790,6 +816,39 @@ fn topology_node_schema() -> Value {
 }
 
 fn result_schema(command: Command, description: &str) -> Value {
+    let result = if command == Command::PaneDescribe {
+        json!({
+            "description": description,
+            "type": "object",
+            "required": ["surfaceId", "paneId", "paneLineageId", "currentTarget", "targetEpoch"],
+            "properties": {
+                "surfaceId": string_schema(),
+                "paneId": positive_integer_schema(),
+                "paneLineageId": { "type": "string", "minLength": 1 },
+                "currentTarget": {
+                    "anyOf": [
+                        { "type": "null" },
+                        {
+                            "type": "object",
+                            "required": ["paneLineageId", "targetEpoch", "currentState", "targetId", "targetKind"],
+                            "properties": {
+                                "paneLineageId": { "type": "string", "minLength": 1 },
+                                "targetEpoch": positive_integer_schema(),
+                                "currentState": { "enum": ["current", "stale", "superseded", "tombstoned"] },
+                                "targetId": string_schema(),
+                                "targetKind": string_schema()
+                            },
+                            "additionalProperties": true
+                        }
+                    ]
+                },
+                "targetEpoch": { "anyOf": [positive_integer_schema(), { "type": "null" }] }
+            },
+            "additionalProperties": false
+        })
+    } else {
+        json!({ "type": "object", "description": description })
+    };
     json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
@@ -799,7 +858,7 @@ fn result_schema(command: Command, description: &str) -> Value {
             "command": { "const": command.name() },
             "controllerInstanceId": { "type": "string" },
             "reconciliations": { "type": "array", "items": { "type": "object" } },
-            "result": { "type": "object", "description": description }
+            "result": result
         },
         "additionalProperties": false
     })
@@ -820,6 +879,14 @@ fn error_schema() -> Value {
 
 fn examples(command: Command) -> Value {
     match command {
+        Command::PaneDescribe => json!([{
+            "purpose": "Fixture-only. Reuse the controller identity in this state root; targetEpoch is null when this response has no currentTarget.",
+            "input": {
+                "expectedControllerInstanceId": "ctl_fixture",
+                "surfaceId": "sf_fixture",
+                "paneId": 1
+            }
+        }]),
         Command::TopologyRealize => json!([{
             "purpose": "Fixture-only replacement with three vertical panes; the integer values are examples, not live revisions.",
             "input": three_vertical_pane_example()
