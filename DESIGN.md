@@ -529,6 +529,8 @@ In addition to the general fixtures above, deterministically inject restart (a) 
 2. Surface caches last 1024 request IDs for idempotent replay.
 3. Duplicate request ID with identical payload must return the original response.
 4. Duplicate request ID with different payload returns `invalid_request_id_reuse`.
+5. The optional pane-paint diagnostic has the explicit bounded metadata-ledger
+   exception in §12.1. Ordinary request replay remains governed by rules 1–4.
 
 ### 5.4 Ordering and Mutation Seam
 1. On a lockless-capable surface, every accepted content operation traverses the client-owned mutation seam.
@@ -896,7 +898,11 @@ Required behavior:
 
 ## 10. JSON Schemas (All Message Types)
 
-The schema below defines every v1 application message type over WS.
+The schema below defines the currently registered v1 application message types
+over WS. The optional §12.1 pane-paint diagnostic contract is versioned in
+`specs/pane-paint-diagnostic-v1/`; it is not a registered message until a later
+reviewed implementation adds it to the production protocol unions and advertises
+its capability.
 
 ```json
 {
@@ -2720,6 +2726,34 @@ Protocol is ready for implementation when these checks pass in integration tests
 16. Static Surf Ace guidance is delivered only through contributed extension skills or an explicitly contributed system prompt. The extension MUST NOT attach static guidance from `before_prompt_build`, `prependContext`, `prependSystemContext`, or any other per-turn prompt-build hook.
 
 Implementation status: ready for implementation.
+
+### 12.1 Explicit diagnostic pane paint observation (optional; implementation gated)
+
+`diagnostics.pane_paint.get` is a separate explicit read-only diagnostic, not an extension of `snapshot.get` or ordinary cached reads. Implementations MUST preserve existing RequestId, SurfaceId and ContentId definitions. The capability `surf-ace.pane-paint-diagnostic.v1` is advertised only after a qualified adapter is implemented; absent capability means unsupported locally, not blind old-client probing. Existing paired-controller/surface authorization applies without new pairing, trust, access or discovery scope.
+
+Describe performs fresh fixed internal ownership/authority reads without capture, returning the exact current surface/epoch, window/host, pane/lineage/content/revision, topology/geometry and guest/frame/render/document identity and canonical §16 projection. It issues a random128bit connection-bound observationToken, expiring after5000ms; one token per admitted connection, superseding successful describe invalidates the prior token. Observe requires that entire expectation and token, validates actual ownership and canonical projection before/after each separate GUEST/HOST capture and again before publication, and refuses stale/detached/replaced/mismatched state. No caller script, debugger, arbitrary WebContents target, cached metadata or HOST crop may substitute for a fresh read or actual GUEST capture. Future generation maintenance and canonical-authority adapter wiring require review.
+
+#### Diagnostic exception to §5.3 request replay
+
+The generic §5.3 last1024 request response cache and identical-payload replay remain unchanged for ordinary operations. Diagnostic requests instead retain a bounded metadata-only ledger of at most1024 IDs per paired connection: RequestId, operation, payload digest, pending/completed marker and terminal reason; never image bytes or tokens. Diagnostic ledger entries are NOT evicted within a connection, expire only on disconnect/re-pair, and never replay images. A duplicate diagnostic ID (same or different payload) returns invalid_request_id_reuse without resampling; an ordinary request colliding with a retained diagnostic ID also returns that error. Diagnostic requests also check the existing ordinary1024 cache: any cross-operation collision still retained there returns invalid_request_id_reuse. After an ordinary cache eviction an otherwise unknown ID may enter the diagnostic ledger; no perpetual uniqueness promise extends beyond those bounded stores or across connections.
+
+Under one admission turn, perform authentication/schema validation, check both ID stores, reserve the diagnostic ledger slot, check concurrency/platform/transport capacity, validate token/expectation, and only then consume an observe token and start reads/capture. Malformed/unpaired requests and duplicate IDs do not reserve or change tokens. If all1024 diagnostic slots are occupied, return busy at admission without inserting a new ID or consuming a token; retries with that unknown ID are permitted only after a new connection clears saturation, not by evicting old diagnostic IDs. An ordinary operation never inserts into this diagnostic ledger. Other pre-admission busy/unsupported/transport failures after reservation complete that metadata record but leave tokens unchanged. Describe failure leaves the previous token intact; successful describe installs its replacement atomically. Observe failure after consumption never makes that token reusable. Disconnect invalidates tokens and both connection-scoped stores; new paired connection may reuse IDs but cannot use old tokens. No concurrent/queued diagnostic request exists per connection; two may be active per app. Pending native work continues holding capacity until it safely drains even after timeout/disconnect, and disconnect cannot evade the application cap.
+
+#### Receipt fences and partials
+
+The versioned `specs/pane-paint-diagnostic-v1/schema.json`, `REFUSAL-MATRIX.md`, and `semantic_model.py` define the exact payload and reason/stage matrix for this optional capability. All results echo the validated request context and configuredBudgetMs. Existing ok:false envelopes apply to malformed/unpaired/duplicate requests; the production protocol must add this operation to its error-operation enum before advertising support. ok:true means handled, not successful pixels: outcome is described, observed or refused. Unsupported platforms/content/backend, busy and admission transport-limit refusals contain no images/checks. Describe never captures. No observation error authorizes recovery.
+
+For observed pairs, checks/captures MUST interleave initial <= GUEST-before <= GUEST-start <= GUEST-end <= GUEST-after <= HOST-before <= HOST-start <= HOST-end <= HOST-after <= publish <= elapsed, with equal offsets permitted for clock resolution. All checks MUST be attached and match request binding/projection. Each image MUST match the admitted binding, target, raw PNG hash, pixel dimensions and coordinate space. Refused results retain only validated prefix captures (none, GUEST, GUEST+HOST), with request-correlated prechecks, exact timing and reason/stage exact-prefix count; bad GUEST has no HOST attempt/image, bad HOST retains exactly the prior valid GUEST. The reason/stage table defines exact image prefix counts and permitted check prefix lengths, including capture prerequisites; a later-stage failure cannot silently discard earlier validated images. Actual failed read state may be preserved, explicitly distinct from a passing fence. The versioned matrix/semantic validator is normative alongside shape validation; schema alone is insufficient.
+
+GUEST means that exact owned guest full current viewport capture. HOST means the owning application-window canonical pane clip, retaining overlapping controls; neither image is silently trimmed/rescaled or relabeled. Projection includes canonical host/clip rect, coordinate spaces, guest viewport/scroll, affine guest-to-surface transform, DPR and scale mode/nonce/revision/sequence/visibility/opacity. Separate monotonic capture intervals, check receipts and midpoint skew label atomic:false, paintFreshness:not-established, physicalDisplay:not-observed. State may render between checks; no same-frame, fresh-painted-frame or physical display proof is promised.
+
+#### Measured deadline, drain, privacy and support
+
+Configured deadline is1..2000ms (describe2000). Observed/described success and retained image completion MUST be within that configured budget. Refusal elapsed/check times are actual finite monotonic offsets up to the safe-number representational bound, and MAY exceed configured budget due to scheduling/synchronous work; never clamp or fabricate them. Timer expiry emits refusal at the earliest safe JS opportunity, with nativeDrain:not-required/pending/complete as actually known then; pending drain has no invented completion time and later safe drain releases capacity without a second wire response. A completed drain receipt gives its actual completion offset, which may exceed the configured deadline but MUST NOT exceed the actual elapsed time of the receipt that reports completion. Native replies completing after deadline cannot be admitted as images. If the clock is invalid/unrepresentable, suppress the diagnostic payload and use existing internal_error/transport failure rather than report false timestamps. Synchronous PNG validation is not preemptible; adapter cancellation/drain requires separate review and no forced guest kill.
+
+Per image bounds:2MiB compressed,8192px/dimension,32MiB decoded; pair4MiB compressed/64MiB decoded. Respect stricter existing transport limits before capture and publication, without raising them. Preflight uses the maximum bounded response size; insufficient transport capacity returns transport-limit at admission without images. If serialization nevertheless exceeds the transport limit, use the existing content_too_large error envelope without images rather than an oversized diagnostic partial result. Require PNG CRC/dimensions, singleton PLTE before IDAT, consecutive IDAT and bounded decode/scanline validation. Capacity admits no diagnostic queue. Unsupported adapters/platforms/native guests return typed unsupported without emulation; initial feature support is only separately qualified Electron HTML/browser adapters on macOS/Linux. Existing native/iOS/Spatial supported-client obligations are not waived.
+
+These sensitive images return only to their requesting authorized controller. No automatic retry, broadcast, cached image replay, journal/history persistence, upload, URL/text collection, base64 logging or recovery mutation is permitted. Expected tuple/token memory expires after5s; diagnostic ID metadata alone remains connection-bounded. Controller artifact retention/redaction is explicit under existing operator policy. Disconnect suppresses replies and frees retained images after safe owned completion. Logs retain only correlation, reason, timing, size/hash under existing retention. Mike approved this separate specification PR in ruling `dr_7ef1e022-1324-4b06-a8b0-85dda410a481`. This contract does not register the operation in the production protocol, enable capture, authorize recovery, or establish live pane paint.
 
 ## 13. Provider → OpenClaw Event Routing
 
