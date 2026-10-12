@@ -243,6 +243,58 @@ Fleet-wide labels are meaningful only within the registry and allocator lineage 
 Deterministic acceptance fixtures MUST cover: (a) a legacy client with confirmed labels and content encountering a different fleet first, with zero mutating registration/claim and no state change; (b) a discovered endpoint with either identity field missing; (c) owner-verified migration to the correct registry with preserved client/surface/pane/lineage claims; (d) the correct registry becoming available after an offline/pending interval; (e) a matching identity reached at a changed address; (f) registry restart with binding and labels preserved; (g) binding persistence interrupted before, during, and after the durable-write boundary, including an ambiguous result resolved by readback; (h) a fresh client committing its initial pair before accepting initial labels; (i) a different allocator identity under an otherwise matching fleet identity; and (j) a pre-marker never-registered local letter, a confirmed label with no active row, missing or contradictory historical evidence, retained tombstone claims, interrupted transition on both sides of durable replacement, and restart followed by initial binding. Assert that unavailable or foreign authority never clears content or confirmed labels, never changes pane lineage, never accepts a trial registration, and never silently rebinds; correct same-fleet recovery resumes automatically, while only verified authority can authorize label mutation. The pre-marker transition preserves content and stable IDs and sends no mutating registration or claim before its verification is durable.
 
 
+#### 3.1.3 Registry-Leased Direct Endpoint Discovery (v1)
+
+This is an additional explicit discovery path for a controller that has a configured registry URL and a named window. It supplements Bonjour/mDNS and does not replace app discovery, change surface advertisement, or change the existing pair-then-list flow. It follows Mike's v1 consistency-only ruling dr_7d417867-d4fd-4fe3-9d48-99fc01b81bc7 and the approved contract package art_9aaf9de7. The ruling explicitly does not require cryptographic proof of key possession.
+
+1. **Configured endpoint.** A client may include a direct WebSocket endpoint in client.register only when that complete endpoint is supplied by deployment configuration. The endpoint is an absolute supported ws or wss URL without embedded credentials. The client also advertises prePairDescribeV1 only when it implements §3.1.4. A client or registry MUST NOT derive an endpoint from the registry URL, Bonjour name, bind address, observed source address, or an inferred port. Missing or unsupported endpoint metadata remains absent and is reported as such; it never falls back to the registry URL or an unrelated discovery result. Older clients that omit this metadata remain valid clients for existing flows.
+2. **Registry lease.** For each registered client, the registry stores the configured direct endpoint with a positive safe-integer leaseGeneration, registrationObservedAtMs, and leaseExpiresAtMs, all in epoch milliseconds. The registry supplies its own registration and server times. registrationObservedAtMs is the registry time when that generation became current and remains fixed for that generation. At each fleet.topology response, leaseExpiresAtMs MUST be later than registryServerTimeMs and no farther ahead than the deployment's finite positive maxEndpointLeaseMs. The registry identity pair, clientId, endpoint, capability, and registered surface set are bound to that generation. Replacing any of them advances the generation and sets a new registrationObservedAtMs; renewing the same lease may extend expiry without changing either the generation or its registration time. Generations are never reused while an earlier lease could still be current. If restore or restart leaves generation continuity or lease freshness unknown, old endpoint rows are not current and a fresh client.register is required before they can be published as current.
+3. **Registry projection.** A successful client.register response exposes the exact configured endpoint, prePairDescribeV1 capability, leaseGeneration, registrationObservedAtMs, leaseExpiresAtMs, clientId, registryIdentity, and registered surface/window labels. fleet.topology additionally exposes registryServerTimeMs and maxEndpointLeaseMs. These are registry observations, not client authentication. fleet.topology remains read-only: it does not pair, claim labels, refresh client registration, or extend a lease. A row is current only when the registry reports the supported endpoint and capability, its registryServerTimeMs is at least registrationObservedAtMs and before leaseExpiresAtMs, and the lease duration is within maxEndpointLeaseMs. Missing identity, lease, expiry, endpoint, capability, server time, or lease bound makes that row unsupported for direct discovery.
+
+   fleet.topology has registryServerTimeMs (a non-negative safe integer) and maxEndpointLeaseMs (a positive safe integer) at the top level. Each client row adds directEndpoint (absolute WebSocket URL or null), prePairDescribeV1 (boolean), and endpointLease (object or null containing leaseGeneration, registrationObservedAtMs, and leaseExpiresAtMs). A row is current only if registrationObservedAtMs is no later than registryServerTimeMs, leaseExpiresAtMs is later than registryServerTimeMs, and leaseExpiresAtMs minus registryServerTimeMs is at most maxEndpointLeaseMs. Legacy rows may report null for endpointLease and false for prePairDescribeV1.
+4. **Stable identity is consistency, not authentication.** The discovery client compares the returned clientId and complete registryIdentity pair with the selected registry row, and also compares the exact surfaceId and leaseGeneration. A nonce correlates one request and response and prevents accidental reuse of a stale cached response by a conforming implementation. None of these self-reported values, including a fingerprint-shaped clientId, proves key possession or authenticates a registry or endpoint. The v1 contract prevents accidental stale or cross-client routing only; it MUST NOT claim protection against a malicious registry, malicious endpoint, or active attacker.
+5. **One current window match.** A named-window lookup uses the canonical fleet windowLabel in a fresh fleet.topology result. It proceeds only for exactly one current registry row/surface match. Zero matches report not_found or stale_registration as applicable; multiple current matches report ambiguous. It never picks the first match, asks mDNS to break a tie, or guesses a direct address. Registration age, lease expiry, direct probe time, and direct probe outcome remain separate evidence.
+6. **Registry recheck.** After the direct probe, the controller reads fleet.topology again. The same registryIdentity, clientId, surfaceId, windowLabel, direct endpoint, and leaseGeneration must still identify exactly one current match, and the returned registryServerTimeMs must still precede leaseExpiresAtMs. A changed, expired, absent, or ambiguous row makes the discovery result stale even if the direct endpoint answered. The two registry reads and direct probe are bounded read-only observations; they do not reserve the name or grant authority for a later mutation.
+
+#### 3.1.4 Pre-Pair Surface Describe
+
+surface.describe is the direct, read-only operation used by §6.0.1. It is a separate pre-pair contract, not an alternate name for panes.list, pair.response, surfaces.list, or snapshot.get.
+
+1. The request is a v1 request envelope with a fresh request id and op surface.describe. Its payload contains the expected clientId, registryIdentity pair, surfaceId, endpointLeaseGeneration, and a fresh nonce of at least 128 random bits. It contains no controllerInstanceId, session token, resume state, admission request, registry URL, or mutation intent.
+   The payload fields are:
+
+   | Field | Type | Meaning |
+   |---|---|---|
+   | clientId | string | Expected client fingerprint-shaped identity; consistency only |
+   | registryIdentity | object | Exact fleetId and allocatorId pair from fleet.topology |
+   | surfaceId | string | Exact selected live surface id |
+   | endpointLeaseGeneration | positive safe integer | Exact selected registry lease generation |
+   | nonce | string | Fresh random value of at least 128 bits, used only for request/response correlation |
+
+2. A supporting client accepts the request before pair.request and reads its own authoritative current surface state. It returns success only when the requested clientId, registryIdentity pair, surfaceId, and endpointLeaseGeneration match its already persisted current binding and registration lease. Missing or uncertain binding returns identity_mismatch or not_ready; the client does not bind itself, migrate identity, refresh its registration, or repair state from this request. A successful response uses the same v1 response envelope and request id/op, with the payload below:
+
+   | Field | Required value |
+   |---|---|
+   | nonce | Exact nonce from this request |
+   | clientId | Responding client's public-key fingerprint identity |
+   | registryIdentity | Object containing fleetId and allocatorId |
+   | surfaceId | Exact requested live surface |
+   | endpointLeaseGeneration | Exact current registration generation known to this client |
+   | observedAtMs | Client observation time as a non-negative safe integer epoch millisecond value |
+   | applicationReadiness | Object with status ready or degraded and a limitationCodes array |
+   | surfaceSetRevision | Current non-negative safe integer endpoint lifecycle revision |
+   | topologyRevision | Current non-negative safe integer surface topology revision |
+   | layout | Committed tree; pane leaves are {type: pane, paneId, weight?}; split nodes are {type: split, direction: horizontal or vertical, children, weight?}; existing weight semantics apply |
+   | panes | One record per live pane, as defined below |
+
+   Each panes record contains only positive safe-integer paneId; paneLabel as a positive safe integer or null; and contentObservation with revision as a non-negative safe integer or null, source equal to client-authority, and observedAtMs as a non-negative safe integer epoch millisecond value. Pane labels that are pending remain null; no local guess is permitted. A ready response has an empty limitationCodes array. A degraded response has at least one limitation code and may return a complete current topology. A not_ready client returns an error with no layout or pane list.
+3. The committed layout and live pane list are one topology observation at the returned topologyRevision. The layout leaves MUST reference every listed paneId exactly once and no other pane. The client compares surfaceSetRevision and topologyRevision before and after collecting the topology; if either changes, it returns revision_churn without an actionable layout or pane list. Content revisions are per-pane observations with their own source and observation times; they are not claimed to be an atomic multi-pane content transaction. The response contains no content body, URL, image, snapshot, annotation payload, or history body at any depth.
+4. applicationReadiness is reported separately from transport reachability, using ready, degraded, or not_ready plus capability-specific limitation codes where applicable. A successful WebSocket connection alone means only transport reachable. An absent, malformed, unsupported, or timed-out describe response never becomes ready by inference.
+5. The request and response are bounded: the caller enforces a deadline no greater than 2,000 ms and a response limit no greater than 65,536 UTF-8 bytes. Exceeding either bound returns a bounded failure and no partial topology. The client performs no registry call and creates or changes no durable state for this request.
+6. Repeated describe requests do not create or renew pairing, controller admission, a session, a cursor, an acknowledgement, a registration lease, a window, a pane, an allocation, or a write receipt. The operation does not append to an admission-attempt ledger. It does not perform hidden pair.request, panes.list, snapshot.get, content read, or label claim operations.
+7. A conforming implementation returns operation errors using invalid_payload, unsupported_protocol_version, prepair_describe_unsupported, surface_not_found, identity_mismatch, revision_churn, not_ready, or internal_error as applicable. It never returns a partial pane list as success.
+
+
 TXT keys used by WS protocol:
 
 | Key | Type | Example | Notes |
@@ -577,6 +629,18 @@ The ledger retains at most 256 records and at most 128 KiB of JSON-encoded recor
 
 Within those limits, the client persists the pending record before admission work begins. A failed attempt survives transaction rollback and restart. A successful attempt is committed atomically with the admitted authority and surface state. Lifecycle `surfaces.list` exposes the complete retained ledger; pre-pair and surface-scoped discovery omit it.
 
+### 6.0.1 Pre-Pair Named-Window Describe
+
+The CLI's registry-to-direct named-window flow uses the registry lease in §3.1.3 and one direct surface.describe request in §3.1.4. This contract defines future support; it does not claim that the current CLI, current client wire, or current registry implements it.
+
+1. Read fleet.topology at the explicitly configured registry and select exactly one current surface whose canonical windowLabel equals the requested label. If the registry is unavailable, the match is absent or ambiguous, the row is stale, or the endpoint capability is unsupported, return that explicit status without connecting to a guessed endpoint.
+2. Connect to the exact direct endpoint from that row and issue one fresh surface.describe request containing the selected identity, surface, lease generation, request id, and nonce. Do not call pair.request, client.register, pane.claim, or any mutating operation.
+3. Accept the direct response only when its v1 envelope, request id, operation, nonce, clientId, registryIdentity, surfaceId, and endpointLeaseGeneration match the request and selected row. Any missing or mismatched field fails closed as unsupported_protocol, stale_response, or identity_mismatch. Re-read fleet.topology and apply §3.1.3 item 6 before returning current status.
+4. Report transportReachability, applicationReadiness, registry registration age/expiry, identityConsistency, surfaceSetRevision, topologyRevision, committed layout, pane ids/labels, and each pane's contentRevision/source/observation time as distinct evidence. Never call identityConsistency authenticated. A ready result is limited to the client-reported describe readiness at the reported observation; it does not promise a later mutation will succeed.
+5. Return explicit not_found, ambiguous, stale_registration, endpoint_unconfigured, registry_unavailable, unreachable, application_unresponsive, unsupported_protocol, identity_mismatch, surface_not_found, revision_churn, degraded, or not_ready outcomes as applicable. If the WebSocket connected but the describe response was absent or invalid, report transport reachable and application readiness unknown or not_ready; do not collapse these into one health bit. Do not fall back to Bonjour, a cached result, the registry endpoint, or another matching client.
+6. A later mutation remains a separate explicit direct-client command and MUST use its current supported expected-revision, request-correlation, receipt, and destructive-target guards. Discovery does not pair, reserve, authorize, replay, or perform that mutation.
+
+
 ### 6.1 Pair Handshake
 
 Flow:
@@ -852,6 +916,11 @@ Required behavior:
 | `invalid_payload` | JSON shape/type invalid |
 | `invalid_request_id_reuse` | Duplicate request ID with different payload |
 | `invalid_operation` | Operation not permitted in current state (e.g. closing the last pane) |
+| `prepair_describe_unsupported` | Client does not implement the pre-pair describe capability |
+| `surface_not_found` | Requested surface is not live on this endpoint |
+| `identity_mismatch` | Requested client, registry, allocator, surface, or endpoint-lease identity does not match this client state |
+| `revision_churn` | Surface-set or topology revision changed while a pre-pair describe snapshot was collected |
+| `not_ready` | Client cannot produce a complete authoritative pre-pair describe snapshot |
 | `unsupported_protocol_version` | Provider protocol version mismatch |
 | `unsupported_content_type` | Content type unsupported by surface |
 | `unsupported_operation_for_content_type` | Append/patch not valid for current type |
