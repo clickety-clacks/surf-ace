@@ -146,6 +146,7 @@ function validPng(bytes: Buffer, width: number, height: number): boolean {
   try {
     if (width > 16_384 || height > 16_384 || !bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) return false;
     let offset = 8, channels = 0, ended = false;
+    let paletteSeen = false, idatSeen = false, idatEnded = false;
     const compressed: Buffer[] = [];
     while (offset < bytes.length) {
       if (bytes.length - offset < 12) return false;
@@ -166,7 +167,15 @@ function validPng(bytes: Buffer, width: number, height: number): boolean {
           || ![2, 6].includes(bytes[offset + 17]) || bytes[offset + 18] !== 0 || bytes[offset + 19] !== 0 || bytes[offset + 20] !== 0) return false;
         channels = bytes[offset + 17] === 6 ? 4 : 3;
       } else if (name === "IHDR") return false;
-      if (name === "IDAT") compressed.push(bytes.subarray(offset + 8, end - 4));
+      if (name === "PLTE") {
+        if (paletteSeen || idatSeen) return false;
+        paletteSeen = true;
+      }
+      if (name === "IDAT") {
+        if (idatEnded) return false;
+        idatSeen = true;
+        compressed.push(bytes.subarray(offset + 8, end - 4));
+      } else if (idatSeen) idatEnded = true;
       if (name === "IEND") {
         if (length !== 0 || end !== bytes.length) return false;
         ended = true;

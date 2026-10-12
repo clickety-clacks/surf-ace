@@ -7,7 +7,7 @@ import { createHash } from 'node:crypto';
 import { deflateSync } from 'node:zlib';
 import ts from 'typescript';
 const module = { exports: {} };
-vm.runInNewContext(ts.transpile(fs.readFileSync(new URL('../src/pane-painted-observation.ts', import.meta.url), 'utf8'), { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }), { module, exports: module.exports, require: createRequire(import.meta.url), Buffer, Uint8Array, AbortController, structuredClone, performance, setTimeout, clearTimeout });
+vm.runInNewContext(ts.transpile(fs.readFileSync(process.env.PANE_PAINT_SOURCE || new URL('../src/pane-painted-observation.ts', import.meta.url), 'utf8'), { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }), { module, exports: module.exports, require: createRequire(import.meta.url), Buffer, Uint8Array, AbortController, structuredClone, performance, setTimeout, clearTimeout });
 const { observePanePaint } = module.exports;
 function chunk(type, data) { let crc = 0xffffffff; const t = Buffer.from(type); for (const v of Buffer.concat([t, data])) {
     crc ^= v;
@@ -96,3 +96,52 @@ test('default monotonic clock times out a hung capture and aborts without host w
     assert.deepEqual(calls, ['GUEST']);
     assert.equal(result.captures.length, 0);
 });
+
+function orderedPng(kind) {
+    const base = png(), compressed = deflateSync(Buffer.from([0, 16, 25, 35, 16, 25, 35]));
+    const palette = chunk('PLTE', Buffer.from([16, 25, 35]));
+    const first = chunk('IDAT', compressed.subarray(0, 4)), second = chunk('IDAT', compressed.subarray(4));
+    const text = chunk('tEXt', Buffer.from('key\0value'));
+    const variants = {
+        single: [chunk('IDAT', compressed)], consecutive: [first, second],
+        palette: [palette, first, second], trailingText: [first, second, text],
+        latePalette: [chunk('IDAT', compressed), palette],
+        duplicatePalette: [palette, palette, chunk('IDAT', compressed)],
+        interruptedIdat: [first, text, second],
+    };
+    return Buffer.concat([base.subarray(0, 33), ...variants[kind], chunk('IEND', Buffer.alloc(0))]);
+}
+for (const kind of ['single', 'consecutive', 'palette', 'trailingText']) {
+    test(`observer accepts valid PNG chunk sequence ${kind}`, async () => {
+        const s = setup(), capture = s.adapter.capture;
+        s.adapter.capture = async (...args) => ({ ...await capture(...args), png: orderedPng(kind) });
+        const r = await s.run();
+        assert.equal(r.kind, 'observed');
+        assert.deepEqual(s.calls, ['GUEST', 'HOST']);
+        assert.equal(r.captures.length, 2);
+        for (const image of r.captures) assert.deepEqual(Buffer.from(image.png), orderedPng(kind));
+        assert.equal(s.timers.size, 0);
+    });
+}
+for (const kind of ['latePalette', 'duplicatePalette', 'interruptedIdat']) {
+    for (const badTarget of ['GUEST', 'HOST']) {
+        test(`observer refuses ${kind} in ${badTarget} with correct partial evidence`, async () => {
+            const s = setup(), capture = s.adapter.capture;
+            s.adapter.capture = async (...args) => {
+                const image = await capture(...args);
+                return args[0] === badTarget ? { ...image, png: orderedPng(kind) } : image;
+            };
+            const r = await s.run();
+            refused(r, 'invalid-image');
+            assert.equal(r.stage, `${badTarget}:png`);
+            assert.deepEqual(s.calls, badTarget === 'GUEST' ? ['GUEST'] : ['GUEST', 'HOST']);
+            assert.equal(r.captures.length, badTarget === 'GUEST' ? 0 : 1);
+            if (badTarget === 'HOST') {
+                assert.equal(r.captures[0].target, 'GUEST');
+                assert.deepEqual(Buffer.from(r.captures[0].png), png());
+                assert.equal(r.captures[0].sha256, createHash('sha256').update(png()).digest('hex'));
+            }
+            assert.equal(s.timers.size, 0);
+        });
+    }
+}
