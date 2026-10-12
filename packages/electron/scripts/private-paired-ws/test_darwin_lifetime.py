@@ -44,17 +44,17 @@ class Controls(unittest.TestCase):
         p=mock.Mock(pid=123)
         with mock.patch.object(r,'leader_exited',return_value=True),mock.patch.object(r.os,'killpg') as kill,mock.patch.object(r.os,'getpgid') as group:
             with self.assertRaisesRegex(ValueError,'anchor exited'):r.cleanup(p,0)
-            kill.assert_not_called();group.assert_not_called();p.wait.assert_not_called()
+            kill.assert_not_called();group.assert_not_called();p.wait.assert_called_once_with(timeout=2)
     def test_esrch_anchor_refuses_without_saved_group_fallback(self):
         p=mock.Mock(pid=123)
         with mock.patch.object(r,'leader_exited',return_value=False),mock.patch.object(r.os,'getpgid',side_effect=ProcessLookupError()),mock.patch.object(r.os,'killpg') as kill:
             with self.assertRaises(ProcessLookupError):r.cleanup(p,0)
-            kill.assert_not_called();p.wait.assert_not_called()
+            kill.assert_not_called();p.wait.assert_called_once_with(timeout=2)
     def test_anchor_dies_between_term_and_kill_no_second_signal(self):
         p=mock.Mock(pid=123);seen=[]
         with mock.patch.object(r,'leader_exited',side_effect=[False,True]),mock.patch.object(r.os,'getpgid',return_value=123),mock.patch.object(r.os,'killpg',side_effect=lambda *args:seen.append(args)):
             with self.assertRaisesRegex(ValueError,'anchor exited'):r.cleanup(p,0)
-            self.assertEqual(seen,[(123,signal.SIGTERM)]);p.wait.assert_not_called()
+            self.assertEqual(seen,[(123,signal.SIGTERM)]);p.wait.assert_called_once_with(timeout=2)
     def test_forged_child_exit_and_owner_receipts_refuse(self):
         with tempfile.TemporaryDirectory() as d:
             p=pathlib.Path(d)/'receipt.json';valid=dict(childPID=321,childExit=0,anchorPID=123,pgid=123)

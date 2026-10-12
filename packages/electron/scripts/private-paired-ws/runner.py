@@ -31,16 +31,29 @@ def census_command(a,policy,nonce,owned_pgid=None):
 def leader_exited(pid): return os.waitid(os.P_PID,pid,os.WEXITED|os.WNOWAIT|os.WNOHANG) is not None
 def cleanup(proc,deadline):
     # The held anchor is required to be live at EACH signal, not merely unreaped.
-    for sig in [signal.SIGTERM,signal.SIGKILL]:
-        if leader_exited(proc.pid): raise ValueError('owned live anchor exited before cleanup')
-        if os.getpgid(proc.pid)!=proc.pid: raise ValueError('owned group identity lost')
-        try: os.killpg(proc.pid,sig)
-        except ProcessLookupError: pass
-        if sig==signal.SIGTERM:
-            end=min(deadline,time.monotonic()+1)
-            while time.monotonic()<end and not leader_exited(proc.pid): time.sleep(.02)
-    code=proc.wait(timeout=2)
-    if proc.stdin is not None: proc.stdin.close()
+    failure=None;code=None;reap_error=None
+    try:
+        for sig in [signal.SIGTERM,signal.SIGKILL]:
+            if leader_exited(proc.pid): raise ValueError('owned live anchor exited before cleanup')
+            if os.getpgid(proc.pid)!=proc.pid: raise ValueError('owned group identity lost')
+            os.killpg(proc.pid,sig)  # ESRCH is failure, including the final signal.
+            if sig==signal.SIGTERM:
+                end=min(deadline,time.monotonic()+1)
+                while time.monotonic()<end and not leader_exited(proc.pid): time.sleep(.02)
+    except Exception as error: failure=error
+    try:
+        if proc.stdin is not None: proc.stdin.close()
+    except Exception as error:
+        if failure is None: failure=error
+    try: code=proc.wait(timeout=2)  # Direct Popen child only, no saved-group retry.
+    except Exception as error:
+        reap_error=str(error)
+        if failure is None: failure=error
+    if failure is None and (isinstance(code,bool) or not isinstance(code,int) or code!=-signal.SIGKILL): failure=ValueError('unexpected anchor terminal status: '+str(code))
+    if failure is not None:
+        failure.anchorExit=code if isinstance(code,int) and not isinstance(code,bool) else None
+        failure.reapError=reap_error
+        raise failure
     return code
 def child_receipt(path,anchor):
     if path.resolve()!=path: raise ValueError('untrusted child receipt path')
@@ -77,7 +90,7 @@ def verify_payload(payload,a):
     if digest(payload/'schema.json')!=SCHEMA_SHA: raise ValueError('protocol schema source mismatch')
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('--admission',required=True);parser.add_argument('--payload',required=True);args=parser.parse_args();root=None;proc=None;a=None
+    parser=argparse.ArgumentParser();parser.add_argument('--admission',required=True);parser.add_argument('--payload',required=True);args=parser.parse_args();root=None;proc=None;a=None;cleanup_attempted=False
     start=time.monotonic();deadline=start+75;r={'scope':'B-actual-paired-ws-synthetic-capture','outerExit':1,'childExit':None,'launched':False,'fixtureLaunchConfirmed':False}
     try:
         if not sys.flags.isolated or not hasattr(os,'WNOWAIT'): raise ValueError('absolute Python -I/WNOWAIT required')
@@ -102,16 +115,24 @@ def main():
             while time.monotonic()<until and not status.exists() and not leader_exited(proc.pid): scratch(root);time.sleep(.02)
             if status.exists():
                 value=child_receipt(status,proc.pid);r.update(childExit=value['childExit'],fixturePID=value['childPID'],fixtureLaunchConfirmed=True)
-            r['anchorExit']=cleanup(proc,min(deadline-10,time.monotonic()+2));proc=None
+            cleanup_attempted=True;r['anchorExit']=cleanup(proc,min(deadline-10,time.monotonic()+2));proc=None
         if r['childExit']!=0: raise ValueError('fixture failed')
         budget(deadline,time.monotonic(),reserve=5);v=subprocess.run([a['node'],str(payload/'collector.mjs'),str(root)],capture_output=True,text=True,timeout=min(3,deadline-time.monotonic()-5));r['collector']={'exit':v.returncode,'stdout':v.stdout,'stderr':v.stderr}
         if v.returncode: raise ValueError('collector refused')
         r.update(outerExit=0,scratchBytes=scratch(root),resultSha256=digest(root/'fixture-result.json'))
-    except Exception as e: r['error']=str(e)
+    except Exception as e:
+        r['error']=str(e)
+        if hasattr(e,'anchorExit'):r['anchorExit']=e.anchorExit
+        if getattr(e,'reapError',None) is not None:r['reapError']=e.reapError
     finally:
         if proc is not None:
-            try: r['anchorExit']=cleanup(proc,min(deadline-5,time.monotonic()+2))
-            except Exception as e: r['cleanupError']=str(e)
+            try:
+                if cleanup_attempted:r['anchorExit']=proc.wait(timeout=2)  # No further group signals.
+                else:
+                    cleanup_attempted=True;r['anchorExit']=cleanup(proc,min(deadline-5,time.monotonic()+2))
+            except Exception as e:
+                r['cleanupError']=str(e)
+                if hasattr(e,'anchorExit'):r['anchorExit']=e.anchorExit
         if r['launched']:
             try:
                 if deadline-time.monotonic()<3: raise ValueError('final census reserve exhausted')
