@@ -1,3 +1,5 @@
+import { PanePaintWsRoute } from "./pane-paint-ws-route.js";
+import type { PaintAdapter } from "./pane-painted-observation.js";
 import http from "node:http";
 import { splitResizeMatches, splitResizeIsNoOp, type SplitResizeExpectation, type SplitResizeGeometry, splitResizeGeometryIsValid } from "./split-resize.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -262,6 +264,8 @@ export class SurfaceWsServer {
   private readonly httpServer: http.Server;
   private readonly wss: WebSocketServer;
   private readonly socketMeta = new WeakMap<WebSocket, SocketMeta>();
+  private panePaintRoute: PanePaintWsRoute<WebSocket> | null = null;
+  private readonly ordinaryInFlight = new WeakMap<WebSocket, Map<string, number>>();
   private readonly locklessSessions = new Map<WebSocket, LocklessTransportSession>();
   private readonly mutationQueues = new Map<string, Promise<void>>();
   private nativePaneStatusRefresh: Promise<CompositorControlResponse | null> | null = null;
@@ -1051,6 +1055,23 @@ export class SurfaceWsServer {
     });
   }
 
+  // Unregistered private factory: no option, caller or capability may enable this prepared route.
+  private makePanePaintSourceRoute(adapter: (surfaceId: string, paneId: number) => PaintAdapter | null): PanePaintWsRoute<WebSocket> | null {
+    const enabled = false;
+    if (!enabled) return null;
+    return new PanePaintWsRoute({
+      enabled: true,
+      clock: { now: () => performance.now(), schedule: (callback, ms) => { const timer = setTimeout(callback, ms); return () => clearTimeout(timer); } },
+      pairedSurface: socket => this.locklessSessions.get(socket)?.surfaceId ?? null,
+      ordinaryIdRetained: (socket, id) => this.socketMeta.get(socket)?.cache.has(id) === true || this.ordinaryInFlight.get(socket)?.has(id) === true,
+      adapter,
+      open: socket => socket.readyState === WebSocket.OPEN,
+      bufferedBytes: socket => socket.bufferedAmount,
+      send: (socket, encoded) => this.send(socket, encoded),
+      terminate: socket => socket.close(4410, "diagnostic_publication_incomplete"),
+    });
+  }
+
   private async handleMessage(socket: WebSocket, raw: string): Promise<void> {
     const initialMeta = this.socketMeta.get(socket);
     let parsedRequest: Request | LocklessRequest;
@@ -1066,6 +1087,10 @@ export class SurfaceWsServer {
         },
       );
       socket.close(4410, "protocol_violation");
+      return;
+    }
+    if (this.panePaintRoute && (parsedRequest as { op: string }).op === "diagnostics.pane_paint.get") {
+      await this.panePaintRoute.handle(socket, parsedRequest);
       return;
     }
     if (
@@ -1119,7 +1144,24 @@ export class SurfaceWsServer {
     );
   }
 
-  private async handleLocklessMessage(
+  private async handleLocklessMessage(socket: WebSocket, request: LocklessRequest): Promise<void> {
+    if (!this.panePaintRoute) return this.handleOrdinaryLocklessMessage(socket, request);
+    if (this.panePaintRoute?.hasDiagnosticId(socket, request.id)) {
+      await this.send(socket, JSON.stringify(errorResponse(request.op, request.id as never,
+        "invalid_request_id_reuse", "Request ID is retained by the diagnostic metadata ledger")));
+      return;
+    }
+    let pending = this.ordinaryInFlight.get(socket);
+    if (!pending) { pending = new Map(); this.ordinaryInFlight.set(socket, pending); }
+    pending.set(request.id, (pending.get(request.id) ?? 0) + 1);
+    try { await this.handleOrdinaryLocklessMessage(socket, request); }
+    finally {
+      const count = pending.get(request.id) ?? 1;
+      if (count <= 1) pending.delete(request.id); else pending.set(request.id, count - 1);
+    }
+  }
+
+  private async handleOrdinaryLocklessMessage(
     socket: WebSocket,
     request: LocklessRequest,
   ): Promise<void> {
@@ -5496,6 +5538,8 @@ export class SurfaceWsServer {
   }
 
   private handleSocketClosed(socket: WebSocket): void {
+    this.panePaintRoute?.close(socket);
+    this.ordinaryInFlight.delete(socket);
     const locklessSession = this.locklessSessions.get(socket);
     if (locklessSession) {
       this.locklessSessions.delete(socket);

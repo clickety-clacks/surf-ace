@@ -847,3 +847,17 @@ export function validPanePaintOutcome(reply: unknown, request: unknown): boolean
     return true;
   } catch { return false; }
 }
+
+/** Existing ordinary error-envelope form, kept outside the immutable successful diagnostic schema. */
+export function validPanePaintError(value: unknown): boolean {
+  return check(value, { type: "object", additionalProperties: false,
+    required: ["v", "type", "op", "id", "sentAt", "ok", "error"], properties: {
+      v: { const: 1 }, type: { const: "response" }, op: { const: "diagnostics.pane_paint.get" },
+      id: { $ref: "#/$defs/RequestId" }, sentAt: { type: "integer", minimum: 0, maximum: Number.MAX_SAFE_INTEGER }, ok: { const: false },
+      error: { type: "object", additionalProperties: false, required: ["code", "message"], properties: {
+        code: { enum: ["not_paired", "invalid_payload", "invalid_request_id_reuse", "internal_error", "content_too_large"] },
+        message: { type: "string", minLength: 1, maxLength: 16384 },
+      } },
+    },
+  });
+}

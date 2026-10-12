@@ -59,7 +59,8 @@ export class PairedPanePaintService<C extends object> {
     const drain = () => { slot.pending.delete(promise); this.release(slot); };
     void promise.then(drain, drain); return promise;
   }
-  async handle(connection: C, input: unknown): Promise<Reply | null> {
+  async handle(connection: C, input: unknown, context?: { origin: number; clock: PaintClock; forceBusy?: boolean; deferCompletion?: (finish: () => void) => void }): Promise<Reply | null> {
+    const clock = context?.clock ?? this.clock;
     const object = input && typeof input === "object" ? input as Record<string, unknown> : null;
     const error = (code: string): Reply => ({ v: 1, type: "response", op: OP, id: typeof object?.id === "string" && /^[A-Za-z0-9._:-]{1,64}$/.test(object.id) ? object.id : "invalid", sentAt: Date.now(), ok: false, error: { code, message: code } });
     const surfaceId = this.ports.pairedSurface(connection);
@@ -74,21 +75,21 @@ export class PairedPanePaintService<C extends object> {
     if (!state) { state = { surfaceId, ids: new Map(), closed: false }; this.connections.set(connection, state); }
     if (state.ids.has(request.id) || this.ports.ordinaryIdRetained(connection, request.id)) return error("invalid_request_id_reuse");
     let origin: number;
-    try { origin = this.clock.now(); } catch { return error("internal_error"); }
+    try { origin = context?.origin ?? clock.now(); } catch { return error("internal_error"); }
     if (!Number.isFinite(origin) || origin < 0 || origin > Number.MAX_SAFE_INTEGER) return error("internal_error");
     const budget = payload.action === "describe" ? 2000 : payload.timeoutMs;
     let lastTime = origin, clockFailed = false;
     const now = () => {
       if (clockFailed) throw Error("invalid clock");
       let value: number;
-      try { value = this.clock.now(); } catch { clockFailed = true; throw Error("invalid clock"); }
+      try { value = clock.now(); } catch { clockFailed = true; throw Error("invalid clock"); }
       if (!Number.isFinite(value) || value < lastTime || value > Number.MAX_SAFE_INTEGER) { clockFailed = true; throw Error("invalid clock"); }
       lastTime = value; return value;
     };
     const deadline = origin + budget;
     if (!Number.isFinite(deadline) || deadline > Number.MAX_SAFE_INTEGER) return error("internal_error");
     const elapsed = () => now() - origin;
-    const checkedClock: PaintClock = { now, schedule: (callback, ms) => this.clock.schedule(callback, ms) };
+    const checkedClock: PaintClock = { now, schedule: (callback, ms) => clock.schedule(callback, ms) };
     const success = (result: Reply): Reply => ({ v: 1, type: "response", op: OP, id: request.id, sentAt: Date.now(), ok: true, payload: { request: payload, configuredBudgetMs: budget, ...FLAGS, ...result } });
     const refusal = (reason: string, stage = "admission", captures: unknown[] = [], checks: unknown[] = [], drain: string = "not-required") => {
       try { return success({ outcome: "refused", reason, stage, captures, checks, elapsedMs: elapsed(), nativeDrain: { state: drain } }); }
@@ -97,7 +98,7 @@ export class PairedPanePaintService<C extends object> {
     if (state.ids.size >= 1024) return refusal("busy");
     const entry: RecordEntry = { digest: createHash("sha256").update(canonical({ op: OP, payload })).digest("hex"), state: "completed", reason: "admission" };
     state.ids.set(request.id, entry);
-    if (state.slot || this.active >= 2) { entry.reason = "busy"; return refusal("busy"); }
+    if (context?.forceBusy || state.slot || this.active >= 2) { entry.reason = "busy"; return refusal("busy"); }
     const paneId = payload.action === "describe" ? payload.paneId : payload.expected.binding.paneId;
     const adapter = this.enabled ? this.ports.adapter(surfaceId, paneId) : null;
     if (!adapter) { entry.reason = "unsupported"; return refusal("unsupported"); }
@@ -200,6 +201,11 @@ export class PairedPanePaintService<C extends object> {
       }
       return reply;
     } catch { entry.reason = "internal_error"; return current() ? error("internal_error") : null; }
-    finally { entry.state = "completed"; slot.finished = true; this.release(slot); }
+    finally {
+      const finish = () => { entry.state = "completed"; slot.finished = true; this.release(slot); };
+      if (context?.deferCompletion) {
+        try { context.deferCompletion(finish); } catch { finish(); }
+      } else finish();
+    }
   }
 }
