@@ -273,10 +273,7 @@ class PaneLabelReuseModel {
       record.closeRevision = closeRevision;
     }
     this.nextClosedSequence += 1;
-    const closedSequence = Math.min(
-      this.nextClosedSequence,
-      ...nestedPaneTombstones.map((nested) => nested.closedSequence),
-    );
+    const closedSequence = this.nextClosedSequence;
     this.tombstones.set(tombstoneId, {
       id: tombstoneId,
       kind: "surface",
@@ -672,7 +669,7 @@ test("surface tombstone keeps every nested pane reserved until restored or recla
   assert.equal(model.chooseLabel(), 3, "the surface tombstone reserves all nested pane labels");
   assert.throws(() => model.restore(first), /not restorable from this tombstone/);
   const retainedSurface = model.tombstones.get(surfaceTombstone);
-  assert.equal(retainedSurface?.closedSequence, 1, "the aggregate retains the oldest nested retention position");
+  assert.equal(retainedSurface?.closedSequence, 2, "the surface keeps its fresh close-time retention position");
   assert.deepEqual(retainedSurface?.nestedPaneTombstones, [{
     id: "nested-pane-tombstone",
     kind: "pane",
@@ -705,6 +702,23 @@ test("surface tombstone keeps every nested pane reserved until restored or recla
   assert.equal(newFirst.paneLabel, 1);
   assert.equal(newSecond.paneLabel, 2);
   assert.ok(newFirst.allocationGeneration > first.allocationGeneration);
+});
+
+test("surface close keeps its fresh retention position ahead of an older unrelated tombstone", () => {
+  const model = new PaneLabelReuseModel();
+  const nestedChild = model.allocate(identity("interleaved-nested-child"));
+  const unrelated = model.allocate(identity("interleaved-unrelated"));
+  const liveChild = model.allocate(identity("interleaved-live-child"));
+  model.close(nestedChild, "interleaved-nested-tombstone", 30); // sequence 1
+  model.close(unrelated, "interleaved-unrelated-tombstone", 31); // sequence 2
+  model.closeSurface("interleaved-surface-tombstone", 32, [nestedChild, liveChild]); // sequence 3
+
+  const surface = model.tombstones.get("interleaved-surface-tombstone");
+  assert.equal(surface?.closedSequence, 3, "the parent uses the sequence assigned when the surface closes");
+  assert.equal(surface?.nestedPaneTombstones?.[0]?.closedSequence, 1, "the child keeps its original sequence as nested metadata");
+  assert.throws(() => model.reclaimTombstone("interleaved-surface-tombstone", 33), /oldest tombstone/);
+  assert.equal(model.reclaimTombstone("interleaved-unrelated-tombstone", 33), true);
+  assert.equal(model.reclaimTombstone("interleaved-surface-tombstone", 34), true);
 });
 
 test("unknown client reclamation persistence holds allocation until readback decides restore or retirement", () => {
