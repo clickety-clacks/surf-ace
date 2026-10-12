@@ -3,6 +3,7 @@ use serde_json::Value;
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::process::{Child, Command as ProcessCommand, Stdio};
+use std::sync::{mpsc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tungstenite::client::{client_with_config, uri_mode, IntoClientRequest};
@@ -339,6 +340,7 @@ fn resolve_addresses_bounded(
     if let Ok(address) = host.parse::<std::net::IpAddr>() {
         return Ok(vec![SocketAddr::new(address, port)]);
     }
+    let reaper = resolver_reaper_sender()?;
     let executable = std::env::current_exe()?;
     let child = ProcessCommand::new(executable)
         .arg("--_surf_ace_internal_resolve_dns")
@@ -347,22 +349,32 @@ fn resolve_addresses_bounded(
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()?;
-    wait_for_resolver_process(&mut ChildResolverProcess { child }, deadline)
+    wait_for_resolver_process(
+        &mut ChildResolverProcess {
+            child: Some(child),
+            reaper,
+        },
+        deadline,
+    )
 }
 
 trait ResolverProcess {
     fn try_wait_success(&mut self) -> io::Result<Option<bool>>;
     fn read_addresses(&mut self) -> io::Result<Vec<SocketAddr>>;
-    fn kill_and_reap(&mut self) -> io::Result<()>;
+    fn kill(&mut self) -> io::Result<()>;
+    fn retain_for_background_reaping(&mut self) -> io::Result<()>;
 }
 
 struct ChildResolverProcess {
-    child: Child,
+    child: Option<Child>,
+    reaper: &'static mpsc::Sender<Child>,
 }
 
 impl ResolverProcess for ChildResolverProcess {
     fn try_wait_success(&mut self) -> io::Result<Option<bool>> {
         self.child
+            .as_mut()
+            .ok_or_else(|| io::Error::other("dns_helper_ownership_transferred"))?
             .try_wait()
             .map(|status| status.map(|status| status.success()))
     }
@@ -370,6 +382,8 @@ impl ResolverProcess for ChildResolverProcess {
     fn read_addresses(&mut self) -> io::Result<Vec<SocketAddr>> {
         let mut output = String::new();
         self.child
+            .as_mut()
+            .ok_or_else(|| io::Error::other("dns_helper_ownership_transferred"))?
             .stdout
             .as_mut()
             .ok_or_else(|| io::Error::other("dns_helper_stdout_missing"))?
@@ -383,33 +397,65 @@ impl ResolverProcess for ChildResolverProcess {
             .collect()
     }
 
-    fn kill_and_reap(&mut self) -> io::Result<()> {
-        if self.child.try_wait()?.is_none() {
-            self.child.kill()?;
+    fn kill(&mut self) -> io::Result<()> {
+        self.child
+            .as_mut()
+            .ok_or_else(|| io::Error::other("dns_helper_ownership_transferred"))?
+            .kill()
+    }
+
+    fn retain_for_background_reaping(&mut self) -> io::Result<()> {
+        let child = self
+            .child
+            .take()
+            .ok_or_else(|| io::Error::other("dns_helper_ownership_already_transferred"))?;
+        match self.reaper.send(child) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                // The worker is intended to live for the process lifetime. If it
+                // nevertheless exits, keep the Child handle owned and report the
+                // failure instead of silently dropping an unreaped helper.
+                resolver_reaper_stalled_children()
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(error.0);
+                Err(io::Error::other("dns_reaper_unavailable_child_retained"))
+            }
         }
-        self.child.wait().map(|_| ())
     }
 }
+
+// Keep resolver work inside the common request deadline while reserving time to
+// terminate and reap its owned helper.
+const RESOLVER_CLEANUP_RESERVE_MAX: Duration = Duration::from_millis(100);
 
 fn wait_for_resolver_process(
     process: &mut impl ResolverProcess,
     deadline: Instant,
 ) -> io::Result<Vec<SocketAddr>> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    let cleanup_reserve = if remaining.is_zero() {
+        Duration::ZERO
+    } else {
+        Duration::from_millis(1)
+            .max(remaining / 10)
+            .min(RESOLVER_CLEANUP_RESERVE_MAX)
+    };
+    let work_deadline = deadline
+        .checked_sub(cleanup_reserve)
+        .unwrap_or_else(Instant::now);
     loop {
-        if Instant::now() >= deadline {
-            process.kill_and_reap()?;
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "dns_deadline_exceeded",
-            ));
+        if Instant::now() >= work_deadline {
+            let timeout = io::Error::new(io::ErrorKind::TimedOut, "dns_deadline_exceeded");
+            return Err(cleanup_after_failure(process, timeout, deadline));
         }
-        let status = process.try_wait_success()?;
-        if Instant::now() >= deadline {
-            process.kill_and_reap()?;
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "dns_deadline_exceeded",
-            ));
+        let status = match process.try_wait_success() {
+            Ok(status) => status,
+            Err(primary) => return Err(cleanup_after_failure(process, primary, deadline)),
+        };
+        if Instant::now() >= work_deadline {
+            let timeout = io::Error::new(io::ErrorKind::TimedOut, "dns_deadline_exceeded");
+            return Err(cleanup_after_failure(process, timeout, deadline));
         }
         if let Some(success) = status {
             if !success {
@@ -425,9 +471,96 @@ fn wait_for_resolver_process(
             return Ok(addresses);
         }
         thread::sleep(
-            Duration::from_millis(5).min(deadline.saturating_duration_since(Instant::now())),
+            Duration::from_millis(5).min(work_deadline.saturating_duration_since(Instant::now())),
         );
     }
+}
+
+fn cleanup_after_failure(
+    process: &mut impl ResolverProcess,
+    primary: io::Error,
+    cleanup_deadline: Instant,
+) -> io::Error {
+    match kill_and_reap_bounded(process, cleanup_deadline) {
+        Ok(()) => primary,
+        Err(cleanup) => io::Error::new(
+            primary.kind(),
+            format!("{primary}; dns_helper_cleanup_failed: {cleanup}"),
+        ),
+    }
+}
+
+fn kill_and_reap_bounded(
+    process: &mut impl ResolverProcess,
+    cleanup_deadline: Instant,
+) -> io::Result<()> {
+    let mut cleanup_errors = Vec::new();
+    match process.try_wait_success() {
+        Ok(Some(_)) => return Ok(()),
+        Ok(None) => {}
+        Err(error) => cleanup_errors.push(format!("poll:{error}")),
+    }
+    if let Err(error) = process.kill() {
+        cleanup_errors.push(format!("kill:{error}"));
+    }
+
+    loop {
+        match process.try_wait_success() {
+            Ok(Some(_)) => {
+                return if cleanup_errors.is_empty() {
+                    Ok(())
+                } else {
+                    Err(io::Error::other(cleanup_errors.join("; ")))
+                };
+            }
+            Ok(None) => {}
+            Err(error) => cleanup_errors.push(format!("poll:{error}")),
+        }
+        let remaining = cleanup_deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            match process.retain_for_background_reaping() {
+                Ok(()) => cleanup_errors.push("ownership transferred to background reaper".into()),
+                Err(error) => cleanup_errors.push(format!("ownership retention:{error}")),
+            }
+            cleanup_errors.push("dns_reap_deadline_exceeded".into());
+            return Err(io::Error::other(cleanup_errors.join("; ")));
+        }
+        thread::sleep(Duration::from_millis(5).min(remaining));
+    }
+}
+
+static RESOLVER_REAPER: OnceLock<Result<mpsc::Sender<Child>, String>> = OnceLock::new();
+static RESOLVER_REAPER_STALLED_CHILDREN: Mutex<Vec<Child>> = Mutex::new(Vec::new());
+
+fn resolver_reaper_sender() -> io::Result<&'static mpsc::Sender<Child>> {
+    // Initialize ownership transfer before spawning a helper, so deadline
+    // cleanup never has to drop an unresolved Child handle.
+    RESOLVER_REAPER
+        .get_or_init(|| {
+            let (sender, receiver) = mpsc::channel::<Child>();
+            thread::Builder::new()
+                .name("surf-ace-dns-reaper".into())
+                .spawn(move || {
+                    while let Ok(mut child) = receiver.recv() {
+                        loop {
+                            match child.try_wait() {
+                                Ok(Some(_)) => break,
+                                Ok(None) | Err(_) => {}
+                            }
+                            let _ = child.kill();
+                            thread::sleep(Duration::from_millis(50));
+                        }
+                    }
+                })
+                .map_err(|error| error.to_string())?;
+            Ok(sender)
+        })
+        .as_ref()
+        .map_err(|error| io::Error::other(error.clone()))
+}
+
+fn resolver_reaper_stalled_children() -> &'static Mutex<Vec<Child>> {
+    &RESOLVER_REAPER_STALLED_CHILDREN
 }
 
 /// Entry point used only by the CLI's isolated DNS helper process.
@@ -471,15 +604,22 @@ mod deadline_tests {
         }
         impl ResolverProcess for PendingResolver {
             fn try_wait_success(&mut self) -> io::Result<Option<bool>> {
-                Ok(None)
+                if self.killed {
+                    self.reaped = true;
+                    Ok(Some(false))
+                } else {
+                    Ok(None)
+                }
             }
             fn read_addresses(&mut self) -> io::Result<Vec<SocketAddr>> {
                 unreachable!()
             }
-            fn kill_and_reap(&mut self) -> io::Result<()> {
+            fn kill(&mut self) -> io::Result<()> {
                 self.killed = true;
-                self.reaped = true;
                 Ok(())
+            }
+            fn retain_for_background_reaping(&mut self) -> io::Result<()> {
+                unreachable!("the local kill should reap before the cleanup deadline")
             }
         }
         let mut resolver = PendingResolver {
@@ -492,6 +632,102 @@ mod deadline_tests {
         assert!(resolver.killed);
         assert!(resolver.reaped);
         assert!(start.elapsed() < Duration::from_millis(250));
+    }
+
+    #[test]
+    fn resolver_poll_failure_attempts_cleanup_and_preserves_the_primary_error() {
+        struct PollFailureResolver {
+            polls: usize,
+            killed: bool,
+            reaped: bool,
+            cleanup_poll_failed: bool,
+        }
+        impl ResolverProcess for PollFailureResolver {
+            fn try_wait_success(&mut self) -> io::Result<Option<bool>> {
+                self.polls += 1;
+                if self.killed {
+                    if !self.cleanup_poll_failed {
+                        self.cleanup_poll_failed = true;
+                        return Err(io::Error::other("reap_poll_failure"));
+                    }
+                    self.reaped = true;
+                    Ok(Some(false))
+                } else {
+                    Err(io::Error::new(io::ErrorKind::BrokenPipe, "poll_failure"))
+                }
+            }
+            fn read_addresses(&mut self) -> io::Result<Vec<SocketAddr>> {
+                unreachable!()
+            }
+            fn kill(&mut self) -> io::Result<()> {
+                self.killed = true;
+                Ok(())
+            }
+            fn retain_for_background_reaping(&mut self) -> io::Result<()> {
+                unreachable!("cleanup should reap after the poll error")
+            }
+        }
+
+        let mut resolver = PollFailureResolver {
+            polls: 0,
+            killed: false,
+            reaped: false,
+            cleanup_poll_failed: false,
+        };
+        let result =
+            wait_for_resolver_process(&mut resolver, Instant::now() + Duration::from_millis(100))
+                .unwrap_err();
+        assert_eq!(result.kind(), io::ErrorKind::BrokenPipe);
+        assert!(result.to_string().contains("poll_failure"));
+        assert!(result.to_string().contains("reap_poll_failure"));
+        assert!(resolver.killed);
+        assert!(resolver.reaped);
+        assert!(resolver.polls >= 2);
+    }
+
+    #[test]
+    fn resolver_cleanup_bounds_delayed_reap_and_retains_the_child_after_kill_error() {
+        struct DelayedReapResolver {
+            killed_at: Option<Instant>,
+            retained: bool,
+        }
+        impl ResolverProcess for DelayedReapResolver {
+            fn try_wait_success(&mut self) -> io::Result<Option<bool>> {
+                Ok(self.killed_at.and_then(|killed_at| {
+                    (killed_at.elapsed() >= Duration::from_millis(150)).then_some(false)
+                }))
+            }
+            fn read_addresses(&mut self) -> io::Result<Vec<SocketAddr>> {
+                unreachable!()
+            }
+            fn kill(&mut self) -> io::Result<()> {
+                self.killed_at = Some(Instant::now());
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "kill_failure",
+                ))
+            }
+            fn retain_for_background_reaping(&mut self) -> io::Result<()> {
+                self.retained = true;
+                Ok(())
+            }
+        }
+
+        let mut resolver = DelayedReapResolver {
+            killed_at: None,
+            retained: false,
+        };
+        let start = Instant::now();
+        let result = wait_for_resolver_process(&mut resolver, start + Duration::from_millis(40))
+            .unwrap_err();
+        assert_eq!(result.kind(), io::ErrorKind::TimedOut);
+        assert!(result.to_string().contains("dns_deadline_exceeded"));
+        assert!(result.to_string().contains("kill_failure"));
+        assert!(
+            resolver.retained,
+            "bounded cleanup must transfer unresolved ownership"
+        );
+        assert!(start.elapsed() < Duration::from_millis(120));
     }
 
     #[test]

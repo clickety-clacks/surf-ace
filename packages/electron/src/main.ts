@@ -259,6 +259,7 @@ function createServer(coreValue: SurfaceCore): SurfaceWsServer {
       hostName: shortHostName(),
       getOverlayDiagnostics: (surfaceId) => overlayDiagnostics.get(surfaceId) ?? null,
       getRuntimeAppBinding: refreshRuntimeAppBindingDiagnostics,
+      beginApplicationStateMutation: () => persistentStateWriteReadiness.beginAuthorityMutation(),
       isApplicationStateReady: () => persistentStateWriteReadiness.isReady &&
         !persistentStateWriteGuard && !persistentStateOutcomeUnknown,
       onNativeMaterialized: (surfaceId, materialization) => {

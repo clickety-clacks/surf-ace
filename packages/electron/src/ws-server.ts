@@ -150,6 +150,7 @@ export type SurfaceWsServerOptions = {
   onNativeReleased?: (surfaceId: string, paneIds: string[]) => Promise<void> | void;
   persistLocklessState?: () => Promise<void>;
   isApplicationStateReady?: () => boolean;
+  beginApplicationStateMutation?: () => () => void;
   port: number;
   protocolVersion?: number;
   viewport: () => SurfaceViewport;
@@ -259,6 +260,7 @@ export class SurfaceWsServer {
   private readonly protocolVersion: number;
   private readonly persistLocklessState: () => Promise<void>;
   private readonly isApplicationStateReady: () => boolean;
+  private readonly beginApplicationStateMutation: () => () => void;
   private readonly capturePaneImage: SurfaceWsServerOptions["capturePaneImage"];
   private readonly viewportProvider: SurfaceWsServerOptions["viewport"];
   private readonly pendingBrowserUrlApplies = new Map<string, PendingBrowserUrlApply>();
@@ -321,6 +323,7 @@ export class SurfaceWsServer {
       }
     };
     this.isApplicationStateReady = options.isApplicationStateReady ?? (() => true);
+    this.beginApplicationStateMutation = options.beginApplicationStateMutation ?? (() => () => {});
     this.protocolVersion = options.protocolVersion ?? 1;
     this.viewportProvider = options.viewport;
     this.wsPath = options.wsPath ?? "/ws";
@@ -1171,6 +1174,26 @@ export class SurfaceWsServer {
   }
 
   private async handleOrdinaryLocklessMessage(
+    socket: WebSocket,
+    request: LocklessRequest,
+  ): Promise<void> {
+    const session = this.locklessSessions.get(socket);
+    // surface.describe bypasses the authority queue, so fence the full mutation
+    // dispatch through its durable receipt write and response.
+    const changesApplicationState = request.op === "pair.request" ||
+      (session !== undefined && locklessOperationMutates(request.op));
+    if (!changesApplicationState) {
+      return await this.handleOrdinaryLocklessMessageBody(socket, request);
+    }
+    const finishMutation = this.beginApplicationStateMutation();
+    try {
+      await this.handleOrdinaryLocklessMessageBody(socket, request);
+    } finally {
+      finishMutation();
+    }
+  }
+
+  private async handleOrdinaryLocklessMessageBody(
     socket: WebSocket,
     request: LocklessRequest,
   ): Promise<void> {
@@ -3590,10 +3613,14 @@ export class SurfaceWsServer {
     });
     const queued = previous.catch(() => undefined).then(() => current);
     this.mutationQueues.set(surfaceId, queued);
-    await previous.catch(() => undefined);
+    // Renderer and lifecycle mutations also need to hide candidate geometry
+    // while they wait for resolution, apply native geometry, or roll back.
+    const finishMutation = this.beginApplicationStateMutation();
     try {
+      await previous.catch(() => undefined);
       return await operation();
     } finally {
+      finishMutation();
       releaseQueue();
       if (this.mutationQueues.get(surfaceId) === queued) {
         this.mutationQueues.delete(surfaceId);
