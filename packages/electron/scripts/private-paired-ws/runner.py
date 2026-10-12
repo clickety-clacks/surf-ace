@@ -24,6 +24,10 @@ def budget(deadline,now,reserve=15):
     return min(60,value)
 def census(value,nonce,utc):
     if value.get('nonce')!=nonce or value.get('runtimeQualified') is not True or value.get('clear') is not True or value.get('conflicts')!=[] or value.get('ownedRemaining')!=[] or not 0<=number(utc)-number(value.get('observedEpoch'))<=2: raise ValueError('unqualified/stale/contested census')
+def census_command(a,policy,nonce,owned_pgid=None):
+    args=[sys.executable,'-I',a['census'],'--nonce',nonce,'--policy',str(policy)]
+    if owned_pgid is not None: args += ['--owned-pgid',str(owned_pgid)]
+    return args
 def leader_exited(pid): return os.waitid(os.P_PID,pid,os.WEXITED|os.WNOWAIT|os.WNOHANG) is not None
 def cleanup(proc,deadline):
     # All group signals occur before wait reaps the Popen-created session leader.
@@ -65,7 +69,7 @@ def main():
             if digest(a[key])!=a[key+'Sha256']: raise ValueError('binary pin mismatch')
         v=subprocess.run([a['node'],'--version'],capture_output=True,text=True,timeout=2)
         if v.returncode or v.stdout.strip()!=a['nodeVersion']: raise ValueError('Node version mismatch')
-        nonce=os.urandom(16).hex();c=subprocess.run([a['census'],'--nonce',nonce],capture_output=True,text=True,timeout=3);r['preCensus']={'exit':c.returncode,'output':c.stdout}
+        nonce=os.urandom(16).hex();c=subprocess.run(census_command(a,p,nonce),capture_output=True,text=True,timeout=3);r['preCensus']={'exit':c.returncode,'output':c.stdout}
         if c.returncode: raise ValueError('pre-census failed')
         census(json.loads(c.stdout),nonce,time.time())
         root=pathlib.Path(tempfile.mkdtemp(prefix='paired-ws-B-',dir='/tmp')).resolve();os.chmod(root,0o700);(root/'runtime.json').write_text(json.dumps(a));os.chmod(root/'runtime.json',0o600)
@@ -88,7 +92,7 @@ def main():
         if r['launched']:
             try:
                 if deadline-time.monotonic()<3: raise ValueError('final census reserve exhausted')
-                nonce=os.urandom(16).hex();c=subprocess.run([a['census'],'--nonce',nonce],capture_output=True,text=True,timeout=3);r['postCensus']={'exit':c.returncode,'output':c.stdout}
+                nonce=os.urandom(16).hex();c=subprocess.run(census_command(a,p,nonce,r['pgid']),capture_output=True,text=True,timeout=3);r['postCensus']={'exit':c.returncode,'output':c.stdout}
                 if c.returncode: raise ValueError('final census failed')
                 census(json.loads(c.stdout),nonce,time.time())
             except Exception as e: r['outerExit']=1;r['censusError']=str(e)
