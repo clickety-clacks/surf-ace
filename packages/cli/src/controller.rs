@@ -340,7 +340,18 @@ fn execute_locked(
             .insert("surfaceId".into(), Value::String(surface_id.into()));
     }
     let pair = request_without_correlation(wire, "pair.request", pair_payload)?;
-    let pair_payload = successful_payload(&pair.response, "pair.request")?;
+    let pane_describe = invocation.command == crate::command::Command::PaneDescribe;
+    let pair_payload = if pane_describe {
+        match pane_describe_successful_payload(&pair.response, "pair.request") {
+            Ok(payload) => payload,
+            Err(error) => {
+                let _ = wire.close();
+                return Err(error);
+            }
+        }
+    } else {
+        successful_payload(&pair.response, "pair.request")?
+    };
     if pair_payload.get("mode").and_then(Value::as_str) != Some("lockless") {
         return Err(CliError::Protocol(
             "lockless_capability_not_admitted".into(),
@@ -404,8 +415,9 @@ fn execute_locked(
     let result = if let Some((surface_id, pane_id)) = pane_target {
         let pane_result = (|| {
             let response = request_without_correlation(wire, op, payload)?;
+            let response_payload =
+                pane_describe_successful_payload(&response.response, "panes.list")?;
             apply_wire_events(root, &response)?;
-            let response_payload = successful_payload(&response.response, "panes.list")?;
             describe_pane(response_payload, &surface_id, pane_id)
         })();
         match pane_result {
@@ -1612,6 +1624,49 @@ fn successful_payload<'a>(
             operation: operation.into(),
             code: code.into(),
         });
+    }
+    response
+        .payload
+        .as_ref()
+        .and_then(Value::as_object)
+        .ok_or_else(|| CliError::Protocol(format!("invalid_response:{operation}")))
+}
+
+fn pane_describe_successful_payload<'a>(
+    response: &'a Envelope,
+    operation: &str,
+) -> Result<&'a Map<String, Value>, CliError> {
+    if response.envelope_type != "response" {
+        return Err(CliError::Protocol(format!(
+            "invalid_response_type:{operation}"
+        )));
+    }
+    if response.v != 1 {
+        return Err(CliError::Protocol(format!(
+            "unsupported_response_version:{operation}"
+        )));
+    }
+    if response.op != operation {
+        return Err(CliError::Protocol(format!(
+            "response_operation_mismatch:{operation}"
+        )));
+    }
+    if response.ok == Some(false) {
+        let code = response
+            .error
+            .as_ref()
+            .and_then(|error| error.get("code"))
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        return Err(CliError::Rejected {
+            operation: operation.into(),
+            code: code.into(),
+        });
+    }
+    if response.ok != Some(true) {
+        return Err(CliError::Protocol(format!(
+            "missing_response_success:{operation}"
+        )));
     }
     response
         .payload

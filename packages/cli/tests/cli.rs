@@ -21,16 +21,35 @@ struct FakeWire {
     payloads: Vec<(String, Value)>,
     fail_after_send_on: Option<String>,
     pair_rejection: Option<Envelope>,
+    pair_response_fault: Option<ResponseEnvelopeFault>,
     pair_controller_instance_id_override: Option<Value>,
     pair_surface_id_override: Option<Value>,
     panes_list_payload: Value,
     panes_list_rejection: Option<String>,
+    panes_list_response_fault: Option<ResponseEnvelopeFault>,
     receipt_capacity_on: Option<String>,
     target_precommit_error: Option<(String, Option<String>)>,
     committed_rejection_on: Option<String>,
     resolutions: Vec<Value>,
     scopes: Vec<Value>,
     response_events: BTreeMap<String, Vec<Envelope>>,
+}
+
+#[derive(Clone, Copy)]
+enum ResponseEnvelopeFault {
+    MissingSuccess,
+    WrongOperation,
+    UnsupportedVersion,
+}
+
+impl ResponseEnvelopeFault {
+    fn apply(self, response: &mut Envelope) {
+        match self {
+            Self::MissingSuccess => response.ok = None,
+            Self::WrongOperation => response.op = "unrelated.operation".into(),
+            Self::UnsupportedVersion => response.v = 2,
+        }
+    }
 }
 
 impl FakeWire {
@@ -42,6 +61,7 @@ impl FakeWire {
             payloads: vec![],
             fail_after_send_on: None,
             pair_rejection: None,
+            pair_response_fault: None,
             pair_controller_instance_id_override: None,
             pair_surface_id_override: None,
             panes_list_payload: json!({
@@ -58,6 +78,7 @@ impl FakeWire {
                 }]
             }),
             panes_list_rejection: None,
+            panes_list_response_fault: None,
             receipt_capacity_on: None,
             target_precommit_error: None,
             committed_rejection_on: None,
@@ -113,7 +134,7 @@ impl DirectWire for FakeWire {
                 return Ok(WireResponse {
                     response: Envelope {
                         id: Some(id.into()),
-                        op: "panes.list.result".into(),
+                        op: "panes.list".into(),
                         payload: Some(json!({})),
                         envelope_type: "response".into(),
                         v: 1,
@@ -183,10 +204,11 @@ impl DirectWire for FakeWire {
             });
         }
         let mut response = match op {
-            "pair.request" => Self::response(
-                id,
-                "pair.response",
-                json!({
+            "pair.request" => {
+                let mut response = Self::response(
+                    id,
+                    "pair.request",
+                    json!({
                     "capabilities": {},
                     "controllerInstanceId": self
                         .pair_controller_instance_id_override
@@ -207,8 +229,13 @@ impl DirectWire for FakeWire {
                         .clone()
                         .unwrap_or_else(|| payload.get("surfaceId").cloned().unwrap_or(Value::Null)),
                     "surfaceSetRevision": 1
-                }),
-            ),
+                    }),
+                );
+                if let Some(fault) = self.pair_response_fault {
+                    fault.apply(&mut response.response);
+                }
+                response
+            }
             "operation.receipt.sync" => Self::response(
                 id,
                 "operation.receipt.sync.result",
@@ -228,7 +255,12 @@ impl DirectWire for FakeWire {
                 json!({ "surfaces": [{ "surfaceId": "sf_1" }] }),
             ),
             "panes.list" => {
-                Self::response(id, "panes.list.result", self.panes_list_payload.clone())
+                let mut response =
+                    Self::response(id, "panes.list", self.panes_list_payload.clone());
+                if let Some(fault) = self.panes_list_response_fault {
+                    fault.apply(&mut response.response);
+                }
+                response
             }
             "snapshot.get" => {
                 Self::response(id, "snapshot.result", json!({ "snapshotId": "sn_1" }))
@@ -2296,6 +2328,60 @@ fn pane_describe_reuses_one_controller_and_uses_one_surface_scoped_panes_list_re
 }
 
 #[test]
+fn pane_describe_rejects_malformed_success_envelopes_and_retires_connection() {
+    let temp = TempDir::new().unwrap();
+    let mut initialize = FakeWire::ordinary();
+    let controller_id =
+        execute_with_wire(invocation(&temp, Command::List, json!({})), &mut initialize)
+            .unwrap()
+            .controller_instance_id
+            .unwrap();
+    let input = pane_describe_input(&controller_id, "sf_1", 1);
+
+    let faults = [
+        (
+            ResponseEnvelopeFault::MissingSuccess,
+            "missing_response_success:{}",
+        ),
+        (
+            ResponseEnvelopeFault::WrongOperation,
+            "response_operation_mismatch:{}",
+        ),
+        (
+            ResponseEnvelopeFault::UnsupportedVersion,
+            "unsupported_response_version:{}",
+        ),
+    ];
+    for (fault, error_template) in faults {
+        let mut pair = FakeWire::ordinary();
+        pair.pair_response_fault = Some(fault);
+        let error = execute_with_wire(
+            invocation(&temp, Command::PaneDescribe, input.clone()),
+            &mut pair,
+        )
+        .unwrap_err();
+        let expected = error_template.replace("{}", "pair.request");
+        assert!(matches!(error, CliError::Protocol(message) if message == expected));
+        assert_eq!(pair.operations, vec!["pair.request"]);
+        assert_eq!(pair.close_count, 1);
+    }
+
+    for (fault, error_template) in faults {
+        let mut panes = FakeWire::ordinary();
+        panes.panes_list_response_fault = Some(fault);
+        let error = execute_with_wire(
+            invocation(&temp, Command::PaneDescribe, input.clone()),
+            &mut panes,
+        )
+        .unwrap_err();
+        let expected = error_template.replace("{}", "panes.list");
+        assert!(matches!(error, CliError::Protocol(message) if message == expected));
+        assert_eq!(panes.operations, vec!["pair.request", "panes.list"]);
+        assert_eq!(panes.close_count, 1);
+    }
+}
+
+#[test]
 fn pane_describe_preserves_stale_target_and_never_invents_an_epoch() {
     let temp = TempDir::new().unwrap();
     let mut initialize = FakeWire::ordinary();
@@ -2492,7 +2578,7 @@ fn pane_describe_refuses_duplicate_live_controller_wrong_surface_unpaired_and_di
     let mut duplicate = FakeWire::ordinary();
     duplicate.pair_rejection = Some(Envelope {
         id: Some("rq_duplicate".into()),
-        op: "pair.response".into(),
+        op: "pair.request".into(),
         payload: Some(json!({})),
         envelope_type: "response".into(),
         v: 1,
@@ -2690,7 +2776,7 @@ fn pane_describe_production_path_uses_one_sequential_same_root_surface_pair() {
         send_response(
             &mut socket,
             pair["id"].as_str().unwrap(),
-            "pair.response",
+            "pair.request",
             paired,
         );
 
@@ -2700,7 +2786,7 @@ fn pane_describe_production_path_uses_one_sequential_same_root_surface_pair() {
         send_response(
             &mut socket,
             panes["id"].as_str().unwrap(),
-            "panes.list.result",
+            "panes.list",
             json!({
                 "panes": [{
                     "paneId": 1,
