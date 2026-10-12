@@ -11,10 +11,10 @@ def admission(a,utc):
     number(utc)
     if a.get('executionAuthorized') is not True or a.get('productSource')!=PRODUCT or a.get('scope')!='B-actual-paired-ws-synthetic-capture' or not a.get('slotId'): raise ValueError('exact B admission required')
     if not number(a.get('startEpoch'))<=utc or number(a.get('endEpoch'))-utc<120: raise ValueError('slot expired/short')
-    for key in ['nodeSha256','censusSha256','manifestSha256']:
+    for key in ['nodeSha256','censusSha256','supervisorSha256','manifestSha256']:
         v=a.get(key)
         if not isinstance(v,str) or len(v)!=64 or any(c not in '0123456789abcdef' for c in v): raise ValueError('missing pin '+key)
-    for key in ['node','census']:
+    for key in ['node','census','supervisor']:
         p=a.get(key)
         if not isinstance(p,str) or not p.startswith('/') or os.path.normpath(p)!=p: raise ValueError('absolute pinned executable')
     if not isinstance(a.get('nodeVersion'),str) or not a['nodeVersion'].startswith('v24.'): raise ValueError('Node24 version required')
@@ -30,15 +30,33 @@ def census_command(a,policy,nonce,owned_pgid=None):
     return args
 def leader_exited(pid): return os.waitid(os.P_PID,pid,os.WEXITED|os.WNOWAIT|os.WNOHANG) is not None
 def cleanup(proc,deadline):
-    # All group signals occur before wait reaps the Popen-created session leader.
-    if os.getpgid(proc.pid)!=proc.pid: raise ValueError('owned group identity lost')
+    # The held anchor is required to be live at EACH signal, not merely unreaped.
     for sig in [signal.SIGTERM,signal.SIGKILL]:
+        if leader_exited(proc.pid): raise ValueError('owned live anchor exited before cleanup')
+        if os.getpgid(proc.pid)!=proc.pid: raise ValueError('owned group identity lost')
         try: os.killpg(proc.pid,sig)
         except ProcessLookupError: pass
         if sig==signal.SIGTERM:
             end=min(deadline,time.monotonic()+1)
             while time.monotonic()<end and not leader_exited(proc.pid): time.sleep(.02)
-    return proc.wait(timeout=2)
+    code=proc.wait(timeout=2)
+    if proc.stdin is not None: proc.stdin.close()
+    return code
+def child_receipt(path,anchor):
+    if path.resolve()!=path: raise ValueError('untrusted child receipt path')
+    fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
+    try:
+        info=os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid!=os.getuid() or info.st_size>2048: raise ValueError('untrusted child receipt file')
+        raw=os.read(fd,2049)
+        if len(raw)>2048: raise ValueError('oversized child receipt')
+        value=json.loads(raw)
+    finally: os.close(fd)
+    if not isinstance(value,dict): raise ValueError('invalid child receipt object')
+    if value.get('anchorPID')!=anchor or value.get('pgid')!=anchor: raise ValueError('unowned child receipt')
+    pid=value.get('childPID');code=value.get('childExit')
+    if isinstance(pid,bool) or not isinstance(pid,int) or pid<=1 or pid==anchor or isinstance(code,bool) or not isinstance(code,int): raise ValueError('invalid child receipt')
+    return value
 def scratch(root):
     total=0
     for p in root.rglob('*'):
@@ -58,14 +76,14 @@ def verify_payload(payload,a):
 
 def main():
     parser=argparse.ArgumentParser();parser.add_argument('--admission',required=True);parser.add_argument('--payload',required=True);args=parser.parse_args();root=None;proc=None;a=None
-    start=time.monotonic();deadline=start+75;r={'scope':'B-actual-paired-ws-synthetic-capture','outerExit':1,'childExit':None,'launched':False}
+    start=time.monotonic();deadline=start+75;r={'scope':'B-actual-paired-ws-synthetic-capture','outerExit':1,'childExit':None,'launched':False,'fixtureLaunchConfirmed':False}
     try:
         if not sys.flags.isolated or not hasattr(os,'WNOWAIT'): raise ValueError('absolute Python -I/WNOWAIT required')
         p=pathlib.Path(args.admission);info=p.lstat()
         if not stat.S_ISREG(info.st_mode) or info.st_uid!=os.getuid() or info.st_mode&0o077: raise ValueError('own regular0600 admission')
         a=json.loads(p.read_text());admission(a,time.time());payload=pathlib.Path(args.payload)
         verify_payload(payload,a)
-        for key in ['node','census']:
+        for key in ['node','census','supervisor']:
             if digest(a[key])!=a[key+'Sha256']: raise ValueError('binary pin mismatch')
         v=subprocess.run([a['node'],'--version'],capture_output=True,text=True,timeout=2)
         if v.returncode or v.stdout.strip()!=a['nodeVersion']: raise ValueError('Node version mismatch')
@@ -77,9 +95,12 @@ def main():
         # Final gate after all preflight/root work; retain cleanup, collector, census and persistence reserve.
         admission(a,time.time());seconds=budget(deadline,time.monotonic())
         with (root/'fixture.log').open('wb') as log:
-            proc=subprocess.Popen([a['node'],str(payload/'app/fixture.mjs')],env=env,stdout=log,stderr=subprocess.STDOUT,start_new_session=True);r.update(launched=True,pid=proc.pid,pgid=proc.pid,root=str(root));until=min(deadline-15,time.monotonic()+seconds)
-            while time.monotonic()<until and not leader_exited(proc.pid): scratch(root);time.sleep(.02)
-            r['childExit']=cleanup(proc,min(deadline-10,time.monotonic()+2));proc=None
+            status=root/'child-receipt.json'
+            proc=subprocess.Popen([sys.executable,'-I',a['supervisor'],'--receipt',str(status),'--hold-seconds',str(seconds+5),a['node'],str(payload/'app/fixture.mjs')],env=env,stdin=subprocess.PIPE,stdout=log,stderr=subprocess.STDOUT,start_new_session=True);r.update(launched=True,pid=proc.pid,pgid=proc.pid,root=str(root));until=min(deadline-15,time.monotonic()+seconds)
+            while time.monotonic()<until and not status.exists() and not leader_exited(proc.pid): scratch(root);time.sleep(.02)
+            if status.exists():
+                value=child_receipt(status,proc.pid);r.update(childExit=value['childExit'],fixturePID=value['childPID'],fixtureLaunchConfirmed=True)
+            r['anchorExit']=cleanup(proc,min(deadline-10,time.monotonic()+2));proc=None
         if r['childExit']!=0: raise ValueError('fixture failed')
         budget(deadline,time.monotonic(),reserve=5);v=subprocess.run([a['node'],str(payload/'collector.mjs'),str(root)],capture_output=True,text=True,timeout=min(3,deadline-time.monotonic()-5));r['collector']={'exit':v.returncode,'stdout':v.stdout,'stderr':v.stderr}
         if v.returncode: raise ValueError('collector refused')
@@ -87,7 +108,7 @@ def main():
     except Exception as e: r['error']=str(e)
     finally:
         if proc is not None:
-            try: r['childExit']=cleanup(proc,min(deadline-5,time.monotonic()+2))
+            try: r['anchorExit']=cleanup(proc,min(deadline-5,time.monotonic()+2))
             except Exception as e: r['cleanupError']=str(e)
         if r['launched']:
             try:

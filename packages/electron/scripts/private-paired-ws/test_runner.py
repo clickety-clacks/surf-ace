@@ -1,10 +1,10 @@
 import importlib.util,pathlib,unittest,unittest.mock as mock,signal,tempfile,json,hashlib
 spec=importlib.util.spec_from_file_location('runner',pathlib.Path(__file__).with_name('runner.py'));r=importlib.util.module_from_spec(spec);spec.loader.exec_module(r)
-def valid(): return dict(executionAuthorized=True,productSource=r.PRODUCT,scope='B-actual-paired-ws-synthetic-capture',slotId='owned-test',startEpoch=0,endEpoch=300,node='/opt/homebrew/bin/node',census='/private/tmp/owned-census',nodeVersion='v24.3.0',nodeSha256='a'*64,censusSha256='b'*64,manifestSha256='c'*64)
+def valid(): return dict(executionAuthorized=True,productSource=r.PRODUCT,scope='B-actual-paired-ws-synthetic-capture',slotId='owned-test',startEpoch=0,endEpoch=300,node='/opt/homebrew/bin/node',census='/private/tmp/owned-census',supervisor='/private/tmp/owned-supervisor',nodeVersion='v24.3.0',nodeSha256='a'*64,censusSha256='b'*64,supervisorSha256='d'*64,manifestSha256='c'*64)
 class Controls(unittest.TestCase):
     def test_exact_scope_and_source(self):
         r.admission(valid(),100)
-        for key,value in [('executionAuthorized',False),('scope','A'),('productSource','stale'),('nodeVersion','v22.0.0'),('nodeSha256','')]:
+        for key,value in [('executionAuthorized',False),('scope','A'),('productSource','stale'),('nodeVersion','v22.0.0'),('nodeSha256',''),('supervisor','relative'),('supervisorSha256','')]:
             a=valid();a[key]=value
             with self.assertRaises(ValueError):r.admission(a,100)
     def test_nonfinite_expired_slot(self):
@@ -21,13 +21,13 @@ class Controls(unittest.TestCase):
         for key,value in [('nonce','stale'),('runtimeQualified',False),('observedEpoch',90),('observedEpoch',float('nan')),('conflicts',[8]),('ownedRemaining',[8])]:
             bad={**v,key:value}
             with self.assertRaises(ValueError):r.census(bad,'n',100)
-    def test_group_signals_before_reaping_exited_leader(self):
+    def test_group_signals_before_reaping_live_anchor(self):
         events=[];p=mock.Mock(pid=123);p.wait.side_effect=lambda timeout:events.append('wait') or 0
-        with mock.patch.object(r.os,'getpgid',return_value=123),mock.patch.object(r.os,'killpg',side_effect=lambda pid,sig:events.append(sig)),mock.patch.object(r,'leader_exited',return_value=True):self.assertEqual(r.cleanup(p,0),0)
+        with mock.patch.object(r.os,'getpgid',return_value=123),mock.patch.object(r.os,'killpg',side_effect=lambda pid,sig:events.append(sig)),mock.patch.object(r,'leader_exited',return_value=False):self.assertEqual(r.cleanup(p,0),0)
         self.assertEqual(events,[signal.SIGTERM,signal.SIGKILL,'wait'])
     def test_lost_group_refuses_signal(self):
         p=mock.Mock(pid=123)
-        with mock.patch.object(r.os,'getpgid',return_value=999),mock.patch.object(r.os,'killpg') as kill:
+        with mock.patch.object(r,'leader_exited',return_value=False),mock.patch.object(r.os,'getpgid',return_value=999),mock.patch.object(r.os,'killpg') as kill:
             with self.assertRaises(ValueError):r.cleanup(p,0)
             kill.assert_not_called();p.wait.assert_not_called()
     def test_actual_entrypoint_final_gate_precedes_popen(self):

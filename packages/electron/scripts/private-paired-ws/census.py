@@ -9,12 +9,13 @@ def finite(v):
 def parse_processes(text):
     rows = {}
     for line in text.splitlines():
-        fields = line.strip().split(None, 9)
-        if len(fields) != 10: raise ValueError('incomplete process row')
+        fields = line.strip().split(None, 10)
+        if len(fields) != 11: raise ValueError('incomplete process row')
         pid, ppid, pgid, uid = map(int, fields[:4])
         if pid <= 0 or min(ppid, pgid, uid) < 0 or pid in rows: raise ValueError('ambiguous process row')
-        rows[pid] = dict(pid=pid, ppid=ppid, pgid=pgid, uid=uid,
-                         started=' '.join(fields[4:9]), argv=fields[9])
+        if not re.fullmatch('[IRSTUZ][A-Za-z0-9+<>-]*', fields[4]): raise ValueError('ambiguous process status')
+        rows[pid] = dict(pid=pid, ppid=ppid, pgid=pgid, uid=uid, state=fields[4],
+                         started=' '.join(fields[5:10]), argv=fields[10])
     if not rows: raise ValueError('empty process snapshot')
     return rows
 
@@ -45,13 +46,16 @@ def process_table(args):
     return rows
 
 def snapshot():
-    args = ['/bin/ps', '-axo', 'pid=,ppid=,pgid=,uid=,lstart=,command=']
+    args = ['/bin/ps', '-axo', 'pid=,ppid=,pgid=,uid=,stat=,lstart=,command=']
     before = process_table(args)
-    owned = {pid: {**r, 'executable': executable(pid)} for pid, r in before.items() if r['uid'] == os.getuid()}
+    owned = {pid: {**r, 'executable': None if r['state'].startswith('Z') else executable(pid)} for pid, r in before.items() if r['uid'] == os.getuid()}
     after = process_table(args)
     for pid, row in owned.items():
-        if after.get(pid) != before[pid]: raise ValueError('process changed during executable resolution')
-        if executable(pid) != row['executable']: raise ValueError('executable changed during census')
+        latest = after.get(pid)
+        if latest is None or {k:v for k,v in latest.items() if k!='state'} != {k:v for k,v in before[pid].items() if k!='state'}:
+            raise ValueError('process changed during executable resolution')
+        if latest['state'].startswith('Z') != row['state'].startswith('Z'): raise ValueError('zombie state changed during census')
+        if row['executable'] is not None and executable(pid) != row['executable']: raise ValueError('executable changed during census')
     # New same-user processes also require resolution; no mutable-name prefilter.
     if {p for p, r in after.items() if r['uid'] == os.getuid()} != set(owned):
         raise ValueError('process set changed during census')
@@ -93,18 +97,21 @@ def evaluate(rows, listen, policy, self_pid, owned_pgid=None):
     resident = policy.get('residentProcesses', [])
     if not isinstance(resident, list): raise ValueError('resident baseline missing')
     exempt = set()
-    keys = {'pid', 'ppid', 'pgid', 'uid', 'started', 'argv', 'executable', 'executableSha256'}
+    keys = {'pid', 'ppid', 'pgid', 'uid', 'state', 'started', 'argv', 'executable', 'executableSha256'}
     for item in resident:
         if not isinstance(item, dict) or set(item) != keys: raise ValueError('incomplete resident identity')
         row = rows.get(item['pid'])
         # Disappeared baseline is harmless; replacement/renamed/changed incarnation is not exempt.
-        if row is not None and all(row[k] == item[k] for k in keys - {'executableSha256'}):
+        if row is not None and row['executable'] is not None and all(row[k] == item[k] for k in keys - {'executableSha256','state'}) and not str(item['state']).startswith('Z'):
             actual = hashlib.sha256(pathlib.Path(row['executable']).read_bytes()).hexdigest()
             if actual != item['executableSha256']: raise ValueError('resident executable changed')
             exempt.add(item['pid'])
     remaining = sorted(p for p, r in rows.items() if owned_pgid is not None and r['pgid'] == owned_pgid)
     conflicts = []
     for pid, row in rows.items():
+        if row.get('state','').startswith('Z'):
+            if row['executable'] is not None or any(item['pid']==pid for item in listen): raise ValueError('ambiguous zombie ownership')
+            continue  # Still included in owned-PGID remainder above; never skipped there.
         if pid in ancestors or pid in exempt: continue
         runtime = runtime_identity(row['executable'])
         private = any(s in row['argv'] for s in ('private-paired-ws', 'paired-ws-B-', 'private-pane-paint', 'native-scale', 'test-pane-popout'))

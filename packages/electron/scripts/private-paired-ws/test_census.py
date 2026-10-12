@@ -4,7 +4,7 @@ c=importlib.util.module_from_spec(spec);spec.loader.exec_module(c)
 spec2=importlib.util.spec_from_file_location('runner',pathlib.Path(__file__).with_name('runner.py'))
 r=importlib.util.module_from_spec(spec2);spec2.loader.exec_module(r)
 def row(pid=10,ppid=1,pgid=10,exe='/bin/sleep',argv='sleep'):
-    return dict(pid=pid,ppid=ppid,pgid=pgid,uid=501,started='Mon Oct 12 11:50:00 2026',executable=exe,argv=argv)
+    return dict(pid=pid,ppid=ppid,pgid=pgid,uid=501,state='S',started='Mon Oct 12 11:50:00 2026',executable=exe,argv=argv)
 class Controls(unittest.TestCase):
     def base(self):return {10:row(exe='/opt/python3',argv='census'),20:row(20,exe='/bin/sleep')}
     def test_clean_nonruntime_snapshot(self):self.assertEqual(c.evaluate(self.base(),[],{},10),([],[]))
@@ -61,10 +61,10 @@ class Controls(unittest.TestCase):
             p=pathlib.Path(d)/'node';p.write_bytes(b'changed');rows=self.base();rows[20]=row(20,exe=str(p))
             with self.assertRaisesRegex(ValueError,'changed'):c.evaluate(rows,[],{'residentProcesses':[{**rows[20],'executableSha256':'a'*64}]},10)
     def test_missing_malformed_duplicate_process_rows(self):
-        for text in ['', '1 2', '1 0 1 501 Mon Oct 12 11:50:00 2026 node\n1 0 1 501 Mon Oct 12 11:50:00 2026 node']:
+        for text in ['', '1 2', '1 0 1 501 S Mon Oct 12 11:50:00 2026 node\n1 0 1 501 S Mon Oct 12 11:50:00 2026 node']:
             with self.assertRaises(ValueError):c.parse_processes(text)
     def test_actual_ps_row_parser(self):
-        value=c.parse_processes('20 1 20 501 Mon Oct 12 11:50:00 2026 renamed --arg')
+        value=c.parse_processes('20 1 20 501 S Mon Oct 12 11:50:00 2026 renamed --arg')
         self.assertEqual(value[20]['argv'],'renamed --arg');self.assertEqual(value[20]['started'],'Mon Oct 12 11:50:00 2026')
     def test_changed_pid_incarnation_snapshot_refuses(self):
         before={10:{k:v for k,v in row().items() if k!='executable'}};after={10:{**before[10],'started':'replacement'}}
@@ -83,7 +83,7 @@ class Controls(unittest.TestCase):
         with mock.patch.object(c,'process_table',return_value=before),mock.patch.object(c.os,'getuid',return_value=501),mock.patch.object(c,'executable',side_effect=['/opt/node','/bin/sleep']):
             with self.assertRaisesRegex(ValueError,'executable changed'):c.snapshot()
     def test_exact_popen_snapshot_child_only_excluded(self):
-        text='10 1 10 501 Mon Oct 12 11:50:00 2026 ps\n20 1 20 501 Mon Oct 12 11:50:00 2026 ps'
+        text='10 1 10 501 R Mon Oct 12 11:50:00 2026 ps\n20 1 20 501 S Mon Oct 12 11:50:00 2026 ps'
         with mock.patch.object(c,'command',return_value=(text,10)):
             self.assertEqual(set(c.process_table([])),{20})
     def test_os_command_failure_not_clear(self):
