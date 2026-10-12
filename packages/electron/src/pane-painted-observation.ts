@@ -66,7 +66,7 @@ export type PaintImageReceipt = {
   endedMonotonicMs: number;
 };
 export type PaintReadReceipt = { stage: string; receivedMonotonicMs: number; state: PaintState };
-export type PaintRefusal = "invalid-request" | "unavailable" | "stale" | "read-failed" | "capture-failed" | "invalid-image" | "timeout";
+export type PaintRefusal = "invalid-request" | "invalid-clock" | "unavailable" | "stale" | "read-failed" | "capture-failed" | "invalid-image" | "timeout";
 export type PaintObservation =
   | { kind: "refused"; reason: PaintRefusal; stage: string; captures: PaintImageReceipt[]; stateReads: PaintReadReceipt[] }
   | {
@@ -202,7 +202,7 @@ class Refused extends Error {
 export async function observePanePaint(
   expected: PaintBinding,
   adapter: PaintAdapter,
-  options: { timeoutMs?: number; maxImageBytes?: number; maxDecodedBytes?: number; maxDimension?: number; expectedProjection?: PaintState["projection"]; clock?: PaintClock } = {},
+  options: { deadlineMonotonicMs?: number; timeoutMs?: number; maxImageBytes?: number; maxDecodedBytes?: number; maxDimension?: number; expectedProjection?: PaintState["projection"]; clock?: PaintClock } = {},
 ): Promise<PaintObservation> {
   const captures: PaintImageReceipt[] = [];
   const stateReads: PaintReadReceipt[] = [];
@@ -214,6 +214,7 @@ export async function observePanePaint(
     || !Number.isSafeInteger(maxImageBytes) || maxImageBytes < 33 || maxImageBytes > 32 * 1024 * 1024
     || !Number.isSafeInteger(maxDecodedBytes) || maxDecodedBytes < 1 || maxDecodedBytes > 64 * 1024 * 1024
     || !Number.isSafeInteger(maxDimension) || maxDimension < 1 || maxDimension > 16_384
+    || (options.deadlineMonotonicMs !== undefined && (!finite(options.deadlineMonotonicMs) || options.deadlineMonotonicMs > Number.MAX_SAFE_INTEGER))
     || (options.expectedProjection !== undefined && !validProjection(options.expectedProjection))) {
     return { kind: "refused", reason: "invalid-request", stage: "request", captures, stateReads };
   }
@@ -222,14 +223,18 @@ export async function observePanePaint(
   const clock = options.clock ?? defaultClock;
   let started: number;
   try { started = clock.now(); } catch {
-    return { kind: "refused", reason: "invalid-request", stage: "clock", captures, stateReads };
+    return { kind: "refused", reason: "invalid-clock", stage: "clock", captures, stateReads };
   }
-  if (!finite(started)) return { kind: "refused", reason: "invalid-request", stage: "clock", captures, stateReads };
+  if (!finite(started) || started > Number.MAX_SAFE_INTEGER) return { kind: "refused", reason: "invalid-clock", stage: "clock", captures, stateReads };
+  const deadline = options.deadlineMonotonicMs ?? started + timeoutMs;
+  if (!finite(deadline) || deadline > Number.MAX_SAFE_INTEGER) return { kind: "refused", reason: "invalid-clock", stage: "clock", captures, stateReads };
   let lastTime = started;
   const controller = new AbortController();
   const time = (stage: string) => {
-    const now = clock.now();
-    if (!finite(now) || now < lastTime || now - started >= timeoutMs) throw new Refused("timeout", stage);
+    let now: number;
+    try { now = clock.now(); } catch { throw new Refused("invalid-clock", "clock"); }
+    if (!finite(now) || now > Number.MAX_SAFE_INTEGER || now < lastTime) throw new Refused("invalid-clock", "clock");
+    if (now >= deadline) throw new Refused("timeout", stage);
     lastTime = now;
     return now;
   };
@@ -239,11 +244,14 @@ export async function observePanePaint(
     let settled = false;
     try {
       return await new Promise<T>((resolve, reject) => {
-        cancel = clock.schedule(() => {
-          settled = true;
-          controller.abort();
-          reject(new Refused("timeout", stage));
-        }, timeoutMs - (lastTime - started));
+        const arm = () => {
+          cancel = clock.schedule(() => {
+            if (settled) return;
+            try { time(stage); arm(); } // Timers can wake before a fractional absolute deadline.
+            catch (failure) { settled = true; controller.abort(); reject(failure); }
+          }, Math.max(0, deadline - lastTime));
+        };
+        arm();
         Promise.resolve().then(operation).then((value) => {
           if (settled) return;
           try { time(stage); settled = true; resolve(value); }
@@ -304,6 +312,7 @@ export async function observePanePaint(
       paintFreshness: "not-established", physicalDisplay: "not-observed" };
   } catch (error) {
     controller.abort();
+    if (error instanceof Refused && error.reason === "invalid-clock") return { kind: "refused", reason: "invalid-clock", stage: "clock", captures: [], stateReads: [] };
     return { kind: "refused", reason: error instanceof Refused ? error.reason : "read-failed",
       stage: error instanceof Refused ? error.stage : "unexpected", captures, stateReads };
   }

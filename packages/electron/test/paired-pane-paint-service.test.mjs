@@ -8,7 +8,7 @@ import ts from 'typescript';
 const cache=new Map(),nativeRequire=createRequire(import.meta.url);
 function load(name){if(cache.has(name))return cache.get(name);const module={exports:{}};cache.set(name,module.exports);const src=fs.readFileSync(new URL('../src/'+name+'.ts',import.meta.url),'utf8');vm.runInNewContext(ts.transpile(src,{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}),{module,exports:module.exports,require:id=>id.startsWith('./')?load(id.slice(2,-3)):nativeRequire(id),Buffer,Uint8Array,AbortController,AbortSignal,structuredClone,performance,setTimeout,clearTimeout},{filename:name});return module.exports;}
 const {PairedPanePaintService}=load('paired-pane-paint-service');
-const {validPanePaintMessage}=load('pane-paint-contract');
+const {validPanePaintMessage,validPanePaintOutcome}=load('pane-paint-contract');
 const fixtureSource=fs.readFileSync(new URL('pane-painted-observation.test.mjs',import.meta.url),'utf8');
 const ast=ts.createSourceFile('fixture.mjs',fixtureSource,ts.ScriptTarget.ES2022,true);
 const functions=ast.statements.filter(n=>ts.isFunctionDeclaration(n)&&['chunk','png','state','setup'].includes(n.name?.text));
@@ -41,3 +41,59 @@ test('request unknown fields, malformed tokens and missing projection are invali
 test('byte cap prevents oversized raw guest evidence',async()=>{const s=setup(),e=await expected(s),capture=s.adapter.capture;s.adapter.capture=async(...args)=>({...await capture(...args),png:Buffer.alloc(2*1024*1024+1)});const r=await s.observe(e);refusal(r,'invalid-image');assert.equal(r.payload.captures.length,0);assert.deepEqual([...s.calls],['GUEST']);});
 
 test('malformed authority state cannot issue an observation token',async()=>{const s=setup();s.current.projection.hostRect.width=0;refusal(await s.describe(),'unavailable');assert.deepEqual([...s.calls],[]);assert.equal(s.timers.size,0);});
+
+function semanticReply(request,response){
+ assert.equal(validPanePaintOutcome(response,request),true);
+ const {spawnSync}=nativeRequire('node:child_process');
+ const reference=new URL('pane-paint-contract-reference/',import.meta.url).pathname;
+ const result=spawnSync('python3',['-c','import json,sys;sys.path.insert(0,sys.argv[1]);from semantic_model import validate;pair=json.load(sys.stdin);validate(pair[1],pair[0])',reference],{input:JSON.stringify([request,response]),encoding:'utf8',env:{...process.env,PYTHONDONTWRITEBYTECODE:'1'}});
+ assert.equal(result.status,0,result.stderr);
+}
+test('one millisecond budget retains fractional admission and uses original absolute deadline',async()=>{
+ const s=setup(),e=await expected(s);s.ports.adapter=()=>{s.advance(.25);return s.adapter;};
+ s.adapter.capture=async target=>{s.calls.push(target);return {target,binding:s.current.binding,png:fixtures.png(),pixelWidth:2,pixelHeight:1};};
+ const q=s.request('fractional-fast',{action:'observe',expected:e,timeoutMs:1}),r=await s.service.handle(s.connection,q);
+ assert.equal(r.payload.outcome,'observed');assert.equal(r.payload.elapsedMs,.25);assert.deepEqual([...s.calls],['GUEST','HOST']);semanticReply(q,r);s.service.close(s.connection);
+});
+test('fractional pending native capture cannot timeout before configured public deadline',async()=>{
+ const s=setup(),e=await expected(s);let release,entered;const started=new Promise(r=>entered=r);
+ s.ports.adapter=()=>{s.advance(.25);return s.adapter;};s.adapter.capture=()=>{entered();return new Promise(r=>release=r);};
+ const q=s.request('fractional-pending',{action:'observe',expected:e,timeoutMs:2000});let settled=false;const pending=s.service.handle(s.connection,q).then(r=>{settled=true;return r;});await started;
+ s.advance(1999);await new Promise(setImmediate);assert.equal(settled,false);s.advance(.75);const r=await pending;
+ refusal(r,'timeout');assert.equal(r.payload.elapsedMs,2000);semanticReply(q,r);assert.equal(s.service.activeCount(),1);
+ release({target:'GUEST',binding:s.current.binding,png:fixtures.png(),pixelWidth:2,pixelHeight:1});await new Promise(setImmediate);assert.equal(s.service.activeCount(),0);s.service.close(s.connection);
+});
+test('early timer delivery rearms without certifying budget exhaustion',async()=>{
+ const s=setup(),e=await expected(s);let release,entered;const started=new Promise(r=>entered=r);s.adapter.capture=()=>{entered();return new Promise(r=>release=r);};
+ const q=s.request('early',{action:'observe',expected:e,timeoutMs:1});let settled=false;const pending=s.service.handle(s.connection,q).then(r=>{settled=true;return r;});await started;
+ const [key,t]=[...s.timers].find(([,t])=>t.at<=1);s.timers.delete(key);s.advance(.5);t.cb();await new Promise(setImmediate);assert.equal(settled,false);
+ s.advance(.5);const r=await pending;semanticReply(q,r);assert.equal(r.payload.elapsedMs,1);release(null);await new Promise(setImmediate);s.service.close(s.connection);
+});
+test('backward positive clock suppresses all diagnostic evidence rather than reporting timeout',async()=>{
+ const s=setup(),e=await expected(s),read=s.adapter.readState,capture=s.adapter.capture;
+ s.adapter.readState=async(...a)=>{s.advance(10);return read(...a);};s.adapter.capture=async(...a)=>{const r=await capture(...a);s.advance(-10);return r;};
+ const r=await s.observe(e);assert.equal(r.ok,false);assert.equal(r.error.code,'internal_error');assert.equal('payload' in r,false);assert.deepEqual([...s.calls],['GUEST']);assert.equal(s.service.activeCount(),0);s.service.close(s.connection);assert.equal(s.timers.size,0);
+});
+test('nonfinite throwing and unrepresentable clocks suppress payload and retain pending drain safely',async()=>{
+ for(const fault of [()=>NaN,()=>Infinity,()=>Number.MAX_SAFE_INTEGER+1,()=>{throw Error('clock');}]){
+  const s=setup(),e=await expected(s);let release,entered;const started=new Promise(r=>entered=r);s.adapter.capture=()=>{entered();return new Promise(r=>release=r);};
+  const pending=s.observe(e);await started;s.clock.now=fault;
+  const [key,t]=[...s.timers].find(([,t])=>t.at===2000);s.timers.delete(key);t.cb();const r=await pending;
+  assert.equal(r.ok,false);assert.equal(r.error.code,'internal_error');assert.equal('payload' in r,false);assert.equal(s.service.activeCount(),1);
+  release(null);await new Promise(setImmediate);assert.equal(s.service.activeCount(),0);s.service.close(s.connection);assert.equal(s.timers.size,0);
+ }
+});
+
+test('publication semantic fence rejects premature and contradictory retained receipts',async()=>{
+ const s=setup(),e=await expected(s),q=s.request('semantic',{action:'observe',expected:e,timeoutMs:2000}),r=await s.service.handle(s.connection,q);
+ semanticReply(q,r);
+ for(const change of [p=>{p.outcome='refused';p.reason='timeout';p.stage='publish';p.nativeDrain={state:'not-required'};delete p.consistency;delete p.midpointSkewMs;},p=>p.elapsedMs=1,p=>p.checks[1].receivedOffsetMs=30,p=>p.captures[0].endedOffsetMs=50,p=>p.checks[2].state.binding.guestId=99,p=>p.request.timeoutMs=1]){
+  const bad=structuredClone(r);change(bad.payload);assert.equal(validPanePaintOutcome(bad,q),false);
+ }s.service.close(s.connection);
+});
+
+test('one invalid clock read stays fatal even if subsequent describe clock reads recover',async()=>{
+ const s=setup();let entered,release;const started=new Promise(r=>entered=r);s.adapter.readState=()=>{entered();return new Promise(r=>release=r);};
+ const pending=s.describe();await started;const read=s.clock.now;let once=true;s.clock.now=()=>{if(once){once=false;return NaN;}return read();};
+ const [key,t]=[...s.timers].find(([,t])=>t.at===2000);s.timers.delete(key);t.cb();const r=await pending;assert.equal(r.ok,false);assert.equal(r.error.code,'internal_error');assert.equal('payload' in r,false);assert.equal(s.service.activeCount(),1);release(s.current);await new Promise(setImmediate);assert.equal(s.service.activeCount(),0);s.service.close(s.connection);
+});

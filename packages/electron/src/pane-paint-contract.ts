@@ -788,3 +788,62 @@ function check(value: unknown, rule: Record<string, unknown>, depth = 0): boolea
 }
 export function validPanePaintMessage(value: unknown): boolean { return check(value, schema); }
 export function panePaintSchemaReference(): Record<string, unknown> { return structuredClone(schema); }
+
+/** Semantic receipt fence in addition to schema shape; no fabricated time or partial-stage evidence. */
+export function validPanePaintOutcome(reply: unknown, request: unknown): boolean {
+  try {
+    if (!validPanePaintMessage(reply) || !validPanePaintMessage(request) || !record(reply) || !record(request)
+      || reply.type !== "response" || request.type !== "request" || reply.ok !== true || reply.id !== request.id) return false;
+    const p = reply.payload as Record<string, any>, q = request.payload as Record<string, any>;
+    const same = (a: unknown, b: unknown): boolean => {
+      if (Array.isArray(a) || Array.isArray(b)) return Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((v, i) => same(v, b[i]));
+      if (record(a) || record(b)) return record(a) && record(b) && Object.keys(a).length === Object.keys(b).length && Object.keys(a).every(k => Object.hasOwn(b, k) && same(a[k], b[k]));
+      return a === b;
+    };
+    if (!same(p.request, q) || p.configuredBudgetMs !== (q.timeoutMs ?? 2000)) return false;
+    const elapsed = p.elapsedMs, budget = p.configuredBudgetMs;
+    if (p.outcome === "described") return q.action === "describe" && elapsed <= budget && p.expectation.binding.surfaceId === q.surfaceId && p.expectation.binding.paneId === q.paneId;
+    const reads = ["before", "GUEST:before", "GUEST:after", "HOST:before", "HOST:after", "publish"];
+    const counts: Record<string, [number, number, number]> = {
+      admission: [0, 0, 0], describe: [0, 0, 0], before: [0, 1, 0], "GUEST:before": [1, 2, 0],
+      "GUEST:capture": [2, 2, 0], "GUEST:png": [2, 2, 0], "GUEST:after": [2, 3, 1], "HOST:before": [3, 4, 1],
+      "HOST:capture": [4, 4, 1], "HOST:png": [4, 4, 1], "HOST:after": [4, 5, 2], publish: [5, 6, 2],
+    };
+    const matrix: Record<string, string[]> = {
+      unsupported: ["admission"], busy: ["admission"], "transport-limit": ["admission"], stale: ["admission", ...reads],
+      unavailable: ["describe", ...reads], "read-failed": ["describe", ...reads], "capture-failed": ["GUEST:capture", "HOST:capture"],
+      "invalid-image": ["GUEST:png", "HOST:png"], timeout: Object.keys(counts),
+    };
+    const checks = p.checks as any[], images = p.captures as any[];
+    if (p.outcome === "observed") {
+      if (q.action !== "observe" || elapsed > budget || checks.length !== 6 || images.length !== 2) return false;
+    } else {
+      const range = counts[p.stage];
+      if (!range || !matrix[p.reason]?.includes(p.stage) || checks.length < range[0] || checks.length > range[1] || images.length !== range[2]) return false;
+      if (p.reason === "timeout" && elapsed < budget) return false;
+      if (p.nativeDrain.state === "complete" && p.nativeDrain.completedOffsetMs > elapsed) return false;
+      if (q.action === "describe") return ["admission", "describe"].includes(p.stage) && checks.length === 0 && images.length === 0;
+      if (p.stage === "describe") return false;
+    }
+    let last = 0;
+    for (let i = 0; i < checks.length; i++) {
+      const c = checks[i];
+      if (c.stage !== reads[i] || c.receivedOffsetMs < last || c.receivedOffsetMs > elapsed) return false;
+      last = c.receivedOffsetMs;
+      // Only the final refusal read may contain changed/unavailable authority.
+      if (p.outcome === "observed" || c.stage !== p.stage) {
+        if (!c.state?.hostAttached || !c.state?.guestAttached || !same(c.state.binding, q.expected.binding) || !same(c.state.projection, q.expected.projection)) return false;
+      }
+    }
+    for (let i = 0; i < images.length; i++) {
+      const image = images[i], target = i === 0 ? "GUEST" : "HOST";
+      const before = checks.find(c => c.stage === target + ":before"), after = checks.find(c => c.stage === target + ":after");
+      if (image.target !== target || !same(image.binding, q.expected.binding) || image.startedOffsetMs > image.endedOffsetMs
+        || image.endedOffsetMs > Math.min(elapsed, budget) || !before || before.receivedOffsetMs > image.startedOffsetMs
+        || (after && image.endedOffsetMs > after.receivedOffsetMs)) return false;
+      if (i && (!checks[2] || images[0].endedOffsetMs > checks[2].receivedOffsetMs || checks[2].receivedOffsetMs > before.receivedOffsetMs)) return false;
+    }
+    if (p.outcome === "observed" && p.midpointSkewMs !== (images[1].startedOffsetMs + images[1].endedOffsetMs - images[0].startedOffsetMs - images[0].endedOffsetMs) / 2) return false;
+    return true;
+  } catch { return false; }
+}

@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { validPanePaintMessage } from "./pane-paint-contract.js";
+import { validPanePaintMessage, validPanePaintOutcome } from "./pane-paint-contract.js";
 import { observePanePaint, isPaintState, type PaintAdapter, type PaintBinding, type PaintClock, type PaintState } from "./pane-painted-observation.js";
 
 export type PaintExpectation = { observationToken: string; binding: PaintBinding; projection: PaintState["projection"] };
@@ -75,11 +75,25 @@ export class PairedPanePaintService<C extends object> {
     if (state.ids.has(request.id) || this.ports.ordinaryIdRetained(connection, request.id)) return error("invalid_request_id_reuse");
     let origin: number;
     try { origin = this.clock.now(); } catch { return error("internal_error"); }
-    if (!Number.isFinite(origin) || origin < 0) return error("internal_error");
+    if (!Number.isFinite(origin) || origin < 0 || origin > Number.MAX_SAFE_INTEGER) return error("internal_error");
     const budget = payload.action === "describe" ? 2000 : payload.timeoutMs;
-    const elapsed = () => { const t = this.clock.now() - origin; if (!Number.isFinite(t) || t < 0 || t > Number.MAX_SAFE_INTEGER) throw Error("invalid clock"); return t; };
+    let lastTime = origin, clockFailed = false;
+    const now = () => {
+      if (clockFailed) throw Error("invalid clock");
+      let value: number;
+      try { value = this.clock.now(); } catch { clockFailed = true; throw Error("invalid clock"); }
+      if (!Number.isFinite(value) || value < lastTime || value > Number.MAX_SAFE_INTEGER) { clockFailed = true; throw Error("invalid clock"); }
+      lastTime = value; return value;
+    };
+    const deadline = origin + budget;
+    if (!Number.isFinite(deadline) || deadline > Number.MAX_SAFE_INTEGER) return error("internal_error");
+    const elapsed = () => now() - origin;
+    const checkedClock: PaintClock = { now, schedule: (callback, ms) => this.clock.schedule(callback, ms) };
     const success = (result: Reply): Reply => ({ v: 1, type: "response", op: OP, id: request.id, sentAt: Date.now(), ok: true, payload: { request: payload, configuredBudgetMs: budget, ...FLAGS, ...result } });
-    const refusal = (reason: string, stage = "admission", captures: unknown[] = [], checks: unknown[] = [], drain: string = "not-required") => success({ outcome: "refused", reason, stage, captures, checks, elapsedMs: elapsed(), nativeDrain: { state: drain } });
+    const refusal = (reason: string, stage = "admission", captures: unknown[] = [], checks: unknown[] = [], drain: string = "not-required") => {
+      try { return success({ outcome: "refused", reason, stage, captures, checks, elapsedMs: elapsed(), nativeDrain: { state: drain } }); }
+      catch { return error("internal_error"); }
+    };
     if (state.ids.size >= 1024) return refusal("busy");
     const entry: RecordEntry = { digest: createHash("sha256").update(canonical({ op: OP, payload })).digest("hex"), state: "completed", reason: "admission" };
     state.ids.set(request.id, entry);
@@ -90,7 +104,9 @@ export class PairedPanePaintService<C extends object> {
     if (this.ports.transportBytes(connection) < PREFLIGHT) { entry.reason = "transport-limit"; return refusal("transport-limit"); }
     if (payload.action === "observe") {
       const token = state.token;
-      if (!token || token.used || this.clock.now() >= token.expires || !equal(token.value, payload.expected)) { entry.reason = "stale"; return refusal("stale"); }
+      let expired: boolean;
+      try { expired = now() >= (token?.expires ?? 0); } catch { entry.reason = "internal_error"; return error("internal_error"); }
+      if (!token || token.used || expired || !equal(token.value, payload.expected)) { entry.reason = "stale"; return refusal("stale"); }
       token.used = true;
     }
     const slot: Slot = { owner: state, controller: new AbortController(), pending: new Set(), finished: false, released: false };
@@ -114,7 +130,14 @@ export class PairedPanePaintService<C extends object> {
         let frame: PaintState | null;
         try {
           frame = await new Promise<PaintState | null>((resolve, reject) => {
-            cancel = this.clock.schedule(() => { slot.controller.abort(); reject(Error("timeout")); }, Math.max(0, budget - elapsed()));
+            const arm = () => {
+              cancel = checkedClock.schedule(() => {
+                try { if (now() < deadline) { arm(); return; } }
+                catch { slot.controller.abort(); reject(Error("invalid clock")); return; }
+                slot.controller.abort(); reject(Error("timeout"));
+              }, Math.max(0, deadline - now()));
+            };
+            arm();
             void tracked.readState(slot.controller.signal).then(resolve, () => reject(Error("read-failed")));
           });
         } catch (failure) {
@@ -140,10 +163,9 @@ export class PairedPanePaintService<C extends object> {
         if (!current()) return null;
         tokenToIssue = expected; entry.reason = "described";
       } else {
-        const remaining = Math.floor(budget - elapsed());
-        if (remaining < 1) { entry.reason = "timeout"; return current() ? refusal("timeout", "before") : null; }
+        if (now() >= deadline) { entry.reason = "timeout"; return current() ? refusal("timeout", "before") : null; }
         const result = await observePanePaint(payload.expected.binding, tracked, {
-          clock: this.clock, timeoutMs: remaining, expectedProjection: payload.expected.projection,
+          clock: checkedClock, timeoutMs: budget, deadlineMonotonicMs: deadline, expectedProjection: payload.expected.projection,
           maxImageBytes: 2 * 1024 * 1024, maxDecodedBytes: 32 * 1024 * 1024, maxDimension: 8192,
         });
         if (!current()) return null;
@@ -170,8 +192,9 @@ export class PairedPanePaintService<C extends object> {
         tokenToIssue = undefined;
       } else resultPayload.elapsedMs = finalElapsed;
       if (!current()) return null;
+      if (!validPanePaintOutcome(reply, request)) { entry.reason = "internal_error"; return error("internal_error"); }
       if (tokenToIssue) {
-        const issued: Token = { value: structuredClone(tokenToIssue), expires: this.clock.now() + 5000, used: false, cancel: () => {} };
+        const issued: Token = { value: structuredClone(tokenToIssue), expires: now() + 5000, used: false, cancel: () => {} };
         issued.cancel = this.clock.schedule(() => { if (state!.token === issued) state!.token = undefined; }, 5000);
         state.token?.cancel(); state.token = issued;
       }
