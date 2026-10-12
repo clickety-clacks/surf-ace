@@ -153,8 +153,9 @@ pub fn document(target: Option<&str>) -> Result<Value, String> {
             "errorBehavior": "Success and error records are one JSON object on stdout; nonzero exit indicates failure.",
             "discoveryLimits": [
                 "fleet-list reads registry inventory only; it has no direct endpoint, freshness, or reachability evidence.",
+                "window-describe reads fleet.topology, sends one nonce-correlated surface.describe to the leased direct endpoint before pairing, then rechecks fleet.topology; identity matching is consistency only and does not authenticate either peer.",
                 "list and capture-pane pair a controller before their direct request; they are not no-pair discovery probes.",
-                "No command resolves a named window to a direct endpoint. Supply an endpoint explicitly for direct-client commands."
+                "window-describe does not pair, create controller state, or authorize later mutations; writes still need their own explicit endpoint and revision guards."
             ],
             "mutationRules": [
                 "Mutations require the current expected revision and a correlated operationReceipt.",
@@ -473,8 +474,8 @@ fn annotation_examples(action: &str) -> Value {
 
 fn global_options() -> Value {
     json!([
-        { "name": "--state-root", "type": "path", "required": true, "appliesTo": "all operational commands; omitted for help/schema" },
-        { "name": "--registry", "type": "websocket-url", "requiredFor": ["fleet-list"], "exclusiveWith": ["--endpoint"] },
+        { "name": "--state-root", "type": "path", "required": true, "appliesTo": "stateful operational commands; window-describe is stateless" },
+        { "name": "--registry", "type": "websocket-url", "requiredFor": ["fleet-list", "window-describe"], "exclusiveWith": ["--endpoint"] },
         { "name": "--endpoint", "type": "websocket-url", "requiredFor": "direct-client commands", "exclusiveWith": ["--registry"] },
         { "name": "--product-label", "type": "string", "requiredFor": "direct-client commands", "description": "Descriptive provenance; not identity or authority." },
         { "name": "--input-json", "type": "object", "description": "One command input object; standard input is used when omitted." },
@@ -491,6 +492,19 @@ fn command_spec(command: Command) -> Value {
             "Read registered client, window, and pane labels from the explicitly selected registry.",
             "Registry fleet.topology payload with clients, registryIdentity, and registrationReady; it does not contain direct endpoints or prove client reachability.",
             vec!["missing_registry", "invalid_registry", "invalid_fleet_topology_clients"],
+        ),
+        Command::WindowDescribe => (
+            "registry-and-direct-client",
+            "registry_leased_read_only_pre_pair_probe",
+            "Resolve exactly one current registry lease for a named window, read it directly before pairing, and recheck the registry row.",
+            "Separate registry identity, registration and lease freshness, direct transport reachability, client application readiness, topology/layout, and per-pane content revision evidence. This is consistency only, does not authenticate either peer, and does not authorize a later mutation.",
+            vec![
+                "missing_registry", "invalid_registry", "registry_timeout", "registry_unreachable",
+                "registry_response_invalid", "window_not_found", "window_ambiguous", "endpoint_unconfigured", "stale_registration",
+                "endpoint_unreachable", "application_unresponsive", "describe_timeout", "describe_response_too_large",
+                "describe_response_invalid", "prepair_describe_unsupported", "identity_mismatch",
+                "revision_churn", "client_not_ready", "unsupported_protocol_version", "clock_unavailable",
+            ],
         ),
         Command::List => (
             "direct-client",
@@ -627,6 +641,7 @@ fn published_input_schema(command: Command) -> Value {
 fn wire_operation(command: Command) -> Value {
     match command {
         Command::FleetList => json!("fleet.topology"),
+        Command::WindowDescribe => json!(["fleet.topology", "surface.describe", "fleet.topology"]),
         Command::List => json!("surfaces.list"),
         Command::PaneDescribe => json!(["pair.request", "panes.list"]),
         Command::Push => json!("content.set"),
@@ -649,6 +664,11 @@ fn wire_operation(command: Command) -> Value {
 fn input_schema(command: Command) -> Value {
     match command {
         Command::FleetList | Command::List => object(&[], json!({}), false),
+        Command::WindowDescribe => object(
+            &["windowLabel"],
+            json!({ "windowLabel": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z]+$" } }),
+            false,
+        ),
         Command::PaneDescribe => object(
             &["expectedControllerInstanceId", "surfaceId", "paneId"],
             json!({
@@ -816,7 +836,44 @@ fn topology_node_schema() -> Value {
 }
 
 fn result_schema(command: Command, description: &str) -> Value {
-    let result = if command == Command::PaneDescribe {
+    let result = if command == Command::WindowDescribe {
+        json!({
+            "description": description,
+            "type": "object",
+            "required": ["windowLabel", "identitySemantics", "transportReachability", "registryBefore", "registryAfter", "applicationReadiness", "surfaceObservation"],
+            "properties": {
+                "windowLabel": { "type": "string", "pattern": "^[a-z]+$" },
+                "identitySemantics": { "const": "consistency_only_not_authentication" },
+                "transportReachability": {
+                    "type": "object", "required": ["status", "directEndpoint", "observedAtMs"],
+                    "properties": { "status": { "const": "reachable" }, "directEndpoint": { "type": "string", "format": "uri" }, "observedAtMs": nonnegative_integer_schema() },
+                    "additionalProperties": false
+                },
+                "registryBefore": registry_candidate_schema(),
+                "registryAfter": registry_candidate_schema(),
+                "applicationReadiness": {
+                    "type": "object", "required": ["status", "limitationCodes"],
+                    "properties": { "status": { "enum": ["ready", "degraded"] }, "limitationCodes": { "type": "array", "items": { "type": "string", "pattern": "^[a-z_]{1,64}$" } } },
+                    "additionalProperties": false
+                },
+                "surfaceObservation": {
+                    "type": "object", "required": ["nonce", "clientId", "registryIdentity", "surfaceId", "endpointLeaseGeneration", "observedAtMs", "applicationReadiness", "surfaceSetRevision", "topologyRevision", "layout", "panes"],
+                    "properties": {
+                        "nonce": { "type": "string", "pattern": "^[a-f0-9]{32,128}$" },
+                        "clientId": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+                        "registryIdentity": { "type": "object", "required": ["allocatorId", "fleetId"], "properties": { "allocatorId": string_schema(), "fleetId": string_schema() }, "additionalProperties": false },
+                        "surfaceId": string_schema(), "endpointLeaseGeneration": positive_integer_schema(),
+                        "observedAtMs": nonnegative_integer_schema(), "applicationReadiness": { "type": "object" },
+                        "surfaceSetRevision": nonnegative_integer_schema(), "topologyRevision": nonnegative_integer_schema(),
+                        "layout": { "type": "object" },
+                        "panes": { "type": "array", "minItems": 1, "items": { "type": "object", "required": ["paneId", "paneLabel", "contentObservation"], "properties": { "paneId": positive_integer_schema(), "paneLabel": { "type": ["integer", "null"], "minimum": 1, "maximum": SAFE_INTEGER_MAX }, "contentObservation": { "type": "object", "required": ["revision", "source", "observedAtMs"], "properties": { "revision": { "type": ["integer", "null"], "minimum": 0, "maximum": SAFE_INTEGER_MAX }, "source": { "const": "client-authority" }, "observedAtMs": nonnegative_integer_schema() }, "additionalProperties": false } }, "additionalProperties": false } }
+                    },
+                    "additionalProperties": false
+                }
+            },
+            "additionalProperties": false
+        })
+    } else if command == Command::PaneDescribe {
         json!({
             "description": description,
             "type": "object",
@@ -864,6 +921,25 @@ fn result_schema(command: Command, description: &str) -> Value {
     })
 }
 
+fn registry_candidate_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["clientId", "surfaceId", "windowLabel", "directEndpoint", "registryIdentity", "registryServerTimeMs", "maxEndpointLeaseMs", "registrationReady", "endpointLease"],
+        "properties": {
+            "clientId": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+            "surfaceId": string_schema(),
+            "windowLabel": { "type": "string", "pattern": "^[a-z]+$" },
+            "directEndpoint": { "type": "string", "format": "uri" },
+            "registryIdentity": { "type": "object", "required": ["allocatorId", "fleetId"], "properties": { "allocatorId": string_schema(), "fleetId": string_schema() }, "additionalProperties": false },
+            "registryServerTimeMs": nonnegative_integer_schema(),
+            "maxEndpointLeaseMs": positive_integer_schema(),
+            "registrationReady": { "type": "boolean" },
+            "endpointLease": { "type": "object", "required": ["leaseGeneration", "registrationObservedAtMs", "leaseExpiresAtMs"], "properties": { "leaseGeneration": positive_integer_schema(), "registrationObservedAtMs": nonnegative_integer_schema(), "leaseExpiresAtMs": positive_integer_schema() }, "additionalProperties": false }
+        },
+        "additionalProperties": false
+    })
+}
+
 fn error_schema() -> Value {
     json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -871,7 +947,7 @@ fn error_schema() -> Value {
         "required": ["ok", "error"],
         "properties": {
             "ok": { "const": false },
-            "error": { "type": "object", "required": ["code", "details"], "properties": { "code": { "enum": ["invalid_input", "outcome_unknown", "protocol_error", "operation_rejected", "state_error", "still_pending", "transport_error", "json_error"] }, "details": { "type": "object" } }, "additionalProperties": false }
+            "error": { "type": "object", "required": ["code", "details"], "properties": { "code": { "enum": ["invalid_input", "outcome_unknown", "protocol_error", "operation_rejected", "state_error", "still_pending", "transport_error", "json_error", "registry_timeout", "registry_unreachable", "registry_response_invalid", "window_not_found", "window_ambiguous", "endpoint_unconfigured", "stale_registration", "endpoint_unreachable", "application_unresponsive", "describe_timeout", "describe_response_too_large", "describe_response_invalid", "prepair_describe_unsupported", "identity_mismatch", "revision_churn", "client_not_ready", "unsupported_protocol_version", "clock_unavailable"] }, "details": { "type": "object" } }, "additionalProperties": false }
         },
         "additionalProperties": false
     })
@@ -879,6 +955,11 @@ fn error_schema() -> Value {
 
 fn examples(command: Command) -> Value {
     match command {
+        Command::WindowDescribe => json!([{
+            "purpose": "Read-only consistency probe. No pairing or local controller state is created; registry identity matching is not authentication.",
+            "input": { "windowLabel": "a" },
+            "command": "surf-ace --registry ws://registry.example:7331 --input-json '{\"windowLabel\":\"a\"}' window-describe"
+        }]),
         Command::PaneDescribe => json!([{
             "purpose": "Fixture-only. Reuse the controller identity in this state root; targetEpoch is null when this response has no currentTarget.",
             "input": {

@@ -257,6 +257,7 @@ function createServer(coreValue: SurfaceCore): SurfaceWsServer {
       hostName: shortHostName(),
       getOverlayDiagnostics: (surfaceId) => overlayDiagnostics.get(surfaceId) ?? null,
       getRuntimeAppBinding: refreshRuntimeAppBindingDiagnostics,
+      isApplicationStateReady: () => !persistentStateWriteGuard && !persistentStateOutcomeUnknown,
       onNativeMaterialized: (surfaceId, materialization) => {
         recordNativePaneInstances(surfaceId, materialization);
         broadcastSurfaceState(surfaceId);
@@ -2049,6 +2050,7 @@ async function boot(): Promise<void> {
   const persistentState = await loadPersistentState();
   const identity = await loadOrCreateIdentity(stateDir);
   const configuredAddress = process.env.SURF_ACE_SERVER?.trim();
+  const configuredDirectEndpoint = process.env.SURF_ACE_DIRECT_ENDPOINT?.trim() || null;
   identityFingerprint = identity.fingerprintPrefix;
   clientInfo("identity_loaded", {
     fingerprint: identityFingerprint,
@@ -2134,6 +2136,7 @@ async function boot(): Promise<void> {
   });
   configuredRegistration = new ServerConnection({
     configuredAddress,
+    directEndpoint: configuredDirectEndpoint,
     clientId: registrationClientId(identity.publicKeyPem),
     core,
     persist: persistRegistryState,

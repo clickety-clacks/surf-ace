@@ -8,11 +8,16 @@ use serde::Serialize;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tungstenite::client::{uri_mode, IntoClientRequest};
 use uuid::Uuid;
 
 const LOCKLESS_CAPABILITY: &str = "surf-ace.lockless-multi-controller.v1";
 const RECEIPT_CAPABILITY: &str = "operation-receipt-replay-v1";
+const DISCOVERY_TIMEOUT: Duration = Duration::from_millis(2_000);
+const DISCOVERY_REGISTRY_MAX_BYTES: usize = 1_048_576;
+const DISCOVERY_DESCRIBE_MAX_BYTES: usize = 65_536;
+const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
 #[derive(Debug, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -39,6 +44,9 @@ pub fn execute(invocation: Invocation) -> Result<CliOutput, CliError> {
             .expect("fleet-list route validation requires registry");
         let mut wire = WebSocketWire::connect_direct(registry).map_err(CliError::Wire)?;
         return execute_fleet_list_with_wire(&mut wire);
+    }
+    if invocation.command == crate::command::Command::WindowDescribe {
+        return execute_window_describe(&invocation);
     }
     if invocation.command.is_local() {
         return execute_local(invocation);
@@ -77,6 +85,11 @@ pub fn execute_with_wire(
     validate_invocation_route(&invocation)?;
     if invocation.command == crate::command::Command::FleetList {
         return execute_fleet_list_with_wire(wire);
+    }
+    if invocation.command == crate::command::Command::WindowDescribe {
+        return Err(CliError::Input(
+            "window_describe_requires_routed_transport".into(),
+        ));
     }
     if invocation.command.is_local() {
         return Err(CliError::Input("read_must_use_local_path".into()));
@@ -124,9 +137,17 @@ fn validate_invocation_route(invocation: &Invocation) -> Result<(), CliError> {
     if invocation.endpoint.is_some() && invocation.registry.is_some() {
         return Err(CliError::Input("ambiguous_endpoint_registry".into()));
     }
-    if invocation.command == crate::command::Command::FleetList {
+    if matches!(
+        invocation.command,
+        crate::command::Command::FleetList | crate::command::Command::WindowDescribe
+    ) {
         if invocation.endpoint.is_some() {
-            return Err(CliError::Input("fleet_list_rejects_endpoint".into()));
+            let code = if invocation.command == crate::command::Command::FleetList {
+                "fleet_list_rejects_endpoint"
+            } else {
+                "window_describe_rejects_endpoint"
+            };
+            return Err(CliError::Input(code.into()));
         }
         if invocation.product_label.is_some() {
             return Err(CliError::Input("fleet_list_rejects_product_label".into()));
@@ -145,6 +166,956 @@ fn validate_invocation_route(invocation: &Invocation) -> Result<(), CliError> {
         return Err(CliError::Input("registry_only_for_fleet_list".into()));
     }
     Ok(())
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RegistryIdentity {
+    allocator_id: String,
+    fleet_id: String,
+}
+
+#[derive(Clone, Debug)]
+struct RegistrySnapshot {
+    payload: Value,
+    identity: RegistryIdentity,
+    server_time_ms: u64,
+    max_endpoint_lease_ms: u64,
+}
+
+#[derive(Clone, Debug)]
+struct EndpointCandidate {
+    identity: RegistryIdentity,
+    client_id: String,
+    surface_id: String,
+    window_label: String,
+    direct_endpoint: String,
+    lease_generation: u64,
+    registration_observed_at_ms: u64,
+    lease_expires_at_ms: u64,
+}
+
+impl EndpointCandidate {
+    fn same_registration(&self, other: &Self) -> bool {
+        self.identity == other.identity
+            && self.client_id == other.client_id
+            && self.surface_id == other.surface_id
+            && self.window_label == other.window_label
+            && self.direct_endpoint == other.direct_endpoint
+            && self.lease_generation == other.lease_generation
+            && self.registration_observed_at_ms == other.registration_observed_at_ms
+    }
+
+    fn evidence(&self, snapshot: &RegistrySnapshot) -> Value {
+        json!({
+            "clientId": self.client_id,
+            "surfaceId": self.surface_id,
+            "windowLabel": self.window_label,
+            "directEndpoint": self.direct_endpoint,
+            "registryIdentity": {
+                "allocatorId": self.identity.allocator_id,
+                "fleetId": self.identity.fleet_id,
+            },
+            "registryServerTimeMs": snapshot.server_time_ms,
+            "maxEndpointLeaseMs": snapshot.max_endpoint_lease_ms,
+            "registrationReady": snapshot.payload.get("registrationReady").cloned().unwrap_or(Value::Null),
+            "endpointLease": {
+                "leaseGeneration": self.lease_generation,
+                "registrationObservedAtMs": self.registration_observed_at_ms,
+                "leaseExpiresAtMs": self.lease_expires_at_ms,
+            },
+        })
+    }
+}
+
+fn execute_window_describe(invocation: &Invocation) -> Result<CliOutput, CliError> {
+    let registry = invocation
+        .registry
+        .as_deref()
+        .expect("window-describe route validation requires registry");
+    let window_label = invocation
+        .input
+        .get("windowLabel")
+        .and_then(Value::as_str)
+        .expect("window-describe input validation requires a label");
+    let before = read_discovery_registry(registry)?;
+    let selected = select_endpoint_candidate(&before, window_label)?;
+    let direct_observed_at_ms = discovery_now_ms()?;
+    let probe = probe_surface(&selected, direct_observed_at_ms);
+    let after = read_discovery_registry(registry)?;
+    let rechecked = select_endpoint_candidate(&after, window_label).map_err(|error| {
+        discovery_error(
+            "stale_registration",
+            format!(
+                "Registry row did not remain uniquely current after direct observation: {error}"
+            ),
+        )
+    })?;
+    if !selected.same_registration(&rechecked) {
+        return Err(discovery_error(
+            "stale_registration",
+            "Registry identity, client, surface, endpoint, window label, or lease generation changed during observation",
+        ));
+    }
+    let surface_observation = probe?;
+    Ok(CliOutput {
+        ok: true,
+        command: crate::command::Command::WindowDescribe.name().into(),
+        controller_instance_id: None,
+        reconciliations: vec![],
+        result: json!({
+            "windowLabel": window_label,
+            "identitySemantics": "consistency_only_not_authentication",
+            "transportReachability": {
+                "status": "reachable",
+                "directEndpoint": selected.direct_endpoint,
+                "observedAtMs": direct_observed_at_ms,
+            },
+            "registryBefore": selected.evidence(&before),
+            "registryAfter": rechecked.evidence(&after),
+            "applicationReadiness": surface_observation["applicationReadiness"].clone(),
+            "surfaceObservation": surface_observation,
+        }),
+    })
+}
+
+fn read_discovery_registry(registry: &str) -> Result<RegistrySnapshot, CliError> {
+    let mut wire = WebSocketWire::connect_direct_bounded(
+        registry,
+        DISCOVERY_TIMEOUT,
+        DISCOVERY_REGISTRY_MAX_BYTES,
+    )
+    .map_err(|error| registry_wire_error(error))?;
+    let request_id = format!("rq_{}", Uuid::new_v4().simple());
+    let mut sent = || Ok(());
+    let response = wire
+        .request(&request_id, "fleet.topology", json!({}), &mut sent)
+        .map_err(registry_wire_error)?;
+    let _ = wire.close();
+    if response.response.id.as_deref() != Some(request_id.as_str())
+        || response.response.op != "fleet.topology"
+        || response.response.envelope_type != "response"
+        || response.response.v != 1
+        || response
+            .response
+            .sent_at
+            .is_none_or(|time| time > MAX_SAFE_INTEGER)
+    {
+        return Err(discovery_error(
+            "registry_response_invalid",
+            "Registry returned an invalid fleet.topology envelope",
+        ));
+    }
+    if response.response.ok != Some(true) {
+        let code = response
+            .response
+            .error
+            .as_ref()
+            .and_then(|error| error.get("code"))
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        return Err(discovery_error(
+            "registry_unavailable",
+            format!("fleet.topology was refused: {code}"),
+        ));
+    }
+    let payload = response.response.payload.ok_or_else(|| {
+        discovery_error(
+            "registry_response_invalid",
+            "Registry omitted fleet.topology payload",
+        )
+    })?;
+    validate_fleet_topology_payload(&payload)
+        .map_err(|error| discovery_error("registry_response_invalid", error.to_string()))?;
+    let object = payload.as_object().ok_or_else(|| {
+        discovery_error(
+            "registry_response_invalid",
+            "Registry topology payload is not an object",
+        )
+    })?;
+    let identity = object
+        .get("registryIdentity")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            discovery_error("registry_response_invalid", "Registry identity is missing")
+        })?;
+    if identity
+        .keys()
+        .any(|key| key != "allocatorId" && key != "fleetId")
+    {
+        return Err(discovery_error(
+            "registry_response_invalid",
+            "Registry identity has unknown fields",
+        ));
+    }
+    let allocator_id = identity
+        .get("allocatorId")
+        .and_then(Value::as_str)
+        .filter(|value| valid_allocator_id(value))
+        .ok_or_else(|| {
+            discovery_error(
+                "registry_response_invalid",
+                "Registry allocator identity is invalid",
+            )
+        })?;
+    let fleet_id = identity
+        .get("fleetId")
+        .and_then(Value::as_str)
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 128
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte))
+        })
+        .ok_or_else(|| {
+            discovery_error(
+                "registry_response_invalid",
+                "Registry fleet identity is invalid",
+            )
+        })?;
+    let server_time_ms = object
+        .get("registryServerTimeMs")
+        .and_then(safe_nonnegative_u64)
+        .ok_or_else(|| {
+            discovery_error(
+                "registry_response_invalid",
+                "Registry server time is missing or invalid",
+            )
+        })?;
+    let max_endpoint_lease_ms = object
+        .get("maxEndpointLeaseMs")
+        .and_then(safe_positive_u64)
+        .ok_or_else(|| {
+            discovery_error(
+                "registry_response_invalid",
+                "Registry endpoint lease bound is missing or invalid",
+            )
+        })?;
+    if !object
+        .get("registrationReady")
+        .is_some_and(Value::is_boolean)
+    {
+        return Err(discovery_error(
+            "registry_response_invalid",
+            "Registry readiness is missing or invalid",
+        ));
+    }
+    let parsed_identity = RegistryIdentity {
+        allocator_id: allocator_id.to_owned(),
+        fleet_id: fleet_id.to_owned(),
+    };
+    Ok(RegistrySnapshot {
+        payload,
+        identity: parsed_identity,
+        server_time_ms,
+        max_endpoint_lease_ms,
+    })
+}
+
+fn select_endpoint_candidate(
+    snapshot: &RegistrySnapshot,
+    window_label: &str,
+) -> Result<EndpointCandidate, CliError> {
+    let clients = snapshot
+        .payload
+        .get("clients")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            discovery_error("registry_response_invalid", "Registry clients are missing")
+        })?;
+    let mut label_seen = false;
+    let mut label_has_supported_endpoint = false;
+    let mut candidates = Vec::new();
+    for client in clients {
+        let Some(client_object) = client.as_object() else {
+            continue;
+        };
+        let Some(client_id) = client_object.get("clientId").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(surfaces) = client_object.get("surfaces").and_then(Value::as_array) else {
+            continue;
+        };
+        for surface in surfaces {
+            let Some(surface_object) = surface.as_object() else {
+                continue;
+            };
+            if surface_object.get("windowLabel").and_then(Value::as_str) != Some(window_label) {
+                continue;
+            }
+            label_seen = true;
+            let Some(surface_id) = surface_object.get("surfaceId").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(direct_endpoint) = client_object.get("directEndpoint").and_then(Value::as_str)
+            else {
+                continue;
+            };
+            if !is_supported_direct_endpoint(direct_endpoint)
+                || client_object.get("prePairDescribeV1") != Some(&Value::Bool(true))
+            {
+                continue;
+            }
+            label_has_supported_endpoint = true;
+            let Some(lease) = client_object
+                .get("endpointLease")
+                .and_then(Value::as_object)
+            else {
+                continue;
+            };
+            if lease.keys().any(|key| {
+                ![
+                    "leaseGeneration",
+                    "registrationObservedAtMs",
+                    "leaseExpiresAtMs",
+                ]
+                .contains(&key.as_str())
+            }) {
+                continue;
+            }
+            let Some(lease_generation) = lease.get("leaseGeneration").and_then(safe_positive_u64)
+            else {
+                continue;
+            };
+            let Some(registration_observed_at_ms) = lease
+                .get("registrationObservedAtMs")
+                .and_then(safe_nonnegative_u64)
+            else {
+                continue;
+            };
+            let Some(lease_expires_at_ms) =
+                lease.get("leaseExpiresAtMs").and_then(safe_positive_u64)
+            else {
+                continue;
+            };
+            if registration_observed_at_ms > snapshot.server_time_ms
+                || lease_expires_at_ms <= snapshot.server_time_ms
+                || lease_expires_at_ms <= registration_observed_at_ms
+                || lease_expires_at_ms - snapshot.server_time_ms > snapshot.max_endpoint_lease_ms
+            {
+                continue;
+            }
+            candidates.push(EndpointCandidate {
+                identity: snapshot.identity.clone(),
+                client_id: client_id.to_owned(),
+                surface_id: surface_id.to_owned(),
+                window_label: window_label.to_owned(),
+                direct_endpoint: direct_endpoint.to_owned(),
+                lease_generation,
+                registration_observed_at_ms,
+                lease_expires_at_ms,
+            });
+        }
+    }
+    match candidates.len() {
+        0 if label_seen && !label_has_supported_endpoint => Err(discovery_error(
+            "endpoint_unconfigured",
+            "Named window has no configured direct endpoint with pre-pair describe support",
+        )),
+        0 if label_seen => Err(discovery_error(
+            "stale_registration",
+            "Named window has no current supported endpoint lease",
+        )),
+        0 => Err(discovery_error(
+            "window_not_found",
+            "No registry surface has the requested window label",
+        )),
+        1 => Ok(candidates.remove(0)),
+        _ => Err(discovery_error(
+            "window_ambiguous",
+            "More than one current registry surface has the requested window label",
+        )),
+    }
+}
+
+fn probe_surface(candidate: &EndpointCandidate, observed_at_ms: u64) -> Result<Value, CliError> {
+    let mut wire = match WebSocketWire::connect_direct_bounded(
+        &candidate.direct_endpoint,
+        DISCOVERY_TIMEOUT,
+        DISCOVERY_DESCRIBE_MAX_BYTES,
+    ) {
+        Ok(wire) => wire,
+        Err(error) => {
+            let failure = endpoint_wire_error(error);
+            return Err(with_probe_evidence(
+                failure,
+                candidate,
+                observed_at_ms,
+                "unreachable",
+                "unknown",
+            ));
+        }
+    };
+    let request_id = format!("rq_{}", Uuid::new_v4().simple());
+    // Two independent v4 values provide 244 random bits after their fixed version/variant bits.
+    let nonce = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+    let payload = json!({
+        "clientId": candidate.client_id,
+        "registryIdentity": {
+            "allocatorId": candidate.identity.allocator_id,
+            "fleetId": candidate.identity.fleet_id,
+        },
+        "surfaceId": candidate.surface_id,
+        "endpointLeaseGeneration": candidate.lease_generation,
+        "nonce": nonce,
+    });
+    let mut sent = || Ok(());
+    let response = match wire.request(&request_id, "surface.describe", payload, &mut sent) {
+        Ok(response) => response,
+        Err(error) => {
+            let _ = wire.close();
+            let failure = endpoint_wire_error(error);
+            return Err(with_probe_evidence(
+                failure,
+                candidate,
+                observed_at_ms,
+                "reachable",
+                "unknown",
+            ));
+        }
+    };
+    let _ = wire.close();
+    if !response.events.is_empty() {
+        return Err(with_probe_evidence(
+            discovery_error(
+                "describe_response_invalid",
+                "Pre-pair surface.describe produced unexpected events",
+            ),
+            candidate,
+            observed_at_ms,
+            "reachable",
+            "unknown",
+        ));
+    }
+    if response.response.id.as_deref() != Some(request_id.as_str())
+        || response.response.op != "surface.describe"
+        || response.response.envelope_type != "response"
+        || response.response.v != 1
+        || response
+            .response
+            .sent_at
+            .is_none_or(|time| time > MAX_SAFE_INTEGER)
+    {
+        return Err(with_probe_evidence(
+            discovery_error(
+                "describe_response_invalid",
+                "Client returned an invalid surface.describe envelope",
+            ),
+            candidate,
+            observed_at_ms,
+            "reachable",
+            "unknown",
+        ));
+    }
+    if response.response.ok != Some(true) {
+        let code = response
+            .response
+            .error
+            .as_ref()
+            .and_then(|error| error.get("code"))
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let (mapped, message) = match code {
+            "prepair_describe_unsupported" => (
+                "prepair_describe_unsupported",
+                "Client does not support pre-pair surface.describe",
+            ),
+            "identity_mismatch" => (
+                "identity_mismatch",
+                "Client refused the registry identity or endpoint lease",
+            ),
+            "revision_churn" => (
+                "revision_churn",
+                "Client topology changed during observation",
+            ),
+            "not_ready" => (
+                "client_not_ready",
+                "Client application is not ready for an authoritative observation",
+            ),
+            "surface_not_found" => (
+                "stale_registration",
+                "Registry surface is no longer live at the endpoint",
+            ),
+            "unsupported_protocol_version" => (
+                "unsupported_protocol_version",
+                "Client does not support protocol v1",
+            ),
+            _ => ("describe_rejected", "Client refused surface.describe"),
+        };
+        let readiness = if mapped == "client_not_ready" {
+            "not_ready"
+        } else {
+            "unknown"
+        };
+        return Err(with_probe_evidence(
+            discovery_error(mapped, format!("{message}: {code}")),
+            candidate,
+            observed_at_ms,
+            "reachable",
+            readiness,
+        ));
+    }
+    let payload = match response.response.payload {
+        Some(payload) => payload,
+        None => {
+            return Err(with_probe_evidence(
+                discovery_error(
+                    "describe_response_invalid",
+                    "Client omitted surface.describe payload",
+                ),
+                candidate,
+                observed_at_ms,
+                "reachable",
+                "unknown",
+            ));
+        }
+    };
+    if let Err(error) = validate_surface_observation(&payload, candidate, &nonce) {
+        return Err(with_probe_evidence(
+            error,
+            candidate,
+            observed_at_ms,
+            "reachable",
+            "unknown",
+        ));
+    }
+    Ok(payload)
+}
+
+fn with_probe_evidence(
+    error: CliError,
+    candidate: &EndpointCandidate,
+    observed_at_ms: u64,
+    transport_status: &str,
+    readiness_status: &str,
+) -> CliError {
+    match error {
+        CliError::Discovery { code, message, .. } => {
+            let details = json!({
+                "message": message.clone(),
+                "transportReachability": {
+                    "status": transport_status,
+                    "directEndpoint": candidate.direct_endpoint.clone(),
+                    "observedAtMs": observed_at_ms,
+                },
+                "applicationReadiness": {
+                    "status": readiness_status,
+                    "limitationCodes": if readiness_status == "unknown" {
+                        vec![code]
+                    } else if readiness_status == "not_ready" {
+                        vec!["not_ready"]
+                    } else {
+                        vec![]
+                    },
+                },
+            });
+            CliError::Discovery {
+                code,
+                message,
+                details,
+            }
+        }
+        other => other,
+    }
+}
+
+fn validate_surface_observation(
+    payload: &Value,
+    candidate: &EndpointCandidate,
+    nonce: &str,
+) -> Result<(), CliError> {
+    let object = payload.as_object().ok_or_else(|| {
+        discovery_error(
+            "describe_response_invalid",
+            "Client observation is not an object",
+        )
+    })?;
+    require_exact_keys(
+        object,
+        &[
+            "nonce",
+            "clientId",
+            "registryIdentity",
+            "surfaceId",
+            "endpointLeaseGeneration",
+            "observedAtMs",
+            "applicationReadiness",
+            "surfaceSetRevision",
+            "topologyRevision",
+            "layout",
+            "panes",
+        ],
+    )
+    .map_err(|message| discovery_error("describe_response_invalid", message))?;
+    if object.get("nonce").and_then(Value::as_str) != Some(nonce)
+        || object.get("clientId").and_then(Value::as_str) != Some(candidate.client_id.as_str())
+        || object.get("surfaceId").and_then(Value::as_str) != Some(candidate.surface_id.as_str())
+        || object
+            .get("endpointLeaseGeneration")
+            .and_then(safe_positive_u64)
+            != Some(candidate.lease_generation)
+    {
+        return Err(discovery_error(
+            "identity_mismatch",
+            "Client observation does not match the selected registry row",
+        ));
+    }
+    let identity = parse_registry_identity(object.get("registryIdentity"))
+        .map_err(|message| discovery_error("describe_response_invalid", message))?;
+    if identity != candidate.identity {
+        return Err(discovery_error(
+            "identity_mismatch",
+            "Client observation reports a different registry identity",
+        ));
+    }
+    for key in ["observedAtMs", "surfaceSetRevision", "topologyRevision"] {
+        if object.get(key).and_then(safe_nonnegative_u64).is_none() {
+            return Err(discovery_error(
+                "describe_response_invalid",
+                format!("Client observation has invalid {key}"),
+            ));
+        }
+    }
+    validate_application_readiness(object.get("applicationReadiness"))
+        .map_err(|message| discovery_error("describe_response_invalid", message))?;
+    let panes = object
+        .get("panes")
+        .and_then(Value::as_array)
+        .filter(|panes| !panes.is_empty())
+        .ok_or_else(|| {
+            discovery_error(
+                "describe_response_invalid",
+                "Client observation has no live panes",
+            )
+        })?;
+    let mut pane_ids = BTreeSet::new();
+    for pane in panes {
+        let pane = pane.as_object().ok_or_else(|| {
+            discovery_error("describe_response_invalid", "Pane record is not an object")
+        })?;
+        require_exact_keys(pane, &["paneId", "paneLabel", "contentObservation"])
+            .map_err(|message| discovery_error("describe_response_invalid", message))?;
+        let pane_id = pane
+            .get("paneId")
+            .and_then(safe_positive_u64)
+            .ok_or_else(|| discovery_error("describe_response_invalid", "Pane id is invalid"))?;
+        if !pane_ids.insert(pane_id) {
+            return Err(discovery_error(
+                "describe_response_invalid",
+                "Client observation contains duplicate pane ids",
+            ));
+        }
+        let label = pane
+            .get("paneLabel")
+            .ok_or_else(|| discovery_error("describe_response_invalid", "Pane label is missing"))?;
+        if !label.is_null() && safe_positive_u64(label).is_none() {
+            return Err(discovery_error(
+                "describe_response_invalid",
+                "Pane label is invalid",
+            ));
+        }
+        let observation = pane
+            .get("contentObservation")
+            .and_then(Value::as_object)
+            .ok_or_else(|| {
+                discovery_error(
+                    "describe_response_invalid",
+                    "Pane content observation is invalid",
+                )
+            })?;
+        require_exact_keys(observation, &["revision", "source", "observedAtMs"])
+            .map_err(|message| discovery_error("describe_response_invalid", message))?;
+        if observation.get("source").and_then(Value::as_str) != Some("client-authority")
+            || observation
+                .get("observedAtMs")
+                .and_then(safe_nonnegative_u64)
+                .is_none()
+            || (!observation.get("revision").is_some_and(Value::is_null)
+                && observation
+                    .get("revision")
+                    .and_then(safe_nonnegative_u64)
+                    .is_none())
+        {
+            return Err(discovery_error(
+                "describe_response_invalid",
+                "Pane content observation is invalid",
+            ));
+        }
+    }
+    let mut layout_ids = Vec::new();
+    validate_layout_node(
+        object.get("layout").expect("required layout"),
+        0,
+        &mut layout_ids,
+    )
+    .map_err(|message| discovery_error("describe_response_invalid", message))?;
+    let pane_id_set = pane_ids.into_iter().collect::<Vec<_>>();
+    layout_ids.sort_unstable();
+    if layout_ids != pane_id_set {
+        return Err(discovery_error(
+            "describe_response_invalid",
+            "Layout leaves do not match the live pane list",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_application_readiness(value: Option<&Value>) -> Result<(), String> {
+    let object = value
+        .and_then(Value::as_object)
+        .ok_or_else(|| "applicationReadiness is missing".to_owned())?;
+    require_exact_keys(object, &["status", "limitationCodes"])?;
+    let status = object
+        .get("status")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "applicationReadiness.status is invalid".to_owned())?;
+    let codes = object
+        .get("limitationCodes")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "applicationReadiness.limitationCodes is invalid".to_owned())?;
+    if !codes
+        .iter()
+        .all(|code| code.as_str().is_some_and(valid_limitation_code))
+    {
+        return Err("applicationReadiness contains an invalid limitation code".into());
+    }
+    match status {
+        "ready" if codes.is_empty() => Ok(()),
+        "degraded" if !codes.is_empty() => Ok(()),
+        _ => Err("applicationReadiness status and limitation codes disagree".into()),
+    }
+}
+
+fn validate_layout_node(
+    value: &Value,
+    depth: usize,
+    pane_ids: &mut Vec<u64>,
+) -> Result<(), String> {
+    if depth > 64 || pane_ids.len() > 4096 {
+        return Err("layout exceeds topology bounds".into());
+    }
+    let object = value
+        .as_object()
+        .ok_or_else(|| "layout node is not an object".to_owned())?;
+    match object.get("type").and_then(Value::as_str) {
+        Some("pane") => {
+            require_exact_keys_with_optional(object, &["type", "paneId"], &["weight"])?;
+            let pane_id = object
+                .get("paneId")
+                .and_then(safe_positive_u64)
+                .ok_or_else(|| "layout pane id is invalid".to_owned())?;
+            validate_layout_weight(object.get("weight"))?;
+            pane_ids.push(pane_id);
+            Ok(())
+        }
+        Some("split") => {
+            require_exact_keys_with_optional(
+                object,
+                &["type", "direction", "children"],
+                &["weight"],
+            )?;
+            if !matches!(
+                object.get("direction").and_then(Value::as_str),
+                Some("horizontal" | "vertical")
+            ) {
+                return Err("layout split direction is invalid".into());
+            }
+            validate_layout_weight(object.get("weight"))?;
+            let children = object
+                .get("children")
+                .and_then(Value::as_array)
+                .filter(|children| !children.is_empty())
+                .ok_or_else(|| "layout split children are invalid".to_owned())?;
+            for child in children {
+                validate_layout_node(child, depth + 1, pane_ids)?;
+            }
+            Ok(())
+        }
+        _ => Err("layout node type is invalid".into()),
+    }
+}
+
+fn validate_layout_weight(weight: Option<&Value>) -> Result<(), String> {
+    if let Some(weight) = weight {
+        let weight = weight
+            .as_f64()
+            .ok_or_else(|| "layout weight is invalid".to_owned())?;
+        if !weight.is_finite() || weight <= 0.0 {
+            return Err("layout weight is invalid".into());
+        }
+    }
+    Ok(())
+}
+
+fn parse_registry_identity(value: Option<&Value>) -> Result<RegistryIdentity, String> {
+    let object = value
+        .and_then(Value::as_object)
+        .ok_or_else(|| "Registry identity is missing".to_owned())?;
+    require_exact_keys(object, &["allocatorId", "fleetId"])?;
+    let allocator_id = object
+        .get("allocatorId")
+        .and_then(Value::as_str)
+        .filter(|value| valid_allocator_id(value))
+        .ok_or_else(|| "Registry allocator identity is invalid".to_owned())?;
+    let fleet_id = object
+        .get("fleetId")
+        .and_then(Value::as_str)
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 128
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte))
+        })
+        .ok_or_else(|| "Registry fleet identity is invalid".to_owned())?;
+    Ok(RegistryIdentity {
+        allocator_id: allocator_id.into(),
+        fleet_id: fleet_id.into(),
+    })
+}
+
+fn require_exact_keys(object: &Map<String, Value>, required: &[&str]) -> Result<(), String> {
+    require_exact_keys_with_optional(object, required, &[])
+}
+
+fn require_exact_keys_with_optional(
+    object: &Map<String, Value>,
+    required: &[&str],
+    optional: &[&str],
+) -> Result<(), String> {
+    if required.iter().any(|key| !object.contains_key(*key)) {
+        return Err("Required response field is missing".into());
+    }
+    if object
+        .keys()
+        .any(|key| !required.contains(&key.as_str()) && !optional.contains(&key.as_str()))
+    {
+        return Err("Response object contains an unsupported field".into());
+    }
+    Ok(())
+}
+
+fn safe_nonnegative_u64(value: &Value) -> Option<u64> {
+    let value = value.as_u64()?;
+    (value <= MAX_SAFE_INTEGER).then_some(value)
+}
+
+fn safe_positive_u64(value: &Value) -> Option<u64> {
+    safe_nonnegative_u64(value).filter(|value| *value > 0)
+}
+
+fn valid_allocator_id(value: &str) -> bool {
+    value.strip_prefix("alloc_").is_some_and(|suffix| {
+        suffix.len() >= 3
+            && suffix.len() <= 64
+            && suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte))
+    })
+}
+
+fn valid_limitation_code(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+}
+
+fn is_supported_direct_endpoint(value: &str) -> bool {
+    if value.is_empty() || value.len() > 2048 || value.contains('#') {
+        return false;
+    }
+    let Ok(request) = value.into_client_request() else {
+        return false;
+    };
+    let uri = request.uri();
+    if uri_mode(uri).is_err() || uri.host().is_none() {
+        return false;
+    }
+    !uri.authority()
+        .is_some_and(|authority| authority.as_str().contains('@'))
+}
+
+fn registry_wire_error(error: WireFailure) -> CliError {
+    let code = if wire_is_timed_out(&error) {
+        "registry_timeout"
+    } else {
+        "registry_unreachable"
+    };
+    discovery_error(code, error.to_string())
+}
+
+fn endpoint_wire_error(error: WireFailure) -> CliError {
+    let code = match &error {
+        WireFailure::BeforeSend { .. } => "endpoint_unreachable",
+        WireFailure::AfterSend { code } if code.contains("response_too_large") => {
+            "describe_response_too_large"
+        }
+        WireFailure::AfterSend { .. } => "application_unresponsive",
+    };
+    discovery_error(code, error.to_string())
+}
+
+fn wire_is_timed_out(error: &WireFailure) -> bool {
+    let message = error.to_string().to_ascii_lowercase();
+    message.contains("timed out")
+        || message.contains("deadline_exceeded")
+        || message.contains("deadline:operation timed out")
+        || message.contains("temporarily unavailable")
+        || message.contains("would block")
+        || message.contains("wouldblock")
+}
+
+#[cfg(test)]
+mod discovery_timeout_tests {
+    use super::wire_is_timed_out;
+    use crate::wire::WireFailure;
+
+    #[test]
+    fn socket_timeout_classification_includes_platform_would_block_errors() {
+        for message in [
+            "deadline_exceeded",
+            "operation timed out",
+            "Resource temporarily unavailable (os error 11)",
+            "WouldBlock",
+        ] {
+            assert!(
+                wire_is_timed_out(&WireFailure::AfterSend {
+                    code: format!("response_read:{message}"),
+                }),
+                "{message} should be reported as a bounded timeout",
+            );
+        }
+        assert!(!wire_is_timed_out(&WireFailure::BeforeSend {
+            code: "reachability:Connection refused".into(),
+        }));
+    }
+}
+
+fn discovery_now_ms() -> Result<u64, CliError> {
+    let value = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| discovery_error("clock_unavailable", error.to_string()))?
+        .as_millis();
+    let value = u64::try_from(value)
+        .map_err(|error| discovery_error("clock_unavailable", error.to_string()))?;
+    if value > MAX_SAFE_INTEGER {
+        return Err(discovery_error(
+            "clock_unavailable",
+            "Local clock exceeds safe epoch milliseconds",
+        ));
+    }
+    Ok(value)
+}
+
+fn discovery_error(code: &'static str, message: impl Into<String>) -> CliError {
+    let message = message.into();
+    CliError::Discovery {
+        code,
+        details: json!({ "message": message.clone() }),
+        message,
+    }
 }
 
 fn execute_fleet_list_with_wire(wire: &mut dyn DirectWire) -> Result<CliOutput, CliError> {
@@ -1706,9 +2677,20 @@ fn mark_all_synchronized(
 #[derive(Debug)]
 pub enum CliError {
     Input(String),
-    OutcomeUnknown { request_id: String, cause: String },
+    Discovery {
+        code: &'static str,
+        message: String,
+        details: Value,
+    },
+    OutcomeUnknown {
+        request_id: String,
+        cause: String,
+    },
     Protocol(String),
-    Rejected { operation: String, code: String },
+    Rejected {
+        operation: String,
+        code: String,
+    },
     State(StateError),
     StillPending,
     Wire(WireFailure),
@@ -1716,9 +2698,10 @@ pub enum CliError {
 }
 
 impl CliError {
-    pub fn code(&self) -> &'static str {
+    pub fn code(&self) -> &str {
         match self {
             Self::Input(_) => "invalid_input",
+            Self::Discovery { code, .. } => code,
             Self::OutcomeUnknown { .. } => "outcome_unknown",
             Self::Protocol(_) => "protocol_error",
             Self::Rejected { .. } => "operation_rejected",
@@ -1731,6 +2714,7 @@ impl CliError {
 
     pub fn details(&self) -> Value {
         match self {
+            Self::Discovery { details, .. } => details.clone(),
             Self::OutcomeUnknown { request_id, cause } => {
                 json!({ "cause": cause, "requestId": request_id })
             }
@@ -1746,6 +2730,7 @@ impl std::fmt::Display for CliError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Input(value) => write!(formatter, "invalid_input:{value}"),
+            Self::Discovery { code, message, .. } => write!(formatter, "{code}:{message}"),
             Self::OutcomeUnknown { request_id, cause } => {
                 write!(formatter, "outcome_unknown:{request_id}:{cause}")
             }

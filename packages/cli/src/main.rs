@@ -94,7 +94,11 @@ fn parse() -> Result<Invocation, surf_ace_cli::CliError> {
         }
     }
     let command = command.ok_or_else(|| input_error("command"))?;
-    let state_root = state_root.ok_or_else(|| input_error("state-root"))?;
+    let state_root = match state_root {
+        Some(path) => path,
+        None if command == Command::WindowDescribe => PathBuf::new(),
+        None => return Err(input_error("state-root")),
+    };
     if endpoint.is_some() && registry.is_some() {
         return Err(surf_ace_cli::CliError::Input(
             "ambiguous_endpoint_registry".into(),

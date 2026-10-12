@@ -19,12 +19,29 @@ import {
 } from "./domain.js";
 import { PostgresCustodyAdapter, type AdapterTestHooks, type AnnotationInfo, type PostgresCustodyConfig } from "./custody.js";
 import { parseAllocatorRequest } from "./validation.js";
+import { EndpointLeaseBook, validateDirectEndpoint, type EndpointLease } from "./endpoint-leases.js";
+
+const DEFAULT_MAX_ENDPOINT_LEASE_MS = 15_000;
+
+type RegisteredClientProjection = {
+  clientId: string;
+  directEndpoint: string | null;
+  endpointLease: EndpointLease | null;
+  prePairDescribeV1: boolean;
+  registryIdentity: { allocatorId: string; fleetId: string };
+  surfaces: Array<{
+    surfaceId: string;
+    windowLabel: string;
+    panes: Array<{ paneId: string; paneLineageId: string; paneLabel: number; paneAddress: string }>;
+  }>;
+};
 
 export type AllocatorServerConfig = {
   custody: PostgresCustodyConfig;
   hostLockPath: string;
   listenHost: string;
   listenPort: number;
+  maxEndpointLeaseMs?: number;
 };
 
 export type AllocatorDiagnostics = {
@@ -70,13 +87,23 @@ export class AllocatorServer {
   private readonly startedAt = Date.now();
   private readonly annotationRoles = new WeakMap<WebSocket, "publisher" | "consumer">();
   private readonly annotationLeases = new Map<string, AnnotationLease>();
-  private readonly registeredClients = new Map<string, unknown>();
+  private readonly registeredClients = new Map<string, RegisteredClientProjection>();
   private registrationTail: Promise<unknown> = Promise.resolve();
 
   private async registerClient(payload: unknown): Promise<unknown> {
-    const value = payload as { clientId?: unknown; surfaces?: unknown };
+    const value = payload as {
+      clientId?: unknown;
+      directEndpoint?: unknown;
+      prePairDescribeV1?: unknown;
+      surfaces?: unknown;
+    };
     if (!value || typeof value.clientId !== "string" || !/^[a-f0-9]{64}$/.test(value.clientId) ||
         !Array.isArray(value.surfaces)) throw new Error("invalid_registration");
+    if (value.prePairDescribeV1 !== undefined && typeof value.prePairDescribeV1 !== "boolean") {
+      throw new Error("invalid_registration");
+    }
+    const directEndpoint = validateDirectEndpoint(value.directEndpoint);
+    const prePairDescribeV1 = value.prePairDescribeV1 === true;
     const clientId = value.clientId;
     const surfaces = value.surfaces as Array<{ surfaceId: string; panes: Array<{ paneId: string; paneLabel: number; paneLineageId: string }> }>;
     const ids = new Set<string>();
@@ -119,8 +146,25 @@ export class AllocatorServer {
         panes,
       });
     }
-    const result = {
+    const surfaceIds = surfaces.map((surface) => surface.surfaceId).sort();
+    const leaseSignature = JSON.stringify({
+      allocatorId: state.allocatorId,
       clientId,
+      directEndpoint,
+      fleetId: state.fleetId,
+      prePairDescribeV1,
+      surfaceIds,
+    });
+    const endpointLease = this.endpointLeases.renew(
+      clientId,
+      leaseSignature,
+      directEndpoint !== null && prePairDescribeV1,
+    );
+    const result: RegisteredClientProjection = {
+      clientId,
+      directEndpoint,
+      endpointLease,
+      prePairDescribeV1,
       registryIdentity: { allocatorId: state.allocatorId, fleetId: state.fleetId },
       surfaces: registered,
     };
@@ -147,13 +191,16 @@ export class AllocatorServer {
   private async fleetTopology(): Promise<unknown> {
     const registrationReady = await this.authority.refreshReadiness();
     const state = await this.custody.readAcceptedState();
+    const registryServerTimeMs = this.endpointLeases.serverTimeMs();
     return {
       clients: [...this.registeredClients.values()],
+      maxEndpointLeaseMs: this.endpointLeases.maxEndpointLeaseMs,
       registrationReady,
       registryIdentity: {
         allocatorId: state.allocatorId,
         fleetId: state.fleetId,
       },
+      registryServerTimeMs,
     };
   }
 
@@ -164,6 +211,7 @@ export class AllocatorServer {
     private readonly authority: WindowLabelAuthority,
     private readonly webSocketServer: WebSocketServer,
     private readonly annotationVerified: boolean,
+    private readonly endpointLeases: EndpointLeaseBook,
   ) {}
 
   static async start(config: AllocatorServerConfig, testHooks: AdapterTestHooks = {}): Promise<AllocatorServer> {
@@ -201,7 +249,18 @@ export class AllocatorServer {
           webSocketServer.once("listening", resolve);
           webSocketServer.once("error", reject);
         });
-        const server = new AllocatorServer(config, hostLock, custody, authority, webSocketServer, annotationVerified);
+        const server = new AllocatorServer(
+          config,
+          hostLock,
+          custody,
+          authority,
+          webSocketServer,
+          annotationVerified,
+          new EndpointLeaseBook(
+            custody.token.leaseGeneration,
+            config.maxEndpointLeaseMs ?? DEFAULT_MAX_ENDPOINT_LEASE_MS,
+          ),
+        );
         webSocketServer.on("connection", (socket) => server.accept(socket));
         return server;
       } catch (error) {
@@ -729,4 +788,8 @@ function validateServerConfig(config: AllocatorServerConfig): void {
     throw new TypeError("allocator listenHost and listenPort must be explicit and valid");
   }
   if (!config.hostLockPath) throw new TypeError("allocator hostLockPath is required");
+  const leaseLimit = config.maxEndpointLeaseMs ?? DEFAULT_MAX_ENDPOINT_LEASE_MS;
+  if (!Number.isSafeInteger(leaseLimit) || leaseLimit < 1) {
+    throw new TypeError("maxEndpointLeaseMs must be a positive safe integer");
+  }
 }

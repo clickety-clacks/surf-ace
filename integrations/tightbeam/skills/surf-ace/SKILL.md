@@ -10,18 +10,20 @@ This skill does not change agent identity, add an MCP server, or start a
 resident service.
 
 The repository source for this skill is
-`integrations/tightbeam/skills/surf-ace/SKILL.md`. To enable it for a
-Tightbeam agent, download the separate `surf-ace-skill-v0.2.8.md`
-release asset with its manifest and `SHA256SUMS`, then verify the checksum.
-Ask the workspace administrator to register the verified Markdown content in
-the served identity as `surf-ace`, attach `surf-ace` to the chosen archetype,
-and apply that identity to existing sessions or provision a new session. The
-skill provides CLI guidance only; the standalone executable must be installed
-separately from the platform-specific CLI asset.
+`integrations/tightbeam/skills/surf-ace/SKILL.md`. Install a release using the
+matching skill asset, manifest, and `SHA256SUMS` from that same published
+release; verify the checksum before registering the content as `surf-ace` in a
+served identity. The standalone executable is a separate platform-specific
+release asset. Do not copy deployment URLs, hostnames, ports, or topology into
+this portable skill.
 
 ## Install and verify the CLI
 
-Choose the versioned CLI archive for the host: `surf-ace-cli-linux-x86_64-v0.2.8.tar.gz` or `surf-ace-cli-macos-arm64-v0.2.8.tar.gz`. Download the archive, release manifest, and checksum file from the same published release. Verify the selected asset against `SHA256SUMS` before extracting it. For example, after downloading the full release asset set:
+Choose the Linux x86_64 or macOS arm64 CLI archive listed by the release
+manifest. Download the archive, skill, manifest, and checksum file from the
+same published release. Verify the selected archive and skill against
+`SHA256SUMS` before extracting or installing them. For example, after
+downloading the release assets:
 
 ```sh
 # Linux
@@ -32,41 +34,36 @@ shasum -a 256 -c SHA256SUMS
 ```
 
 Extract into a versioned, user-owned directory and keep the prior version
-available until the new copy is checked:
+available until the new copy is checked. Substitute the exact version and
+asset filename from the verified manifest:
 
 ```sh
-VERSION=0.2.8
+VERSION="REPLACE_WITH_MANIFEST_VERSION"
 INSTALL_ROOT="$HOME/.local/opt/surf-ace/$VERSION"
 mkdir -p "$INSTALL_ROOT"
 tar -xzf "surf-ace-cli-linux-x86_64-v${VERSION}.tar.gz" -C "$INSTALL_ROOT"
 CLI="$INSTALL_ROOT/surf-ace-cli/bin/surf-ace"
 ```
 
-The macOS CLI archive has the same `surf-ace-cli/bin/surf-ace` path. This CLI
-does not implement a `--version` flag. Check the release manifest's `version`,
-`source.tag`, `source.commit`, and `tooling.tag` fields and verify the asset
-checksum to identify the installed bytes. To upgrade or roll back, select the
-versioned executable path for the desired verified release; no in-place CLI
-updater is provided.
+The macOS CLI archive has the same `surf-ace-cli/bin/surf-ace` path. Check the
+release manifest's `version`, `source.tag`, `source.commit`, and `tooling.tag`
+fields and verify the asset checksum to identify the installed bytes. Use
+`--help` and the command schema for a local capability check. To upgrade or
+roll back, select the versioned executable path for the desired verified
+release; no in-place CLI updater is provided.
 
 ## Verify release-smoke participants
 
 Before a release smoke starts or uses any server, CLI, or client, check that
-participant independently against its exact v0.2.8 asset name, byte size,
-SHA-256, product commit, and tooling commit. Rehash the archive bytes and stop
-before launch or CLI operations on any mismatch. For Electron, also require the
-packaged version and runtime `electron.app.getVersion()` to equal `0.2.8`, with
-the runtime check completed before CLI operations. Do not infer the server or
-CLI version from command output; identify those archives through their
-versioned names, manifest, and checksum.
+participant against the exact asset name, byte size, SHA-256, product commit,
+and tooling commit in its verified release manifest. Rehash the archive bytes
+and stop before launch or CLI operations on any mismatch. Do not infer a
+participant's version from the host, network, or command output; use its
+versioned manifest and checksum.
 
 ## CLI help and schema
 
-The `help` and `schema` commands are available only in a CLI build whose
-verified release manifest includes this source change. The currently released
-v0.2.8 CLI predates them; its `--help` flag returns an invalid-input error.
-For a matching later build, query the JSON command catalog before constructing
-an invocation:
+Use the installed CLI's help and schema before constructing an invocation:
 
 ```sh
 "$CLI" --help
@@ -74,10 +71,15 @@ an invocation:
 "$CLI" schema clear
 "$CLI" help annotations watch
 "$CLI" schema annotations ack
+"$CLI" help window-describe
+"$CLI" schema window-describe
 ```
 
 Command help reports route, side effects, input schema, success result shape,
-and error behavior. The examples below are fixtures; replace every identity,
+and error behavior. The currently published v0.2.9-rc3 CLI supports help and
+schema but predates `window-describe`; its schema will report that command as
+unsupported. Use named-window discovery only with a verified CLI release whose
+schema includes it. The examples below are fixtures; replace every identity,
 revision, endpoint, and destroy list with current values from the intended
 client. The CLI schema and validator tests cover the three-pane replacement
 and pane-specific clear inputs.
@@ -112,11 +114,45 @@ unavailable registry is an error. Do not combine `--registry` and
 Always pass the registry URL explicitly; the CLI does not infer one from
 configuration or environment variables.
 
-Registry inventory does not resolve a window label to a direct endpoint or
-prove client reachability. Do not choose an endpoint from the registry URL or
-guess a host or port. The named-window direct discovery operation is not
-available in v0.2.8; use deployment-owned endpoint configuration until a
-verified release adds that capability.
+Registry inventory alone does not resolve a window label to a direct endpoint
+or prove client reachability. Do not choose an endpoint from the registry URL
+or guess a host or port. If the installed CLI schema includes
+`window-describe`, use it for a read-only named-window observation:
+
+```sh
+"$CLI" --registry "$REGISTRY_WS" \
+  --input-json '{"windowLabel":"a"}' \
+  window-describe
+```
+
+The label must be lowercase ASCII letters. The command requires exactly one
+current registry registration and a fresh endpoint lease. It sends a
+nonce-correlated `surface.describe` directly to that leased endpoint before
+controller pairing, then rereads the registry and refuses if the registration
+or lease changed. It creates no controller state, does not send `pair.request`,
+and does not authorize a later mutation. Its identity comparison is
+`consistency_only_not_authentication`: neither the registry identity nor the
+direct response proves cryptographic client identity.
+
+The response keeps registry identity and lease freshness, transport
+reachability, application readiness, topology/layout, and each pane's current
+content revision separate. `window_not_found` and `window_ambiguous` require a
+fresh explicit selection. `endpoint_unconfigured` means the matching client
+did not register a direct endpoint and pre-pair capability. `stale_registration`
+means the row or lease is absent, invalid, expired, or changed during the probe.
+`endpoint_unreachable` reports a failed direct connection. If the WebSocket
+connects but does not return a valid describe response, `application_unresponsive`
+reports the reachable transport separately from unknown application readiness.
+`client_not_ready`, `revision_churn`, unsupported protocol, invalid response,
+and response-size errors are explicit outcomes; never guess another host or
+port as fallback. A content revision is observation evidence only and
+can become stale immediately. Before a later mutation, select the direct
+endpoint explicitly and fetch the exact current topology/content revisions.
+
+`pane-describe` is different: it makes a normal `pair.request` before
+`panes.list` and may persist admission, synchronization, cursor, acknowledgement,
+or pending-receipt reconciliation state. It is not a no-pair discovery
+substitute. Use it only when that paired-controller admission is intended.
 
 ## Select a client and endpoint
 
@@ -132,7 +168,8 @@ or substitute the registry URL.
 Supply runtime facts explicitly:
 
 - `--state-root` names a durable local controller state root shared by
-  sequential invocations for the same working context.
+  sequential invocations for the same working context. `window-describe` does
+  not require or create controller state; omit this option for that command.
 - `--endpoint` is the selected client's WebSocket URL for networked commands.
 - `--product-label` is required for networked commands and is descriptive
   provenance, not identity or authority.
@@ -171,10 +208,12 @@ Example markdown push:
   '{"surfaceId":"sf_1","paneId":1,"contentId":"c1","contentType":"markdown","content":{"markdown":"# Visible result"}}'
 ```
 
-Supported commands are `list`, `push`, `read`, `topology-intent`,
-`topology-realize`, `clear`, `annotations-remove`, `capture-pane`,
-`surface-intent`, `target-register`, and `target-apply`. Bind mutations and
-reads to the exact `surfaceId` and numeric `paneId` required by each command.
+Supported commands include `fleet-list`, `window-describe`, `list`,
+`pane-describe`, `push`, `read`, `topology-intent`, `topology-realize`,
+`clear`, `annotations-remove`, `capture-pane`, `surface-intent`,
+`target-register`, and `target-apply`; availability depends on the installed
+CLI's verified schema. Bind mutations and paired reads to the exact
+`surfaceId` and numeric `paneId` required by each command.
 
 To replace a root with three vertical panes, first inspect the current
 topology. Name every pane that the replacement may destroy in

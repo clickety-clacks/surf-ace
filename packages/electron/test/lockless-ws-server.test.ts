@@ -233,6 +233,177 @@ async function waitForTargetCounts(
   );
 }
 
+function describeFixture() {
+  const core = new SurfaceCore();
+  const surface = core.ensurePrimarySurface("Surf Ace", {
+    height: 800,
+    scale: 2,
+    width: 1200,
+  });
+  initializeRegistryBootstrapPanes(core);
+  const binding = {
+    clientId: "a".repeat(64),
+    allocatorId: "alloc_describe_fixture",
+    fleetId: "fleet_describe_fixture",
+  };
+  const now = Date.now();
+  core.bindRegistryIdentity(binding);
+  core.setRegistryEndpointLease({
+    leaseGeneration: 17,
+    registrationObservedAtMs: now - 1_000,
+    leaseExpiresAtMs: now + 14_000,
+  });
+  return { binding, core, surface };
+}
+
+function describePayload(fixture: ReturnType<typeof describeFixture>, overrides: Record<string, unknown> = {}) {
+  return {
+    clientId: fixture.binding.clientId,
+    registryIdentity: {
+      allocatorId: fixture.binding.allocatorId,
+      fleetId: fixture.binding.fleetId,
+    },
+    surfaceId: fixture.surface.surfaceId,
+    endpointLeaseGeneration: 17,
+    nonce: "a".repeat(32),
+    ...overrides,
+  };
+}
+
+function describeServer(core: SurfaceCore, isApplicationStateReady: () => boolean = () => true) {
+  return new SurfaceWsServer({
+    bindAddress: "127.0.0.1",
+    capturePaneImage: async () => null,
+    compositorSocketPath: null,
+    core,
+    endpointName: "Surf Ace fixture",
+    hostName: "localhost",
+    isApplicationStateReady,
+    port: nextPort++,
+    viewport: () => ({ height: 800, scale: 2, width: 1200 }),
+  });
+}
+
+test("surface.describe returns revision-bound topology before pairing without admitting a controller", async () => {
+  const fixture = describeFixture();
+  const expectedPairState = fixture.core.pairState(fixture.surface.surfaceId);
+  const expectedAuthority = fixture.core.locklessAuthority.exportState();
+  const server = describeServer(fixture.core);
+  let socket: WebSocket | null = null;
+  try {
+    await server.start();
+    socket = await connect(`ws://127.0.0.1:${server.port}/ws`);
+    const response = await request(socket, "surface.describe", describePayload(fixture));
+
+    assert.equal(response.ok, true, JSON.stringify(response));
+    assert.equal(response.op, "surface.describe");
+    assert.deepEqual(response.payload.registryIdentity, {
+      allocatorId: fixture.binding.allocatorId,
+      fleetId: fixture.binding.fleetId,
+    });
+    assert.equal(response.payload.clientId, fixture.binding.clientId);
+    assert.equal(response.payload.surfaceId, fixture.surface.surfaceId);
+    assert.equal(response.payload.endpointLeaseGeneration, 17);
+    assert.equal(response.payload.nonce, "a".repeat(32));
+    assert.equal(response.payload.applicationReadiness.status, "ready");
+    assert.deepEqual(response.payload.applicationReadiness.limitationCodes, []);
+    assert.equal(response.payload.topologyRevision, expectedPairState.topologyRevision);
+    assert.deepEqual(response.payload.layout, expectedPairState.layout);
+    assert.deepEqual(
+      response.payload.panes.map((pane: Record<string, any>) => ({
+        paneId: pane.paneId,
+        paneLabel: pane.paneLabel,
+        contentObservation: pane.contentObservation,
+      })),
+      expectedPairState.panes.map((pane) => ({
+        paneId: Number(pane.paneId),
+        paneLabel: pane.paneLabel,
+        contentObservation: {
+          revision: pane.currentRevision,
+          source: "client-authority",
+          observedAtMs: response.payload.panes[0].contentObservation.observedAtMs,
+        },
+      })),
+    );
+    assert.deepEqual(fixture.core.locklessAuthority.exportState(), expectedAuthority);
+    assert.equal(Object.keys(expectedAuthority.controllers ?? {}).length, 0);
+    assert.ok(response.payload.panes.every((pane: Record<string, unknown>) =>
+      Object.keys(pane).sort().join(",") === "contentObservation,paneId,paneLabel"));
+    assert.equal(JSON.stringify(response).includes("currentTarget"), false);
+    assert.equal(JSON.stringify(response).includes("paneLineageId"), false);
+  } finally {
+    socket?.close();
+    await server.stop();
+  }
+});
+
+test("surface.describe fails closed for wrong identity, stale surface, invalid nonce, and application guard", async () => {
+  const fixture = describeFixture();
+  let appReady = true;
+  const server = describeServer(fixture.core, () => appReady);
+  let socket: WebSocket | null = null;
+  try {
+    await server.start();
+    socket = await connect(`ws://127.0.0.1:${server.port}/ws`);
+
+    const wrongIdentity = await request(socket, "surface.describe", describePayload(fixture, {
+      clientId: "b".repeat(64),
+    }));
+    assert.equal(wrongIdentity.ok, false);
+    assert.equal(wrongIdentity.error.code, "identity_mismatch");
+    assert.equal(wrongIdentity.payload, undefined);
+
+    const staleSurface = await request(socket, "surface.describe", describePayload(fixture, {
+      surfaceId: "sf_missing_fixture",
+    }));
+    assert.equal(staleSurface.ok, false);
+    assert.equal(staleSurface.error.code, "surface_not_found");
+    assert.equal(staleSurface.payload, undefined);
+
+    const badNonce = await request(socket, "surface.describe", describePayload(fixture, {
+      nonce: "abc",
+    }));
+    assert.equal(badNonce.ok, false);
+    assert.equal(badNonce.error.code, "invalid_payload");
+
+    appReady = false;
+    const notReady = await request(socket, "surface.describe", describePayload(fixture));
+    assert.equal(notReady.ok, false);
+    assert.equal(notReady.error.code, "not_ready");
+    assert.equal(notReady.payload, undefined);
+  } finally {
+    socket?.close();
+    await server.stop();
+  }
+});
+
+test("surface.describe omits topology when a revision changes during collection", async () => {
+  const fixture = describeFixture();
+  const originalPairState = fixture.core.pairState.bind(fixture.core);
+  let calls = 0;
+  fixture.core.pairState = ((surfaceId: string) => {
+    const state = originalPairState(surfaceId);
+    calls += 1;
+    return calls === 2
+      ? { ...state, topologyRevision: Number(state.topologyRevision) + 1 }
+      : state;
+  }) as SurfaceCore["pairState"];
+
+  const server = describeServer(fixture.core);
+  let socket: WebSocket | null = null;
+  try {
+    await server.start();
+    socket = await connect(`ws://127.0.0.1:${server.port}/ws`);
+    const response = await request(socket, "surface.describe", describePayload(fixture));
+    assert.equal(response.ok, false);
+    assert.equal(response.error.code, "revision_churn");
+    assert.equal(response.payload, undefined);
+  } finally {
+    socket?.close();
+    await server.stop();
+  }
+});
+
 test("pane focus changes reach the compositor through its runtime focus target API", async () => {
   const core = new SurfaceCore();
   const surface = core.ensurePrimarySurface("Surf Ace", {

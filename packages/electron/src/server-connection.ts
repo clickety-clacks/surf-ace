@@ -47,6 +47,7 @@ export class ServerConnection {
 
   constructor(private readonly options: {
     configuredAddress?: string;
+    directEndpoint?: string | null;
     clientId: string;
     core: SurfaceCore;
     persist: () => Promise<void>;
@@ -99,6 +100,7 @@ export class ServerConnection {
             address, this.options.clientId, this.options.core, this.options.persist,
             this.options.onError, this.options.requestTimeoutMs ?? 2000,
             this.options.provisionedBinding,
+            this.options.directEndpoint ?? null,
           );
           candidate.onClose(() => {
             if (this.selected?.registration === candidate) {

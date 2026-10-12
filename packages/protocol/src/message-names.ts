@@ -1,4 +1,5 @@
 export const REQUEST_MESSAGES = [
+  "surface.describe",
   "surfaces.list",
   "pair.request",
   "surface.window.open",
@@ -19,6 +20,7 @@ export const REQUEST_MESSAGES = [
 ] as const;
 
 export const RESPONSE_MESSAGES = [
+  "surface.describe",
   "surfaces.list",
   "pair.request",
   "surface.window.open",

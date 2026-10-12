@@ -19,6 +19,8 @@ type ProtocolSchemaDefName =
   | "SurfacesListResponse"
   | "SurfaceWindowCloseRequest"
   | "SurfaceWindowCloseResponse"
+  | "SurfaceDescribeRequest"
+  | "SurfaceDescribeResponse"
   | "SurfaceWindowOpenRequest"
   | "SurfaceWindowOpenResponse"
   | "TargetApplyRequest"
@@ -95,6 +97,8 @@ export const locklessEventSchema = getSchemaDef("LocklessEvent");
 
 export const surfacesListRequestSchema = getSchemaDef("SurfacesListRequest");
 export const surfacesListResponseSchema = getSchemaDef("SurfacesListResponse");
+export const surfaceDescribeRequestSchema = getSchemaDef("SurfaceDescribeRequest");
+export const surfaceDescribeResponseSchema = getSchemaDef("SurfaceDescribeResponse");
 export const surfaceWindowCloseRequestSchema = getSchemaDef("SurfaceWindowCloseRequest");
 export const surfaceWindowCloseResponseSchema = getSchemaDef("SurfaceWindowCloseResponse");
 export const surfaceWindowOpenRequestSchema = getSchemaDef("SurfaceWindowOpenRequest");

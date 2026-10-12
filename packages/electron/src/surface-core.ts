@@ -209,6 +209,7 @@ export type PersistentSurfaceState = {
   nextAdmissionAttemptSequence?: number;
   primarySurfaceId: string | null;
   registryBinding?: PersistentRegistryBinding;
+  registryEndpointLease?: PersistentRegistryEndpointLease | null;
   surfaces?: PersistentSurfaceRecord[];
   version: 1;
 };
@@ -217,6 +218,12 @@ export type PersistentRegistryBinding = {
   allocatorId: string;
   clientId: string;
   fleetId: string;
+};
+
+export type PersistentRegistryEndpointLease = {
+  leaseGeneration: number;
+  registrationObservedAtMs: number;
+  leaseExpiresAtMs: number;
 };
 
 export type ConfirmedRegistryClaim = {
@@ -351,6 +358,11 @@ export class SurfaceCoreError extends Error {
       | "invalid_payload"
       | "missing_provider_name"
       | "not_paired"
+      | "not_ready"
+      | "prepair_describe_unsupported"
+      | "identity_mismatch"
+      | "revision_churn"
+      | "surface_not_found"
       | "render_failed"
       | "stale_content"
       | "stale_revision"
@@ -909,6 +921,26 @@ export class SurfaceCore {
       throw new SurfaceCoreError("invalid_payload", "Stored registry identity cannot be replaced implicitly");
     }
     this.persistentState.registryBinding = structuredClone(binding);
+  }
+
+  registryEndpointLease(): PersistentRegistryEndpointLease | null {
+    const lease = this.persistentState.registryEndpointLease;
+    if (!lease) return null;
+    if (!Number.isSafeInteger(lease.leaseGeneration) || lease.leaseGeneration < 1 ||
+        !Number.isSafeInteger(lease.registrationObservedAtMs) || lease.registrationObservedAtMs < 0 ||
+        !Number.isSafeInteger(lease.leaseExpiresAtMs) || lease.leaseExpiresAtMs <= lease.registrationObservedAtMs) {
+      throw new SurfaceCoreError("invalid_payload", "Stored registry endpoint lease is invalid");
+    }
+    return structuredClone(lease);
+  }
+
+  setRegistryEndpointLease(lease: PersistentRegistryEndpointLease | null): void {
+    if (lease && (!Number.isSafeInteger(lease.leaseGeneration) || lease.leaseGeneration < 1 ||
+        !Number.isSafeInteger(lease.registrationObservedAtMs) || lease.registrationObservedAtMs < 0 ||
+        !Number.isSafeInteger(lease.leaseExpiresAtMs) || lease.leaseExpiresAtMs <= lease.registrationObservedAtMs)) {
+      throw new SurfaceCoreError("invalid_payload", "Proposed registry endpoint lease is invalid");
+    }
+    this.persistentState.registryEndpointLease = lease ? structuredClone(lease) : null;
   }
 
   confirmedRegistryClaims(): ConfirmedRegistryClaim[] {
