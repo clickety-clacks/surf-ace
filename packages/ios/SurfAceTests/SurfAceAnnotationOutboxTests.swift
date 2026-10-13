@@ -691,6 +691,49 @@ extension SurfAceAnnotationOutboxTests {
         try await assertAmbiguousServerFailurePreservesCrossPaneFIFO(.afterCommit, gap: true)
     }
     @MainActor
+    func testPreviouslyPoisonedSurfaceAndDistinctLaterFramesRemainUntouched() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SurfAceExistingPoison-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = SurfAceLocklessGenerationStore(stateURL: directory.appendingPathComponent("authority.json"))
+        var limits = SurfAceLocklessCapacityLimits.production
+        limits.maxAnnotationPublisherStateBytesPerSurface = Int64(SurfAceAnnotationOutbox.maximumBytes)
+        limits.maxAnnotationPublisherRecordsPerSurface = Int64(SurfAceAnnotationOutbox.maximumRecords)
+        limits.maxRecoverableSurfaceBytes = 704 * 1_024 * 1_024
+        var state = try SurfAceLocklessAuthorityState.empty(limits: limits)
+        state.annotationPublisher = try SurfAceAnnotationOutbox(clientId: "client-1", sourceEpoch: sourceEpoch)
+        let opened = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
+            state: &state, expectedSurfaceSetRevision: state.surfaceSetRevision)
+        let sid = opened.surface.surfaceId
+        _ = try SurfAceLocklessTopologyOperations.paneSplit(
+            state: &state, surfaceId: sid, paneId: try XCTUnwrap(opened.surface.panes.values.first).paneId,
+            count: 2, direction: "horizontal", expectedTopologyRevision: opened.surface.topologyRevision)
+        let panes = try XCTUnwrap(state.liveSurfaces[sid]).panes.values.map(\.paneId).sorted()
+        var earlier = record(); earlier["paneId"] = panes[0]
+        _ = try state.annotationPublisher?.append(surfaceId: sid, record: earlier)
+        try state.annotationPublisher?.markUnhealthy(surfaceId: sid, code: "internal_error")
+        var later = record(); later["paneId"] = panes[1]
+        later["frameId"] = "fr_22222222222222222222222222222222"
+        _ = try state.annotationPublisher?.append(surfaceId: sid, record: later)
+        let expected = try XCTUnwrap(state.annotationPublisher?.surfaces[sid])
+        XCTAssertEqual(expected.fifo.count, 2)
+        XCTAssertNotEqual(expected.fifo[0].sourceEventId, expected.fifo[1].sourceEventId)
+        XCTAssertNotEqual(expected.fifo[0].canonical, expected.fifo[1].canonical)
+        try store.save(state)
+        let adapter = try SurfAceLocklessRuntimeAdapter(store: store, annotationClientId: "client-1")
+        let probe = AnnotationAmbiguousServerProbe(.beforeCommit)
+        let publisher = try SurfAceAnnotationPublisher(
+            adapter: adapter, endpoint: XCTUnwrap(URL(string: "ws://127.0.0.1:1/ws")),
+            makeTransport: { _ in AnnotationAmbiguousServerTransport(probe) }, onError: { _ in XCTFail("unexpected send") })
+        try await publisher.drain(); publisher.stop()
+        let saved = try XCTUnwrap(store.load())
+        XCTAssertEqual(probe.connections, 0, "prevention fix cannot automatically reopen or replay existing poison")
+        XCTAssertEqual(saved.annotationPublisher?.surfaces[sid]?.unhealthy, expected.unhealthy)
+        XCTAssertEqual(saved.annotationPublisher?.surfaces[sid]?.fifo, expected.fifo)
+        XCTAssertEqual(saved.annotationPublisher?.surfaces[sid]?.nextSequence, expected.nextSequence)
+        XCTAssertNil(saved.annotationPublisher?.surfaces[sid]?.acceptedCursor)
+    }
+    @MainActor
     func testRejectedGapPersistsUnhealthyAndDoesNotBlockOtherSurface() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("SurfAceAnnotationRejectedGap-\(UUID().uuidString)", isDirectory: true)
