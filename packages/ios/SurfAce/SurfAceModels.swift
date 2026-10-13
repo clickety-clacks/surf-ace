@@ -1223,11 +1223,13 @@ final class SurfAcePaneModel {
         annotationDoneError = "Saving is still pending. Your drawings are retained."
     }
 
-    func finishAnnotationDone(failed: Bool) {
+    func finishAnnotationDone(failed: Bool, localSaveProven: Bool = false) {
         annotationDonePending = false
         annotationDoneSpinning = false
         annotationDoneError = failed ? "Could not save. Your drawings are retained; try Done again." : nil
-        if !failed { annotationDeliveryStatus = "Saved on device" }
+        if !failed {
+            annotationDeliveryStatus = localSaveProven ? "Saved on device" : "Local save not verified"
+        }
     }
 
     var labelText: String { paneLabel > 0 ? "\(paneLabel)" : "" }

@@ -111,7 +111,7 @@ final class SurfAceAnnotationOutboxTests: XCTestCase {
         XCTAssertTrue(pane.annotationDoneSpinning, "a previous wait timer cannot affect a newer attempt")
         XCTAssertNil(pane.annotationDoneError)
         XCTAssertNotEqual(next, generation)
-        pane.finishAnnotationDone(failed: false)
+        pane.finishAnnotationDone(failed: false, localSaveProven: true)
         XCTAssertFalse(pane.annotationDonePending)
         XCTAssertEqual(pane.annotationDeliveryStatus, "Saved on device")
         XCTAssertNil(pane.annotationDoneError)
@@ -131,6 +131,16 @@ final class SurfAceAnnotationOutboxTests: XCTestCase {
         try outbox.lose(surfaceId: surfaceId, code: "later_loss")
         XCTAssertEqual(outbox.deliveryStatus(surfaceId: surfaceId, paneId: 1, contentId: "content-1",
                                             revision: 1, hasSavedStrokes: true), "Saved on device — delivery incomplete")
+    }
+
+    @MainActor
+    func testUnprovenLocalCompletionCannotClaimSavedOrRemoteDelivery() throws {
+        let pane = SurfAcePaneModel(paneId: 12)
+        _ = try XCTUnwrap(pane.beginAnnotationDone())
+        pane.finishAnnotationDone(failed: false)
+        XCTAssertFalse(pane.annotationDonePending)
+        XCTAssertFalse(pane.annotationDoneSpinning)
+        XCTAssertEqual(pane.annotationDeliveryStatus, "Local save not verified")
     }
 
     func testCanonicalSourceBytesUseECMAScriptNumbersEscapesAndUTF16KeyOrder() throws {

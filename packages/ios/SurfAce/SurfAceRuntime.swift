@@ -1581,7 +1581,7 @@ final class SurfAceRuntime {
             surfAceLifecycleLog(
                 "event=annotation_mode_changed \(surfAceDiagnosticFields([("surface_id", surfaceId), ("pane_id", paneId), ("enabled", projectedPane.annotationMode), ("finger_draw_enabled", projectedPane.fingerDrawEnabled), ("source", transitionSource)]))"
             )
-            if !enabled { projectedPane.finishAnnotationDone(failed: false) }
+            if !enabled { projectedPane.finishAnnotationDone(failed: false, localSaveProven: true) }
             if wasEnabled && !enabled {
                 requestAnnotationCommit(surfaceId: surfaceId, paneId: paneId)
                 clearPaneDrawings(projectedPane)
@@ -1597,7 +1597,7 @@ final class SurfAceRuntime {
             await drainControllerRetentionReclamations(adapter: adapter)
         } catch {
             if !enabled {
-                originalPane.finishAnnotationDone(failed: !localModeCommitted)
+                originalPane.finishAnnotationDone(failed: !localModeCommitted, localSaveProven: localModeCommitted)
                 if localModeCommitted {
                     originalPane.annotationDoneError = "Saved on device; local display update is pending."
                 }
