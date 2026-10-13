@@ -626,12 +626,16 @@ extension SurfAceAnnotationOutboxTests {
             _ = try state.annotationPublisher?.head(surfaceId: sid)
         } else {
             for (index, paneId) in panes.enumerated() {
-                var source = record(); source["paneId"] = paneId
+                var source = record(); source["paneId"] = Int(paneId)
                 source["frameId"] = "fr_\(String(repeating: String(index + 1), count: 32))"
                 _ = try state.annotationPublisher?.append(surfaceId: sid, record: source)
             }
         }
         let expected = try XCTUnwrap(state.annotationPublisher?.surfaces[sid]?.fifo)
+        guard expected.count == (gap ? 1 : 2) else {
+            XCTFail("fixture records must be valid payloads before testing transport faults")
+            return
+        }
         let preservedLive = try JSONEncoder().encode(state.liveSurfaces)
         try store.save(state)
         let adapter = try SurfAceLocklessRuntimeAdapter(store: store, annotationClientId: "client-1")
@@ -709,14 +713,17 @@ extension SurfAceAnnotationOutboxTests {
             state: &state, surfaceId: sid, paneId: try XCTUnwrap(opened.surface.panes.values.first).paneId,
             count: 2, direction: "horizontal", expectedTopologyRevision: opened.surface.topologyRevision)
         let panes = try XCTUnwrap(state.liveSurfaces[sid]).panes.values.map(\.paneId).sorted()
-        var earlier = record(); earlier["paneId"] = panes[0]
+        var earlier = record(); earlier["paneId"] = Int(panes[0])
         _ = try state.annotationPublisher?.append(surfaceId: sid, record: earlier)
         try state.annotationPublisher?.markUnhealthy(surfaceId: sid, code: "internal_error")
-        var later = record(); later["paneId"] = panes[1]
+        var later = record(); later["paneId"] = Int(panes[1])
         later["frameId"] = "fr_22222222222222222222222222222222"
         _ = try state.annotationPublisher?.append(surfaceId: sid, record: later)
         let expected = try XCTUnwrap(state.annotationPublisher?.surfaces[sid])
-        XCTAssertEqual(expected.fifo.count, 2)
+        guard expected.fifo.count == 2 else {
+            XCTFail("fixture must retain distinct earlier and later payloads")
+            return
+        }
         XCTAssertNotEqual(expected.fifo[0].sourceEventId, expected.fifo[1].sourceEventId)
         XCTAssertNotEqual(expected.fifo[0].canonical, expected.fifo[1].canonical)
         try store.save(state)
