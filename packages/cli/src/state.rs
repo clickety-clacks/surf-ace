@@ -98,6 +98,22 @@ pub struct LockedStateRoot {
 
 impl LockedStateRoot {
     pub fn open(root: &Path, capacity_bytes: u64) -> Result<Self, StateError> {
+        Self::open_with_existing_policy(root, capacity_bytes, false)
+    }
+
+    pub fn open_existing(root: &Path, capacity_bytes: u64) -> Result<Self, StateError> {
+        Self::open_with_existing_policy(root, capacity_bytes, true)
+    }
+
+    fn open_with_existing_policy(
+        root: &Path,
+        capacity_bytes: u64,
+        require_existing: bool,
+    ) -> Result<Self, StateError> {
+        let state_path = root.join("controller-state.json");
+        if require_existing && !state_path.is_file() {
+            return Err(StateError::ExistingStateRequired);
+        }
         fs::create_dir_all(root)?;
         let lock = OpenOptions::new()
             .create(true)
@@ -106,10 +122,12 @@ impl LockedStateRoot {
             .write(true)
             .open(root.join("invocation.lock"))?;
         lock.lock_exclusive()?;
-        let state_path = root.join("controller-state.json");
         let state = match fs::read(&state_path) {
             Ok(bytes) => {
                 serde_json::from_slice::<DurableState>(&bytes).map_err(StateError::InvalidState)?
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound && require_existing => {
+                return Err(StateError::ExistingStateRequired);
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => DurableState::new(),
             Err(error) => return Err(error.into()),
@@ -191,6 +209,7 @@ pub enum StateError {
     Io(io::Error),
     InvalidState(serde_json::Error),
     InvalidVersion,
+    ExistingStateRequired,
     Json(serde_json::Error),
     ProjectionCapacity { actual: u64, maximum: u64 },
 }
@@ -201,6 +220,7 @@ impl std::fmt::Display for StateError {
             Self::Io(error) => write!(formatter, "state_io:{error}"),
             Self::InvalidState(error) => write!(formatter, "invalid_state:{error}"),
             Self::InvalidVersion => formatter.write_str("invalid_state_version"),
+            Self::ExistingStateRequired => formatter.write_str("state_root_not_initialized"),
             Self::Json(error) => write!(formatter, "state_json:{error}"),
             Self::ProjectionCapacity { actual, maximum } => {
                 write!(formatter, "projection_capacity:{actual}:{maximum}")

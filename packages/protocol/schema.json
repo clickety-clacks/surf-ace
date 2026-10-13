@@ -5,6 +5,12 @@
   "type": "object",
   "oneOf": [
     {
+      "$ref": "#/$defs/SurfaceDescribeRequest"
+    },
+    {
+      "$ref": "#/$defs/SurfaceDescribeResponse"
+    },
+    {
       "$ref": "#/$defs/LocklessRequest"
     },
     {
@@ -1080,6 +1086,116 @@
           }
         }
       ]
+    },
+    "SurfaceDescribeRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "op", "id", "sentAt", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "type": { "const": "request" },
+        "op": { "const": "surface.describe" },
+        "id": { "$ref": "#/$defs/RequestId" },
+        "sentAt": { "$ref": "#/$defs/EpochMs" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["clientId", "registryIdentity", "surfaceId", "endpointLeaseGeneration", "nonce"],
+          "properties": {
+            "clientId": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+            "registryIdentity": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["allocatorId", "fleetId"],
+              "properties": {
+                "allocatorId": { "type": "string", "pattern": "^alloc_[A-Za-z0-9._:-]{3,64}$" },
+                "fleetId": { "type": "string", "pattern": "^[A-Za-z0-9._:-]{1,128}$" }
+              }
+            },
+            "surfaceId": { "$ref": "#/$defs/SurfaceId" },
+            "endpointLeaseGeneration": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+            "nonce": { "type": "string", "pattern": "^[a-f0-9]{32,128}$" }
+          }
+        }
+      }
+    },
+    "SurfaceDescribeResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "type", "op", "id", "ok", "sentAt", "payload"],
+      "properties": {
+        "v": { "const": 1 },
+        "type": { "const": "response" },
+        "op": { "const": "surface.describe" },
+        "id": { "$ref": "#/$defs/RequestId" },
+        "ok": { "const": true },
+        "sentAt": { "$ref": "#/$defs/EpochMs" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["nonce", "clientId", "registryIdentity", "surfaceId", "endpointLeaseGeneration", "observedAtMs", "applicationReadiness", "surfaceSetRevision", "topologyRevision", "layout", "panes"],
+          "properties": {
+            "nonce": { "type": "string", "pattern": "^[a-f0-9]{32,128}$" },
+            "clientId": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+            "registryIdentity": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["allocatorId", "fleetId"],
+              "properties": {
+                "allocatorId": { "type": "string", "pattern": "^alloc_[A-Za-z0-9._:-]{3,64}$" },
+                "fleetId": { "type": "string", "pattern": "^[A-Za-z0-9._:-]{1,128}$" }
+              }
+            },
+            "surfaceId": { "$ref": "#/$defs/SurfaceId" },
+            "endpointLeaseGeneration": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+            "observedAtMs": { "$ref": "#/$defs/EpochMs" },
+            "applicationReadiness": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["status", "limitationCodes"],
+              "properties": {
+                "status": { "type": "string", "enum": ["ready", "degraded"] },
+                "limitationCodes": { "type": "array", "items": { "type": "string", "pattern": "^[a-z_]{1,64}$" } }
+              }
+            },
+            "surfaceSetRevision": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+            "topologyRevision": { "$ref": "#/$defs/TopologyRevision" },
+            "layout": { "$ref": "#/$defs/TopologyLayoutNode" },
+            "panes": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["paneId", "paneLabel", "contentObservation"],
+                "properties": {
+                  "paneId": { "$ref": "#/$defs/PaneId" },
+                  "paneLabel": {
+                    "oneOf": [
+                      { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+                      { "type": "null" }
+                    ]
+                  },
+                  "contentObservation": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["revision", "source", "observedAtMs"],
+                    "properties": {
+                      "revision": {
+                        "oneOf": [
+                          { "$ref": "#/$defs/Revision" },
+                          { "type": "null" }
+                        ]
+                      },
+                      "source": { "const": "client-authority" },
+                      "observedAtMs": { "$ref": "#/$defs/EpochMs" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
     },
     "SurfacesListRequest": {
       "type": "object",
@@ -2436,6 +2552,7 @@
         "op": {
           "type": "string",
           "enum": [
+            "surface.describe",
             "surfaces.list",
             "pair.request",
             "runtime.app_binding",

@@ -1151,6 +1151,21 @@ final class SurfAcePaneModel {
     var annotationMode = false
     var fingerDrawEnabled = false
     var isDrawingFlushSending = false
+    // Admission happens synchronously, before the mode task can suspend.
+    struct AnnotationDoneContext: Equatable, Sendable {
+        var generation: Int
+        var paneInstanceId: String
+        var paneLineageId: String
+        var contentId: String?
+        var revision: Int
+        var historyOwnerToken: String?
+    }
+    var annotationDoneGeneration = 0
+    var annotationDoneContext: AnnotationDoneContext?
+    var annotationDonePending = false
+    var annotationDoneSpinning = false
+    var annotationDoneError: String?
+    var annotationDeliveryStatus: String?
     var drawingRestoreWarningVisible = false
     var toast: String?
     var lastViewport = SurfAceViewport(
@@ -1198,6 +1213,61 @@ final class SurfAcePaneModel {
         self.backStack = []
         self.currentEntry = .empty()
         self.forwardStack = []
+    }
+
+    /// The caller must admit Done before scheduling any async dependencies.
+    func beginAnnotationDone() -> Int? {
+        guard !annotationDonePending else { return nil }
+        annotationDoneGeneration += 1
+        annotationDonePending = true
+        annotationDoneSpinning = true
+        annotationDoneError = nil
+        annotationDoneContext = .init(generation: annotationDoneGeneration,
+                                      paneInstanceId: paneInstanceId, paneLineageId: paneLineageId,
+                                      contentId: currentEntry.contentId, revision: currentEntry.revision,
+                                      historyOwnerToken: currentEntry.historyOwnerToken)
+        return annotationDoneGeneration
+    }
+
+    func matchesAnnotationDone(_ context: AnnotationDoneContext) -> Bool {
+        annotationDonePending && annotationDoneContext == context
+            && annotationDoneGeneration == context.generation
+            && paneInstanceId == context.paneInstanceId && paneLineageId == context.paneLineageId
+            && currentEntry.contentId == context.contentId && currentEntry.revision == context.revision
+            && currentEntry.historyOwnerToken == context.historyOwnerToken
+    }
+
+    func retireAnnotationDone(generation: Int) {
+        guard annotationDoneGeneration == generation else { return }
+        annotationDoneGeneration += 1
+        annotationDoneContext = nil
+        annotationDonePending = false
+        annotationDoneSpinning = false
+        annotationDoneError = nil
+    }
+
+    func annotationDoneWaitExpired(generation: Int) {
+        guard annotationDonePending, annotationDoneGeneration == generation else { return }
+        // A wait notice must not cancel persistence or admit a duplicate submit.
+        annotationDoneSpinning = false
+        annotationDoneError = "Saving is still pending. Your drawings are retained."
+    }
+
+    @discardableResult
+    func finishAnnotationDone(generation: Int, failed: Bool, localSaveProven: Bool = false) -> Bool {
+        guard annotationDoneGeneration == generation, let context = annotationDoneContext else { return false }
+        guard matchesAnnotationDone(context) else {
+            retireAnnotationDone(generation: generation)
+            return false
+        }
+        annotationDoneContext = nil
+        annotationDonePending = false
+        annotationDoneSpinning = false
+        annotationDoneError = failed ? "Save could not be confirmed. Your drawings are retained; try Done again." : nil
+        if !failed {
+            annotationDeliveryStatus = localSaveProven ? "Saved on device" : "Local save not verified"
+        }
+        return true
     }
 
     var labelText: String { paneLabel > 0 ? "\(paneLabel)" : "" }

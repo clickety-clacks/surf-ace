@@ -6,6 +6,29 @@ use surf_ace_cli::{execute, Command, Invocation};
 
 fn main() {
     let arguments: Vec<String> = env::args().skip(1).collect();
+    if let Some(exit_code) = surf_ace_cli::wire::run_internal_dns_resolver(&arguments) {
+        std::process::exit(exit_code);
+    }
+    if let Some(result) = surf_ace_cli::help::handle_arguments(&arguments) {
+        match result {
+            Ok(output) => println!(
+                "{}",
+                serde_json::to_string(&output).expect("help is serializable")
+            ),
+            Err(message) => {
+                println!(
+                    "{}",
+                    serde_json::to_string(&json!({
+                        "error": { "code": "invalid_input", "details": { "message": message } },
+                        "ok": false,
+                    }))
+                    .expect("help error is serializable")
+                );
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     if arguments.windows(2).any(|pair| {
         pair[0] == "annotations"
             && matches!(pair[1].as_str(), "watch" | "resume" | "ack" | "retire")
@@ -74,7 +97,11 @@ fn parse() -> Result<Invocation, surf_ace_cli::CliError> {
         }
     }
     let command = command.ok_or_else(|| input_error("command"))?;
-    let state_root = state_root.ok_or_else(|| input_error("state-root"))?;
+    let state_root = match state_root {
+        Some(path) => path,
+        None if command == Command::WindowDescribe => PathBuf::new(),
+        None => return Err(input_error("state-root")),
+    };
     if endpoint.is_some() && registry.is_some() {
         return Err(surf_ace_cli::CliError::Input(
             "ambiguous_endpoint_registry".into(),

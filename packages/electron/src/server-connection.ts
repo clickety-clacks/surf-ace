@@ -5,7 +5,7 @@ import {
 } from "./surf-ace-discovery.js";
 import { ConfiguredServerRegistration } from "./configured-server.js";
 import type { ProvisionedRegistryBinding } from "./registry-binding.js";
-import type { SurfaceCore } from "./surface-core.js";
+import type { PaneLabelAllocation, SurfaceCore } from "./surface-core.js";
 
 type SelectedRegistration = {
   address: string;
@@ -47,6 +47,7 @@ export class ServerConnection {
 
   constructor(private readonly options: {
     configuredAddress?: string;
+    directEndpoint?: string | null;
     clientId: string;
     core: SurfaceCore;
     persist: () => Promise<void>;
@@ -82,7 +83,7 @@ export class ServerConnection {
     this.lastReportedFailure = null;
   }
 
-  async claimPaneLabel(surfaceId: string, paneId: number, paneLineageId: string): Promise<number> {
+  async claimPaneLabel(surfaceId: string, paneId: number, paneLineageId: string): Promise<PaneLabelAllocation> {
     if (this.status !== "connected" || !this.selected) throw new Error("allocator_unavailable");
     return await this.selected.registration.claimPaneLabel(surfaceId, paneId, paneLineageId);
   }
@@ -99,6 +100,7 @@ export class ServerConnection {
             address, this.options.clientId, this.options.core, this.options.persist,
             this.options.onError, this.options.requestTimeoutMs ?? 2000,
             this.options.provisionedBinding,
+            this.options.directEndpoint ?? null,
           );
           candidate.onClose(() => {
             if (this.selected?.registration === candidate) {

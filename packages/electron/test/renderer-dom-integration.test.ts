@@ -66,14 +66,22 @@ test("renderer DOM integrates authoritative connection states and live scale con
   let keyboardListener: ((intent: unknown) => void) | null = null;
   let focusStateUpdate: (() => void) | null = null;
   let provenanceWidth = 200;
+  let nonceCounter = 0;
   let textMetricScale = 1;
   const commands: unknown[] = [];
   const presentations: Record<string, unknown>[] = [];
   let presentationResponse: (() => Promise<{ ok: boolean; error?: string; revision?: number; authorityRevision?: number; presentationCleared?: boolean; presentationBlocked?: boolean }>) | null = null;
+  let finishCalls = 0;
+  let finishReply!: (state: { phase: string; busy: boolean; localSaved: boolean }) => void;
   const resizeCallbacks: Array<() => void> = [];
   const mutationCallbacks: Array<() => void> = [];
   const fontCallbacks: Array<() => void> = [];
   const surfAce = {
+    panePresentationEnabled: false,
+    finishAnnotation() {
+      finishCalls++;
+      return new Promise((resolve) => { finishReply = resolve; });
+    },
     clearToast() {},
     command(command: unknown) {
       commands.push(command);
@@ -116,6 +124,10 @@ test("renderer DOM integrates authoritative connection states and live scale con
     getSelection: () => null,
     requestAnimationFrame: (callback: FrameRequestCallback) => { callback(0); return 1; },
     surfAce,
+  });
+  Object.defineProperty(window, "crypto", {
+    configurable: true,
+    value: { getRandomValues(bytes: Uint8Array) { bytes.fill(++nonceCounter); return bytes; } },
   });
   Object.assign(globalThis, {
     document,
@@ -192,6 +204,9 @@ test("renderer DOM integrates authoritative connection states and live scale con
   assert.equal(chrome().pane.hasAttribute("hidden"), false);
   assert.equal(chrome().window.hasAttribute("hidden"), false);
 
+  assert.equal(document.querySelector(".pane-pop-out"), null, "default-off presentation exposes no Solo control");
+  assert.equal(presentations.length, 0, "default-off rendering sends no presentation request");
+  surfAce.panePresentationEnabled = true; // Explicit isolated fixture opt-in.
   stateListener!(state("connecting"));
   assert.equal(chrome().glyph.hasAttribute("hidden"), true);
   assert.equal(chrome().pane.hasAttribute("hidden"), false);
@@ -245,6 +260,81 @@ test("renderer DOM integrates authoritative connection states and live scale con
   document.querySelectorAll(".pane-shell")[0]!.querySelector(".pane-scroll")!
     .dispatchEvent(new window.Event("scroll"));
   assert.equal(document.querySelector(".font-size-popover"), null);
+
+  // Hold the actual internal completion response through a real chrome rebuild.
+  // Replaced controls must retain the fence, and an old button must not submit twice.
+  stateListener!(state("connected", true, 1));
+  const oldDone = document.querySelector(".done") as HTMLButtonElement;
+  const annotationIntent = (action: string, expected = { paneId: 1, paneLineageId: "lineage-1", contentId: "content-1", revision: 1, renderVersion: 1 }) =>
+    keyboardListener!({ type: "annotation", action, expected });
+  annotationIntent("done", { paneId: 1, paneLineageId: "old-lineage", contentId: "content-1", revision: 1, renderVersion: 1 });
+  assert.equal(finishCalls, 0, "stale keyboard context cannot finish a replacement");
+  annotationIntent("done");
+  assert.equal((document.querySelector(".done") as HTMLButtonElement).disabled, true);
+  assert.equal(document.querySelector(".done")!.getAttribute("aria-busy"), "true");
+  oldDone.click();
+  const heldCommandCount = commands.length;
+  annotationIntent("enter"); annotationIntent("done"); annotationIntent("done");
+  assert.equal(commands.length, heldCommandCount, "keyboard A cannot re-enter around held renderer Done");
+  await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+  assert.equal(finishCalls, 1);
+  stateListener!(state("disconnected", true, 1));
+  const rebuiltDone = document.querySelector(".done") as HTMLButtonElement;
+  assert.notEqual(rebuiltDone, oldDone);
+  assert.equal(rebuiltDone.disabled, true);
+  assert.equal((document.querySelector(".annotate") as HTMLButtonElement).disabled, true);
+  rebuiltDone.click();
+  assert.equal(finishCalls, 1);
+  stateListener!(state("connected", true)); // local save can exit Sketch before delivery settles
+  assert.equal((document.querySelector(".done") as HTMLButtonElement).disabled, true);
+  finishReply({ phase: "saved", busy: false, localSaved: true });
+  for (let i = 0; i < 8; i++) await Promise.resolve();
+  assert.equal(document.querySelector(".done"), null);
+  assert.equal(document.querySelector(".annotation-local-status")?.textContent, "Saved locally");
+  // Delivery-only changes must update chrome without changing content/geometry.
+  // These restored internal receipts explicitly remain registry acceptance,
+  // never consumer processed acknowledgement.
+  for (const [phase, label] of [
+    ["waiting", "Saved locally · Waiting"], ["sending", "Saved locally · Sending"],
+    ["sent", "Sent to registry"], ["rejected", "Saved locally · Registry rejected this record"],
+  ]) {
+    const next = state("connected", true);
+    (next.panes[0] as any).annotationDelivery = { phase };
+    stateListener!(next);
+    assert.equal(document.querySelector(".annotation-local-status")?.textContent, label);
+    assert.equal(document.querySelector(".annotation-local-status")?.textContent?.includes("processed"), false);
+  }
+  stateListener!(state("connected", true));
+
+  annotationIntent("enter");
+  assert.equal((commands.at(-1) as any).type, "annotate");
+  assert.equal((commands.at(-1) as any).enabled, true);
+  stateListener!(state("connected", true, 1));
+  assert.equal(document.querySelector(".annotation-local-status"), null,
+    "a new Sketch session cannot reuse the last completed local Saved status");
+  stateListener!(state("connected", true));
+
+  stateListener!(state("connected", true, 1));
+  annotationIntent("done");
+  for (let i = 0; i < 4; i++) await Promise.resolve();
+  finishReply({ phase: "unknown", busy: false, localSaved: false });
+  for (let i = 0; i < 8; i++) await Promise.resolve();
+  assert.match(document.querySelector(".annotation-local-status")!.textContent!, /Save outcome unknown/);
+  // Independently verified persistence reconciliation can supersede unknown
+  // after the local operation retired; it cannot supersede a busy owner.
+  const verifiedLocal = state("connected", true);
+  (verifiedLocal.panes[0] as any).annotationDone = { phase: "saved", busy: false, localSaved: true };
+  stateListener!(verifiedLocal);
+  assert.equal(document.querySelector(".annotation-local-status")!.textContent, "Saved locally");
+  annotationIntent("enter");
+  stateListener!(state("connected", true, 1));
+  annotationIntent("done");
+  for (let i = 0; i < 4; i++) await Promise.resolve();
+  finishReply({ phase: "waiting", busy: false, localSaved: true });
+  for (let i = 0; i < 8; i++) await Promise.resolve();
+  assert.equal(document.querySelector(".annotation-local-status")!.textContent, "Saved locally · Waiting");
+  annotationIntent("enter");
+  stateListener!(state("connected", true));
 
   function provenanceState(
     revision: number,
@@ -587,13 +677,13 @@ test("renderer DOM integrates authoritative connection states and live scale con
       ready = true;
       webview.dispatchEvent(new window.Event("dom-ready"));
       await new Promise((resolve) => setTimeout(resolve, 0));
-      assert.ok(scripts.some((script) => script.includes("document.documentElement.style.zoom")),
+      assert.ok(scripts.some((script) => script.includes("surf-ace.public-terminal-font-scale.v2")),
         "scale initialization still runs after dom-ready");
-      const firstScales = scripts.filter((script) => script.includes("document.documentElement.style.zoom")).length;
+      const firstScales = scripts.filter((script) => script.includes("surf-ace.public-terminal-font-scale.v2")).length;
       webview.dispatchEvent(new window.Event("did-start-loading"));
       webview.dispatchEvent(new window.Event("dom-ready"));
       await new Promise((resolve) => setTimeout(resolve, 0));
-      assert.ok(scripts.filter((script) => script.includes("document.documentElement.style.zoom")).length > firstScales,
+      assert.ok(scripts.filter((script) => script.includes("surf-ace.public-terminal-font-scale.v2")).length > firstScales,
         "navigation reapplies scale after the next dom-ready");
     }
   });
@@ -698,6 +788,16 @@ test("renderer DOM integrates authoritative connection states and live scale con
       assert.equal(selected.querySelector("webview"), liveHost);
       assert.deepEqual(slots.map((slot) => slot.style.flexGrow), slotWeights);
     }
+    toggle.click();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const coveredPane = next.panes[0]!;
+    const commandCount = commands.length;
+    keyboardListener!({ type: "annotation", action: "enter", expected: {
+      ...coveredPane.content, paneId: coveredPane.paneId, paneLineageId: coveredPane.paneLineageId,
+    } });
+    assert.equal(commands.length, commandCount, "annotation shortcut cannot activate a covered sibling");
+    toggle.click();
+    await new Promise<void>((resolve) => setImmediate(resolve));
     // A native resize cannot move the retained DOM ahead of its acknowledgement.
     toggle.click();
     await new Promise<void>((resolve) => setImmediate(resolve));
@@ -905,7 +1005,7 @@ test("renderer DOM integrates authoritative connection states and live scale con
     assert.equal(document.querySelector(".pane-slot")?.getAttribute("inert"), null);
 
   });
-  await test("zoom refits only the ready guest without shared-origin zoom or remount", async () => {
+  await test("generic page host scale changes only the ready guest without document zoom or remount", async () => {
     const next = state("connected", true);
     for (const [index, pane] of next.panes.entries()) Object.assign(pane.content, {
       content: { url: "https://fixture.invalid/same-origin" }, contentType: "browser_url",
@@ -916,43 +1016,239 @@ test("renderer DOM integrates authoritative connection states and live scale con
     assert.equal(guests.length, 2);
     const contexts = guests.map(() => {
       const root = { style: { zoom: "" } };
-      const result = { columns: 40, resizeEvents: 0 };
+      const result = { resizeEvents: 0 };
       return {
         document: { documentElement: root, body: { style: { setProperty() {} } } },
+        CustomEvent: class { constructor(public type: string, public init?: { detail?: unknown }) {} },
+        MutationObserver: class { constructor() {} observe() {} disconnect() {} },
         Event: class { constructor(public type: string) {} },
+        setTimeout: () => 1, clearTimeout: () => {},
         window: { dispatchEvent(event: { type: string }) {
           if (event.type === "resize") {
             result.resizeEvents++;
-            result.columns = Math.floor(400 / (10 * (Number(root.style.zoom) || 1)));
           }
         } }, result,
       };
     });
+    const scripts = guests.map(() => [] as string[]);
+    let deferNextModeResult = false;
+    let heldModeResult: { resolve: (value: unknown) => void; value: unknown } | null = null;
     guests.forEach((guest, index) => {
       guest.executeJavaScript = async (code) => {
-        if (code.includes("document.documentElement.style.zoom")) runInNewContext(code, contexts[index]);
+        if (code.includes("surf-ace.public-terminal-font-scale.v2")) {
+          scripts[index]!.push(code);
+          const value = runInNewContext(code, contexts[index]);
+          if (index === 0 && deferNextModeResult) {
+            deferNextModeResult = false;
+            return new Promise((resolve) => { heldModeResult = { resolve, value }; });
+          }
+          return value;
+        }
         return null;
       };
       guest.dispatchEvent(new window.Event("dom-ready"));
     });
+    const identity = (code: string) => {
+      const nonce = code.match(/c\.hostNonce = ("[^"]*")/)?.[1];
+      const revision = code.match(/c\.hostRevision = (\d+)/)?.[1];
+      assert.ok(nonce && revision, "scale script carries its current nonce and revision");
+      return { nonce: JSON.parse(nonce) as string, revision: Number(revision) };
+    };
+    const sendMode = (
+      guest: HTMLElement,
+      mode: "host-transform" | "public-terminal-font",
+      stamp: { nonce: string; revision: number },
+      sequence: number,
+    ) => {
+      const event = new window.Event("ipc-message");
+      Object.assign(event, { channel: "surf-ace-content", args: [{ type: "scale-mode", mode, sequence, ...stamp }] });
+      guest.dispatchEvent(event);
+    };
     await new Promise((resolve) => setTimeout(resolve, 0));
-    assert.equal(contexts[0]!.document.documentElement.style.zoom, "0.85");
-    assert.equal(contexts[0]!.result.columns, 47, "default base zoom must trigger refitting");
+    const initialWidth = Number.parseFloat(guests[0]!.style.width);
+    assert.equal(guests[0]!.style.transform, "scale(0.85)");
+    assert.equal(guests[0]!.style.transformOrigin, "0 0");
+    assert.ok(Math.abs(initialWidth * 0.85 - guests[0]!.getBoundingClientRect().width) < 0.01);
+    assert.equal(contexts[0]!.document.documentElement.style.zoom, "");
     const otherEvents = contexts[1]!.result.resizeEvents;
     keyboardListener!({ action: "increase", paneId: 1, type: "content-scale" });
-    assert.equal(contexts[0]!.document.documentElement.style.zoom, "0.935");
-    assert.equal(contexts[0]!.result.columns, 42);
-    assert.equal(contexts[1]!.document.documentElement.style.zoom, "0.85");
+    assert.equal(guests[0]!.style.transform, "scale(0.935)");
+    assert.ok(Math.abs(Number.parseFloat(guests[0]!.style.width) * 0.935 - guests[0]!.getBoundingClientRect().width) < 0.01);
+    assert.equal(guests[1]!.style.transform, "scale(0.85)");
+    assert.equal(contexts[0]!.document.documentElement.style.zoom, "");
     assert.equal(contexts[1]!.result.resizeEvents, otherEvents);
     assert.deepEqual([...document.querySelectorAll("webview")], guests);
+    const firstIdentity = identity(scripts[0]![0]!);
+    const currentIdentity = identity(scripts[0]!.at(-1)!);
+    sendMode(guests[0]!, "public-terminal-font", firstIdentity, 2);
+    assert.equal(guests[0]!.style.transform, "scale(0.935)", "obsolete mode event cannot undo a newer host scale");
     guests[0]!.dispatchEvent(new window.Event("did-start-loading"));
     const prior = contexts[0]!.result.resizeEvents;
     keyboardListener!({ action: "increase", paneId: 1, type: "content-scale" });
     assert.equal(contexts[0]!.result.resizeEvents, prior, "loading guest cannot run scale methods");
+    assert.equal(guests[0]!.style.transform, "", "unknown loading document waits for its mode before host scaling");
     guests[0]!.dispatchEvent(new window.Event("dom-ready"));
     await new Promise((resolve) => setTimeout(resolve, 0));
-    assert.equal(contexts[0]!.document.documentElement.style.zoom, "1.02");
-    assert.equal(contexts[0]!.result.columns, 39);
+    assert.equal(guests[0]!.style.transform, "scale(1.02)");
+    assert.equal(contexts[0]!.document.documentElement.style.zoom, "");
+    keyboardListener!({ action: "increase", paneId: 1, type: "content-scale" });
+    keyboardListener!({ action: "increase", paneId: 1, type: "content-scale" });
+    deferNextModeResult = true;
+    keyboardListener!({ action: "increase", paneId: 1, type: "content-scale" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const enlargedScale = 1.275;
+    assert.equal(guests[0]!.style.transform, `scale(${enlargedScale})`);
+    assert.ok(Math.abs(Number.parseFloat(guests[0]!.style.width) * enlargedScale - guests[0]!.getBoundingClientRect().width) < 0.01);
+    assert.ok(Math.abs(Number.parseFloat(guests[0]!.style.minHeight) * enlargedScale - guests[0]!.getBoundingClientRect().height) < 0.01);
+    const delayedIdentity = identity(scripts[0]!.at(-1)!);
+    assert.notEqual(delayedIdentity.nonce, currentIdentity.nonce);
+    assert.ok(heldModeResult, "initial mode result is held until a newer same-request IPC observation arrives");
+    sendMode(guests[0]!, "public-terminal-font", delayedIdentity, 2);
+    assert.equal(guests[0]!.style.transform, "", "newer terminal observation removes the host transform");
+    heldModeResult!.resolve(heldModeResult!.value);
+    heldModeResult = null;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(guests[0]!.style.transform, "", "late host-transform result cannot roll back a newer terminal observation");
+    sendMode(guests[0]!, "host-transform", delayedIdentity, 2);
+    assert.equal(guests[0]!.style.transform, "", "a duplicate observation cannot switch modes at the same sequence");
+    sendMode(guests[0]!, "public-terminal-font", currentIdentity, 2);
+    assert.equal(guests[0]!.style.transform, "", "old revision cannot affect the delayed current mode");
+    sendMode(guests[0]!, "host-transform", delayedIdentity, 3);
+    assert.equal(guests[0]!.style.transform, `scale(${enlargedScale})`, "newer generic observation restores the host transform");
+
+    deferNextModeResult = true;
+    keyboardListener!({ action: "increase", paneId: 1, type: "content-scale" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const supersededResult = heldModeResult;
+    assert.ok(supersededResult, "a pending initial result is retained across a newer scale request");
+    const supersededIdentity = identity(scripts[0]!.at(-1)!);
+    keyboardListener!({ action: "increase", paneId: 1, type: "content-scale" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const latestTransform = guests[0]!.style.transform;
+    supersededResult!.resolve(supersededResult!.value);
+    heldModeResult = null;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(guests[0]!.style.transform, latestTransform, "a result from a superseded scale request cannot affect the current request");
+    sendMode(guests[0]!, "public-terminal-font", supersededIdentity, 2);
+    assert.equal(guests[0]!.style.transform, latestTransform, "an IPC observation from a superseded request remains fenced");
+
+    deferNextModeResult = true;
+    keyboardListener!({ action: "increase", paneId: 1, type: "content-scale" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const navigationResult = heldModeResult;
+    assert.ok(navigationResult, "navigation fixture holds the initial result before it resolves");
+    guests[0]!.dispatchEvent(new window.Event("did-start-loading"));
+    assert.equal(guests[0]!.style.transform, "", "navigation reset retires the old host transform");
+    navigationResult!.resolve(navigationResult!.value);
+    heldModeResult = null;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(guests[0]!.style.transform, "", "a pending result from the prior document cannot restore its transform after navigation");
+  });
+
+  await test("ready public terminal scales its font at unit document zoom and retains guest", async () => {
+    const next = state("connected");
+    Object.assign(next.panes[0]!.content, {
+      content: { url: "https://fixture.invalid/public-terminal" }, contentType: "browser_url",
+      contentId: "public-terminal", revision: 44, renderVersion: 44,
+    });
+    stateListener!(next);
+    const guest = document.querySelector("webview") as HTMLElement & {
+      executeJavaScript: (code: string) => Promise<unknown>;
+    };
+    const root = { style: { zoom: "" } };
+    const guestDocument = {
+      documentElement: root, body: { style: { setProperty() {} } },
+      querySelectorAll: () => [element],
+    };
+    class GuestElement {
+      isConnected = true;
+      ownerDocument = guestDocument;
+      matches(selector: string) { return selector === ".xterm"; }
+      querySelector(selector: string) { return selector === ".xterm-screen" ? {} : null; }
+    }
+    const element = new GuestElement();
+    const fits: number[] = [];
+    const term = {
+      element, options: { fontSize: 16 },
+      fit() { fits.push(this.options.fontSize); },
+      onRender() { return { dispose() {} }; },
+    };
+    const context = {
+      document: guestDocument, HTMLElement: GuestElement,
+      window: { term, dispatchEvent() {} },
+      CustomEvent: class { constructor(public type: string, public init?: { detail?: unknown }) {} },
+      MutationObserver: class { constructor() {} observe() {} disconnect() {} },
+      requestAnimationFrame() {}, setTimeout: () => 1, clearTimeout() {},
+      Event: class { constructor(public type: string) {} },
+    };
+    const modes: string[] = [];
+    const modeSequences: number[] = [];
+    const scripts: string[] = [];
+    let deferInitialModeResult = true;
+    let heldInitialModeResult: { resolve: (value: unknown) => void; value: unknown } | null = null;
+    const scaleIdentity = (code: string) => {
+      const nonce = code.match(/c\.hostNonce = ("[^"]*")/)?.[1];
+      const revision = code.match(/c\.hostRevision = (\d+)/)?.[1];
+      assert.ok(nonce && revision, "scale script carries its current nonce and revision");
+      return { nonce: JSON.parse(nonce) as string, revision: Number(revision) };
+    };
+    const sendMode = (
+      mode: "host-transform" | "public-terminal-font",
+      stamp: { nonce: string; revision: number },
+      sequence: number,
+    ) => {
+      const event = new window.Event("ipc-message");
+      Object.assign(event, { channel: "surf-ace-content", args: [{ type: "scale-mode", mode, sequence, ...stamp }] });
+      guest.dispatchEvent(event);
+    };
+    guest.executeJavaScript = async (code) => {
+      if (code === "document.readyState") return "complete";
+      if (code.includes("surf-ace.public-terminal-font-scale.v2")) {
+        scripts.push(code);
+        const result = runInNewContext(code, context);
+        modes.push(result.mode);
+        modeSequences.push(result.sequence);
+        if (deferInitialModeResult) {
+          deferInitialModeResult = false;
+          return new Promise((resolve) => { heldInitialModeResult = { resolve, value: result }; });
+        }
+        return result;
+      }
+      return null;
+    };
+    keyboardListener!({ action: "reset", paneId: 1, type: "content-scale" });
+    guest.dispatchEvent(new window.Event("did-attach"));
+    assert.equal(fits.length, 0, "attach cannot scale an unready public terminal");
+    guest.dispatchEvent(new window.Event("dom-ready"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.ok(heldInitialModeResult, "initial public-terminal result is held for the ordering check");
+    const initialIdentity = scaleIdentity(scripts[0]!);
+    sendMode("host-transform", initialIdentity, 2);
+    assert.equal(guest.style.transform, "scale(0.85)", "newer host observation applies while terminal result is pending");
+    heldInitialModeResult!.resolve(heldInitialModeResult!.value);
+    heldInitialModeResult = null;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(guest.style.transform, "scale(0.85)", "late public-terminal result cannot roll back a newer host observation");
+    sendMode("public-terminal-font", initialIdentity, 3);
+    assert.equal(guest.style.transform, "", "newer terminal observation restores physical guest bounds");
+    assert.equal(term.options.fontSize, 13.6);
+    assert.equal(root.style.zoom, "", "terminal font scaling must not also scale its document");
+    const terminalWidth = guest.style.width;
+    assert.equal(guest.style.transform, "", "public terminal keeps physical webview bounds without a second host scale");
+    assert.equal(guest.style.minWidth, terminalWidth);
+    keyboardListener!({ action: "increase", paneId: 1, type: "content-scale" });
+    assert.equal(term.options.fontSize, 14.96);
+    assert.equal(root.style.zoom, "");
+    assert.equal(guest.style.transform, "", "terminal fit owns its scale while host bounds remain physical");
+    assert.equal(guest.style.width, terminalWidth);
+    keyboardListener!({ action: "reset", paneId: 1, type: "content-scale" });
+    assert.equal(term.options.fontSize, 13.6);
+    assert.deepEqual(fits, [13.6, 14.96, 13.6]);
+    assert.deepEqual(modes, ["public-terminal-font", "public-terminal-font", "public-terminal-font"]);
+    assert.deepEqual(modeSequences, [1, 1, 1], "each new scale request starts a fresh ordered observation sequence");
+    assert.equal(scripts.length, 3);
+    assert.equal(document.querySelector("webview"), guest);
+    assert.equal(context.window.term, term);
   });
 
   await test("completed loading restores zoom without dom-ready and fences obsolete readiness probes", async () => {
@@ -970,7 +1266,7 @@ test("renderer DOM integrates authoritative connection states and live scale con
     guests.forEach((guest, index) => {
       guest.executeJavaScript = async (code) => {
         if (code === "document.readyState") return probe;
-        if (code.includes("document.documentElement.style.zoom")) scripts[index]!.push(code);
+        if (code.includes("surf-ace.public-terminal-font-scale.v2")) scripts[index]!.push(code);
         return null;
       };
       guest.dispatchEvent(new window.Event("dom-ready"));
@@ -1384,6 +1680,204 @@ test("renderer DOM integrates authoritative connection states and live scale con
     flush();
     assert.equal(commits.length, 3, "resize/rotation cancels captured old coordinates");
     queued.clear();
+  });
+
+  // Pane33: same-byte duplicate preservation must not outrank an absent owned guest.
+  window.requestAnimationFrame = (callback: FrameRequestCallback) => { callback(0); return 1; };
+  let duplicateSequence = 1000;
+  const duplicateFixture = () => {
+    const next = state("connected", true);
+    for (const [index, p] of next.panes.entries()) {
+      Object.assign(p.content, {
+        content: { html: `<html><body>guest ${index} fixture ${++duplicateSequence}</body></html>` },
+        contentType: "html", contentId: `duplicate-${duplicateSequence}`, revision: duplicateSequence, renderVersion: duplicateSequence,
+      });
+    }
+    stateListener!(next);
+    const roots = [...document.querySelectorAll(".pane-shell")] as HTMLElement[];
+    const guests = roots.map(root => root.querySelector("webview")!) as Array<HTMLElement & {
+      src?: string; getWebContentsId?: () => number; sessionMarker?: object;
+    }>;
+    assert.equal(guests.length, 2);
+    for (const [index, guest] of guests.entries()) {
+      guest.getWebContentsId = () => 501 + index;
+      guest.sessionMarker = { session: `retained-${index}`, history: ["first", "second"] };
+    }
+    return { next, roots, guests };
+  };
+  const repush = (next: ReturnType<typeof state>, html?: string) => {
+    const changed = structuredClone(next);
+    const p = changed.panes[0]!;
+    p.content.revision = ++duplicateSequence;
+    p.content.renderVersion = duplicateSequence;
+    p.content.contentId = `duplicate-${duplicateSequence}`;
+    if (html !== undefined) Object.assign(p.content, { content: { html } });
+    stateListener!(changed);
+    return changed;
+  };
+  await test("healthy HTML duplicate keeps owned DOM guest, session and siblings", () => {
+    const f = duplicateFixture();
+    const siblingSession = f.guests[1]!.sessionMarker;
+    const firstSession = f.guests[0]!.sessionMarker;
+    const src = f.guests[0]!.src;
+    const beforeCommands = commands.length;
+    const next = repush(f.next);
+    assert.equal(document.querySelectorAll(".pane-shell")[0], f.roots[0]);
+    assert.equal(f.roots[0]!.querySelector("webview"), f.guests[0]);
+    assert.equal(f.guests[0]!.sessionMarker, firstSession);
+    assert.equal(f.guests[0]!.getWebContentsId?.(), 501);
+    assert.equal(f.guests[0]!.src, src);
+    assert.equal(f.roots[1]!.querySelector("webview"), f.guests[1]);
+    assert.equal(f.guests[1]!.sessionMarker, siblingSession);
+    assert.deepEqual(next.layout, f.next.layout);
+    assert.deepEqual(next.panes[1], f.next.panes[1]);
+    assert.deepEqual(commands.slice(beforeCommands), [], "no authority/history mutation command is introduced");
+  });
+  await test("absent owned guest repush runs normal render in same pane host", () => {
+    const f = duplicateFixture();
+    const host = f.roots[0]!.querySelector(".pane-content")!;
+    host.replaceChildren();
+    const next = repush(f.next);
+    const restored = host.querySelector("webview") as HTMLElement & { src?: string };
+    assert.ok(restored);
+    assert.notEqual(restored, f.guests[0]);
+    assert.equal(restored.isConnected, true);
+    assert.equal(document.querySelectorAll(".pane-shell")[0], f.roots[0]);
+    assert.equal(restored.src, f.guests[0]!.src);
+    assert.equal(f.roots[1]!.querySelector("webview"), f.guests[1]);
+    assert.deepEqual(next.layout, f.next.layout);
+    assert.deepEqual(next.panes[1], f.next.panes[1]);
+  });
+  await test("detached retained guest is replaced only for the fresh target key", () => {
+    const f = duplicateFixture(), detached = document.createElement("div");
+    detached.appendChild(f.guests[0]!);
+    assert.equal(f.guests[0]!.isConnected, false);
+    repush(f.next);
+    const restored = f.roots[0]!.querySelector("webview")!;
+    assert.ok(restored); assert.notEqual(restored, f.guests[0]);
+    assert.equal(detached.firstChild, f.guests[0], "retired node is not borrowed into the fresh pane");
+    assert.equal(f.roots[1]!.querySelector("webview"), f.guests[1]);
+  });
+  await test("foreign unowned frame cannot borrow duplicate signature", () => {
+    const f = duplicateFixture(), host = f.roots[0]!.querySelector(".pane-content")!;
+    const foreign = f.guests[0]!.cloneNode(true) as HTMLElement;
+    host.replaceChildren(foreign);
+    assert.equal(foreign.isConnected, true);
+    repush(f.next);
+    const restored = host.querySelector("webview")!;
+    assert.ok(restored); assert.ok(restored !== foreign, "unowned replacement cannot be retained"); assert.notEqual(restored, f.guests[0]);
+    assert.equal(foreign.isConnected, false);
+    assert.equal(f.roots[1]!.querySelector("webview"), f.guests[1]);
+  });
+  await test("unchanged authoritative key with missing guest remains no-op", () => {
+    const f = duplicateFixture(), host = f.roots[0]!.querySelector(".pane-content")!;
+    host.replaceChildren();
+    const churn = structuredClone(f.next);
+    churn.connectionBar = "connecting";
+    stateListener!(churn);
+    assert.equal(host.querySelector("webview"), null);
+    assert.equal(f.roots[1]!.querySelector("webview"), f.guests[1]);
+  });
+  await test("changed HTML creates a fresh guest without changing sibling session", () => {
+    const f = duplicateFixture(), siblingSession = f.guests[1]!.sessionMarker;
+    repush(f.next, "<html><body>changed exact content</body></html>");
+    const changed = f.roots[0]!.querySelector("webview") as HTMLElement & { src?: string };
+    assert.notEqual(changed, f.guests[0]);
+    assert.ok(changed.src?.includes(encodeURIComponent("changed exact content")));
+    assert.equal(f.roots[1]!.querySelector("webview"), f.guests[1]);
+    assert.equal(f.guests[1]!.sessionMarker, siblingSession);
+  });
+  await test("connected loading and unmeasured white guest are not classified dead", () => {
+    const f = duplicateFixture();
+    f.guests[0]!.dispatchEvent(new window.Event("did-start-loading"));
+    delete f.guests[0]!.dataset.guestReady;
+    f.guests[0]!.getWebContentsId = () => { throw new Error("guest temporarily unavailable"); };
+    repush(f.next);
+    assert.equal(f.roots[0]!.querySelector("webview"), f.guests[0]);
+    assert.equal(f.roots[1]!.querySelector("webview"), f.guests[1]);
+  });
+  await test("old deferred navigation cannot overwrite recovered or newer content", () => {
+    const f = duplicateFixture();
+    const queued: FrameRequestCallback[] = [];
+    const immediate = window.requestAnimationFrame;
+    window.requestAnimationFrame = (callback: FrameRequestCallback) => { queued.push(callback); return queued.length; };
+    try {
+      const pending = repush(f.next, "<html><body>held navigation</body></html>");
+      const old = f.roots[0]!.querySelector("webview") as HTMLElement & { src?: string };
+      assert.equal(old.src, undefined);
+      old.remove();
+      const recoveredState = repush(pending);
+      const recovered = f.roots[0]!.querySelector("webview") as HTMLElement & { src?: string };
+      assert.notEqual(recovered, old);
+      const newestState = repush(recoveredState, "<html><body>newest navigation</body></html>");
+      const newest = f.roots[0]!.querySelector("webview") as HTMLElement & { src?: string };
+      assert.notEqual(newest, recovered);
+      let count = 0;
+      while (queued.length) { assert.ok(++count < 100); queued.shift()!(0); }
+      assert.equal(old.src, undefined);
+      assert.equal(recovered.src, undefined);
+      assert.ok(newest.src?.includes(encodeURIComponent("newest navigation")));
+      assert.equal(f.roots[1]!.querySelector("webview"), f.guests[1]);
+      assert.deepEqual(newestState.panes[1], f.next.panes[1]);
+    } finally { window.requestAnimationFrame = immediate; queued.length = 0; }
+  });
+  await test("duplicate during pending initial navigation retains original assignment and session", () => {
+    const f = duplicateFixture();
+    const queued: FrameRequestCallback[] = [];
+    const immediate = window.requestAnimationFrame;
+    window.requestAnimationFrame = (callback: FrameRequestCallback) => { queued.push(callback); return queued.length; };
+    try {
+      const pending = repush(f.next, "<html><body>pending healthy navigation</body></html>");
+      const guest = f.roots[0]!.querySelector("webview") as HTMLElement & { src?: string; sessionMarker?: object };
+      guest.sessionMarker = { history: ["retained before ready"] };
+      const session = guest.sessionMarker;
+      repush(pending);
+      assert.equal(f.roots[0]!.querySelector("webview"), guest);
+      assert.equal(guest.src, undefined);
+      let count = 0;
+      while (queued.length) { assert.ok(++count < 100); queued.shift()!(0); }
+      assert.ok(String(guest.src).includes(encodeURIComponent("pending healthy navigation")));
+      assert.equal(guest.sessionMarker, session);
+      assert.equal(f.roots[1]!.querySelector("webview"), f.guests[1]);
+    } finally { window.requestAnimationFrame = immediate; queued.length = 0; }
+  });
+
+  await test("browser URL duplicate preserves its own frame while absent URL frame renders normally", () => {
+    const f = duplicateFixture();
+    const browserState = structuredClone(f.next);
+    Object.assign(browserState.panes[0]!.content, { contentType: "browser_url", content: { url: "https://example.invalid/isolated-dom-only" }, revision: ++duplicateSequence, renderVersion: duplicateSequence });
+    stateListener!(browserState);
+    const browser = f.roots[0]!.querySelector("webview") as HTMLElement & { src?: string; sessionMarker?: object };
+    browser.sessionMarker = { history: ["url history retained"] };
+    const session = browser.sessionMarker;
+    const repeated = repush(browserState);
+    assert.equal(f.roots[0]!.querySelector("webview"), browser);
+    assert.equal(browser.sessionMarker, session);
+    browser.remove();
+    repush(repeated);
+    const restored = f.roots[0]!.querySelector("webview") as HTMLElement & { src?: string };
+    assert.ok(restored); assert.ok(restored !== browser);
+    assert.equal(restored.src, browser.src);
+    assert.equal(f.roots[1]!.querySelector("webview"), f.guests[1]);
+  });
+  await test("late readiness from retired guest does not mark reconstructed document ready", async () => {
+    const f = duplicateFixture();
+    const old = f.guests[0]! as HTMLElement & { executeJavaScript?: (script: string) => Promise<unknown> };
+    const pendingReady: { resolve?: (value: string) => void } = {};
+    old.executeJavaScript = script => script === "document.readyState"
+      ? new Promise(resolve => { pendingReady.resolve = resolve; })
+      : Promise.resolve(null);
+    old.dispatchEvent(new window.Event("did-stop-loading"));
+    assert.ok(pendingReady.resolve);
+    old.remove();
+    repush(f.next);
+    const current = f.roots[0]!.querySelector("webview") as HTMLElement;
+    assert.ok(current); assert.ok(current !== old);
+    pendingReady.resolve!("complete");
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.notEqual(old.dataset.guestReady, "true");
+    assert.notEqual(current.dataset.guestReady, "true");
+    assert.equal(f.roots[1]!.querySelector("webview"), f.guests[1]);
   });
 
 });

@@ -365,12 +365,15 @@ final class SurfAceRuntime {
     @ObservationIgnored private let annotationCommitStagePreparation: (@Sendable () async -> Void)?
     @ObservationIgnored private let annotationFrameCommitPreparation: (@Sendable () async throws -> Void)?
     @ObservationIgnored private let annotationDirectEventResultOverride: (@Sendable (String, Bool) async -> Bool)?
+    @ObservationIgnored private let annotationModeMutationPreparation: (@Sendable (Bool) async throws -> Void)?
     @ObservationIgnored private let annotationModeProjectionObserver: (@Sendable (Bool) async -> Void)?
     @ObservationIgnored private let locklessDeliveryWaitObserver: (@Sendable () -> Void)?
     @ObservationIgnored private let foregroundCompletion: (@MainActor () -> Void)?
     @ObservationIgnored private var identity: SurfAceIdentity?
     @ObservationIgnored private var centralRegistration: SurfAceCentralRegistration?
     @ObservationIgnored private var annotationPublisher: SurfAceAnnotationPublisher?
+    @ObservationIgnored private var verifiedAnnotationRegistryURL: URL?
+    @ObservationIgnored private let annotationPublisherTransportFactory: (@MainActor (URL) -> any SurfAceAnnotationWireTransport)?
     @ObservationIgnored private var annotationStrokeTasks: [String: Task<Void, Never>] = [:]
     @ObservationIgnored private var annotationFlushTasks: [String: Task<Void, Never>] = [:]
     @ObservationIgnored private var annotationModeTasks: [String: Task<Void, Never>] = [:]
@@ -463,6 +466,7 @@ final class SurfAceRuntime {
         locklessStateURL: URL? = nil,
         configuredRegistryURL: URL? = nil,
         annotationClientId: String? = nil,
+        annotationPublisherTransportFactory: (@MainActor (URL) -> any SurfAceAnnotationWireTransport)? = nil,
         annotationDirectStageMaxBytesForTesting: Int? = nil,
         enableFleetDiscovery: Bool = true,
         isolatedTestLoopback: Bool = false,
@@ -475,12 +479,14 @@ final class SurfAceRuntime {
         annotationFrameCommitPreparation: (@Sendable () async throws -> Void)? = nil,
         annotationDirectEventResultOverride: (@Sendable (String, Bool) async -> Bool)? = nil,
         annotationModeProjectionObserver: (@Sendable (Bool) async -> Void)? = nil,
+        annotationModeMutationPreparation: (@Sendable (Bool) async throws -> Void)? = nil,
         locklessDeliveryWaitObserver: (@Sendable () -> Void)? = nil
     ) {
         self.userDefaults = userDefaults
         self.locklessStateURLOverride = locklessStateURL
         self.configuredRegistryURLOverride = configuredRegistryURL
         self.annotationClientIdOverride = annotationClientId
+        self.annotationPublisherTransportFactory = annotationPublisherTransportFactory
         self.annotationDirectStageMaxBytesForTesting = annotationDirectStageMaxBytesForTesting
         self.enableFleetDiscovery = enableFleetDiscovery
         self.forceIsolatedTestLoopback = isolatedTestLoopback
@@ -491,6 +497,7 @@ final class SurfAceRuntime {
         self.annotationFrameCommitPreparation = annotationFrameCommitPreparation
         self.annotationDirectEventResultOverride = annotationDirectEventResultOverride
         self.annotationModeProjectionObserver = annotationModeProjectionObserver
+        self.annotationModeMutationPreparation = annotationModeMutationPreparation
         self.locklessDeliveryWaitObserver = locklessDeliveryWaitObserver
         let fallbackName = "Surf Ace"
         let deviceName = UIDevice.current.name
@@ -641,21 +648,42 @@ final class SurfAceRuntime {
             },
             onConnectionError: { [weak self] error in
                 self?.updateCentralRegistrationError(error)
+            },
+            onVerifiedEndpoint: { [weak self] endpoint in
+                self?.reconcileVerifiedAnnotationRegistry(endpoint)
             }
         )
         centralRegistration = registration
         registration.start()
     }
 
+    func awaitAnnotationPublisherIdle() async { await annotationPublisher?.awaitIdle() }
+
+    func reconcileVerifiedAnnotationRegistry(_ endpoint: URL) {
+        verifiedAnnotationRegistryURL = endpoint
+        startAnnotationPublisher()
+    }
+
     private func startAnnotationPublisher() {
-        guard annotationPublisher == nil,
-              let endpoint = configuredRegistryURL,
+        guard let endpoint = verifiedAnnotationRegistryURL ?? configuredRegistryURL,
               ["ws", "wss"].contains(endpoint.scheme?.lowercased() ?? ""),
               endpoint.host != nil else { return }
+        let provenance = verifiedAnnotationRegistryURL != nil ? "verified_selection"
+            : (configuredRegistryURLOverride != nil ? "explicit_override" : "explicit_environment")
+        surfAceServerRuntimeLog("event=annotation_publisher_route \(surfAceDiagnosticFields([("provenance", provenance), ("endpoint", SurfAceAnnotationPublisher.safeEndpoint(endpoint))]))")
         do {
+            if let annotationPublisher {
+                try annotationPublisher.reconcileEndpoint(endpoint)
+                return
+            }
             let adapter = try ensureLocklessAdapter()
-            let publisher = try SurfAceAnnotationPublisher(adapter: adapter, endpoint: endpoint) { error in
-                surfAceServerRuntimeLog("event=annotation_publisher_failed \(surfAceDiagnosticFields([("error", String(describing: error))]))")
+            let publisher = try SurfAceAnnotationPublisher(adapter: adapter, endpoint: endpoint,
+                                                           makeTransport: annotationPublisherTransportFactory,
+                                                           onDiagnostic: { [weak self] fields in
+                self?.updateAnnotationDeliveryFeedback(fields)
+                surfAceServerRuntimeLog("event=annotation_publisher \(surfAceDiagnosticFields(fields.sorted { $0.key < $1.key }.map { ($0.key, $0.value as CustomStringConvertible?) }))")
+            }) { error in
+                surfAceServerRuntimeLog("event=annotation_publisher_failed \(surfAceDiagnosticFields([("error_code", SurfAceAnnotationPublisher.safeErrorCode(error))]))")
             }
             annotationPublisher = publisher
             publisher.notify()
@@ -670,6 +698,7 @@ final class SurfAceRuntime {
         annotationRecoveryTask = nil
         annotationPublisher?.stop()
         annotationPublisher = nil
+        verifiedAnnotationRegistryURL = nil
         centralRegistration?.stop()
         centralRegistration = nil
         updateCentralRegistrationStatus(.disconnected)
@@ -1089,6 +1118,48 @@ final class SurfAceRuntime {
                 surface.surfaceEpoch = Int(authoritySurface.surfaceRevision)
             }
         }
+        projectAnnotationDeliveryFeedback(state)
+    }
+
+    private func projectAnnotationDeliveryFeedback(_ state: SurfAceLocklessAuthorityState,
+                                                    diagnostic: [String: String] = [:]) {
+        // A committed local projection/queue update also supersedes suspended
+        // diagnostic snapshots, not just a newer publisher callback.
+        annotationFeedbackGeneration += 1
+        for surface in surfaces {
+            for pane in surface.panes {
+                guard let authorityPane = state.liveSurfaces[surface.surfaceId]?.panes[String(pane.paneId)],
+                      authorityPane.paneLineageId == pane.paneLineageId,
+                      authorityPane.history.visible.contentId == pane.currentEntry.contentId,
+                      authorityPane.history.visible.revision == Int64(pane.currentEntry.revision) else {
+                    pane.annotationDeliveryStatus = nil
+                    continue
+                }
+                var hasSavedStrokes = false
+                if case .object(let annotations) = authorityPane.history.visible.annotations {
+                    if case .object(let strokes)? = annotations["strokesById"] { hasSavedStrokes = !strokes.isEmpty }
+                    if case .string(let drawing)? = annotations["drawingData"], !drawing.isEmpty { hasSavedStrokes = true }
+                }
+                pane.annotationDeliveryStatus = state.annotationPublisher?.deliveryStatus(
+                    surfaceId: surface.surfaceId, paneId: pane.paneId,
+                    contentId: pane.currentEntry.contentId, revision: pane.currentEntry.revision,
+                    hasSavedStrokes: hasSavedStrokes, diagnostic: diagnostic
+                ) ?? (hasSavedStrokes ? "Saved on device" : nil)
+            }
+        }
+    }
+
+    @ObservationIgnored private var annotationFeedbackGeneration = 0
+
+    private func updateAnnotationDeliveryFeedback(_ fields: [String: String]) {
+        guard let adapter = locklessAdapter else { return }
+        annotationFeedbackGeneration += 1
+        let generation = annotationFeedbackGeneration
+        Task { @MainActor [weak self] in
+            let snapshot = await adapter.snapshot()
+            guard let self, self.annotationFeedbackGeneration == generation else { return }
+            self.projectAnnotationDeliveryFeedback(snapshot, diagnostic: fields)
+        }
     }
 
     func project(
@@ -1109,6 +1180,12 @@ final class SurfAceRuntime {
             let nextEntry = persistedPane.currentEntry ?? .empty()
             let visibleEntryChanged = pane.currentEntry.contentId != nextEntry.contentId
                 || pane.currentEntry.revision != nextEntry.revision
+            if visibleEntryChanged || pane.currentEntry.historyOwnerToken != nextEntry.historyOwnerToken
+                || pane.annotationDoneContext?.paneLineageId != pane.paneLineageId {
+                if let attempt = pane.annotationDoneContext {
+                    pane.retireAnnotationDone(generation: attempt.generation)
+                }
+            }
             pane.currentEntry = nextEntry
             pane.forwardStack = persistedPane.forwardStack ?? []
             pane.currentTarget = persistedPane.currentTarget
@@ -1231,6 +1308,15 @@ final class SurfAceRuntime {
         fingerDrawEnabled: Bool,
         source: String? = nil
     ) {
+        guard let requestedPane = pane(surfaceId: surfaceId, paneId: paneId) else { return }
+        if !enabled {
+            guard let generation = requestedPane.beginAnnotationDone() else { return }
+            Task { @MainActor [weak requestedPane] in
+                try? await Task.sleep(for: .seconds(15))
+                requestedPane?.annotationDoneWaitExpired(generation: generation)
+            }
+        }
+        let doneContext = !enabled ? requestedPane.annotationDoneContext : nil
         if let adapter = locklessAdapter {
             let key = "\(surfaceId):\(paneId)"
             if enabled { annotationReentryRequested.insert(key) }
@@ -1248,7 +1334,9 @@ final class SurfAceRuntime {
                     paneId: paneId,
                     enabled: enabled,
                     fingerDrawEnabled: fingerDrawEnabled,
-                    source: source
+                    source: source,
+                    requestedPane: requestedPane,
+                    doneContext: doneContext
                 )
                 if enabled { annotationReentryRequested.remove(key) }
             }
@@ -1265,6 +1353,9 @@ final class SurfAceRuntime {
             pane.pendingAnnotationCommit = false
         }
         pane.annotationMode = enabled
+        if let doneContext {
+            pane.finishAnnotationDone(generation: doneContext.generation, failed: false)
+        }
         pane.fingerDrawEnabled = enabled && fingerDrawEnabled
         pane.bridge?.setInteraction(annotationMode: pane.annotationMode, fingerDrawEnabled: pane.fingerDrawEnabled)
         let transitionSource = source ?? (enabled ? (fingerDrawEnabled ? "finger_button" : "annotation_button") : "done_button")
@@ -1430,11 +1521,19 @@ final class SurfAceRuntime {
         paneId: Int,
         enabled: Bool,
         fingerDrawEnabled: Bool,
-        source: String?
+        source: String?,
+        requestedPane: SurfAcePaneModel,
+        doneContext: SurfAcePaneModel.AnnotationDoneContext?
     ) async {
-        guard let originalPane = pane(surfaceId: surfaceId, paneId: paneId) else { return }
+        guard let originalPane = pane(surfaceId: surfaceId, paneId: paneId), originalPane === requestedPane,
+              doneContext.map({ originalPane.matchesAnnotationDone($0) }) ?? true else {
+            if let doneContext { requestedPane.retireAnnotationDone(generation: doneContext.generation) }
+            return
+        }
         let wasEnabled = originalPane.annotationMode
-        var durableFrame = await adapter.snapshot().annotationPublisher?
+        let initialState = await adapter.snapshot()
+        let expectedVisible = initialState.liveSurfaces[surfaceId]?.panes[String(paneId)]?.history.visible
+        var durableFrame = initialState.annotationPublisher?
             .openFrame(surfaceId: surfaceId, paneId: paneId)
         if enabled, durableFrame?.directCommitAttempted == true,
            durableFrame?.directCommitDelivered != true {
@@ -1464,11 +1563,28 @@ final class SurfAceRuntime {
             originalPane.pendingAnnotationCommit ||
             (durableFrame?.commitRequested == true && durableFrame?.directCommitDelivered != true)
         )
+        var localModeCommitted = false
         do {
+            try await annotationModeMutationPreparation?(enabled)
+            if let doneContext,
+               (self.pane(surfaceId: surfaceId, paneId: paneId) !== requestedPane
+                || !requestedPane.matchesAnnotationDone(doneContext)) {
+                requestedPane.retireAnnotationDone(generation: doneContext.generation)
+                return
+            }
             _ = try await commitLocalMutation(adapter: adapter, operation: "local.annotation.mode") { state, sequence in
                 guard var surface = state.liveSurfaces[surfaceId],
                       var authorityPane = surface.panes[String(paneId)] else {
                     throw SurfAceLocklessAuthorityError.invalidState("local_annotation_pane")
+                }
+                if let doneContext {
+                    guard authorityPane.paneLineageId == doneContext.paneLineageId,
+                          authorityPane.history.visible.contentId == doneContext.contentId,
+                          authorityPane.history.visible.revision == Int64(doneContext.revision),
+                          authorityPane.history.visible.historyEntryId == expectedVisible?.historyEntryId,
+                          authorityPane.history.visible.lastVisibleSequence == expectedVisible?.lastVisibleSequence else {
+                        throw SurfAceLocklessAuthorityError.invalidState("local_annotation_context_changed")
+                    }
                 }
                 authorityPane.annotationMode = enabled
                 surface.panes[String(paneId)] = authorityPane
@@ -1491,9 +1607,15 @@ final class SurfAceRuntime {
                     "surfaceId": .string(surfaceId),
                 ])
             }
+            localModeCommitted = true
             try projectLocklessAuthorityState(await adapter.snapshot())
             await annotationModeProjectionObserver?(enabled)
             guard let projectedPane = self.pane(surfaceId: surfaceId, paneId: paneId) else { return }
+            if let doneContext,
+               (projectedPane !== requestedPane || !projectedPane.matchesAnnotationDone(doneContext)) {
+                requestedPane.retireAnnotationDone(generation: doneContext.generation)
+                return
+            }
             if enabled && !wasEnabled {
                 // Cancel only a not-yet-emitted commit. After the event has
                 // been emitted, pendingAnnotationCommit is already false and
@@ -1510,6 +1632,10 @@ final class SurfAceRuntime {
             surfAceLifecycleLog(
                 "event=annotation_mode_changed \(surfAceDiagnosticFields([("surface_id", surfaceId), ("pane_id", paneId), ("enabled", projectedPane.annotationMode), ("finger_draw_enabled", projectedPane.fingerDrawEnabled), ("source", transitionSource)]))"
             )
+            if let doneContext {
+                projectedPane.finishAnnotationDone(generation: doneContext.generation,
+                                                   failed: false, localSaveProven: true)
+            }
             if wasEnabled && !enabled {
                 requestAnnotationCommit(surfaceId: surfaceId, paneId: paneId)
                 clearPaneDrawings(projectedPane)
@@ -1524,6 +1650,15 @@ final class SurfAceRuntime {
             )
             await drainControllerRetentionReclamations(adapter: adapter)
         } catch {
+            if let doneContext {
+                let applied = originalPane.finishAnnotationDone(generation: doneContext.generation,
+                                                                 failed: !localModeCommitted,
+                                                                 localSaveProven: localModeCommitted)
+                if applied && localModeCommitted {
+                    originalPane.annotationDoneError = "Saved on device; local display update is pending."
+                }
+                if !applied { return }
+            }
             originalPane.toast = "Annotation change failed"
             endpointError = "Lockless annotation mutation failed: \(error.localizedDescription)"
         }
@@ -1837,7 +1972,7 @@ final class SurfAceRuntime {
             let serializedStrokes = try Self.locklessJSON(
                 Dictionary(uniqueKeysWithValues: strokes.map { ($0.strokeId, $0) })
             )
-            _ = try await commitLocalMutation(adapter: adapter, operation: "local.annotation.stroke") { state, sequence in
+            let saved = try await commitLocalMutation(adapter: adapter, operation: "local.annotation.stroke") { state, sequence in
                 guard var surface = state.liveSurfaces[surfaceId],
                       var authorityPane = surface.panes[String(paneId)],
                       case .object(var annotations) = authorityPane.history.visible.annotations,
@@ -1883,7 +2018,20 @@ final class SurfAceRuntime {
                     "paneId": .integer(Int64(paneId)),
                     "strokeCount": .integer(Int64(strokes.count)),
                     "surfaceId": .string(surfaceId),
+                    "frameId": state.annotationPublisher?.openFrame(surfaceId: surfaceId, paneId: paneId).map { .string($0.frameId) } ?? .null,
+                    "clientId": state.annotationPublisher.map { .string($0.clientId) } ?? .null,
+                    "sourceEpoch": state.annotationPublisher.map { .string($0.sourceEpoch) } ?? .null,
                 ])
+            }
+            if case .object(let result) = saved.result {
+                var fields: [(String, CustomStringConvertible?)] = [
+                    ("at", Self.annotationSourceTimestamp()), ("commit_sequence", saved.commitSequence),
+                    ("surface_id", surfaceId), ("pane_id", paneId)
+                ]
+                for (key, name) in [("frameId", "frame_id"), ("clientId", "client_id"), ("sourceEpoch", "source_epoch")] {
+                    if case .string(let value) = result[key] { fields.append((name, value)) }
+                }
+                surfAceServerRuntimeLog("event=annotation_saved \(surfAceDiagnosticFields(fields))")
             }
             try projectLocklessAuthorityState(await adapter.snapshot())
             guard let pane = pane(surfaceId: surfaceId, paneId: paneId) else { return }
@@ -3827,10 +3975,9 @@ final class SurfAceRuntime {
                 .appendingPathComponent("lockless-authority-v1.json")
         }
         let store = SurfAceLocklessGenerationStore(stateURL: stateURL)
-        let configuredRegistry = configuredRegistryURL
-        let annotationClientId = ["ws", "wss"].contains(configuredRegistry?.scheme?.lowercased() ?? "")
-            && configuredRegistry?.host != nil
-            ? (annotationClientIdOverride ?? identity?.clientId) : nil
+        // Capture source durably with the established client identity even
+        // while Bonjour has not selected a registry transport yet.
+        let annotationClientId = annotationClientIdOverride ?? identity?.clientId
         let adapter = try SurfAceLocklessRuntimeAdapter(store: store, annotationClientId: annotationClientId)
         locklessAdapter = adapter
         return adapter
@@ -4685,7 +4832,6 @@ final class SurfAceRuntime {
     private func publishAnnotationDelta(surfaceId: String, paneId: Int,
                                         strokes: [SurfAceStroke], flushPayload: [String: Any]) async {
         guard let adapter = locklessAdapter,
-              let publisher = annotationPublisher,
               let pane = pane(surfaceId: surfaceId, paneId: paneId) else { return }
         let snapshot = await adapter.snapshot()
         let frame = snapshot.annotationPublisher?.openFrame(surfaceId: surfaceId, paneId: paneId)
@@ -4723,11 +4869,11 @@ final class SurfAceRuntime {
         }
         do {
             let data = recordData
-            let appended = try await adapter.transactAnnotationPublisher(surfaceId: surfaceId) { outbox in
+            let appended = try await adapter.transactAnnotationPublisher(surfaceId: surfaceId) { outbox -> [String: String]? in
                 let current = outbox.openFrame(surfaceId: surfaceId, paneId: paneId)
                 guard current?.frameId == frameId,
                       current?.publishedStrokeCount == frame?.publishedStrokeCount else {
-                    return false
+                    return nil
                 }
                 if let data, let record = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
                     let currentUnpublished = current.map {
@@ -4735,7 +4881,7 @@ final class SurfAceRuntime {
                     } ?? []
                     guard sourceStrokes.map(\.strokeId)
                         == Array(currentUnpublished.prefix(sourceStrokes.count)).map(\.strokeId) else {
-                        return false
+                        return nil
                     }
                     _ = try outbox.append(surfaceId: surfaceId, record: record)
                     outbox.advanceFramePublished(surfaceId: surfaceId, paneId: paneId,
@@ -4745,12 +4891,36 @@ final class SurfAceRuntime {
                     outbox.advanceFramePublished(surfaceId: surfaceId, paneId: paneId,
                                                  by: lossCount)
                 }
-                return true
+                return Self.annotationQueueFields(outbox: outbox, surfaceId: surfaceId, frameId: frameId)
             }
-            if appended { publisher.notify() }
+            if let appended {
+                recordAnnotationQueueCheckpoint(appended)
+                projectAnnotationDeliveryFeedback(await adapter.snapshot())
+                annotationPublisher?.notify()
+            }
         } catch {
             surfAceServerRuntimeLog("event=annotation_delta_failed \(surfAceDiagnosticFields([("error", String(describing: error))]))")
         }
+    }
+
+    nonisolated private static func annotationQueueFields(outbox: SurfAceAnnotationOutbox,
+                                                         surfaceId: String, frameId: String?) -> [String: String] {
+        guard let surface = outbox.surfaces[surfaceId] else { return [:] }
+        let head = surface.fifo.last
+        var fields = ["client_id": outbox.clientId, "source_epoch": outbox.sourceEpoch,
+                      "surface_id": surfaceId,
+                      "outbox_depth": String(surface.fifo.count + (surface.trailingGap == nil ? 0 : 1))]
+        fields["frame_id"] = frameId
+        fields["source_event_id"] = surface.trailingGap?.sourceEventId ?? head?.sourceEventId
+        fields["source_sequence"] = surface.trailingGap?.through ?? head?.sourceSequence
+        return fields
+    }
+
+    private func recordAnnotationQueueCheckpoint(_ savedFields: [String: String]) {
+        var fields = savedFields
+        fields["at"] = Self.annotationSourceTimestamp()
+        fields["publisher_available"] = annotationPublisher == nil ? "false" : "true"
+        surfAceServerRuntimeLog("event=annotation_queued \(surfAceDiagnosticFields(fields.sorted { $0.key < $1.key }.map { ($0.key, $0.value as CustomStringConvertible?) }))")
     }
 
     private static func annotationSourceTimestamp() -> String {
@@ -4857,21 +5027,25 @@ final class SurfAceRuntime {
         guard let data = try? JSONSerialization.data(withJSONObject: record) else { return false }
         let strokeCount = strokes.count
         do {
-            let appended = try await adapter.transactAnnotationPublisher(surfaceId: surfaceId) { outbox in
+            let appended = try await adapter.transactAnnotationPublisher(surfaceId: surfaceId) { outbox -> [String: String]? in
                 guard let current = outbox.openFrame(surfaceId: surfaceId, paneId: paneId),
                       current.frameId == frame.frameId,
                       current.pendingDirectFlush?.eventId == event.eventId,
-                      current.publishedStrokeCount == frame.publishedStrokeCount else { return false }
+                      current.publishedStrokeCount == frame.publishedStrokeCount else { return nil }
                 guard let record = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                    return false
+                    return nil
                 }
                 _ = try outbox.append(surfaceId: surfaceId, record: record)
                 outbox.advanceFramePublished(surfaceId: surfaceId, paneId: paneId,
                                              by: strokeCount)
-                return true
+                return Self.annotationQueueFields(outbox: outbox, surfaceId: surfaceId, frameId: frame.frameId)
             }
-            if appended { annotationPublisher?.notify() }
-            return appended
+            if let appended {
+                recordAnnotationQueueCheckpoint(appended)
+                projectAnnotationDeliveryFeedback(await adapter.snapshot())
+                annotationPublisher?.notify()
+            }
+            return appended != nil
         } catch {
             surfAceServerRuntimeLog("event=annotation_staged_delta_failed \(surfAceDiagnosticFields([("error", String(describing: error))]))")
             return false
@@ -5060,11 +5234,11 @@ final class SurfAceRuntime {
         do {
             try await annotationFrameCommitPreparation?()
             let data = recordData
-            let appended = try await adapter.transactAnnotationPublisher(surfaceId: surfaceId) { outbox in
+            let appended = try await adapter.transactAnnotationPublisher(surfaceId: surfaceId) { outbox -> [String: String]? in
                 guard let current = outbox.openFrame(surfaceId: surfaceId, paneId: paneId),
                       current.frameId == frame.frameId,
                       current.commitRequested == true,
-                      current.directCommitDelivered == true else { return false }
+                      current.directCommitDelivered == true else { return nil }
                 if current.sourceStrokeCount > current.publishedStrokeCount {
                     try outbox.lose(surfaceId: surfaceId, code: "annotation_final_delta_unavailable")
                     outbox.markFramePublished(surfaceId: surfaceId, paneId: paneId)
@@ -5075,14 +5249,18 @@ final class SurfAceRuntime {
                     try outbox.lose(surfaceId: surfaceId, code: "annotation_frame_commit_unavailable")
                 }
                 outbox.closeFrame(surfaceId: surfaceId, paneId: paneId)
-                return true
+                return Self.annotationQueueFields(outbox: outbox, surfaceId: surfaceId, frameId: frame.frameId)
             }
-            if appended { annotationPublisher?.notify() }
+            if let appended {
+                recordAnnotationQueueCheckpoint(appended)
+                projectAnnotationDeliveryFeedback(await adapter.snapshot())
+                annotationPublisher?.notify()
+            }
         } catch {
             surfAceServerRuntimeLog("event=annotation_commit_failed \(surfAceDiagnosticFields([("error", String(describing: error))]))")
             Task { @MainActor [weak self] in
                 try? await Task.sleep(for: .seconds(2))
-                guard let self, self.annotationPublisher != nil else { return }
+                guard let self, self.locklessAdapter != nil else { return }
                 await self.finalizeAnnotationSourceFrame(
                     adapter: adapter, surfaceId: surfaceId, paneId: paneId,
                     revision: revision, contentType: contentType
@@ -5092,7 +5270,7 @@ final class SurfAceRuntime {
     }
 
     private func resumeRequestedAnnotationSourceCommits(allowReentryForFrame: String? = nil) async {
-        guard let adapter = locklessAdapter, annotationPublisher != nil else { return }
+        guard let adapter = locklessAdapter else { return }
         let state = await adapter.snapshot()
         for (surfaceId, surface) in state.annotationPublisher?.surfaces ?? [:] {
             for (paneKey, initialFrame) in surface.openFrames ?? [:]

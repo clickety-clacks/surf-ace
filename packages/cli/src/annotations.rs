@@ -560,9 +560,13 @@ pub fn run(arguments: &[String]) -> Result<(), AnnotationError> {
                     .get("payload")
                     .ok_or_else(|| AnnotationError::protocol("event.payload"))?;
                 let store = StateStore::open(&invocation.state_root, &invocation.consumer_id)?;
-                let terminal = op == "annotation.lease_replaced" || op == "annotation.consumer_retired";
+                let terminal =
+                    op == "annotation.lease_replaced" || op == "annotation.consumer_retired";
                 let stored = store.load()?;
-                if stored.as_ref().is_none_or(|state| state.lease_id != active_lease) {
+                if stored
+                    .as_ref()
+                    .is_none_or(|state| state.lease_id != active_lease)
+                {
                     // Another CLI invocation can persist the replacement or retirement
                     // before this foreground listener reads its terminal wire event.
                     // Report that event without overwriting the newer local state.

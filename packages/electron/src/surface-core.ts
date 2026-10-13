@@ -73,6 +73,7 @@ import {
   type LocklessSurfaceAdmissionAttempt,
 } from "../../protocol/src/lockless.js";
 import { cloneWindowPlacement, type WindowPlacement } from "./window-placement.js";
+import { ANNOTATION_LOCAL_SAVE_LIMIT, parseAnnotationLocalSave, validLocalAnnotationFrameId, type AnnotationLocalSave } from "./annotation-local-save.js";
 import { AnnotationPublisherOutbox, ANNOTATION_PUBLISHER_MAX_BYTES, type PersistentAnnotationPublisher } from "./annotation-publisher-outbox.js";
 
 type ContentPayload = ContentSetRequest["payload"]["content"];
@@ -120,6 +121,8 @@ type PaneSnapshot = {
 type PaneState = {
   annotating: boolean;
   annotationFrameOpen: boolean;
+  annotationLocalFrameId?: string;
+  annotationLocalSave?: AnnotationLocalSave;
   deliveredClosedFrameCount: number;
   dirtyStrokeIds: string[];
   externalNative: boolean;
@@ -140,6 +143,7 @@ type PaneState = {
   } | null;
   nativeWindowGroup: NativePaneWindowGroupDiagnostic | null;
   paneId: number;
+  allocationGeneration: number | null;
   paneLabel: number;
   paneLineageId: string;
   pendingAnnotationCommit: boolean;
@@ -209,6 +213,7 @@ export type PersistentSurfaceState = {
   nextAdmissionAttemptSequence?: number;
   primarySurfaceId: string | null;
   registryBinding?: PersistentRegistryBinding;
+  registryEndpointLease?: PersistentRegistryEndpointLease | null;
   surfaces?: PersistentSurfaceRecord[];
   version: 1;
 };
@@ -219,8 +224,14 @@ export type PersistentRegistryBinding = {
   fleetId: string;
 };
 
+export type PersistentRegistryEndpointLease = {
+  leaseGeneration: number;
+  registrationObservedAtMs: number;
+  leaseExpiresAtMs: number;
+};
+
 export type ConfirmedRegistryClaim = {
-  panes: Array<{ paneId: string; paneLabel: number; paneLineageId: string }>;
+  panes: Array<{ allocationGeneration: number | null; paneId: string; paneLabel: number; paneLineageId: string }>;
   surfaceId: string;
   windowLabel: string;
 };
@@ -245,6 +256,8 @@ type PersistentSurfaceRecord = {
 type PersistentPaneRecord = {
   annotating: boolean;
   annotationFrameOpen: boolean;
+  annotationLocalFrameId?: string;
+  annotationLocalSave?: AnnotationLocalSave;
   deliveredClosedFrameCount: number;
   dirtyStrokeIds: string[];
   externalNative: boolean;
@@ -258,6 +271,7 @@ type PersistentPaneRecord = {
   name: string | null;
   nextRevision?: number;
   paneId: number;
+  allocationGeneration?: number | null;
   paneLabel: number;
   paneLineageId: string;
   pendingAnnotationCommit: boolean;
@@ -288,6 +302,9 @@ export type RendererPaneState = {
   name: string | null;
   ownerName: string | null;
   paneId: number;
+  paneLineageId?: string;
+  annotationDone?: import("./annotation-done-state.js").AnnotationDoneState;
+  annotationDelivery?: import("./annotation-registry-publisher.js").AnnotationDeliveryStatus;
   displayId: string;
   provenanceName: string | null;
   provenance: LocklessEntryProvenance | null;
@@ -341,6 +358,11 @@ export type CoreEvent =
   | { surfaceId: string; type: "topology-changed"; topology?: ReturnType<SurfaceCore["publicTopologyState"]>; admittedOccurrence?: { record: ConsumableRecord | null } }
   | { paneId: number; surfaceId: string; type: "drawing-dirty" };
 
+export type PaneLabelAllocation = {
+  allocationGeneration: number | null;
+  paneLabel: number;
+};
+
 export class SurfaceCoreError extends Error {
   constructor(
     readonly code:
@@ -352,6 +374,11 @@ export class SurfaceCoreError extends Error {
       | "invalid_payload"
       | "missing_provider_name"
       | "not_paired"
+      | "not_ready"
+      | "prepair_describe_unsupported"
+      | "identity_mismatch"
+      | "revision_churn"
+      | "surface_not_found"
       | "render_failed"
       | "stale_content"
       | "stale_revision"
@@ -671,7 +698,7 @@ export class SurfaceCore {
    */
   private readonly inFlightAdmissionSequences = new Set<number>();
   private readonly surfaces = new Map<string, SurfaceState>();
-  private readonly confirmedPaneLabels = new Map<string, { pane: PaneState; label: number }>();
+  private readonly confirmedPaneLabels = new Map<string, { allocationGeneration: number; pane: PaneState; label: number }>();
   private readonly listeners = new Set<(event: CoreEvent) => void>();
   private pendingEvents: CoreEvent[] | null = null;
   private deferredVerifiedEvents: { state: string; events: CoreEvent[] } | null = null;
@@ -918,13 +945,33 @@ export class SurfaceCore {
     this.persistentState.registryBinding = structuredClone(binding);
   }
 
+  registryEndpointLease(): PersistentRegistryEndpointLease | null {
+    const lease = this.persistentState.registryEndpointLease;
+    if (!lease) return null;
+    if (!Number.isSafeInteger(lease.leaseGeneration) || lease.leaseGeneration < 1 ||
+        !Number.isSafeInteger(lease.registrationObservedAtMs) || lease.registrationObservedAtMs < 0 ||
+        !Number.isSafeInteger(lease.leaseExpiresAtMs) || lease.leaseExpiresAtMs <= lease.registrationObservedAtMs) {
+      throw new SurfaceCoreError("invalid_payload", "Stored registry endpoint lease is invalid");
+    }
+    return structuredClone(lease);
+  }
+
+  setRegistryEndpointLease(lease: PersistentRegistryEndpointLease | null): void {
+    if (lease && (!Number.isSafeInteger(lease.leaseGeneration) || lease.leaseGeneration < 1 ||
+        !Number.isSafeInteger(lease.registrationObservedAtMs) || lease.registrationObservedAtMs < 0 ||
+        !Number.isSafeInteger(lease.leaseExpiresAtMs) || lease.leaseExpiresAtMs <= lease.registrationObservedAtMs)) {
+      throw new SurfaceCoreError("invalid_payload", "Proposed registry endpoint lease is invalid");
+    }
+    this.persistentState.registryEndpointLease = lease ? structuredClone(lease) : null;
+  }
+
   confirmedRegistryClaims(): ConfirmedRegistryClaim[] {
     const claims = new Map<string, ConfirmedRegistryClaim>();
     const add = (
       surfaceId: string,
       windowLabel: string,
       windowLabelConfirmed: boolean | null | undefined,
-      panes: Array<{ paneId: number; paneLabel: number; paneLineageId: string }>,
+      panes: Array<{ allocationGeneration?: number | null; paneId: number; paneLabel: number; paneLineageId: string }>,
     ) => {
       const confirmed = panes.filter((pane) => pane.paneLabel > 0);
       if ((!isValidWindowLabel(windowLabel) || windowLabelConfirmed === false) && confirmed.length === 0) return;
@@ -933,6 +980,7 @@ export class SurfaceCore {
       for (const pane of confirmed) {
         if (!claim.panes.some((existing) => existing.paneId === String(pane.paneId))) {
           claim.panes.push({
+            allocationGeneration: pane.allocationGeneration ?? null,
             paneId: String(pane.paneId), paneLabel: pane.paneLabel, paneLineageId: pane.paneLineageId,
           });
         }
@@ -1464,7 +1512,10 @@ export class SurfaceCore {
         bootstrapPane &&
         isPristineProviderBootstrapPane(bootstrapPane, true)
       ) {
-        const identity = this.locklessAuthority.allocatePaneIdentity([]);
+        const identity = this.locklessAuthority.allocatePaneIdentity([
+          ...this.locklessAuthority.retainedPaneIds(surfaceId),
+          ...this.locklessAuthority.unavailablePaneIds(surfaceId),
+        ]);
         this.ensureInitialPane(
           surface,
           identity.paneId,
@@ -1776,6 +1827,7 @@ export class SurfaceCore {
           name: pane.name,
           ownerName: provenanceDisplayName(current.display),
           paneId,
+          paneLineageId: pane.paneLineageId,
           displayId: visibleWindowLabel && this.isRegistryPaneConfirmed(surface.surfaceId, paneId, pane)
             ? visiblePaneAddress(visibleWindowLabel, pane.paneLabel) : "",
           provenanceName: provenanceDisplayName(current.display),
@@ -1932,7 +1984,20 @@ export class SurfaceCore {
     if (pane.annotating === enabled) {
       return;
     }
-    if (enabled) pane.pendingAnnotationCommit = false;
+    if (enabled) {
+      pane.pendingAnnotationCommit = false;
+      pane.annotationLocalFrameId = `lf_${randomUUID().replaceAll("-", "")}`;
+      delete pane.annotationLocalSave;
+    } else if (pane.annotationLocalFrameId) {
+      const entry = currentEntry(pane);
+      pane.annotationLocalSave = parseAnnotationLocalSave({ version: 1, frameId: pane.annotationLocalFrameId,
+        context: { paneId: pane.paneId, paneLineageId: pane.paneLineageId,
+          contentId: entry.contentId, revision: entry.revision, renderVersion: pane.latestContentEventAt } }) ?? undefined;
+      // Optional UI metadata never displaces source/history/ink. One bounded
+      // record per pane, at most64 per surface; oldest pane-order proof evicts.
+      const saved = surface.paneOrder.map((id) => surface.panes.get(id)!).filter((p) => p.annotationLocalSave);
+      while (saved.length > ANNOTATION_LOCAL_SAVE_LIMIT) delete saved.shift()!.annotationLocalSave;
+    }
     pane.annotating = enabled;
     pane.toast = null;
     bumpGeometryRevision(surface);
@@ -1941,6 +2006,10 @@ export class SurfaceCore {
       pane.pendingAnnotationCommit = true;
       this.emit({ paneId, surfaceId, type: "annotation-committed" });
     }
+  }
+
+  localAnnotationFrameId(surfaceId: string, paneId: number): string | undefined {
+    return this.requirePane(surfaceId, paneId)?.annotationLocalFrameId;
   }
 
   navigateHistory(surfaceId: string, paneId: number, direction: "back" | "forward"): void {
@@ -2592,9 +2661,9 @@ export class SurfaceCore {
 
   applyRegistryPaneLabels(assignments: Array<{
     surfaceId: string;
-    panes: Array<{ paneId: string; paneLineageId: string; paneLabel: number }>;
+    panes: Array<{ allocationGeneration: number; paneId: string; paneLineageId: string; paneLabel: number }>;
   }>): void {
-    const proposed = new Map<string, number>();
+    const proposed = new Map<string, { allocationGeneration: number; paneLabel: number }>();
     const labels = new Set<number>();
     for (const assignment of assignments) {
       const surface = this.getSurface(assignment.surfaceId);
@@ -2607,17 +2676,26 @@ export class SurfaceCore {
         if (!Number.isSafeInteger(paneId) || !surface.panes.has(paneId) ||
             surface.panes.get(paneId)?.paneLineageId !== pane.paneLineageId ||
             !Number.isSafeInteger(pane.paneLabel) || pane.paneLabel < 1 ||
+            !Number.isSafeInteger(pane.allocationGeneration) || pane.allocationGeneration < 1 ||
+            (surface.panes.get(paneId)?.paneLabel !== undefined &&
+              surface.panes.get(paneId)!.paneLabel > 0 &&
+              surface.panes.get(paneId)!.paneLabel !== pane.paneLabel) ||
+            (surface.panes.get(paneId)?.allocationGeneration !== null &&
+              surface.panes.get(paneId)?.allocationGeneration !== undefined &&
+              surface.panes.get(paneId)?.allocationGeneration !== pane.allocationGeneration) ||
             proposed.has(key) || labels.has(pane.paneLabel)) {
           throw new SurfaceCoreError("invalid_payload", "Invalid or duplicate registry pane assignment");
         }
-        proposed.set(key, pane.paneLabel);
+        proposed.set(key, { allocationGeneration: pane.allocationGeneration, paneLabel: pane.paneLabel });
         labels.add(pane.paneLabel);
       }
     }
     this.transaction(() => {
-      for (const [key, paneLabel] of proposed) {
+      for (const [key, allocation] of proposed) {
         const [surfaceId, paneIdText] = key.split("\0");
-        this.getSurface(surfaceId!).panes.get(Number(paneIdText))!.paneLabel = paneLabel;
+        const pane = this.getSurface(surfaceId!).panes.get(Number(paneIdText))!;
+        pane.paneLabel = allocation.paneLabel;
+        pane.allocationGeneration = allocation.allocationGeneration;
         this.emit({ surfaceId: surfaceId!, type: "surface-changed" });
       }
     });
@@ -2625,7 +2703,7 @@ export class SurfaceCore {
 
   confirmRegistryPaneLabels(assignments: Array<{
     surfaceId: string;
-    panes: Array<{ paneId: string; paneLineageId?: string; paneLabel: number }>;
+    panes: Array<{ allocationGeneration?: number | null; paneId: string; paneLineageId?: string; paneLabel: number }>;
   }>): void {
     for (const [key, confirmation] of this.confirmedPaneLabels) {
       const [surfaceId, paneIdText] = key.split("\0");
@@ -2635,15 +2713,19 @@ export class SurfaceCore {
     }
     for (const assignment of assignments) {
       for (const pane of assignment.panes) {
+        if (!Number.isSafeInteger(pane.allocationGeneration) || Number(pane.allocationGeneration) < 1) {
+          continue;
+        }
         const paneId = Number(pane.paneId);
         const material = this.getSurface(assignment.surfaceId).panes.get(paneId);
         if (!material || !Number.isSafeInteger(pane.paneLabel) || pane.paneLabel < 1 ||
             material.paneLabel !== pane.paneLabel ||
+            material.allocationGeneration !== pane.allocationGeneration ||
             (pane.paneLineageId && material.paneLineageId !== pane.paneLineageId)) {
           throw new SurfaceCoreError("invalid_payload", "Registry pane confirmation changed before projection");
         }
         this.confirmedPaneLabels.set(`${assignment.surfaceId}\0${paneId}`, {
-          pane: material, label: pane.paneLabel,
+          allocationGeneration: Number(pane.allocationGeneration), pane: material, label: pane.paneLabel,
         });
       }
       this.emit({ surfaceId: assignment.surfaceId, type: "surface-changed" });
@@ -2660,7 +2742,8 @@ export class SurfaceCore {
 
   private isRegistryPaneConfirmed(surfaceId: string, paneId: number, pane: PaneState): boolean {
     const confirmed = this.confirmedPaneLabels.get(`${surfaceId}\0${paneId}`);
-    return confirmed?.pane === pane && confirmed.label === pane.paneLabel;
+    return confirmed?.pane === pane && confirmed.label === pane.paneLabel &&
+      confirmed.allocationGeneration === pane.allocationGeneration;
   }
 
   assertProviderWindowLabelAvailable(surfaceId: string, windowLabel: string): void {
@@ -2731,6 +2814,7 @@ export class SurfaceCore {
     surfaceId: string,
     payload: AuthoritativeTopologyPayload,
     newPaneLineageIds?: Map<number, string>,
+    newPaneAllocationGenerations?: Map<number, number | null>,
   ): TopologyApplyResponse["payload"] {
     const surface = this.getSurface(surfaceId);
     assertValidWindowLabel(payload.windowLabel);
@@ -2750,8 +2834,12 @@ export class SurfaceCore {
     for (const paneId of activePaneIds) {
       const summary = paneStateById.get(paneId)!;
       const existingPane = existingPanes.get(paneId);
+      if (existingPane && existingPane.paneLabel !== summary.paneLabel) {
+        throw new SurfaceCoreError("invalid_payload", "topology.apply cannot change an existing pane label");
+      }
       const pane = existingPane ?? createPaneState(
         paneId, summary.paneLabel, this.now(), newPaneLineageIds?.get(paneId),
+        newPaneAllocationGenerations?.get(paneId) ?? null,
       );
       pane.paneLabel = summary.paneLabel;
       pane.name = summary.name;
@@ -3089,7 +3177,15 @@ export class SurfaceCore {
 
   paneSplit(
     surfaceId: string,
-    payload: { count: number; direction: "horizontal" | "vertical"; newPaneIds: number[]; newPaneLabels: number[]; newPaneLineageIds?: string[]; paneId: number },
+    payload: {
+      count: number;
+      direction: "horizontal" | "vertical";
+      newPaneIds: number[];
+      newPaneLabels: number[];
+      newPaneLineageIds?: string[];
+      newPaneAllocationGenerations?: Array<number | null>;
+      paneId: number;
+    },
   ): { panes: PaneSplitState[] } {
     const surface = this.getSurface(surfaceId);
     const sourcePane = this.expectPane(surfaceId, payload.paneId);
@@ -3118,6 +3214,7 @@ export class SurfaceCore {
     }
     const newPanes = newPaneIds.map((paneId, index) => createPaneState(
       paneId, newPaneLabels[index]!, this.now(), payload.newPaneLineageIds?.[index],
+      payload.newPaneAllocationGenerations?.[index] ?? null,
     ));
     for (const pane of newPanes) {
       surface.panes.set(pane.paneId, pane);
@@ -3358,13 +3455,17 @@ export class SurfaceCore {
   capturePaneTombstonePayload(
     surfaceId: string,
     paneId: number,
-  ): { pane: PersistentPaneRecord; paneOrderIndex: number } {
+  ): { closeTopologyRevision: number; pane: PersistentPaneRecord; paneOrderIndex: number } {
     const record = serializeSurface(this.getSurface(surfaceId));
     const pane = record.panes.find((candidate) => candidate.paneId === paneId);
     if (!pane) {
       throw new SurfaceCoreError("invalid_payload", `Unknown pane: ${paneId}`);
     }
     return {
+      // paneClose and topology.apply each commit exactly one topology revision
+      // after this snapshot is captured. Retain that revision; closedSequence
+      // is ordered retention metadata and cannot authorize allocator release.
+      closeTopologyRevision: record.topologyRevision + 1,
       pane: structuredClone(pane),
       paneOrderIndex: record.paneOrder.indexOf(paneId),
     };
@@ -4084,6 +4185,9 @@ export class SurfaceCore {
       if (currentPane.paneLabel === initialPaneLabel) {
         return false;
       }
+      if (currentPane.allocationGeneration !== null) {
+        throw new SurfaceCoreError("invalid_payload", "Provider bootstrap cannot change a confirmed pane label");
+      }
       currentPane.paneLabel = initialPaneLabel;
       return true;
     }
@@ -4172,7 +4276,13 @@ type PaneSplitState = {
   paneLabel: number;
 };
 
-function createPaneState(paneId: number, paneLabel: number, now: number, paneLineageId?: string): PaneState {
+function createPaneState(
+  paneId: number,
+  paneLabel: number,
+  now: number,
+  paneLineageId?: string,
+  allocationGeneration: number | null = null,
+): PaneState {
   return {
     annotating: false,
     annotationFrameOpen: false,
@@ -4200,6 +4310,8 @@ function createPaneState(paneId: number, paneLabel: number, now: number, paneLin
     nativeHost: null,
     nativeWindowGroup: null,
     paneId,
+    allocationGeneration: Number.isSafeInteger(allocationGeneration) && Number(allocationGeneration) > 0
+      ? Number(allocationGeneration) : null,
     paneLabel,
     paneLineageId: paneLineageId ?? `pl_${randomUUID().replaceAll("-", "")}`,
     pendingAnnotationCommit: false,
@@ -4234,6 +4346,8 @@ function serializeSurface(surface: SurfaceState): PersistentSurfaceRecord {
       .map((pane) => ({
         annotating: pane.annotating,
         annotationFrameOpen: pane.annotationFrameOpen,
+        ...(pane.annotationLocalFrameId ? { annotationLocalFrameId: pane.annotationLocalFrameId } : {}),
+        ...(pane.annotationLocalSave ? { annotationLocalSave: structuredClone(pane.annotationLocalSave) } : {}),
         deliveredClosedFrameCount: pane.deliveredClosedFrameCount,
         dirtyStrokeIds: [...pane.dirtyStrokeIds],
         externalNative: false,
@@ -4247,6 +4361,7 @@ function serializeSurface(surface: SurfaceState): PersistentSurfaceRecord {
         name: pane.name,
         nextRevision: pane.nextRevision,
         paneId: pane.paneId,
+        allocationGeneration: pane.allocationGeneration,
         paneLabel: pane.paneLabel,
         paneLineageId: pane.paneLineageId,
         pendingAnnotationCommit: pane.pendingAnnotationCommit,
@@ -4269,6 +4384,7 @@ function deserializeSurface(record: PersistentSurfaceRecord, now: number): Surfa
   }
   const panes = new Map<number, PaneState>();
   const paneOrder: number[] = [];
+  let restoredLocalSaveCount = 0;
   for (const paneRecord of record.panes) {
     if (!Number.isInteger(paneRecord.paneId) || panes.has(paneRecord.paneId)) {
       return null;
@@ -4281,6 +4397,8 @@ function deserializeSurface(record: PersistentSurfaceRecord, now: number): Surfa
       Number.isInteger(paneRecord.paneLabel) && paneRecord.paneLabel > 0 ? paneRecord.paneLabel : 0,
       now,
     );
+    pane.allocationGeneration = Number.isSafeInteger(paneRecord.allocationGeneration) &&
+      Number(paneRecord.allocationGeneration) > 0 ? Number(paneRecord.allocationGeneration) : null;
     pane.annotating = Boolean(paneRecord.annotating);
     pane.annotationFrameOpen = Boolean(paneRecord.annotationFrameOpen);
     pane.deliveredClosedFrameCount = Number(paneRecord.deliveredClosedFrameCount ?? 0);
@@ -4310,6 +4428,12 @@ function deserializeSurface(record: PersistentSurfaceRecord, now: number): Surfa
     pane.paneLineageId = typeof paneRecord.paneLineageId === "string" && paneRecord.paneLineageId.length > 0
       ? paneRecord.paneLineageId
       : pane.paneLineageId;
+    pane.annotationLocalFrameId = validLocalAnnotationFrameId(paneRecord.annotationLocalFrameId)
+      ? paneRecord.annotationLocalFrameId : undefined;
+    pane.annotationLocalSave = parseAnnotationLocalSave(paneRecord.annotationLocalSave) ?? undefined;
+    if (pane.annotationLocalSave && ++restoredLocalSaveCount > ANNOTATION_LOCAL_SAVE_LIMIT) {
+      delete pane.annotationLocalSave;
+    }
     pane.pendingAnnotationCommit = Boolean(paneRecord.pendingAnnotationCommit);
     pane.snapshot = paneRecord.snapshot
       ? {

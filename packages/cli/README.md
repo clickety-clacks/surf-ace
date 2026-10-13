@@ -4,12 +4,13 @@ General standalone native Rust Surf Ace controller CLI. It is directly callable
 by any local program, script, user, or agent and is not a daemon, sidecar, MCP
 server, archetype, or persistence service.
 
-Every invocation supplies a state root. Client-directed network commands also
-supply that client's Surf Ace WebSocket endpoint and product label; push
-supplies its friendly chat label in the command input. `fleet-list` is the
-separate read-only registry inventory command and supplies a registry WebSocket
-URL instead. Nothing about a host, surface, deployment, or provenance label is
-compiled in.
+Stateful invocations supply a controller state root. Client-directed commands
+also supply that client's Surf Ace WebSocket endpoint and product label; push
+supplies its friendly chat label in the command input. `fleet-list` and
+`window-describe` instead use an explicit registry WebSocket URL. The
+`window-describe` command is stateless: it creates no controller identity or
+client admission. Nothing about a host, surface, deployment, or provenance
+label is compiled in.
 
 To discover registered client and surface identities, query the configured
 registry explicitly:
@@ -30,6 +31,40 @@ reachability, or live application health. An empty `clients` array is a
 successful empty inventory; an invalid or unavailable registry is an error.
 Do not combine `--registry` and `--endpoint`; the command never pairs with or
 mutates clients.
+
+To resolve one lowercase window label against a fresh leased registry route and
+observe the client directly before pairing, use `window-describe`:
+
+```sh
+surf-ace \
+  --registry "$REGISTRY_WS" \
+  --input-json '{"windowLabel":"a"}' \
+  window-describe
+```
+
+This command needs neither `--state-root`, `--endpoint`, nor
+`--product-label`. It requires exactly one current registry candidate, probes
+the registered direct endpoint with a nonce-correlated `surface.describe`, and
+rechecks the same registration and lease after the response. The result keeps
+registry identity and lease freshness, transport reachability, application
+readiness, surface topology/layout, and each pane's content revision in
+separate fields. The v1 identity match is a consistency check, not
+authentication. The command does not pair, create controller state, or
+authorize a later mutation.
+
+`window_not_found` and `window_ambiguous` require a fresh explicit selection;
+never guess an endpoint from the registry host or choose the first duplicate.
+`endpoint_unconfigured` means the matching client did not register both a direct
+endpoint and pre-pair capability. `stale_registration` means the row or lease
+was absent, invalid, expired, or changed during observation.
+`endpoint_unreachable` reports a failed direct connection. If the WebSocket
+connects but does not return a valid describe response, `application_unresponsive`
+reports the reachable transport separately from unknown application readiness.
+`client_not_ready` and `revision_churn` are explicit evidence, not permission to
+fall back to a different route. Other bounded errors distinguish
+invalid/unsupported responses and oversized responses. A later stateful read or mutation still
+needs the explicitly selected client endpoint, and every mutation retains its
+own expected-revision and correlated-receipt guards.
 
 To list one selected client's surfaces, use that client's direct WebSocket
 endpoint with the existing `list` command:
@@ -56,13 +91,93 @@ uses `{"data":"..."}`, `terminal` uses `{"lines":["..."],"scrollback":0}`,
 `markdown` uses `{"markdown":"..."}`, `video` uses a string, and `canvas`
 uses `""` or an object with optional `color` and `grid` fields.
 
-The existing public command set is `fleet-list`, `list`, `push`, `read`, `topology-intent`,
-`topology-realize`, `clear`, `annotations-remove`, `capture-pane`,
-`surface-intent`, `target-register`, and `target-apply`. Each command accepts
-one JSON object via `--input-json` or standard input and writes exactly one JSON
-result to standard output. `read` is strictly local and rejects `--endpoint`.
+The existing public command set is `fleet-list`, `window-describe`, `list`,
+`pane-describe`, `push`, `read`, `topology-intent`, `topology-realize`,
+`clear`, `annotations-remove`, `capture-pane`, `surface-intent`,
+`target-register`, and `target-apply`. Each command accepts one JSON object via
+`--input-json` or standard input and writes exactly one JSON result to standard
+output. `read` is strictly local and rejects `--endpoint`.
 Every successful `capture-pane` call includes its PNG screenshot; the command
 has no option to suppress it.
+
+## Help and schemas
+
+The native CLI exposes JSON help without requiring an endpoint, registry, or
+state root:
+
+```sh
+surf-ace --help
+surf-ace help topology-realize
+surf-ace schema clear
+surf-ace help annotations watch
+surf-ace schema annotations ack
+```
+
+Command help reports the route, side effects, input JSON Schema, success result
+shape, and error codes. The CLI validator remains authoritative; regression
+tests run the documented layout and clear examples through that validator.
+`fleet-list` still reports inventory only. `window-describe` is the
+registry-to-direct-endpoint read-only probe; `list`, `pane-describe`, and
+`capture-pane` pair the controller before their direct request. In particular,
+`pane-describe` may persist admission, synchronization, cursor, acknowledgement,
+or pending-receipt state and is not a substitute for no-pair discovery.
+
+The separate registry annotation commands also have action-specific help and
+schemas. `annotations watch` requires an unused consumer ID and creates a
+durable registry consumer and lease before saving local state; an existing ID
+is refused. `annotations resume` requires an existing registry consumer ID,
+not a locally stored lease. It replaces and fences the prior lease, saves the
+new local state, and may close another live listener using that same ID. Treat
+both as consumer lifecycle operations. They emit NDJSON in the foreground;
+record delivery does not acknowledge a record. Use `annotations ack` only
+after durable processing, with either the exact cursor or a history gap ID.
+`annotations retire` requires an explicit expected acknowledgement and the
+discard flag.
+
+This fixture example replaces a root layout with three vertical panes. Here
+`sf_fixture`, revision `7`, and pane IDs `1`, `2`, and `3` are test values. In a
+real invocation, use the current surface ID, topology revision, and the full
+explicit list of pane IDs that may be destroyed:
+
+```sh
+surf-ace \
+  --state-root "$STATE_ROOT" \
+  --endpoint "$CLIENT_WS" \
+  --product-label "Surf Ace CLI" \
+  topology-realize --input-json \
+  '{"surfaceId":"sf_fixture","expectedTopologyRevision":7,"target":{"root":true},"desired":{"type":"split","direction":"vertical","children":[{"type":"pane"},{"type":"pane"},{"type":"pane"}]},"allowDestroyPaneIds":[1,2,3]}'
+```
+
+After the layout is committed, read each pane's local projection separately.
+Use a revision only when `cacheStatus` is `current`,
+`currentContentRecord` is present, and the record belongs to that exact pane.
+The projection can be unsynchronized or have a loss gap; in either case, do
+not clear from its revision. Clear examples below use different fixture
+revisions to show that the value is pane-local:
+
+```sh
+surf-ace --state-root "$STATE_ROOT" read \
+  --input-json '{"scopeId":"pane:sf_fixture:1"}'
+surf-ace --state-root "$STATE_ROOT" read \
+  --input-json '{"scopeId":"pane:sf_fixture:2"}'
+surf-ace --state-root "$STATE_ROOT" read \
+  --input-json '{"scopeId":"pane:sf_fixture:3"}'
+
+surf-ace --state-root "$STATE_ROOT" --endpoint "$CLIENT_WS" \
+  --product-label "Surf Ace CLI" clear \
+  --input-json '{"surfaceId":"sf_fixture","paneId":1,"expectedRevision":5}'
+surf-ace --state-root "$STATE_ROOT" --endpoint "$CLIENT_WS" \
+  --product-label "Surf Ace CLI" clear \
+  --input-json '{"surfaceId":"sf_fixture","paneId":2,"expectedRevision":2}'
+surf-ace --state-root "$STATE_ROOT" --endpoint "$CLIENT_WS" \
+  --product-label "Surf Ace CLI" clear \
+  --input-json '{"surfaceId":"sf_fixture","paneId":3,"expectedRevision":8}'
+```
+
+Replace each example revision with the exact `currentContentRecord.payload.revision`
+returned for that pane. A stale-revision refusal requires a fresh read and a
+recomputed request. A mutation result of `outcome_unknown` must be reconciled
+through its durable correlation, never retried as a new request.
 
 The separate registry annotation listener uses `annotations watch`,
 `annotations resume`, `annotations ack`, and `annotations retire` with an

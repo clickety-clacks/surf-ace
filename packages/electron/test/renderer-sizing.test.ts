@@ -183,8 +183,13 @@ test("browser_url webviews constrain Electron guest bounds to the measured pane"
 
   assert.ok(applyIndex > -1);
   assert.match(source.slice(applyIndex, sizeIndex), /element\.setAttribute\("autosize", "on"\)/);
-  assert.match(source.slice(applyIndex, sizeIndex), /element\.setAttribute\("minwidth", String\(width\)\)/);
-  assert.match(source.slice(applyIndex, sizeIndex), /element\.setAttribute\("maxheight", String\(height\)\)/);
+  assert.match(source.slice(applyIndex, sizeIndex), /const logicalWidth = width \/ hostScale/);
+  assert.match(source.slice(applyIndex, sizeIndex), /const logicalHeight = height \/ hostScale/);
+  assert.match(source.slice(applyIndex, sizeIndex), /element\.style\.minHeight = heightCss/);
+  assert.match(source.slice(applyIndex, sizeIndex), /element\.setAttribute\("minwidth", String\(Math\.max\(1, Math\.ceil\(logicalWidth\)\)\)\)/);
+  assert.match(source.slice(applyIndex, sizeIndex), /element\.setAttribute\("maxheight", String\(Math\.max\(1, Math\.ceil\(logicalHeight\)\)\)\)/);
+  assert.match(source.slice(applyIndex, sizeIndex), /element\.style\.transformOrigin = "0 0"/);
+  assert.match(source.slice(applyIndex, sizeIndex), /element\.style\.transform = transform/);
 });
 
 test("browser_url diagnostics report host and guest sizing through surface commands", async () => {
@@ -448,19 +453,36 @@ test("renderer scales every source-proven scalable content type", async () => {
   assert.match(styles, /\.content-pdf-stack\s*\{[\s\S]*width:\s*calc\(100% \* var\(--surf-ace-content-scale\)\)/);
 });
 
-test("html and browser_url content scale through guest document zoom", async () => {
+test("html and browser_url use the guarded guest scale adapter", async () => {
   const source = await rendererSource();
+  const modeIndex = source.indexOf("function applyBrowserScaleMode");
   const scaleIndex = source.indexOf("function applyBrowserContentScale");
   const renderBrowserIndex = source.indexOf("function renderBrowserContent");
   const renderPaneIndex = source.indexOf("function renderPaneContent");
 
+  assert.ok(modeIndex > -1);
   assert.ok(scaleIndex > -1);
   assert.ok(renderBrowserIndex > scaleIndex);
   assert.match(source, /const WEB_CONTENT_BASE_SCALE = 0\.85/);
   assert.match(source.slice(scaleIndex, renderBrowserIndex), /WEB_CONTENT_BASE_SCALE \* view\.scale/);
-  assert.match(source.slice(scaleIndex, renderBrowserIndex), /document\.documentElement\.style\.zoom = scale === 1 \? "" : String\(scale\)/);
-  assert.match(source.slice(scaleIndex, renderBrowserIndex), /document\.body\?\.style\.setProperty\("--surf-ace-content-scale", String\(scale\)\)/);
+  assert.match(source.slice(scaleIndex, renderBrowserIndex), /browserContentScaleScript\(scale, state\.nonce, state\.revision\)/);
+  assert.match(source.slice(scaleIndex, renderBrowserIndex), /applyBrowserScaleMode\(view, webview, state, mode, sequence as number\)/);
+  assert.match(source.slice(modeIndex, scaleIndex), /sequence <= state\.modeSequence/);
+  assert.match(source.slice(scaleIndex, renderBrowserIndex), /mode: previous\?\.mode \?\? "public-terminal-font"/);
   assert.match(source.slice(renderBrowserIndex, renderPaneIndex), /reportBrowserUrlDiagnostics\(view, browserView, eventReason\);[\s\S]*applyBrowserContentScale\(view, browserView\)/);
+});
+
+test("browser guest tap and selection rectangles are mapped back through the host scale", async () => {
+  const source = await rendererSource();
+  const helperIndex = source.indexOf("function browserHostCoordinateScale");
+  const eventIndex = source.indexOf("function wireBrowserContentEvents");
+  assert.ok(helperIndex > -1);
+  assert.ok(eventIndex > helperIndex);
+  assert.match(source.slice(helperIndex, eventIndex), /state\?\.mode === "host-transform" \? state\.scale : 1/);
+  assert.match(source.slice(helperIndex, eventIndex), /point\.x \* scale/);
+  assert.match(source.slice(helperIndex, eventIndex), /bounds\.width as number\) \* scale/);
+  assert.match(source.slice(eventIndex), /scaleBrowserSelection\(payload\.selection \?\? null, browserHostCoordinateScale\(webview\)\)/);
+  assert.match(source.slice(eventIndex), /scaleBrowserPoint\(payload\.position, browserHostCoordinateScale\(webview\)\)/);
 });
 
 test("toolbar font-size popover persists for repeated scale taps and dismisses explicitly", async () => {
@@ -577,6 +599,7 @@ test("html content is loaded through the browser webview surface", async () => {
   assert.match(source, /window\.surfAce\.reportSnapshot\(\{\s*bounds: paneBounds\(view\),\s*\.\.\.paneSnapshotGeometryIdentity\(\),\s*paneId: view\.paneId,\s*\}\)/);
   assert.match(source, /webview\.addEventListener\("ipc-message", onIpcMessage\)/);
   assert.match(guestPreload, /ipcRenderer\.sendToHost\("surf-ace-content", payload\)/);
+  assert.match(guestPreload, /Number\.isSafeInteger\(value\.sequence\)[\s\S]*value\.sequence as number\) < 1/);
   assert.match(guestPreload, /if \(window\.location\.protocol === "data:"\)[\s\S]*event\.preventDefault\(\)/);
   assert.doesNotMatch(source, /document\.createElement\("iframe"\)/);
   assert.doesNotMatch(source, /\.srcdoc\b/);

@@ -1,7 +1,68 @@
 import XCTest
 
 final class SurfAceResizeUITests: XCTestCase {
-    func testPopoutRestoreKeepsSessionAndOwnsCoveredPaneInput() {
+    @MainActor
+    func testSupported240PaneKeepsChromeHitRegionsInsideItsTile() throws {
+        try preparePopoutWithoutVoiceOver()
+        let app = XCUIApplication()
+        app.launchEnvironment["SURF_ACE_XCTEST_HOST_NO_AUTOSTART"] = "1"
+        app.launchEnvironment["SURF_ACE_POPOUT_PROBE"] = "1"
+        app.launchEnvironment["SURF_ACE_NARROW_CHROME_PROBE"] = "1"
+        app.launch()
+        defer {
+            XCUIDevice.shared.orientation = .portrait
+            app.terminate()
+        }
+        XCUIDevice.shared.orientation = .landscapeLeft
+        let landscape = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            app.frame.width > app.frame.height
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [landscape], timeout: 5), .completed)
+        let root = app.otherElements["surf-ace-popout-probe-host"]
+        XCTAssertTrue(root.waitForExistence(timeout: 10))
+        XCTAssertEqual(root.frame.width, 1000, accuracy: 1)
+        let tile = CGRect(x: root.frame.minX, y: root.frame.minY,
+                          width: 240, height: root.frame.height)
+        let toggle = app.buttons["surf-ace-pane-popout-1"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 10))
+        func nearest(_ identifier: String) throws -> XCUIElement {
+            try XCTUnwrap(app.buttons.matching(identifier: identifier).allElementsBoundByIndex.min {
+                hypot($0.frame.midX - toggle.frame.midX, $0.frame.midY - toggle.frame.midY)
+                    < hypot($1.frame.midX - toggle.frame.midX, $1.frame.midY - toggle.frame.midY)
+            })
+        }
+        let font = try nearest("FontSize")
+        let sketch = try nearest("hand.draw")
+        let back = app.buttons["surf-ace-pane-history-back-1"]
+        let forward = app.buttons["surf-ace-pane-history-forward-1"]
+        let controls = [toggle, font, sketch, back, forward]
+        for control in controls {
+            XCTAssertTrue(control.isHittable, control.debugDescription)
+            XCTAssertGreaterThanOrEqual(control.frame.width, 43)
+            XCTAssertGreaterThanOrEqual(control.frame.height, 43)
+            XCTAssertGreaterThanOrEqual(control.frame.minX, tile.minX - 1)
+            XCTAssertLessThanOrEqual(control.frame.maxX, tile.maxX + 1)
+            XCTAssertGreaterThanOrEqual(control.frame.minY, tile.minY - 1)
+            XCTAssertLessThanOrEqual(control.frame.maxY, tile.maxY + 1)
+        }
+        for left in controls.indices {
+            for right in controls.indices where right > left {
+                XCTAssertTrue(controls[left].frame.intersection(controls[right].frame).isEmpty,
+                              "required control hit regions must not overlap")
+            }
+        }
+        font.tap()
+        XCTAssertTrue(app.buttons["Reset font size"].waitForExistence(timeout: 5),
+                      "the narrow font control actually opens its reachable popover")
+        let attachment = XCTAttachment(screenshot: app.screenshot())
+        attachment.name = "supported-240-narrow-chrome-and-font-popover"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    @MainActor
+    func testPopoutRestoreKeepsSessionAndOwnsCoveredPaneInput() throws {
+        try preparePopoutWithoutVoiceOver()
         let app = XCUIApplication()
         app.launchEnvironment["SURF_ACE_XCTEST_HOST_NO_AUTOSTART"] = "1"
         app.launchEnvironment["SURF_ACE_POPOUT_PROBE"] = "1"
@@ -12,26 +73,32 @@ final class SurfAceResizeUITests: XCTestCase {
         }
         let toggle = app.buttons["surf-ace-pane-popout-3"]
         XCTAssertTrue(toggle.waitForExistence(timeout: 10))
+        XCTAssertEqual(app.buttons.matching(identifier: "surf-ace-pane-popout-3").count, 1,
+                       "the native toolbar toggle is the sole accessibility target")
         let revision = app.staticTexts["surf-ace-popout-topology"].label
+        assertSmallBottomToolbarToggle(toggle, in: app)
         let tiled = toggle.frame
         let contentButton = app.buttons["Increment pane 3"]
         XCTAssertTrue(contentButton.waitForExistence(timeout: 10))
-        contentButton.tap()
-        XCTAssertTrue(app.staticTexts["Pane 3 clicks 1"].waitForExistence(timeout: 5))
         toggle.tap()
         let expanded = XCTNSPredicateExpectation(
             predicate: NSPredicate(format: "value == %@ AND label == %@", "Expanded", "Restore"), object: toggle)
         XCTAssertEqual(XCTWaiter.wait(for: [expanded], timeout: 5), .completed)
-        XCTAssertTrue(toggle.isHittable, "Restore stays reachable after content collapses other chrome")
+        assertSmallBottomToolbarToggle(toggle, in: app)
+        XCTAssertTrue(toggle.isHittable, "Restore stays reachable in the bottom toolbar")
         XCTAssertFalse(app.buttons["surf-ace-pane-popout-1"].isHittable)
         XCTAssertFalse(app.buttons["surf-ace-pane-popout-2"].isHittable)
         XCTAssertLessThan(toggle.frame.minY, tiled.minY, "the selected leaf moves out of its lower tile")
+        contentButton.tap()
+        XCTAssertTrue(app.staticTexts["Pane 3 clicks 1"].waitForExistence(timeout: 5))
+        XCTAssertTrue(toggle.isHittable, "expanded toolbar keeps the same Restore action reachable after content input")
         contentButton.tap()
         XCTAssertTrue(app.staticTexts["Pane 3 clicks 2"].waitForExistence(timeout: 5))
         toggle.tap()
         let restored = XCTNSPredicateExpectation(
             predicate: NSPredicate(format: "value == %@ AND label == %@", "Tiled", "Pop out"), object: toggle)
         XCTAssertEqual(XCTWaiter.wait(for: [restored], timeout: 5), .completed)
+        assertSmallBottomToolbarToggle(toggle, in: app)
         XCTAssertEqual(toggle.frame.minX, tiled.minX, accuracy: 1)
         XCTAssertEqual(toggle.frame.minY, tiled.minY, accuracy: 1)
         XCTAssertTrue(app.staticTexts["Pane 3 clicks 2"].exists, "Restore cannot reload the HTML session")
@@ -48,8 +115,7 @@ final class SurfAceResizeUITests: XCTestCase {
         XCTAssertEqual(XCTWaiter.wait(for: [rotated], timeout: 5), .completed)
         XCTAssertTrue(toggle.isHittable)
         XCTAssertEqual(toggle.label, "Restore")
-        XCTAssertGreaterThanOrEqual(toggle.frame.width, 44)
-        XCTAssertGreaterThanOrEqual(toggle.frame.height, 44)
+        assertSmallBottomToolbarToggle(toggle, in: app)
         XCTAssertFalse(app.buttons["surf-ace-pane-popout-1"].isHittable)
         contentButton.tap()
         XCTAssertTrue(app.staticTexts["Pane 3 clicks 3"].waitForExistence(timeout: 5))
@@ -62,6 +128,39 @@ final class SurfAceResizeUITests: XCTestCase {
         XCTAssertEqual(app.staticTexts["surf-ace-popout-topology"].label, revision)
     }
 
+    @MainActor
+    private func assertSmallBottomToolbarToggle(
+        _ toggle: XCUIElement, in app: XCUIApplication,
+        file: StaticString = #filePath, line: UInt = #line
+    ) {
+        let visual = XCTAttachment(image: toggle.screenshot().image)
+        visual.name = "popout-control-\(toggle.label)-\(String(describing: toggle.value))"
+        visual.lifetime = .keepAlways
+        add(visual)
+        // Compare actual accessibility frames with the adjacent shipping controls,
+        // rather than duplicating the production size constants in the fixture.
+        let fonts = app.buttons.matching(identifier: "FontSize").allElementsBoundByIndex
+        let sketches = app.buttons.matching(identifier: "hand.draw").allElementsBoundByIndex
+        guard let font = fonts.min(by: {
+            hypot($0.frame.midX - toggle.frame.midX, $0.frame.midY - toggle.frame.midY)
+                < hypot($1.frame.midX - toggle.frame.midX, $1.frame.midY - toggle.frame.midY)
+        }), let sketch = sketches.min(by: {
+            hypot($0.frame.midX - toggle.frame.midX, $0.frame.midY - toggle.frame.midY)
+                < hypot($1.frame.midX - toggle.frame.midX, $1.frame.midY - toggle.frame.midY)
+        }) else {
+            XCTFail("toggle must share the font-size/annotation toolbar", file: file, line: line)
+            return
+        }
+        XCTAssertEqual(toggle.frame.midY, font.frame.midY, accuracy: 1, file: file, line: line)
+        XCTAssertEqual(toggle.frame.midY, sketch.frame.midY, accuracy: 1, file: file, line: line)
+        XCTAssertLessThan(toggle.frame.maxX, font.frame.minX + 1, file: file, line: line)
+        XCTAssertEqual(toggle.frame.width, font.frame.width, accuracy: 1, file: file, line: line)
+        XCTAssertEqual(toggle.frame.height, font.frame.height, accuracy: 1, file: file, line: line)
+        XCTAssertGreaterThan(toggle.frame.midY, app.frame.midY, file: file, line: line)
+        XCTAssertFalse(toggle.staticTexts["Restore"].exists, "icon-only control", file: file, line: line)
+        XCTAssertFalse(toggle.staticTexts["Pop out"].exists, "icon-only control", file: file, line: line)
+    }
+
     @available(iOS 27.0, *)
     @MainActor
     func testPopoutMovesVoiceOverFocusToRestoreAndHidesCoveredLeaves() throws {
@@ -69,22 +168,37 @@ final class SurfAceResizeUITests: XCTestCase {
         app.launchEnvironment["SURF_ACE_XCTEST_HOST_NO_AUTOSTART"] = "1"
         app.launchEnvironment["SURF_ACE_POPOUT_PROBE"] = "1"
         let voiceOver = XCUIDevice.shared.voiceOverService
-        let originallyEnabled = voiceOver.isEnabled
+        try preparePopoutWithoutVoiceOver()
         defer {
-            if !originallyEnabled { try? voiceOver.disable() }
+            do {
+                try voiceOver.disable()
+                XCTAssertFalse(voiceOver.isEnabled, "VoiceOver must not leak into later UI checks")
+            } catch {
+                XCTFail("VoiceOver teardown failed: \(error)")
+            }
             app.terminate()
         }
         app.launch()
         let toggle = app.buttons["surf-ace-pane-popout-3"]
         XCTAssertTrue(toggle.waitForExistence(timeout: 10))
+        XCTAssertEqual(app.buttons.matching(identifier: "surf-ace-pane-popout-3").count, 1,
+                       "the native toolbar toggle is the sole accessibility target")
         try voiceOver.enable()
+        XCTAssertTrue(voiceOver.isEnabled)
         toggle.tap() // Select the toggle before the VoiceOver activation gesture.
         toggle.doubleTap()
         let expanded = XCTNSPredicateExpectation(
             predicate: NSPredicate(format: "value == %@", "Expanded"), object: toggle)
         XCTAssertEqual(XCTWaiter.wait(for: [expanded], timeout: 5), .completed)
-        XCTAssertTrue(try voiceOver.currentSpeech().utterance.contains("Restore"),
-                      "the accessibility focus binding moves to the same Restore control")
+        let focused = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            (try? voiceOver.currentSpeech().utterance.contains("Restore")) == true
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [focused], timeout: 5), .completed,
+                       "wait for actual VoiceOver focus, not only the Expanded model value")
+        print("popout_post_expansion_hierarchy=\(app.debugDescription)")
+        let focusedSpeech = try voiceOver.currentSpeech().utterance
+        XCTAssertTrue(focusedSpeech.contains("Restore"),
+                      "expected same Restore control focus, actual speech: \(focusedSpeech)")
         for _ in 0..<8 {
             let utterance = try voiceOver.moveForward().utterance
             XCTAssertFalse(utterance.contains("Increment pane 1"))
@@ -99,7 +213,8 @@ final class SurfAceResizeUITests: XCTestCase {
     }
 
     @MainActor
-    func testKeyboardFocusCanActivateExpandedRestore() {
+    func testKeyboardFocusCanActivateExpandedRestore() throws {
+        try preparePopoutWithoutVoiceOver()
         let app = XCUIApplication()
         app.launchEnvironment["SURF_ACE_XCTEST_HOST_NO_AUTOSTART"] = "1"
         app.launchEnvironment["SURF_ACE_POPOUT_PROBE"] = "1"
@@ -107,14 +222,30 @@ final class SurfAceResizeUITests: XCTestCase {
         defer { app.terminate() }
         let toggle = app.buttons["surf-ace-pane-popout-3"]
         XCTAssertTrue(toggle.waitForExistence(timeout: 10))
+        XCTAssertEqual(app.buttons.matching(identifier: "surf-ace-pane-popout-3").count, 1,
+                       "the native toolbar toggle is the sole accessibility target")
         toggle.tap()
         let expanded = XCTNSPredicateExpectation(
             predicate: NSPredicate(format: "value == %@", "Expanded"), object: toggle)
         XCTAssertEqual(XCTWaiter.wait(for: [expanded], timeout: 5), .completed)
+        // UI focus-engine queries need not report UIKit first-responder
+        // ownership. The mounted-host test proves that ownership directly;
+        // this check proves real key delivery activates exactly this control.
+        print("popout_keyboard_focus=\(toggle.hasFocus) hierarchy=\(app.debugDescription)")
         app.typeKey(" ", modifierFlags: [])
         let restored = XCTNSPredicateExpectation(
             predicate: NSPredicate(format: "value == %@", "Tiled"), object: toggle)
-        XCTAssertEqual(XCTWaiter.wait(for: [restored], timeout: 5), .completed)
+        XCTAssertEqual(XCTWaiter.wait(for: [restored], timeout: 5), .completed,
+                       "keyboard Restore readback: \(toggle.debugDescription)")
+    }
+
+    @MainActor
+    private func preparePopoutWithoutVoiceOver() throws {
+        if #available(iOS 27.0, *) {
+            let voiceOver = XCUIDevice.shared.voiceOverService
+            if voiceOver.isEnabled { try voiceOver.disable() }
+            XCTAssertFalse(voiceOver.isEnabled, "touch/keyboard fixture starts with VoiceOver disabled")
+        }
     }
 
     func testDragAcrossLocalWebContentChangesSplitWeight() {

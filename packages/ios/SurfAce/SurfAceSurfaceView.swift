@@ -860,6 +860,7 @@ private struct SurfAceResizeProbeWebView: UIViewRepresentable {
 struct SurfAcePopoutProbeView: View {
     @State private var runtime: SurfAceRuntime
     @State private var surface: SurfAceSurfaceModel?
+    private let narrowChrome = ProcessInfo.processInfo.environment["SURF_ACE_NARROW_CHROME_PROBE"] == "1"
 
     init() {
         let name = "SurfAcePopoutUI.\(UUID().uuidString)"
@@ -879,6 +880,9 @@ struct SurfAcePopoutProbeView: View {
                         .padding(4).background(.black).foregroundStyle(.white)
                         .allowsHitTesting(false)
                 }
+                .frame(width: narrowChrome ? 1000 : nil, height: narrowChrome ? 600 : nil)
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("surf-ace-popout-probe-host")
         } else {
             Color.clear.task {
                 let local = runtime.registerSurface(sceneKey: "popout-ui")
@@ -897,11 +901,21 @@ struct SurfAcePopoutProbeView: View {
                         payload: .html(html: html, baseURL: nil), reloadSource: nil,
                         title: "Pane \(id)", scrollable: true, interactive: true))
                 }
+                if narrowChrome {
+                    for pane in panes {
+                        pane.backStack = [pane.currentEntry]
+                        pane.forwardStack = [pane.currentEntry]
+                    }
+                }
                 local.panesById = Dictionary(uniqueKeysWithValues: panes.map { ($0.paneId, $0) })
-                local.paneLayout = .split(direction: .vertical, children: [
-                    .leaf(1, weight: 1), .split(direction: .horizontal,
-                        children: [.leaf(2, weight: 2), .leaf(3, weight: 1)], weight: 3),
-                ])
+                local.paneLayout = narrowChrome
+                    ? .split(direction: .vertical, children: [
+                        .leaf(1, weight: 0.24), .leaf(2, weight: 0.26), .leaf(3, weight: 0.5),
+                    ])
+                    : .split(direction: .vertical, children: [
+                        .leaf(1, weight: 1), .split(direction: .horizontal,
+                            children: [.leaf(2, weight: 2), .leaf(3, weight: 1)], weight: 3),
+                    ])
                 surface = local
             }
         }
@@ -1075,8 +1089,6 @@ private struct SurfAcePaneView: View {
     var isPoppedOut = false
     var onTogglePopout: () -> Void = {}
     @State private var toolbarCollapsed = false
-    @AccessibilityFocusState private var popoutControlFocused: Bool
-    @FocusState private var popoutKeyboardFocused: Bool
 
     var body: some View {
         GeometryReader { proxy in
@@ -1094,6 +1106,9 @@ private struct SurfAcePaneView: View {
                             }
                         )
                         .id("\(surface.surfaceId):\(pane.paneInstanceId)")
+                        // Content geometry belongs to the allocated tile, not
+                        // the intrinsic minimum of an overlaid toolbar.
+                        .frame(width: proxy.size.width, height: proxy.size.height)
                         .background(surfAcePaneBackdropColor(isEmpty: showsSpatialEmptyPaneChrome))
                         .contentShape(Rectangle())
                         .simultaneousGesture(
@@ -1123,6 +1138,19 @@ private struct SurfAcePaneView: View {
                     .allowsHitTesting(false)
                     .accessibilityHidden(true)
 
+                    if let status = pane.annotationDoneError ?? pane.annotationDeliveryStatus {
+                        VStack {
+                            Spacer()
+                            Text(status)
+                                .font(.caption)
+                                .padding(6)
+                                .background(.regularMaterial, in: Capsule())
+                                .padding(.bottom, 96)
+                                .accessibilityIdentifier("annotation.delivery.status")
+                        }
+                        .allowsHitTesting(false)
+                    }
+
                     if !showsSpatialEmptyPaneChrome, let toast = pane.toast {
                         VStack {
                             Spacer()
@@ -1144,8 +1172,11 @@ private struct SurfAcePaneView: View {
                     if !showsSpatialEmptyPaneChrome {
                         VStack {
                             Spacer()
-                            if !toolbarCollapsed {
-                                SurfAcePaneControls(runtime: runtime, surface: surface, pane: pane)
+                            if !toolbarCollapsed || isPoppedOut {
+                                SurfAcePaneControls(
+                                    runtime: runtime, surface: surface, pane: pane,
+                                    isPoppedOut: isPoppedOut, onTogglePopout: onTogglePopout
+                                )
                                     .padding(.bottom, SurfAcePaneChromeLayout.bottomInset)
                                     .surfAceSpatialChromeDepthOffset()
                                     .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -1154,7 +1185,7 @@ private struct SurfAcePaneView: View {
                         .zIndex(20_000)
                     }
 
-                    if !showsSpatialEmptyPaneChrome && toolbarCollapsed {
+                    if !showsSpatialEmptyPaneChrome && toolbarCollapsed && !isPoppedOut {
                         VStack {
                             Spacer()
                             HStack {
@@ -1203,31 +1234,6 @@ private struct SurfAcePaneView: View {
                         .zIndex(1)
                 }
             }
-            .overlay(alignment: .topTrailing) {
-                Button(action: onTogglePopout) {
-                    HStack(spacing: 6) {
-                        Image(systemName: isPoppedOut ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
-                        if isPoppedOut { Text("Restore") }
-                    }
-                    .font(.custom(SurfAceChromeFont.boldName, size: 17))
-                    .padding(.horizontal, isPoppedOut ? 10 : 0)
-                    .frame(minWidth: 44, minHeight: 44)
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(Color(red: 0.04, green: 0.28, blue: 0.20))
-                .foregroundStyle(.white)
-                .focusable(interactions: .activate)
-                .focused($popoutKeyboardFocused)
-                .onKeyPress(keys: [.space, .return], phases: .down) { _ in
-                    onTogglePopout()
-                    return .handled
-                }
-                .accessibilityLabel(isPoppedOut ? "Restore" : "Pop out")
-                .accessibilityIdentifier("surf-ace-pane-popout-\(pane.paneId)")
-                .accessibilityValue(isPoppedOut ? "Expanded" : "Tiled")
-                .accessibilityFocused($popoutControlFocused)
-                .padding(8)
-            }
             .overlay {
                 RoundedRectangle(cornerRadius: 12)
                     .strokeBorder(.black, lineWidth: isPoppedOut ? 5 : 0)
@@ -1241,8 +1247,7 @@ private struct SurfAcePaneView: View {
                 pane.lastMeasuredSize = newSize
             }
             .onChange(of: isPoppedOut) { _, _ in
-                popoutControlFocused = true
-                if !UIAccessibility.isVoiceOverRunning { popoutKeyboardFocused = true }
+                toolbarCollapsed = false
             }
             .onAppear {
                 publishGeometrySnapshot(paneFrame: paneFrame)
@@ -1672,15 +1677,75 @@ private extension View {
     }
 }
 
+// Arrange the same control groups in rows when the tile is narrow. Keeping
+// one Layout and one set of subviews preserves native toggle/focus identity;
+// 44pt hit targets are neither scaled down nor clipped to make a row fit.
+private struct SurfAcePaneControlsLayout: Layout {
+    let spacing: CGFloat = 7
+
+    private struct Item {
+        let index: Int
+        let size: CGSize
+    }
+
+    private func rows(width: CGFloat, subviews: Subviews) -> [[Item]] {
+        var result: [[Item]] = []
+        var row: [Item] = []
+        var extent: CGFloat = 0
+        for index in subviews.indices {
+            let size = subviews[index].sizeThatFits(ProposedViewSize(width: width, height: nil))
+            let nextExtent = extent + (row.isEmpty ? 0 : spacing) + size.width
+            if !row.isEmpty && nextExtent > width {
+                result.append(row)
+                row = []
+                extent = 0
+            }
+            row.append(Item(index: index, size: size))
+            extent += (row.count == 1 ? 0 : spacing) + size.width
+        }
+        if !row.isEmpty { result.append(row) }
+        return result
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let idealWidth = subviews.reduce(CGFloat.zero) { $0 + $1.sizeThatFits(.unspecified).width }
+            + spacing * CGFloat(max(0, subviews.count - 1))
+        let width = proposal.width ?? idealWidth
+        let arranged = rows(width: width, subviews: subviews)
+        let height = arranged.reduce(CGFloat.zero) { $0 + ($1.map(\.size.height).max() ?? 0) }
+            + spacing * CGFloat(max(0, arranged.count - 1))
+        return CGSize(width: width, height: height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var y = bounds.minY
+        for row in rows(width: bounds.width, subviews: subviews) {
+            let height = row.map(\.size.height).max() ?? 0
+            let width = row.reduce(CGFloat.zero) { $0 + $1.size.width }
+                + spacing * CGFloat(max(0, row.count - 1))
+            var x = bounds.midX - width / 2
+            for item in row {
+                subviews[item.index].place(
+                    at: CGPoint(x: x, y: y + (height - item.size.height) / 2),
+                    anchor: .topLeading, proposal: ProposedViewSize(item.size))
+                x += item.size.width + spacing
+            }
+            y += height + spacing
+        }
+    }
+}
+
 private struct SurfAcePaneControls: View {
     let runtime: SurfAceRuntime
     @Bindable var surface: SurfAceSurfaceModel
     @Bindable var pane: SurfAcePaneModel
+    let isPoppedOut: Bool
+    let onTogglePopout: () -> Void
     @Environment(\.colorScheme) private var colorScheme
     @State private var fontSizePopoverVisible = false
 
     var body: some View {
-        HStack(spacing: 7) {
+        SurfAcePaneControlsLayout {
             if pane.drawingRestoreWarningVisible {
                 SurfAceWarningIndicator()
             }
@@ -1703,6 +1768,7 @@ private struct SurfAcePaneControls: View {
                         }
                         .buttonStyle(SurfAceGlassButtonStyle())
                         .accessibilityLabel("Back")
+                        .accessibilityIdentifier("surf-ace-pane-history-back-\(pane.paneId)")
                         .accessibilityHint("Shows \(provenance.accessibilityLabel)")
                     }
 
@@ -1718,6 +1784,7 @@ private struct SurfAcePaneControls: View {
                         }
                         .buttonStyle(SurfAceGlassButtonStyle())
                         .accessibilityLabel("Forward")
+                        .accessibilityIdentifier("surf-ace-pane-history-forward-\(pane.paneId)")
                         .accessibilityHint("Shows \(provenance.accessibilityLabel)")
                     }
 
@@ -1728,6 +1795,14 @@ private struct SurfAcePaneControls: View {
             }
 
             HStack(spacing: 4) {
+                SurfAcePanePopoutButton(
+                    paneId: pane.paneId, isPoppedOut: isPoppedOut,
+                    foregroundColor: UIColor(surfAceToolbarForegroundColor(for: colorScheme)),
+                    onToggle: onTogglePopout
+                )
+                .frame(width: SurfAcePaneChromeLayout.controlHitSize,
+                       height: SurfAcePaneChromeLayout.controlHitSize)
+
                 Button {
                     runtime.activateKeyboardPane(surfaceId: surface.surfaceId, paneId: pane.paneId)
                     fontSizePopoverVisible.toggle()
@@ -1779,17 +1854,27 @@ private struct SurfAcePaneControls: View {
                 .buttonStyle(SurfAceGlassButtonStyle())
                 .accessibilityLabel("Sketch")
                 .accessibilityIdentifier("hand.draw")
+                .disabled(pane.annotationDonePending)
 
                 if pane.annotationMode {
-                    Button("Done") {
+                    Button {
                         runtime.setAnnotationMode(
                             surfaceId: surface.surfaceId,
                             paneId: pane.paneId,
                             enabled: false,
                             fingerDrawEnabled: false
                         )
+                    } label: {
+                        if pane.annotationDoneSpinning {
+                            ProgressView().accessibilityLabel("Saving annotation")
+                        } else {
+                            Text("Done")
+                        }
                     }
+                    .disabled(pane.annotationDonePending)
                     .buttonStyle(SurfAceGlassButtonStyle())
+                    .accessibilityLabel("Done")
+                    .accessibilityValue(pane.annotationDonePending ? "Saving" : "Ready")
                     .accessibilityIdentifier("Done")
                 }
             }
@@ -1804,6 +1889,109 @@ private struct SurfAcePaneControls: View {
     private var hasNavigationContext: Bool {
         pane.currentEntry.contentId != nil || pane.currentEntry.payload != nil || pane.canGoBack || pane.canGoForward
     }
+}
+
+// Keep the same native toolbar control mounted across enter/Restore. Explicit
+// responder/accessibility ownership avoids leaving focus inside the covered
+// WebKit content when SwiftUI relocates the pane's bottom toolbar.
+private struct SurfAcePanePopoutButton: UIViewRepresentable {
+    let paneId: Int
+    let isPoppedOut: Bool
+    let foregroundColor: UIColor
+    let onToggle: () -> Void
+
+    func makeUIView(context: Context) -> SurfAcePanePopoutControl {
+        SurfAcePanePopoutControl()
+    }
+
+    func updateUIView(_ button: SurfAcePanePopoutControl, context: Context) {
+        button.configure(paneId: paneId, expanded: isPoppedOut,
+                         foregroundColor: foregroundColor, onToggle: onToggle)
+    }
+}
+
+private final class SurfAcePanePopoutControl: UIButton {
+    private let chrome = UIVisualEffectView(effect: UIBlurEffect(style: .systemMaterial))
+    private var expanded = false
+    private var focusPending = false
+    private var focusGeneration = 0
+    private var onToggle: () -> Void = {}
+
+    init() {
+        super.init(frame: .zero)
+        chrome.isUserInteractionEnabled = false
+        chrome.layer.cornerRadius = SurfAcePaneChromeLayout.controlVisualSize / 2
+        chrome.clipsToBounds = true
+        chrome.layer.borderWidth = 1
+        insertSubview(chrome, at: 0)
+        // UIButton is the sole accessibility and keyboard target.
+        isAccessibilityElement = true
+        addTarget(self, action: #selector(activateToggle), for: .touchUpInside)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override var canBecomeFirstResponder: Bool { true }
+
+    override var keyCommands: [UIKeyCommand]? {
+        [" ", "\r"].map { input in
+            let command = UIKeyCommand(input: input, modifierFlags: [], action: #selector(activateToggle))
+            command.wantsPriorityOverSystemBehavior = true
+            return command
+        }
+    }
+
+    func configure(paneId: Int, expanded: Bool, foregroundColor: UIColor,
+                   onToggle: @escaping () -> Void) {
+        self.onToggle = onToggle
+        if self.expanded != expanded {
+            self.expanded = expanded
+            focusGeneration += 1
+            focusPending = true
+        }
+        setImage(UIImage(
+            systemName: expanded ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right",
+            withConfiguration: UIImage.SymbolConfiguration(pointSize: 12)
+        ), for: .normal)
+        tintColor = foregroundColor
+        chrome.layer.borderColor = foregroundColor.withAlphaComponent(0.18).cgColor
+        accessibilityLabel = expanded ? "Restore" : "Pop out"
+        accessibilityValue = expanded ? "Expanded" : "Tiled"
+        accessibilityIdentifier = "surf-ace-pane-popout-\(paneId)"
+        setNeedsLayout()
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        // UIButton creates and orders its image view lazily. Keep material
+        // behind that image after UIKit has completed its own layout.
+        sendSubviewToBack(chrome)
+        let size = SurfAcePaneChromeLayout.controlVisualSize
+        chrome.frame = CGRect(x: (bounds.width - size) / 2,
+                              y: (bounds.height - size) / 2, width: size, height: size)
+        guard focusPending, window != nil, !bounds.isEmpty else { return }
+        focusPending = false
+        let generation = focusGeneration
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let window = self.window,
+                  self.focusGeneration == generation else { return }
+            // Ancestors move the retained toolbar without changing this
+            // button's bounds. Finish their layout before targeting its new
+            // accessibility frame, rather than focusing during local layout.
+            window.layoutIfNeeded()
+            guard self.window === window, self.focusGeneration == generation else { return }
+            self.becomeFirstResponder()
+            UIAccessibility.post(notification: .layoutChanged, argument: self)
+        }
+    }
+
+    override func accessibilityActivate() -> Bool {
+        // Use exactly the same action as touch and keyboard activation.
+        onToggle()
+        return true
+    }
+
+    @objc private func activateToggle() { onToggle() }
 }
 
 private struct SurfAceCompositeProvenanceView: View {
@@ -2504,6 +2692,7 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
 
     override func layoutSubviews() {
         super.layoutSubviews()
+        layoutWebViewport()
         preserveDrawingAlignmentAfterCanvasResize()
     }
 
@@ -2525,6 +2714,7 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
             url: pendingBrowserNavigationURL
         )
         currentEntry = entry
+        layoutWebViewport()
         reportBrowserNavigationStateIfNeeded()
         pendingViewportRestore = nil
         let html: String
@@ -2698,6 +2888,7 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
 
     func setContentScale(_ scale: CGFloat) {
         contentScale = max(0.5, min(scale, 2))
+        layoutWebViewport()
         applyCurrentContentScale()
     }
 
@@ -2812,6 +3003,11 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
         )
     }
 
+    func fetchScrollMetadataForTesting() async -> SurfAceSurfaceSnapshot? {
+        guard let payload = await evaluateScrollPayload() else { return nil }
+        return SurfAceSurfaceSnapshot(viewport: payload.viewport, selection: payload.selection, imageBase64: nil)
+    }
+
     var hasPendingWebContentRenderForTesting: Bool {
         pendingHTMLRenderActive
     }
@@ -2894,10 +3090,11 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
         switch message.name {
         case selectionMessageName:
             if let text = body["text"] as? String,
-               let rect = parseRect(body["boundingRect"] as? [String: Any]) {
-                let selection = SurfAceSelection.text(text, boundingRect: rect.surfAceRect)
+               let rect = parseRect(body["viewBoundingRect"] as? [String: Any]) {
+                let presentedRect = webView.convert(rect, to: self)
+                let selection = SurfAceSelection.text(text, boundingRect: presentedRect.surfAceRect)
                 lastSelection = selection
-                onSelectionChanged?(text, rect)
+                onSelectionChanged?(text, presentedRect)
             }
         case scrollMessageName:
             guard let viewport = parseViewport(body["viewport"] as? [String: Any]) else { return }
@@ -2906,10 +3103,11 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
             lastVisibleText = visibleText
             onScrollSettled?(viewport, visibleText)
         case tapMessageName:
-            guard let position = parsePoint(body["position"] as? [String: Any]) else { return }
+            guard let position = parsePoint(body["viewPosition"] as? [String: Any]) else { return }
             let nearestContent = (body["nearestContent"] as? String) ?? ""
             let kind = (body["kind"] as? String) == "long_press" ? "long_press" : "tap"
-            onTapEvent?(kind, SurfAcePoint(x: Double(position.x), y: Double(position.y)), nearestContent)
+            let presentedPosition = webView.convert(position, to: self)
+            onTapEvent?(kind, SurfAcePoint(x: Double(presentedPosition.x), y: Double(presentedPosition.y)), nearestContent)
         case navigationMessageName:
             guard let url = body["url"] as? String, !url.isEmpty else { return }
             let sentAt = parseInt64(body["sentAt"]) ?? Int64(Date().timeIntervalSince1970 * 1000)
@@ -2936,10 +3134,21 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
         backgroundColor = .black
 #endif
 
-        webView.translatesAutoresizingMaskIntoConstraints = false
+        webView.translatesAutoresizingMaskIntoConstraints = true
         webView.isOpaque = false
         webView.backgroundColor = .clear
         webView.scrollView.backgroundColor = .clear
+        // The pane has already resolved its content viewport; safe-area insets
+        // must not subtract a second band from the edge-pinned WebKit view.
+        webView.scrollView.contentInsetAdjustmentBehavior = .never
+        if #available(iOS 26.0, visionOS 26.0, *) {
+            // Pane chrome is outside this viewport; native scroll-edge fades
+            // would otherwise obscure content in its safe-area bands.
+            webView.scrollView.topEdgeEffect.isHidden = true
+            webView.scrollView.bottomEdgeEffect.isHidden = true
+            webView.scrollView.leftEdgeEffect.isHidden = true
+            webView.scrollView.rightEdgeEffect.isHidden = true
+        }
         #if !os(visionOS)
         webView.scrollView.keyboardDismissMode = .onDrag
         #endif
@@ -2968,10 +3177,6 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
         addSubview(canvasView)
 
         NSLayoutConstraint.activate([
-            webView.leadingAnchor.constraint(equalTo: leadingAnchor),
-            webView.trailingAnchor.constraint(equalTo: trailingAnchor),
-            webView.topAnchor.constraint(equalTo: topAnchor),
-            webView.bottomAnchor.constraint(equalTo: bottomAnchor),
             pdfView.leadingAnchor.constraint(equalTo: leadingAnchor),
             pdfView.trailingAnchor.constraint(equalTo: trailingAnchor),
             pdfView.topAnchor.constraint(equalTo: topAnchor),
@@ -3147,6 +3352,29 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
         lastViewport = pdfViewport()
     }
 
+    private var webPresentationScale: CGFloat {
+        switch currentEntry?.payload {
+        case .html, .browserURL:
+            (SurfAceWebContentScale.base * contentScale * 1000).rounded() / 1000
+        default:
+            1
+        }
+    }
+
+    private func layoutWebViewport() {
+        let scale = webPresentationScale
+        // Give WebKit the complete logical viewport before scaling its native
+        // presentation. Every nested frame lays out against that viewport; no
+        // document zoom or site-specific sizing changes are needed.
+        let viewport = CGRect(x: 0, y: 0, width: bounds.width / scale, height: bounds.height / scale)
+        let center = CGPoint(x: bounds.midX, y: bounds.midY)
+        let transform = CGAffineTransform(scaleX: scale, y: scale)
+        guard webView.bounds != viewport || webView.center != center || webView.transform != transform else { return }
+        webView.bounds = viewport
+        webView.center = center
+        webView.transform = transform
+    }
+
     private func applyWebContentScale() async {
         guard !webView.isHidden else { return }
         let baseScale: CGFloat = switch currentEntry?.payload {
@@ -3156,10 +3384,17 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
             1
         }
         let effectiveScale = (baseScale * contentScale * 1000).rounded() / 1000
+        let scalesWholePage: Bool = switch currentEntry?.payload {
+        case .html, .browserURL: true
+        default: false
+        }
+        layoutWebViewport()
+        webView.pageZoom = 1
+        let documentZoom = scalesWholePage ? "" : "document.documentElement.style.zoom = scale === 1 ? \"\" : String(scale);"
         let script = """
         (() => {
           const scale = \(effectiveScale);
-          document.documentElement.style.zoom = scale === 1 ? "" : String(scale);
+          \(documentZoom)
           document.body?.style.setProperty("--surf-ace-content-scale", String(scale));
         })();
         """
@@ -3339,8 +3574,8 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
         var selection: SurfAceSelection?
         if let selectionObject = object["selection"] as? [String: Any],
            let text = selectionObject["text"] as? String,
-           let rect = parseRect(selectionObject["boundingRect"] as? [String: Any]) {
-            selection = .text(text, boundingRect: rect.surfAceRect)
+           let rect = parseRect(selectionObject["viewBoundingRect"] as? [String: Any]) {
+            selection = .text(text, boundingRect: webView.convert(rect, to: self).surfAceRect)
         }
 
         return (viewport, selection)
@@ -3357,8 +3592,8 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
         var selection: SurfAceSelection?
         if let selectionObject = object["selection"] as? [String: Any],
            let text = selectionObject["text"] as? String,
-           let rect = parseRect(selectionObject["boundingRect"] as? [String: Any]) {
-            selection = .text(text, boundingRect: rect.surfAceRect)
+           let rect = parseRect(selectionObject["viewBoundingRect"] as? [String: Any]) {
+            selection = .text(text, boundingRect: webView.convert(rect, to: self).surfAceRect)
         }
 
         return (viewport, visibleText, selection)
@@ -3778,6 +4013,16 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
             return stripCssNoise((document.body && document.body.innerText) || document.documentElement.innerText || '').slice(0, 4096);
           }
 
+          // DOM client coordinates belong to the layout viewport. Keep the existing
+          // document fields for logical metadata, and capture presentation coordinates
+          // in the same JS turn so scrolling cannot race a later native conversion.
+          function viewPoint(x, y) {
+            const viewport = window.visualViewport;
+            const scale = viewport ? viewport.scale : 1;
+            return { x: (x - (viewport ? viewport.offsetLeft : 0)) * scale,
+                     y: (y - (viewport ? viewport.offsetTop : 0)) * scale };
+          }
+
           function currentSelection() {
             const selection = window.getSelection();
             if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return null;
@@ -3785,8 +4030,12 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
             if (!text) return null;
             const range = selection.getRangeAt(0);
             const rect = range.getBoundingClientRect();
+            const point = viewPoint(rect.x, rect.y);
+            const scale = window.visualViewport ? window.visualViewport.scale : 1;
             return {
               kind: 'text',
+              viewBoundingRect: { x: point.x, y: point.y,
+                                  width: rect.width * scale, height: rect.height * scale },
               text: text,
               boundingRect: {
                 x: rect.x + window.scrollX,
@@ -3836,6 +4085,7 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
             if (!event) return;
             const payload = {
               kind: kind,
+              viewPosition: viewPoint(event.clientX || 0, event.clientY || 0),
               position: { x: (event.clientX || 0) + (window.scrollX || 0), y: (event.clientY || 0) + (window.scrollY || 0) },
               nearestContent: cleanText(event.target && event.target.innerText ? event.target.innerText : '').slice(0, 4096)
             };

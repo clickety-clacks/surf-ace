@@ -1,10 +1,12 @@
+mod common;
+
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 use std::fs;
-use std::net::TcpListener;
+use std::net::{SocketAddr, TcpListener};
 use std::process::Command as ProcessCommand;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use surf_ace_cli::command::{Command, Invocation};
 use surf_ace_cli::controller::{execute, execute_with_wire, CliError};
 use surf_ace_cli::state::{CorrelationPhase, LockedStateRoot, UnresolvedCorrelation};
@@ -19,12 +21,35 @@ struct FakeWire {
     payloads: Vec<(String, Value)>,
     fail_after_send_on: Option<String>,
     pair_rejection: Option<Envelope>,
+    pair_response_fault: Option<ResponseEnvelopeFault>,
+    pair_controller_instance_id_override: Option<Value>,
+    pair_surface_id_override: Option<Value>,
+    panes_list_payload: Value,
+    panes_list_rejection: Option<String>,
+    panes_list_response_fault: Option<ResponseEnvelopeFault>,
     receipt_capacity_on: Option<String>,
     target_precommit_error: Option<(String, Option<String>)>,
     committed_rejection_on: Option<String>,
     resolutions: Vec<Value>,
     scopes: Vec<Value>,
     response_events: BTreeMap<String, Vec<Envelope>>,
+}
+
+#[derive(Clone, Copy)]
+enum ResponseEnvelopeFault {
+    MissingSuccess,
+    WrongOperation,
+    UnsupportedVersion,
+}
+
+impl ResponseEnvelopeFault {
+    fn apply(self, response: &mut Envelope) {
+        match self {
+            Self::MissingSuccess => response.ok = None,
+            Self::WrongOperation => response.op = "unrelated.operation".into(),
+            Self::UnsupportedVersion => response.v = 2,
+        }
+    }
 }
 
 impl FakeWire {
@@ -36,6 +61,24 @@ impl FakeWire {
             payloads: vec![],
             fail_after_send_on: None,
             pair_rejection: None,
+            pair_response_fault: None,
+            pair_controller_instance_id_override: None,
+            pair_surface_id_override: None,
+            panes_list_payload: json!({
+                "panes": [{
+                    "paneId": 1,
+                    "paneLineageId": "pl_1",
+                    "currentTarget": {
+                        "currentState": "current",
+                        "paneLineageId": "pl_1",
+                        "targetEpoch": 3,
+                        "targetId": "tg_1",
+                        "targetKind": "browser_url"
+                    }
+                }]
+            }),
+            panes_list_rejection: None,
+            panes_list_response_fault: None,
             receipt_capacity_on: None,
             target_precommit_error: None,
             committed_rejection_on: None,
@@ -82,6 +125,23 @@ impl DirectWire for FakeWire {
             if let Some(response) = self.pair_rejection.clone() {
                 return Ok(WireResponse {
                     response,
+                    events: vec![],
+                });
+            }
+        }
+        if op == "panes.list" {
+            if let Some(code) = self.panes_list_rejection.clone() {
+                return Ok(WireResponse {
+                    response: Envelope {
+                        id: Some(id.into()),
+                        op: "panes.list".into(),
+                        payload: Some(json!({})),
+                        envelope_type: "response".into(),
+                        v: 1,
+                        ok: Some(false),
+                        error: Some(json!({ "code": code })),
+                        sent_at: None,
+                    },
                     events: vec![],
                 });
             }
@@ -144,12 +204,16 @@ impl DirectWire for FakeWire {
             });
         }
         let mut response = match op {
-            "pair.request" => Self::response(
-                id,
-                "pair.response",
-                json!({
+            "pair.request" => {
+                let mut response = Self::response(
+                    id,
+                    "pair.request",
+                    json!({
                     "capabilities": {},
-                    "controllerInstanceId": payload["controllerInstanceId"],
+                    "controllerInstanceId": self
+                        .pair_controller_instance_id_override
+                        .clone()
+                        .unwrap_or_else(|| payload["controllerInstanceId"].clone()),
                     "limits": {
                         "maxPendingOperationReceiptBytesPerController": 65536,
                         "maxPendingOperationReceiptsPerController": 16
@@ -160,10 +224,18 @@ impl DirectWire for FakeWire {
                     "scopes": self.scopes.clone(),
                     "sessionId": "session_test",
                     "state": null,
-                    "surfaceId": payload.get("surfaceId").cloned().unwrap_or(Value::Null),
+                    "surfaceId": self
+                        .pair_surface_id_override
+                        .clone()
+                        .unwrap_or_else(|| payload.get("surfaceId").cloned().unwrap_or(Value::Null)),
                     "surfaceSetRevision": 1
-                }),
-            ),
+                    }),
+                );
+                if let Some(fault) = self.pair_response_fault {
+                    fault.apply(&mut response.response);
+                }
+                response
+            }
             "operation.receipt.sync" => Self::response(
                 id,
                 "operation.receipt.sync.result",
@@ -182,6 +254,14 @@ impl DirectWire for FakeWire {
                 "surfaces.list.result",
                 json!({ "surfaces": [{ "surfaceId": "sf_1" }] }),
             ),
+            "panes.list" => {
+                let mut response =
+                    Self::response(id, "panes.list", self.panes_list_payload.clone());
+                if let Some(fault) = self.panes_list_response_fault {
+                    fault.apply(&mut response.response);
+                }
+                response
+            }
             "snapshot.get" => {
                 Self::response(id, "snapshot.result", json!({ "snapshotId": "sn_1" }))
             }
@@ -235,6 +315,14 @@ fn invocation(temp: &TempDir, command: Command, input: Value) -> Invocation {
         projection_capacity_bytes: 1024 * 1024,
         state_root: temp.path().into(),
     }
+}
+
+fn pane_describe_input(controller_id: &str, surface_id: &str, pane_id: u64) -> Value {
+    json!({
+        "expectedControllerInstanceId": controller_id,
+        "surfaceId": surface_id,
+        "paneId": pane_id
+    })
 }
 
 fn event(op: &str, payload: Value) -> Envelope {
@@ -350,6 +438,7 @@ fn spawn_registry_server(
             "id": request["id"],
             "op": response_op,
             "payload": payload,
+            "sentAt": epoch_ms(),
             "type": "response",
             "v": 1,
             "ok": response_ok,
@@ -366,6 +455,226 @@ fn spawn_registry_server(
     (format!("ws://{address}"), task)
 }
 
+fn spawn_registry_sequence(payloads: Vec<Value>) -> (String, thread::JoinHandle<Vec<Value>>) {
+    spawn_registry_sequence_with_outcomes(
+        payloads
+            .into_iter()
+            .map(|payload| (payload, true))
+            .collect(),
+    )
+}
+
+fn spawn_registry_sequence_with_outcomes(
+    outcomes: Vec<(Value, bool)>,
+) -> (String, thread::JoinHandle<Vec<Value>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let task = thread::spawn(move || {
+        let mut requests = Vec::new();
+        for (payload, response_ok) in outcomes {
+            let (stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut socket = accept(stream).unwrap();
+            let request = match socket.read().unwrap() {
+                Message::Text(text) => serde_json::from_str::<Value>(&text).unwrap(),
+                message => panic!("unexpected registry request frame: {message:?}"),
+            };
+            assert_eq!(request["op"], "fleet.topology");
+            assert_eq!(request["payload"], json!({}));
+            let mut response = json!({
+                "id": request["id"],
+                "op": "fleet.topology",
+                "payload": payload,
+                "sentAt": epoch_ms(),
+                "type": "response",
+                "v": 1,
+                "ok": response_ok,
+            });
+            if !response_ok {
+                response["error"] = json!({ "code": "registry_unavailable" });
+            }
+            socket
+                .send(Message::Text(response.to_string().into()))
+                .unwrap();
+            let _ = socket.close(None);
+            requests.push(request);
+        }
+        requests
+    });
+    (format!("ws://{address}"), task)
+}
+
+fn spawn_rejected_surface_describe_server(
+    code: &'static str,
+) -> (String, thread::JoinHandle<Value>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let task = thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut socket = accept(stream).unwrap();
+        let request = match socket.read().unwrap() {
+            Message::Text(text) => serde_json::from_str::<Value>(&text).unwrap(),
+            message => panic!("unexpected direct request frame: {message:?}"),
+        };
+        assert_eq!(request["op"], "surface.describe");
+        socket
+            .send(Message::Text(
+                json!({
+                    "id": request["id"], "op": "surface.describe", "error": { "code": code },
+                    "sentAt": epoch_ms(), "type": "response", "v": 1, "ok": false
+                })
+                .to_string()
+                .into(),
+            ))
+            .unwrap();
+        let _ = socket.close(None);
+        request
+    });
+    (format!("ws://{address}"), task)
+}
+
+fn spawn_surface_describe_server(payload: Value) -> (String, thread::JoinHandle<Value>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let task = thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut socket = accept(stream).unwrap();
+        let request = match socket.read().unwrap() {
+            Message::Text(text) => serde_json::from_str::<Value>(&text).unwrap(),
+            message => panic!("unexpected direct request frame: {message:?}"),
+        };
+        assert_eq!(request["op"], "surface.describe");
+        let mut response_payload = payload;
+        response_payload["nonce"] = request["payload"]["nonce"].clone();
+        socket
+            .send(Message::Text(
+                json!({
+                    "id": request["id"],
+                    "op": "surface.describe",
+                    "payload": response_payload,
+                    "sentAt": epoch_ms(),
+                    "type": "response",
+                    "v": 1,
+                    "ok": true,
+                })
+                .to_string()
+                .into(),
+            ))
+            .unwrap();
+        let _ = socket.close(None);
+        request
+    });
+    (format!("ws://{address}"), task)
+}
+
+fn spawn_unresponsive_surface_server() -> (String, thread::JoinHandle<Value>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let task = thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut socket = accept(stream).unwrap();
+        let request = match socket.read().unwrap() {
+            Message::Text(text) => serde_json::from_str::<Value>(&text).unwrap(),
+            message => panic!("unexpected direct request frame: {message:?}"),
+        };
+        assert_eq!(request["op"], "surface.describe");
+        drop(socket);
+        request
+    });
+    (format!("ws://{address}"), task)
+}
+
+fn epoch_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+}
+
+fn discovery_client(
+    client_id: &str,
+    endpoint: Option<&str>,
+    surface_rows: Vec<Value>,
+    generation: u64,
+    registered_at: u64,
+    expires_at: u64,
+    supports_describe: bool,
+) -> Value {
+    json!({
+        "clientId": client_id,
+        "directEndpoint": endpoint,
+        "prePairDescribeV1": supports_describe,
+        "registryIdentity": { "allocatorId": "alloc_fixture", "fleetId": "fleet_fixture" },
+        "endpointLease": {
+            "leaseGeneration": generation,
+            "registrationObservedAtMs": registered_at,
+            "leaseExpiresAtMs": expires_at
+        },
+        "surfaces": surface_rows,
+    })
+}
+
+fn discovery_surface(surface_id: &str, label: &str) -> Value {
+    json!({
+        "surfaceId": surface_id,
+        "windowLabel": label,
+        "panes": [{ "paneId": "1", "paneLabel": 1, "paneAddress": format!("{label}1") }]
+    })
+}
+
+fn discovery_topology(clients: Vec<Value>, server_time_ms: u64) -> Value {
+    json!({
+        "clients": clients,
+        "registryIdentity": { "allocatorId": "alloc_fixture", "fleetId": "fleet_fixture" },
+        "registryServerTimeMs": server_time_ms,
+        "maxEndpointLeaseMs": 15_000,
+        "registrationReady": true,
+    })
+}
+
+fn describe_observation(client_id: &str, surface_id: &str, generation: u64) -> Value {
+    let now = epoch_ms();
+    json!({
+        "nonce": "ignored-by-fixture",
+        "clientId": client_id,
+        "registryIdentity": { "allocatorId": "alloc_fixture", "fleetId": "fleet_fixture" },
+        "surfaceId": surface_id,
+        "endpointLeaseGeneration": generation,
+        "observedAtMs": now,
+        "applicationReadiness": { "status": "ready", "limitationCodes": [] },
+        "surfaceSetRevision": 4,
+        "topologyRevision": 8,
+        "layout": { "type": "pane", "paneId": 1 },
+        "panes": [{
+            "paneId": 1,
+            "paneLabel": null,
+            "contentObservation": { "revision": null, "source": "client-authority", "observedAtMs": now }
+        }]
+    })
+}
+
+fn run_window_describe(registry: &str, label: &str) -> std::process::Output {
+    let input = serde_json::to_string(&json!({ "windowLabel": label })).unwrap();
+    run_native_cli(&[
+        "--registry",
+        registry,
+        "--input-json",
+        &input,
+        "window-describe",
+    ])
+}
+
 fn run_native_cli(arguments: &[&str]) -> std::process::Output {
     ProcessCommand::new(env!("CARGO_BIN_EXE_surf-ace"))
         .args(arguments)
@@ -373,11 +682,332 @@ fn run_native_cli(arguments: &[&str]) -> std::process::Output {
         .unwrap()
 }
 
+#[test]
+fn help_and_schema_are_json_and_do_not_require_operational_arguments() {
+    let help = run_native_cli(&["--help"]);
+    assert!(
+        help.status.success(),
+        "{}",
+        String::from_utf8_lossy(&help.stdout)
+    );
+    let help_json: Value = serde_json::from_slice(&help.stdout).unwrap();
+    assert_eq!(help_json["command"], "help");
+    assert_eq!(
+        help_json["result"]["commands"].as_array().unwrap().len(),
+        Command::ALL.len() + 4
+    );
+    assert_eq!(
+        help_json["result"]["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|command| command["name"]
+                .as_str()
+                .is_some_and(|name| name.starts_with("annotations ")))
+            .count(),
+        4
+    );
+    let discovery_limits = help_json["result"]["discoveryLimits"].as_array().unwrap();
+    assert!(discovery_limits.iter().any(|limit| limit
+        .as_str()
+        .is_some_and(|text| text.contains("fleet-list")
+            && text.contains("does not prove endpoint reachability"))));
+    assert!(discovery_limits
+        .iter()
+        .any(|limit| limit.as_str().is_some_and(|text| {
+            text.contains("pair a controller") && text.contains("not no-pair discovery probes")
+        })));
+    assert!(discovery_limits
+        .iter()
+        .any(|limit| limit.as_str().is_some_and(
+            |text| text.contains("window-describe") && text.contains("does not authenticate")
+        )));
+
+    let list_help = run_native_cli(&["help", "list"]);
+    assert!(list_help.status.success());
+    let list_help_json: Value = serde_json::from_slice(&list_help.stdout).unwrap();
+    assert!(list_help_json["result"]["command"]["effect"]
+        .as_str()
+        .unwrap()
+        .contains("paired_direct_read"));
+    assert!(
+        list_help_json["result"]["command"]["resultSchema"]["properties"]["result"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("pair.request")
+    );
+
+    let window_help = run_native_cli(&["help", "window-describe"]);
+    assert!(window_help.status.success());
+    let window_help_json: Value = serde_json::from_slice(&window_help.stdout).unwrap();
+    let window_command = &window_help_json["result"]["command"];
+    assert_eq!(window_command["route"], "registry-and-direct-client");
+    assert_eq!(
+        window_command["effect"],
+        "registry_leased_read_only_pre_pair_probe"
+    );
+    assert_eq!(
+        window_command["wireOperation"],
+        json!(["fleet.topology", "surface.describe", "fleet.topology"])
+    );
+    let window_input_schema = &window_command["inputSchema"];
+    common::schema::validate(
+        window_input_schema,
+        window_input_schema,
+        &window_command["examples"][0]["input"],
+    )
+    .expect("window-describe example validates against its published input schema");
+    let window_result_schema = &window_command["resultSchema"]["properties"]["result"];
+    assert!(
+        window_result_schema["properties"]["surfaceObservation"]["properties"]["panes"]["items"]
+            ["properties"]["contentObservation"]["properties"]["revision"]["type"]
+            .as_array()
+            .is_some_and(|types| types.contains(&json!("null")))
+    );
+
+    let window_schema = run_native_cli(&["schema", "window-describe"]);
+    assert!(window_schema.status.success());
+    let window_schema_json: Value = serde_json::from_slice(&window_schema.stdout).unwrap();
+    assert_eq!(
+        window_schema_json["result"]["command"]["name"],
+        "window-describe"
+    );
+
+    let pane_help = run_native_cli(&["help", "pane-describe"]);
+    assert!(pane_help.status.success());
+    let pane_help_json: Value = serde_json::from_slice(&pane_help.stdout).unwrap();
+    let pane_command = &pane_help_json["result"]["command"];
+    assert_eq!(pane_command["effect"], "paired_surface_read_with_admission");
+    assert_eq!(
+        pane_command["wireOperation"],
+        json!(["pair.request", "panes.list"])
+    );
+    assert!(
+        pane_command["resultSchema"]["properties"]["result"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("pending-receipt reconciliation")
+    );
+    let pane_input_schema = &pane_command["inputSchema"];
+    let pane_input_example = pane_command["examples"][0]["input"].clone();
+    common::schema::validate(pane_input_schema, pane_input_schema, &pane_input_example)
+        .expect("the pane-describe example validates against its published input schema");
+    let pane_result_schema = &pane_command["resultSchema"]["properties"]["result"];
+    common::schema::validate(
+        pane_result_schema,
+        pane_result_schema,
+        &json!({
+            "surfaceId": "sf_fixture",
+            "paneId": 1,
+            "paneLineageId": "pl_fixture",
+            "currentTarget": {
+                "paneLineageId": "pl_fixture",
+                "targetEpoch": 7,
+                "currentState": "stale",
+                "targetId": "tg_fixture",
+                "targetKind": "browser_url"
+            },
+            "targetEpoch": 7
+        }),
+    )
+    .expect("a stale target's actual epoch validates without being represented as current");
+    common::schema::validate(
+        pane_result_schema,
+        pane_result_schema,
+        &json!({
+            "surfaceId": "sf_fixture",
+            "paneId": 1,
+            "paneLineageId": "pl_fixture",
+            "currentTarget": null,
+            "targetEpoch": null
+        }),
+    )
+    .expect("an absent current target is represented by null without an invented epoch");
+    assert!(common::schema::validate(
+        pane_result_schema,
+        pane_result_schema,
+        &json!({
+            "surfaceId": "sf_fixture",
+            "paneId": 1,
+            "paneLineageId": "pl_fixture",
+            "currentTarget": {
+                "paneLineageId": "pl_fixture",
+                "currentState": "current",
+                "targetId": "tg_fixture",
+                "targetKind": "browser_url"
+            },
+            "targetEpoch": 1
+        }),
+    )
+    .is_err());
+
+    let pane_schema = run_native_cli(&["schema", "pane-describe"]);
+    assert!(pane_schema.status.success());
+    let pane_schema_json: Value = serde_json::from_slice(&pane_schema.stdout).unwrap();
+    assert_eq!(
+        pane_schema_json["result"]["command"]["name"],
+        "pane-describe"
+    );
+    assert!(pane_schema_json["result"]["command"]["inputSchema"].is_object());
+    assert!(pane_schema_json["result"]["command"]["resultSchema"].is_object());
+
+    let schema = run_native_cli(&["schema", "topology-realize"]);
+    assert!(
+        schema.status.success(),
+        "{}",
+        String::from_utf8_lossy(&schema.stdout)
+    );
+    let schema_json: Value = serde_json::from_slice(&schema.stdout).unwrap();
+    assert_eq!(schema_json["command"], "schema");
+    assert_eq!(schema_json["result"]["command"]["name"], "topology-realize");
+    assert_eq!(schema_json["result"]["command"]["route"], "direct-client");
+
+    let annotation_help = run_native_cli(&["annotations", "watch", "--help"]);
+    assert!(
+        annotation_help.status.success(),
+        "{}",
+        String::from_utf8_lossy(&annotation_help.stdout)
+    );
+    let annotation_help_json: Value = serde_json::from_slice(&annotation_help.stdout).unwrap();
+    assert_eq!(
+        annotation_help_json["result"]["command"]["name"],
+        "annotations watch"
+    );
+    assert_eq!(
+        annotation_help_json["result"]["command"]["route"],
+        "registry"
+    );
+
+    let annotation_schema = run_native_cli(&["schema", "annotations", "ack"]);
+    assert!(
+        annotation_schema.status.success(),
+        "{}",
+        String::from_utf8_lossy(&annotation_schema.stdout)
+    );
+    let annotation_schema_json: Value = serde_json::from_slice(&annotation_schema.stdout).unwrap();
+    assert_eq!(
+        annotation_schema_json["result"]["command"]["name"],
+        "annotations ack"
+    );
+
+    let watch_schema = run_native_cli(&["schema", "annotations", "watch"]);
+    assert!(watch_schema.status.success());
+    let watch_spec: Value = serde_json::from_slice(&watch_schema.stdout).unwrap();
+    let watch_command = &watch_spec["result"]["command"];
+    let watch_help = run_native_cli(&["help", "annotations", "watch"]);
+    assert!(watch_help.status.success());
+    let watch_help_json: Value = serde_json::from_slice(&watch_help.stdout).unwrap();
+    let watch_help_command = &watch_help_json["result"]["command"];
+    assert_eq!(
+        watch_command["effect"],
+        "registry_consumer_create_and_lease_acquire_and_local_state_write"
+    );
+    assert_eq!(watch_help_command["effect"], watch_command["effect"]);
+    assert!(watch_command["summary"]
+        .as_str()
+        .unwrap()
+        .contains("consumer ID must be unused"));
+    assert!(watch_help_command["summary"]
+        .as_str()
+        .unwrap()
+        .contains("consumer ID must be unused"));
+    assert_eq!(
+        watch_command["consumerLifecycle"]["registryConsumer"],
+        "create"
+    );
+
+    let resume_schema = run_native_cli(&["schema", "annotations", "resume"]);
+    assert!(resume_schema.status.success());
+    let resume_spec: Value = serde_json::from_slice(&resume_schema.stdout).unwrap();
+    let resume_command = &resume_spec["result"]["command"];
+    let resume_help = run_native_cli(&["help", "annotations", "resume"]);
+    assert!(resume_help.status.success());
+    let resume_help_json: Value = serde_json::from_slice(&resume_help.stdout).unwrap();
+    let resume_help_command = &resume_help_json["result"]["command"];
+    assert_eq!(
+        resume_command["effect"],
+        "registry_consumer_lease_replace_and_local_state_write_may_close_prior_listener"
+    );
+    assert_eq!(resume_help_command["effect"], resume_command["effect"]);
+    assert!(resume_command["summary"]
+        .as_str()
+        .unwrap()
+        .contains("may close another live listener"));
+    assert!(resume_help_command["summary"]
+        .as_str()
+        .unwrap()
+        .contains("may close another live listener"));
+    assert_eq!(
+        resume_command["consumerLifecycle"]["lease"],
+        "replace_and_fence_prior"
+    );
+    assert_eq!(
+        resume_command["consumerLifecycle"]["mayClosePriorSameIdListener"],
+        true
+    );
+}
+
+#[test]
+fn private_dns_helper_uses_the_platform_resolver_without_starting_cli_state() {
+    let output = ProcessCommand::new(env!("CARGO_BIN_EXE_surf-ace"))
+        .args(["--_surf_ace_internal_resolve_dns", "localhost", "80"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let addresses = String::from_utf8(output.stdout).unwrap();
+    assert!(addresses.lines().any(|line| line
+        .parse::<SocketAddr>()
+        .is_ok_and(|addr| addr.port() == 80)));
+}
+
+#[test]
+fn topology_realize_published_schema_resolves_recursive_nodes_at_resource_root() {
+    let schema_output = run_native_cli(&["schema", "topology-realize"]);
+    assert!(
+        schema_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&schema_output.stdout)
+    );
+    let schema_response: Value = serde_json::from_slice(&schema_output.stdout).unwrap();
+    let input_schema = &schema_response["result"]["command"]["inputSchema"];
+    assert!(input_schema["$defs"]["topology"].is_object());
+
+    let help_output = run_native_cli(&["help", "topology-realize"]);
+    assert!(help_output.status.success());
+    let help_response: Value = serde_json::from_slice(&help_output.stdout).unwrap();
+    let example = help_response["result"]["command"]["examples"][0]["input"].clone();
+    common::schema::validate(input_schema, input_schema, &example)
+        .expect("the documented three-pane example validates against the published schema");
+
+    let mut nested = example.clone();
+    nested["desired"]["children"][0] = json!({
+        "type": "split", "direction": "horizontal", "children": [
+            { "type": "pane" }, { "type": "pane", "paneId": 17 }
+        ]
+    });
+    common::schema::validate(input_schema, input_schema, &nested)
+        .expect("nested splits resolve the same resource-root definition");
+
+    let mut unknown_descendant = nested.clone();
+    unknown_descendant["desired"]["children"][0]["children"][1]["type"] = json!("unknown");
+    assert!(common::schema::validate(input_schema, input_schema, &unknown_descendant).is_err());
+
+    let mut incomplete_descendant = nested;
+    incomplete_descendant["desired"]["children"][0]["children"][0] =
+        json!({ "type": "split", "direction": "vertical" });
+    assert!(common::schema::validate(input_schema, input_schema, &incomplete_descendant).is_err());
+}
+
 fn fleet_inventory_fixture() -> Value {
     json!({
         "clients": [
             {
                 "clientId": "a".repeat(64),
+                "registryIdentity": { "allocatorId": "alloc_fixture", "fleetId": "fleet_fixture" },
                 "surfaces": [
                     {
                         "surfaceId": "sf_primary",
@@ -396,6 +1026,7 @@ fn fleet_inventory_fixture() -> Value {
             },
             {
                 "clientId": "b".repeat(64),
+                "registryIdentity": { "allocatorId": "alloc_fixture", "fleetId": "fleet_fixture" },
                 "surfaces": [{
                     "surfaceId": "sf_other_client",
                     "windowLabel": "c",
@@ -404,6 +1035,606 @@ fn fleet_inventory_fixture() -> Value {
             }
         ]
     })
+}
+
+#[test]
+fn window_describe_reads_a_leased_endpoint_before_pairing_and_rechecks_the_registry() {
+    let now = epoch_ms();
+    let client_id = "a".repeat(64);
+    let surface_id = "sf_window_fixture";
+    let (endpoint, endpoint_server) =
+        spawn_surface_describe_server(describe_observation(&client_id, surface_id, 9));
+    let first = discovery_topology(
+        vec![discovery_client(
+            &client_id,
+            Some(&endpoint),
+            vec![discovery_surface(surface_id, "a")],
+            9,
+            now - 100,
+            now + 10_000,
+            true,
+        )],
+        now,
+    );
+    let second = discovery_topology(
+        vec![discovery_client(
+            &client_id,
+            Some(&endpoint),
+            vec![discovery_surface(surface_id, "a")],
+            9,
+            now - 100,
+            now + 12_000,
+            true,
+        )],
+        now + 5,
+    );
+    let (registry, registry_server) = spawn_registry_sequence(vec![first, second]);
+    let temp = TempDir::new().unwrap();
+    let state_root = temp.path().join("must-remain-absent");
+    let state_root_text = state_root.to_str().unwrap();
+    let input = serde_json::to_string(&json!({ "windowLabel": "a" })).unwrap();
+
+    let output = run_native_cli(&[
+        "--state-root",
+        state_root_text,
+        "--registry",
+        &registry,
+        "--input-json",
+        &input,
+        "window-describe",
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["command"], "window-describe");
+    assert_eq!(result["result"]["windowLabel"], "a");
+    assert_eq!(
+        result["result"]["identitySemantics"],
+        "consistency_only_not_authentication"
+    );
+    assert_eq!(
+        result["result"]["transportReachability"]["status"],
+        "reachable"
+    );
+    assert_eq!(
+        result["result"]["transportReachability"]["directEndpoint"],
+        endpoint
+    );
+    assert_eq!(result["result"]["applicationReadiness"]["status"], "ready");
+    assert_eq!(
+        result["result"]["registryBefore"]["endpointLease"]["leaseGeneration"],
+        9
+    );
+    assert_eq!(
+        result["result"]["registryAfter"]["endpointLease"]["leaseExpiresAtMs"],
+        now + 12_000
+    );
+    assert_eq!(
+        result["result"]["surfaceObservation"]["surfaceSetRevision"],
+        4
+    );
+    assert_eq!(
+        result["result"]["surfaceObservation"]["topologyRevision"],
+        8
+    );
+    assert_eq!(
+        result["result"]["surfaceObservation"]["layout"]["paneId"],
+        1
+    );
+    assert_eq!(
+        result["result"]["surfaceObservation"]["panes"][0]["paneLabel"],
+        Value::Null
+    );
+    assert_eq!(
+        result["result"]["surfaceObservation"]["panes"][0]["contentObservation"]["revision"],
+        Value::Null
+    );
+
+    let registry_requests = registry_server.join().unwrap();
+    assert_eq!(registry_requests.len(), 2);
+    assert!(registry_requests
+        .iter()
+        .all(|request| request["op"] == "fleet.topology"));
+    let direct_request = endpoint_server.join().unwrap();
+    assert_eq!(direct_request["op"], "surface.describe");
+    assert_eq!(direct_request["type"], "request");
+    assert_eq!(direct_request["v"], 1);
+    let payload = direct_request["payload"].as_object().unwrap();
+    let mut keys = payload.keys().map(String::as_str).collect::<Vec<_>>();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "clientId",
+            "endpointLeaseGeneration",
+            "nonce",
+            "registryIdentity",
+            "surfaceId"
+        ]
+    );
+    assert_eq!(payload["nonce"].as_str().unwrap().len(), 64);
+    assert!(!payload.contains_key("controllerInstanceId"));
+    assert!(
+        !state_root.exists(),
+        "window-describe must not create controller state"
+    );
+}
+
+#[test]
+fn window_describe_rejects_missing_ambiguous_and_stale_registry_rows() {
+    let now = epoch_ms();
+    let id_a = "a".repeat(64);
+    let id_b = "b".repeat(64);
+    let endpoint = "ws://127.0.0.1:1";
+    let cases = vec![
+        ("window_not_found", discovery_topology(vec![], now)),
+        (
+            "endpoint_unconfigured",
+            discovery_topology(
+                vec![discovery_client(
+                    &id_a,
+                    None,
+                    vec![discovery_surface("sf_window_unconfigured", "a")],
+                    2,
+                    now - 10,
+                    now + 10_000,
+                    false,
+                )],
+                now,
+            ),
+        ),
+        (
+            "window_ambiguous",
+            discovery_topology(
+                vec![
+                    discovery_client(
+                        &id_a,
+                        Some(endpoint),
+                        vec![discovery_surface("sf_window_one", "a")],
+                        2,
+                        now - 10,
+                        now + 10_000,
+                        true,
+                    ),
+                    discovery_client(
+                        &id_b,
+                        Some(endpoint),
+                        vec![discovery_surface("sf_window_two", "a")],
+                        3,
+                        now - 10,
+                        now + 10_000,
+                        true,
+                    ),
+                ],
+                now,
+            ),
+        ),
+        (
+            "stale_registration",
+            discovery_topology(
+                vec![discovery_client(
+                    &id_a,
+                    Some("ws://127.0.0.1:1"),
+                    vec![discovery_surface("sf_window_stale", "a")],
+                    2,
+                    now - 20_000,
+                    now - 1,
+                    true,
+                )],
+                now,
+            ),
+        ),
+    ];
+    for (expected_code, topology) in cases {
+        let (registry, server) = spawn_registry_sequence(vec![topology]);
+        let output = run_window_describe(&registry, "a");
+        assert!(!output.status.success());
+        let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(result["error"]["code"], expected_code);
+        assert_eq!(server.join().unwrap().len(), 1);
+    }
+}
+
+#[test]
+fn window_describe_requires_selected_row_identity_to_match_registry_identity() {
+    let now = epoch_ms();
+    let client_id = "6".repeat(64);
+    let endpoint = "ws://127.0.0.1:1";
+    let mut missing = discovery_topology(
+        vec![discovery_client(
+            &client_id,
+            Some(endpoint),
+            vec![discovery_surface("sf_row_missing_identity", "a")],
+            3,
+            now - 10,
+            now + 10_000,
+            true,
+        )],
+        now,
+    );
+    missing["clients"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("registryIdentity");
+
+    let mut foreign_allocator = discovery_topology(
+        vec![discovery_client(
+            &client_id,
+            Some(endpoint),
+            vec![discovery_surface("sf_row_foreign_allocator", "a")],
+            3,
+            now - 10,
+            now + 10_000,
+            true,
+        )],
+        now,
+    );
+    foreign_allocator["clients"][0]["registryIdentity"]["allocatorId"] = json!("alloc_other");
+
+    let mut foreign_fleet = discovery_topology(
+        vec![discovery_client(
+            &client_id,
+            Some(endpoint),
+            vec![discovery_surface("sf_row_foreign_fleet", "a")],
+            3,
+            now - 10,
+            now + 10_000,
+            true,
+        )],
+        now,
+    );
+    foreign_fleet["clients"][0]["registryIdentity"]["fleetId"] = json!("fleet_other");
+
+    for topology in [missing, foreign_allocator, foreign_fleet] {
+        let (registry, server) = spawn_registry_sequence(vec![topology]);
+        let output = run_window_describe(&registry, "a");
+        assert!(!output.status.success());
+        let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(result["error"]["code"], "registry_response_invalid");
+        assert_eq!(
+            server.join().unwrap().len(),
+            1,
+            "must refuse before direct connect"
+        );
+    }
+
+    let now = epoch_ms();
+    let surface_id = "sf_row_identity_recheck";
+    let (direct_endpoint, direct_server) =
+        spawn_surface_describe_server(describe_observation(&client_id, surface_id, 4));
+    let before = discovery_topology(
+        vec![discovery_client(
+            &client_id,
+            Some(&direct_endpoint),
+            vec![discovery_surface(surface_id, "a")],
+            4,
+            now - 10,
+            now + 10_000,
+            true,
+        )],
+        now,
+    );
+    let mut after = before.clone();
+    after["clients"][0]["registryIdentity"]["fleetId"] = json!("fleet_foreign_recheck");
+    after["registryIdentity"]["fleetId"] = json!("fleet_foreign_recheck");
+    let (registry, server) = spawn_registry_sequence(vec![before, after]);
+    let output = run_window_describe(&registry, "a");
+    assert!(!output.status.success());
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        result["error"]["code"], "stale_registration",
+        "result={result}"
+    );
+    assert_eq!(
+        result["error"]["details"]["transportReachability"]["status"],
+        "reachable"
+    );
+    assert_eq!(server.join().unwrap().len(), 2);
+    let request = direct_server.join().unwrap();
+    assert_eq!(
+        request["payload"]["registryIdentity"]["allocatorId"],
+        "alloc_fixture"
+    );
+    assert_eq!(
+        request["payload"]["registryIdentity"]["fleetId"],
+        "fleet_fixture"
+    );
+}
+
+#[test]
+fn window_describe_rejects_unreachable_endpoints_and_stale_rechecks() {
+    let now = epoch_ms();
+    let client_id = "c".repeat(64);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let unavailable_endpoint = format!("ws://{}", listener.local_addr().unwrap());
+    drop(listener);
+    let topology = discovery_topology(
+        vec![discovery_client(
+            &client_id,
+            Some(&unavailable_endpoint),
+            vec![discovery_surface("sf_unreachable", "a")],
+            5,
+            now - 10,
+            now + 10_000,
+            true,
+        )],
+        now,
+    );
+    let (registry, server) = spawn_registry_sequence(vec![topology.clone(), topology]);
+    let unreachable = run_window_describe(&registry, "a");
+    assert!(!unreachable.status.success());
+    let unreachable_json: Value = serde_json::from_slice(&unreachable.stdout).unwrap();
+    assert_eq!(unreachable_json["error"]["code"], "endpoint_unreachable");
+    assert_eq!(
+        unreachable_json["error"]["details"]["transportReachability"]["status"],
+        "unreachable"
+    );
+    assert_eq!(
+        unreachable_json["error"]["details"]["applicationReadiness"]["status"],
+        "unknown"
+    );
+    assert_eq!(server.join().unwrap().len(), 2);
+
+    let surface_id = "sf_stale_after_probe";
+    let (endpoint, endpoint_server) =
+        spawn_surface_describe_server(describe_observation(&client_id, surface_id, 5));
+    let first = discovery_topology(
+        vec![discovery_client(
+            &client_id,
+            Some(&endpoint),
+            vec![discovery_surface(surface_id, "a")],
+            5,
+            now - 10,
+            now + 10_000,
+            true,
+        )],
+        now,
+    );
+    let changed = discovery_topology(
+        vec![discovery_client(
+            &client_id,
+            Some(&endpoint),
+            vec![discovery_surface(surface_id, "a")],
+            6,
+            now - 10,
+            now + 10_000,
+            true,
+        )],
+        now + 1,
+    );
+    let (registry, server) = spawn_registry_sequence(vec![first, changed]);
+    let stale = run_window_describe(&registry, "a");
+    assert!(!stale.status.success());
+    let stale_json: Value = serde_json::from_slice(&stale.stdout).unwrap();
+    assert_eq!(stale_json["error"]["code"], "stale_registration");
+    assert_eq!(
+        stale_json["error"]["details"]["transportReachability"]["status"],
+        "reachable"
+    );
+    assert_eq!(
+        stale_json["error"]["details"]["applicationReadiness"]["status"],
+        "ready"
+    );
+    assert_eq!(
+        stale_json["error"]["details"]["surfaceObservation"]["topologyRevision"],
+        8
+    );
+    assert!(stale_json["error"]["details"]
+        .get("registryAfter")
+        .is_none());
+    assert_eq!(server.join().unwrap().len(), 2);
+    let direct_request = endpoint_server.join().unwrap();
+    assert_eq!(direct_request["op"], "surface.describe");
+}
+
+#[test]
+fn window_describe_preserves_transport_and_unknown_readiness_when_recheck_fails() {
+    let now = epoch_ms();
+    let client_id = "7".repeat(64);
+    let surface_id = "sf_invalid_then_stale";
+    for recheck_kind in ["stale", "ambiguous", "unavailable"] {
+        let mut invalid_observation = describe_observation(&client_id, surface_id, 5);
+        invalid_observation
+            .as_object_mut()
+            .unwrap()
+            .remove("topologyRevision");
+        let (endpoint, endpoint_server) = spawn_surface_describe_server(invalid_observation);
+        let first = discovery_topology(
+            vec![discovery_client(
+                &client_id,
+                Some(&endpoint),
+                vec![discovery_surface(surface_id, "a")],
+                5,
+                now - 10,
+                now + 10_000,
+                true,
+            )],
+            now,
+        );
+        let (second, response_ok, expected_code) = match recheck_kind {
+            "stale" => {
+                let mut changed = first.clone();
+                changed["clients"][0]["endpointLease"]["leaseGeneration"] = json!(6);
+                (changed, true, "stale_registration")
+            }
+            "ambiguous" => (
+                discovery_topology(
+                    vec![
+                        discovery_client(
+                            &client_id,
+                            Some(&endpoint),
+                            vec![discovery_surface(surface_id, "a")],
+                            5,
+                            now - 10,
+                            now + 10_000,
+                            true,
+                        ),
+                        discovery_client(
+                            &"9".repeat(64),
+                            Some("ws://127.0.0.1:2"),
+                            vec![discovery_surface("sf_ambiguous_recheck", "a")],
+                            7,
+                            now - 10,
+                            now + 10_000,
+                            true,
+                        ),
+                    ],
+                    now,
+                ),
+                true,
+                "stale_registration",
+            ),
+            _ => (json!({}), false, "registry_unavailable"),
+        };
+        let outcomes = vec![(first, true), (second, response_ok)];
+        let (registry, registry_server) = spawn_registry_sequence_with_outcomes(outcomes);
+        let output = run_window_describe(&registry, "a");
+        assert!(!output.status.success());
+        let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            result["error"]["code"], expected_code,
+            "recheck_kind={recheck_kind}, result={result}"
+        );
+        assert_eq!(
+            result["error"]["details"]["transportReachability"]["status"],
+            "reachable"
+        );
+        assert_eq!(
+            result["error"]["details"]["applicationReadiness"]["status"],
+            "unknown"
+        );
+        assert_eq!(
+            result["error"]["details"]["transportReachability"]["observedAtMs"]
+                .as_u64()
+                .is_some(),
+            true
+        );
+        assert!(result["error"]["details"]
+            .get("surfaceObservation")
+            .is_none());
+        assert_eq!(registry_server.join().unwrap().len(), 2);
+        assert_eq!(endpoint_server.join().unwrap()["op"], "surface.describe");
+    }
+}
+
+#[test]
+fn window_describe_serialized_discovery_errors_match_advertised_error_schema() {
+    let schema_output = run_native_cli(&["schema", "window-describe"]);
+    assert!(schema_output.status.success());
+    let schema: Value = serde_json::from_slice(&schema_output.stdout).unwrap();
+    let error_schema = schema["result"]["errorSchema"].clone();
+
+    let (registry, server) = spawn_registry_server(json!({}), "fleet.topology", false);
+    let unavailable = run_window_describe(&registry, "a");
+    assert!(!unavailable.status.success());
+    let unavailable_json: Value = serde_json::from_slice(&unavailable.stdout).unwrap();
+    assert_eq!(unavailable_json["error"]["code"], "registry_unavailable");
+    common::schema::validate(&error_schema, &error_schema, &unavailable_json).unwrap();
+    server.join().unwrap();
+
+    let now = epoch_ms();
+    let client_id = "8".repeat(64);
+    let surface_id = "sf_rejected_schema";
+    let (endpoint, endpoint_server) =
+        spawn_rejected_surface_describe_server("unexpected_client_failure");
+    let topology = discovery_topology(
+        vec![discovery_client(
+            &client_id,
+            Some(&endpoint),
+            vec![discovery_surface(surface_id, "a")],
+            5,
+            now - 10,
+            now + 10_000,
+            true,
+        )],
+        now,
+    );
+    let (registry, registry_server) = spawn_registry_sequence(vec![topology.clone(), topology]);
+    let rejected = run_window_describe(&registry, "a");
+    assert!(!rejected.status.success());
+    let rejected_json: Value = serde_json::from_slice(&rejected.stdout).unwrap();
+    assert_eq!(
+        rejected_json["error"]["code"], "describe_rejected",
+        "result={rejected_json}"
+    );
+    common::schema::validate(&error_schema, &error_schema, &rejected_json).unwrap();
+    assert_eq!(registry_server.join().unwrap().len(), 2);
+    assert_eq!(endpoint_server.join().unwrap()["op"], "surface.describe");
+}
+
+#[test]
+fn window_describe_rejects_direct_identity_mismatch() {
+    let now = epoch_ms();
+    let client_id = "d".repeat(64);
+    let wrong_client_id = "e".repeat(64);
+    let surface_id = "sf_identity_mismatch";
+    let (endpoint, endpoint_server) =
+        spawn_surface_describe_server(describe_observation(&wrong_client_id, surface_id, 7));
+    let topology = discovery_topology(
+        vec![discovery_client(
+            &client_id,
+            Some(&endpoint),
+            vec![discovery_surface(surface_id, "a")],
+            7,
+            now - 10,
+            now + 10_000,
+            true,
+        )],
+        now,
+    );
+    let (registry, server) = spawn_registry_sequence(vec![topology.clone(), topology]);
+    let output = run_window_describe(&registry, "a");
+    assert!(!output.status.success());
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["error"]["code"], "identity_mismatch");
+    assert_eq!(
+        result["error"]["details"]["transportReachability"]["status"],
+        "reachable"
+    );
+    assert_eq!(
+        result["error"]["details"]["applicationReadiness"]["status"],
+        "unknown"
+    );
+    assert_eq!(server.join().unwrap().len(), 2);
+    assert_eq!(endpoint_server.join().unwrap()["op"], "surface.describe");
+}
+
+#[test]
+fn window_describe_keeps_reachable_transport_separate_from_unresponsive_application() {
+    let now = epoch_ms();
+    let client_id = "f".repeat(64);
+    let surface_id = "sf_unresponsive";
+    let (endpoint, endpoint_server) = spawn_unresponsive_surface_server();
+    let topology = discovery_topology(
+        vec![discovery_client(
+            &client_id,
+            Some(&endpoint),
+            vec![discovery_surface(surface_id, "a")],
+            7,
+            now - 10,
+            now + 10_000,
+            true,
+        )],
+        now,
+    );
+    let (registry, registry_server) = spawn_registry_sequence(vec![topology.clone(), topology]);
+    let output = run_window_describe(&registry, "a");
+    assert!(!output.status.success());
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["error"]["code"], "application_unresponsive");
+    assert_eq!(
+        result["error"]["details"]["transportReachability"]["status"],
+        "reachable"
+    );
+    assert_eq!(
+        result["error"]["details"]["applicationReadiness"]["status"],
+        "unknown"
+    );
+    assert_eq!(registry_server.join().unwrap().len(), 2);
+    assert_eq!(endpoint_server.join().unwrap()["op"], "surface.describe");
 }
 
 #[test]
@@ -667,7 +1898,7 @@ fn command_surface_is_exact_and_matches_package_and_canonical_vectors() {
         .iter()
         .map(|command| command.name())
         .collect::<Vec<_>>();
-    assert_eq!(expected.len(), 12);
+    assert_eq!(expected.len(), 14);
     assert_eq!(package["commands"], json!(expected));
     assert_eq!(
         package["receiptResolutionOutcomes"],
@@ -1153,6 +2384,30 @@ fn canonical_network_cases() -> Vec<(Command, Value, &'static str)> {
             "target.apply",
         ),
     ]
+}
+
+#[test]
+fn pane_describe_validates_local_guards_and_sends_only_surface_id_to_panes_list() {
+    let input = pane_describe_input("ctl_fixture", "sf_1", 1);
+    let fields = input.as_object().unwrap();
+    assert_eq!(
+        Command::PaneDescribe.wire_operation(fields).unwrap(),
+        "panes.list"
+    );
+    assert_eq!(
+        Command::PaneDescribe.wire_payload(fields.clone()).unwrap(),
+        json!({ "surfaceId": "sf_1" })
+    );
+
+    for invalid in [
+        json!({ "expectedControllerInstanceId": "", "surfaceId": "sf_1", "paneId": 1 }),
+        json!({ "expectedControllerInstanceId": "ctl_fixture", "surfaceId": "sf_1", "paneId": 0 }),
+        json!({ "expectedControllerInstanceId": "ctl_fixture", "surfaceId": "sf_1", "paneId": 1, "extra": true }),
+    ] {
+        assert!(Command::PaneDescribe
+            .validate(invalid.as_object().unwrap())
+            .is_err());
+    }
 }
 
 #[test]
@@ -1857,6 +3112,417 @@ fn sequential_process_model_reuses_identity() {
 }
 
 #[test]
+fn pane_describe_requires_the_existing_controller_root_and_expected_identity() {
+    let expected_root = TempDir::new().unwrap();
+    let mut initialize = FakeWire::ordinary();
+    let expected_id = execute_with_wire(
+        invocation(&expected_root, Command::List, json!({})),
+        &mut initialize,
+    )
+    .unwrap()
+    .controller_instance_id
+    .unwrap();
+
+    let uninitialized_root = TempDir::new().unwrap();
+    let mut uninitialized_wire = FakeWire::ordinary();
+    let error = execute_with_wire(
+        invocation(
+            &uninitialized_root,
+            Command::PaneDescribe,
+            pane_describe_input(&expected_id, "sf_1", 1),
+        ),
+        &mut uninitialized_wire,
+    )
+    .unwrap_err();
+    assert!(matches!(error, CliError::State(_)));
+    assert!(uninitialized_wire.operations.is_empty());
+    assert!(
+        !uninitialized_root.path().exists()
+            || fs::read_dir(uninitialized_root.path())
+                .unwrap()
+                .next()
+                .is_none()
+    );
+
+    let wrong_root = TempDir::new().unwrap();
+    let mut initialize_wrong = FakeWire::ordinary();
+    let wrong_id = execute_with_wire(
+        invocation(&wrong_root, Command::List, json!({})),
+        &mut initialize_wrong,
+    )
+    .unwrap()
+    .controller_instance_id
+    .unwrap();
+    assert_ne!(expected_id, wrong_id);
+
+    let mut wrong_root_wire = FakeWire::ordinary();
+    let error = execute_with_wire(
+        invocation(
+            &wrong_root,
+            Command::PaneDescribe,
+            pane_describe_input(&expected_id, "sf_1", 1),
+        ),
+        &mut wrong_root_wire,
+    )
+    .unwrap_err();
+    assert!(matches!(error, CliError::Input(message) if message == "controller_instance_mismatch"));
+    assert!(wrong_root_wire.operations.is_empty());
+}
+
+#[test]
+fn pane_describe_reuses_one_controller_and_uses_one_surface_scoped_panes_list_response() {
+    let temp = TempDir::new().unwrap();
+    let mut first = FakeWire::ordinary();
+    let first_output =
+        execute_with_wire(invocation(&temp, Command::List, json!({})), &mut first).unwrap();
+    let controller_id = first_output.controller_instance_id.unwrap();
+
+    let mut second = FakeWire::ordinary();
+    let output = execute_with_wire(
+        invocation(
+            &temp,
+            Command::PaneDescribe,
+            pane_describe_input(&controller_id, "sf_1", 1),
+        ),
+        &mut second,
+    )
+    .unwrap();
+    assert_eq!(output.command, "pane-describe");
+    assert_eq!(
+        output.controller_instance_id.as_deref(),
+        Some(controller_id.as_str())
+    );
+    assert_eq!(second.operations, vec!["pair.request", "panes.list"]);
+    let pair = &second.payloads[0].1;
+    assert_eq!(pair["controllerInstanceId"], controller_id);
+    assert_eq!(pair["surfaceId"], "sf_1");
+    let (op, request) = &second.payloads[1];
+    assert_eq!(op, "panes.list");
+    assert_eq!(request, &json!({ "surfaceId": "sf_1" }));
+    assert_eq!(output.result["surfaceId"], "sf_1");
+    assert_eq!(output.result["paneId"], 1);
+    assert_eq!(output.result["paneLineageId"], "pl_1");
+    assert_eq!(output.result["currentTarget"]["targetEpoch"], 3);
+    assert_eq!(output.result["targetEpoch"], 3);
+}
+
+#[test]
+fn pane_describe_rejects_malformed_success_envelopes_and_retires_connection() {
+    let temp = TempDir::new().unwrap();
+    let mut initialize = FakeWire::ordinary();
+    let controller_id =
+        execute_with_wire(invocation(&temp, Command::List, json!({})), &mut initialize)
+            .unwrap()
+            .controller_instance_id
+            .unwrap();
+    let input = pane_describe_input(&controller_id, "sf_1", 1);
+
+    let faults = [
+        (
+            ResponseEnvelopeFault::MissingSuccess,
+            "missing_response_success:{}",
+        ),
+        (
+            ResponseEnvelopeFault::WrongOperation,
+            "response_operation_mismatch:{}",
+        ),
+        (
+            ResponseEnvelopeFault::UnsupportedVersion,
+            "unsupported_response_version:{}",
+        ),
+    ];
+    for (fault, error_template) in faults {
+        let mut pair = FakeWire::ordinary();
+        pair.pair_response_fault = Some(fault);
+        let error = execute_with_wire(
+            invocation(&temp, Command::PaneDescribe, input.clone()),
+            &mut pair,
+        )
+        .unwrap_err();
+        let expected = error_template.replace("{}", "pair.request");
+        assert!(matches!(error, CliError::Protocol(message) if message == expected));
+        assert_eq!(pair.operations, vec!["pair.request"]);
+        assert_eq!(pair.close_count, 1);
+    }
+
+    for (fault, error_template) in faults {
+        let mut panes = FakeWire::ordinary();
+        panes.panes_list_response_fault = Some(fault);
+        let error = execute_with_wire(
+            invocation(&temp, Command::PaneDescribe, input.clone()),
+            &mut panes,
+        )
+        .unwrap_err();
+        let expected = error_template.replace("{}", "panes.list");
+        assert!(matches!(error, CliError::Protocol(message) if message == expected));
+        assert_eq!(panes.operations, vec!["pair.request", "panes.list"]);
+        assert_eq!(panes.close_count, 1);
+    }
+}
+
+#[test]
+fn pane_describe_preserves_stale_target_and_never_invents_an_epoch() {
+    let temp = TempDir::new().unwrap();
+    let mut initialize = FakeWire::ordinary();
+    let controller_id =
+        execute_with_wire(invocation(&temp, Command::List, json!({})), &mut initialize)
+            .unwrap()
+            .controller_instance_id
+            .unwrap();
+
+    let mut stale = FakeWire::ordinary();
+    stale.panes_list_payload = json!({
+        "panes": [{
+            "paneId": 1,
+            "paneLineageId": "pl_1",
+            "currentTarget": {
+                "currentState": "stale",
+                "paneLineageId": "pl_1",
+                "targetEpoch": 9,
+                "targetId": "tg_stale",
+                "targetKind": "browser_url"
+            }
+        }]
+    });
+    let stale_output = execute_with_wire(
+        invocation(
+            &temp,
+            Command::PaneDescribe,
+            pane_describe_input(&controller_id, "sf_1", 1),
+        ),
+        &mut stale,
+    )
+    .unwrap();
+    assert_eq!(
+        stale_output.result["currentTarget"]["currentState"],
+        "stale"
+    );
+    assert_eq!(stale_output.result["targetEpoch"], 9);
+    assert_eq!(
+        stale
+            .operations
+            .iter()
+            .filter(|op| *op == "panes.list")
+            .count(),
+        1
+    );
+
+    for current_target_is_null in [false, true] {
+        let mut absent = FakeWire::ordinary();
+        let mut pane = json!({ "paneId": 1, "paneLineageId": "pl_1" });
+        if current_target_is_null {
+            pane["currentTarget"] = Value::Null;
+        }
+        absent.panes_list_payload = json!({ "panes": [pane] });
+        let absent_output = execute_with_wire(
+            invocation(
+                &temp,
+                Command::PaneDescribe,
+                pane_describe_input(&controller_id, "sf_1", 1),
+            ),
+            &mut absent,
+        )
+        .unwrap();
+        assert_eq!(absent_output.result["currentTarget"], Value::Null);
+        assert_eq!(absent_output.result["targetEpoch"], Value::Null);
+        assert_eq!(
+            absent
+                .operations
+                .iter()
+                .filter(|op| *op == "panes.list")
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn pane_describe_rejects_missing_lineage_and_missing_target_epoch() {
+    let temp = TempDir::new().unwrap();
+    let mut initialize = FakeWire::ordinary();
+    let controller_id =
+        execute_with_wire(invocation(&temp, Command::List, json!({})), &mut initialize)
+            .unwrap()
+            .controller_instance_id
+            .unwrap();
+
+    let mut missing_lineage = FakeWire::ordinary();
+    missing_lineage.panes_list_payload = json!({ "panes": [{ "paneId": 1 }] });
+    let error = execute_with_wire(
+        invocation(
+            &temp,
+            Command::PaneDescribe,
+            pane_describe_input(&controller_id, "sf_1", 1),
+        ),
+        &mut missing_lineage,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error, CliError::Protocol(message) if message == "invalid_panes_list_pane_lineage")
+    );
+
+    let mut missing_epoch = FakeWire::ordinary();
+    missing_epoch.panes_list_payload = json!({ "panes": [{
+        "paneId": 1,
+        "paneLineageId": "pl_1",
+        "currentTarget": {
+            "currentState": "current",
+            "paneLineageId": "pl_1",
+            "targetId": "tg_1",
+            "targetKind": "browser_url"
+        }
+    }] });
+    let error = execute_with_wire(
+        invocation(
+            &temp,
+            Command::PaneDescribe,
+            pane_describe_input(&controller_id, "sf_1", 1),
+        ),
+        &mut missing_epoch,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error, CliError::Protocol(message) if message == "invalid_panes_list_target_epoch")
+    );
+}
+
+#[test]
+fn pane_describe_rejects_ambiguous_or_inconsistent_pane_identity() {
+    let temp = TempDir::new().unwrap();
+    let mut initialize = FakeWire::ordinary();
+    let controller_id =
+        execute_with_wire(invocation(&temp, Command::List, json!({})), &mut initialize)
+            .unwrap()
+            .controller_instance_id
+            .unwrap();
+
+    let malformed = [
+        (
+            json!({
+                "panes": [
+                    { "paneId": 1, "paneLineageId": "pl_1" },
+                    { "paneId": 1, "paneLineageId": "pl_2" }
+                ]
+            }),
+            "duplicate_panes_list_pane_id",
+        ),
+        (
+            json!({
+                "panes": [{
+                    "paneId": 1,
+                    "paneLineageId": "pl_1",
+                    "currentTarget": {
+                        "currentState": "current",
+                        "paneLineageId": "pl_other",
+                        "targetEpoch": 1,
+                        "targetId": "tg_1",
+                        "targetKind": "browser_url"
+                    }
+                }]
+            }),
+            "panes_list_target_lineage_mismatch",
+        ),
+        (json!({ "panes": [] }), "pane_not_found"),
+    ];
+
+    for (payload, expected_error) in malformed {
+        let mut wire = FakeWire::ordinary();
+        wire.panes_list_payload = payload;
+        let error = execute_with_wire(
+            invocation(
+                &temp,
+                Command::PaneDescribe,
+                pane_describe_input(&controller_id, "sf_1", 1),
+            ),
+            &mut wire,
+        )
+        .unwrap_err();
+        assert!(matches!(error, CliError::Protocol(message) if message == expected_error));
+        assert_eq!(wire.operations, vec!["pair.request", "panes.list"]);
+        assert_eq!(wire.close_count, 1);
+    }
+}
+
+#[test]
+fn pane_describe_refuses_duplicate_live_controller_wrong_surface_unpaired_and_disconnects() {
+    let temp = TempDir::new().unwrap();
+    let mut initialize = FakeWire::ordinary();
+    let controller_id =
+        execute_with_wire(invocation(&temp, Command::List, json!({})), &mut initialize)
+            .unwrap()
+            .controller_instance_id
+            .unwrap();
+    let pane_input = pane_describe_input(&controller_id, "sf_1", 1);
+
+    let mut duplicate = FakeWire::ordinary();
+    duplicate.pair_rejection = Some(Envelope {
+        id: Some("rq_duplicate".into()),
+        op: "pair.request".into(),
+        payload: Some(json!({})),
+        envelope_type: "response".into(),
+        v: 1,
+        ok: Some(false),
+        error: Some(json!({ "code": "duplicate_controller_instance" })),
+        sent_at: None,
+    });
+    let error = execute_with_wire(
+        invocation(&temp, Command::PaneDescribe, pane_input.clone()),
+        &mut duplicate,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error, CliError::Rejected { ref operation, ref code } if operation == "pair.request" && code == "duplicate_controller_instance")
+    );
+    assert_eq!(duplicate.operations, vec!["pair.request"]);
+
+    let mut wrong_surface = FakeWire::ordinary();
+    wrong_surface.pair_surface_id_override = Some(json!("sf_other"));
+    let error = execute_with_wire(
+        invocation(&temp, Command::PaneDescribe, pane_input.clone()),
+        &mut wrong_surface,
+    )
+    .unwrap_err();
+    assert!(matches!(error, CliError::Protocol(message) if message == "surface_pair_mismatch"));
+    assert_eq!(wrong_surface.operations, vec!["pair.request"]);
+
+    let mut wrong_controller = FakeWire::ordinary();
+    wrong_controller.pair_controller_instance_id_override = Some(json!("ctl_other"));
+    let error = execute_with_wire(
+        invocation(&temp, Command::PaneDescribe, pane_input.clone()),
+        &mut wrong_controller,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error, CliError::Protocol(message) if message == "controller_identity_mismatch")
+    );
+    assert_eq!(wrong_controller.operations, vec!["pair.request"]);
+
+    let mut unpaired = FakeWire::ordinary();
+    unpaired.panes_list_rejection = Some("not_paired".into());
+    let error = execute_with_wire(
+        invocation(&temp, Command::PaneDescribe, pane_input.clone()),
+        &mut unpaired,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error, CliError::Rejected { ref operation, ref code } if operation == "panes.list" && code == "not_paired")
+    );
+    assert_eq!(unpaired.operations, vec!["pair.request", "panes.list"]);
+    assert_eq!(unpaired.close_count, 1);
+
+    let mut disconnected = FakeWire::ordinary();
+    disconnected.fail_after_send_on = Some("panes.list".into());
+    let error = execute_with_wire(
+        invocation(&temp, Command::PaneDescribe, pane_input),
+        &mut disconnected,
+    )
+    .unwrap_err();
+    assert!(matches!(error, CliError::Wire(_)));
+    assert_eq!(disconnected.operations, vec!["pair.request", "panes.list"]);
+    assert_eq!(disconnected.close_count, 1);
+}
+
+#[test]
 fn production_path_uses_lifecycle_discovery_then_surface_scoped_connection() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = format!("ws://{}", listener.local_addr().unwrap());
@@ -1954,6 +3620,79 @@ fn production_path_uses_lifecycle_discovery_then_surface_scoped_connection() {
         output.result["payload"]["operationReceipt"]["commitSequence"],
         11
     );
+    server.join().unwrap();
+}
+
+#[test]
+fn pane_describe_production_path_uses_one_sequential_same_root_surface_pair() {
+    let temp = TempDir::new().unwrap();
+    let mut initialize = FakeWire::ordinary();
+    let controller_id =
+        execute_with_wire(invocation(&temp, Command::List, json!({})), &mut initialize)
+            .unwrap()
+            .controller_instance_id
+            .unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("ws://{}", listener.local_addr().unwrap());
+    let server_controller_id = controller_id.clone();
+    let server = thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut socket = accept(stream).unwrap();
+        let pair = read_request(&mut socket);
+        assert_eq!(pair["op"], "pair.request");
+        assert_eq!(
+            pair["payload"]["controllerInstanceId"],
+            server_controller_id
+        );
+        assert_eq!(pair["payload"]["surfaceId"], "sf_1");
+        assert_eq!(pair["payload"]["controllerProductName"], "Clawline");
+        let mut paired = pair_payload(pair["payload"]["controllerInstanceId"].clone());
+        paired["surfaceId"] = json!("sf_1");
+        send_response(
+            &mut socket,
+            pair["id"].as_str().unwrap(),
+            "pair.request",
+            paired,
+        );
+
+        let panes = read_request(&mut socket);
+        assert_eq!(panes["op"], "panes.list");
+        assert_eq!(panes["payload"], json!({ "surfaceId": "sf_1" }));
+        send_response(
+            &mut socket,
+            panes["id"].as_str().unwrap(),
+            "panes.list",
+            json!({
+                "panes": [{
+                    "paneId": 1,
+                    "paneLineageId": "pl_1",
+                    "currentTarget": null
+                }]
+            }),
+        );
+        expect_orderly_close(&mut socket);
+    });
+
+    let mut call = invocation(
+        &temp,
+        Command::PaneDescribe,
+        pane_describe_input(&controller_id, "sf_1", 1),
+    );
+    call.endpoint = Some(endpoint);
+    let output = execute(call).unwrap();
+    assert_eq!(
+        output.controller_instance_id.as_deref(),
+        Some(controller_id.as_str())
+    );
+    assert_eq!(output.result["surfaceId"], "sf_1");
+    assert_eq!(output.result["paneId"], 1);
+    assert_eq!(output.result["paneLineageId"], "pl_1");
+    assert_eq!(output.result["currentTarget"], Value::Null);
+    assert_eq!(output.result["targetEpoch"], Value::Null);
     server.join().unwrap();
 }
 

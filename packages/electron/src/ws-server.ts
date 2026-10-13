@@ -1,3 +1,5 @@
+import { PanePaintWsRoute } from "./pane-paint-ws-route.js";
+import type { PaintAdapter } from "./pane-painted-observation.js";
 import http from "node:http";
 import { splitResizeMatches, splitResizeIsNoOp, type SplitResizeExpectation, type SplitResizeGeometry, splitResizeGeometryIsValid } from "./split-resize.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -25,6 +27,7 @@ import type {
   PanesListRequest,
   Request,
   Response,
+  SurfaceDescribeRequest,
   Selection,
   SnapshotGetRequest,
   SurfaceViewport,
@@ -36,6 +39,7 @@ import type {
   TopologyApplyRequest,
   Viewport,
 } from "../../protocol/src/index.js";
+import { validateEnvelopeType } from "../../protocol/src/validate.js";
 import {
   SURF_ACE_LOCKLESS_V1_CAPABILITY,
   locklessPaneScopeId,
@@ -80,6 +84,7 @@ import {
   SurfaceCore,
   SurfaceCoreError,
   type CoreEvent,
+  type PaneLabelAllocation,
 } from "./surface-core.js";
 import {
   LocklessAuthorityError,
@@ -133,7 +138,7 @@ type SocketMeta = {
 export type SurfaceWsServerOptions = {
   bindAddress?: string;
   capturePaneImage: (surfaceId: string, paneId: number) => Promise<string | null>;
-  claimPaneLabel?: (surfaceId: string, paneId: number, paneLineageId: string) => Promise<number>;
+  claimPaneLabel?: (surfaceId: string, paneId: number, paneLineageId: string) => Promise<number | PaneLabelAllocation>;
   core: SurfaceCore;
   endpointName: string;
   hostName: string;
@@ -145,6 +150,8 @@ export type SurfaceWsServerOptions = {
   onNativeMaterialized?: (surfaceId: string, materialization: NativePaneMaterialization) => void;
   onNativeReleased?: (surfaceId: string, paneIds: string[]) => Promise<void> | void;
   persistLocklessState?: () => Promise<void>;
+  isApplicationStateReady?: () => boolean;
+  beginApplicationStateMutation?: () => () => void;
   port: number;
   protocolVersion?: number;
   viewport: () => SurfaceViewport;
@@ -241,7 +248,7 @@ export class SurfaceWsServer {
   private readonly bindAddress: string;
   private readonly compositorSocketPath: string | null;
   private readonly core: SurfaceCore;
-  private readonly claimPaneLabel: (surfaceId: string, paneId: number, paneLineageId: string) => Promise<number>;
+  private readonly claimPaneLabel: (surfaceId: string, paneId: number, paneLineageId: string) => Promise<number | PaneLabelAllocation>;
   private readonly endpointName: string;
   private readonly hostName: string;
   private readonly getOverlayDiagnostics?: (surfaceId: string) => Record<string, unknown> | null;
@@ -253,6 +260,8 @@ export class SurfaceWsServer {
   private port: number;
   private readonly protocolVersion: number;
   private readonly persistLocklessState: () => Promise<void>;
+  private readonly isApplicationStateReady: () => boolean;
+  private readonly beginApplicationStateMutation: () => () => void;
   private readonly capturePaneImage: SurfaceWsServerOptions["capturePaneImage"];
   private readonly viewportProvider: SurfaceWsServerOptions["viewport"];
   private readonly pendingBrowserUrlApplies = new Map<string, PendingBrowserUrlApply>();
@@ -262,6 +271,8 @@ export class SurfaceWsServer {
   private readonly httpServer: http.Server;
   private readonly wss: WebSocketServer;
   private readonly socketMeta = new WeakMap<WebSocket, SocketMeta>();
+  private panePaintRoute: PanePaintWsRoute<WebSocket> | null = null;
+  private readonly ordinaryInFlight = new WeakMap<WebSocket, Map<string, number>>();
   private readonly locklessSessions = new Map<WebSocket, LocklessTransportSession>();
   private readonly mutationQueues = new Map<string, Promise<void>>();
   private nativePaneStatusRefresh: Promise<CompositorControlResponse | null> | null = null;
@@ -312,6 +323,8 @@ export class SurfaceWsServer {
         throw error;
       }
     };
+    this.isApplicationStateReady = options.isApplicationStateReady ?? (() => true);
+    this.beginApplicationStateMutation = options.beginApplicationStateMutation ?? (() => () => {});
     this.protocolVersion = options.protocolVersion ?? 1;
     this.viewportProvider = options.viewport;
     this.wsPath = options.wsPath ?? "/ws";
@@ -1051,6 +1064,23 @@ export class SurfaceWsServer {
     });
   }
 
+  // Unregistered private factory: no option, caller or capability may enable this prepared route.
+  private makePanePaintSourceRoute(adapter: (surfaceId: string, paneId: number) => PaintAdapter | null): PanePaintWsRoute<WebSocket> | null {
+    const enabled = false;
+    if (!enabled) return null;
+    return new PanePaintWsRoute({
+      enabled: true,
+      clock: { now: () => performance.now(), schedule: (callback, ms) => { const timer = setTimeout(callback, ms); return () => clearTimeout(timer); } },
+      pairedSurface: socket => this.locklessSessions.get(socket)?.surfaceId ?? null,
+      ordinaryIdRetained: (socket, id) => this.socketMeta.get(socket)?.cache.has(id) === true || this.ordinaryInFlight.get(socket)?.has(id) === true,
+      adapter,
+      open: socket => socket.readyState === WebSocket.OPEN,
+      bufferedBytes: socket => socket.bufferedAmount,
+      send: (socket, encoded) => this.send(socket, encoded),
+      terminate: socket => socket.close(4410, "diagnostic_publication_incomplete"),
+    });
+  }
+
   private async handleMessage(socket: WebSocket, raw: string): Promise<void> {
     const initialMeta = this.socketMeta.get(socket);
     let parsedRequest: Request | LocklessRequest;
@@ -1066,6 +1096,14 @@ export class SurfaceWsServer {
         },
       );
       socket.close(4410, "protocol_violation");
+      return;
+    }
+    if (this.panePaintRoute && (parsedRequest as { op: string }).op === "diagnostics.pane_paint.get") {
+      await this.panePaintRoute.handle(socket, parsedRequest);
+      return;
+    }
+    if (parsedRequest.op === "surface.describe") {
+      await this.reply(socket, this.handleSurfaceDescribe(parsedRequest as SurfaceDescribeRequest));
       return;
     }
     if (
@@ -1119,7 +1157,44 @@ export class SurfaceWsServer {
     );
   }
 
-  private async handleLocklessMessage(
+  private async handleLocklessMessage(socket: WebSocket, request: LocklessRequest): Promise<void> {
+    if (!this.panePaintRoute) return this.handleOrdinaryLocklessMessage(socket, request);
+    if (this.panePaintRoute?.hasDiagnosticId(socket, request.id)) {
+      await this.send(socket, JSON.stringify(errorResponse(request.op, request.id as never,
+        "invalid_request_id_reuse", "Request ID is retained by the diagnostic metadata ledger")));
+      return;
+    }
+    let pending = this.ordinaryInFlight.get(socket);
+    if (!pending) { pending = new Map(); this.ordinaryInFlight.set(socket, pending); }
+    pending.set(request.id, (pending.get(request.id) ?? 0) + 1);
+    try { await this.handleOrdinaryLocklessMessage(socket, request); }
+    finally {
+      const count = pending.get(request.id) ?? 1;
+      if (count <= 1) pending.delete(request.id); else pending.set(request.id, count - 1);
+    }
+  }
+
+  private async handleOrdinaryLocklessMessage(
+    socket: WebSocket,
+    request: LocklessRequest,
+  ): Promise<void> {
+    const session = this.locklessSessions.get(socket);
+    // surface.describe bypasses the authority queue, so fence the full mutation
+    // dispatch through its durable receipt write and response.
+    const changesApplicationState = request.op === "pair.request" ||
+      (session !== undefined && locklessOperationMutates(request.op));
+    if (!changesApplicationState) {
+      return await this.handleOrdinaryLocklessMessageBody(socket, request);
+    }
+    const finishMutation = this.beginApplicationStateMutation();
+    try {
+      await this.handleOrdinaryLocklessMessageBody(socket, request);
+    } finally {
+      finishMutation();
+    }
+  }
+
+  private async handleOrdinaryLocklessMessageBody(
     socket: WebSocket,
     request: LocklessRequest,
   ): Promise<void> {
@@ -2682,11 +2757,13 @@ export class SurfaceWsServer {
           );
           const newPaneIds: number[] = [];
           const newPaneLabels: number[] = [];
+          const newPaneAllocationGenerations: Array<number | null> = [];
           const newPaneLineageIds: string[] = [];
           const usedIds = new Set(
             [
               ...topology.panes.map((pane) => Number(pane.paneId)),
               ...this.core.locklessAuthority.retainedPaneIds(surfaceId),
+              ...this.core.locklessAuthority.unavailablePaneIds(surfaceId),
             ],
           );
           for (let index = 1; index < request.payload.count; index += 1) {
@@ -2695,9 +2772,11 @@ export class SurfaceWsServer {
             newPaneIds.push(identity.paneId);
             const lineageId = `pl_${randomUUID().replaceAll("-", "")}`;
             newPaneLineageIds.push(lineageId);
-            newPaneLabels.push(await claimPaneLabelOrUnnumbered(
+            const allocation = await claimPaneLabelOrUnnumbered(
               this.claimPaneLabel, surfaceId, identity.paneId, lineageId,
-            ));
+            );
+            newPaneLabels.push(allocation.paneLabel);
+            newPaneAllocationGenerations.push(allocation.allocationGeneration);
           }
           const panes = this.core.transaction(() => this.core.paneSplit(surfaceId, {
             count: request.payload.count,
@@ -2705,12 +2784,17 @@ export class SurfaceWsServer {
             newPaneIds,
             newPaneLabels,
             newPaneLineageIds,
+            newPaneAllocationGenerations,
             paneId: request.payload.paneId,
           }));
           this.assertLocklessRecoverableCapacity(surfaceId, rollbackRecord);
           const numberedPanes = newPaneIds.flatMap((paneId, index) => {
             const paneLabel = newPaneLabels[index]!;
-            return paneLabel > 0 ? [{ paneId: String(paneId), paneLabel }] : [];
+            const allocationGeneration = newPaneAllocationGenerations[index];
+            return paneLabel > 0 && allocationGeneration !== null
+              ? [{ allocationGeneration, paneId: String(paneId),
+                  paneLineageId: newPaneLineageIds[index]!, paneLabel }]
+              : [];
           });
           if (numberedPanes.length > 0) {
             this.core.confirmRegistryPaneLabels([{ surfaceId, panes: numberedPanes }]);
@@ -2846,9 +2930,39 @@ export class SurfaceWsServer {
           // Claim before mutating the retained ledger so allocator failure leaves
           // the tombstone intact. The authority work queue held by this request
           // prevents a competing restore/reclaim while the claim is in flight.
-          pane.paneLabel = await claimPaneLabelOrUnnumbered(
+          const allocation = await claimPaneLabelOrUnnumbered(
             this.claimPaneLabel, surfaceId, pane.paneId, pane.paneLineageId,
           );
+          if (allocation.paneLabel < 1) {
+            if (pane.paneLabel > 0 || pane.allocationGeneration !== null) {
+              throw new SurfaceCoreError(
+                "invalid_operation",
+                "Pane restore requires current allocator confirmation; the tombstone remains recoverable",
+              );
+            }
+            // A pane that has never held a fleet label can be restored offline
+            // by its stable local identity; it remains unnumbered and cannot
+            // authorize a release.
+          } else if (allocation.allocationGeneration === null) {
+            // A generation-unaware allocator is tolerated only for legacy
+            // state while reuse is unavailable. It cannot release a label or
+            // replace a generation-confirmed allocation.
+            if (pane.allocationGeneration !== null ||
+                (pane.paneLabel > 0 && pane.paneLabel !== allocation.paneLabel)) {
+              throw new SurfaceCoreError(
+                "invalid_operation",
+                "Restored pane allocation no longer matches its saved identity",
+              );
+            }
+            pane.paneLabel = allocation.paneLabel;
+          } else {
+            if ((pane.paneLabel > 0 && pane.paneLabel !== allocation.paneLabel) ||
+                (pane.allocationGeneration !== null && allocation.allocationGeneration !== pane.allocationGeneration)) {
+              throw new SurfaceCoreError("invalid_operation", "Restored pane allocation no longer matches its saved identity");
+            }
+            pane.paneLabel = allocation.paneLabel;
+            pane.allocationGeneration = allocation.allocationGeneration;
+          }
           return this.core.locklessAuthority.transaction(() => {
             this.core.locklessAuthority.restoreTombstone(
               request.payload.tombstoneId,
@@ -2860,10 +2974,10 @@ export class SurfaceWsServer {
               request.payload.anchorPaneId,
               request.payload.direction,
             );
-            if (pane.paneLabel > 0) {
+            if (pane.paneLabel > 0 && pane.allocationGeneration !== null) {
               this.core.confirmRegistryPaneLabels([{ surfaceId, panes: [{
                 paneId: String(pane.paneId), paneLineageId: pane.paneLineageId,
-                paneLabel: pane.paneLabel,
+                allocationGeneration: pane.allocationGeneration, paneLabel: pane.paneLabel,
               }] }]);
             }
             return restored;
@@ -2923,8 +3037,17 @@ export class SurfaceWsServer {
         current.panes.map((pane) => [Number(pane.paneId), pane]),
       );
       const retained = this.core.locklessAuthority.retainedPaneIds(surfaceId);
-      const usedIds = new Set([...existing.keys(), ...retained]);
-      const created = new Map<number, { name: string | null; paneLabel: number; paneLineageId: string }>();
+      const usedIds = new Set([
+        ...existing.keys(),
+        ...retained,
+        ...this.core.locklessAuthority.unavailablePaneIds(surfaceId),
+      ]);
+      const created = new Map<number, {
+        allocationGeneration: number | null;
+        name: string | null;
+        paneLabel: number;
+        paneLineageId: string;
+      }>();
       const materialize = (value: unknown): TopologyApplyRequest["payload"]["layout"] => {
         if (!value || typeof value !== "object") {
           throw new SurfaceCoreError(
@@ -2966,6 +3089,7 @@ export class SurfaceWsServer {
           usedIds.add(identity.paneId);
           created.set(identity.paneId, {
             name: typeof node.name === "string" ? node.name : null,
+            allocationGeneration: null,
             paneLabel: 0,
             paneLineageId: `pl_${randomUUID().replaceAll("-", "")}`,
           });
@@ -3056,9 +3180,11 @@ export class SurfaceWsServer {
         resultingIds.size,
       );
       for (const [paneId, entry] of created) {
-        entry.paneLabel = await claimPaneLabelOrUnnumbered(
+        const allocation = await claimPaneLabelOrUnnumbered(
           this.claimPaneLabel, surfaceId, paneId, entry.paneLineageId,
         );
+        entry.paneLabel = allocation.paneLabel;
+        entry.allocationGeneration = allocation.allocationGeneration;
       }
       const panes = [...resultingIds].map((paneId) => {
         const prior = existing.get(paneId);
@@ -3083,11 +3209,14 @@ export class SurfaceWsServer {
               topologyRevision:
                 (request.payload.expectedTopologyRevision + 1) as never,
               windowLabel: current.windowLabel,
-            }, new Map([...created].map(([paneId, entry]) => [paneId, entry.paneLineageId])));
+            }, new Map([...created].map(([paneId, entry]) => [paneId, entry.paneLineageId])),
+            new Map([...created].map(([paneId, entry]) => [paneId, entry.allocationGeneration])));
           this.assertLocklessRecoverableCapacity(surfaceId, beforeRecord);
           const numberedPanes = [...created].flatMap(([paneId, entry]) =>
-            entry.paneLabel > 0
-              ? [{ paneId: String(paneId), paneLabel: entry.paneLabel }]
+            entry.paneLabel > 0 && entry.allocationGeneration !== null
+              ? [{ allocationGeneration: entry.allocationGeneration,
+                  paneId: String(paneId), paneLineageId: entry.paneLineageId,
+                  paneLabel: entry.paneLabel }]
               : [],
           );
           if (numberedPanes.length > 0) {
@@ -3214,6 +3343,131 @@ export class SurfaceWsServer {
       type: "response",
       v: 1,
     } as unknown as Response;
+  }
+
+  private handleSurfaceDescribe(request: SurfaceDescribeRequest): Response {
+    if (request.v !== 1) {
+      return errorResponse("surface.describe", request.id, "unsupported_protocol_version",
+        "surface.describe requires protocol version 1");
+    }
+    const validation = validateEnvelopeType("surface.describe", request);
+    if (!validation.ok || !Number.isSafeInteger(request.sentAt) || request.sentAt < 0 ||
+        !/^[a-f0-9]{32,128}$/.test(request.payload?.nonce ?? "")) {
+      return errorResponse("surface.describe", request.id, "invalid_payload",
+        validation.ok ? "surface.describe payload is invalid" : validation.reason);
+    }
+    if (this.persistenceOutcomeUnknown || !this.isApplicationStateReady()) {
+      return errorResponse("surface.describe", request.id, "not_ready",
+        "Client application state is not ready for an authoritative pre-pair observation");
+    }
+    let binding: ReturnType<SurfaceCore["registryBinding"]>;
+    let lease: ReturnType<SurfaceCore["registryEndpointLease"]>;
+    try {
+      binding = this.core.registryBinding();
+      lease = this.core.registryEndpointLease();
+    } catch {
+      return errorResponse("surface.describe", request.id, "not_ready",
+        "Persisted registry authority is invalid or unavailable");
+    }
+    if (!binding || !lease) {
+      return errorResponse("surface.describe", request.id, "not_ready",
+        "A persisted registry identity and endpoint lease are required");
+    }
+    if (request.payload.clientId !== binding.clientId ||
+        request.payload.registryIdentity.allocatorId !== binding.allocatorId ||
+        request.payload.registryIdentity.fleetId !== binding.fleetId ||
+        request.payload.endpointLeaseGeneration !== lease.leaseGeneration) {
+      return errorResponse("surface.describe", request.id, "identity_mismatch",
+        "Requested registry identity or endpoint lease does not match the persisted client binding");
+    }
+    if (!this.core.listSurfaces().some((surface) => surface.surfaceId === request.payload.surfaceId)) {
+      return errorResponse("surface.describe", request.id, "surface_not_found",
+        "Requested surface is not live on this endpoint");
+    }
+    const surfaceSetBefore = this.core.locklessAuthority.surfaceSetRevision;
+    let before: ReturnType<SurfaceCore["pairState"]>;
+    let snapshot: ReturnType<SurfaceCore["pairState"]>;
+    let surfaceSetAfter: number;
+    try {
+      before = this.core.pairState(request.payload.surfaceId);
+      snapshot = this.core.pairState(request.payload.surfaceId);
+      surfaceSetAfter = this.core.locklessAuthority.surfaceSetRevision;
+    } catch (error) {
+      if (error instanceof SurfaceCoreError && error.code === "invalid_payload") {
+        return errorResponse("surface.describe", request.id, "surface_not_found",
+          "Requested surface is not live on this endpoint");
+      }
+      return errorResponse("surface.describe", request.id, "internal_error",
+        "Client could not read authoritative surface state");
+    }
+    if (surfaceSetBefore !== surfaceSetAfter || before.topologyRevision !== snapshot.topologyRevision) {
+      return errorResponse("surface.describe", request.id, "revision_churn",
+        "Surface set or topology changed while the observation was collected");
+    }
+    const observedAtMs = Date.now();
+    if (!Number.isSafeInteger(observedAtMs) || observedAtMs < 0 ||
+        !Number.isSafeInteger(surfaceSetAfter) || surfaceSetAfter < 0 ||
+        !Number.isSafeInteger(snapshot.topologyRevision) || snapshot.topologyRevision < 0) {
+      return errorResponse("surface.describe", request.id, "not_ready",
+        "Client revision or observation clock is unavailable");
+    }
+    const panes = snapshot.panes.map((pane) => ({
+      paneId: Number(pane.paneId),
+      paneLabel: pane.paneLabel,
+      contentObservation: {
+        revision: Number.isSafeInteger(pane.currentRevision) && pane.currentRevision >= 0
+          ? Number(pane.currentRevision) : null,
+        source: "client-authority" as const,
+        observedAtMs,
+      },
+    }));
+    const layoutPaneIds: number[] = [];
+    const visit = (node: typeof snapshot.layout): boolean => {
+      if (node.type === "pane") {
+        layoutPaneIds.push(Number(node.paneId));
+        return true;
+      }
+      return node.type === "split" && node.children.length > 0 && node.children.every(visit);
+    };
+    const paneIds = panes.map((pane) => pane.paneId);
+    if (!visit(snapshot.layout) || panes.length === 0 ||
+        panes.some((pane) => !Number.isSafeInteger(pane.paneId) || pane.paneId < 1 ||
+          (pane.paneLabel !== null && (!Number.isSafeInteger(pane.paneLabel) || pane.paneLabel < 1)) ||
+          (pane.contentObservation.revision !== null &&
+            (!Number.isSafeInteger(pane.contentObservation.revision) || pane.contentObservation.revision < 0))) ||
+        new Set(paneIds).size !== paneIds.length ||
+        layoutPaneIds.length !== paneIds.length ||
+        new Set(layoutPaneIds).size !== layoutPaneIds.length ||
+        layoutPaneIds.some((paneId) => !paneIds.includes(paneId))) {
+      return errorResponse("surface.describe", request.id, "not_ready",
+        "Client cannot produce a complete authoritative topology observation");
+    }
+    const response: Response = {
+      id: request.id as Request["id"],
+      ok: true,
+      op: "surface.describe",
+      payload: {
+        nonce: request.payload.nonce,
+        clientId: binding.clientId,
+        registryIdentity: { allocatorId: binding.allocatorId, fleetId: binding.fleetId },
+        surfaceId: request.payload.surfaceId,
+        endpointLeaseGeneration: lease.leaseGeneration,
+        observedAtMs,
+        applicationReadiness: { status: "ready", limitationCodes: [] },
+        surfaceSetRevision: surfaceSetAfter,
+        topologyRevision: snapshot.topologyRevision,
+        layout: snapshot.layout,
+        panes,
+      },
+      sentAt: Date.now(),
+      type: "response",
+      v: 1,
+    } as Response;
+    if (Buffer.byteLength(JSON.stringify(response), "utf8") > 65_536) {
+      return errorResponse("surface.describe", request.id, "not_ready",
+        "Authoritative surface observation exceeds the response bound");
+    }
+    return response;
   }
 
   private async handleRuntimeAppBinding(request: Request): Promise<Response> {
@@ -3414,10 +3668,14 @@ export class SurfaceWsServer {
     });
     const queued = previous.catch(() => undefined).then(() => current);
     this.mutationQueues.set(surfaceId, queued);
-    await previous.catch(() => undefined);
+    // Renderer and lifecycle mutations also need to hide candidate geometry
+    // while they wait for resolution, apply native geometry, or roll back.
+    const finishMutation = this.beginApplicationStateMutation();
     try {
+      await previous.catch(() => undefined);
       return await operation();
     } finally {
+      finishMutation();
       releaseQueue();
       if (this.mutationQueues.get(surfaceId) === queued) {
         this.mutationQueues.delete(surfaceId);
@@ -3719,6 +3977,7 @@ export class SurfaceWsServer {
     const payload = await this.runProviderWindowLabelMutation(() => this.runSurfaceMutation(surfaceId, async () => {
       const livePanes = this.core.getSurface(surfaceId).panes;
       const newPaneLineages = new Map<number, string>();
+      const newPaneAllocationGenerations = new Map<number, number | null>();
       const authoritativePanes = [];
       for (const pane of request.payload.panes) {
         const paneId = Number(pane.paneId);
@@ -3728,13 +3987,17 @@ export class SurfaceWsServer {
         const existing = livePanes.get(paneId);
         const lineageId = existing?.paneLineageId ?? `pl_${randomUUID().replaceAll("-", "")}`;
         if (!existing) newPaneLineages.set(paneId, lineageId);
+        let paneLabel = existing?.paneLabel ?? 0;
+        if (!existing) {
+          const allocation = await claimPaneLabelOrUnnumbered(
+            this.claimPaneLabel, surfaceId, paneId, lineageId,
+          );
+          paneLabel = allocation.paneLabel;
+          newPaneAllocationGenerations.set(paneId, allocation.allocationGeneration);
+        }
         authoritativePanes.push({
           ...pane,
-          paneLabel: existing
-            ? existing.paneLabel
-            : await claimPaneLabelOrUnnumbered(
-                this.claimPaneLabel, surfaceId, paneId, lineageId,
-              ),
+          paneLabel,
         });
       }
       const authoritativePayload = { ...request.payload, panes: authoritativePanes };
@@ -3749,16 +4012,16 @@ export class SurfaceWsServer {
         ? this.core.projectCurrentNativePaneGeometry(surfaceId, retainedNativePaneIds)
         : null;
       try {
-        const result = this.core.topologyApply(surfaceId, authoritativePayload, newPaneLineages);
-        const numberedPanes = result.panes.flatMap((pane) =>
-          pane.paneLabel > 0
-            ? [{
-                paneId: String(pane.paneId),
-                paneLineageId: pane.paneLineageId,
-                paneLabel: pane.paneLabel,
-              }]
-            : [],
+        const result = this.core.topologyApply(
+          surfaceId, authoritativePayload, newPaneLineages, newPaneAllocationGenerations,
         );
+        const numberedPanes = [...newPaneAllocationGenerations].flatMap(([paneId, allocationGeneration]) => {
+          const pane = this.core.getSurface(surfaceId).panes.get(paneId);
+          return pane && pane.paneLabel > 0 && allocationGeneration !== null
+            ? [{ allocationGeneration, paneId: String(paneId), paneLineageId: pane.paneLineageId,
+                paneLabel: pane.paneLabel }]
+            : [];
+        });
         if (numberedPanes.length > 0) {
           this.core.confirmRegistryPaneLabels([{ surfaceId, panes: numberedPanes }]);
         }
@@ -4904,18 +5167,28 @@ export class SurfaceWsServer {
         new Set(paneIds).size !== paneIds.length) {
       throw new SurfaceCoreError("invalid_payload", "pane.split newPaneIds must be unique positive integers");
     }
+    const unavailablePaneIds = new Set([
+      ...this.core.topologyState(surfaceId).panes.map((pane) => Number(pane.paneId)),
+      ...this.core.locklessAuthority.retainedPaneIds(surfaceId),
+      ...this.core.locklessAuthority.unavailablePaneIds(surfaceId),
+    ]);
+    if (paneIds.some((paneId) => unavailablePaneIds.has(paneId))) {
+      throw new SurfaceCoreError("invalid_payload", "pane.split cannot reuse a live, retained, or retired pane identity");
+    }
     const newPaneLineageIds = request.payload.newPaneIds.map(() =>
       `pl_${randomUUID().replaceAll("-", "")}`,
     );
-    const newPaneLabels: number[] = [];
+    const allocations: PaneLabelAllocation[] = [];
     for (let index = 0; index < request.payload.newPaneIds.length; index += 1) {
-      newPaneLabels.push(await claimPaneLabelOrUnnumbered(
+      allocations.push(await claimPaneLabelOrUnnumbered(
         this.claimPaneLabel,
         surfaceId,
         paneIds[index]!,
         newPaneLineageIds[index]!,
       ));
     }
+    const newPaneLabels = allocations.map((allocation) => allocation.paneLabel);
+    const newPaneAllocationGenerations = allocations.map((allocation) => allocation.allocationGeneration);
     const splitPayload = {
       count: request.payload.count,
       direction: request.payload.direction,
@@ -4923,6 +5196,7 @@ export class SurfaceWsServer {
       // The caller's visible labels are compatibility input only; allocator
       // authority supplies every committed label, or zero when unavailable.
       newPaneLabels,
+      newPaneAllocationGenerations,
       newPaneLineageIds,
       paneId: Number(request.payload.paneId),
     };
@@ -4934,11 +5208,11 @@ export class SurfaceWsServer {
         : null;
       try {
         const result = this.core.paneSplit(surfaceId, splitPayload);
-        const numberedPanes = result.panes.flatMap((pane) =>
-          pane.paneLabel > 0
-            ? [{ paneId: String(pane.paneId), paneLineageId: newPaneLineageIds[
-                splitPayload.newPaneIds.indexOf(pane.paneId)
-              ], paneLabel: pane.paneLabel }]
+        const numberedPanes = allocations.flatMap((allocation, index) =>
+          allocation.paneLabel > 0 && allocation.allocationGeneration !== null
+            ? [{ allocationGeneration: allocation.allocationGeneration,
+                paneId: String(paneIds[index]!), paneLineageId: newPaneLineageIds[index]!,
+                paneLabel: allocation.paneLabel }]
             : [],
         );
         if (numberedPanes.length > 0) {
@@ -5496,6 +5770,8 @@ export class SurfaceWsServer {
   }
 
   private handleSocketClosed(socket: WebSocket): void {
+    this.panePaintRoute?.close(socket);
+    this.ordinaryInFlight.delete(socket);
     const locklessSession = this.locklessSessions.get(socket);
     if (locklessSession) {
       this.locklessSessions.delete(socket);
@@ -6157,14 +6433,23 @@ async function claimPaneLabelOrUnnumbered(
   surfaceId: string,
   paneId: number,
   paneLineageId: string,
-): Promise<number> {
+): Promise<PaneLabelAllocation> {
   try {
-    const label = await claim(surfaceId, paneId, paneLineageId);
-    return Number.isSafeInteger(label) && label > 0 ? label : 0;
+    const result = await claim(surfaceId, paneId, paneLineageId);
+    const allocation = typeof result === "number"
+      ? { allocationGeneration: null, paneLabel: result }
+      : result;
+    return Number.isSafeInteger(allocation.paneLabel) && allocation.paneLabel > 0
+      ? {
+          allocationGeneration: Number.isSafeInteger(allocation.allocationGeneration) &&
+            Number(allocation.allocationGeneration) > 0 ? Number(allocation.allocationGeneration) : null,
+          paneLabel: allocation.paneLabel,
+        }
+      : { allocationGeneration: null, paneLabel: 0 };
   } catch {
     // Any failed claim leaves fleet authority unconfirmed. The local topology
     // operation may still commit the pane, but it must remain unnumbered until
     // a later client.register supplies an authoritative lineage assignment.
-    return 0;
+    return { allocationGeneration: null, paneLabel: 0 };
   }
 }
