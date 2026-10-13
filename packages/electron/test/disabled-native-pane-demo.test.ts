@@ -4,7 +4,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-const packageDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
+const packageDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 async function demoSource(): Promise<string> {
   return fs.readFile(path.join(packageDir, "scripts", "disabled-native-pane-demo.mjs"), "utf8");
