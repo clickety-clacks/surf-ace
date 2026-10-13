@@ -6,14 +6,25 @@ import XCTest
 @MainActor
 final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
     func testDoneHeldLocalFailureStopsSpinnerWithoutChangingAuthorityOrHistory() async throws {
+        try await assertDoneLocalFailure(storageFault: false)
+    }
+
+    func testDoneActualStoreWriteFailurePreservesModeHistoryAndAuthority() async throws {
+        try await assertDoneLocalFailure(storageFault: true)
+    }
+
+    private func assertDoneLocalFailure(storageFault: Bool) async throws {
         let suiteName = "SurfAceDoneLocalFailure-\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        let stateURL = FileManager.default.temporaryDirectory.appendingPathComponent("\(suiteName).json")
-        let gate = SurfAceAnnotationDoneMutationGate()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(suiteName, isDirectory: true)
+        let authorityDirectory = directory.appendingPathComponent("authority", isDirectory: true)
+        let preservedDirectory = directory.appendingPathComponent("authority-preserved", isDirectory: true)
+        let stateURL = authorityDirectory.appendingPathComponent("state.json")
+        let gate = SurfAceAnnotationDoneMutationGate(failAfterRelease: !storageFault)
         addTeardownBlock { await gate.release() }
         addTeardownBlock {
             defaults.removePersistentDomain(forName: suiteName)
-            try? FileManager.default.removeItem(at: stateURL)
+            try? FileManager.default.removeItem(at: directory)
         }
         let runtime = SurfAceRuntime(
             userDefaults: defaults, locklessStateURL: stateURL,
@@ -72,6 +83,19 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         let held = expectation(description: "Done suspended before durable mode mutation")
         Task { await gate.waitUntilHeld(); held.fulfill() }
         await fulfillment(of: [held], timeout: 5)
+        let durableBefore = try Data(contentsOf: stateURL)
+        if storageFault {
+            // Only this fixture's disposable storage is blocked. The real
+            // generation store must fail creating its parent, before commit.
+            try FileManager.default.moveItem(at: authorityDirectory, to: preservedDirectory)
+            try Data("test-owned write blocker".utf8).write(to: authorityDirectory)
+        }
+        defer {
+            if storageFault {
+                try? FileManager.default.removeItem(at: authorityDirectory)
+                try? FileManager.default.moveItem(at: preservedDirectory, to: authorityDirectory)
+            }
+        }
         runtime.setAnnotationMode(surfaceId: surface.surfaceId, paneId: pane.paneId,
                                   enabled: false, fingerDrawEnabled: false)
         XCTAssertEqual(pane.annotationDoneGeneration, generation)
@@ -92,6 +116,9 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         XCTAssertEqual(after, before)
         let attempts = await gate.attemptCount()
         XCTAssertEqual(attempts, 1)
+        let durableAfter = try Data(contentsOf: storageFault
+            ? preservedDirectory.appendingPathComponent("state.json") : stateURL)
+        XCTAssertEqual(durableAfter, durableBefore, "failed Done must not replace the accepted generation")
     }
 
     func testRecoverableDirectStageCapacityLossDrainsGapBeforeLaterFrame() async throws {
@@ -2081,6 +2108,8 @@ private actor SurfAceAnnotationDoneMutationGate {
     private var held = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
     private var attempts = 0
+    private let failAfterRelease: Bool
+    init(failAfterRelease: Bool = true) { self.failAfterRelease = failAfterRelease }
     func prepare(enabled: Bool) async throws {
         guard !enabled else { return }
         attempts += 1
@@ -2088,7 +2117,7 @@ private actor SurfAceAnnotationDoneMutationGate {
         let pending = waiters; waiters.removeAll()
         pending.forEach { $0.resume() }
         await gate.wait()
-        throw Injected.storageUnavailable
+        if failAfterRelease { throw Injected.storageUnavailable }
     }
     func waitUntilHeld() async {
         if held { return }
