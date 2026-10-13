@@ -132,7 +132,7 @@ test("pre-pair describe hides candidate topology through held geometry and rollb
   const server = new SurfaceWsServer({
     beginApplicationStateMutation: () => readiness.beginAuthorityMutation(),
     capturePaneImage: async () => null,
-    claimPaneLabel: async (_surfaceId, paneId) => paneId,
+    claimPaneLabel: async (_surfaceId, paneId) => ({ allocationGeneration: paneId, paneLabel: paneId }),
     compositorSocketPath: null,
     core,
     endpointName: "readiness geometry fixture",

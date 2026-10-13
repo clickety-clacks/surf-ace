@@ -1,7 +1,7 @@
 import { createHash, createPublicKey } from "node:crypto";
 import { PublicControllerWireClient, parseRegistryIdentity } from "../../controller/src/wire.js";
 import { matchesProvisionedClaims, type ProvisionedRegistryBinding } from "./registry-binding.js";
-import type { PersistentRegistryEndpointLease, SurfaceCore } from "./surface-core.js";
+import type { PaneLabelAllocation, PersistentRegistryEndpointLease, SurfaceCore } from "./surface-core.js";
 
 export function registrationClientId(publicKeyPem: string): string {
   return createHash("sha256").update(createPublicKey(publicKeyPem).export({ format: "der", type: "spki" })).digest("hex");
@@ -64,16 +64,22 @@ export class ConfiguredServerRegistration {
     return this.wire.onClose(listener);
   }
 
-  async claimPaneLabel(surfaceId: string, paneId: number, paneLineageId: string): Promise<number> {
+  async claimPaneLabel(surfaceId: string, paneId: number, paneLineageId: string): Promise<PaneLabelAllocation> {
     if (this.stopped || !this.wire.isOpen()) throw new Error("allocator_unavailable");
     await this.confirmRegistryIdentity();
     const response = await this.wire.request("pane.claim", {
       clientId: this.clientId, surfaceId, paneId: String(paneId), paneLineageId,
     });
     if (!response.ok) throw new Error(response.error?.message ?? "pane_allocation_failed");
-    const label = (response.payload as { paneLabel?: unknown })?.paneLabel;
-    if (!Number.isSafeInteger(label) || Number(label) < 1) throw new Error("invalid_pane_assignment");
-    return Number(label);
+    const payload = response.payload as { allocationGeneration?: unknown; paneLabel?: unknown };
+    if (!Number.isSafeInteger(payload?.paneLabel) || Number(payload.paneLabel) < 1 ||
+        !Number.isSafeInteger(payload?.allocationGeneration) || Number(payload.allocationGeneration) < 1) {
+      throw new Error("invalid_pane_assignment");
+    }
+    return {
+      allocationGeneration: Number(payload.allocationGeneration),
+      paneLabel: Number(payload.paneLabel),
+    };
   }
 
   async synchronize(): Promise<void> {
@@ -81,19 +87,32 @@ export class ConfiguredServerRegistration {
       if (this.stopped) return;
       await this.wire.connect();
       await this.confirmRegistryIdentity();
-      for (const surface of this.core.listSurfaces()) this.core.admitSurfaceToLockless(surface.surfaceId);
-      const response = await this.wire.request("client.register", {
-        clientId: this.clientId,
-        directEndpoint: this.directEndpoint,
-        prePairDescribeV1: true,
-        surfaces: this.core.listSurfaces().map((surface) => ({
-          surfaceId: surface.surfaceId,
-          panes: [...surface.panes.values()].map((pane) => ({
-            paneId: String(pane.paneId), paneLabel: pane.paneLabel,
-            paneLineageId: pane.paneLineageId,
-          })),
-        })),
-      });
+      const registrationPayload = await this.core.locklessAuthority.transactionAsync(() =>
+        this.core.transactionAsync(async () => {
+          for (const surface of this.core.listSurfaces()) this.core.admitSurfaceToLockless(surface.surfaceId);
+          const payload = {
+            clientId: this.clientId,
+            directEndpoint: this.directEndpoint,
+            allocationGenerationV1: true,
+            prePairDescribeV1: true,
+            pendingPaneReleases: this.core.locklessAuthority.listPendingPaneReleases(),
+            surfaces: this.core.listSurfaces().map((surface) => ({
+              surfaceId: surface.surfaceId,
+              panes: [...surface.panes.values()].map((pane) => ({
+                allocationGeneration: pane.allocationGeneration,
+                paneId: String(pane.paneId), paneLabel: pane.paneLabel,
+                paneLineageId: pane.paneLineageId,
+              })),
+            })),
+          };
+          // Snapshot, client persistence, and release evidence share the same
+          // lifecycle/authority turn. A concurrent rollback cannot export an
+          // uncommitted retirement to the allocator.
+          if (payload.pendingPaneReleases.length > 0) await this.persist();
+          return payload;
+        }),
+      );
+      const response = await this.wire.request("client.register", registrationPayload);
       if (!response.ok) throw new Error(response.error?.message ?? "registration_failed");
       if (response.type !== "response" || response.v !== 1 || response.op !== "client.register") {
         throw new Error("invalid_registration_response");
@@ -104,6 +123,7 @@ export class ConfiguredServerRegistration {
         directEndpoint?: unknown;
         endpointLease?: unknown;
         prePairDescribeV1?: unknown;
+        completedPaneReleaseIds?: unknown;
         surfaces?: unknown;
       };
       const endpointLease = registrationEndpointLease(response.payload);
@@ -124,17 +144,25 @@ export class ConfiguredServerRegistration {
       }
       const payload = response.payload as { clientId: string; surfaces: Array<{
         surfaceId: string; windowLabel: string;
-        panes: Array<{ paneId: string; paneLineageId: string; paneLabel: number }>;
-      }> };
+        panes: Array<{ allocationGeneration: number; paneId: string; paneLineageId: string; paneLabel: number }>;
+      }>; completedPaneReleaseIds?: string[] };
       const expectedSurfaceIds = new Set(this.core.listSurfaces().map((surface) => surface.surfaceId));
       if (payload.clientId !== this.clientId || !Array.isArray(payload.surfaces) ||
           payload.surfaces.length !== expectedSurfaceIds.size ||
           payload.surfaces.some((surface) => !expectedSurfaceIds.delete(surface.surfaceId)) ||
           expectedSurfaceIds.size !== 0) throw new Error("invalid_registration_response");
+      const pendingReleaseIds = new Set(registrationPayload.pendingPaneReleases.map((release) => release.releaseId));
+      if (!Array.isArray(payload.completedPaneReleaseIds) ||
+          new Set(payload.completedPaneReleaseIds).size !== payload.completedPaneReleaseIds.length ||
+          payload.completedPaneReleaseIds.length !== pendingReleaseIds.size ||
+          payload.completedPaneReleaseIds.some((releaseId) => typeof releaseId !== "string" || !pendingReleaseIds.has(releaseId))) {
+        throw new Error("invalid_registration_response");
+      }
       await this.core.locklessAuthority.transactionAsync(() =>
         this.core.transactionAsync(async () => {
           this.core.applyWindowLabels(payload.surfaces);
           this.core.applyRegistryPaneLabels(payload.surfaces);
+          this.core.locklessAuthority.acknowledgePaneReleases(payload.completedPaneReleaseIds ?? []);
           this.core.setRegistryEndpointLease(endpointLease);
           await this.persist();
         }),
@@ -154,7 +182,9 @@ export class ConfiguredServerRegistration {
           binding.fleetId !== identity.fleetId) throw new Error("foreign_registry_identity");
       // Reconfirm durability on every mutation attempt. An ambiguous prior write
       // may leave the exact candidate in memory while local persistence is fenced.
-      await this.persist();
+      await this.core.locklessAuthority.transactionAsync(() =>
+        this.core.transactionAsync(async () => { await this.persist(); }),
+      );
       return;
     }
     const claims = this.core.confirmedRegistryClaims();

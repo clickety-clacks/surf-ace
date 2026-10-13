@@ -143,6 +143,7 @@ type PaneState = {
   } | null;
   nativeWindowGroup: NativePaneWindowGroupDiagnostic | null;
   paneId: number;
+  allocationGeneration: number | null;
   paneLabel: number;
   paneLineageId: string;
   pendingAnnotationCommit: boolean;
@@ -230,7 +231,7 @@ export type PersistentRegistryEndpointLease = {
 };
 
 export type ConfirmedRegistryClaim = {
-  panes: Array<{ paneId: string; paneLabel: number; paneLineageId: string }>;
+  panes: Array<{ allocationGeneration: number | null; paneId: string; paneLabel: number; paneLineageId: string }>;
   surfaceId: string;
   windowLabel: string;
 };
@@ -270,6 +271,7 @@ type PersistentPaneRecord = {
   name: string | null;
   nextRevision?: number;
   paneId: number;
+  allocationGeneration?: number | null;
   paneLabel: number;
   paneLineageId: string;
   pendingAnnotationCommit: boolean;
@@ -354,6 +356,11 @@ export type CoreEvent =
   | { contentId: string | null; direction: "back" | "forward"; paneId: number; revision: number; surfaceId: string; type: "history-navigated" }
   | { surfaceId: string; type: "topology-changed"; topology?: ReturnType<SurfaceCore["publicTopologyState"]>; admittedOccurrence?: { record: ConsumableRecord | null } }
   | { paneId: number; surfaceId: string; type: "drawing-dirty" };
+
+export type PaneLabelAllocation = {
+  allocationGeneration: number | null;
+  paneLabel: number;
+};
 
 export class SurfaceCoreError extends Error {
   constructor(
@@ -684,7 +691,7 @@ export class SurfaceCore {
    */
   private readonly inFlightAdmissionSequences = new Set<number>();
   private readonly surfaces = new Map<string, SurfaceState>();
-  private readonly confirmedPaneLabels = new Map<string, { pane: PaneState; label: number }>();
+  private readonly confirmedPaneLabels = new Map<string, { allocationGeneration: number; pane: PaneState; label: number }>();
   private readonly listeners = new Set<(event: CoreEvent) => void>();
   private pendingEvents: CoreEvent[] | null = null;
   private deferredVerifiedEvents: { state: string; events: CoreEvent[] } | null = null;
@@ -957,7 +964,7 @@ export class SurfaceCore {
       surfaceId: string,
       windowLabel: string,
       windowLabelConfirmed: boolean | null | undefined,
-      panes: Array<{ paneId: number; paneLabel: number; paneLineageId: string }>,
+      panes: Array<{ allocationGeneration?: number | null; paneId: number; paneLabel: number; paneLineageId: string }>,
     ) => {
       const confirmed = panes.filter((pane) => pane.paneLabel > 0);
       if ((!isValidWindowLabel(windowLabel) || windowLabelConfirmed === false) && confirmed.length === 0) return;
@@ -966,6 +973,7 @@ export class SurfaceCore {
       for (const pane of confirmed) {
         if (!claim.panes.some((existing) => existing.paneId === String(pane.paneId))) {
           claim.panes.push({
+            allocationGeneration: pane.allocationGeneration ?? null,
             paneId: String(pane.paneId), paneLabel: pane.paneLabel, paneLineageId: pane.paneLineageId,
           });
         }
@@ -1497,7 +1505,10 @@ export class SurfaceCore {
         bootstrapPane &&
         isPristineProviderBootstrapPane(bootstrapPane, true)
       ) {
-        const identity = this.locklessAuthority.allocatePaneIdentity([]);
+        const identity = this.locklessAuthority.allocatePaneIdentity([
+          ...this.locklessAuthority.retainedPaneIds(surfaceId),
+          ...this.locklessAuthority.unavailablePaneIds(surfaceId),
+        ]);
         this.ensureInitialPane(
           surface,
           identity.paneId,
@@ -2641,9 +2652,9 @@ export class SurfaceCore {
 
   applyRegistryPaneLabels(assignments: Array<{
     surfaceId: string;
-    panes: Array<{ paneId: string; paneLineageId: string; paneLabel: number }>;
+    panes: Array<{ allocationGeneration: number; paneId: string; paneLineageId: string; paneLabel: number }>;
   }>): void {
-    const proposed = new Map<string, number>();
+    const proposed = new Map<string, { allocationGeneration: number; paneLabel: number }>();
     const labels = new Set<number>();
     for (const assignment of assignments) {
       const surface = this.getSurface(assignment.surfaceId);
@@ -2656,17 +2667,26 @@ export class SurfaceCore {
         if (!Number.isSafeInteger(paneId) || !surface.panes.has(paneId) ||
             surface.panes.get(paneId)?.paneLineageId !== pane.paneLineageId ||
             !Number.isSafeInteger(pane.paneLabel) || pane.paneLabel < 1 ||
+            !Number.isSafeInteger(pane.allocationGeneration) || pane.allocationGeneration < 1 ||
+            (surface.panes.get(paneId)?.paneLabel !== undefined &&
+              surface.panes.get(paneId)!.paneLabel > 0 &&
+              surface.panes.get(paneId)!.paneLabel !== pane.paneLabel) ||
+            (surface.panes.get(paneId)?.allocationGeneration !== null &&
+              surface.panes.get(paneId)?.allocationGeneration !== undefined &&
+              surface.panes.get(paneId)?.allocationGeneration !== pane.allocationGeneration) ||
             proposed.has(key) || labels.has(pane.paneLabel)) {
           throw new SurfaceCoreError("invalid_payload", "Invalid or duplicate registry pane assignment");
         }
-        proposed.set(key, pane.paneLabel);
+        proposed.set(key, { allocationGeneration: pane.allocationGeneration, paneLabel: pane.paneLabel });
         labels.add(pane.paneLabel);
       }
     }
     this.transaction(() => {
-      for (const [key, paneLabel] of proposed) {
+      for (const [key, allocation] of proposed) {
         const [surfaceId, paneIdText] = key.split("\0");
-        this.getSurface(surfaceId!).panes.get(Number(paneIdText))!.paneLabel = paneLabel;
+        const pane = this.getSurface(surfaceId!).panes.get(Number(paneIdText))!;
+        pane.paneLabel = allocation.paneLabel;
+        pane.allocationGeneration = allocation.allocationGeneration;
         this.emit({ surfaceId: surfaceId!, type: "surface-changed" });
       }
     });
@@ -2674,7 +2694,7 @@ export class SurfaceCore {
 
   confirmRegistryPaneLabels(assignments: Array<{
     surfaceId: string;
-    panes: Array<{ paneId: string; paneLineageId?: string; paneLabel: number }>;
+    panes: Array<{ allocationGeneration?: number | null; paneId: string; paneLineageId?: string; paneLabel: number }>;
   }>): void {
     for (const [key, confirmation] of this.confirmedPaneLabels) {
       const [surfaceId, paneIdText] = key.split("\0");
@@ -2684,15 +2704,19 @@ export class SurfaceCore {
     }
     for (const assignment of assignments) {
       for (const pane of assignment.panes) {
+        if (!Number.isSafeInteger(pane.allocationGeneration) || Number(pane.allocationGeneration) < 1) {
+          continue;
+        }
         const paneId = Number(pane.paneId);
         const material = this.getSurface(assignment.surfaceId).panes.get(paneId);
         if (!material || !Number.isSafeInteger(pane.paneLabel) || pane.paneLabel < 1 ||
             material.paneLabel !== pane.paneLabel ||
+            material.allocationGeneration !== pane.allocationGeneration ||
             (pane.paneLineageId && material.paneLineageId !== pane.paneLineageId)) {
           throw new SurfaceCoreError("invalid_payload", "Registry pane confirmation changed before projection");
         }
         this.confirmedPaneLabels.set(`${assignment.surfaceId}\0${paneId}`, {
-          pane: material, label: pane.paneLabel,
+          allocationGeneration: Number(pane.allocationGeneration), pane: material, label: pane.paneLabel,
         });
       }
       this.emit({ surfaceId: assignment.surfaceId, type: "surface-changed" });
@@ -2709,7 +2733,8 @@ export class SurfaceCore {
 
   private isRegistryPaneConfirmed(surfaceId: string, paneId: number, pane: PaneState): boolean {
     const confirmed = this.confirmedPaneLabels.get(`${surfaceId}\0${paneId}`);
-    return confirmed?.pane === pane && confirmed.label === pane.paneLabel;
+    return confirmed?.pane === pane && confirmed.label === pane.paneLabel &&
+      confirmed.allocationGeneration === pane.allocationGeneration;
   }
 
   assertProviderWindowLabelAvailable(surfaceId: string, windowLabel: string): void {
@@ -2780,6 +2805,7 @@ export class SurfaceCore {
     surfaceId: string,
     payload: AuthoritativeTopologyPayload,
     newPaneLineageIds?: Map<number, string>,
+    newPaneAllocationGenerations?: Map<number, number | null>,
   ): TopologyApplyResponse["payload"] {
     const surface = this.getSurface(surfaceId);
     assertValidWindowLabel(payload.windowLabel);
@@ -2799,8 +2825,12 @@ export class SurfaceCore {
     for (const paneId of activePaneIds) {
       const summary = paneStateById.get(paneId)!;
       const existingPane = existingPanes.get(paneId);
+      if (existingPane && existingPane.paneLabel !== summary.paneLabel) {
+        throw new SurfaceCoreError("invalid_payload", "topology.apply cannot change an existing pane label");
+      }
       const pane = existingPane ?? createPaneState(
         paneId, summary.paneLabel, this.now(), newPaneLineageIds?.get(paneId),
+        newPaneAllocationGenerations?.get(paneId) ?? null,
       );
       pane.paneLabel = summary.paneLabel;
       pane.name = summary.name;
@@ -3138,7 +3168,15 @@ export class SurfaceCore {
 
   paneSplit(
     surfaceId: string,
-    payload: { count: number; direction: "horizontal" | "vertical"; newPaneIds: number[]; newPaneLabels: number[]; newPaneLineageIds?: string[]; paneId: number },
+    payload: {
+      count: number;
+      direction: "horizontal" | "vertical";
+      newPaneIds: number[];
+      newPaneLabels: number[];
+      newPaneLineageIds?: string[];
+      newPaneAllocationGenerations?: Array<number | null>;
+      paneId: number;
+    },
   ): { panes: PaneSplitState[] } {
     const surface = this.getSurface(surfaceId);
     const sourcePane = this.expectPane(surfaceId, payload.paneId);
@@ -3167,6 +3205,7 @@ export class SurfaceCore {
     }
     const newPanes = newPaneIds.map((paneId, index) => createPaneState(
       paneId, newPaneLabels[index]!, this.now(), payload.newPaneLineageIds?.[index],
+      payload.newPaneAllocationGenerations?.[index] ?? null,
     ));
     for (const pane of newPanes) {
       surface.panes.set(pane.paneId, pane);
@@ -3407,13 +3446,17 @@ export class SurfaceCore {
   capturePaneTombstonePayload(
     surfaceId: string,
     paneId: number,
-  ): { pane: PersistentPaneRecord; paneOrderIndex: number } {
+  ): { closeTopologyRevision: number; pane: PersistentPaneRecord; paneOrderIndex: number } {
     const record = serializeSurface(this.getSurface(surfaceId));
     const pane = record.panes.find((candidate) => candidate.paneId === paneId);
     if (!pane) {
       throw new SurfaceCoreError("invalid_payload", `Unknown pane: ${paneId}`);
     }
     return {
+      // paneClose and topology.apply each commit exactly one topology revision
+      // after this snapshot is captured. Retain that revision; closedSequence
+      // is ordered retention metadata and cannot authorize allocator release.
+      closeTopologyRevision: record.topologyRevision + 1,
       pane: structuredClone(pane),
       paneOrderIndex: record.paneOrder.indexOf(paneId),
     };
@@ -4046,6 +4089,9 @@ export class SurfaceCore {
       if (currentPane.paneLabel === initialPaneLabel) {
         return false;
       }
+      if (currentPane.allocationGeneration !== null) {
+        throw new SurfaceCoreError("invalid_payload", "Provider bootstrap cannot change a confirmed pane label");
+      }
       currentPane.paneLabel = initialPaneLabel;
       return true;
     }
@@ -4134,7 +4180,13 @@ type PaneSplitState = {
   paneLabel: number;
 };
 
-function createPaneState(paneId: number, paneLabel: number, now: number, paneLineageId?: string): PaneState {
+function createPaneState(
+  paneId: number,
+  paneLabel: number,
+  now: number,
+  paneLineageId?: string,
+  allocationGeneration: number | null = null,
+): PaneState {
   return {
     annotating: false,
     annotationFrameOpen: false,
@@ -4162,6 +4214,8 @@ function createPaneState(paneId: number, paneLabel: number, now: number, paneLin
     nativeHost: null,
     nativeWindowGroup: null,
     paneId,
+    allocationGeneration: Number.isSafeInteger(allocationGeneration) && Number(allocationGeneration) > 0
+      ? Number(allocationGeneration) : null,
     paneLabel,
     paneLineageId: paneLineageId ?? `pl_${randomUUID().replaceAll("-", "")}`,
     pendingAnnotationCommit: false,
@@ -4211,6 +4265,7 @@ function serializeSurface(surface: SurfaceState): PersistentSurfaceRecord {
         name: pane.name,
         nextRevision: pane.nextRevision,
         paneId: pane.paneId,
+        allocationGeneration: pane.allocationGeneration,
         paneLabel: pane.paneLabel,
         paneLineageId: pane.paneLineageId,
         pendingAnnotationCommit: pane.pendingAnnotationCommit,
@@ -4246,6 +4301,8 @@ function deserializeSurface(record: PersistentSurfaceRecord, now: number): Surfa
       Number.isInteger(paneRecord.paneLabel) && paneRecord.paneLabel > 0 ? paneRecord.paneLabel : 0,
       now,
     );
+    pane.allocationGeneration = Number.isSafeInteger(paneRecord.allocationGeneration) &&
+      Number(paneRecord.allocationGeneration) > 0 ? Number(paneRecord.allocationGeneration) : null;
     pane.annotating = Boolean(paneRecord.annotating);
     pane.annotationFrameOpen = Boolean(paneRecord.annotationFrameOpen);
     pane.deliveredClosedFrameCount = Number(paneRecord.deliveredClosedFrameCount ?? 0);

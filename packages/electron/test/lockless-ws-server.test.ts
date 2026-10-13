@@ -33,7 +33,71 @@ import { PersistenceWriteReadiness } from "../src/persistence-write-readiness.js
 
 let nextPort = 25901;
 let nextTestRegistryPaneLabel = 100_000;
-const claimTestRegistryPaneLabel = async (): Promise<number> => nextTestRegistryPaneLabel++;
+const testRegistryPaneClaims = new Map<string, { allocationGeneration: number; paneLabel: number }>();
+const claimTestRegistryPaneLabel = async (surfaceId: string, paneId: number, paneLineageId: string) => {
+  const key = `${surfaceId}\0${paneId}\0${paneLineageId}`;
+  const existing = testRegistryPaneClaims.get(key);
+  if (existing) return existing;
+  const paneLabel = nextTestRegistryPaneLabel++;
+  const allocation = { allocationGeneration: paneLabel, paneLabel };
+  testRegistryPaneClaims.set(key, allocation);
+  return allocation;
+};
+
+test("pane.split assigns a fresh internal ID above terminally retired paneIds", async () => {
+  const surfaceId = "sf_retired_id_guard";
+  const lockless = createEmptyLocklessClientState(DEFAULT_LOCKLESS_LIMITS);
+  for (let paneId = 2; paneId <= 8; paneId += 1) {
+    lockless.paneIdentityReservations.push({
+      lineageId: `pl_retired_identity_${paneId}`,
+      paneId: String(paneId),
+      surfaceId,
+      tombstoneId: `pt_retired_identity_${paneId}`,
+      tombstoneKind: "pane",
+    });
+  }
+  const core = new SurfaceCore({
+    persistentState: { lockless, primarySurfaceId: surfaceId, version: 1 },
+  });
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  initializeRegistryBootstrapPanes(core);
+  let allocationRequests = 0;
+  const port = nextPort++;
+  const server = new SurfaceWsServer({
+    bindAddress: "127.0.0.1",
+    capturePaneImage: async () => null,
+    claimPaneLabel: async (...args) => {
+      allocationRequests += 1;
+      return claimTestRegistryPaneLabel(...args);
+    },
+    compositorSocketPath: null,
+    core,
+    endpointName: "Surf Ace",
+    hostName: "localhost",
+    port,
+    viewport: () => ({ height: 800, scale: 2, width: 1200 }),
+  });
+  await server.start();
+  const socket = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+  try {
+    assert.equal((await pair(socket, "retired-pane-id-client", surface.surfaceId)).ok, true);
+    const before = core.pairState(surface.surfaceId);
+    const split = await request(socket, "pane.split", {
+      count: 2,
+      direction: "horizontal",
+      expectedTopologyRevision: Number(before.topologyRevision),
+      paneId: Number(before.panes[0]!.paneId),
+      surfaceId: surface.surfaceId,
+    });
+    assert.equal(split.ok, true, JSON.stringify(split));
+    assert.equal(allocationRequests, 1);
+    assert.deepEqual(split.payload.panes.map((pane: { paneId: number }) => Number(pane.paneId)), [1, 9],
+      "pane.split skips IDs 2–8 because those identities are terminally retired");
+  } finally {
+    socket.close();
+    await server.stop();
+  }
+});
 
 function initializeRegistryBootstrapPanes(core: SurfaceCore): void {
   const assignments = core.listSurfaces().map(({ surfaceId }, surfaceIndex) => {
@@ -46,6 +110,7 @@ function initializeRegistryBootstrapPanes(core: SurfaceCore): void {
     return {
       surfaceId,
       panes: core.panesList(surfaceId).panes.map((pane) => ({
+        allocationGeneration: paneLabel,
         paneId: String(pane.paneId),
         paneLineageId: pane.paneLineageId,
         paneLabel,
@@ -2094,9 +2159,14 @@ test("new panes stay unnumbered when the registry rejects a pane claim and recov
       new Set(registrationPanes.filter((pane: any) => pane.paneLabel === 0).map((pane: any) => pane.paneLineageId)),
       unnumberedLineages,
     );
-    const labelsByLineage = new Map<string, number>();
+    const allocationsByLineage = new Map<string, { allocationGeneration: number; paneLabel: number }>();
     let nextLabel = 900;
-    for (const pane of registrationPanes) labelsByLineage.set(pane.paneLineageId, nextLabel++);
+    for (const pane of registrationPanes) {
+      allocationsByLineage.set(pane.paneLineageId, {
+        allocationGeneration: pane.allocationGeneration ?? nextLabel,
+        paneLabel: pane.paneLabel > 0 ? pane.paneLabel : nextLabel++,
+      });
+    }
     registrationSocket.send(JSON.stringify({
       id: registrationRequest.id,
       ok: true,
@@ -2109,9 +2179,11 @@ test("new panes stay unnumbered when the registry rejects a pane claim and recov
           windowLabel: "a",
           panes: entry.panes.map((pane: any) => ({
             ...pane,
-            paneLabel: labelsByLineage.get(pane.paneLineageId),
+            ...allocationsByLineage.get(pane.paneLineageId),
           })),
         })),
+        completedPaneReleaseIds: (registrationRequest.payload.pendingPaneReleases ?? [])
+          .map((release: any) => release.releaseId),
       },
       type: "response",
       v: 1,
@@ -2119,7 +2191,7 @@ test("new panes stay unnumbered when the registry rejects a pane claim and recov
     await synchronize;
     const recovered = core.panesList(surface.surfaceId).panes;
     for (const pane of recovered) {
-      assert.equal(pane.paneLabel, labelsByLineage.get(pane.paneLineageId));
+      assert.equal(pane.paneLabel, allocationsByLineage.get(pane.paneLineageId)?.paneLabel);
     }
     assert.equal(new Set(recovered.map((pane) => pane.paneLabel)).size, recovered.length);
   } finally {
@@ -2127,6 +2199,89 @@ test("new panes stay unnumbered when the registry rejects a pane claim and recov
     controller.close();
     for (const socket of registry.clients) socket.terminate();
     await new Promise<void>((resolve) => registry.close(() => resolve()));
+    await server.stop();
+  }
+});
+
+test("pane restore refuses an unavailable current allocation and keeps its tombstone retryable", async () => {
+  const core = new SurfaceCore();
+  const surface = core.ensurePrimarySurface("Surf Ace", {
+    height: 800,
+    scale: 2,
+    width: 1200,
+  });
+  initializeRegistryBootstrapPanes(core);
+  let refusedLineage: string | null = null;
+  const port = nextPort++;
+  const server = new SurfaceWsServer({
+    capturePaneImage: async () => null,
+    claimPaneLabel: async (surfaceId, paneId, paneLineageId) => {
+      if (paneLineageId === refusedLineage) throw new Error("pane_generation_retired");
+      return claimTestRegistryPaneLabel(surfaceId, paneId, paneLineageId);
+    },
+    compositorSocketPath: null,
+    core,
+    endpointName: "Surf Ace",
+    hostName: "localhost",
+    port,
+    viewport: () => ({ height: 800, scale: 2, width: 1200 }),
+  });
+  await server.start();
+  const controller = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+  try {
+    assert.equal((await pair(controller, "restore-fence-controller", surface.surfaceId)).ok, true);
+    const base = (await request(controller, "panes.list", { surfaceId: surface.surfaceId })).payload;
+    const split = await request(controller, "pane.split", {
+      count: 2,
+      direction: "horizontal",
+      expectedTopologyRevision: base.topology.topologyRevision,
+      paneId: Number(base.panes[0].paneId),
+      surfaceId: surface.surfaceId,
+    });
+    assert.equal(split.ok, true, JSON.stringify(split));
+    const created = (await request(controller, "panes.list", { surfaceId: surface.surfaceId })).payload.panes
+      .find((pane: any) => pane.paneId !== base.panes[0].paneId);
+    assert.ok(created?.paneLabel > 0);
+    const allocated = core.confirmedRegistryClaims().find((entry) => entry.surfaceId === surface.surfaceId)
+      ?.panes.find((pane) => pane.paneLineageId === created.paneLineageId);
+    assert.ok(allocated?.allocationGeneration && allocated.allocationGeneration > 0);
+    const closed = await request(controller, "pane.close", {
+      expectedTopologyRevision: split.payload.topologyRevision,
+      paneId: Number(created.paneId),
+      surfaceId: surface.surfaceId,
+    });
+    assert.equal(closed.ok, true, JSON.stringify(closed));
+
+    refusedLineage = created.paneLineageId;
+    const refused = await request(controller, "pane.restore", {
+      anchorPaneId: Number(base.panes[0].paneId),
+      direction: "vertical",
+      expectedTopologyRevision: closed.payload.topologyRevision,
+      surfaceId: surface.surfaceId,
+      tombstoneId: closed.payload.tombstoneId,
+    });
+    assert.equal(refused.ok, false);
+    let panes = (await request(controller, "panes.list", { surfaceId: surface.surfaceId })).payload.panes;
+    assert.equal(panes.some((pane: any) => pane.paneId === created.paneId), false,
+      "a stale or unavailable allocator claim cannot reinsert the pane");
+
+    refusedLineage = null;
+    const restored = await request(controller, "pane.restore", {
+      anchorPaneId: Number(base.panes[0].paneId),
+      direction: "vertical",
+      expectedTopologyRevision: closed.payload.topologyRevision,
+      surfaceId: surface.surfaceId,
+      tombstoneId: closed.payload.tombstoneId,
+    });
+    assert.equal(restored.ok, true, JSON.stringify(restored));
+    panes = (await request(controller, "panes.list", { surfaceId: surface.surfaceId })).payload.panes;
+    const restoredPane = panes.find((pane: any) => pane.paneId === created.paneId);
+    assert.equal(restoredPane.paneLabel, created.paneLabel);
+    const restoredAllocation = core.confirmedRegistryClaims().find((entry) => entry.surfaceId === surface.surfaceId)
+      ?.panes.find((pane) => pane.paneLineageId === created.paneLineageId);
+    assert.equal(restoredAllocation?.allocationGeneration, allocated?.allocationGeneration);
+  } finally {
+    controller.close();
     await server.stop();
   }
 });

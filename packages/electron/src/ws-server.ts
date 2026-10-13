@@ -84,6 +84,7 @@ import {
   SurfaceCore,
   SurfaceCoreError,
   type CoreEvent,
+  type PaneLabelAllocation,
 } from "./surface-core.js";
 import {
   LocklessAuthorityError,
@@ -137,7 +138,7 @@ type SocketMeta = {
 export type SurfaceWsServerOptions = {
   bindAddress?: string;
   capturePaneImage: (surfaceId: string, paneId: number) => Promise<string | null>;
-  claimPaneLabel?: (surfaceId: string, paneId: number, paneLineageId: string) => Promise<number>;
+  claimPaneLabel?: (surfaceId: string, paneId: number, paneLineageId: string) => Promise<number | PaneLabelAllocation>;
   core: SurfaceCore;
   endpointName: string;
   hostName: string;
@@ -247,7 +248,7 @@ export class SurfaceWsServer {
   private readonly bindAddress: string;
   private readonly compositorSocketPath: string | null;
   private readonly core: SurfaceCore;
-  private readonly claimPaneLabel: (surfaceId: string, paneId: number, paneLineageId: string) => Promise<number>;
+  private readonly claimPaneLabel: (surfaceId: string, paneId: number, paneLineageId: string) => Promise<number | PaneLabelAllocation>;
   private readonly endpointName: string;
   private readonly hostName: string;
   private readonly getOverlayDiagnostics?: (surfaceId: string) => Record<string, unknown> | null;
@@ -2756,11 +2757,13 @@ export class SurfaceWsServer {
           );
           const newPaneIds: number[] = [];
           const newPaneLabels: number[] = [];
+          const newPaneAllocationGenerations: Array<number | null> = [];
           const newPaneLineageIds: string[] = [];
           const usedIds = new Set(
             [
               ...topology.panes.map((pane) => Number(pane.paneId)),
               ...this.core.locklessAuthority.retainedPaneIds(surfaceId),
+              ...this.core.locklessAuthority.unavailablePaneIds(surfaceId),
             ],
           );
           for (let index = 1; index < request.payload.count; index += 1) {
@@ -2769,9 +2772,11 @@ export class SurfaceWsServer {
             newPaneIds.push(identity.paneId);
             const lineageId = `pl_${randomUUID().replaceAll("-", "")}`;
             newPaneLineageIds.push(lineageId);
-            newPaneLabels.push(await claimPaneLabelOrUnnumbered(
+            const allocation = await claimPaneLabelOrUnnumbered(
               this.claimPaneLabel, surfaceId, identity.paneId, lineageId,
-            ));
+            );
+            newPaneLabels.push(allocation.paneLabel);
+            newPaneAllocationGenerations.push(allocation.allocationGeneration);
           }
           const panes = this.core.transaction(() => this.core.paneSplit(surfaceId, {
             count: request.payload.count,
@@ -2779,12 +2784,17 @@ export class SurfaceWsServer {
             newPaneIds,
             newPaneLabels,
             newPaneLineageIds,
+            newPaneAllocationGenerations,
             paneId: request.payload.paneId,
           }));
           this.assertLocklessRecoverableCapacity(surfaceId, rollbackRecord);
           const numberedPanes = newPaneIds.flatMap((paneId, index) => {
             const paneLabel = newPaneLabels[index]!;
-            return paneLabel > 0 ? [{ paneId: String(paneId), paneLabel }] : [];
+            const allocationGeneration = newPaneAllocationGenerations[index];
+            return paneLabel > 0 && allocationGeneration !== null
+              ? [{ allocationGeneration, paneId: String(paneId),
+                  paneLineageId: newPaneLineageIds[index]!, paneLabel }]
+              : [];
           });
           if (numberedPanes.length > 0) {
             this.core.confirmRegistryPaneLabels([{ surfaceId, panes: numberedPanes }]);
@@ -2920,9 +2930,39 @@ export class SurfaceWsServer {
           // Claim before mutating the retained ledger so allocator failure leaves
           // the tombstone intact. The authority work queue held by this request
           // prevents a competing restore/reclaim while the claim is in flight.
-          pane.paneLabel = await claimPaneLabelOrUnnumbered(
+          const allocation = await claimPaneLabelOrUnnumbered(
             this.claimPaneLabel, surfaceId, pane.paneId, pane.paneLineageId,
           );
+          if (allocation.paneLabel < 1) {
+            if (pane.paneLabel > 0 || pane.allocationGeneration !== null) {
+              throw new SurfaceCoreError(
+                "invalid_operation",
+                "Pane restore requires current allocator confirmation; the tombstone remains recoverable",
+              );
+            }
+            // A pane that has never held a fleet label can be restored offline
+            // by its stable local identity; it remains unnumbered and cannot
+            // authorize a release.
+          } else if (allocation.allocationGeneration === null) {
+            // A generation-unaware allocator is tolerated only for legacy
+            // state while reuse is unavailable. It cannot release a label or
+            // replace a generation-confirmed allocation.
+            if (pane.allocationGeneration !== null ||
+                (pane.paneLabel > 0 && pane.paneLabel !== allocation.paneLabel)) {
+              throw new SurfaceCoreError(
+                "invalid_operation",
+                "Restored pane allocation no longer matches its saved identity",
+              );
+            }
+            pane.paneLabel = allocation.paneLabel;
+          } else {
+            if ((pane.paneLabel > 0 && pane.paneLabel !== allocation.paneLabel) ||
+                (pane.allocationGeneration !== null && allocation.allocationGeneration !== pane.allocationGeneration)) {
+              throw new SurfaceCoreError("invalid_operation", "Restored pane allocation no longer matches its saved identity");
+            }
+            pane.paneLabel = allocation.paneLabel;
+            pane.allocationGeneration = allocation.allocationGeneration;
+          }
           return this.core.locklessAuthority.transaction(() => {
             this.core.locklessAuthority.restoreTombstone(
               request.payload.tombstoneId,
@@ -2934,10 +2974,10 @@ export class SurfaceWsServer {
               request.payload.anchorPaneId,
               request.payload.direction,
             );
-            if (pane.paneLabel > 0) {
+            if (pane.paneLabel > 0 && pane.allocationGeneration !== null) {
               this.core.confirmRegistryPaneLabels([{ surfaceId, panes: [{
                 paneId: String(pane.paneId), paneLineageId: pane.paneLineageId,
-                paneLabel: pane.paneLabel,
+                allocationGeneration: pane.allocationGeneration, paneLabel: pane.paneLabel,
               }] }]);
             }
             return restored;
@@ -2997,8 +3037,17 @@ export class SurfaceWsServer {
         current.panes.map((pane) => [Number(pane.paneId), pane]),
       );
       const retained = this.core.locklessAuthority.retainedPaneIds(surfaceId);
-      const usedIds = new Set([...existing.keys(), ...retained]);
-      const created = new Map<number, { name: string | null; paneLabel: number; paneLineageId: string }>();
+      const usedIds = new Set([
+        ...existing.keys(),
+        ...retained,
+        ...this.core.locklessAuthority.unavailablePaneIds(surfaceId),
+      ]);
+      const created = new Map<number, {
+        allocationGeneration: number | null;
+        name: string | null;
+        paneLabel: number;
+        paneLineageId: string;
+      }>();
       const materialize = (value: unknown): TopologyApplyRequest["payload"]["layout"] => {
         if (!value || typeof value !== "object") {
           throw new SurfaceCoreError(
@@ -3040,6 +3089,7 @@ export class SurfaceWsServer {
           usedIds.add(identity.paneId);
           created.set(identity.paneId, {
             name: typeof node.name === "string" ? node.name : null,
+            allocationGeneration: null,
             paneLabel: 0,
             paneLineageId: `pl_${randomUUID().replaceAll("-", "")}`,
           });
@@ -3130,9 +3180,11 @@ export class SurfaceWsServer {
         resultingIds.size,
       );
       for (const [paneId, entry] of created) {
-        entry.paneLabel = await claimPaneLabelOrUnnumbered(
+        const allocation = await claimPaneLabelOrUnnumbered(
           this.claimPaneLabel, surfaceId, paneId, entry.paneLineageId,
         );
+        entry.paneLabel = allocation.paneLabel;
+        entry.allocationGeneration = allocation.allocationGeneration;
       }
       const panes = [...resultingIds].map((paneId) => {
         const prior = existing.get(paneId);
@@ -3157,11 +3209,14 @@ export class SurfaceWsServer {
               topologyRevision:
                 (request.payload.expectedTopologyRevision + 1) as never,
               windowLabel: current.windowLabel,
-            }, new Map([...created].map(([paneId, entry]) => [paneId, entry.paneLineageId])));
+            }, new Map([...created].map(([paneId, entry]) => [paneId, entry.paneLineageId])),
+            new Map([...created].map(([paneId, entry]) => [paneId, entry.allocationGeneration])));
           this.assertLocklessRecoverableCapacity(surfaceId, beforeRecord);
           const numberedPanes = [...created].flatMap(([paneId, entry]) =>
-            entry.paneLabel > 0
-              ? [{ paneId: String(paneId), paneLabel: entry.paneLabel }]
+            entry.paneLabel > 0 && entry.allocationGeneration !== null
+              ? [{ allocationGeneration: entry.allocationGeneration,
+                  paneId: String(paneId), paneLineageId: entry.paneLineageId,
+                  paneLabel: entry.paneLabel }]
               : [],
           );
           if (numberedPanes.length > 0) {
@@ -3922,6 +3977,7 @@ export class SurfaceWsServer {
     const payload = await this.runProviderWindowLabelMutation(() => this.runSurfaceMutation(surfaceId, async () => {
       const livePanes = this.core.getSurface(surfaceId).panes;
       const newPaneLineages = new Map<number, string>();
+      const newPaneAllocationGenerations = new Map<number, number | null>();
       const authoritativePanes = [];
       for (const pane of request.payload.panes) {
         const paneId = Number(pane.paneId);
@@ -3931,13 +3987,17 @@ export class SurfaceWsServer {
         const existing = livePanes.get(paneId);
         const lineageId = existing?.paneLineageId ?? `pl_${randomUUID().replaceAll("-", "")}`;
         if (!existing) newPaneLineages.set(paneId, lineageId);
+        let paneLabel = existing?.paneLabel ?? 0;
+        if (!existing) {
+          const allocation = await claimPaneLabelOrUnnumbered(
+            this.claimPaneLabel, surfaceId, paneId, lineageId,
+          );
+          paneLabel = allocation.paneLabel;
+          newPaneAllocationGenerations.set(paneId, allocation.allocationGeneration);
+        }
         authoritativePanes.push({
           ...pane,
-          paneLabel: existing
-            ? existing.paneLabel
-            : await claimPaneLabelOrUnnumbered(
-                this.claimPaneLabel, surfaceId, paneId, lineageId,
-              ),
+          paneLabel,
         });
       }
       const authoritativePayload = { ...request.payload, panes: authoritativePanes };
@@ -3952,16 +4012,16 @@ export class SurfaceWsServer {
         ? this.core.projectCurrentNativePaneGeometry(surfaceId, retainedNativePaneIds)
         : null;
       try {
-        const result = this.core.topologyApply(surfaceId, authoritativePayload, newPaneLineages);
-        const numberedPanes = result.panes.flatMap((pane) =>
-          pane.paneLabel > 0
-            ? [{
-                paneId: String(pane.paneId),
-                paneLineageId: pane.paneLineageId,
-                paneLabel: pane.paneLabel,
-              }]
-            : [],
+        const result = this.core.topologyApply(
+          surfaceId, authoritativePayload, newPaneLineages, newPaneAllocationGenerations,
         );
+        const numberedPanes = [...newPaneAllocationGenerations].flatMap(([paneId, allocationGeneration]) => {
+          const pane = this.core.getSurface(surfaceId).panes.get(paneId);
+          return pane && pane.paneLabel > 0 && allocationGeneration !== null
+            ? [{ allocationGeneration, paneId: String(paneId), paneLineageId: pane.paneLineageId,
+                paneLabel: pane.paneLabel }]
+            : [];
+        });
         if (numberedPanes.length > 0) {
           this.core.confirmRegistryPaneLabels([{ surfaceId, panes: numberedPanes }]);
         }
@@ -5107,18 +5167,28 @@ export class SurfaceWsServer {
         new Set(paneIds).size !== paneIds.length) {
       throw new SurfaceCoreError("invalid_payload", "pane.split newPaneIds must be unique positive integers");
     }
+    const unavailablePaneIds = new Set([
+      ...this.core.topologyState(surfaceId).panes.map((pane) => Number(pane.paneId)),
+      ...this.core.locklessAuthority.retainedPaneIds(surfaceId),
+      ...this.core.locklessAuthority.unavailablePaneIds(surfaceId),
+    ]);
+    if (paneIds.some((paneId) => unavailablePaneIds.has(paneId))) {
+      throw new SurfaceCoreError("invalid_payload", "pane.split cannot reuse a live, retained, or retired pane identity");
+    }
     const newPaneLineageIds = request.payload.newPaneIds.map(() =>
       `pl_${randomUUID().replaceAll("-", "")}`,
     );
-    const newPaneLabels: number[] = [];
+    const allocations: PaneLabelAllocation[] = [];
     for (let index = 0; index < request.payload.newPaneIds.length; index += 1) {
-      newPaneLabels.push(await claimPaneLabelOrUnnumbered(
+      allocations.push(await claimPaneLabelOrUnnumbered(
         this.claimPaneLabel,
         surfaceId,
         paneIds[index]!,
         newPaneLineageIds[index]!,
       ));
     }
+    const newPaneLabels = allocations.map((allocation) => allocation.paneLabel);
+    const newPaneAllocationGenerations = allocations.map((allocation) => allocation.allocationGeneration);
     const splitPayload = {
       count: request.payload.count,
       direction: request.payload.direction,
@@ -5126,6 +5196,7 @@ export class SurfaceWsServer {
       // The caller's visible labels are compatibility input only; allocator
       // authority supplies every committed label, or zero when unavailable.
       newPaneLabels,
+      newPaneAllocationGenerations,
       newPaneLineageIds,
       paneId: Number(request.payload.paneId),
     };
@@ -5137,11 +5208,11 @@ export class SurfaceWsServer {
         : null;
       try {
         const result = this.core.paneSplit(surfaceId, splitPayload);
-        const numberedPanes = result.panes.flatMap((pane) =>
-          pane.paneLabel > 0
-            ? [{ paneId: String(pane.paneId), paneLineageId: newPaneLineageIds[
-                splitPayload.newPaneIds.indexOf(pane.paneId)
-              ], paneLabel: pane.paneLabel }]
+        const numberedPanes = allocations.flatMap((allocation, index) =>
+          allocation.paneLabel > 0 && allocation.allocationGeneration !== null
+            ? [{ allocationGeneration: allocation.allocationGeneration,
+                paneId: String(paneIds[index]!), paneLineageId: newPaneLineageIds[index]!,
+                paneLabel: allocation.paneLabel }]
             : [],
         );
         if (numberedPanes.length > 0) {
@@ -6362,14 +6433,23 @@ async function claimPaneLabelOrUnnumbered(
   surfaceId: string,
   paneId: number,
   paneLineageId: string,
-): Promise<number> {
+): Promise<PaneLabelAllocation> {
   try {
-    const label = await claim(surfaceId, paneId, paneLineageId);
-    return Number.isSafeInteger(label) && label > 0 ? label : 0;
+    const result = await claim(surfaceId, paneId, paneLineageId);
+    const allocation = typeof result === "number"
+      ? { allocationGeneration: null, paneLabel: result }
+      : result;
+    return Number.isSafeInteger(allocation.paneLabel) && allocation.paneLabel > 0
+      ? {
+          allocationGeneration: Number.isSafeInteger(allocation.allocationGeneration) &&
+            Number(allocation.allocationGeneration) > 0 ? Number(allocation.allocationGeneration) : null,
+          paneLabel: allocation.paneLabel,
+        }
+      : { allocationGeneration: null, paneLabel: 0 };
   } catch {
     // Any failed claim leaves fleet authority unconfirmed. The local topology
     // operation may still commit the pane, but it must remain unnumbered until
     // a later client.register supplies an authoritative lineage assignment.
-    return 0;
+    return { allocationGeneration: null, paneLabel: 0 };
   }
 }
