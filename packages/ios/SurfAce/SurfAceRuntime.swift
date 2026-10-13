@@ -1123,6 +1123,9 @@ final class SurfAceRuntime {
 
     private func projectAnnotationDeliveryFeedback(_ state: SurfAceLocklessAuthorityState,
                                                     diagnostic: [String: String] = [:]) {
+        // A committed local projection/queue update also supersedes suspended
+        // diagnostic snapshots, not just a newer publisher callback.
+        annotationFeedbackGeneration += 1
         for surface in surfaces {
             for pane in surface.panes {
                 pane.annotationDeliveryStatus = state.annotationPublisher?.deliveryStatus(
