@@ -206,6 +206,7 @@ export class AnnotationPublisherOutbox {
       return sourceSequence;
     }
     surface.fifo.push({ canonical, kind: "payload", sourceEventId, sourceSequence });
+    this.trimDeliveryReceipts(surfaceId);
     if (!this.fits(surfaceId)) {
       surface.fifo.pop();
       this.extendGap(surface, sourceSequence, "source_retention_overflow");
@@ -286,6 +287,7 @@ export class AnnotationPublisherOutbox {
     if (surface.frames[key]) return surface.frames[key];
     const frameId = `fr_${randomBytes(16).toString("hex")}`;
     surface.frames[key] = frameId;
+    this.trimDeliveryReceipts(surfaceId);
     if (!this.fits(surfaceId)) {
       delete surface.frames[key];
       throw new RangeError("annotation publisher frame state capacity");
@@ -307,6 +309,7 @@ export class AnnotationPublisherOutbox {
     };
     surface.openFrames ??= {};
     surface.openFrames[key] = frame;
+    this.trimDeliveryReceipts(surfaceId);
     if (!this.fits(surfaceId)) {
       delete surface.openFrames[key];
       throw new RangeError("annotation at-open frame exceeds publisher state capacity");
@@ -339,6 +342,7 @@ export class AnnotationPublisherOutbox {
     const previousUpdatedAt = frame.updatedAt;
     frame.strokes.push(structuredClone(stroke));
     frame.updatedAt = Math.max(frame.updatedAt, stroke.endedAt);
+    this.trimDeliveryReceipts(surfaceId);
     if (!this.fits(surfaceId)) {
       frame.strokes.pop();
       frame.updatedAt = previousUpdatedAt;

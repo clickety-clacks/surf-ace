@@ -1297,14 +1297,18 @@ function handleShortcutInput(
       event.preventDefault();
       return;
     }
-    if (input.key.toLowerCase() === "a" && !input.meta) {
-      void annotationSourceCoordinator?.setAnnotating(surfaceId, activePaneId, true)
-        .catch((error) => clientWarn("annotation_source_mode_failed", errorDiagnosticFields(error)));
-      return;
-    }
-    if (input.key.toLowerCase() === "d" && !input.meta) {
-      void annotationSourceCoordinator?.setAnnotating(surfaceId, activePaneId, false)
-        .catch((error) => clientWarn("annotation_source_commit_failed", errorDiagnosticFields(error)));
+    if (["a", "d"].includes(input.key.toLowerCase()) && !input.meta) {
+      const scope = JSON.stringify([surfaceId, activePaneId]);
+      if (annotationDoneFence.isBusy(scope)) return;
+      const expected = parseAnnotationDoneContext({ ...activePane.content,
+        paneId: activePane.paneId, paneLineageId: activePane.paneLineageId });
+      if (!expected) return;
+      // The owning renderer shares the visible action's pending-stroke barrier,
+      // immediate fence and status retirement; main never commits around it.
+      window.webContents.send("surface:keyboard-intent", {
+        type: "annotation", action: input.key.toLowerCase() === "a" ? "enter" : "done", expected,
+      });
+      event.preventDefault();
       return;
     }
     if (input.meta && input.key === "[") {

@@ -3644,6 +3644,21 @@ async function init(): Promise<void> {
   });
 
   window.surfAce.onKeyboardIntent((intent) => {
+    if (intent && typeof intent === "object" && (intent as { type?: unknown }).type === "annotation") {
+      const request = intent as { action?: unknown; expected?: unknown };
+      const expected = parseAnnotationDoneContext(request.expected);
+      if (!expected || (request.action !== "enter" && request.action !== "done")) return;
+      const pane = latestState?.panes.find((p) => p.paneId === expected.paneId);
+      const current = pane && parseAnnotationDoneContext({ ...pane.content,
+        paneId: pane.paneId, paneLineageId: pane.paneLineageId });
+      if (!current || annotationDoneContextKey(current) !== annotationDoneContextKey(expected) ||
+          localAnnotationDone.isBusy(String(expected.paneId)) || pane?.annotationDone?.busy) return;
+      const view = paneViews.get(expected.paneId);
+      const action = view?.controlsEl.querySelector<HTMLButtonElement>(
+        request.action === "enter" ? '.annotate' : '.done');
+      if (action && !action.disabled) action.click();
+      return;
+    }
     if (isKeyboardScrollIntent(intent)) {
       scrollPaneByKeyboard(intent);
       return;

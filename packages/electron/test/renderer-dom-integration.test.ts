@@ -245,10 +245,17 @@ test("renderer DOM integrates authoritative connection states and live scale con
   // Replaced controls must retain the fence, and an old button must not submit twice.
   stateListener!(state("connected", true, 1));
   const oldDone = document.querySelector(".done") as HTMLButtonElement;
-  oldDone.click();
+  const annotationIntent = (action: string, expected = { paneId: 1, paneLineageId: "lineage-1", contentId: "content-1", revision: 1, renderVersion: 1 }) =>
+    keyboardListener!({ type: "annotation", action, expected });
+  annotationIntent("done", { paneId: 1, paneLineageId: "old-lineage", contentId: "content-1", revision: 1, renderVersion: 1 });
+  assert.equal(finishCalls, 0, "stale keyboard context cannot finish a replacement");
+  annotationIntent("done");
   assert.equal((document.querySelector(".done") as HTMLButtonElement).disabled, true);
   assert.equal(document.querySelector(".done")!.getAttribute("aria-busy"), "true");
   oldDone.click();
+  const heldCommandCount = commands.length;
+  annotationIntent("enter"); annotationIntent("done"); annotationIntent("done");
+  assert.equal(commands.length, heldCommandCount, "keyboard A cannot re-enter around held renderer Done");
   await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
   assert.equal(finishCalls, 1);
   stateListener!(state("disconnected", true, 1));
@@ -279,9 +286,28 @@ test("renderer DOM integrates authoritative connection states and live scale con
   }
   stateListener!(state("connected", true));
 
+  annotationIntent("enter");
+  assert.equal((commands.at(-1) as any).type, "annotate");
+  assert.equal((commands.at(-1) as any).enabled, true);
   stateListener!(state("connected", true, 1));
   assert.equal(document.querySelector(".annotation-local-status"), null,
     "a new Sketch session cannot reuse the last completed local Saved status");
+  stateListener!(state("connected", true));
+
+  stateListener!(state("connected", true, 1));
+  annotationIntent("done");
+  for (let i = 0; i < 4; i++) await Promise.resolve();
+  finishReply({ phase: "unknown", busy: false, localSaved: false });
+  for (let i = 0; i < 8; i++) await Promise.resolve();
+  assert.match(document.querySelector(".annotation-local-status")!.textContent!, /Save outcome unknown/);
+  annotationIntent("enter");
+  stateListener!(state("connected", true, 1));
+  annotationIntent("done");
+  for (let i = 0; i < 4; i++) await Promise.resolve();
+  finishReply({ phase: "waiting", busy: false, localSaved: true });
+  for (let i = 0; i < 8; i++) await Promise.resolve();
+  assert.equal(document.querySelector(".annotation-local-status")!.textContent, "Saved locally · Waiting");
+  annotationIntent("enter");
   stateListener!(state("connected", true));
 
   function provenanceState(
