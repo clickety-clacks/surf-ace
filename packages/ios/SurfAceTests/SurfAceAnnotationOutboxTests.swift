@@ -21,6 +21,70 @@ final class SurfAceAnnotationOutboxTests: XCTestCase {
         ]
     }
 
+    func testOptionalSubmissionFrontierCannotTurnFittingPayloadIntoGap() throws {
+        var final = record(padding: 2_000)
+        final["kind"] = "frame_commit"
+        var reference = try SurfAceAnnotationOutbox(clientId: "client-1", sourceEpoch: sourceEpoch)
+        _ = try reference.append(surfaceId: surfaceId, record: final)
+        XCTAssertEqual(reference.surfaces[surfaceId]?.fifo.first?.kind, "payload")
+        // Independent capacity oracle: retain all mandatory canonical/framing state,
+        // remove only optional display proof, and reserve both required gap slots.
+        reference.surfaces[surfaceId]?.acceptedFramesByPane = nil
+        reference.surfaces[surfaceId]?.latestSubmissionByPane = nil
+        let limit = Int(try reference.partitionBytes(surfaceId: surfaceId))
+            + 2 * SurfAceAnnotationOutbox.gapSlotBytes
+        try reference.validate(maxBytes: limit)
+        var actual = try SurfAceAnnotationOutbox(clientId: "client-1", sourceEpoch: sourceEpoch)
+        _ = try actual.append(surfaceId: surfaceId, record: final, maxBytes: limit)
+        XCTAssertEqual(actual.surfaces[surfaceId]?.fifo.first?.kind, "payload",
+                       "optional UI metadata must be reclaimed before dropping fitting canonical source")
+        XCTAssertNil(actual.surfaces[surfaceId]?.trailingGap)
+        try actual.validate(maxBytes: limit)
+    }
+
+    func testPostAppendMetadataReclaimPreservesHeadAndRejectsLateReceipt() throws {
+        var outbox = try SurfAceAnnotationOutbox(clientId: "client-1", sourceEpoch: sourceEpoch)
+        var final = record(); final["kind"] = "frame_commit"
+        _ = try outbox.append(surfaceId: surfaceId, record: final)
+        let oldHead = try XCTUnwrap(outbox.head(surfaceId: surfaceId))
+        var newer = final; newer["payload"] = ["strokes": [], "padding": String(repeating: "x", count: 2_000)]
+        var reference = outbox
+        _ = try reference.append(surfaceId: surfaceId, record: newer)
+        reference.surfaces[surfaceId]?.acceptedFramesByPane = nil
+        reference.surfaces[surfaceId]?.latestSubmissionByPane = nil
+        let limit = Int(try reference.partitionBytes(surfaceId: surfaceId))
+            + 2 * SurfAceAnnotationOutbox.gapSlotBytes
+        _ = try outbox.append(surfaceId: surfaceId, record: newer, maxBytes: limit)
+        XCTAssertEqual(outbox.surfaces[surfaceId]?.fifo.count, 2)
+        XCTAssertEqual(outbox.surfaces[surfaceId]?.fifo.first, oldHead)
+        XCTAssertNil(outbox.surfaces[surfaceId]?.trailingGap)
+        XCTAssertNil(outbox.surfaces[surfaceId]?.latestSubmissionByPane)
+        XCTAssertEqual(outbox.sourceEpoch, sourceEpoch)
+        XCTAssertEqual(outbox.surfaces[surfaceId]?.nextSequence, 3)
+        try outbox.validate(maxBytes: limit)
+        try outbox.accept(surfaceId: surfaceId, head: oldHead,
+                          cursor: .init(epoch: sourceEpoch, sequence: "17"))
+        var restored = try JSONDecoder().decode(SurfAceAnnotationOutbox.self, from: JSONEncoder().encode(outbox))
+        XCTAssertNil(restored.surfaces[surfaceId]?.acceptedFramesByPane)
+        XCTAssertEqual(restored.deliveryStatus(surfaceId: surfaceId, paneId: 1, contentId: "content-1",
+                                               revision: 1, hasSavedStrokes: true, diagnostic: [:]), "Waiting to send")
+        let newerHead = try XCTUnwrap(restored.head(surfaceId: surfaceId))
+        try restored.accept(surfaceId: surfaceId, head: newerHead,
+                            cursor: .init(epoch: sourceEpoch, sequence: "18"))
+        XCTAssertNil(restored.surfaces[surfaceId]?.acceptedFramesByPane)
+        XCTAssertEqual(restored.deliveryStatus(surfaceId: surfaceId, paneId: 1, contentId: "content-1",
+                                               revision: 1, hasSavedStrokes: true, diagnostic: [:]), "Saved on device")
+        try restored.validate(maxBytes: limit)
+        // One byte below mandatory capacity still records genuine source loss.
+        var overflow = try SurfAceAnnotationOutbox(clientId: "client-1", sourceEpoch: sourceEpoch)
+        _ = try overflow.append(surfaceId: surfaceId, record: final)
+        let retained = try XCTUnwrap(overflow.head(surfaceId: surfaceId))
+        _ = try overflow.append(surfaceId: surfaceId, record: newer, maxBytes: limit - 1)
+        XCTAssertEqual(overflow.surfaces[surfaceId]?.fifo, [retained])
+        XCTAssertEqual(overflow.surfaces[surfaceId]?.trailingGap?.through, "2")
+        try overflow.validate(maxBytes: limit - 1)
+    }
+
     func testFinalFrameAcceptanceReceiptSurvivesRestoreAndDoesNotGrowPartition() throws {
         var outbox = try SurfAceAnnotationOutbox(clientId: "client-1", sourceEpoch: sourceEpoch)
         var final = record(); final["kind"] = "frame_commit"

@@ -522,6 +522,14 @@ struct SurfAceAnnotationOutbox: Codable, Equatable, Sendable {
                                   sourceEventId: eventId, sourceSequence: sequence))
         surfaces[surfaceId] = surface
         if try !fits(surfaceId: surfaceId, maxBytes: maxBytes, maxRecords: maxRecords) {
+            // Reassess the complete proposed payload without discardable UI
+            // proof before allocating a canonical source-loss gap. Missing
+            // frontier also prevents delayed acceptance from restoring Sent.
+            surface.acceptedFramesByPane = nil
+            surface.latestSubmissionByPane = nil
+            surfaces[surfaceId] = surface
+        }
+        if try !fits(surfaceId: surfaceId, maxBytes: maxBytes, maxRecords: maxRecords) {
             surface.fifo.removeLast()
             surface.extendGap(sequence: sequence, reason: "source_retention_overflow")
             surfaces[surfaceId] = surface
