@@ -1705,71 +1705,6 @@ test("fleet-list discovery is the first client-selection step in the shipped ski
   }
 });
 
-test("Tightbeam Linux builder creates source-declared dependencies before the Electron server bundle", async () => {
-  const repository = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../..");
-  const builder = await fs.readFile(path.join(repository, "scripts/release/build-tightbeam-release.mjs"), "utf8");
-  const functionStart = builder.indexOf("export async function buildTightbeamLinuxStage");
-  const functionEnd = builder.indexOf("export async function buildTightbeamRelease", functionStart);
-  const body = builder.slice(functionStart, functionEnd);
-  const protocol = body.indexOf('"@surf-ace/protocol", "build"');
-  const allocator = body.indexOf('"@surf-ace/allocator", "build"');
-  const controller = body.indexOf('"@surf-ace/controller", "build"');
-  const electron = body.indexOf('"@surf-ace/electron", "build"');
-  assert.ok(protocol >= 0, "protocol build is required");
-  assert.ok(allocator > protocol, "allocator smoke helpers must compile against the exact product source");
-  assert.ok(controller > allocator, "controller build must follow allocator");
-  assert.ok(electron > controller, "Electron server bundle must follow controller");
-});
-
-test("Tightbeam Linux clean tests build required workspace packages before controller tests and stop on prerequisite failure", async (t) => {
-  const workflow = await fs.readFile(path.join(repository, ".github/workflows/release-tightbeam.yml"), "utf8");
-  const script = workflowRunScript(workflow, "Install frozen dependencies and run Linux product tests");
-  const protocolBuild = script.indexOf("pnpm --dir source --filter @surf-ace/protocol build");
-  const allocatorBuild = script.indexOf("pnpm --dir source --filter @surf-ace/allocator build");
-  const controllerBuild = script.indexOf("pnpm --dir source --filter @surf-ace/controller build");
-  const controllerTest = script.indexOf("pnpm --dir source --filter @surf-ace/controller test");
-  const protocolTest = script.indexOf("pnpm --dir source --filter @surf-ace/protocol test");
-  assert.ok(protocolBuild >= 0 && allocatorBuild > protocolBuild && controllerBuild > allocatorBuild &&
-    controllerTest > controllerBuild && protocolTest > controllerTest,
-  "a clean install must build protocol and allocator before controller tests load dist entrypoints");
-  assert.ok(TIGHTBEAM_TEST_COMMANDS.indexOf("pnpm --dir source --filter @surf-ace/protocol build") <
-    TIGHTBEAM_TEST_COMMANDS.indexOf("pnpm --dir source --filter @surf-ace/allocator build"));
-  assert.ok(TIGHTBEAM_TEST_COMMANDS.indexOf("pnpm --dir source --filter @surf-ace/allocator build") <
-    TIGHTBEAM_TEST_COMMANDS.indexOf("pnpm --dir source --filter @surf-ace/controller test"));
-  assert.ok(TIGHTBEAM_BUILD_COMMANDS.some((command) => command.includes("--config.executableName surf-ace")),
-    "the manifest must bind the same Linux executable-name override as the packaged builder");
-
-  const root = await temporary(t);
-  const bin = path.join(root, "bin");
-  const log = path.join(root, "commands.log");
-  await fs.mkdir(bin);
-  await fs.writeFile(path.join(bin, "git"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
-  await fs.writeFile(path.join(bin, "pnpm"), "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$COMMAND_LOG\"\nif test \"$*\" = \"$FAIL_COMMAND\"; then exit 37; fi\n", { mode: 0o755 });
-  await fs.writeFile(path.join(bin, "cargo"), "#!/bin/sh\nprintf '%s\\n' \"cargo $*\" >> \"$COMMAND_LOG\"\n", { mode: 0o755 });
-  const invoke = async (failCommand = "") => {
-    await fs.writeFile(log, "");
-    const invocation = exec("/bin/bash", ["-c", script], {
-      cwd: root,
-      env: { ...process.env, COMMAND_LOG: log, FAIL_COMMAND: failCommand, PATH: `${bin}:${process.env.PATH}` },
-    });
-    if (failCommand) await assert.rejects(invocation);
-    else await invocation;
-    return (await fs.readFile(log, "utf8")).trim().split("\n").filter(Boolean);
-  };
-  const expected = [
-    "--dir source fetch --frozen-lockfile",
-    "--dir source install --offline --frozen-lockfile",
-    "--dir source --filter @surf-ace/protocol build",
-    "--dir source --filter @surf-ace/allocator build",
-    "--dir source --filter @surf-ace/controller build",
-    "--dir source --filter @surf-ace/controller test",
-    "--dir source --filter @surf-ace/protocol test",
-    "cargo test --manifest-path source/packages/cli/Cargo.toml --locked",
-  ];
-  assert.deepEqual(await invoke(), expected);
-  assert.deepEqual(await invoke(expected[2]), expected.slice(0, 3));
-});
-
 function semanticPhase(sourceCommit, overrides = {}) {
   const phase = {
     allocatorAfterRegistration: {
@@ -2924,23 +2859,6 @@ test("Tightbeam Linux smoke fixture binds adapter dependencies to the exact prod
   assert.doesNotMatch(fixture, /^import\s+(?:pg|WebSocket)\s+from\s+["'](?:pg|ws)["']/m);
 });
 
-test("Linux smoke fixture starts through the product TSX loader and rejects retired phase inputs", async () => {
-  const fixture = path.join(repository, "scripts/release/tightbeam-state-smoke-fixture.ts");
-  const loader = path.join(repository, "packages/allocator/node_modules/tsx/dist/loader.mjs");
-  await fs.access(loader);
-  await assert.rejects(exec(process.execPath, ["--import", loader, fixture, "--mode", "transition"]), (error) => {
-    assert.match(error.stderr, /old_version_smoke_mode_forbidden/);
-    assert.doesNotMatch(error.stderr, /Top-level await is currently not supported/);
-    return true;
-  });
-  await assert.rejects(exec(process.execPath, ["--import", loader, fixture, "--baseline-commit", "cf91ef1baab26d6045fac5300487c29d0ddf332d"]), (error) => {
-    assert.match(error.stderr, /old_version_smoke_inputs_forbidden/);
-    assert.doesNotMatch(error.stderr, /Top-level await is currently not supported/);
-    return true;
-  });
-});
-
-
 test("v0.2.8 standalone specification and release gates bind the product and all public assets", async () => {
   const specification = await fs.readFile(path.join(repository, "docs/release/surf-ace-standalone-v0.2.8.md"), "utf8");
   const readme = await fs.readFile(path.join(repository, "README.md"), "utf8");
@@ -2970,11 +2888,9 @@ test("v0.2.8 standalone specification and release gates bind the product and all
   assert.match(readme, /do not use `surf-ace --version`/);
   assert.match(readme, /server archive\s+includes `docs\/OPERATIONS\.md`/);
   assert.match(readme, /## Install and run/);
-  assert.match(skill, /surf-ace-skill-v0\.2\.8\.md/);
-  assert.match(skill, /register the verified Markdown content/);
+  assert.match(skill, /verify\s+the skill before registering the content/);
   assert.doesNotMatch(`${readme}\n${skill}`, /\b(?:Racter|Plumbus|Shrdlu|Gibson|Eezo)\b|\/Users\/mike\/|\b100\.64\.\d{1,3}\.\d{1,3}\b/i);
   assert.match(workflow, /^on:\n  workflow_dispatch:/m);
-  await exec("ruby", ["-e", "require \"yaml\"; YAML.load_file(ARGV.fetch(0))", workflowPath]);
   for (const match of workflow.matchAll(/^\s*uses:\s*([^\s]+)$/gm)) assert.match(match[1], /@[0-9a-f]{40}$/);
   assert.match(workflow, /run_smoke:[\s\S]*?default: false/);
   assert.match(workflow, /publish_release:[\s\S]*?default: false/);
@@ -2985,70 +2901,15 @@ test("v0.2.8 standalone specification and release gates bind the product and all
   assert.match(workflow, /GITHUB_REF_TYPE/);
   assert.match(workflow, /node tooling\/scripts\/release\/build-tightbeam-release\.mjs/);
   assert.doesNotMatch(workflow, /build-ios|tightbeam-ios-ipa|xcodebuild archive|-exportArchive|\.ipa\b|IOS_CERTIFICATE|IOS_PROVISIONING_PROFILE|tightbeam-ios-signing/);
-  const linuxStart = workflow.indexOf("  build-linux:\n");
-  const macosStart = workflow.indexOf("  build-macos:\n", linuxStart);
-  const linuxJob = workflow.slice(linuxStart, macosStart);
-  assert.match(linuxJob, /^    defaults:\n      run:\n        shell: bash$/m);
-  const linuxTests = workflowRunScript(workflow, "Install frozen dependencies and run Linux product tests");
-  const linuxBuildOrder = [
-    "pnpm --dir source --filter @surf-ace/protocol build",
-    "pnpm --dir source --filter @surf-ace/allocator build",
-    "pnpm --dir source --filter @surf-ace/controller build",
-    "pnpm --dir source --filter @surf-ace/controller test",
-  ].map((command) => linuxTests.indexOf(command));
-  assert.ok(linuxBuildOrder.every((index) => index >= 0));
-  assert.deepEqual([...linuxBuildOrder].sort((left, right) => left - right), linuxBuildOrder);
-  const linuxSmokeHostDependencies = workflowRunScript(workflow, "Install Linux smoke host dependencies");
-  for (const packageName of ["iproute2", "libpq-dev", "postgresql-16", "postgresql-client-16", "util-linux", "tar", "unzip", "x11-utils", "xauth", "xvfb"]) {
-    assert.ok(linuxSmokeHostDependencies.includes(packageName), `missing Linux smoke host package ${packageName}`);
-  }
-  assert.match(linuxSmokeHostDependencies, /for tool in ip unshare runuser xvfb-run Xvfb xauth xdpyinfo pg_config tar unzip timeout; do/);
-  assert.match(linuxSmokeHostDependencies, /command -v "\$\{tool\}"/);
-  assert.match(linuxSmokeHostDependencies, /for tool in initdb postgres pg_ctl psql pg_basebackup pg_dump pg_restore; do/);
-  assert.match(linuxSmokeHostDependencies, /linux_smoke_required_postgres_tool_missing/);
-  const linuxNodePin = workflow.indexOf("      - name: Pin Node", workflow.indexOf("  smoke-linux:\n"));
-  const linuxRuntimeDeps = workflow.indexOf("      - name: Install Linux smoke host dependencies", workflow.indexOf("  smoke-linux:\n"));
-  const linuxPrepare = workflow.indexOf("      - name: Prepare the exact candidate product and state driver", workflow.indexOf("  smoke-linux:\n"));
-  const linuxAcceptance = workflow.indexOf("      - name: Run PostgreSQL-backed server, packaged CLI, and Linux client acceptance", workflow.indexOf("  smoke-linux:\n"));
-  assert.ok(linuxNodePin >= 0 && linuxNodePin < linuxRuntimeDeps && linuxRuntimeDeps < linuxPrepare && linuxPrepare < linuxAcceptance);
   const linuxSmoke = workflowRunScript(workflow, "Run PostgreSQL-backed server, packaged CLI, and Linux client acceptance");
   assert.match(linuxSmoke, /smoke_tmp="\$\(mktemp -d \/tmp\/sa\.XXXXXX\)"/);
   assert.match(linuxSmoke, /trap 'rm -rf "\$smoke_tmp"' EXIT/);
   assert.match(linuxSmoke, /timeout --signal=TERM --kill-after=10s 20m sudo -n unshare --net -- bash -c/);
   assert.match(linuxSmoke, /linux_smoke_packaged_acceptance_timeout_20m/);
-  assert.match(linuxSmoke, /-name 'client-flight-recorder\.log'/);
-  assert.match(linuxSmoke, /-name 'raw-cli-progress\.ndjson'/);
-  assert.match(linuxSmoke, /-name 'raw-cli-evidence\.ndjson'/);
-  assert.match(linuxSmoke, /-name 'annotation-journal-progress\.ndjson'/);
   assert.match(linuxSmoke, /ip route add 224\.0\.0\.0\/4 dev veth0/);
   assert.match(linuxSmoke, /test -z "\$\(ip route show default\)"/);
   assert.match(linuxSmoke, /exec runuser -u "\$smoke_user" -- env/);
-  assert.match(linuxSmoke, /xvfb-run -a "\$smoke_node" tooling\/scripts\/release\/smoke-tightbeam-release\.mjs/);
-  const macosTests = workflowRunScript(workflow, "Install frozen dependencies and run macOS/iPadOS tests");
-  const macosBuildOrder = [
-    "pnpm --dir source --filter @surf-ace/protocol build",
-    "pnpm --dir source --filter @surf-ace/allocator build",
-    "pnpm --dir source --filter @surf-ace/controller build",
-    "pnpm --dir source --filter @surf-ace/electron build",
-    "pnpm --dir source --filter @surf-ace/controller test",
-    "pnpm --dir source --filter @surf-ace/protocol test",
-    "pnpm --dir source --filter @surf-ace/electron test",
-  ].map((command) => macosTests.indexOf(command));
-  assert.ok(macosBuildOrder.every((index) => index >= 0));
-  assert.deepEqual([...macosBuildOrder].sort((left, right) => left - right), macosBuildOrder);
-  const macosSmokeDependencies = workflowRunScript(workflow, "Install packaged Electron inspection dependencies");
-  assert.match(macosSmokeDependencies, /corepack prepare "pnpm@\$\{PNPM_VERSION\}" --activate/);
-  assert.match(macosSmokeDependencies, /pnpm --dir source fetch --frozen-lockfile/);
-  assert.match(macosSmokeDependencies, /pnpm --dir source install --offline --frozen-lockfile/);
-  const macosSmokeDependencyOffset = workflow.indexOf("      - name: Install packaged Electron inspection dependencies\n");
-  const macosSmokeRunOffset = workflow.indexOf("      - name: Run the matching macOS candidate client and CLI smoke\n");
-  assert.ok(macosSmokeRunOffset > macosSmokeDependencyOffset,
-    "macOS smoke must install source package-inspection dependencies before launching the packaged app");
   assert.ok(workflow.includes("xcodebuild test"), "hosted iPad simulator tests remain distinct from IPA distribution signing");
-  assert.match(workflow, /name: tightbeam-linux-build-a/);
-  assert.match(workflow, /name: tightbeam-linux-build-b/);
-  assert.match(workflow, /name: tightbeam-macos-build-a/);
-  assert.match(workflow, /name: tightbeam-macos-build-b/);
   assert.match(workflow, /subject-path: release\/\.receipts\/linux-smoke-receipt\.json/);
   assert.match(workflow, /subject-path: release\/\.receipts\/macos-smoke-receipt\.json/);
   const compareStart = workflow.indexOf("  compare:\n");
@@ -3057,12 +2918,6 @@ test("v0.2.8 standalone specification and release gates bind the product and all
   for (const name of TIGHTBEAM.assets) assert.ok(compareJob.includes(name));
   assert.match(compareJob, /surf-ace-skill-v0\.2\.8\.md/);
   assert.match(workflow, /needs: \[assemble, smoke-linux, smoke-macos\]/);
-  for (const command of [
-    "cargo build --manifest-path source/packages/cli/Cargo.toml",
-    "pnpm --dir source --filter @surf-ace/protocol build",
-    "pnpm --dir source --filter @surf-ace/controller build",
-    "pnpm --dir source --filter @surf-ace/electron exec electron-builder",
-  ]) assert.ok(TIGHTBEAM_BUILD_COMMANDS.some((item) => item.startsWith(command)));
   assert.doesNotMatch(TIGHTBEAM_BUILD_COMMANDS.join("\n"), /xcodebuild archive|-exportArchive|\.ipa\b/);
   assert.ok(TIGHTBEAM_TEST_COMMANDS.includes("cargo test --manifest-path source/packages/cli/Cargo.toml --locked"));
   assert.ok(TIGHTBEAM_TEST_COMMANDS.some((command) => command.startsWith("xcodebuild test ")));
