@@ -86,6 +86,7 @@ struct SurfAceAnnotationDeliveryReceipt: Codable, Equatable, Sendable {
     var revision: Int
     var sourceEventId: String
     var cursor: SurfAceAnnotationServerCursor
+    var sourceSequence: String? = nil
 }
 
 struct SurfAceAnnotationSurfaceOutbox: Codable, Equatable, Sendable {
@@ -152,6 +153,7 @@ struct SurfAceAnnotationOutbox: Codable, Equatable, Sendable {
                           && !receipt.frameId.isEmpty && receipt.frameId.utf8.count <= 128
                           && !receipt.contentId.isEmpty && receipt.contentId.utf8.count <= 256
                           && receipt.sourceEventId.utf8.count <= 128
+                          && (receipt.sourceSequence.map { Int64($0).map({ $0 > 0 }) == true } ?? true)
                           && receipt.cursor.epoch.count == 32
                           && receipt.cursor.epoch.utf8.allSatisfy({ $0.isASCIIHexLowercase })
                           && Int64(receipt.cursor.sequence).map({ $0 > 0 }) == true
@@ -514,7 +516,8 @@ struct SurfAceAnnotationOutbox: Codable, Equatable, Sendable {
             let key = String(paneId)
             if receipts[key] != nil || receipts.count < 256 {
                 receipts[key] = .init(frameId: frameId, contentId: contentId, revision: revision,
-                                      sourceEventId: head.sourceEventId, cursor: cursor)
+                                      sourceEventId: head.sourceEventId, cursor: cursor,
+                                      sourceSequence: head.sourceSequence)
                 surface.acceptedFramesByPane = receipts
                 surfaces[surfaceId] = surface
                 if try partitionBytes(surfaceId: surfaceId) > previousBytes {
@@ -547,10 +550,15 @@ struct SurfAceAnnotationOutbox: Codable, Equatable, Sendable {
             return "Waiting to send"
         }
         if let frame = surface.openFrames?[String(paneId)], frame.contentId == contentId,
-           frame.revision == nil || frame.revision == revision { return "Saved on device" }
-        if surface.diagnostic == nil, surface.unhealthy == nil,
-           let receipt = surface.acceptedFramesByPane?[String(paneId)],
-           receipt.contentId == contentId, receipt.revision == revision { return "Sent to registry" }
+           frame.revision == nil || frame.revision == revision {
+            return surface.unhealthy == nil ? "Saved on device" : "Saved on device — waiting for publisher recovery"
+        }
+        if let receipt = surface.acceptedFramesByPane?[String(paneId)],
+           receipt.contentId == contentId, receipt.revision == revision,
+           let receiptSequence = receipt.sourceSequence.flatMap({ Int64($0) }),
+           surface.diagnostic == nil || surface.diagnostic.flatMap({ Int64($0.sequence) }).map({ $0 < receiptSequence }) == true {
+            return "Sent to registry"
+        }
         if surface.diagnostic != nil { return "Saved on device — delivery incomplete" }
         return hasSavedStrokes ? "Saved on device" : nil
     }

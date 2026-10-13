@@ -117,6 +117,22 @@ final class SurfAceAnnotationOutboxTests: XCTestCase {
         XCTAssertNil(pane.annotationDoneError)
     }
 
+    func testOlderLossDiagnosticCannotHideNewFinalAcceptanceOrProveLaterLostFrame() throws {
+        var outbox = try SurfAceAnnotationOutbox(clientId: "client-1", sourceEpoch: sourceEpoch)
+        try outbox.lose(surfaceId: surfaceId, code: "isolated_loss")
+        let gap = try XCTUnwrap(outbox.head(surfaceId: surfaceId))
+        try outbox.accept(surfaceId: surfaceId, head: gap, cursor: .init(epoch: sourceEpoch, sequence: "1"))
+        var final = record(); final["kind"] = "frame_commit"
+        _ = try outbox.append(surfaceId: surfaceId, record: final)
+        let head = try XCTUnwrap(outbox.head(surfaceId: surfaceId))
+        try outbox.accept(surfaceId: surfaceId, head: head, cursor: .init(epoch: sourceEpoch, sequence: "2"))
+        XCTAssertEqual(outbox.deliveryStatus(surfaceId: surfaceId, paneId: 1, contentId: "content-1",
+                                            revision: 1, hasSavedStrokes: true), "Sent to registry")
+        try outbox.lose(surfaceId: surfaceId, code: "later_loss")
+        XCTAssertEqual(outbox.deliveryStatus(surfaceId: surfaceId, paneId: 1, contentId: "content-1",
+                                            revision: 1, hasSavedStrokes: true), "Saved on device — delivery incomplete")
+    }
+
     func testCanonicalSourceBytesUseECMAScriptNumbersEscapesAndUTF16KeyOrder() throws {
         let canonical = try XCTUnwrap(SurfAceAnnotationOutbox.canonical([
             "\u{E000}": 1.0,
