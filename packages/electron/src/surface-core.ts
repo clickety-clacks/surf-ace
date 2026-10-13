@@ -1505,7 +1505,10 @@ export class SurfaceCore {
         bootstrapPane &&
         isPristineProviderBootstrapPane(bootstrapPane, true)
       ) {
-        const identity = this.locklessAuthority.allocatePaneIdentity([]);
+        const identity = this.locklessAuthority.allocatePaneIdentity([
+          ...this.locklessAuthority.retainedPaneIds(surfaceId),
+          ...this.locklessAuthority.unavailablePaneIds(surfaceId),
+        ]);
         this.ensureInitialPane(
           surface,
           identity.paneId,

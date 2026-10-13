@@ -683,6 +683,15 @@ test("surface reclamation releases only generation-bound panes after its final n
     { paneId: "2", paneLabel: 12, allocationGeneration: 7, tombstoneKind: "surface", tombstoneId: "st_reuse_surface", closeRevision: 4 },
   ]);
   assert.ok(releases.every((release) => release.terminalRetirementRevision > 0));
+  assert.deepEqual(target.unavailablePaneIds("sf_reuse_surface"), [1, 2, 5],
+    "released and unverified pane identities keep their old internal IDs out of future allocations");
+  assert.deepEqual(
+    target.allocatePaneIdentity([
+      ...target.retainedPaneIds("sf_reuse_surface"),
+      ...target.unavailablePaneIds("sf_reuse_surface"),
+    ]),
+    { paneId: 3 },
+  );
 
   const recovered = new LocklessClientAuthority(target.exportState(), () => 101, clientId);
   assert.deepEqual(recovered.listPendingPaneReleases(), releases);
@@ -703,26 +712,35 @@ test("surface reclamation releases only generation-bound panes after its final n
 });
 
 test("a reclaimed legacy tombstone without a committed topology revision cannot release its pane label", () => {
-  const clientId = "b".repeat(64);
   const state = createEmptyLocklessClientState({ ...limits, maxRetainedTombstones: 2 });
-  const authority = new LocklessClientAuthority(state, () => 100, clientId);
+  const authority = new LocklessClientAuthority(state, () => 100);
+  let staleCopy: ReturnType<LocklessClientAuthority["createTombstone"]> | null = null;
   for (let paneId = 1; paneId <= 3; paneId += 1) {
-    authority.createTombstone({
+    const tombstone = authority.createTombstone({
       kind: "pane",
       payload: {
         pane: {
-          allocationGeneration: paneId,
+          allocationGeneration: null,
           paneId,
           paneLabel: paneId,
-          paneLineageId: `pl_legacy_retained_${paneId}`,
+          ...(paneId === 1 ? {} : { paneLineageId: `pl_legacy_retained_${paneId}` }),
         },
       },
       surfaceId: `sf_legacy_retained_${paneId}`,
     });
+    if (paneId === 1) staleCopy = structuredClone(tombstone);
   }
   assert.deepEqual(authority.listTombstones().map(({ closedSequence }) => closedSequence), [2, 3]);
   assert.deepEqual(authority.listPendingPaneReleases(), [],
     "legacy retention order is not a committed close/topology revision or release proof");
+  assert.deepEqual(authority.unavailablePaneIds("sf_legacy_retained_1"), [1],
+    "legacy IDs remain reserved even when their label cannot be released");
+  const staleState = authority.exportState();
+  staleState.tombstones = [staleCopy!];
+  const staleBackup = new LocklessClientAuthority(staleState);
+  assert.equal(staleBackup.restoreTombstone(staleCopy!.tombstoneId, "pane").tombstoneId, staleCopy!.tombstoneId,
+    "an unverified legacy reservation is not mislabeled as terminal retirement");
+  assert.deepEqual(staleBackup.listPendingPaneReleases(), []);
 });
 
 function retainedAggregateFixture(identityOrder: "forward" | "reverse"): {

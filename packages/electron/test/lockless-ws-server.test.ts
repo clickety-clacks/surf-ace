@@ -44,6 +44,61 @@ const claimTestRegistryPaneLabel = async (surfaceId: string, paneId: number, pan
   return allocation;
 };
 
+test("pane.split assigns a fresh internal ID above terminally retired paneIds", async () => {
+  const surfaceId = "sf_retired_id_guard";
+  const lockless = createEmptyLocklessClientState(DEFAULT_LOCKLESS_LIMITS);
+  for (let paneId = 2; paneId <= 8; paneId += 1) {
+    lockless.paneIdentityReservations.push({
+      lineageId: `pl_retired_identity_${paneId}`,
+      paneId: String(paneId),
+      surfaceId,
+      tombstoneId: `pt_retired_identity_${paneId}`,
+      tombstoneKind: "pane",
+    });
+  }
+  const core = new SurfaceCore({
+    persistentState: { lockless, primarySurfaceId: surfaceId, version: 1 },
+  });
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  initializeRegistryBootstrapPanes(core);
+  let allocationRequests = 0;
+  const port = nextPort++;
+  const server = new SurfaceWsServer({
+    bindAddress: "127.0.0.1",
+    capturePaneImage: async () => null,
+    claimPaneLabel: async (...args) => {
+      allocationRequests += 1;
+      return claimTestRegistryPaneLabel(...args);
+    },
+    compositorSocketPath: null,
+    core,
+    endpointName: "Surf Ace",
+    hostName: "localhost",
+    port,
+    viewport: () => ({ height: 800, scale: 2, width: 1200 }),
+  });
+  await server.start();
+  const socket = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+  try {
+    assert.equal((await pair(socket, "retired-pane-id-client", surface.surfaceId)).ok, true);
+    const before = core.pairState(surface.surfaceId);
+    const split = await request(socket, "pane.split", {
+      count: 2,
+      direction: "horizontal",
+      expectedTopologyRevision: Number(before.topologyRevision),
+      paneId: Number(before.panes[0]!.paneId),
+      surfaceId: surface.surfaceId,
+    });
+    assert.equal(split.ok, true, JSON.stringify(split));
+    assert.equal(allocationRequests, 1);
+    assert.deepEqual(split.payload.panes.map((pane: { paneId: number }) => Number(pane.paneId)), [1, 9],
+      "pane.split skips IDs 2–8 because those identities are terminally retired");
+  } finally {
+    socket.close();
+    await server.stop();
+  }
+});
+
 function initializeRegistryBootstrapPanes(core: SurfaceCore): void {
   const assignments = core.listSurfaces().map(({ surfaceId }, surfaceIndex) => {
     const paneLabel = nextTestRegistryPaneLabel++;

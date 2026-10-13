@@ -481,6 +481,25 @@ test("surface core replaces the bootstrap pane with the provider initial pane", 
   assert.equal(windowState.panes[0]?.activeKeyboardPane, true);
 });
 
+test("lockless admission does not reuse a terminally retired pane ID when replacing bootstrap", () => {
+  const surfaceId = "sf_retired_bootstrap";
+  const lockless = createEmptyLocklessClientState(DEFAULT_LOCKLESS_LIMITS);
+  lockless.paneIdentityReservations.push({
+    lineageId: "pl_retired_bootstrap",
+    paneId: "1",
+    surfaceId,
+    tombstoneId: "pt_retired_bootstrap",
+    tombstoneKind: "pane",
+  });
+  const core = new SurfaceCore({
+    persistentState: { lockless, primarySurfaceId: surfaceId, version: 1 },
+  });
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  core.admitSurfaceToLockless(surface.surfaceId);
+
+  assert.equal(core.getRendererWindowState(surfaceId).panes[0]?.paneId, 2);
+});
+
 test("surface core marks unresolved single-pane geometry as non-authoritative", () => {
   const core = new SurfaceCore({
     persistentState: {

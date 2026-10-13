@@ -2763,6 +2763,7 @@ export class SurfaceWsServer {
             [
               ...topology.panes.map((pane) => Number(pane.paneId)),
               ...this.core.locklessAuthority.retainedPaneIds(surfaceId),
+              ...this.core.locklessAuthority.unavailablePaneIds(surfaceId),
             ],
           );
           for (let index = 1; index < request.payload.count; index += 1) {
@@ -3036,7 +3037,11 @@ export class SurfaceWsServer {
         current.panes.map((pane) => [Number(pane.paneId), pane]),
       );
       const retained = this.core.locklessAuthority.retainedPaneIds(surfaceId);
-      const usedIds = new Set([...existing.keys(), ...retained]);
+      const usedIds = new Set([
+        ...existing.keys(),
+        ...retained,
+        ...this.core.locklessAuthority.unavailablePaneIds(surfaceId),
+      ]);
       const created = new Map<number, {
         allocationGeneration: number | null;
         name: string | null;
@@ -5161,6 +5166,14 @@ export class SurfaceWsServer {
     if (paneIds.some((paneId) => !Number.isSafeInteger(paneId) || paneId < 1) ||
         new Set(paneIds).size !== paneIds.length) {
       throw new SurfaceCoreError("invalid_payload", "pane.split newPaneIds must be unique positive integers");
+    }
+    const unavailablePaneIds = new Set([
+      ...this.core.topologyState(surfaceId).panes.map((pane) => Number(pane.paneId)),
+      ...this.core.locklessAuthority.retainedPaneIds(surfaceId),
+      ...this.core.locklessAuthority.unavailablePaneIds(surfaceId),
+    ]);
+    if (paneIds.some((paneId) => unavailablePaneIds.has(paneId))) {
+      throw new SurfaceCoreError("invalid_payload", "pane.split cannot reuse a live, retained, or retired pane identity");
     }
     const newPaneLineageIds = request.payload.newPaneIds.map(() =>
       `pl_${randomUUID().replaceAll("-", "")}`,
