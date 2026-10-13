@@ -9,8 +9,8 @@ import { SurfaceCore } from "../src/surface-core.js";
 
 test("owner-verified claims compare by identity without accepting omissions or duplicates", () => {
   const first = { surfaceId: "sf_first", windowLabel: "d", panes: [
-    { paneId: "1", paneLabel: 703, paneLineageId: "pl_first" },
-    { paneId: "2", paneLabel: 704, paneLineageId: "pl_second" },
+    { allocationGeneration: 1, paneId: "1", paneLabel: 703, paneLineageId: "pl_first" },
+    { allocationGeneration: 2, paneId: "2", paneLabel: 704, paneLineageId: "pl_second" },
   ] };
   const second = { surfaceId: "sf_second", windowLabel: "e", panes: [] };
   const provisioned = {
@@ -126,12 +126,15 @@ async function centralFixture(registryIdentity: { allocatorId: string; fleetId: 
         type: "response", v: 1, id: message.id, op: message.op, ok,
         payload: { clientId: message.payload.clientId,
           ...(responseIdentity ? { registryIdentity: responseIdentity } : {}),
+          completedPaneReleaseIds: (message.payload.pendingPaneReleases ?? []).map((release: any) => release.releaseId),
           surfaces: message.payload.surfaces.map((surface: any, i: number) => ({
             surfaceId: surface.surfaceId,
             windowLabel: windowLabel ?? String.fromCharCode(97 + i),
             ...(assignPaneLabels ? {
               panes: (surface.panes ?? []).map((pane: any, paneIndex: number) => ({
-                ...pane, paneLabel: paneLabelBase + i * 100 + paneIndex,
+                ...pane,
+                allocationGeneration: pane.allocationGeneration ?? paneLabelBase + i * 100 + paneIndex,
+                paneLabel: paneLabelBase + i * 100 + paneIndex,
               })),
             } : {}),
           })) },
@@ -156,6 +159,7 @@ test("confirmed fleet pane labels remain visible through a transient central dis
   try {
     const connecting = registration.synchronize();
     await until(() => central.requests.length === 1);
+    assert.equal(central.requests[0]!.message.payload.allocationGenerationV1, true);
     central.reply(0, true, true);
     await connecting;
 
@@ -458,7 +462,7 @@ test("legacy labels wait for verified pin; foreign and missing identities never 
   const pane = [...surface.panes.values()][0]!;
   const assignment = [{
     surfaceId: surface.surfaceId, windowLabel: "d", panes: [{
-      paneId: String(pane.paneId), paneLineageId: pane.paneLineageId, paneLabel: 703,
+      allocationGeneration: 1, paneId: String(pane.paneId), paneLineageId: pane.paneLineageId, paneLabel: 703,
     }],
   }];
   core.applyWindowLabels(assignment);
@@ -529,7 +533,7 @@ test("tombstone-only legacy labels refuse foreign-first binding and recover with
   const surface = core.ensurePrimarySurface("Retained legacy", { width: 800, height: 600, scale: 1 });
   const pane = [...surface.panes.values()][0]!;
   const assignment = [{ surfaceId: surface.surfaceId, windowLabel: "d", panes: [{
-    paneId: String(pane.paneId), paneLineageId: pane.paneLineageId, paneLabel: 703,
+    allocationGeneration: 1, paneId: String(pane.paneId), paneLineageId: pane.paneLineageId, paneLabel: 703,
   }] }];
   core.applyWindowLabels(assignment);
   core.applyRegistryPaneLabels(assignment);

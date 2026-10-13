@@ -99,7 +99,16 @@ export type AcceptedState = {
   }>;
   nextOrdinalFence: number;
   nextPaneOrdinalFence: number;
-  paneMappings: Array<{ clientId: string; surfaceId: string; paneId: string; lineageId: string; paneLabel: number }>;
+  nextPaneAllocationGenerationFence: number;
+  paneLabelReuseEnabled: boolean;
+  paneMappings: Array<{
+    allocationGeneration: number | null;
+    clientId: string;
+    surfaceId: string;
+    paneId: string;
+    lineageId: string;
+    paneLabel: number;
+  }>;
   stateVersion: number;
   transactions: Array<{
     authorityId: string;
@@ -131,8 +140,26 @@ export type ReserveResult = {
 
 export type RestoreSnapshot = Pick<
   AcceptedState,
-  "allocatorId" | "authorityOwners" | "custodyRevision" | "fleetId" | "headHash" | "headSeq" | "mappings" | "nextOrdinalFence" | "nextPaneOrdinalFence" | "paneMappings" | "stateVersion" | "transactions"
+  "allocatorId" | "authorityOwners" | "custodyRevision" | "fleetId" | "headHash" | "headSeq" | "mappings" | "nextOrdinalFence" | "nextPaneOrdinalFence" | "nextPaneAllocationGenerationFence" | "paneLabelReuseEnabled" | "paneMappings" | "stateVersion" | "transactions"
 >;
+
+export type PaneAllocation = {
+  allocationGeneration: number;
+  paneLabel: number;
+};
+
+export type PaneRetirementEvidence = {
+  allocationGeneration: number;
+  clientId: string;
+  closeRevision: number;
+  lineageId: string;
+  paneId: string;
+  paneLabel: number;
+  surfaceId: string;
+  terminalRetirementRevision: number;
+  tombstoneId: string;
+  tombstoneKind: "pane" | "surface";
+};
 
 export type RestoreReady = {
   computedFence: number;
@@ -714,6 +741,63 @@ export class PostgresCustodyAdapter<M extends LeaseMode> {
     }
   }
 
+  async claimPaneWithGeneration(
+    this: PostgresCustodyAdapter<"writer">,
+    clientId: string,
+    surfaceId: string,
+    paneId: string,
+    lineageId: string,
+  ): Promise<PaneAllocation> {
+    this.assertMode("writer");
+    const identityMatches = (state: AcceptedState) => state.paneMappings.some((pane) =>
+      pane.clientId === clientId && pane.surfaceId === surfaceId && pane.paneId === paneId &&
+      pane.lineageId === lineageId && pane.allocationGeneration !== null);
+    const result = await this.mutate("claim_pane_generation", async () =>
+      await this.primary.query<{ pane_label: number | string; allocation_generation: number | string }>(
+        "SELECT * FROM surf_ace_allocator.claim_pane_generation($1, $2, $3, $4, $5, $6, $7)",
+        [this.config.fleetId, this.token.leaseGeneration, this.token.leaseId, clientId, surfaceId, paneId, lineageId],
+      ), identityMatches, (state) => {
+        const byLineage = state.paneMappings.find((pane) => pane.clientId === clientId &&
+          pane.surfaceId === surfaceId && pane.lineageId === lineageId);
+        const byPane = state.paneMappings.find((pane) => pane.clientId === clientId &&
+          pane.surfaceId === surfaceId && pane.paneId === paneId);
+        if ((byLineage && byLineage.paneId !== paneId) || (byPane && byPane.lineageId !== lineageId)) {
+          throw new AllocatorError("assignment_conflict", "pane identity conflicts with allocator history");
+        }
+      });
+    const row = requiredRow(result.rows[0], "claim_pane_generation");
+    return {
+      paneLabel: integer(row.pane_label),
+      allocationGeneration: integer(row.allocation_generation),
+    };
+  }
+
+  async releasePaneGeneration(
+    this: PostgresCustodyAdapter<"writer">,
+    evidence: PaneRetirementEvidence,
+  ): Promise<void> {
+    this.assertMode("writer");
+    const matches = (state: AcceptedState) => !state.paneMappings.some((pane) =>
+      pane.clientId === evidence.clientId && pane.surfaceId === evidence.surfaceId &&
+      pane.paneId === evidence.paneId && pane.lineageId === evidence.lineageId &&
+      pane.paneLabel === evidence.paneLabel && pane.allocationGeneration === evidence.allocationGeneration);
+    await this.mutate("release_pane_generation", async () => await this.primary.query(
+      "SELECT surf_ace_allocator.release_pane_generation($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+      [this.config.fleetId, this.token.leaseGeneration, this.token.leaseId,
+        evidence.clientId, evidence.surfaceId, evidence.paneId, evidence.lineageId,
+        evidence.paneLabel, evidence.allocationGeneration, evidence.tombstoneKind,
+        evidence.tombstoneId, evidence.closeRevision, evidence.terminalRetirementRevision],
+    ), matches, (state) => {
+      const prior = state.paneMappings.find((pane) => pane.clientId === evidence.clientId &&
+        pane.surfaceId === evidence.surfaceId && pane.paneId === evidence.paneId &&
+        pane.lineageId === evidence.lineageId);
+      if (prior && (prior.paneLabel !== evidence.paneLabel ||
+          prior.allocationGeneration !== evidence.allocationGeneration)) {
+        throw new AllocatorError("assignment_conflict", "pane release does not match the active allocation");
+      }
+    });
+  }
+
   async burn(this: PostgresCustodyAdapter<"writer">, transactionId: string): Promise<void> {
     this.assertMode("writer");
     await this.mutate("burn_reservation", async () => await this.primary.query(
@@ -1097,6 +1181,8 @@ function validateAcceptedState(state: AcceptedState, config: PostgresCustodyConf
     );
   }
   if (!Number.isSafeInteger(state.nextPaneOrdinalFence) || state.nextPaneOrdinalFence < 1 ||
+      !Number.isSafeInteger(state.nextPaneAllocationGenerationFence) ||
+      state.nextPaneAllocationGenerationFence < 0 || typeof state.paneLabelReuseEnabled !== "boolean" ||
       !Array.isArray(state.paneMappings)) {
     throw new AllocatorError("allocator_state_corrupt", "pane allocator fence or mappings are invalid");
   }
@@ -1110,6 +1196,9 @@ function validateAcceptedState(state: AcceptedState, config: PostgresCustodyConf
         !/^pl_[A-Za-z0-9._:-]{3,128}$/.test(pane.lineageId) ||
         !Number.isSafeInteger(pane.paneLabel) || pane.paneLabel < 1 ||
         pane.paneLabel >= state.nextPaneOrdinalFence ||
+        (pane.allocationGeneration !== null &&
+          (!Number.isSafeInteger(pane.allocationGeneration) || pane.allocationGeneration < 1 ||
+            pane.allocationGeneration > state.nextPaneAllocationGenerationFence)) ||
         paneKeys.has(key) || paneLabels.has(pane.paneLabel)) {
       throw new AllocatorError("allocator_state_corrupt", "pane assignments violate uniqueness or fence invariants");
     }

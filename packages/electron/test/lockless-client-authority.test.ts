@@ -603,6 +603,128 @@ test("latest-wins records coalesce and tombstones reclaim oldest sequence", () =
   );
 });
 
+test("surface reclamation releases only generation-bound panes after its final nested restore path", () => {
+  const clientId = "a".repeat(64);
+  const state = createEmptyLocklessClientState(limits);
+  const pane = (paneId: number, paneLabel: number, allocationGeneration: number | null, paneLineageId: string) => ({
+    allocationGeneration,
+    paneId,
+    paneLabel,
+    paneLineageId,
+  });
+  const nestedPane = pane(2, 12, 7, "pl_nested_surface_pane");
+  const nestedTombstone = {
+    bytes: 0,
+    closedSequence: 1,
+    kind: "pane" as const,
+    payload: { pane: nestedPane },
+    scopes: {},
+    surfaceId: "sf_reuse_surface",
+    tombstoneId: "pt_nested_reuse",
+  };
+  const { bytes: _nestedBytes, ...nestedMaterial } = nestedTombstone;
+  nestedTombstone.bytes = exactDurableBytes({ version: 1, ...nestedMaterial });
+  const parentWithoutBytes = {
+    closedSequence: 4,
+    kind: "surface" as const,
+    payload: {
+      paneTombstones: [nestedTombstone],
+      surface: {
+        panes: [pane(1, 11, 6, "pl_live_surface_pane"), pane(5, 15, null, "pl_legacy_pane")],
+        topologyRevision: 4,
+      },
+    },
+    scopes: {},
+    surfaceId: "sf_reuse_surface",
+    tombstoneId: "st_reuse_surface",
+  };
+  state.tombstones = [{
+    ...parentWithoutBytes,
+    bytes: exactDurableBytes({ version: 1, ...parentWithoutBytes }),
+  }];
+  const staleParent = structuredClone(state.tombstones[0]!);
+  const unrelatedWithoutBytes = {
+    closedSequence: 2,
+    kind: "pane" as const,
+    payload: { pane: pane(9, 19, null, "pl_unrelated_earlier") },
+    scopes: {},
+    surfaceId: "sf_unrelated",
+    tombstoneId: "pt_unrelated_earlier",
+  };
+  state.tombstones.push({
+    ...unrelatedWithoutBytes,
+    bytes: exactDurableBytes({ version: 1, ...unrelatedWithoutBytes }),
+  });
+  state.tombstones.sort((left, right) => left.closedSequence - right.closedSequence);
+  state.nextClosedSequence = 5;
+
+  const restoreFirst = new LocklessClientAuthority(structuredClone(state), () => 99, clientId);
+  const restoredSurface = restoreFirst.restoreTombstone("st_reuse_surface", "surface");
+  const restoredPayload = restoredSurface.payload as { paneTombstones: typeof state.tombstones };
+  assert.equal(restoredSurface.closedSequence, 4);
+  assert.equal(restoredPayload.paneTombstones[0]?.closedSequence, 1,
+    "surface restore preserves the nested pane's original retention order");
+  restoreFirst.restoreExactTombstones(restoredPayload.paneTombstones);
+  assert.deepEqual(restoreFirst.listTombstones().map(({ closedSequence }) => closedSequence), [1, 2],
+    "restored nested tombstone remains ahead of the unrelated later close");
+  assert.deepEqual(restoreFirst.listPendingPaneReleases(), [],
+    "restoring before reclamation retains the allocation");
+
+  const target = new LocklessClientAuthority(state, () => 100, clientId);
+
+  target.createTombstone({ kind: "pane", payload: { pane: pane(3, 13, 8, "pl_next_one") }, surfaceId: "sf_next" });
+  target.createTombstone({ kind: "pane", payload: { pane: pane(4, 14, 9, "pl_next_two") }, surfaceId: "sf_next" });
+
+  const releases = target.listPendingPaneReleases();
+  assert.deepEqual(releases.map(({ paneId, paneLabel, allocationGeneration, tombstoneKind, tombstoneId, closeRevision }) => ({
+    paneId, paneLabel, allocationGeneration, tombstoneKind, tombstoneId, closeRevision,
+  })), [
+    { paneId: "1", paneLabel: 11, allocationGeneration: 6, tombstoneKind: "surface", tombstoneId: "st_reuse_surface", closeRevision: 4 },
+    { paneId: "2", paneLabel: 12, allocationGeneration: 7, tombstoneKind: "surface", tombstoneId: "st_reuse_surface", closeRevision: 4 },
+  ]);
+  assert.ok(releases.every((release) => release.terminalRetirementRevision > 0));
+
+  const recovered = new LocklessClientAuthority(target.exportState(), () => 101, clientId);
+  assert.deepEqual(recovered.listPendingPaneReleases(), releases);
+  recovered.acknowledgePaneReleases(releases.map((release) => release.releaseId));
+  assert.deepEqual(recovered.listPendingPaneReleases(), []);
+  assert.equal(recovered.exportState().paneRetirementAudits.length, 2);
+
+  const staleRestoreState = createEmptyLocklessClientState(limits);
+  staleRestoreState.paneRetirementAudits = recovered.exportState().paneRetirementAudits;
+  staleRestoreState.tombstones = [staleParent];
+  staleRestoreState.nextClosedSequence = 5;
+  const staleRestore = new LocklessClientAuthority(staleRestoreState, () => 102, clientId);
+  assert.throws(
+    () => staleRestore.restoreTombstone("st_reuse_surface", "surface"),
+    /Terminally retired pane identity cannot be restored/,
+    "the persistent identity audit fences a stale backup that reintroduces the reclaimed surface tombstone",
+  );
+});
+
+test("a reclaimed legacy tombstone without a committed topology revision cannot release its pane label", () => {
+  const clientId = "b".repeat(64);
+  const state = createEmptyLocklessClientState({ ...limits, maxRetainedTombstones: 2 });
+  const authority = new LocklessClientAuthority(state, () => 100, clientId);
+  for (let paneId = 1; paneId <= 3; paneId += 1) {
+    authority.createTombstone({
+      kind: "pane",
+      payload: {
+        pane: {
+          allocationGeneration: paneId,
+          paneId,
+          paneLabel: paneId,
+          paneLineageId: `pl_legacy_retained_${paneId}`,
+        },
+      },
+      surfaceId: `sf_legacy_retained_${paneId}`,
+    });
+  }
+  assert.deepEqual(authority.listTombstones().map(({ closedSequence }) => closedSequence), [2, 3]);
+  assert.deepEqual(authority.listPendingPaneReleases(), [],
+    "legacy retention order is not a committed close/topology revision or release proof");
+});
+
 function retainedAggregateFixture(identityOrder: "forward" | "reverse"): {
   aggregateBytes: number;
   state: PersistentLocklessClientState;

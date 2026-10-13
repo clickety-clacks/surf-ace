@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import {
   SURF_ACE_LOCKLESS_V1_CAPABILITY,
@@ -121,6 +121,20 @@ export type PersistentTombstone = {
   tombstoneId: string;
 };
 
+export type PersistentPaneRetirement = {
+  allocationGeneration: number;
+  clientId: string;
+  closeRevision: number;
+  lineageId: string;
+  paneId: string;
+  paneLabel: number;
+  releaseId: string;
+  surfaceId: string;
+  terminalRetirementRevision: number;
+  tombstoneId: string;
+  tombstoneKind: "pane" | "surface";
+};
+
 export type PersistentLocklessClientState = {
   capability: typeof SURF_ACE_LOCKLESS_V1_CAPABILITY;
   controllers: Record<ControllerInstanceId, PersistentControllerEntry>;
@@ -128,6 +142,8 @@ export type PersistentLocklessClientState = {
   nextClosedSequence: number;
   nextCommitSequence: number;
   nextDormantSequence: number;
+  paneRetirementAudits: PersistentPaneRetirement[];
+  pendingPaneReleases: PersistentPaneRetirement[];
   scopes: Record<string, PersistentConsumableScope>;
   surfaceSetRevision: number;
   targetApplyWorkItems: Record<string, PersistentTargetApplyWorkItem>;
@@ -248,6 +264,27 @@ function nestedTombstones(
   ]);
 }
 
+function paneMaterials(tombstone: PersistentTombstone): unknown[] {
+  const payload = tombstone.payload as {
+    pane?: unknown;
+    surface?: { panes?: unknown[] };
+  };
+  const values: unknown[] = tombstone.kind === "pane"
+    ? [payload.pane]
+    : [...(Array.isArray(payload.surface?.panes) ? payload.surface.panes : [])];
+  for (const nested of nestedTombstones(tombstone)) {
+    const nestedPayload = nested.payload as {
+      pane?: unknown;
+      surface?: { panes?: unknown[] };
+    };
+    if (nested.kind === "pane") values.push(nestedPayload.pane);
+    else if (Array.isArray(nestedPayload.surface?.panes)) {
+      values.push(...nestedPayload.surface.panes);
+    }
+  }
+  return values;
+}
+
 function tombstoneScopes(
   tombstone: PersistentTombstone,
 ): PersistentConsumableScope[] {
@@ -293,6 +330,27 @@ function newOpaqueId(prefix: string): string {
   return `${prefix}_${randomUUID().replaceAll("-", "")}`;
 }
 
+function paneRetirementKey(value: Pick<PersistentPaneRetirement, "surfaceId" | "paneId" | "lineageId" | "allocationGeneration">): string {
+  return JSON.stringify([value.surfaceId, value.paneId, value.lineageId, value.allocationGeneration]);
+}
+
+function paneReleaseId(value: Omit<PersistentPaneRetirement, "releaseId">): string {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
+
+function tombstoneCloseRevision(tombstone: PersistentTombstone): number | null {
+  if (!tombstone.payload || typeof tombstone.payload !== "object") return null;
+  const payload = tombstone.payload as Record<string, unknown>;
+  const revision = tombstone.kind === "pane"
+    ? payload.closeTopologyRevision
+    : (payload.surface && typeof payload.surface === "object")
+      ? (payload.surface as Record<string, unknown>).topologyRevision
+      : null;
+  return Number.isSafeInteger(revision) && Number(revision) > 0
+    ? Number(revision)
+    : null;
+}
+
 function targetApplyWorkItemKey(
   controllerInstanceId: string,
   operationRequestId: string,
@@ -320,6 +378,8 @@ export function createEmptyLocklessClientState(
     nextClosedSequence: 1,
     nextCommitSequence: 1,
     nextDormantSequence: 1,
+    paneRetirementAudits: [],
+    pendingPaneReleases: [],
     scopes: {},
     surfaceSetRevision: 0,
     targetApplyWorkItems: {},
@@ -356,6 +416,8 @@ export function migrateLocklessClientState(
   state.scopes ??= {};
   state.targetApplyWorkItems ??= {};
   state.tombstones ??= [];
+  state.paneRetirementAudits ??= [];
+  state.pendingPaneReleases ??= [];
   for (const tombstone of state.tombstones) {
     tombstone.scopes ??= {};
   }
@@ -1590,6 +1652,7 @@ export class LocklessClientAuthority {
           unreadFrameCount,
         },
       );
+      this.recordPaneRetirementIntents(victim, audit.commitSequence);
       this.emit({
         bytes: victim.bytes,
         closedSequence: victim.closedSequence,
@@ -1610,6 +1673,80 @@ export class LocklessClientAuthority {
       });
   }
 
+  private recordPaneRetirementIntents(victim: PersistentTombstone, terminalRevision: number): void {
+    if (!this.clientIdentity || !/^[a-f0-9]{64}$/.test(this.clientIdentity)) return;
+    const closeRevision = tombstoneCloseRevision(victim);
+    // Older tombstones lack committed topology evidence. They remain reserved;
+    // retention order alone cannot authorize allocator reuse.
+    if (closeRevision === null) return;
+    const paneValues = paneMaterials(victim);
+    const remaining = new Set<string>();
+    for (const retained of this.state.tombstones) {
+      for (const candidate of paneMaterials(retained)) {
+        if (!candidate || typeof candidate !== "object") continue;
+        const pane = candidate as Record<string, unknown>;
+        if (Number.isSafeInteger(pane.allocationGeneration) && Number(pane.allocationGeneration) > 0 &&
+            Number.isSafeInteger(pane.paneId) && typeof pane.paneLineageId === "string") {
+          remaining.add(JSON.stringify([retained.surfaceId, String(pane.paneId), pane.paneLineageId,
+            Number(pane.allocationGeneration)]));
+        }
+      }
+    }
+    for (const candidate of paneValues) {
+      if (!candidate || typeof candidate !== "object") continue;
+      const pane = candidate as Record<string, unknown>;
+      if (!Number.isSafeInteger(pane.paneId) || Number(pane.paneId) < 1 ||
+          !Number.isSafeInteger(pane.paneLabel) || Number(pane.paneLabel) < 1 ||
+          !Number.isSafeInteger(pane.allocationGeneration) || Number(pane.allocationGeneration) < 1 ||
+          typeof pane.paneLineageId !== "string" ||
+          !/^pl_[A-Za-z0-9._:-]{3,128}$/.test(pane.paneLineageId)) continue;
+      const base = {
+        allocationGeneration: Number(pane.allocationGeneration),
+        clientId: this.clientIdentity,
+        closeRevision,
+        lineageId: pane.paneLineageId,
+        paneId: String(pane.paneId),
+        paneLabel: Number(pane.paneLabel),
+        surfaceId: victim.surfaceId,
+        terminalRetirementRevision: terminalRevision,
+        tombstoneId: victim.tombstoneId,
+        tombstoneKind: victim.kind,
+      } as const;
+      if (remaining.has(paneRetirementKey(base))) continue;
+      const release: PersistentPaneRetirement = { ...base, releaseId: paneReleaseId(base) };
+      const existing = this.state.paneRetirementAudits.find((entry) =>
+        paneRetirementKey(entry) === paneRetirementKey(release));
+      if (existing && existing.releaseId !== release.releaseId) {
+        throw new LocklessAuthorityError("internal_error", "Pane retirement identity already has conflicting evidence");
+      }
+      if (!existing) this.state.paneRetirementAudits.push(clone(release));
+      if (!this.state.pendingPaneReleases.some((entry) => entry.releaseId === release.releaseId)) {
+        this.state.pendingPaneReleases.push(clone(release));
+      }
+    }
+  }
+
+  private assertTombstoneNotRetired(tombstone: PersistentTombstone): void {
+    if (!this.clientIdentity || !/^[a-f0-9]{64}$/.test(this.clientIdentity)) return;
+    for (const candidate of paneMaterials(tombstone)) {
+      if (!candidate || typeof candidate !== "object") continue;
+      const pane = candidate as Record<string, unknown>;
+      if (!Number.isSafeInteger(pane.paneId) || Number(pane.paneId) < 1 ||
+          typeof pane.paneLineageId !== "string") continue;
+      const retirement = this.state.paneRetirementAudits.find((entry) =>
+        entry.clientId === this.clientIdentity && entry.surfaceId === tombstone.surfaceId &&
+        entry.paneId === String(pane.paneId) && entry.lineageId === pane.paneLineageId);
+      if (retirement) {
+        throw new LocklessAuthorityError(
+          "invalid_operation",
+          "Terminally retired pane identity cannot be restored from a stale tombstone",
+          { allocationGeneration: retirement.allocationGeneration, paneId: retirement.paneId,
+            retirementId: retirement.releaseId, surfaceId: retirement.surfaceId },
+        );
+      }
+    }
+  }
+
   restoreTombstone(
     tombstoneId: string,
     kind: "pane" | "surface",
@@ -1626,6 +1763,7 @@ export class LocklessClientAuthority {
       );
     }
     const tombstone = this.state.tombstones[index]!;
+    this.assertTombstoneNotRetired(tombstone);
     for (const scopeId of Object.keys(tombstone.scopes)) {
       if (this.state.scopes[scopeId]) {
         throw new LocklessAuthorityError(
@@ -1649,6 +1787,25 @@ export class LocklessClientAuthority {
       kind
         ? this.state.tombstones.filter((entry) => entry.kind === kind)
         : this.state.tombstones,
+    );
+  }
+
+  listPendingPaneReleases(): PersistentPaneRetirement[] {
+    return clone(this.state.pendingPaneReleases);
+  }
+
+  acknowledgePaneReleases(releaseIds: string[]): void {
+    if (new Set(releaseIds).size !== releaseIds.length ||
+        releaseIds.some((releaseId) => !/^[a-f0-9]{64}$/.test(releaseId))) {
+      throw new LocklessAuthorityError("invalid_payload", "Pane release acknowledgement is malformed");
+    }
+    const known = new Set(this.state.pendingPaneReleases.map((release) => release.releaseId));
+    if (releaseIds.some((releaseId) => !known.has(releaseId))) {
+      throw new LocklessAuthorityError("invalid_operation", "Pane release acknowledgement is not pending");
+    }
+    const completed = new Set(releaseIds);
+    this.state.pendingPaneReleases = this.state.pendingPaneReleases.filter(
+      (release) => !completed.has(release.releaseId),
     );
   }
 
@@ -1693,6 +1850,7 @@ export class LocklessClientAuthority {
   }
 
   restoreExactTombstones(tombstones: PersistentTombstone[]): void {
+    for (const tombstone of tombstones) this.assertTombstoneNotRetired(tombstone);
     const combined = [...this.state.tombstones, ...clone(tombstones)].sort(
       (left, right) => left.closedSequence - right.closedSequence,
     );
@@ -1862,6 +2020,31 @@ export class LocklessClientAuthority {
   ): void {
     assertLocklessCapacityLimits(this.state.limits);
     assertRetainedTombstoneAggregate(this.state, this.state.limits, transition);
+    const retirementIds = new Set<string>();
+    for (const retirement of this.state.paneRetirementAudits) {
+      const { releaseId, ...evidence } = retirement;
+      if (!/^[a-f0-9]{64}$/.test(releaseId) || releaseId !== paneReleaseId(evidence) ||
+          !/^[a-f0-9]{64}$/.test(retirement.clientId) ||
+          !/^sf_[A-Za-z0-9._:-]{3,64}$/.test(retirement.surfaceId) ||
+          !/^[A-Za-z0-9._:-]{1,64}$/.test(retirement.paneId) ||
+          !/^pl_[A-Za-z0-9._:-]{3,128}$/.test(retirement.lineageId) ||
+          !Number.isSafeInteger(retirement.paneLabel) || retirement.paneLabel < 1 ||
+          !Number.isSafeInteger(retirement.allocationGeneration) || retirement.allocationGeneration < 1 ||
+          !Number.isSafeInteger(retirement.closeRevision) || retirement.closeRevision < 1 ||
+          !Number.isSafeInteger(retirement.terminalRetirementRevision) || retirement.terminalRetirementRevision < 1 ||
+          !/^[A-Za-z0-9._:-]{1,128}$/.test(retirement.tombstoneId) ||
+          !["pane", "surface"].includes(retirement.tombstoneKind) || retirementIds.has(releaseId)) {
+        throw new LocklessAuthorityError("capability_mismatch", "Persisted pane retirement audit is invalid");
+      }
+      retirementIds.add(releaseId);
+    }
+    const pendingIds = new Set<string>();
+    for (const release of this.state.pendingPaneReleases) {
+      if (!retirementIds.has(release.releaseId) || pendingIds.has(release.releaseId)) {
+        throw new LocklessAuthorityError("capability_mismatch", "Persisted pane release intent has no retirement audit");
+      }
+      pendingIds.add(release.releaseId);
+    }
     for (const controller of Object.values(this.state.controllers)) {
       controller.pendingOperationReceipts ??= {};
       const receipts = Object.values(controller.pendingOperationReceipts);
