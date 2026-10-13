@@ -696,7 +696,7 @@ function rendererWindowState(surfaceId: string): RendererWindowState {
     if (pane.paneLineageId && pane.content.contentId) {
       const frame = core.annotationPublisher?.openFrameFor(surfaceId, pane.paneId);
       const delivery = (!pane.showDone || frame) && annotationRegistryPublisher?.deliveryStatus(surfaceId,
-        pane.paneId, pane.paneLineageId, pane.content.contentId, pane.content.revision, frame?.frameId, !pane.showDone);
+        pane.paneId, pane.paneLineageId, pane.content.contentId, pane.content.revision, frame?.frameId);
       if (delivery) pane.annotationDelivery = delivery;
     }
   }

@@ -54,17 +54,18 @@ export class AnnotationRegistryPublisher {
   localSaved(): void { this.publishStatus(true); }
 
   deliveryStatus(surfaceId: string, paneId: number, paneLineageId: string, contentId: string,
-    revision: number, frameId?: string, requireFrameCommit = false): AnnotationDeliveryStatus | null {
+    revision: number, frameId?: string): AnnotationDeliveryStatus | null {
     const receipt = this.savedReceipts[surfaceId]?.find((r) => r.paneId === paneId &&
       r.paneLineageId === paneLineageId && r.contentId === contentId && r.revision === revision &&
       (frameId === undefined || r.frameId === frameId));
-    if (!receipt || (requireFrameCommit && receipt.kind !== "frame_commit")) {
+    if (!receipt) {
       const pending = this.savedPendingFrames[surfaceId]?.some((f) => f.commitRequested &&
         f.paneId === paneId && f.paneLineageId === paneLineageId && f.contentId === contentId &&
         f.contentRevision === revision && (frameId === undefined || f.frameId === frameId));
       return pending ? { phase: "waiting", ...(this.deliveryErrors.has(surfaceId) ? { error: true } : {}) } : null;
     }
-    if (receipt.phase === "sent" || receipt.phase === "rejected") return { phase: receipt.phase };
+    if (receipt.phase === "rejected") return { phase: "rejected" };
+    if (receipt.phase === "sent" && receipt.kind === "frame_commit") return { phase: "sent" };
     const sending = this.sending?.surfaceId === surfaceId && this.sending.sourceEventId === receipt.sourceEventId;
     return { phase: sending ? "sending" : "waiting", ...(this.deliveryErrors.has(surfaceId) ? { error: true } : {}) };
   }

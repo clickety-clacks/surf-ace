@@ -1,11 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createHash } from "node:crypto";
 import { AnnotationPublisherOutbox } from "../src/annotation-publisher-outbox.js";
 import { AnnotationRegistryPublisher, type AnnotationPublisherWire } from "../src/annotation-registry-publisher.js";
 import type { SurfaceCore } from "../src/surface-core.js";
 const client = "c".repeat(64), surface = "sf_delivery";
-const event = { paneId: 1, frameId: "frame-one", kind: "live_delta" as const, contentId: "content-one",
-  revision: 1, contentType: "html", sourceTimestamp: "2026-10-13T02:00:00Z", payload: { strokes: [] },
+const image = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL/nwAAAABJRU5ErkJggg==";
+const viewport = { width: 10, height: 10, scale: 1 };
+const event = { paneId: 1, frameId: "frame-one", kind: "frame_commit" as const, contentId: "content-one",
+  revision: 1, contentType: "html", sourceTimestamp: "2026-10-13T02:00:00Z", viewport,
+  payload: { frame: { frameId: "frame-one", contextKey: "content-one", contentId: "content-one",
+    scrollOffset: { x: 0, y: 0 }, viewport, openedAt: 1, updatedAt: 1, image, strokes: [] },
+    imageSha256: createHash("sha256").update(Buffer.from(image, "base64")).digest("hex") } };
+const liveEvent = { ...event, kind: "live_delta" as const, payload: { strokes: [] },
   viewport: { scrollOffset: { x: 0, y: 0 }, visibleRect: { x: 0, y: 0, width: 10, height: 10 },
     contentSize: { width: 10, height: 10 }, zoomLevel: 1 } };
 const cursor = { epoch: "a".repeat(32), sequence: "1" };
@@ -69,14 +76,20 @@ test("accepted live delta cannot stand in for Done frame-commit acceptance", asy
     paneLineageId: "lineage-one", contentRevision: 1, contentId: "content-one", contextKey: "content-one",
     image: "", openedAt: 1, scrollOffset: { x: 0, y: 0 }, viewport: { width: 10, height: 10, scale: 1 },
   });
-  outbox.append(surface, { ...event, frameId: frame.frameId }, "lineage-one");
+  outbox.append(surface, { ...liveEvent, frameId: frame.frameId }, "lineage-one");
   outbox.accepted(surface, outbox.head(surface)!, cursor);
   outbox.accepted(surface, outbox.head(surface)!, { ...cursor, sequence: "2" });
   outbox.requestFrameCommit(surface, 1, true);
   publisher.localSaved(); // explicitly acknowledged local save; no transport drain
+  assert.equal(publisher.deliveryStatus(surface, 1, "lineage-one", "content-one", 1, frame.frameId)?.phase, "waiting");
+  assert.equal(publisher.deliveryStatus(surface, 1, "lineage-one", "content-one", 2, frame.frameId), null);
+  outbox.append(surface, { ...event, frameId: frame.frameId,
+    payload: { ...event.payload, frame: { ...event.payload.frame, frameId: frame.frameId } } }, "lineage-one");
+  publisher.localSaved();
+  assert.equal(publisher.deliveryStatus(surface, 1, "lineage-one", "content-one", 1, frame.frameId)?.phase, "waiting");
+  outbox.accepted(surface, outbox.head(surface)!, { ...cursor, sequence: "3" });
+  publisher.localSaved();
   assert.equal(publisher.deliveryStatus(surface, 1, "lineage-one", "content-one", 1, frame.frameId)?.phase, "sent");
-  assert.equal(publisher.deliveryStatus(surface, 1, "lineage-one", "content-one", 1, frame.frameId, true)?.phase, "waiting");
-  assert.equal(publisher.deliveryStatus(surface, 1, "lineage-one", "content-one", 2, frame.frameId, true), null);
   await publisher.stop();
 });
 test("restored unhealthy delivery is visibly pending with an error and causes no recovery replay", async () => {
