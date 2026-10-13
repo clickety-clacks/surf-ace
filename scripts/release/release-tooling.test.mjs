@@ -2937,6 +2937,8 @@ test("v0.2.8 release smoke gates bind only matching candidate participants", asy
   assert.match(smoke, /tightbeam-\$\{channel\}-v023-candidate-write/);
   assert.match(smoke, /inspectScreenshotPixels\(visible\.capture\.image, expectedScreenshotColors\)/);
   assert.doesNotMatch(`${smoke}\n${fixture}`, /includeImage/);
+  assert.match(fixture, /if \(\["--baseline-commit", "--baseline-electron", "--baseline-root"\]\.includes\(flag\)\) \{\s*throw new Error\("old_version_smoke_inputs_forbidden"\);/);
+  assert.match(fixture, /const mode = values\.get\("--mode"\) \?\? "fresh-install";\s*if \(mode !== "fresh-install"\) throw new Error\("old_version_smoke_mode_forbidden"\);/);
   assert.match(smoke, /validateTightbeamFreshInstallState/);
   assert.match(fixture, /mode: "fresh-install"/);
   assert.doesNotMatch(fixture, /runPhase\("baseline"|runPhase\("candidate"|runPhase\("rollback"/);
