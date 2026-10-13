@@ -389,6 +389,66 @@ private final class AnnotationWireProbe {
 }
 
 @MainActor
+private final class AnnotationAmbiguousServerProbe {
+    enum Failure { case beforeCommit, afterCommit, lostReply, hello }
+    let failure: Failure
+    var failed = false
+    var operations: [String] = []
+    var attemptedCanonicals: [String] = []
+    var committedCanonicals: [String] = []
+    var duplicates = 0
+    var connections = 0
+    var closedConnections = 0
+    init(_ failure: Failure) { self.failure = failure }
+}
+
+@MainActor
+private final class AnnotationAmbiguousServerTransport: SurfAceAnnotationWireTransport {
+    let probe: AnnotationAmbiguousServerProbe
+    private var roleEstablished = false
+    init(_ probe: AnnotationAmbiguousServerProbe) { self.probe = probe; probe.connections += 1 }
+    func exchange(_ data: Data) async throws -> Data {
+        let request = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let op = try XCTUnwrap(request["op"] as? String)
+        probe.operations.append(op)
+        var reply: [String: Any] = ["v": 1, "type": "response", "op": op, "id": request["id"]!, "ok": true]
+        if op == "annotation.hello" {
+            if probe.failure == .hello && !probe.failed {
+                probe.failed = true
+                reply["ok"] = false; reply["error"] = ["code": "internal_error"]
+            } else {
+                roleEstablished = true
+                reply["payload"] = ["registryId": "isolated-registry"]
+            }
+        } else {
+            XCTAssertTrue(roleEstablished, "each replacement connection must hello before ingestion")
+            let payload = try XCTUnwrap(request["payload"] as? [String: Any])
+            let record = try XCTUnwrap(payload["record"] as? [String: Any])
+            let canonical = try XCTUnwrap(SurfAceAnnotationOutbox.canonical(record))
+            probe.attemptedCanonicals.append(canonical)
+            if probe.failure == .beforeCommit && !probe.failed {
+                probe.failed = true
+                reply["ok"] = false; reply["error"] = ["code": "internal_error"]
+            } else {
+                let duplicate = probe.committedCanonicals.contains(canonical)
+                if duplicate { probe.duplicates += 1 } else { probe.committedCanonicals.append(canonical) }
+                if !probe.failed && (probe.failure == .afterCommit || probe.failure == .lostReply) {
+                    probe.failed = true
+                    if probe.failure == .lostReply { throw URLError(.networkConnectionLost) }
+                    reply["ok"] = false; reply["error"] = ["code": "internal_error"]
+                } else {
+                    let cursor = try XCTUnwrap(probe.committedCanonicals.firstIndex(of: canonical)) + 1
+                    reply["payload"] = ["serverCursor": ["epoch": "0123456789abcdef0123456789abcdef", "sequence": String(cursor)],
+                                        "duplicate": duplicate, "committedAt": "2026-10-13T02:00:00.000Z"]
+                }
+            }
+        }
+        return try JSONSerialization.data(withJSONObject: reply)
+    }
+    func close() { roleEstablished = false; probe.closedConnections += 1 }
+}
+
+@MainActor
 private final class AnnotationWireProbeTransport: SurfAceAnnotationWireTransport {
     let probe: AnnotationWireProbe
     init(_ probe: AnnotationWireProbe) {
@@ -538,6 +598,98 @@ private final class AnnotationRejectOneSurfaceTransport: SurfAceAnnotationWireTr
 }
 
 extension SurfAceAnnotationOutboxTests {
+    @MainActor
+    private func assertAmbiguousServerFailurePreservesCrossPaneFIFO(
+        _ failure: AnnotationAmbiguousServerProbe.Failure, gap: Bool = false
+    ) async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SurfAceInternalError-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = SurfAceLocklessGenerationStore(stateURL: directory.appendingPathComponent("authority.json"))
+        var limits = SurfAceLocklessCapacityLimits.production
+        limits.maxAnnotationPublisherStateBytesPerSurface = Int64(SurfAceAnnotationOutbox.maximumBytes)
+        limits.maxAnnotationPublisherRecordsPerSurface = Int64(SurfAceAnnotationOutbox.maximumRecords)
+        limits.maxRecoverableSurfaceBytes = 704 * 1_024 * 1_024
+        var state = try SurfAceLocklessAuthorityState.empty(limits: limits)
+        state.annotationPublisher = try SurfAceAnnotationOutbox(clientId: "client-1", sourceEpoch: sourceEpoch)
+        let opened = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
+            state: &state, expectedSurfaceSetRevision: state.surfaceSetRevision)
+        let sid = opened.surface.surfaceId
+        let firstPane = try XCTUnwrap(opened.surface.panes.values.first).paneId
+        _ = try SurfAceLocklessTopologyOperations.paneSplit(
+            state: &state, surfaceId: sid, paneId: firstPane, count: 2,
+            direction: "horizontal", expectedTopologyRevision: opened.surface.topologyRevision)
+        let panes = try XCTUnwrap(state.liveSurfaces[sid]).panes.values.map(\.paneId).sorted()
+        XCTAssertEqual(panes.count, 2)
+        if gap {
+            try state.annotationPublisher?.lose(surfaceId: sid, code: "isolated_gap")
+            _ = try state.annotationPublisher?.head(surfaceId: sid)
+        } else {
+            for (index, paneId) in panes.enumerated() {
+                var source = record(); source["paneId"] = paneId
+                source["frameId"] = "fr_\(String(repeating: String(index + 1), count: 32))"
+                _ = try state.annotationPublisher?.append(surfaceId: sid, record: source)
+            }
+        }
+        let expected = try XCTUnwrap(state.annotationPublisher?.surfaces[sid]?.fifo)
+        let preservedLive = try JSONEncoder().encode(state.liveSurfaces)
+        try store.save(state)
+        let adapter = try SurfAceLocklessRuntimeAdapter(store: store, annotationClientId: "client-1")
+        let probe = AnnotationAmbiguousServerProbe(failure)
+        var diagnostics: [[String: String]] = []
+        let failed = expectation(description: "bounded retry scheduled after ambiguous server failure")
+        let first = try SurfAceAnnotationPublisher(
+            adapter: adapter, endpoint: XCTUnwrap(URL(string: "ws://127.0.0.1:1/ws")),
+            makeTransport: { _ in AnnotationAmbiguousServerTransport(probe) },
+            onDiagnostic: { diagnostics.append($0) }, onError: { _ in failed.fulfill() })
+        first.notify()
+        await fulfillment(of: [failed], timeout: 5)
+        await first.awaitIdle()
+        first.stop() // Cancel the retry timer; this test controls the next connection.
+        let pending = await adapter.snapshot()
+        XCTAssertNil(pending.annotationPublisher?.surfaces[sid]?.unhealthy)
+        XCTAssertNil(pending.annotationPublisher?.surfaces[sid]?.acceptedCursor)
+        XCTAssertEqual(pending.annotationPublisher?.surfaces[sid]?.fifo.map(\.canonical), expected.map(\.canonical))
+        XCTAssertEqual(pending.annotationPublisher?.surfaces[sid]?.fifo.map(\.sourceEventId), expected.map(\.sourceEventId))
+        XCTAssertTrue(diagnostics.contains { $0["stage"] == "retry_scheduled" })
+        XCTAssertEqual(probe.attemptedCanonicals.count, failure == .hello ? 0 : 1,
+                       "later pane must not bypass an uncertain FIFO head")
+        let resumedAdapter = try SurfAceLocklessRuntimeAdapter(store: store, annotationClientId: "client-1")
+        let resumed = try SurfAceAnnotationPublisher(
+            adapter: resumedAdapter, endpoint: XCTUnwrap(URL(string: "ws://127.0.0.1:1/ws")),
+            makeTransport: { _ in AnnotationAmbiguousServerTransport(probe) }, onError: { _ in XCTFail("retry failed") })
+        try await resumed.drain(); resumed.stop()
+        let saved = try XCTUnwrap(store.load())
+        XCTAssertEqual(probe.connections, 2)
+        XCTAssertEqual(probe.operations.filter { $0 == "annotation.hello" }.count, 2)
+        XCTAssertEqual(probe.committedCanonicals, expected.map(\.canonical))
+        let expectedAttempts = (failure == .hello ? [] : [expected[0].canonical]) + expected.map(\.canonical)
+        XCTAssertEqual(probe.attemptedCanonicals, expectedAttempts)
+        XCTAssertEqual(probe.duplicates, failure == .afterCommit || failure == .lostReply ? 1 : 0)
+        XCTAssertEqual(saved.annotationPublisher?.surfaces[sid]?.fifo.count, 0)
+        XCTAssertNil(saved.annotationPublisher?.surfaces[sid]?.unhealthy)
+        XCTAssertEqual(saved.annotationPublisher?.surfaces[sid]?.acceptedCursor?.sequence, String(expected.count))
+        XCTAssertEqual(saved.annotationPublisher?.clientId, "client-1")
+        XCTAssertEqual(saved.annotationPublisher?.sourceEpoch, sourceEpoch)
+        let finalLive = try JSONEncoder().encode(saved.liveSurfaces)
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: finalLive) as? NSDictionary,
+                       try JSONSerialization.jsonObject(with: preservedLive) as? NSDictionary)
+    }
+    @MainActor func testInternalErrorBeforeCommitRetainsSameHeadAndLaterPaneFIFO() async throws {
+        try await assertAmbiguousServerFailurePreservesCrossPaneFIFO(.beforeCommit)
+    }
+    @MainActor func testInternalErrorAfterCommitRetriesDuplicateWithoutNewFrameOrHistory() async throws {
+        try await assertAmbiguousServerFailurePreservesCrossPaneFIFO(.afterCommit)
+    }
+    @MainActor func testCommittedButReplyLostPreservesCrossPaneFIFOAndDeduplicates() async throws {
+        try await assertAmbiguousServerFailurePreservesCrossPaneFIFO(.lostReply)
+    }
+    @MainActor func testInternalErrorHelloDoesNotPoisonSurfaceOrAllocateSourceIdentity() async throws {
+        try await assertAmbiguousServerFailurePreservesCrossPaneFIFO(.hello)
+    }
+    @MainActor func testInternalErrorSourceGapRetriesSameCanonicalGap() async throws {
+        try await assertAmbiguousServerFailurePreservesCrossPaneFIFO(.afterCommit, gap: true)
+    }
     @MainActor
     func testRejectedGapPersistsUnhealthyAndDoesNotBlockOtherSurface() async throws {
         let directory = FileManager.default.temporaryDirectory

@@ -247,7 +247,9 @@ final class SurfAceAnnotationPublisher {
                     helloDone = true
                     emit("connected", surfaceId: surfaceId, outbox: snapshot.annotationPublisher)
                 } catch SurfAceAnnotationWireError.rejected(let code) {
-                    if code == "writer_fence_unavailable" { throw SurfAceAnnotationWireError.rejected(code) }
+                    if code == "writer_fence_unavailable" || code == "internal_error" {
+                        throw SurfAceAnnotationWireError.rejected(code)
+                    }
                     try await markUnhealthy(surfaceId: surfaceId, code: code)
                     continue
                 } catch SurfAceAnnotationWireError.invalidResponse {
@@ -282,8 +284,11 @@ final class SurfAceAnnotationPublisher {
                 }
                 continue
             } catch SurfAceAnnotationWireError.rejected(let code) {
-                if head.kind != "gap" &&
-                    (code == "annotation_ingest_capacity" || code == "writer_fence_unavailable") {
+                // A generic server failure does not establish whether the
+                // transaction committed before its reply failed. Preserve this
+                // exact durable head for deduplicated retry, including gaps.
+                if code == "internal_error" || (head.kind != "gap" &&
+                    (code == "annotation_ingest_capacity" || code == "writer_fence_unavailable")) {
                     throw SurfAceAnnotationWireError.rejected(code)
                 }
                 try await markUnhealthy(surfaceId: surfaceId, code: code)
