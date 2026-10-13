@@ -1128,11 +1128,23 @@ final class SurfAceRuntime {
         annotationFeedbackGeneration += 1
         for surface in surfaces {
             for pane in surface.panes {
+                guard let authorityPane = state.liveSurfaces[surface.surfaceId]?.panes[String(pane.paneId)],
+                      authorityPane.paneLineageId == pane.paneLineageId,
+                      authorityPane.history.visible.contentId == pane.currentEntry.contentId,
+                      authorityPane.history.visible.revision == Int64(pane.currentEntry.revision) else {
+                    pane.annotationDeliveryStatus = nil
+                    continue
+                }
+                var hasSavedStrokes = false
+                if case .object(let annotations) = authorityPane.history.visible.annotations {
+                    if case .object(let strokes)? = annotations["strokesById"] { hasSavedStrokes = !strokes.isEmpty }
+                    if case .string(let drawing)? = annotations["drawingData"], !drawing.isEmpty { hasSavedStrokes = true }
+                }
                 pane.annotationDeliveryStatus = state.annotationPublisher?.deliveryStatus(
                     surfaceId: surface.surfaceId, paneId: pane.paneId,
                     contentId: pane.currentEntry.contentId, revision: pane.currentEntry.revision,
-                    hasSavedStrokes: !pane.currentEntry.strokesById.isEmpty, diagnostic: diagnostic
-                ) ?? (pane.currentEntry.strokesById.isEmpty ? nil : "Saved on device")
+                    hasSavedStrokes: hasSavedStrokes, diagnostic: diagnostic
+                ) ?? (hasSavedStrokes ? "Saved on device" : nil)
             }
         }
     }

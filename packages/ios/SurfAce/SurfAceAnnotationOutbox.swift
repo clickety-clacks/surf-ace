@@ -431,6 +431,12 @@ struct SurfAceAnnotationOutbox: Codable, Equatable, Sendable {
         guard surface.nextSequence < Int64.max else { throw SurfAceAnnotationOutboxError.sequenceExhausted }
         let sequence = String(surface.nextSequence)
         surface.nextSequence += 1
+        // A new pane submission supersedes its UI proof even when capacity
+        // folds the record into a gap. Keep source cursor/history untouched.
+        if let paneId = record["paneId"] as? Int {
+            surface.acceptedFramesByPane?.removeValue(forKey: String(paneId))
+            if surface.acceptedFramesByPane?.isEmpty == true { surface.acceptedFramesByPane = nil }
+        }
         if surface.trailingGap != nil || surface.fifo.contains(where: { $0.kind == "gap" }) {
             surface.extendGap(sequence: sequence, reason: "source_retention_overflow")
             surfaces[surfaceId] = surface
@@ -559,7 +565,9 @@ struct SurfAceAnnotationOutbox: Codable, Equatable, Sendable {
            surface.diagnostic == nil || surface.diagnostic.flatMap({ Int64($0.sequence) }).map({ $0 < receiptSequence }) == true {
             return "Sent to registry"
         }
-        if surface.diagnostic != nil { return "Saved on device — delivery incomplete" }
+        if surface.diagnostic != nil || surface.trailingGap != nil || surface.fifo.contains(where: { $0.kind == "gap" }) {
+            return hasSavedStrokes ? "Saved on device — delivery incomplete" : "Delivery incomplete"
+        }
         return hasSavedStrokes ? "Saved on device" : nil
     }
 

@@ -143,6 +143,33 @@ final class SurfAceAnnotationOutboxTests: XCTestCase {
         XCTAssertEqual(pane.annotationDeliveryStatus, "Local save not verified")
     }
 
+    func testGapAbsorbedNewFrameCannotBorrowOlderPaneAcceptanceOrSurfaceCursor() throws {
+        var outbox = try SurfAceAnnotationOutbox(clientId: "client-1", sourceEpoch: sourceEpoch)
+        var final = record(); final["kind"] = "frame_commit"
+        _ = try outbox.append(surfaceId: surfaceId, record: final, maxRecords: 2)
+        let accepted = try XCTUnwrap(outbox.head(surfaceId: surfaceId, maxRecords: 2))
+        let cursor = SurfAceAnnotationServerCursor(epoch: sourceEpoch, sequence: "91")
+        try outbox.accept(surfaceId: surfaceId, head: accepted, cursor: cursor)
+        XCTAssertEqual(outbox.deliveryStatus(surfaceId: surfaceId, paneId: 1, contentId: "content-1",
+                                            revision: 1, hasSavedStrokes: true), "Sent to registry")
+        var sibling = record(); sibling["paneId"] = 2
+        sibling["frameId"] = "fr_22222222222222222222222222222222"
+        _ = try outbox.append(surfaceId: surfaceId, record: sibling, maxRecords: 2)
+        let preserved = try XCTUnwrap(outbox.surfaces[surfaceId]?.fifo)
+        _ = try outbox.append(surfaceId: surfaceId, record: sibling, maxRecords: 2)
+        XCTAssertNil(outbox.surfaces[surfaceId]?.diagnostic,
+                     "capacity gap must not depend on a diagnostic to invalidate old proof")
+        final["frameId"] = "fr_33333333333333333333333333333333"
+        _ = try outbox.append(surfaceId: surfaceId, record: final, maxRecords: 2)
+        XCTAssertNil(outbox.surfaces[surfaceId]?.acceptedFramesByPane?["1"])
+        XCTAssertEqual(outbox.surfaces[surfaceId]?.acceptedCursor, cursor)
+        XCTAssertEqual(outbox.surfaces[surfaceId]?.fifo, preserved)
+        XCTAssertEqual(outbox.surfaces[surfaceId]?.trailingGap?.through, "4")
+        XCTAssertEqual(outbox.deliveryStatus(surfaceId: surfaceId, paneId: 1, contentId: "content-1",
+                                            revision: 1, hasSavedStrokes: true), "Saved on device — delivery incomplete")
+        try outbox.validate(maxRecords: 2)
+    }
+
     func testCanonicalSourceBytesUseECMAScriptNumbersEscapesAndUTF16KeyOrder() throws {
         let canonical = try XCTUnwrap(SurfAceAnnotationOutbox.canonical([
             "\u{E000}": 1.0,
