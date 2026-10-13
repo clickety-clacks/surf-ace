@@ -1180,6 +1180,12 @@ final class SurfAceRuntime {
             let nextEntry = persistedPane.currentEntry ?? .empty()
             let visibleEntryChanged = pane.currentEntry.contentId != nextEntry.contentId
                 || pane.currentEntry.revision != nextEntry.revision
+            if visibleEntryChanged || pane.currentEntry.historyOwnerToken != nextEntry.historyOwnerToken
+                || pane.annotationDoneContext?.paneLineageId != pane.paneLineageId {
+                if let attempt = pane.annotationDoneContext {
+                    pane.retireAnnotationDone(generation: attempt.generation)
+                }
+            }
             pane.currentEntry = nextEntry
             pane.forwardStack = persistedPane.forwardStack ?? []
             pane.currentTarget = persistedPane.currentTarget
@@ -1310,6 +1316,7 @@ final class SurfAceRuntime {
                 requestedPane?.annotationDoneWaitExpired(generation: generation)
             }
         }
+        let doneContext = !enabled ? requestedPane.annotationDoneContext : nil
         if let adapter = locklessAdapter {
             let key = "\(surfaceId):\(paneId)"
             if enabled { annotationReentryRequested.insert(key) }
@@ -1327,7 +1334,9 @@ final class SurfAceRuntime {
                     paneId: paneId,
                     enabled: enabled,
                     fingerDrawEnabled: fingerDrawEnabled,
-                    source: source
+                    source: source,
+                    requestedPane: requestedPane,
+                    doneContext: doneContext
                 )
                 if enabled { annotationReentryRequested.remove(key) }
             }
@@ -1344,7 +1353,9 @@ final class SurfAceRuntime {
             pane.pendingAnnotationCommit = false
         }
         pane.annotationMode = enabled
-        if !enabled { pane.finishAnnotationDone(failed: false) }
+        if let doneContext {
+            pane.finishAnnotationDone(generation: doneContext.generation, failed: false)
+        }
         pane.fingerDrawEnabled = enabled && fingerDrawEnabled
         pane.bridge?.setInteraction(annotationMode: pane.annotationMode, fingerDrawEnabled: pane.fingerDrawEnabled)
         let transitionSource = source ?? (enabled ? (fingerDrawEnabled ? "finger_button" : "annotation_button") : "done_button")
@@ -1510,11 +1521,19 @@ final class SurfAceRuntime {
         paneId: Int,
         enabled: Bool,
         fingerDrawEnabled: Bool,
-        source: String?
+        source: String?,
+        requestedPane: SurfAcePaneModel,
+        doneContext: SurfAcePaneModel.AnnotationDoneContext?
     ) async {
-        guard let originalPane = pane(surfaceId: surfaceId, paneId: paneId) else { return }
+        guard let originalPane = pane(surfaceId: surfaceId, paneId: paneId), originalPane === requestedPane,
+              doneContext.map({ originalPane.matchesAnnotationDone($0) }) ?? true else {
+            if let doneContext { requestedPane.retireAnnotationDone(generation: doneContext.generation) }
+            return
+        }
         let wasEnabled = originalPane.annotationMode
-        var durableFrame = await adapter.snapshot().annotationPublisher?
+        let initialState = await adapter.snapshot()
+        let expectedVisible = initialState.liveSurfaces[surfaceId]?.panes[String(paneId)]?.history.visible
+        var durableFrame = initialState.annotationPublisher?
             .openFrame(surfaceId: surfaceId, paneId: paneId)
         if enabled, durableFrame?.directCommitAttempted == true,
            durableFrame?.directCommitDelivered != true {
@@ -1547,10 +1566,25 @@ final class SurfAceRuntime {
         var localModeCommitted = false
         do {
             try await annotationModeMutationPreparation?(enabled)
+            if let doneContext,
+               (self.pane(surfaceId: surfaceId, paneId: paneId) !== requestedPane
+                || !requestedPane.matchesAnnotationDone(doneContext)) {
+                requestedPane.retireAnnotationDone(generation: doneContext.generation)
+                return
+            }
             _ = try await commitLocalMutation(adapter: adapter, operation: "local.annotation.mode") { state, sequence in
                 guard var surface = state.liveSurfaces[surfaceId],
                       var authorityPane = surface.panes[String(paneId)] else {
                     throw SurfAceLocklessAuthorityError.invalidState("local_annotation_pane")
+                }
+                if let doneContext {
+                    guard authorityPane.paneLineageId == doneContext.paneLineageId,
+                          authorityPane.history.visible.contentId == doneContext.contentId,
+                          authorityPane.history.visible.revision == Int64(doneContext.revision),
+                          authorityPane.history.visible.historyEntryId == expectedVisible?.historyEntryId,
+                          authorityPane.history.visible.lastVisibleSequence == expectedVisible?.lastVisibleSequence else {
+                        throw SurfAceLocklessAuthorityError.invalidState("local_annotation_context_changed")
+                    }
                 }
                 authorityPane.annotationMode = enabled
                 surface.panes[String(paneId)] = authorityPane
@@ -1577,6 +1611,11 @@ final class SurfAceRuntime {
             try projectLocklessAuthorityState(await adapter.snapshot())
             await annotationModeProjectionObserver?(enabled)
             guard let projectedPane = self.pane(surfaceId: surfaceId, paneId: paneId) else { return }
+            if let doneContext,
+               (projectedPane !== requestedPane || !projectedPane.matchesAnnotationDone(doneContext)) {
+                requestedPane.retireAnnotationDone(generation: doneContext.generation)
+                return
+            }
             if enabled && !wasEnabled {
                 // Cancel only a not-yet-emitted commit. After the event has
                 // been emitted, pendingAnnotationCommit is already false and
@@ -1593,7 +1632,10 @@ final class SurfAceRuntime {
             surfAceLifecycleLog(
                 "event=annotation_mode_changed \(surfAceDiagnosticFields([("surface_id", surfaceId), ("pane_id", paneId), ("enabled", projectedPane.annotationMode), ("finger_draw_enabled", projectedPane.fingerDrawEnabled), ("source", transitionSource)]))"
             )
-            if !enabled { projectedPane.finishAnnotationDone(failed: false, localSaveProven: true) }
+            if let doneContext {
+                projectedPane.finishAnnotationDone(generation: doneContext.generation,
+                                                   failed: false, localSaveProven: true)
+            }
             if wasEnabled && !enabled {
                 requestAnnotationCommit(surfaceId: surfaceId, paneId: paneId)
                 clearPaneDrawings(projectedPane)
@@ -1608,11 +1650,14 @@ final class SurfAceRuntime {
             )
             await drainControllerRetentionReclamations(adapter: adapter)
         } catch {
-            if !enabled {
-                originalPane.finishAnnotationDone(failed: !localModeCommitted, localSaveProven: localModeCommitted)
-                if localModeCommitted {
+            if let doneContext {
+                let applied = originalPane.finishAnnotationDone(generation: doneContext.generation,
+                                                                 failed: !localModeCommitted,
+                                                                 localSaveProven: localModeCommitted)
+                if applied && localModeCommitted {
                     originalPane.annotationDoneError = "Saved on device; local display update is pending."
                 }
+                if !applied { return }
             }
             originalPane.toast = "Annotation change failed"
             endpointError = "Lockless annotation mutation failed: \(error.localizedDescription)"

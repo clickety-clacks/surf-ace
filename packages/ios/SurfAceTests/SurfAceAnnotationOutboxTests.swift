@@ -100,7 +100,7 @@ final class SurfAceAnnotationOutboxTests: XCTestCase {
         XCTAssertTrue(pane.annotationDonePending)
         XCTAssertNotNil(pane.annotationDoneError)
         XCTAssertNil(pane.beginAnnotationDone(), "timeout does not cancel persistence or reopen admission")
-        pane.finishAnnotationDone(failed: true)
+        pane.finishAnnotationDone(generation: generation, failed: true)
         XCTAssertFalse(pane.annotationDonePending)
         XCTAssertFalse(pane.annotationDoneSpinning)
         XCTAssertTrue(pane.annotationMode)
@@ -111,7 +111,7 @@ final class SurfAceAnnotationOutboxTests: XCTestCase {
         XCTAssertTrue(pane.annotationDoneSpinning, "a previous wait timer cannot affect a newer attempt")
         XCTAssertNil(pane.annotationDoneError)
         XCTAssertNotEqual(next, generation)
-        pane.finishAnnotationDone(failed: false, localSaveProven: true)
+        pane.finishAnnotationDone(generation: next, failed: false, localSaveProven: true)
         XCTAssertFalse(pane.annotationDonePending)
         XCTAssertEqual(pane.annotationDeliveryStatus, "Saved on device")
         XCTAssertNil(pane.annotationDoneError)
@@ -136,11 +136,37 @@ final class SurfAceAnnotationOutboxTests: XCTestCase {
     @MainActor
     func testUnprovenLocalCompletionCannotClaimSavedOrRemoteDelivery() throws {
         let pane = SurfAcePaneModel(paneId: 12)
-        _ = try XCTUnwrap(pane.beginAnnotationDone())
-        pane.finishAnnotationDone(failed: false)
+        let generation = try XCTUnwrap(pane.beginAnnotationDone())
+        pane.finishAnnotationDone(generation: generation, failed: false)
         XCTAssertFalse(pane.annotationDonePending)
         XCTAssertFalse(pane.annotationDoneSpinning)
         XCTAssertEqual(pane.annotationDeliveryStatus, "Local save not verified")
+    }
+
+    @MainActor
+    func testDoneCompletionCannotTransferSaveOrFailureToNewContextOrGeneration() throws {
+        let pane = SurfAcePaneModel(paneId: 12, paneLineageId: "pl_done_fixture")
+        pane.currentEntry.contentId = "content-A"
+        pane.currentEntry.revision = 1
+        let old = try XCTUnwrap(pane.beginAnnotationDone())
+        pane.currentEntry.contentId = "content-B"
+        pane.annotationDeliveryStatus = "Waiting to send"
+        XCTAssertFalse(pane.finishAnnotationDone(generation: old, failed: false, localSaveProven: true))
+        XCTAssertFalse(pane.annotationDonePending)
+        XCTAssertEqual(pane.annotationDeliveryStatus, "Waiting to send")
+        XCTAssertNil(pane.annotationDoneError)
+        let newer = try XCTUnwrap(pane.beginAnnotationDone())
+        XCTAssertFalse(pane.finishAnnotationDone(generation: old, failed: true))
+        XCTAssertTrue(pane.annotationDonePending)
+        XCTAssertTrue(pane.annotationDoneSpinning)
+        XCTAssertNil(pane.annotationDoneError)
+        XCTAssertTrue(pane.finishAnnotationDone(generation: newer, failed: false, localSaveProven: true))
+        XCTAssertEqual(pane.annotationDeliveryStatus, "Saved on device")
+        let sameNumbers = try XCTUnwrap(pane.beginAnnotationDone())
+        pane.currentEntry.historyOwnerToken = "replacement-history-owner"
+        pane.annotationDeliveryStatus = nil
+        XCTAssertFalse(pane.finishAnnotationDone(generation: sameNumbers, failed: false, localSaveProven: true))
+        XCTAssertNil(pane.annotationDeliveryStatus)
     }
 
     func testGapAbsorbedNewFrameCannotBorrowOlderPaneAcceptanceOrSurfaceCursor() throws {
@@ -168,6 +194,52 @@ final class SurfAceAnnotationOutboxTests: XCTestCase {
         XCTAssertEqual(outbox.deliveryStatus(surfaceId: surfaceId, paneId: 1, contentId: "content-1",
                                             revision: 1, hasSavedStrokes: true), "Saved on device — delivery incomplete")
         try outbox.validate(maxRecords: 2)
+    }
+
+    func testLateOldAcceptanceCannotResurrectSentAfterNewerGapDrainAndRestore() throws {
+        var outbox = try SurfAceAnnotationOutbox(clientId: "client-1", sourceEpoch: sourceEpoch)
+        var final = record(); final["kind"] = "frame_commit"
+        _ = try outbox.append(surfaceId: surfaceId, record: final, maxRecords: 2)
+        let inFlight = try XCTUnwrap(outbox.head(surfaceId: surfaceId, maxRecords: 2))
+        final["frameId"] = "fr_33333333333333333333333333333333"
+        _ = try outbox.append(surfaceId: surfaceId, record: final, maxRecords: 2)
+        XCTAssertEqual(outbox.surfaces[surfaceId]?.trailingGap?.through, "2")
+        let cursor = SurfAceAnnotationServerCursor(epoch: sourceEpoch, sequence: "91")
+        try outbox.accept(surfaceId: surfaceId, head: inFlight, cursor: cursor)
+        XCTAssertNil(outbox.surfaces[surfaceId]?.acceptedFramesByPane?["1"])
+        XCTAssertEqual(outbox.deliveryStatus(surfaceId: surfaceId, paneId: 1, contentId: "content-1",
+                                            revision: 1, hasSavedStrokes: true), "Saved on device — delivery incomplete")
+        let gap = try XCTUnwrap(outbox.head(surfaceId: surfaceId, maxRecords: 2))
+        try outbox.accept(surfaceId: surfaceId, head: gap, cursor: .init(epoch: sourceEpoch, sequence: "92"))
+        outbox = try JSONDecoder().decode(SurfAceAnnotationOutbox.self, from: JSONEncoder().encode(outbox))
+        XCTAssertEqual(outbox.surfaces[surfaceId]?.latestSubmissionByPane?["1"], "2")
+        XCTAssertNil(outbox.surfaces[surfaceId]?.acceptedFramesByPane?["1"])
+        XCTAssertNotEqual(outbox.deliveryStatus(surfaceId: surfaceId, paneId: 1, contentId: "content-1",
+                                               revision: 1, hasSavedStrokes: true), "Sent to registry")
+        // A genuinely newer final frame can still establish its own proof.
+        _ = try outbox.append(surfaceId: surfaceId, record: final, maxRecords: 2)
+        let newer = try XCTUnwrap(outbox.head(surfaceId: surfaceId, maxRecords: 2))
+        try outbox.accept(surfaceId: surfaceId, head: newer, cursor: .init(epoch: sourceEpoch, sequence: "93"))
+        XCTAssertEqual(outbox.deliveryStatus(surfaceId: surfaceId, paneId: 1, contentId: "content-1",
+                                            revision: 1, hasSavedStrokes: true), "Sent to registry")
+        try outbox.validate(maxRecords: 2)
+    }
+
+    func testLateAcceptanceRetainsSiblingProofAcrossOtherPaneLoss() throws {
+        var outbox = try SurfAceAnnotationOutbox(clientId: "client-1", sourceEpoch: sourceEpoch)
+        var final = record(); final["kind"] = "frame_commit"
+        _ = try outbox.append(surfaceId: surfaceId, record: final, maxRecords: 2)
+        let inFlight = try XCTUnwrap(outbox.head(surfaceId: surfaceId, maxRecords: 2))
+        final["paneId"] = 2
+        _ = try outbox.append(surfaceId: surfaceId, record: final, maxRecords: 2)
+        try outbox.accept(surfaceId: surfaceId, head: inFlight, cursor: .init(epoch: sourceEpoch, sequence: "91"))
+        let gap = try XCTUnwrap(outbox.head(surfaceId: surfaceId, maxRecords: 2))
+        try outbox.accept(surfaceId: surfaceId, head: gap, cursor: .init(epoch: sourceEpoch, sequence: "92"))
+        let restored = try JSONDecoder().decode(SurfAceAnnotationOutbox.self, from: JSONEncoder().encode(outbox))
+        XCTAssertEqual(restored.deliveryStatus(surfaceId: surfaceId, paneId: 1, contentId: "content-1",
+                                              revision: 1, hasSavedStrokes: true), "Sent to registry")
+        XCTAssertNotEqual(restored.deliveryStatus(surfaceId: surfaceId, paneId: 2, contentId: "content-1",
+                                                 revision: 1, hasSavedStrokes: true), "Sent to registry")
     }
 
     func testCanonicalSourceBytesUseECMAScriptNumbersEscapesAndUTF16KeyOrder() throws {

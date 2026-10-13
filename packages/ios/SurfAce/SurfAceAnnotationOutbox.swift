@@ -91,6 +91,9 @@ struct SurfAceAnnotationDeliveryReceipt: Codable, Equatable, Sendable {
 
 struct SurfAceAnnotationSurfaceOutbox: Codable, Equatable, Sendable {
     var acceptedFramesByPane: [String: SurfAceAnnotationDeliveryReceipt]? = nil
+    // Latest submission survives loss gaps and their later acceptance. An old
+    // in-flight response may prove its own delivery, never a newer pane outcome.
+    var latestSubmissionByPane: [String: String]? = nil
     var acceptedCursor: SurfAceAnnotationServerCursor?
     var diagnostic: SurfAceAnnotationDiagnostic?
     var unhealthy: SurfAceAnnotationDiagnostic? = nil
@@ -148,6 +151,11 @@ struct SurfAceAnnotationOutbox: Codable, Equatable, Sendable {
                   surface.nextSequence > 0, surface.fifo.count <= maxRecords,
                   surface.fifo.allSatisfy({ $0.canonical.utf8.count <= Self.maximumRecordBytes }),
                   (surface.acceptedFramesByPane?.count ?? 0) <= 256,
+                  (surface.latestSubmissionByPane?.count ?? 0) <= 256,
+                  (surface.latestSubmissionByPane ?? [:]).allSatisfy({ key, sequence in
+                      Int(key).map({ $0 > 0 }) == true
+                          && Int64(sequence).map({ $0 > 0 && $0 < surface.nextSequence }) == true
+                  }),
                   (surface.acceptedFramesByPane ?? [:]).allSatisfy({ key, receipt in
                       Int(key).map({ $0 > 0 }) == true && receipt.revision >= 0
                           && !receipt.frameId.isEmpty && receipt.frameId.utf8.count <= 128
@@ -433,9 +441,28 @@ struct SurfAceAnnotationOutbox: Codable, Equatable, Sendable {
         surface.nextSequence += 1
         // A new pane submission supersedes its UI proof even when capacity
         // folds the record into a gap. Keep source cursor/history untouched.
-        if let paneId = record["paneId"] as? Int {
-            surface.acceptedFramesByPane?.removeValue(forKey: String(paneId))
+        if let paneId = record["paneId"] as? Int, paneId > 0 {
+            let key = String(paneId)
+            var submissions = surface.latestSubmissionByPane ?? [:]
+            if submissions[key] == nil, submissions.count >= 256,
+               let oldest = submissions.min(by: {
+                   (Int64($0.value) ?? 0) < (Int64($1.value) ?? 0)
+               })?.key {
+                submissions.removeValue(forKey: oldest)
+                surface.acceptedFramesByPane?.removeValue(forKey: oldest)
+            }
+            submissions[key] = sequence
+            surface.latestSubmissionByPane = submissions
+            surface.acceptedFramesByPane?.removeValue(forKey: key)
             if surface.acceptedFramesByPane?.isEmpty == true { surface.acceptedFramesByPane = nil }
+        }
+        surfaces[surfaceId] = surface
+        if try !fits(surfaceId: surfaceId, maxBytes: maxBytes, maxRecords: maxRecords) {
+            // Optional UI evidence must never force canonical source eviction.
+            // Missing frontier fails closed when a delayed reply arrives.
+            surface.acceptedFramesByPane = nil
+            surface.latestSubmissionByPane = nil
+            surfaces[surfaceId] = surface
         }
         if surface.trailingGap != nil || surface.fifo.contains(where: { $0.kind == "gap" }) {
             surface.extendGap(sequence: sequence, reason: "source_retention_overflow")
@@ -514,6 +541,7 @@ struct SurfAceAnnotationOutbox: Codable, Equatable, Sendable {
            let record = try JSONSerialization.jsonObject(with: data) as? [String: Any],
            record["kind"] as? String == "frame_commit",
            let paneId = record["paneId"] as? Int,
+           surface.latestSubmissionByPane?[String(paneId)] == head.sourceSequence,
            let frameId = record["frameId"] as? String, frameId.utf8.count <= 128,
            let contentId = record["contentId"] as? String, contentId.utf8.count <= 256,
            let revision = record["revision"] as? Int {
@@ -560,12 +588,14 @@ struct SurfAceAnnotationOutbox: Codable, Equatable, Sendable {
             return surface.unhealthy == nil ? "Saved on device" : "Saved on device — waiting for publisher recovery"
         }
         if let receipt = surface.acceptedFramesByPane?[String(paneId)],
+           surface.latestSubmissionByPane?[String(paneId)] == receipt.sourceSequence,
            receipt.contentId == contentId, receipt.revision == revision,
            let receiptSequence = receipt.sourceSequence.flatMap({ Int64($0) }),
            surface.diagnostic == nil || surface.diagnostic.flatMap({ Int64($0.sequence) }).map({ $0 < receiptSequence }) == true {
             return "Sent to registry"
         }
-        if surface.diagnostic != nil || surface.trailingGap != nil || surface.fifo.contains(where: { $0.kind == "gap" }) {
+        if surface.diagnostic != nil || surface.trailingGap != nil || surface.fifo.contains(where: { $0.kind == "gap" })
+            || surface.latestSubmissionByPane?[String(paneId)] != nil {
             return hasSavedStrokes ? "Saved on device — delivery incomplete" : "Delivery incomplete"
         }
         return hasSavedStrokes ? "Saved on device" : nil
