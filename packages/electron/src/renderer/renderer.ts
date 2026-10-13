@@ -1751,7 +1751,8 @@ function buildControls(view: PaneView, pane: RendererPaneState): void {
     localAnnotationDone.forget(doneScope);
     localDone = localAnnotationDone.snapshot(doneScope, doneKey);
   }
-  const doneState = localDone.phase !== "idle" ? localDone : (pane.annotationDone ?? localDone);
+  const doneState = !localDone.busy && pane.annotationDone?.phase === "saved" && pane.annotationDone.localSaved
+    ? pane.annotationDone : localDone.phase !== "idle" ? localDone : (pane.annotationDone ?? localDone);
   const doneBusy = localAnnotationDone.isBusy(doneScope) || doneState.busy;
   annotate.disabled = doneBusy;
   annotate.addEventListener("click", () => {

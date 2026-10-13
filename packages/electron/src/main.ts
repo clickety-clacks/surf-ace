@@ -1,3 +1,4 @@
+import { ConfirmedAnnotationLocalSaves } from "./annotation-local-save.js";
 import { createPanePaintCaptureAdapter, PANE_PAINT_DOCUMENT_RECIPE } from "./pane-paint-capture-adapter.js";
 import { FreshPanePaintReads, NativePanePaintOwners, rendererPaintMatchesAuthority, type PanePaintAuthority, type PaintOwner } from "./pane-paint-owner-bridge.js";
 import { ServerConnection } from "./server-connection.js";
@@ -94,6 +95,7 @@ const SURF_ACE_WEBAUTHN_KEYCHAIN_ACCESS_GROUP = "Z7R59J7QV8.ai.surf-ace.electron
 let persistentStateWriteGuard: PersistentStateLoadResult["writeGuard"] = false;
 let persistentStateOutcomeUnknown: PersistentStateOutcomeUnknownError | null = null;
 let uncertainStateCandidate: PersistentSurfaceState | null = null;
+const confirmedAnnotationLocalSaves = new ConfirmedAnnotationLocalSaves();
 let persistenceRecoveryTimer: NodeJS.Timeout | null = null;
 let persistenceRetryDelayMs = 1_000;
 let providerEndpointAvailable = false;
@@ -466,6 +468,7 @@ async function loadPersistentState(): Promise<PersistentSurfaceState | undefined
       primary_surface_id: result.state.primarySurfaceId,
       surface_count: result.state.surfaces?.length ?? 0,
     });
+    if (!result.writeGuard) confirmedAnnotationLocalSaves.confirm(result.state);
     return result.state;
   }
   clientInfo("state_restore_read_miss", {
@@ -495,6 +498,7 @@ async function persistState(): Promise<void> {
         if (persistentStateOutcomeUnknown) throw new Error("Local persistence is paused pending reconciliation");
         try {
           await writePersistentStateFile(stateDir, STATE_FILE_NAME, candidate);
+          confirmedAnnotationLocalSaves.confirm(candidate);
         } catch (error) {
           if (error instanceof PersistentStateOutcomeUnknownError) {
             uncertainStateCandidate = candidate;
@@ -565,6 +569,7 @@ async function reconcilePersistence(): Promise<void> {
     // state meanwhile; queue its save after reopening the persistence seam.
     const changedWhilePaused = JSON.stringify(core.getPersistentState()) !== JSON.stringify(uncertainStateCandidate);
     const verifiedCandidate = uncertainStateCandidate;
+    confirmedAnnotationLocalSaves.confirm(verifiedCandidate);
     persistentStateOutcomeUnknown = null;
     uncertainStateCandidate = null;
     persistentStateWriteGuard = false;
@@ -692,7 +697,13 @@ function rendererWindowState(surfaceId: string): RendererWindowState {
   const state = core.getRendererWindowState(surfaceId);
   for (const pane of state.panes) {
     const context = parseAnnotationDoneContext({ ...pane.content, paneId: pane.paneId, paneLineageId: pane.paneLineageId });
-    if (context) pane.annotationDone = annotationDoneFence.snapshot(JSON.stringify([surfaceId, pane.paneId]), annotationDoneContextKey(context));
+    if (context) {
+      pane.annotationDone = annotationDoneFence.snapshot(JSON.stringify([surfaceId, pane.paneId]), annotationDoneContextKey(context));
+      if (!pane.showDone && !pane.annotationDone.busy && confirmedAnnotationLocalSaves.has(surfaceId, context,
+          core.localAnnotationFrameId(surfaceId, pane.paneId))) {
+        pane.annotationDone = { phase: "saved", busy: false, localSaved: true };
+      }
+    }
     if (pane.paneLineageId && pane.content.contentId) {
       const frame = core.annotationPublisher?.openFrameFor(surfaceId, pane.paneId);
       const delivery = (!pane.showDone || frame) && annotationRegistryPublisher?.deliveryStatus(surfaceId,

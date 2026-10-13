@@ -63,6 +63,7 @@ await build({
     path.join(rootDir, "test", "annotation-done-save-boundary.test.ts"),
     path.join(rootDir, "test", "annotation-delivery-receipts.test.ts"),
     path.join(rootDir, "test", "annotation-delivery-status.test.ts"),
+    path.join(rootDir, "test", "annotation-local-save.test.ts"),
     path.join(rootDir, "test", "bonjour-advertiser.test.ts"),
     path.join(rootDir, "test", "central-server-health.test.ts"),
     path.join(rootDir, "test", "central-server-package.test.ts"),

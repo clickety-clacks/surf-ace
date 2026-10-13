@@ -300,6 +300,12 @@ test("renderer DOM integrates authoritative connection states and live scale con
   finishReply({ phase: "unknown", busy: false, localSaved: false });
   for (let i = 0; i < 8; i++) await Promise.resolve();
   assert.match(document.querySelector(".annotation-local-status")!.textContent!, /Save outcome unknown/);
+  // Independently verified persistence reconciliation can supersede unknown
+  // after the local operation retired; it cannot supersede a busy owner.
+  const verifiedLocal = state("connected", true);
+  (verifiedLocal.panes[0] as any).annotationDone = { phase: "saved", busy: false, localSaved: true };
+  stateListener!(verifiedLocal);
+  assert.equal(document.querySelector(".annotation-local-status")!.textContent, "Saved locally");
   annotationIntent("enter");
   stateListener!(state("connected", true, 1));
   annotationIntent("done");
