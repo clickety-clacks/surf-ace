@@ -1226,7 +1226,7 @@ final class SurfAcePaneModel {
     func finishAnnotationDone(failed: Bool, localSaveProven: Bool = false) {
         annotationDonePending = false
         annotationDoneSpinning = false
-        annotationDoneError = failed ? "Could not save. Your drawings are retained; try Done again." : nil
+        annotationDoneError = failed ? "Save could not be confirmed. Your drawings are retained; try Done again." : nil
         if !failed {
             annotationDeliveryStatus = localSaveProven ? "Saved on device" : "Local save not verified"
         }
