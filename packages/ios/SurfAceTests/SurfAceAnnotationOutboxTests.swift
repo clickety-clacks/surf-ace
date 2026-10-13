@@ -52,6 +52,71 @@ final class SurfAceAnnotationOutboxTests: XCTestCase {
         XCTAssertNil(outbox.surfaces[surfaceId]?.acceptedFramesByPane)
     }
 
+    func testDeliveryStatusRequiresMatchingPaneRevisionAndPersistedFinalReceipt() throws {
+        var outbox = try SurfAceAnnotationOutbox(clientId: "client-1", sourceEpoch: sourceEpoch)
+        var final = record(); final["kind"] = "frame_commit"
+        _ = try outbox.append(surfaceId: surfaceId, record: final)
+        let head = try XCTUnwrap(outbox.head(surfaceId: surfaceId))
+        func status(_ value: SurfAceAnnotationOutbox, pane: Int = 1, revision: Int = 1,
+                    fields: [String: String] = [:]) -> String? {
+            value.deliveryStatus(surfaceId: surfaceId, paneId: pane, contentId: "content-1",
+                                 revision: revision, hasSavedStrokes: true, diagnostic: fields)
+        }
+        XCTAssertEqual(status(outbox), "Waiting to send")
+        XCTAssertEqual(status(outbox, fields: ["stage": "sent", "surface_id": surfaceId,
+                                               "source_event_id": head.sourceEventId]), "Sending")
+        XCTAssertEqual(status(outbox, fields: ["stage": "sent", "surface_id": "other",
+                                               "source_event_id": head.sourceEventId]), "Waiting to send")
+        XCTAssertEqual(status(outbox, fields: ["stage": "registry_accepted", "surface_id": surfaceId,
+                                               "source_event_id": head.sourceEventId]), "Waiting to send",
+                       "unpersisted acceptance must not become restored delivery proof")
+        XCTAssertEqual(status(outbox, fields: ["stage": "processed_ack"]), "Waiting to send")
+        try outbox.accept(surfaceId: surfaceId, head: head, cursor: .init(epoch: sourceEpoch, sequence: "9"))
+        let restored = try JSONDecoder().decode(SurfAceAnnotationOutbox.self, from: JSONEncoder().encode(outbox))
+        XCTAssertEqual(status(restored), "Sent to registry")
+        XCTAssertEqual(status(restored, pane: 2), "Saved on device")
+        XCTAssertEqual(status(restored, revision: 2), "Saved on device")
+        XCTAssertEqual(status(restored, fields: ["stage": "processed_ack"]), "Sent to registry",
+                       "no native processed ACK contract exists in this state")
+        var later = final; later["frameId"] = "fr_22222222222222222222222222222222"
+        _ = try outbox.append(surfaceId: surfaceId, record: later)
+        XCTAssertEqual(status(outbox), "Waiting to send", "older final receipt cannot hide a newer frame")
+        try outbox.markUnhealthy(surfaceId: surfaceId, code: "internal_error")
+        XCTAssertEqual(status(outbox), "Waiting to send — publisher needs recovery")
+    }
+
+    @MainActor
+    func testDoneAdmissionWaitNoticeFailureAndStaleTimeoutPreserveLocalState() throws {
+        let pane = SurfAcePaneModel(paneId: 12, paneLineageId: "pl_done_fixture")
+        pane.annotationMode = true
+        pane.currentEntry.drawingData = Data([1, 2, 3])
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        let originalEntry = try encoder.encode(pane.currentEntry)
+        let generation = try XCTUnwrap(pane.beginAnnotationDone())
+        XCTAssertTrue(pane.annotationDoneSpinning)
+        XCTAssertNil(pane.beginAnnotationDone(), "double tap must not enter another async transition")
+        pane.annotationDoneWaitExpired(generation: generation)
+        XCTAssertFalse(pane.annotationDoneSpinning, "a stalled wait cannot spin forever")
+        XCTAssertTrue(pane.annotationDonePending)
+        XCTAssertNotNil(pane.annotationDoneError)
+        XCTAssertNil(pane.beginAnnotationDone(), "timeout does not cancel persistence or reopen admission")
+        pane.finishAnnotationDone(failed: true)
+        XCTAssertFalse(pane.annotationDonePending)
+        XCTAssertFalse(pane.annotationDoneSpinning)
+        XCTAssertTrue(pane.annotationMode)
+        XCTAssertEqual(try encoder.encode(pane.currentEntry), originalEntry)
+        XCTAssertNotNil(pane.annotationDoneError)
+        let next = try XCTUnwrap(pane.beginAnnotationDone())
+        pane.annotationDoneWaitExpired(generation: generation)
+        XCTAssertTrue(pane.annotationDoneSpinning, "a previous wait timer cannot affect a newer attempt")
+        XCTAssertNil(pane.annotationDoneError)
+        XCTAssertNotEqual(next, generation)
+        pane.finishAnnotationDone(failed: false)
+        XCTAssertFalse(pane.annotationDonePending)
+        XCTAssertEqual(pane.annotationDeliveryStatus, "Saved on device")
+        XCTAssertNil(pane.annotationDoneError)
+    }
+
     func testCanonicalSourceBytesUseECMAScriptNumbersEscapesAndUTF16KeyOrder() throws {
         let canonical = try XCTUnwrap(SurfAceAnnotationOutbox.canonical([
             "\u{E000}": 1.0,

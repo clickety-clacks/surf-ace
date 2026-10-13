@@ -1206,6 +1206,30 @@ final class SurfAcePaneModel {
         self.forwardStack = []
     }
 
+    /// The caller must admit Done before scheduling any async dependencies.
+    func beginAnnotationDone() -> Int? {
+        guard !annotationDonePending else { return nil }
+        annotationDoneGeneration += 1
+        annotationDonePending = true
+        annotationDoneSpinning = true
+        annotationDoneError = nil
+        return annotationDoneGeneration
+    }
+
+    func annotationDoneWaitExpired(generation: Int) {
+        guard annotationDonePending, annotationDoneGeneration == generation else { return }
+        // A wait notice must not cancel persistence or admit a duplicate submit.
+        annotationDoneSpinning = false
+        annotationDoneError = "Saving is still pending. Your drawings are retained."
+    }
+
+    func finishAnnotationDone(failed: Bool) {
+        annotationDonePending = false
+        annotationDoneSpinning = false
+        annotationDoneError = failed ? "Could not save. Your drawings are retained; try Done again." : nil
+        if !failed { annotationDeliveryStatus = "Saved on device" }
+    }
+
     var labelText: String { paneLabel > 0 ? "\(paneLabel)" : "" }
     func displayId(windowLabel: String) -> String {
         labelText

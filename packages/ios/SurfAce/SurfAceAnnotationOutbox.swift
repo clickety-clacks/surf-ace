@@ -525,6 +525,36 @@ struct SurfAceAnnotationOutbox: Codable, Equatable, Sendable {
         }
     }
 
+    /// Derive pane feedback from local durable evidence, never from an agent ACK guess.
+    func deliveryStatus(surfaceId: String, paneId: Int, contentId: String?, revision: Int,
+                        hasSavedStrokes: Bool, diagnostic: [String: String] = [:]) -> String? {
+        guard let surface = surfaces[surfaceId] else { return hasSavedStrokes ? "Saved on device" : nil }
+        let pending = surface.fifo.filter { entry in
+            guard let data = entry.canonical.data(using: .utf8),
+                  let record = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+            return record["paneId"] as? Int == paneId
+                && record["contentId"] as? String == contentId
+                && record["revision"] as? Int == revision
+        }
+        if !pending.isEmpty {
+            if surface.unhealthy != nil { return "Waiting to send — publisher needs recovery" }
+            let matching = diagnostic["surface_id"] == surfaceId
+                && pending.contains { $0.sourceEventId == diagnostic["source_event_id"] }
+            if matching && diagnostic["stage"] == "sent" { return "Sending" }
+            if matching && diagnostic["stage"] == "retry_scheduled" {
+                return "Waiting to send — delivery failed; retry scheduled"
+            }
+            return "Waiting to send"
+        }
+        if let frame = surface.openFrames?[String(paneId)], frame.contentId == contentId,
+           frame.revision == nil || frame.revision == revision { return "Saved on device" }
+        if surface.diagnostic == nil, surface.unhealthy == nil,
+           let receipt = surface.acceptedFramesByPane?[String(paneId)],
+           receipt.contentId == contentId, receipt.revision == revision { return "Sent to registry" }
+        if surface.diagnostic != nil { return "Saved on device — delivery incomplete" }
+        return hasSavedStrokes ? "Saved on device" : nil
+    }
+
     mutating func rejectHead(surfaceId: String, code: String) throws {
         guard code == "annotation_record_too_large" || code == "annotation_context_image_invalid",
               var surface = surfaces[surfaceId], let head = surface.fifo.first,
