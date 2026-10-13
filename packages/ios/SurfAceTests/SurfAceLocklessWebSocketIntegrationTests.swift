@@ -5,6 +5,186 @@ import XCTest
 
 @MainActor
 final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
+    func testDoneHeldLocalFailureStopsSpinnerWithoutChangingAuthorityOrHistory() async throws {
+        try await assertDoneLocalFailure(storageFault: false)
+    }
+
+    func testDoneActualStoreWriteFailurePreservesModeHistoryAndAuthority() async throws {
+        try await assertDoneLocalFailure(storageFault: true)
+    }
+
+    func testDoneHeldProjectionDoesNotTransferOldSaveToNewVisibleContent() async throws {
+        let name = "SurfAceDoneContext-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(name, isDirectory: true)
+        let gate = SurfAceAnnotationDoneMutationGate(failAfterRelease: false)
+        addTeardownBlock { await gate.release() }
+        addTeardownBlock {
+            defaults.removePersistentDomain(forName: name)
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let runtime = SurfAceRuntime(
+            userDefaults: defaults, locklessStateURL: directory.appendingPathComponent("state.json"),
+            configuredRegistryURL: try XCTUnwrap(URL(string: "ws://127.0.0.1:1/ws")),
+            annotationClientId: "client-done-context", enableFleetDiscovery: false, isolatedTestLoopback: true,
+            annotationModeProjectionObserver: { enabled in try? await gate.prepare(enabled: enabled) }
+        )
+        await runtime.start()
+        addTeardownBlock { await runtime.stop() }
+        let registered = await runtime.registerSurfaceForScene(sceneKey: name)
+        let surface = try XCTUnwrap(registered)
+        let pane = try XCTUnwrap(surface.panes.first)
+        let socket = socket(port: try XCTUnwrap(UInt16(exactly: runtime.serverPort)))
+        socket.resume()
+        defer { socket.cancel(with: .normalClosure, reason: nil) }
+        try await assertOwnedRuntimeDiscovery(runtime, socket: socket, surface: surface, requestId: "context-owned")
+        let paired = try await pair(socket, id: "context-pair", controllerId: "context-controller", surfaceId: surface.surfaceId)
+        guard paired["ok"] as? Bool == true else { XCTFail("owned pair required before mutation"); return }
+        try await send(socket, op: "content.set", id: "context-A", payload: [
+            "content": ["html": "<main>A</main>"], "contentId": "context-A", "contentType": "html",
+            "friendlyChatName": "Done context", "paneId": pane.paneId, "surfaceId": surface.surfaceId,
+        ])
+        let setA = try await receive(socket, matchingId: "context-A")
+        guard setA["ok"] as? Bool == true else { XCTFail("A must persist"); return }
+        runtime.setAnnotationMode(surfaceId: surface.surfaceId, paneId: pane.paneId, enabled: true, fingerDrawEnabled: false)
+        await runtime.awaitAnnotationModeTransition(surfaceId: surface.surfaceId, paneId: pane.paneId)
+        runtime.setAnnotationMode(surfaceId: surface.surfaceId, paneId: pane.paneId, enabled: false, fingerDrawEnabled: false)
+        let held = expectation(description: "Done durable mode commit projected but feedback completion held")
+        Task { await gate.waitUntilHeld(); held.fulfill() }
+        await fulfillment(of: [held], timeout: 5)
+        let adapter = try runtime.locklessAuthorityForLocalMutation()
+        let savedState = await adapter.snapshot()
+        let savedA = try XCTUnwrap(savedState.liveSurfaces[surface.surfaceId]?.panes[String(pane.paneId)]?.history.visible)
+        XCTAssertFalse(pane.annotationMode)
+        try await send(socket, op: "content.set", id: "context-B", payload: [
+            "content": ["html": "<main>B</main>"], "contentId": "context-B", "contentType": "html",
+            "friendlyChatName": "Done context", "paneId": pane.paneId, "surfaceId": surface.surfaceId,
+        ])
+        let setB = try await receive(socket, matchingId: "context-B")
+        guard setB["ok"] as? Bool == true else { XCTFail("B must persist after mode=false"); return }
+        XCTAssertTrue(runtime.surfaces.first?.panes.first === pane, "projection intentionally reuses model")
+        XCTAssertEqual(pane.currentEntry.contentId, "context-B")
+        let feedbackB = pane.annotationDeliveryStatus
+        XCTAssertNotEqual(feedbackB, "Saved on device")
+        await gate.release()
+        await runtime.awaitAnnotationModeTransition(surfaceId: surface.surfaceId, paneId: pane.paneId)
+        XCTAssertEqual(pane.currentEntry.contentId, "context-B")
+        XCTAssertEqual(pane.annotationDeliveryStatus, feedbackB, "A completion cannot overwrite B projection")
+        XCTAssertFalse(pane.annotationDonePending)
+        XCTAssertNil(pane.annotationDoneError)
+        let after = await adapter.snapshot()
+        XCTAssertEqual(after.liveSurfaces[surface.surfaceId]?.panes[String(pane.paneId)]?.history.back.last, savedA)
+        XCTAssertEqual(after.liveSurfaces[surface.surfaceId]?.panes[String(pane.paneId)]?.history.visible.contentId, "context-B")
+    }
+
+    private func assertDoneLocalFailure(storageFault: Bool) async throws {
+        let suiteName = "SurfAceDoneLocalFailure-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(suiteName, isDirectory: true)
+        let authorityDirectory = directory.appendingPathComponent("authority", isDirectory: true)
+        let preservedDirectory = directory.appendingPathComponent("authority-preserved", isDirectory: true)
+        let stateURL = authorityDirectory.appendingPathComponent("state.json")
+        let gate = SurfAceAnnotationDoneMutationGate(failAfterRelease: !storageFault)
+        addTeardownBlock { await gate.release() }
+        addTeardownBlock {
+            defaults.removePersistentDomain(forName: suiteName)
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let runtime = SurfAceRuntime(
+            userDefaults: defaults, locklessStateURL: stateURL,
+            configuredRegistryURL: try XCTUnwrap(URL(string: "ws://127.0.0.1:1/ws")),
+            annotationClientId: "client-done-failure-fixture",
+            enableFleetDiscovery: false, isolatedTestLoopback: true,
+            annotationModeMutationPreparation: { enabled in try await gate.prepare(enabled: enabled) }
+        )
+        await runtime.start()
+        addTeardownBlock { await runtime.stop() }
+        let registered = await runtime.registerSurfaceForScene(sceneKey: suiteName)
+        let surface = try XCTUnwrap(registered)
+        let pane = try XCTUnwrap(surface.panes.first)
+        let socket = socket(port: try XCTUnwrap(UInt16(exactly: runtime.serverPort)))
+        socket.resume()
+        defer { socket.cancel(with: .normalClosure, reason: nil) }
+        try await assertOwnedRuntimeDiscovery(runtime, socket: socket, surface: surface,
+                                              requestId: "done-owned-discovery")
+        let paired = try await pair(socket, id: "done-pair", controllerId: "done-fixture",
+                                    surfaceId: surface.surfaceId)
+        guard paired["ok"] as? Bool == true else {
+            XCTFail("owned fixture pairing must succeed before content mutation")
+            return
+        }
+        for index in 1...2 {
+            let requestId = "done-content-\(index)"
+            try await send(socket, op: "content.set", id: requestId, payload: [
+                "content": ["html": "<main>Done fixture history \(index)</main>"],
+                "contentId": requestId, "contentType": "html",
+                "friendlyChatName": "Done fixture", "paneId": pane.paneId,
+                "surfaceId": surface.surfaceId,
+            ])
+            let response = try await receive(socket, matchingId: requestId)
+            guard response["ok"] as? Bool == true else {
+                XCTFail("owned fixture content must persist before testing Done failure")
+                return
+            }
+        }
+        XCTAssertFalse(pane.backStack.isEmpty)
+        runtime.setAnnotationMode(surfaceId: surface.surfaceId, paneId: pane.paneId,
+                                  enabled: true, fingerDrawEnabled: false)
+        await runtime.awaitAnnotationModeTransition(surfaceId: surface.surfaceId, paneId: pane.paneId)
+        XCTAssertTrue(pane.annotationMode)
+        let adapter = try runtime.locklessAuthorityForLocalMutation()
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        let before = try encoder.encode(await adapter.snapshot().liveSurfaces)
+        let history = try encoder.encode(pane.currentEntry)
+        let backHistory = try encoder.encode(pane.backStack)
+        let lineage = pane.paneLineageId
+        let instance = pane.paneInstanceId
+        runtime.setAnnotationMode(surfaceId: surface.surfaceId, paneId: pane.paneId,
+                                  enabled: false, fingerDrawEnabled: false)
+        XCTAssertTrue(pane.annotationDonePending)
+        XCTAssertTrue(pane.annotationDoneSpinning)
+        let generation = pane.annotationDoneGeneration
+        let held = expectation(description: "Done suspended before durable mode mutation")
+        Task { await gate.waitUntilHeld(); held.fulfill() }
+        await fulfillment(of: [held], timeout: 5)
+        let durableBefore = try Data(contentsOf: stateURL)
+        if storageFault {
+            // Only this fixture's disposable storage is blocked. The real
+            // generation store must fail creating its parent, before commit.
+            try FileManager.default.moveItem(at: authorityDirectory, to: preservedDirectory)
+            try Data("test-owned write blocker".utf8).write(to: authorityDirectory)
+        }
+        defer {
+            if storageFault {
+                try? FileManager.default.removeItem(at: authorityDirectory)
+                try? FileManager.default.moveItem(at: preservedDirectory, to: authorityDirectory)
+            }
+        }
+        runtime.setAnnotationMode(surfaceId: surface.surfaceId, paneId: pane.paneId,
+                                  enabled: false, fingerDrawEnabled: false)
+        XCTAssertEqual(pane.annotationDoneGeneration, generation)
+        pane.annotationDoneWaitExpired(generation: generation)
+        XCTAssertFalse(pane.annotationDoneSpinning)
+        XCTAssertTrue(pane.annotationDonePending)
+        await gate.release()
+        await runtime.awaitAnnotationModeTransition(surfaceId: surface.surfaceId, paneId: pane.paneId)
+        XCTAssertFalse(pane.annotationDonePending)
+        XCTAssertFalse(pane.annotationDoneSpinning)
+        XCTAssertTrue(pane.annotationMode)
+        XCTAssertNotNil(pane.annotationDoneError)
+        XCTAssertEqual(try encoder.encode(pane.currentEntry), history)
+        XCTAssertEqual(try encoder.encode(pane.backStack), backHistory)
+        XCTAssertEqual(pane.paneLineageId, lineage)
+        XCTAssertEqual(pane.paneInstanceId, instance)
+        let after = try encoder.encode(await adapter.snapshot().liveSurfaces)
+        XCTAssertEqual(after, before)
+        let attempts = await gate.attemptCount()
+        XCTAssertEqual(attempts, 1)
+        let durableAfter = try Data(contentsOf: storageFault
+            ? preservedDirectory.appendingPathComponent("state.json") : stateURL)
+        XCTAssertEqual(durableAfter, durableBefore, "failed Done must not replace the accepted generation")
+    }
+
     func testRecoverableDirectStageCapacityLossDrainsGapBeforeLaterFrame() async throws {
         let suiteName = "SurfAceCapacityDrain-\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
@@ -928,6 +1108,13 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
             enabled: false,
             fingerDrawEnabled: false
         )
+        XCTAssertTrue(pane.annotationDonePending, "Done admission precedes all async waits")
+        XCTAssertTrue(pane.annotationDoneSpinning)
+        let doneGeneration = pane.annotationDoneGeneration
+        runtime.setAnnotationMode(surfaceId: surface.surfaceId, paneId: pane.paneId,
+                                  enabled: false, fingerDrawEnabled: false)
+        XCTAssertEqual(pane.annotationDoneGeneration, doneGeneration,
+                       "duplicate Done cannot enqueue another transition")
         let flushHeld = expectation(description: "final direct flush held")
         Task { if await flushGate.waitUntilHeld() { flushHeld.fulfill() } }
         await fulfillment(of: [flushHeld], timeout: 5)
@@ -1977,4 +2164,29 @@ private final class SurfAceNoNetworkTestService: NetService {
 
     override func publish(options: NetService.Options = []) {}
     override func stop() {}
+}
+
+private actor SurfAceAnnotationDoneMutationGate {
+    private enum Injected: Error { case storageUnavailable }
+    private let gate = SurfAceLocklessTestGate()
+    private var held = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var attempts = 0
+    private let failAfterRelease: Bool
+    init(failAfterRelease: Bool = true) { self.failAfterRelease = failAfterRelease }
+    func prepare(enabled: Bool) async throws {
+        guard !enabled else { return }
+        attempts += 1
+        held = true
+        let pending = waiters; waiters.removeAll()
+        pending.forEach { $0.resume() }
+        await gate.wait()
+        if failAfterRelease { throw Injected.storageUnavailable }
+    }
+    func waitUntilHeld() async {
+        if held { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+    func release() async { await gate.open() }
+    func attemptCount() -> Int { attempts }
 }
