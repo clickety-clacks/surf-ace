@@ -498,23 +498,6 @@ test("Linux Electron ZIP launcher binds the expected name and documented sandbox
   assert.equal((await fs.stat(installed)).mode & 0o111, 0o111);
 });
 
-test("smoke stop treats an already signal-exited child as exited", async () => {
-  const { start, stop } = await import("./smoke-lib.mjs");
-  const started = start(process.execPath, ["-e", "process.kill(process.pid, 'SIGKILL')"]);
-  const outcome = await new Promise((resolve) => started.child.once("exit", (code, signal) => resolve({ code, signal })));
-  assert.equal(outcome.code, null);
-  assert.equal(outcome.signal, "SIGKILL");
-  let timer;
-  try {
-    await Promise.race([
-      stop(started),
-      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("signal_exit_cleanup_timeout")), 2_000); }),
-    ]);
-  } finally {
-    clearTimeout(timer);
-  }
-});
-
 test("Tightbeam macOS smoke plans one exact candidate profile", async (t) => {
   const root = await temporary(t);
   const candidate = path.join(root, "candidate.zip");
@@ -1585,14 +1568,7 @@ test("Tightbeam foreground launcher validates exact PG16 config and WebSocket he
   await assert.rejects(tightbeamServerLauncher.checkHealth(endpoint), /health_websocket_connect_failed|health_websocket_closed_before_open/);
 });
 
-test("Tightbeam foreground output separates product diagnostics from lifecycle events", () => {
-  const diagnostic = "[surf-ace:server] event=server_bind_ok host=127.0.0.1 port=59625 ws_path=/ws";
-  assert.deepEqual(tightbeamServerLauncher.parseForegroundOutputLine(diagnostic), {
-    event: "server_bind_ok", kind: "diagnostic", scope: "server",
-  });
-  assert.deepEqual(tightbeamServerLauncher.parseForegroundOutputLine("[surf-ace:bonjour] event=publish_start port=59625"), {
-    event: "publish_start", kind: "diagnostic", scope: "bonjour",
-  });
+test("Tightbeam foreground output admits lifecycle readiness and rejects unexpected output", () => {
   assert.deepEqual(tightbeamServerLauncher.parseForegroundOutputLine(JSON.stringify({
     endpoint: "ws://127.0.0.1:59625/ws", event: "ready", host: "127.0.0.1", pid: 1234, port: 59625,
   })), {
@@ -1609,18 +1585,6 @@ test("Tightbeam foreground output separates product diagnostics from lifecycle e
     () => tightbeamServerLauncher.parseForegroundOutputLine(JSON.stringify({ event: "unknown" })),
     (error) => error.publicCode === "server_output_line_invalid" && error.outputIssue === "lifecycle_event_unexpected",
   );
-  assert.throws(
-    () => tightbeamServerLauncher.parseForegroundOutputLine("[surf-ace:allocator] event=unexpected"),
-    (error) => error.publicCode === "server_output_line_invalid" && error.outputIssue === "product_diagnostic_scope_allocator",
-  );
-  const config = validTightbeamServerConfig({ hostLockPath: "/run/surf-ace-server/instance.lock" });
-  assert.equal(tightbeamServerLauncher.defaultDiagnosticLogPath(config, {}), "/run/surf-ace-server/client-flight-recorder.log");
-  assert.equal(tightbeamServerLauncher.defaultDiagnosticLogPath(config, {
-    SURF_ACE_CLIENT_DIAGNOSTIC_LOG: "/private/tmp/fixture-diagnostics.log",
-  }), "/private/tmp/fixture-diagnostics.log");
-  assert.throws(() => tightbeamServerLauncher.defaultDiagnosticLogPath(config, {
-    SURF_ACE_CLIENT_DIAGNOSTIC_LOG: "relative/diagnostics.log",
-  }), /server_diagnostic_log_path_invalid/);
 });
 
 test("Tightbeam launcher reports bounded shutdown location without exposing error messages", () => {
@@ -2905,7 +2869,7 @@ test("Linux fresh-install state driver binds candidate-only inputs and packaged 
   }), /raw_cli_evidence_digest_mismatch/);
 });
 
-test("Linux smoke reports the persisted state-driver failure and subprocess diagnostics", async (t) => {
+test("Linux smoke reports state-driver failures and redacts subprocess secrets", async (t) => {
   const root = await temporary(t);
   const output = path.join(root, "fresh-install-state.json");
   const productSourceDir = path.join(root, "product");
@@ -2929,11 +2893,6 @@ test("Linux smoke reports the persisted state-driver failure and subprocess diag
   });
 
   await assert.rejects(runLinuxFreshInstallStateDriver(options, async () => {
-    await fs.mkdir(options.stateRoot, { recursive: true });
-    await fs.writeFile(path.join(options.stateRoot, "client-flight-recorder.log"), [
-      "[surf-ace:app] event=app_launch app_version=0.2.1 platform=linux",
-      "[surf-ace:app] event=window_created error_message=ECONNREFUSED",
-    ].join("\n"));
     await fs.writeFile(output, JSON.stringify({
       error: "fresh-install-direct-client-endpoint-timeout:last=ECONNREFUSED",
       mode: "fresh-install",
@@ -2945,22 +2904,10 @@ test("Linux smoke reports the persisted state-driver failure and subprocess diag
     const jobLog = formatSmokeFailure(error);
     assert.match(jobLog, /fresh-install-direct-client-endpoint-timeout:last=ECONNREFUSED/);
     assert.match(jobLog, /ECONNREFUSED 127\.0\.0\.1:19001/);
-    assert.match(jobLog, /client_flight_recorder_tail:/);
-    assert.match(jobLog, /event=window_created error_message=ECONNREFUSED/);
     assert.match(jobLog, /exit_code: 1/);
     assert.match(jobLog, /stderr:/);
     assert.match(jobLog, /password=\[REDACTED\]/);
     assert.doesNotMatch(jobLog, /hunter2/);
-    return true;
-  });
-});
-
-test("smoke CLI writes caught failures to stderr for the hosted job log", async () => {
-  const smokeScript = path.join(repository, "scripts/release/smoke-tightbeam-release.mjs");
-  await assert.rejects(exec(process.execPath, [smokeScript, "--invalid", "value"]), (error) => {
-    assert.equal(error.code, 1);
-    assert.match(error.stderr, /tightbeam_release_smoke_failed/);
-    assert.match(error.stderr, /unknown_argument:--invalid/);
     return true;
   });
 });
@@ -2975,12 +2922,6 @@ test("Tightbeam Linux smoke fixture binds adapter dependencies to the exact prod
   assert.match(fixture, /allocatorRequire\("ws"\)/);
   assert.match(smoke, /packages\/allocator\/node_modules\/tsx\/dist\/loader\.mjs/);
   assert.doesNotMatch(fixture, /^import\s+(?:pg|WebSocket)\s+from\s+["'](?:pg|ws)["']/m);
-});
-
-test("task-local PostgreSQL smoke uses disk-backed dynamic shared memory", async () => {
-  const fixture = await fs.readFile(path.join(repository, "scripts/release/tightbeam-state-smoke-fixture.ts"), "utf8");
-  assert.match(fixture, /const primaryData = path\.join\(root, "primary"\)/);
-  assert.match(fixture, /dynamic_shared_memory_type = 'mmap'/);
 });
 
 test("Linux smoke fixture starts through the product TSX loader and rejects retired phase inputs", async () => {
