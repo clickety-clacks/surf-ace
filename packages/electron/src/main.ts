@@ -2004,6 +2004,7 @@ function installIpc(): void {
       case "annotate":
         try {
           if (annotationDoneFence.isBusy(JSON.stringify([surfaceId, paneId]))) break;
+          if (payload.enabled === true) annotationDoneFence.forget(JSON.stringify([surfaceId, paneId]));
           void annotationSourceCoordinator?.setAnnotating(surfaceId, paneId, Boolean(payload.enabled))
             .catch((error) => clientWarn("annotation_source_commit_failed", errorDiagnosticFields(error)));
         } catch {

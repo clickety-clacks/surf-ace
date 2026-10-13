@@ -279,6 +279,11 @@ test("renderer DOM integrates authoritative connection states and live scale con
   }
   stateListener!(state("connected", true));
 
+  stateListener!(state("connected", true, 1));
+  assert.equal(document.querySelector(".annotation-local-status"), null,
+    "a new Sketch session cannot reuse the last completed local Saved status");
+  stateListener!(state("connected", true));
+
   function provenanceState(
     revision: number,
     provenance: {

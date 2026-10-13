@@ -1746,12 +1746,17 @@ function buildControls(view: PaneView, pane: RendererPaneState): void {
   const doneContext = parseAnnotationDoneContext({ ...pane.content, paneId: pane.paneId, paneLineageId: pane.paneLineageId });
   const doneKey = doneContext ? annotationDoneContextKey(doneContext) : "unavailable";
   const doneScope = String(pane.paneId);
-  const localDone = localAnnotationDone.snapshot(doneScope, doneKey);
+  let localDone = localAnnotationDone.snapshot(doneScope, doneKey);
+  if (pane.showDone && localDone.phase === "saved" && !localDone.busy) {
+    localAnnotationDone.forget(doneScope);
+    localDone = localAnnotationDone.snapshot(doneScope, doneKey);
+  }
   const doneState = localDone.phase !== "idle" ? localDone : (pane.annotationDone ?? localDone);
   const doneBusy = localAnnotationDone.isBusy(doneScope) || doneState.busy;
   annotate.disabled = doneBusy;
   annotate.addEventListener("click", () => {
     if (localAnnotationDone.isBusy(doneScope) || pane.annotationDone?.busy) return;
+    localAnnotationDone.forget(doneScope);
     rememberPaneContext(pane.paneId);
     annotationIntentEpoch.set(pane.paneId, (annotationIntentEpoch.get(pane.paneId) ?? 0) + 1);
     window.surfAce.command({ enabled: true, paneId: pane.paneId, type: "annotate" });
@@ -1798,7 +1803,8 @@ function buildControls(view: PaneView, pane: RendererPaneState): void {
       delivery?.phase === "rejected" ? "Saved locally · Registry rejected this record" :
       delivery?.phase === "waiting" ? (delivery.error ? "Saved locally · Waiting · Delivery outcome unconfirmed" : "Saved locally · Waiting") :
       doneState.phase === "saved" ? "Saved locally" :
-      doneState.localSaved ? "Saved locally · Waiting" : "Save outcome unknown · Try Done again";
+      doneState.localSaved ? "Saved locally · Waiting" : pane.showDone
+        ? "Save outcome unknown · Try Done again" : "Save outcome unknown · Waiting for reconciliation";
     if (delivery?.phase === "sent") status.title = "Accepted by the registry; consumer processing is not confirmed.";
     annotationPill.appendChild(status);
   }
