@@ -11,26 +11,33 @@ resident service.
 
 The repository source for this skill is
 `integrations/tightbeam/skills/surf-ace/SKILL.md`. Install a release using the
-matching skill asset, manifest, and `SHA256SUMS` from that same published
-release; verify the checksum before registering the content as `surf-ace` in a
-served identity. The standalone executable is a separate platform-specific
-release asset. Do not copy deployment URLs, hostnames, ports, or topology into
-this portable skill.
+matching skill asset, supplement manifest, and versioned checksum file from
+that same published release. Read the manifest's top-level `version` field
+and use the corresponding `surf-ace-cli-v<VERSION>-SHA256SUMS` file to verify
+the skill before registering the content as `surf-ace` in a served identity.
+The standalone executable is a separate platform-specific release asset. Do
+not copy deployment URLs, hostnames, ports, or topology into this portable
+skill.
 
 ## Install and verify the CLI
 
 Choose the Linux x86_64 or macOS arm64 CLI archive listed by the release
-manifest. Download the archive, skill, manifest, and checksum file from the
-same published release. Verify the selected archive and skill against
-`SHA256SUMS` before extracting or installing them. For example, after
-downloading the release assets:
+manifest. Download the archive, skill, supplement manifest, and versioned
+checksum file from the same published release. Set the version from the
+manifest's top-level `version` field; the checksum file is named
+`surf-ace-cli-v${VERSION}-SHA256SUMS`. Verify the selected assets before
+extracting or installing them. For example, after downloading the release
+assets:
 
 ```sh
+VERSION="REPLACE_WITH_MANIFEST_VERSION"
+CHECKSUMS="surf-ace-cli-v${VERSION}-SHA256SUMS"
+
 # Linux
-sha256sum -c SHA256SUMS
+sha256sum -c "$CHECKSUMS"
 
 # macOS
-shasum -a 256 -c SHA256SUMS
+shasum -a 256 -c "$CHECKSUMS"
 ```
 
 Extract into a versioned, user-owned directory and keep the prior version
@@ -46,11 +53,13 @@ CLI="$INSTALL_ROOT/surf-ace-cli/bin/surf-ace"
 ```
 
 The macOS CLI archive has the same `surf-ace-cli/bin/surf-ace` path. Check the
-release manifest's `version`, `source.tag`, `source.commit`, and `tooling.tag`
-fields and verify the asset checksum to identify the installed bytes. Use
-`--help` and the command schema for a local capability check. To upgrade or
-roll back, select the versioned executable path for the desired verified
-release; no in-place CLI updater is provided.
+supplement manifest's top-level `version`, `releaseTag`, `sourceCommit`, and
+`sourceTree` fields, plus the selected artifact's `file`, `target`, `bytes`,
+`sha256`, `binaryBytes`, and `binarySha256` fields. Verify the asset checksum
+to identify the installed bytes. Use `--help` and the command schema for a
+local capability check. To upgrade or roll back, select the versioned
+executable path for the desired verified release; no in-place CLI updater is
+provided.
 
 ## Verify release-smoke participants
 
