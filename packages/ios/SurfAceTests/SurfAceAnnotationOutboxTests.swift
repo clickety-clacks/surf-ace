@@ -212,9 +212,27 @@ final class SurfAceAnnotationOutboxTests: XCTestCase {
         let gap = try XCTUnwrap(outbox.head(surfaceId: surfaceId, maxRecords: 2))
         try outbox.accept(surfaceId: surfaceId, head: gap, cursor: .init(epoch: sourceEpoch, sequence: "92"))
         outbox = try JSONDecoder().decode(SurfAceAnnotationOutbox.self, from: JSONEncoder().encode(outbox))
-        XCTAssertEqual(outbox.surfaces[surfaceId]?.latestSubmissionByPane?["1"], "2")
+        XCTAssertEqual(outbox.surfaces[surfaceId]?.latestSubmissionByPane?["1"]?.sourceSequence, "2")
+        XCTAssertEqual(outbox.surfaces[surfaceId]?.latestSubmissionByPane?["1"]?.contentId, "content-1")
+        XCTAssertEqual(outbox.surfaces[surfaceId]?.latestSubmissionByPane?["1"]?.revision, 1)
         XCTAssertNil(outbox.surfaces[surfaceId]?.acceptedFramesByPane?["1"])
         XCTAssertNotEqual(outbox.deliveryStatus(surfaceId: surfaceId, paneId: 1, contentId: "content-1",
+                                               revision: 1, hasSavedStrokes: true), "Sent to registry")
+        XCTAssertEqual(outbox.deliveryStatus(surfaceId: surfaceId, paneId: 1, contentId: "content-1",
+                                            revision: 1, hasSavedStrokes: true), "Saved on device — delivery incomplete")
+        XCTAssertEqual(outbox.deliveryStatus(surfaceId: surfaceId, paneId: 1, contentId: "content-1",
+                                            revision: 2, hasSavedStrokes: true), "Saved on device")
+        XCTAssertEqual(outbox.deliveryStatus(surfaceId: surfaceId, paneId: 1, contentId: "other-content",
+                                            revision: 1, hasSavedStrokes: true), "Saved on device")
+        var json = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(outbox)) as? [String: Any])
+        var surfaces = try XCTUnwrap(json["surfaces"] as? [String: Any])
+        var storedSurface = try XCTUnwrap(surfaces[surfaceId] as? [String: Any])
+        storedSurface["latestSubmissionByPane"] = ["1": "2"]
+        surfaces[surfaceId] = storedSurface; json["surfaces"] = surfaces
+        let legacy = try JSONDecoder().decode(SurfAceAnnotationOutbox.self, from: JSONSerialization.data(withJSONObject: json))
+        XCTAssertEqual(legacy.surfaces[surfaceId]?.latestSubmissionByPane?["1"]?.sourceSequence, "2")
+        XCTAssertNil(legacy.surfaces[surfaceId]?.latestSubmissionByPane?["1"]?.contentId)
+        XCTAssertNotEqual(legacy.deliveryStatus(surfaceId: surfaceId, paneId: 1, contentId: "content-1",
                                                revision: 1, hasSavedStrokes: true), "Sent to registry")
         // A genuinely newer final frame can still establish its own proof.
         _ = try outbox.append(surfaceId: surfaceId, record: final, maxRecords: 2)

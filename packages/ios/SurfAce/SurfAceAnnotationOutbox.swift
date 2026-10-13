@@ -89,11 +89,37 @@ struct SurfAceAnnotationDeliveryReceipt: Codable, Equatable, Sendable {
     var sourceSequence: String? = nil
 }
 
+struct SurfAceAnnotationPaneSubmission: Codable, Equatable, Sendable {
+    var sourceSequence: String
+    var contentId: String?
+    var revision: Int?
+
+    init(sourceSequence: String, contentId: String?, revision: Int?) {
+        self.sourceSequence = sourceSequence
+        self.contentId = contentId
+        self.revision = revision
+    }
+
+    private enum CodingKeys: String, CodingKey { case sourceSequence, contentId, revision }
+    init(from decoder: Decoder) throws {
+        // Preserve the earlier local draft's sequence fence without inventing
+        // context proof for it. No installed authority/history is rewritten.
+        if let sequence = try? decoder.singleValueContainer().decode(String.self) {
+            sourceSequence = sequence; contentId = nil; revision = nil
+        } else {
+            let values = try decoder.container(keyedBy: CodingKeys.self)
+            sourceSequence = try values.decode(String.self, forKey: .sourceSequence)
+            contentId = try values.decodeIfPresent(String.self, forKey: .contentId)
+            revision = try values.decodeIfPresent(Int.self, forKey: .revision)
+        }
+    }
+}
+
 struct SurfAceAnnotationSurfaceOutbox: Codable, Equatable, Sendable {
     var acceptedFramesByPane: [String: SurfAceAnnotationDeliveryReceipt]? = nil
     // Latest submission survives loss gaps and their later acceptance. An old
     // in-flight response may prove its own delivery, never a newer pane outcome.
-    var latestSubmissionByPane: [String: String]? = nil
+    var latestSubmissionByPane: [String: SurfAceAnnotationPaneSubmission]? = nil
     var acceptedCursor: SurfAceAnnotationServerCursor?
     var diagnostic: SurfAceAnnotationDiagnostic?
     var unhealthy: SurfAceAnnotationDiagnostic? = nil
@@ -152,9 +178,11 @@ struct SurfAceAnnotationOutbox: Codable, Equatable, Sendable {
                   surface.fifo.allSatisfy({ $0.canonical.utf8.count <= Self.maximumRecordBytes }),
                   (surface.acceptedFramesByPane?.count ?? 0) <= 256,
                   (surface.latestSubmissionByPane?.count ?? 0) <= 256,
-                  (surface.latestSubmissionByPane ?? [:]).allSatisfy({ key, sequence in
+                  (surface.latestSubmissionByPane ?? [:]).allSatisfy({ key, submission in
                       Int(key).map({ $0 > 0 }) == true
-                          && Int64(sequence).map({ $0 > 0 && $0 < surface.nextSequence }) == true
+                          && Int64(submission.sourceSequence).map({ $0 > 0 && $0 < surface.nextSequence }) == true
+                          && (submission.contentId.map({ $0.utf8.count <= 256 }) ?? true)
+                          && (submission.revision.map({ $0 >= 0 }) ?? true)
                   }),
                   (surface.acceptedFramesByPane ?? [:]).allSatisfy({ key, receipt in
                       Int(key).map({ $0 > 0 }) == true && receipt.revision >= 0
@@ -446,12 +474,13 @@ struct SurfAceAnnotationOutbox: Codable, Equatable, Sendable {
             var submissions = surface.latestSubmissionByPane ?? [:]
             if submissions[key] == nil, submissions.count >= 256,
                let oldest = submissions.min(by: {
-                   (Int64($0.value) ?? 0) < (Int64($1.value) ?? 0)
+                   (Int64($0.value.sourceSequence) ?? 0) < (Int64($1.value.sourceSequence) ?? 0)
                })?.key {
                 submissions.removeValue(forKey: oldest)
                 surface.acceptedFramesByPane?.removeValue(forKey: oldest)
             }
-            submissions[key] = sequence
+            submissions[key] = .init(sourceSequence: sequence, contentId: record["contentId"] as? String,
+                                      revision: record["revision"] as? Int)
             surface.latestSubmissionByPane = submissions
             surface.acceptedFramesByPane?.removeValue(forKey: key)
             if surface.acceptedFramesByPane?.isEmpty == true { surface.acceptedFramesByPane = nil }
@@ -541,7 +570,7 @@ struct SurfAceAnnotationOutbox: Codable, Equatable, Sendable {
            let record = try JSONSerialization.jsonObject(with: data) as? [String: Any],
            record["kind"] as? String == "frame_commit",
            let paneId = record["paneId"] as? Int,
-           surface.latestSubmissionByPane?[String(paneId)] == head.sourceSequence,
+           surface.latestSubmissionByPane?[String(paneId)]?.sourceSequence == head.sourceSequence,
            let frameId = record["frameId"] as? String, frameId.utf8.count <= 128,
            let contentId = record["contentId"] as? String, contentId.utf8.count <= 256,
            let revision = record["revision"] as? Int {
@@ -588,14 +617,16 @@ struct SurfAceAnnotationOutbox: Codable, Equatable, Sendable {
             return surface.unhealthy == nil ? "Saved on device" : "Saved on device — waiting for publisher recovery"
         }
         if let receipt = surface.acceptedFramesByPane?[String(paneId)],
-           surface.latestSubmissionByPane?[String(paneId)] == receipt.sourceSequence,
+           surface.latestSubmissionByPane?[String(paneId)]?.sourceSequence == receipt.sourceSequence,
            receipt.contentId == contentId, receipt.revision == revision,
            let receiptSequence = receipt.sourceSequence.flatMap({ Int64($0) }),
            surface.diagnostic == nil || surface.diagnostic.flatMap({ Int64($0.sequence) }).map({ $0 < receiptSequence }) == true {
             return "Sent to registry"
         }
+        let latest = surface.latestSubmissionByPane?[String(paneId)]
+        let matchingUnprovenSubmission = latest != nil && latest?.contentId == contentId && latest?.revision == revision
         if surface.diagnostic != nil || surface.trailingGap != nil || surface.fifo.contains(where: { $0.kind == "gap" })
-            || surface.latestSubmissionByPane?[String(paneId)] != nil {
+            || matchingUnprovenSubmission {
             return hasSavedStrokes ? "Saved on device — delivery incomplete" : "Delivery incomplete"
         }
         return hasSavedStrokes ? "Saved on device" : nil
