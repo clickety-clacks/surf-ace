@@ -1138,6 +1138,19 @@ private struct SurfAcePaneView: View {
                     .allowsHitTesting(false)
                     .accessibilityHidden(true)
 
+                    if let status = pane.annotationDoneError ?? pane.annotationDeliveryStatus {
+                        VStack {
+                            Spacer()
+                            Text(status)
+                                .font(.caption)
+                                .padding(6)
+                                .background(.regularMaterial, in: Capsule())
+                                .padding(.bottom, 96)
+                                .accessibilityIdentifier("annotation.delivery.status")
+                        }
+                        .allowsHitTesting(false)
+                    }
+
                     if !showsSpatialEmptyPaneChrome, let toast = pane.toast {
                         VStack {
                             Spacer()
@@ -1841,17 +1854,27 @@ private struct SurfAcePaneControls: View {
                 .buttonStyle(SurfAceGlassButtonStyle())
                 .accessibilityLabel("Sketch")
                 .accessibilityIdentifier("hand.draw")
+                .disabled(pane.annotationDonePending)
 
                 if pane.annotationMode {
-                    Button("Done") {
+                    Button {
                         runtime.setAnnotationMode(
                             surfaceId: surface.surfaceId,
                             paneId: pane.paneId,
                             enabled: false,
                             fingerDrawEnabled: false
                         )
+                    } label: {
+                        if pane.annotationDoneSpinning {
+                            ProgressView().accessibilityLabel("Saving annotation")
+                        } else {
+                            Text("Done")
+                        }
                     }
+                    .disabled(pane.annotationDonePending)
                     .buttonStyle(SurfAceGlassButtonStyle())
+                    .accessibilityLabel("Done")
+                    .accessibilityValue(pane.annotationDonePending ? "Saving" : "Ready")
                     .accessibilityIdentifier("Done")
                 }
             }

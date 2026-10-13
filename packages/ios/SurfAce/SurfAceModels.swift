@@ -1151,6 +1151,12 @@ final class SurfAcePaneModel {
     var annotationMode = false
     var fingerDrawEnabled = false
     var isDrawingFlushSending = false
+    // Admission happens synchronously, before the mode task can suspend.
+    var annotationDoneGeneration = 0
+    var annotationDonePending = false
+    var annotationDoneSpinning = false
+    var annotationDoneError: String?
+    var annotationDeliveryStatus: String?
     var drawingRestoreWarningVisible = false
     var toast: String?
     var lastViewport = SurfAceViewport(

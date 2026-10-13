@@ -928,6 +928,13 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
             enabled: false,
             fingerDrawEnabled: false
         )
+        XCTAssertTrue(pane.annotationDonePending, "Done admission precedes all async waits")
+        XCTAssertTrue(pane.annotationDoneSpinning)
+        let doneGeneration = pane.annotationDoneGeneration
+        runtime.setAnnotationMode(surfaceId: surface.surfaceId, paneId: pane.paneId,
+                                  enabled: false, fingerDrawEnabled: false)
+        XCTAssertEqual(pane.annotationDoneGeneration, doneGeneration,
+                       "duplicate Done cannot enqueue another transition")
         let flushHeld = expectation(description: "final direct flush held")
         Task { if await flushGate.waitUntilHeld() { flushHeld.fulfill() } }
         await fulfillment(of: [flushHeld], timeout: 5)

@@ -676,7 +676,8 @@ final class SurfAceRuntime {
             let adapter = try ensureLocklessAdapter()
             let publisher = try SurfAceAnnotationPublisher(adapter: adapter, endpoint: endpoint,
                                                            makeTransport: annotationPublisherTransportFactory,
-                                                           onDiagnostic: { fields in
+                                                           onDiagnostic: { [weak self] fields in
+                self?.updateAnnotationDeliveryFeedback(fields)
                 surfAceServerRuntimeLog("event=annotation_publisher \(surfAceDiagnosticFields(fields.sorted { $0.key < $1.key }.map { ($0.key, $0.value as CustomStringConvertible?) }))")
             }) { error in
                 surfAceServerRuntimeLog("event=annotation_publisher_failed \(surfAceDiagnosticFields([("error_code", SurfAceAnnotationPublisher.safeErrorCode(error))]))")
@@ -1114,6 +1115,50 @@ final class SurfAceRuntime {
                 surface.surfaceEpoch = Int(authoritySurface.surfaceRevision)
             }
         }
+        projectAnnotationDeliveryFeedback(state)
+    }
+
+    private func projectAnnotationDeliveryFeedback(_ state: SurfAceLocklessAuthorityState,
+                                                    diagnostic: [String: String] = [:]) {
+        for surface in surfaces {
+            guard let source = state.annotationPublisher?.surfaces[surface.surfaceId] else { continue }
+            for pane in surface.panes {
+                let pending = source.fifo.compactMap { entry -> (SurfAceAnnotationOutboxEntry, [String: Any])? in
+                    guard let data = entry.canonical.data(using: .utf8),
+                          let record = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                          record["paneId"] as? Int == pane.paneId,
+                          record["contentId"] as? String == pane.currentEntry.contentId,
+                          record["revision"] as? Int == pane.currentEntry.revision else { return nil }
+                    return (entry, record)
+                }
+                if !pending.isEmpty {
+                    let sending = diagnostic["stage"] == "sent"
+                        && diagnostic["surface_id"] == surface.surfaceId
+                        && pending.contains { $0.0.sourceEventId == diagnostic["source_event_id"] }
+                    pane.annotationDeliveryStatus = source.unhealthy != nil
+                        ? "Waiting to send — publisher needs recovery"
+                        : sending ? "Sending" : "Waiting to send"
+                } else if source.openFrames?[String(pane.paneId)]?.contentId == pane.currentEntry.contentId {
+                    pane.annotationDeliveryStatus = "Saved on device"
+                } else if source.diagnostic == nil, source.unhealthy == nil,
+                          let receipt = source.acceptedFramesByPane?[String(pane.paneId)],
+                          receipt.contentId == pane.currentEntry.contentId,
+                          receipt.revision == pane.currentEntry.revision {
+                    pane.annotationDeliveryStatus = "Sent to registry"
+                } else if source.diagnostic != nil {
+                    pane.annotationDeliveryStatus = "Saved on device — delivery incomplete"
+                } else {
+                    pane.annotationDeliveryStatus = pane.currentEntry.strokesById.isEmpty ? nil : "Saved on device"
+                }
+            }
+        }
+    }
+
+    private func updateAnnotationDeliveryFeedback(_ fields: [String: String]) {
+        guard let adapter = locklessAdapter else { return }
+        Task { @MainActor [weak self] in
+            self?.projectAnnotationDeliveryFeedback(await adapter.snapshot(), diagnostic: fields)
+        }
     }
 
     func project(
@@ -1256,6 +1301,23 @@ final class SurfAceRuntime {
         fingerDrawEnabled: Bool,
         source: String? = nil
     ) {
+        guard let requestedPane = pane(surfaceId: surfaceId, paneId: paneId) else { return }
+        if !enabled {
+            guard !requestedPane.annotationDonePending else { return }
+            requestedPane.annotationDoneGeneration += 1
+            let generation = requestedPane.annotationDoneGeneration
+            requestedPane.annotationDonePending = true
+            requestedPane.annotationDoneSpinning = true
+            requestedPane.annotationDoneError = nil
+            Task { @MainActor [weak requestedPane] in
+                try? await Task.sleep(for: .seconds(15))
+                guard let requestedPane, requestedPane.annotationDonePending,
+                      requestedPane.annotationDoneGeneration == generation else { return }
+                // Do not cancel an in-flight durable mutation or admit another Done.
+                requestedPane.annotationDoneSpinning = false
+                requestedPane.annotationDoneError = "Saving is still pending. Your drawings are retained."
+            }
+        }
         if let adapter = locklessAdapter {
             let key = "\(surfaceId):\(paneId)"
             if enabled { annotationReentryRequested.insert(key) }
@@ -1290,6 +1352,7 @@ final class SurfAceRuntime {
             pane.pendingAnnotationCommit = false
         }
         pane.annotationMode = enabled
+        if !enabled { finishAnnotationDone(pane, failed: false) }
         pane.fingerDrawEnabled = enabled && fingerDrawEnabled
         pane.bridge?.setInteraction(annotationMode: pane.annotationMode, fingerDrawEnabled: pane.fingerDrawEnabled)
         let transitionSource = source ?? (enabled ? (fingerDrawEnabled ? "finger_button" : "annotation_button") : "done_button")
@@ -1300,6 +1363,13 @@ final class SurfAceRuntime {
             requestAnnotationCommit(surfaceId: surfaceId, paneId: paneId)
             clearPaneDrawings(pane)
         }
+    }
+
+    private func finishAnnotationDone(_ pane: SurfAcePaneModel, failed: Bool) {
+        pane.annotationDonePending = false
+        pane.annotationDoneSpinning = false
+        pane.annotationDoneError = failed ? "Could not save. Your drawings are retained; try Done again." : nil
+        if !failed { pane.annotationDeliveryStatus = "Saved on device" }
     }
 
     func awaitAnnotationModeTransition(surfaceId: String, paneId: Int) async {
@@ -1489,6 +1559,7 @@ final class SurfAceRuntime {
             originalPane.pendingAnnotationCommit ||
             (durableFrame?.commitRequested == true && durableFrame?.directCommitDelivered != true)
         )
+        var localModeCommitted = false
         do {
             _ = try await commitLocalMutation(adapter: adapter, operation: "local.annotation.mode") { state, sequence in
                 guard var surface = state.liveSurfaces[surfaceId],
@@ -1516,6 +1587,7 @@ final class SurfAceRuntime {
                     "surfaceId": .string(surfaceId),
                 ])
             }
+            localModeCommitted = true
             try projectLocklessAuthorityState(await adapter.snapshot())
             await annotationModeProjectionObserver?(enabled)
             guard let projectedPane = self.pane(surfaceId: surfaceId, paneId: paneId) else { return }
@@ -1535,6 +1607,7 @@ final class SurfAceRuntime {
             surfAceLifecycleLog(
                 "event=annotation_mode_changed \(surfAceDiagnosticFields([("surface_id", surfaceId), ("pane_id", paneId), ("enabled", projectedPane.annotationMode), ("finger_draw_enabled", projectedPane.fingerDrawEnabled), ("source", transitionSource)]))"
             )
+            if !enabled { finishAnnotationDone(projectedPane, failed: false) }
             if wasEnabled && !enabled {
                 requestAnnotationCommit(surfaceId: surfaceId, paneId: paneId)
                 clearPaneDrawings(projectedPane)
@@ -1549,6 +1622,12 @@ final class SurfAceRuntime {
             )
             await drainControllerRetentionReclamations(adapter: adapter)
         } catch {
+            if !enabled {
+                finishAnnotationDone(originalPane, failed: !localModeCommitted)
+                if localModeCommitted {
+                    originalPane.annotationDoneError = "Saved on device; local display update is pending."
+                }
+            }
             originalPane.toast = "Annotation change failed"
             endpointError = "Lockless annotation mutation failed: \(error.localizedDescription)"
         }
@@ -4785,6 +4864,7 @@ final class SurfAceRuntime {
             }
             if let appended {
                 recordAnnotationQueueCheckpoint(appended)
+                projectAnnotationDeliveryFeedback(await adapter.snapshot())
                 annotationPublisher?.notify()
             }
         } catch {
@@ -4931,6 +5011,7 @@ final class SurfAceRuntime {
             }
             if let appended {
                 recordAnnotationQueueCheckpoint(appended)
+                projectAnnotationDeliveryFeedback(await adapter.snapshot())
                 annotationPublisher?.notify()
             }
             return appended != nil
@@ -5141,6 +5222,7 @@ final class SurfAceRuntime {
             }
             if let appended {
                 recordAnnotationQueueCheckpoint(appended)
+                projectAnnotationDeliveryFeedback(await adapter.snapshot())
                 annotationPublisher?.notify()
             }
         } catch {

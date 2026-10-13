@@ -21,6 +21,37 @@ final class SurfAceAnnotationOutboxTests: XCTestCase {
         ]
     }
 
+    func testFinalFrameAcceptanceReceiptSurvivesRestoreAndDoesNotGrowPartition() throws {
+        var outbox = try SurfAceAnnotationOutbox(clientId: "client-1", sourceEpoch: sourceEpoch)
+        var final = record(); final["kind"] = "frame_commit"
+        _ = try outbox.append(surfaceId: surfaceId, record: final)
+        let head = try XCTUnwrap(outbox.head(surfaceId: surfaceId))
+        XCTAssertNil(outbox.surfaces[surfaceId]?.acceptedFramesByPane)
+        let bytes = try outbox.partitionBytes(surfaceId: surfaceId)
+        try outbox.accept(surfaceId: surfaceId, head: head,
+                          cursor: .init(epoch: sourceEpoch, sequence: "17"))
+        XCTAssertLessThanOrEqual(try outbox.partitionBytes(surfaceId: surfaceId), bytes)
+        let restored = try JSONDecoder().decode(SurfAceAnnotationOutbox.self,
+                                                from: JSONEncoder().encode(outbox))
+        let receipt = try XCTUnwrap(restored.surfaces[surfaceId]?.acceptedFramesByPane?["1"])
+        XCTAssertEqual(receipt.frameId, final["frameId"] as? String)
+        XCTAssertEqual(receipt.contentId, "content-1")
+        XCTAssertEqual(receipt.revision, 1)
+        XCTAssertEqual(receipt.sourceEventId, head.sourceEventId)
+        XCTAssertEqual(receipt.cursor.sequence, "17")
+        XCTAssertNil(restored.surfaces[surfaceId]?.acceptedFramesByPane?["2"])
+        try restored.validate()
+    }
+
+    func testDeltaAcceptanceDoesNotClaimFinalFrameDelivery() throws {
+        var outbox = try SurfAceAnnotationOutbox(clientId: "client-1", sourceEpoch: sourceEpoch)
+        _ = try outbox.append(surfaceId: surfaceId, record: record())
+        let head = try XCTUnwrap(outbox.head(surfaceId: surfaceId))
+        try outbox.accept(surfaceId: surfaceId, head: head,
+                          cursor: .init(epoch: sourceEpoch, sequence: "1"))
+        XCTAssertNil(outbox.surfaces[surfaceId]?.acceptedFramesByPane)
+    }
+
     func testCanonicalSourceBytesUseECMAScriptNumbersEscapesAndUTF16KeyOrder() throws {
         let canonical = try XCTUnwrap(SurfAceAnnotationOutbox.canonical([
             "\u{E000}": 1.0,

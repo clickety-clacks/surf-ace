@@ -79,7 +79,17 @@ struct SurfAceAnnotationOpenFrame: Codable, Equatable, Sendable {
     var directStrokeIds: [String]? = nil
 }
 
+/// Local proof of a persisted registry acceptance, never a processed-agent ACK.
+struct SurfAceAnnotationDeliveryReceipt: Codable, Equatable, Sendable {
+    var frameId: String
+    var contentId: String
+    var revision: Int
+    var sourceEventId: String
+    var cursor: SurfAceAnnotationServerCursor
+}
+
 struct SurfAceAnnotationSurfaceOutbox: Codable, Equatable, Sendable {
+    var acceptedFramesByPane: [String: SurfAceAnnotationDeliveryReceipt]? = nil
     var acceptedCursor: SurfAceAnnotationServerCursor?
     var diagnostic: SurfAceAnnotationDiagnostic?
     var unhealthy: SurfAceAnnotationDiagnostic? = nil
@@ -136,6 +146,16 @@ struct SurfAceAnnotationOutbox: Codable, Equatable, Sendable {
             guard !surfaceId.isEmpty, surfaceId.utf8.count <= 128,
                   surface.nextSequence > 0, surface.fifo.count <= maxRecords,
                   surface.fifo.allSatisfy({ $0.canonical.utf8.count <= Self.maximumRecordBytes }),
+                  (surface.acceptedFramesByPane?.count ?? 0) <= 256,
+                  (surface.acceptedFramesByPane ?? [:]).allSatisfy({ key, receipt in
+                      Int(key).map({ $0 > 0 }) == true && receipt.revision >= 0
+                          && !receipt.frameId.isEmpty && receipt.frameId.utf8.count <= 128
+                          && !receipt.contentId.isEmpty && receipt.contentId.utf8.count <= 256
+                          && receipt.sourceEventId.utf8.count <= 128
+                          && receipt.cursor.epoch.count == 32
+                          && receipt.cursor.epoch.utf8.allSatisfy({ $0.isASCIIHexLowercase })
+                          && Int64(receipt.cursor.sequence).map({ $0 > 0 }) == true
+                  }),
                   (surface.openFrames ?? [:]).allSatisfy({ key, frame in
                       Int(key).map({ $0 > 0 }) == true && frame.frameId.hasPrefix("fr_")
                           && frame.sourceStrokeCount >= frame.publishedStrokeCount
@@ -476,9 +496,33 @@ struct SurfAceAnnotationOutbox: Codable, Equatable, Sendable {
               Int64(cursor.sequence).map({ $0 > 0 }) == true else {
             throw SurfAceAnnotationOutboxError.staleAcceptance
         }
+        let previousBytes = try partitionBytes(surfaceId: surfaceId)
         surface.fifo.removeFirst()
         surface.acceptedCursor = cursor
         surfaces[surfaceId] = surface
+        // Retain only the latest final-frame proof per pane. The serialized
+        // partition accounts for receipts; lack of space loses UI proof, not FIFO.
+        if head.kind == "payload", let data = head.canonical.data(using: .utf8),
+           let record = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+           record["kind"] as? String == "frame_commit",
+           let paneId = record["paneId"] as? Int,
+           let frameId = record["frameId"] as? String, frameId.utf8.count <= 128,
+           let contentId = record["contentId"] as? String, contentId.utf8.count <= 256,
+           let revision = record["revision"] as? Int {
+            let previous = surface.acceptedFramesByPane
+            var receipts = previous ?? [:]
+            let key = String(paneId)
+            if receipts[key] != nil || receipts.count < 256 {
+                receipts[key] = .init(frameId: frameId, contentId: contentId, revision: revision,
+                                      sourceEventId: head.sourceEventId, cursor: cursor)
+                surface.acceptedFramesByPane = receipts
+                surfaces[surfaceId] = surface
+                if try partitionBytes(surfaceId: surfaceId) > previousBytes {
+                    surface.acceptedFramesByPane = previous
+                    surfaces[surfaceId] = surface
+                }
+            }
+        }
     }
 
     mutating func rejectHead(surfaceId: String, code: String) throws {
