@@ -1354,7 +1354,9 @@ test("Tightbeam manifest assembles the six hosted assets including the exact ski
   const skillRecord = manifest.assets.find(({ name }) => name === TIGHTBEAM_SKILL_ASSET);
   assert.equal(skillRecord.sha256, createHash("sha256").update(toolingSkillBytes).digest("hex"));
   assert.deepEqual(await fs.readFile(path.join(outputDir, TIGHTBEAM_SKILL_ASSET)), toolingSkillBytes);
-  assert.ok((await fs.readFile(path.join(outputDir, TIGHTBEAM_SKILL_ASSET), "utf8")).includes(TIGHTBEAM_SKILL_ASSET));
+  const packagedSkill = await fs.readFile(path.join(outputDir, TIGHTBEAM_SKILL_ASSET), "utf8");
+  assert.match(packagedSkill, /matching skill asset/);
+  assert.ok(packagedSkill.includes("surf-ace-cli-v${VERSION}-SHA256SUMS"));
   assert.equal(Object.hasOwn(manifest, "iosSigning"), false);
   assert.deepEqual((await verifyTightbeamChecksums(result.manifestPath)).files,
     [...TIGHTBEAM.assets, TIGHTBEAM.manifest].sort());
@@ -2970,8 +2972,9 @@ test("v0.2.8 standalone specification and release gates bind the product and all
   assert.match(readme, /do not use `surf-ace --version`/);
   assert.match(readme, /server archive\s+includes `docs\/OPERATIONS\.md`/);
   assert.match(readme, /## Install and run/);
-  assert.match(skill, /surf-ace-skill-v0\.2\.8\.md/);
-  assert.match(skill, /register the verified Markdown content/);
+  assert.match(skill, /matching skill asset/);
+  assert.ok(skill.includes("surf-ace-cli-v${VERSION}-SHA256SUMS"));
+  assert.match(skill, /before registering the content as `surf-ace` in a served identity/);
   assert.doesNotMatch(`${readme}\n${skill}`, /\b(?:Racter|Plumbus|Shrdlu|Gibson|Eezo)\b|\/Users\/mike\/|\b100\.64\.\d{1,3}\.\d{1,3}\b/i);
   assert.match(workflow, /^on:\n  workflow_dispatch:/m);
   await exec("ruby", ["-e", "require \"yaml\"; YAML.load_file(ARGV.fetch(0))", workflowPath]);
