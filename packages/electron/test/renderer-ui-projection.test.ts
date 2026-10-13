@@ -161,7 +161,7 @@ test("drawing input, navigation, and Done controls keep their two-pill contract"
   assert.match(renderer, /annotationPill\.className = "control-pill annotation-pill"/);
   assert.match(renderer, /createIconButton\("pen-line", "Sketch", "annotate"\)/);
   assert.match(renderer, /createButton\("Done", "done"\)/);
-  assert.match(renderer, /if \(pane\.showDone\)\s*\{[\s\S]*?createButton\("Done", "done"\)/);
+  assert.match(renderer, /if \(pane\.showDone \|\| doneBusy\)\s*\{[\s\S]*?createButton\("Done", "done"\)/);
 });
 
 test("disabled history controls stay disabled without a hover affordance", () => {

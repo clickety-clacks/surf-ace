@@ -1,6 +1,9 @@
 import { parseAnnotationCursor, type AnnotationCursor } from "@surf-ace/protocol";
 import { PublicControllerWireClient, type ControllerWireEnvelope } from "../../controller/src/wire.js";
 import type { SurfaceCore } from "./surface-core.js";
+import type { AnnotationDeliveryReceipt } from "./annotation-publisher-outbox.js";
+
+export type AnnotationDeliveryStatus = { phase: "waiting" | "sending" | "sent" | "rejected"; error?: boolean };
 
 export type AnnotationPublisherWire = Pick<PublicControllerWireClient,
   "connect" | "request" | "onClose" | "close" | "abort">;
@@ -19,6 +22,10 @@ export class AnnotationRegistryPublisher {
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private active: Promise<void> = Promise.resolve();
   private lastSurfaceId: string | null = null;
+  private savedReceipts: Record<string, AnnotationDeliveryReceipt[]>;
+  private savedPendingFrames: ReturnType<NonNullable<SurfaceCore["annotationPublisher"]>["pendingDeliveryFramesSnapshot"]>;
+  private sending: { surfaceId: string; sourceEventId: string } | null = null;
+  private readonly deliveryErrors = new Set<string>();
 
   constructor(
     address: string,
@@ -26,12 +33,16 @@ export class AnnotationRegistryPublisher {
     private readonly persist: () => Promise<void>,
     private readonly onError: (error: unknown) => void,
     wireFactory: (url: string) => AnnotationPublisherWire = (url) => new PublicControllerWireClient(url),
+    private readonly onStatus: () => void = () => {},
   ) {
     const url = new URL(address);
     if (!(["ws:", "wss:"].includes(url.protocol)) || !core.annotationPublisher) {
       throw new TypeError("annotation publisher requires a configured registry and durable outbox");
     }
     this.wire = wireFactory(url.toString());
+    this.savedReceipts = core.annotationPublisher.deliveryReceiptsSnapshot();
+    this.savedPendingFrames = core.annotationPublisher.pendingDeliveryFramesSnapshot();
+    for (const surfaceId of core.annotationPublisher.unhealthySurfaceIds()) this.deliveryErrors.add(surfaceId);
     this.wire.onClose(() => {
       this.helloDone = false;
       if (!this.stopped && this.core.annotationPublisher!.publishableSurfaceIds().length > 0) this.retry();
@@ -39,6 +50,32 @@ export class AnnotationRegistryPublisher {
   }
 
   start(): void { this.notify(); }
+  sourceSaved(): void { this.publishStatus(true); this.notify(); }
+  localSaved(): void { this.publishStatus(true); }
+
+  deliveryStatus(surfaceId: string, paneId: number, paneLineageId: string, contentId: string,
+    revision: number, frameId?: string, requireFrameCommit = false): AnnotationDeliveryStatus | null {
+    const receipt = this.savedReceipts[surfaceId]?.find((r) => r.paneId === paneId &&
+      r.paneLineageId === paneLineageId && r.contentId === contentId && r.revision === revision &&
+      (frameId === undefined || r.frameId === frameId));
+    if (!receipt || (requireFrameCommit && receipt.kind !== "frame_commit")) {
+      const pending = this.savedPendingFrames[surfaceId]?.some((f) => f.commitRequested &&
+        f.paneId === paneId && f.paneLineageId === paneLineageId && f.contentId === contentId &&
+        f.contentRevision === revision && (frameId === undefined || f.frameId === frameId));
+      return pending ? { phase: "waiting", ...(this.deliveryErrors.has(surfaceId) ? { error: true } : {}) } : null;
+    }
+    if (receipt.phase === "sent" || receipt.phase === "rejected") return { phase: receipt.phase };
+    const sending = this.sending?.surfaceId === surfaceId && this.sending.sourceEventId === receipt.sourceEventId;
+    return { phase: sending ? "sending" : "waiting", ...(this.deliveryErrors.has(surfaceId) ? { error: true } : {}) };
+  }
+
+  private publishStatus(refreshSaved = false): void {
+    if (refreshSaved) {
+      this.savedReceipts = this.core.annotationPublisher!.deliveryReceiptsSnapshot();
+      this.savedPendingFrames = this.core.annotationPublisher!.pendingDeliveryFramesSnapshot();
+    }
+    try { this.onStatus(); } catch { /* UI observers cannot change source delivery. */ }
+  }
 
   /** Called only after a source record has been durably appended. */
   notify(): void {
@@ -47,6 +84,9 @@ export class AnnotationRegistryPublisher {
     if (this.running) return;
     this.running = true;
     this.active = this.drain().catch((error) => {
+      if (this.sending || this.lastSurfaceId) this.deliveryErrors.add(this.sending?.surfaceId ?? this.lastSurfaceId!);
+      this.sending = null;
+      this.publishStatus();
       this.onError(error);
       this.retry();
     }).finally(() => {
@@ -102,7 +142,11 @@ export class AnnotationRegistryPublisher {
       const durableHead = outbox.head(surfaceId);
       if (!durableHead || durableHead.canonical !== entry.canonical) continue;
       const op = entry.kind === "gap" ? "annotation.source_gap" : "annotation.ingest";
+      this.sending = { surfaceId, sourceEventId: entry.sourceEventId };
+      this.deliveryErrors.delete(surfaceId);
+      this.publishStatus(true); // selected head has just been persisted
       const response = await this.wire.request(op, { record: JSON.parse(entry.canonical) });
+      this.sending = null;
       if (!response.ok) {
         if (entry.kind === "payload" &&
             (response.error?.code === "annotation_record_too_large" ||
@@ -111,6 +155,7 @@ export class AnnotationRegistryPublisher {
             outbox.rejectHead(surfaceId, response.error!.code as
               "annotation_record_too_large" | "annotation_context_image_invalid");
             await this.persist();
+            this.publishStatus(true);
           });
           continue;
         }
@@ -130,6 +175,8 @@ export class AnnotationRegistryPublisher {
       await this.core.transactionAsync(async () => {
         outbox.accepted(surfaceId, entry, cursor);
         await this.persist();
+        // A server response alone is insufficient for a restored Sent label.
+        this.publishStatus(true);
       });
     }
   }
@@ -138,6 +185,8 @@ export class AnnotationRegistryPublisher {
     await this.core.transactionAsync(async () => {
       this.core.annotationPublisher!.markUnhealthy(surfaceId, code);
       await this.persist();
+      this.deliveryErrors.add(surfaceId);
+      this.publishStatus(true);
     });
     this.onError(new AnnotationPublisherRefusal(code));
   }

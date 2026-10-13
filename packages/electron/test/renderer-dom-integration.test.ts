@@ -29,6 +29,7 @@ function pane(paneId: number, annotationBorderVisible = false) {
     name: null,
     ownerName: null,
     paneId,
+    paneLineageId: `lineage-${paneId}`,
     provenance: null,
     provenanceName: null,
     showDone: annotationBorderVisible,
@@ -66,10 +67,16 @@ test("renderer DOM integrates authoritative connection states and live scale con
   let nonceCounter = 0;
   let textMetricScale = 1;
   const commands: unknown[] = [];
+  let finishCalls = 0;
+  let finishReply!: (state: { phase: string; busy: boolean; localSaved: boolean }) => void;
   const resizeCallbacks: Array<() => void> = [];
   const mutationCallbacks: Array<() => void> = [];
   const fontCallbacks: Array<() => void> = [];
   const surfAce = {
+    finishAnnotation() {
+      finishCalls++;
+      return new Promise((resolve) => { finishReply = resolve; });
+    },
     clearToast() {},
     command(command: unknown) {
       commands.push(command);
@@ -233,6 +240,44 @@ test("renderer DOM integrates authoritative connection states and live scale con
   document.querySelectorAll(".pane-shell")[0]!.querySelector(".pane-scroll")!
     .dispatchEvent(new window.Event("scroll"));
   assert.equal(document.querySelector(".font-size-popover"), null);
+
+  // Hold the actual internal completion response through a real chrome rebuild.
+  // Replaced controls must retain the fence, and an old button must not submit twice.
+  stateListener!(state("connected", true, 1));
+  const oldDone = document.querySelector(".done") as HTMLButtonElement;
+  oldDone.click();
+  assert.equal((document.querySelector(".done") as HTMLButtonElement).disabled, true);
+  assert.equal(document.querySelector(".done")!.getAttribute("aria-busy"), "true");
+  oldDone.click();
+  await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+  assert.equal(finishCalls, 1);
+  stateListener!(state("disconnected", true, 1));
+  const rebuiltDone = document.querySelector(".done") as HTMLButtonElement;
+  assert.notEqual(rebuiltDone, oldDone);
+  assert.equal(rebuiltDone.disabled, true);
+  assert.equal((document.querySelector(".annotate") as HTMLButtonElement).disabled, true);
+  rebuiltDone.click();
+  assert.equal(finishCalls, 1);
+  stateListener!(state("connected", true)); // local save can exit Sketch before delivery settles
+  assert.equal((document.querySelector(".done") as HTMLButtonElement).disabled, true);
+  finishReply({ phase: "saved", busy: false, localSaved: true });
+  for (let i = 0; i < 8; i++) await Promise.resolve();
+  assert.equal(document.querySelector(".done"), null);
+  assert.equal(document.querySelector(".annotation-local-status")?.textContent, "Saved locally");
+  // Delivery-only changes must update chrome without changing content/geometry.
+  // These restored internal receipts explicitly remain registry acceptance,
+  // never consumer processed acknowledgement.
+  for (const [phase, label] of [
+    ["waiting", "Saved locally · Waiting"], ["sending", "Saved locally · Sending"],
+    ["sent", "Sent to registry"], ["rejected", "Saved locally · Registry rejected this record"],
+  ]) {
+    const next = state("connected", true);
+    (next.panes[0] as any).annotationDelivery = { phase };
+    stateListener!(next);
+    assert.equal(document.querySelector(".annotation-local-status")?.textContent, label);
+    assert.equal(document.querySelector(".annotation-local-status")?.textContent?.includes("processed"), false);
+  }
+  stateListener!(state("connected", true));
 
   function provenanceState(
     revision: number,

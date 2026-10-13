@@ -16,6 +16,20 @@ import {
 export const ANNOTATION_PUBLISHER_MAX_BYTES = 67_108_864;
 export const ANNOTATION_PUBLISHER_MAX_RECORDS = 256;
 const GAP_SLOT_BYTES = 8_192;
+export const ANNOTATION_DELIVERY_RECEIPT_LIMIT = 64;
+export type AnnotationDeliveryReceipt = {
+  kind: "live_delta" | "frame_commit";
+  paneId: number;
+  paneLineageId: string;
+  contentId: string;
+  revision: number;
+  frameId: string;
+  sourceEventId: string;
+  sourceSequence: string;
+  phase: "waiting" | "sent" | "rejected";
+  acceptedCursor?: AnnotationCursor;
+  errorCode?: string;
+};
 
 type GapReason = AnnotationSourceGap["reason"];
 export type AnnotationPublisherEntry = {
@@ -31,6 +45,8 @@ type PendingGap = {
   reason: GapReason;
 };
 export type AnnotationOpenFrame = {
+  paneLineageId?: string;
+  contentRevision?: number;
   frameId: string;
   contextKey: string;
   contentId: string;
@@ -60,6 +76,7 @@ export type AnnotationPublisherSurface = {
   fifo: AnnotationPublisherEntry[];
   frames: Record<string, string>;
   openFrames?: Record<string, AnnotationOpenFrame>;
+  deliveryReceipts?: AnnotationDeliveryReceipt[];
   nextSequence: string;
   trailingGap: PendingGap | null;
 };
@@ -109,6 +126,10 @@ export class AnnotationPublisherOutbox {
     return this.pendingSurfaceIds().filter((surfaceId) => !this.state.surfaces[surfaceId]?.unhealthy);
   }
 
+  unhealthySurfaceIds(): string[] {
+    return Object.entries(this.state.surfaces).filter(([, surface]) => !!surface.unhealthy).map(([id]) => id);
+  }
+
   markUnhealthy(surfaceId: string, code: string): void {
     const surface = this.surface(surfaceId);
     const sequence = surface.fifo[0]?.sourceSequence ?? surface.trailingGap?.from ?? surface.nextSequence;
@@ -153,8 +174,10 @@ export class AnnotationPublisherOutbox {
     return this.partitionBytes(surfaceId) + 2 * GAP_SLOT_BYTES <= this.maxBytes;
   }
 
-  append(surfaceId: string, value: Omit<AnnotationSourceRecord, "protocolVersion" | "clientId" | "sourceEpoch" | "surfaceId" | "sourceSequence" | "sourceEventId">): string {
+  append(surfaceId: string, value: Omit<AnnotationSourceRecord, "protocolVersion" | "clientId" | "sourceEpoch" | "surfaceId" | "sourceSequence" | "sourceEventId">,
+    paneLineageId?: string): string {
     const surface = this.surface(surfaceId);
+    if (Number.isSafeInteger(value.paneId)) this.forgetDeliveryReceipt(surfaceId, value.paneId as number);
     const sequence = parseAnnotationSequence(surface.nextSequence);
     if (sequence >= ANNOTATION_MAX_SEQUENCE) throw new RangeError("annotation source sequence exhausted");
     const sourceSequence = sequence.toString();
@@ -187,7 +210,74 @@ export class AnnotationPublisherOutbox {
       surface.fifo.pop();
       this.extendGap(surface, sourceSequence, "source_retention_overflow");
     }
+    if (paneLineageId && surface.fifo.some((entry) => entry.sourceEventId === sourceEventId && entry.kind === "payload")) {
+      // Local metadata only: never change the canonical registry record. Missing
+      // legacy ownership means unknown UI status, not a fabricated receipt.
+      const receipt: AnnotationDeliveryReceipt = {
+        kind: value.kind as "live_delta" | "frame_commit",
+        paneId: value.paneId as number, paneLineageId, contentId: value.contentId as string,
+        revision: value.revision as number, frameId: value.frameId as string,
+        sourceEventId, sourceSequence, phase: "waiting",
+      };
+      if (this.validDeliveryReceipt(receipt)) {
+        surface.deliveryReceipts = (surface.deliveryReceipts ?? []).filter((r) => r.paneId !== receipt.paneId);
+        surface.deliveryReceipts.push(receipt);
+        this.trimDeliveryReceipts(surfaceId);
+      }
+    }
     return sourceSequence;
+  }
+
+  deliveryReceiptFor(surfaceId: string, paneId: number, paneLineageId: string,
+    contentId: string, revision: number): AnnotationDeliveryReceipt | null {
+    const receipt = this.state.surfaces[surfaceId]?.deliveryReceipts?.find((r) =>
+      r.paneId === paneId && r.paneLineageId === paneLineageId && r.contentId === contentId && r.revision === revision);
+    return receipt ? structuredClone(receipt) : null;
+  }
+
+  deliveryReceiptsSnapshot(): Record<string, AnnotationDeliveryReceipt[]> {
+    return Object.fromEntries(Object.entries(this.state.surfaces).map(([surfaceId, surface]) =>
+      [surfaceId, structuredClone(surface.deliveryReceipts ?? [])]));
+  }
+
+  pendingDeliveryFramesSnapshot(): Record<string, Array<{ paneId: number; paneLineageId?: string;
+    contentId: string; contentRevision?: number; frameId: string; commitRequested: boolean }>> {
+    return Object.fromEntries(Object.entries(this.state.surfaces).map(([id, surface]) => [id,
+      Object.entries(surface.openFrames ?? {}).map(([paneId, frame]) => ({ paneId: Number(paneId),
+        paneLineageId: frame.paneLineageId, contentId: frame.contentId, contentRevision: frame.contentRevision,
+        frameId: frame.frameId, commitRequested: frame.commitRequested === true }))]));
+  }
+
+  forgetDeliveryReceipt(surfaceId: string, paneId: number): void {
+    const surface = this.state.surfaces[surfaceId];
+    if (surface?.deliveryReceipts) surface.deliveryReceipts = surface.deliveryReceipts.filter((r) => r.paneId !== paneId);
+  }
+
+  private trimDeliveryReceipts(surfaceId: string): void {
+    const surface = this.state.surfaces[surfaceId]!;
+    // Evict UI metadata only, never FIFO/image/source data. Eviction means
+    // unknown delivery on restoration; it cannot imply acceptance or no work.
+    while (surface.deliveryReceipts?.length &&
+      (surface.deliveryReceipts.length > ANNOTATION_DELIVERY_RECEIPT_LIMIT || !this.fits(surfaceId))) {
+      surface.deliveryReceipts.shift();
+    }
+  }
+
+  private validDeliveryReceipt(receipt: AnnotationDeliveryReceipt): boolean {
+    try {
+      if (!Number.isSafeInteger(receipt.paneId) || receipt.paneId <= 0 ||
+          !["live_delta", "frame_commit"].includes(receipt.kind) ||
+          typeof receipt.paneLineageId !== "string" || !receipt.paneLineageId || receipt.paneLineageId.length > 256 ||
+          typeof receipt.contentId !== "string" || !receipt.contentId || receipt.contentId.length > 512 ||
+          !Number.isSafeInteger(receipt.revision) || receipt.revision < 0 ||
+          typeof receipt.frameId !== "string" || !receipt.frameId || receipt.frameId.length > 256 ||
+          typeof receipt.sourceEventId !== "string" || !/^[0-9a-f]{32}$/.test(receipt.sourceEventId) ||
+          !["waiting", "sent", "rejected"].includes(receipt.phase)) return false;
+      parseAnnotationSequence(receipt.sourceSequence);
+      if (receipt.phase === "sent") return !!receipt.acceptedCursor && !!parseAnnotationCursor(receipt.acceptedCursor) && receipt.errorCode === undefined;
+      return receipt.acceptedCursor === undefined && (receipt.phase === "waiting"
+        ? receipt.errorCode === undefined : typeof receipt.errorCode === "string" && /^[a-z][a-z0-9_]{0,127}$/.test(receipt.errorCode));
+    } catch { return false; }
   }
 
   frameId(surfaceId: string, paneId: number): string {
@@ -209,6 +299,7 @@ export class AnnotationPublisherOutbox {
     const key = String(paneId);
     const existing = surface.openFrames?.[key];
     if (existing) return structuredClone(existing);
+    this.forgetDeliveryReceipt(surfaceId, paneId);
     const frameId = this.frameId(surfaceId, paneId);
     const frame: AnnotationOpenFrame = {
       ...structuredClone(capture), frameId, updatedAt: capture.openedAt, strokes: [],
@@ -346,6 +437,13 @@ export class AnnotationPublisherOutbox {
     parseAnnotationCursor(cursor);
     surface.fifo.shift();
     surface.acceptedCursor = structuredClone(cursor);
+    const receipt = surface.deliveryReceipts?.find((r) => r.sourceEventId === entry.sourceEventId);
+    if (entry.kind === "payload" && receipt) {
+      receipt.phase = "sent";
+      receipt.acceptedCursor = structuredClone(cursor);
+      delete receipt.errorCode;
+      this.trimDeliveryReceipts(surfaceId);
+    }
   }
 
   /** Only a definite record-specific rejection may replace an unaccepted payload. */
@@ -363,6 +461,8 @@ export class AnnotationPublisherOutbox {
     surface.fifo[0] = { canonical, kind: "gap", sourceEventId: head.sourceEventId,
       sourceSequence: head.sourceSequence };
     surface.diagnostic = { code, sequence: head.sourceSequence };
+    const receipt = surface.deliveryReceipts?.find((r) => r.sourceEventId === head.sourceEventId);
+    if (receipt) { receipt.phase = "rejected"; receipt.errorCode = code; this.trimDeliveryReceipts(surfaceId); }
   }
 
   private validateState(): void {
@@ -372,6 +472,12 @@ export class AnnotationPublisherOutbox {
       throw new TypeError("invalid persisted annotation publisher state");
     }
     for (const [surfaceId, surface] of Object.entries(this.state.surfaces)) {
+      if (surface.deliveryReceipts !== undefined && (!Array.isArray(surface.deliveryReceipts) ||
+          surface.deliveryReceipts.length > ANNOTATION_DELIVERY_RECEIPT_LIMIT ||
+          surface.deliveryReceipts.some((r) => !r || !this.validDeliveryReceipt(r)) ||
+          new Set(surface.deliveryReceipts.map((r) => r.paneId)).size !== surface.deliveryReceipts.length)) {
+        throw new TypeError("invalid persisted annotation delivery receipts");
+      }
       parseAnnotationSequence(surface.nextSequence);
       if (!surface.frames || typeof surface.frames !== "object" ||
           (surface.unhealthy != null &&
@@ -382,6 +488,8 @@ export class AnnotationPublisherOutbox {
           (surface.openFrames !== undefined && (typeof surface.openFrames !== "object" ||
             Object.entries(surface.openFrames).some(([key, frame]) =>
               surface.frames[key] !== frame.frameId || typeof frame.image !== "string" ||
+              (frame.paneLineageId !== undefined && (typeof frame.paneLineageId !== "string" || !frame.paneLineageId || frame.paneLineageId.length > 256)) ||
+              (frame.contentRevision !== undefined && (!Number.isSafeInteger(frame.contentRevision) || frame.contentRevision < 0)) ||
               !Array.isArray(frame.strokes) ||
               (frame.commitRequested !== undefined && typeof frame.commitRequested !== "boolean") ||
               (frame.directCommitDelivered !== undefined &&
@@ -396,6 +504,22 @@ export class AnnotationPublisherOutbox {
           throw new TypeError("persisted annotation source bytes are not canonical");
         }
         validateAnnotationSource(JSON.parse(entry.canonical));
+      }
+      for (const receipt of surface.deliveryReceipts ?? []) {
+        if (parseAnnotationSequence(receipt.sourceSequence) >= parseAnnotationSequence(surface.nextSequence)) {
+          throw new TypeError("invalid persisted annotation delivery receipts");
+        }
+        if (receipt.phase === "waiting") {
+          const entry = surface.fifo.find((e) => e.kind === "payload" && e.sourceEventId === receipt.sourceEventId);
+          const record = entry && JSON.parse(entry.canonical);
+          if (!record || record.surfaceId !== surfaceId || record.clientId !== this.clientId ||
+              record.sourceEpoch !== this.state.sourceEpoch || record.sourceSequence !== receipt.sourceSequence ||
+              record.kind !== receipt.kind ||
+              record.paneId !== receipt.paneId || record.frameId !== receipt.frameId ||
+              record.contentId !== receipt.contentId || record.revision !== receipt.revision) {
+            throw new TypeError("invalid persisted annotation delivery receipts");
+          }
+        }
       }
     }
   }

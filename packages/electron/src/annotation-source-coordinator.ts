@@ -37,7 +37,9 @@ export class AnnotationSourceCoordinator {
     }
   }
 
-  async setAnnotating(surfaceId: string, paneId: number, enabled: boolean): Promise<void> {
+  async setAnnotating(surfaceId: string, paneId: number, enabled: boolean,
+    onDoneSaved: () => void = () => {}, isCurrent: () => boolean = () => true): Promise<void> {
+    if (!isCurrent()) throw new Error("annotation completion context changed");
     const key = JSON.stringify([surfaceId, paneId]);
     const epoch = (this.doneEpoch.get(key) ?? 0) + 1;
     this.doneEpoch.set(key, epoch);
@@ -77,11 +79,18 @@ export class AnnotationSourceCoordinator {
       return;
     }
     await this.core.transactionAsync(async () => {
+      // The owner/content can change while this operation waits in the core
+      // queue. Refuse before changing mode or persisting the replacement pane.
+      if (!isCurrent()) throw new Error("annotation completion context changed");
       this.core.setAnnotating(surfaceId, paneId, false);
       if (this.core.hasPendingAnnotationCommit(surfaceId, paneId)) {
         this.core.annotationPublisher?.requestFrameCommit(surfaceId, paneId, true);
       }
       await this.persist();
+      // Record only the completed local save boundary. Later direct delivery,
+      // registry-source completion or transaction notifications can still fail;
+      // those failures cannot erase this evidence or imply registry acceptance.
+      try { onDoneSaved(); } catch { /* Status observers cannot undo saved ink. */ }
     });
     if (this.doneEpoch.get(key) === epoch) await this.finishRequestedFrame(surfaceId, paneId);
   }
@@ -154,6 +163,7 @@ export class AnnotationSourceCoordinator {
       const pane = this.core.getRendererWindowState(surfaceId).panes.find((item) => item.paneId === paneId);
       const contentType = pane?.content.contentType === "browser_url" ? "html" : pane?.content.contentType;
       if (current.failed || !contentType || current.contentId !== pane?.content.contentId) {
+        outbox.forgetDeliveryReceipt(surfaceId, paneId);
         outbox.lose(surfaceId, "annotation_frame_commit_unavailable");
       } else {
         const closedFrame = {
@@ -169,7 +179,7 @@ export class AnnotationSourceCoordinator {
           sourceTimestamp: new Date().toISOString(),
           payload: { frame: closedFrame,
             imageSha256: createHash("sha256").update(Buffer.from(current.image, "base64")).digest("hex") },
-        });
+        }, current.paneLineageId && current.paneLineageId === pane?.paneLineageId ? current.paneLineageId : undefined);
       }
       outbox.closeFrame(surfaceId, paneId);
       await this.persist();
@@ -194,6 +204,8 @@ export class AnnotationSourceCoordinator {
       if (!frame && payload) {
         // A failed at-open capture still needs a stable loss position across retries.
         outbox.openFrame(surfaceId, paneId, {
+          ...(pane?.paneLineageId ? { paneLineageId: pane.paneLineageId } : {}),
+          ...(pane ? { contentRevision: pane.content.revision } : {}),
           contextKey: payload.contentId, contentId: payload.contentId, image: "", failed: true,
           openedAt: payload.firstStrokeAt, scrollOffset: this.core.captureSnapshot(surfaceId, paneId).viewport.scrollOffset,
           viewport: this.core.viewport(surfaceId),
@@ -206,11 +218,13 @@ export class AnnotationSourceCoordinator {
       if (pending <= 0) return;
       const contentType = pane?.content.contentType === "browser_url" ? "html" : pane?.content.contentType;
       if (!payload || frame.failed || frame.contentId !== payload.contentId || !contentType) {
+        outbox.forgetDeliveryReceipt(surfaceId, paneId);
         outbox.lose(surfaceId, "annotation_at_open_frame_unavailable");
       } else {
         const ids = new Set(frame.strokes.slice(frame.publishedStrokeCount ?? 0).map((stroke) => stroke.strokeId));
         const strokes = payload.strokes.filter((stroke) => ids.has(stroke.strokeId));
         if (strokes.length !== pending) {
+          outbox.forgetDeliveryReceipt(surfaceId, paneId);
           outbox.lose(surfaceId, "annotation_source_strokes_unavailable");
         } else {
           const firstStrokeAt = strokes[0]!.points[0]!.timestamp;
@@ -222,7 +236,7 @@ export class AnnotationSourceCoordinator {
             sourceTimestamp: new Date().toISOString(), payload: { ...payload, strokes,
               firstStrokeAt, lastStrokeAt, strokeCount: strokes.length,
               pointsCount: strokes.reduce((count, stroke) => count + stroke.points.length, 0) },
-          });
+          }, frame.paneLineageId && frame.paneLineageId === pane?.paneLineageId ? frame.paneLineageId : undefined);
         }
       }
       outbox.markFramePublished(surfaceId, paneId);

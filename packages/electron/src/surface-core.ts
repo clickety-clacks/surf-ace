@@ -294,6 +294,9 @@ export type RendererPaneState = {
   name: string | null;
   ownerName: string | null;
   paneId: number;
+  paneLineageId?: string;
+  annotationDone?: import("./annotation-done-state.js").AnnotationDoneState;
+  annotationDelivery?: import("./annotation-registry-publisher.js").AnnotationDeliveryStatus;
   displayId: string;
   provenanceName: string | null;
   provenance: LocklessEntryProvenance | null;
@@ -1799,6 +1802,7 @@ export class SurfaceCore {
           name: pane.name,
           ownerName: provenanceDisplayName(current.display),
           paneId,
+          paneLineageId: pane.paneLineageId,
           displayId: visibleWindowLabel && this.isRegistryPaneConfirmed(surface.surfaceId, paneId, pane)
             ? visiblePaneAddress(visibleWindowLabel, pane.paneLabel) : "",
           provenanceName: provenanceDisplayName(current.display),
