@@ -87,25 +87,31 @@ export class ConfiguredServerRegistration {
       if (this.stopped) return;
       await this.wire.connect();
       await this.confirmRegistryIdentity();
-      for (const surface of this.core.listSurfaces()) this.core.admitSurfaceToLockless(surface.surfaceId);
-      const registrationPayload = {
-        clientId: this.clientId,
-        directEndpoint: this.directEndpoint,
-        allocationGenerationV1: true,
-        prePairDescribeV1: true,
-        pendingPaneReleases: this.core.locklessAuthority.listPendingPaneReleases(),
-        surfaces: this.core.listSurfaces().map((surface) => ({
-          surfaceId: surface.surfaceId,
-          panes: [...surface.panes.values()].map((pane) => ({
-            allocationGeneration: pane.allocationGeneration,
-            paneId: String(pane.paneId), paneLabel: pane.paneLabel,
-            paneLineageId: pane.paneLineageId,
-          })),
-        })),
-      };
-      // A terminal release may free its fleet label. Persist the exact local
-      // retirement audit and release intent before the allocator can receive it.
-      if (registrationPayload.pendingPaneReleases.length > 0) await this.persist();
+      const registrationPayload = await this.core.locklessAuthority.transactionAsync(() =>
+        this.core.transactionAsync(async () => {
+          for (const surface of this.core.listSurfaces()) this.core.admitSurfaceToLockless(surface.surfaceId);
+          const payload = {
+            clientId: this.clientId,
+            directEndpoint: this.directEndpoint,
+            allocationGenerationV1: true,
+            prePairDescribeV1: true,
+            pendingPaneReleases: this.core.locklessAuthority.listPendingPaneReleases(),
+            surfaces: this.core.listSurfaces().map((surface) => ({
+              surfaceId: surface.surfaceId,
+              panes: [...surface.panes.values()].map((pane) => ({
+                allocationGeneration: pane.allocationGeneration,
+                paneId: String(pane.paneId), paneLabel: pane.paneLabel,
+                paneLineageId: pane.paneLineageId,
+              })),
+            })),
+          };
+          // Snapshot, client persistence, and release evidence share the same
+          // lifecycle/authority turn. A concurrent rollback cannot export an
+          // uncommitted retirement to the allocator.
+          if (payload.pendingPaneReleases.length > 0) await this.persist();
+          return payload;
+        }),
+      );
       const response = await this.wire.request("client.register", registrationPayload);
       if (!response.ok) throw new Error(response.error?.message ?? "registration_failed");
       if (response.type !== "response" || response.v !== 1 || response.op !== "client.register") {
@@ -176,7 +182,9 @@ export class ConfiguredServerRegistration {
           binding.fleetId !== identity.fleetId) throw new Error("foreign_registry_identity");
       // Reconfirm durability on every mutation attempt. An ambiguous prior write
       // may leave the exact candidate in memory while local persistence is fenced.
-      await this.persist();
+      await this.core.locklessAuthority.transactionAsync(() =>
+        this.core.transactionAsync(async () => { await this.persist(); }),
+      );
       return;
     }
     const claims = this.core.confirmedRegistryClaims();

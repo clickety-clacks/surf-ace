@@ -823,6 +823,3 @@ GRANT EXECUTE ON FUNCTION surf_ace_allocator.claim_pane(text, bigint, text, text
   TO surf_ace_allocator_writer;
 RESET ROLE;
 COMMIT;
-
-
-
