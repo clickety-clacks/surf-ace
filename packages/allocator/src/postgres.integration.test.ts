@@ -1932,7 +1932,7 @@ test("pane allocation generations release exact tombstoned identities and gate s
     };
     await assert.rejects(writer.releasePaneGeneration({
       ...retirement, allocationGeneration: first.allocationGeneration + 1,
-    }), /pane allocation generation does not match/);
+    }), (error) => error instanceof AllocatorError && error.code === "assignment_conflict");
     assert.equal((await writer.readAcceptedState()).paneMappings[0]?.paneLabel, first.paneLabel,
       "a wrong-generation retirement cannot make the number available");
     await writer.releasePaneGeneration(retirement);
@@ -1963,14 +1963,14 @@ test("pane allocation generations release exact tombstoned identities and gate s
 
     await writer.release();
     writer = null;
-    const recovery = await PostgresCustodyAdapter.acquireRecovery(cluster.config);
+    const restoreRecovery = await PostgresCustodyAdapter.acquireRecovery(cluster.config);
     try {
       const restoreId = `restore_pane_reuse_${Date.now()}`;
-      const witness = await recovery.readWitness();
-      await recovery.stageRestore(restoreId, `${restoreId}_idem`, preReleaseSnapshot, witness);
-      const ready = await recovery.markRestoreReady(restoreId);
-      await recovery.activateRestore(restoreId, ready);
-      const restored = await recovery.readAcceptedState();
+      const witness = await restoreRecovery.readWitness();
+      await restoreRecovery.stageRestore(restoreId, `${restoreId}_idem`, preReleaseSnapshot, witness);
+      const ready = await restoreRecovery.markRestoreReady(restoreId);
+      await restoreRecovery.activateRestore(restoreId, ready);
+      const restored = await restoreRecovery.readAcceptedState();
       assert.equal(restored.nextPaneAllocationGenerationFence, 4,
         "rollback to an older snapshot replays later allocation generations");
       assert.equal(restored.paneLabelReuseEnabled, true,
@@ -1981,7 +1981,7 @@ test("pane allocation generations release exact tombstoned identities and gate s
         { paneLabel: 3, allocationGeneration: 3 },
       ], "an old snapshot cannot resurrect a retired allocation or displace the new occupant");
     } finally {
-      await recovery.release();
+      await restoreRecovery.release();
     }
     writer = await PostgresCustodyAdapter.acquireWriter(cluster.config);
 
