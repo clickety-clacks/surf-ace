@@ -1,4 +1,6 @@
 import type { RendererPaintDescriptor, RendererPaintRequest } from "../pane-paint-owner-bridge.js";
+import { AnnotationDoneFence, type AnnotationDoneState } from "../annotation-done-state.js";
+import { annotationDoneContextKey, parseAnnotationDoneContext } from "../annotation-done-context.js";
 import { browserContentScaleScript } from "./browser-content-scale.js";
 import {
   isMarkedOverlayVisible,
@@ -165,6 +167,9 @@ type RendererPaneState = {
   name: string | null;
   ownerName: string | null;
   paneId: number;
+  paneLineageId?: string;
+  annotationDone?: AnnotationDoneState;
+  annotationDelivery?: { phase: "waiting" | "sending" | "sent" | "rejected"; error?: boolean };
   displayId: string;
   provenanceName: string | null;
   provenance: {
@@ -287,6 +292,7 @@ const browserContentScaleStates = new WeakMap<BrowserUrlWebViewElement, BrowserC
 const paintRendererFrameIds = new WeakMap<BrowserUrlWebViewElement, string>();
 const pendingStrokeDelivery = new Map<number, Promise<void>>();
 const annotationIntentEpoch = new Map<number, number>();
+const localAnnotationDone = new AnnotationDoneFence((scope) => rebuildPaneControls(Number(scope)));
 const pendingHistoryAnnouncements = new Map<number, string>();
 const provenanceLabels = new Set<HTMLElement>();
 let bootstrap: Bootstrap | null = null;
@@ -395,6 +401,9 @@ function isDuplicateRepush(view: PaneView, pane: RendererPaneState, nextSignatur
 function paneRenderKey(state: RendererWindowState, pane: RendererPaneState): string {
   return JSON.stringify({
     annotationBorderVisible: pane.annotationBorderVisible,
+    annotationDone: pane.annotationDone,
+    annotationDelivery: pane.annotationDelivery,
+    paneLineageId: pane.paneLineageId,
     canGoBack: pane.canGoBack,
     canGoForward: pane.canGoForward,
     connectionBar: state.connectionBar,
@@ -1734,7 +1743,21 @@ function buildControls(view: PaneView, pane: RendererPaneState): void {
     scale: view.scale,
   });
   const annotate = surfAceOverlay(createIconButton("pen-line", "Sketch", "annotate"), "annotation-control");
+  const doneContext = parseAnnotationDoneContext({ ...pane.content, paneId: pane.paneId, paneLineageId: pane.paneLineageId });
+  const doneKey = doneContext ? annotationDoneContextKey(doneContext) : "unavailable";
+  const doneScope = String(pane.paneId);
+  let localDone = localAnnotationDone.snapshot(doneScope, doneKey);
+  if (pane.showDone && localDone.phase === "saved" && !localDone.busy) {
+    localAnnotationDone.forget(doneScope);
+    localDone = localAnnotationDone.snapshot(doneScope, doneKey);
+  }
+  const doneState = !localDone.busy && pane.annotationDone?.phase === "saved" && pane.annotationDone.localSaved
+    ? pane.annotationDone : localDone.phase !== "idle" ? localDone : (pane.annotationDone ?? localDone);
+  const doneBusy = localAnnotationDone.isBusy(doneScope) || doneState.busy;
+  annotate.disabled = doneBusy;
   annotate.addEventListener("click", () => {
+    if (localAnnotationDone.isBusy(doneScope) || pane.annotationDone?.busy) return;
+    localAnnotationDone.forget(doneScope);
     rememberPaneContext(pane.paneId);
     annotationIntentEpoch.set(pane.paneId, (annotationIntentEpoch.get(pane.paneId) ?? 0) + 1);
     window.surfAce.command({ enabled: true, paneId: pane.paneId, type: "annotate" });
@@ -1742,19 +1765,49 @@ function buildControls(view: PaneView, pane: RendererPaneState): void {
   annotate.classList.toggle("active", pane.showDone);
   annotationPill.appendChild(annotate);
 
-  if (pane.showDone) {
+  if (pane.showDone || doneBusy) {
+    const spinning = doneBusy && doneState.phase !== "waiting";
     const done = surfAceOverlay(createButton("Done", "done"), "annotation-control");
+    done.textContent = doneBusy ? (spinning ? "Saving…" : "Waiting…") : "Done";
+    done.disabled = doneBusy || !doneContext;
+    done.setAttribute("aria-busy", String(doneBusy));
+    done.classList.toggle("annotation-saving", spinning);
     done.addEventListener("click", () => {
+      if (!doneContext || localAnnotationDone.isBusy(doneScope) || pane.annotationDone?.busy) return;
       rememberPaneContext(pane.paneId);
       const epoch = (annotationIntentEpoch.get(pane.paneId) ?? 0) + 1;
       annotationIntentEpoch.set(pane.paneId, epoch);
-      void (pendingStrokeDelivery.get(pane.paneId) ?? Promise.resolve()).then(() => {
-        if (annotationIntentEpoch.get(pane.paneId) === epoch) {
-          window.surfAce.command({ enabled: false, paneId: pane.paneId, type: "annotate" });
-        }
+      const isCurrent = () => {
+        const currentPane = latestState?.panes.find((p) => p.paneId === pane.paneId);
+        const current = currentPane && parseAnnotationDoneContext({ ...currentPane.content,
+          paneId: currentPane.paneId, paneLineageId: currentPane.paneLineageId });
+        return paneViews.get(pane.paneId) === view && annotationIntentEpoch.get(pane.paneId) === epoch &&
+          !!current && annotationDoneContextKey(current) === doneKey;
+      };
+      void localAnnotationDone.finish(doneScope, doneKey, isCurrent, async (saved) => {
+        await (pendingStrokeDelivery.get(pane.paneId) ?? Promise.resolve());
+        if (!isCurrent()) throw new Error("annotation context changed");
+        const result = await window.surfAce.finishAnnotation(doneContext);
+        if (result.localSaved) saved();
+        if (result.phase !== "saved") throw new Error("annotation completion pending");
       });
     });
     annotationPill.appendChild(done);
+  }
+  if (!doneBusy && (pane.annotationDelivery || ["saved", "waiting", "unknown"].includes(doneState.phase))) {
+    const status = document.createElement("span");
+    status.className = "annotation-local-status";
+    status.setAttribute("role", "status");
+    const delivery = doneState.phase === "unknown" ? undefined : pane.annotationDelivery;
+    status.textContent = delivery?.phase === "sent" ? "Sent to registry" :
+      delivery?.phase === "sending" ? "Saved locally · Sending" :
+      delivery?.phase === "rejected" ? "Saved locally · Registry rejected this record" :
+      delivery?.phase === "waiting" ? (delivery.error ? "Saved locally · Waiting · Delivery outcome unconfirmed" : "Saved locally · Waiting") :
+      doneState.phase === "saved" ? "Saved locally" :
+      doneState.localSaved ? "Saved locally · Waiting" : pane.showDone
+        ? "Save outcome unknown · Try Done again" : "Save outcome unknown · Waiting for reconciliation";
+    if (delivery?.phase === "sent") status.title = "Accepted by the registry; consumer processing is not confirmed.";
+    annotationPill.appendChild(status);
   }
   view.controlsEl.appendChild(annotationPill);
 }
@@ -3592,6 +3645,21 @@ async function init(): Promise<void> {
   });
 
   window.surfAce.onKeyboardIntent((intent) => {
+    if (intent && typeof intent === "object" && (intent as { type?: unknown }).type === "annotation") {
+      const request = intent as { action?: unknown; expected?: unknown };
+      const expected = parseAnnotationDoneContext(request.expected);
+      if (!expected || (request.action !== "enter" && request.action !== "done")) return;
+      const pane = latestState?.panes.find((p) => p.paneId === expected.paneId);
+      const current = pane && parseAnnotationDoneContext({ ...pane.content,
+        paneId: pane.paneId, paneLineageId: pane.paneLineageId });
+      if (!current || annotationDoneContextKey(current) !== annotationDoneContextKey(expected) ||
+          localAnnotationDone.isBusy(String(expected.paneId)) || pane?.annotationDone?.busy) return;
+      const view = paneViews.get(expected.paneId);
+      const action = view?.controlsEl.querySelector<HTMLButtonElement>(
+        request.action === "enter" ? '.annotate' : '.done');
+      if (action && !action.disabled) action.click();
+      return;
+    }
     if (isKeyboardScrollIntent(intent)) {
       scrollPaneByKeyboard(intent);
       return;

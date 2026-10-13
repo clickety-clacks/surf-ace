@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { test } from 'node:test';
 import { transformSync } from 'esbuild';
+import { parseAnnotationDoneContext } from '../src/annotation-done-context.ts';
 
 // Execute the production wiring and handler without importing Electron's startup.
 const source = readFileSync(process.env.SURF_ACE_SHORTCUT_SOURCE ?? new URL('../src/main.ts', import.meta.url), 'utf8');
@@ -19,9 +20,10 @@ const code = transformSync(diagnosticGate + '\n' + section('function keyboardDir
   section('function handleShortcutInput', 'function wireWindowDiagnostics'), { loader: 'ts' }).code;
 function fixture({ native = false } = {}) {
   const annotations = [], sends = [], activations = [], navigation = [], history = [];
-  const panes = [{ paneId: 1, content: { contentType: 'markdown' } },
+  const panes = [{ paneId: 1, paneLineageId: 'lineage-1', content: { contentType: 'markdown', contentId:'content-1', revision:1, renderVersion:1 } },
     { paneId: 2, externalNative: native, content: { contentType: native ? 'terminal' : 'browser_url' } }];
   let active = native ? 2 : 1;
+  let doneBusy = false;
   const contents = id => ({ id, handlers: new Map(),
     on(name, listener) { this.handlers.set(name, listener); },
     once(name, listener) { this.handlers.set(name, listener); },
@@ -29,7 +31,8 @@ function fixture({ native = false } = {}) {
   const window = { webContents: contents(1) }, guest = contents(2);
   const bindings = new Map([[2, { surfaceId: 'sf', paneId: 2 }]]);
   let diagnosticOwnerReads = 0;
-  const context = vm.createContext({ process, console,
+  const context = vm.createContext({ process, console, parseAnnotationDoneContext,
+    annotationDoneFence: { isBusy() { return doneBusy; } },
     get paintNativeOwners() { diagnosticOwnerReads++; throw Error('disabled diagnostic owner accessed'); },
     core: { setActiveKeyboardPane(_s, id) { active = id; activations.push(id); },
       activeKeyboardPaneId() { return active; }, navigateActiveKeyboardPane(...args) { navigation.push(args); } },
@@ -49,7 +52,7 @@ function fixture({ native = false } = {}) {
     return prevented;
   }
   return { window, guest, bindings, annotations, sends, activations, navigation, history, key,
-    diagnosticOwnerReads: () => diagnosticOwnerReads };
+    setDoneBusy(value) { doneBusy = value; }, diagnosticOwnerReads: () => diagnosticOwnerReads };
 }
 test('production default-off attachment gate never accesses diagnostic owner', () => {
   const f = fixture();
@@ -99,7 +102,9 @@ test('explicit guest command shortcuts keep owning pane identity', () => {
 test('chrome retains deliberate annotation and scrolling shortcuts', () => {
   const f = fixture();
   f.key(f.window.webContents, 'a'); f.key(f.window.webContents, 'd');
-  assert.deepEqual(f.annotations.map(args => args[2]), [true, false]);
+  assert.deepEqual(f.annotations, []);
+  assert.deepEqual(f.sends.slice(0,2).map(row=>row[1].action), ['enter','done']);
+  assert.equal(f.sends[1][1].expected.paneLineageId,'lineage-1');
   assert.equal(f.key(f.window.webContents, 'ArrowDown'), 1);
 });
 test('native terminal owns ordinary keys delivered through the host', () => {
@@ -107,4 +112,12 @@ test('native terminal owns ordinary keys delivered through the host', () => {
   assert.equal(f.key(f.window.webContents, 'ArrowUp'), 0);
   f.key(f.window.webContents, 'a');
   assert.deepEqual(f.annotations, []); assert.deepEqual(f.sends, []);
+});
+
+test('production A/D shortcuts cannot bypass a held main Done owner', () => {
+ const f=fixture();f.setDoneBusy(true);
+ for(const key of ['a','d','d']) f.key(f.window.webContents,key);
+ assert.deepEqual(f.annotations,[]);assert.deepEqual(f.sends,[]);
+ f.setDoneBusy(false);f.key(f.window.webContents,'d');
+ assert.equal(f.sends.length,1);assert.equal(f.sends[0][1].action,'done');
 });

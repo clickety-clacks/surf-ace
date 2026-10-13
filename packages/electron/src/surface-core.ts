@@ -73,6 +73,7 @@ import {
   type LocklessSurfaceAdmissionAttempt,
 } from "../../protocol/src/lockless.js";
 import { cloneWindowPlacement, type WindowPlacement } from "./window-placement.js";
+import { ANNOTATION_LOCAL_SAVE_LIMIT, parseAnnotationLocalSave, validLocalAnnotationFrameId, type AnnotationLocalSave } from "./annotation-local-save.js";
 import { AnnotationPublisherOutbox, ANNOTATION_PUBLISHER_MAX_BYTES, type PersistentAnnotationPublisher } from "./annotation-publisher-outbox.js";
 
 type ContentPayload = ContentSetRequest["payload"]["content"];
@@ -120,6 +121,8 @@ type PaneSnapshot = {
 type PaneState = {
   annotating: boolean;
   annotationFrameOpen: boolean;
+  annotationLocalFrameId?: string;
+  annotationLocalSave?: AnnotationLocalSave;
   deliveredClosedFrameCount: number;
   dirtyStrokeIds: string[];
   externalNative: boolean;
@@ -252,6 +255,8 @@ type PersistentSurfaceRecord = {
 type PersistentPaneRecord = {
   annotating: boolean;
   annotationFrameOpen: boolean;
+  annotationLocalFrameId?: string;
+  annotationLocalSave?: AnnotationLocalSave;
   deliveredClosedFrameCount: number;
   dirtyStrokeIds: string[];
   externalNative: boolean;
@@ -294,6 +299,9 @@ export type RendererPaneState = {
   name: string | null;
   ownerName: string | null;
   paneId: number;
+  paneLineageId?: string;
+  annotationDone?: import("./annotation-done-state.js").AnnotationDoneState;
+  annotationDelivery?: import("./annotation-registry-publisher.js").AnnotationDeliveryStatus;
   displayId: string;
   provenanceName: string | null;
   provenance: LocklessEntryProvenance | null;
@@ -1799,6 +1807,7 @@ export class SurfaceCore {
           name: pane.name,
           ownerName: provenanceDisplayName(current.display),
           paneId,
+          paneLineageId: pane.paneLineageId,
           displayId: visibleWindowLabel && this.isRegistryPaneConfirmed(surface.surfaceId, paneId, pane)
             ? visiblePaneAddress(visibleWindowLabel, pane.paneLabel) : "",
           provenanceName: provenanceDisplayName(current.display),
@@ -1955,7 +1964,20 @@ export class SurfaceCore {
     if (pane.annotating === enabled) {
       return;
     }
-    if (enabled) pane.pendingAnnotationCommit = false;
+    if (enabled) {
+      pane.pendingAnnotationCommit = false;
+      pane.annotationLocalFrameId = `lf_${randomUUID().replaceAll("-", "")}`;
+      delete pane.annotationLocalSave;
+    } else if (pane.annotationLocalFrameId) {
+      const entry = currentEntry(pane);
+      pane.annotationLocalSave = parseAnnotationLocalSave({ version: 1, frameId: pane.annotationLocalFrameId,
+        context: { paneId: pane.paneId, paneLineageId: pane.paneLineageId,
+          contentId: entry.contentId, revision: entry.revision, renderVersion: pane.latestContentEventAt } }) ?? undefined;
+      // Optional UI metadata never displaces source/history/ink. One bounded
+      // record per pane, at most64 per surface; oldest pane-order proof evicts.
+      const saved = surface.paneOrder.map((id) => surface.panes.get(id)!).filter((p) => p.annotationLocalSave);
+      while (saved.length > ANNOTATION_LOCAL_SAVE_LIMIT) delete saved.shift()!.annotationLocalSave;
+    }
     pane.annotating = enabled;
     pane.toast = null;
     bumpGeometryRevision(surface);
@@ -1964,6 +1986,10 @@ export class SurfaceCore {
       pane.pendingAnnotationCommit = true;
       this.emit({ paneId, surfaceId, type: "annotation-committed" });
     }
+  }
+
+  localAnnotationFrameId(surfaceId: string, paneId: number): string | undefined {
+    return this.requirePane(surfaceId, paneId)?.annotationLocalFrameId;
   }
 
   navigateHistory(surfaceId: string, paneId: number, direction: "back" | "forward"): void {
@@ -4170,6 +4196,8 @@ function serializeSurface(surface: SurfaceState): PersistentSurfaceRecord {
       .map((pane) => ({
         annotating: pane.annotating,
         annotationFrameOpen: pane.annotationFrameOpen,
+        ...(pane.annotationLocalFrameId ? { annotationLocalFrameId: pane.annotationLocalFrameId } : {}),
+        ...(pane.annotationLocalSave ? { annotationLocalSave: structuredClone(pane.annotationLocalSave) } : {}),
         deliveredClosedFrameCount: pane.deliveredClosedFrameCount,
         dirtyStrokeIds: [...pane.dirtyStrokeIds],
         externalNative: false,
@@ -4205,6 +4233,7 @@ function deserializeSurface(record: PersistentSurfaceRecord, now: number): Surfa
   }
   const panes = new Map<number, PaneState>();
   const paneOrder: number[] = [];
+  let restoredLocalSaveCount = 0;
   for (const paneRecord of record.panes) {
     if (!Number.isInteger(paneRecord.paneId) || panes.has(paneRecord.paneId)) {
       return null;
@@ -4246,6 +4275,12 @@ function deserializeSurface(record: PersistentSurfaceRecord, now: number): Surfa
     pane.paneLineageId = typeof paneRecord.paneLineageId === "string" && paneRecord.paneLineageId.length > 0
       ? paneRecord.paneLineageId
       : pane.paneLineageId;
+    pane.annotationLocalFrameId = validLocalAnnotationFrameId(paneRecord.annotationLocalFrameId)
+      ? paneRecord.annotationLocalFrameId : undefined;
+    pane.annotationLocalSave = parseAnnotationLocalSave(paneRecord.annotationLocalSave) ?? undefined;
+    if (pane.annotationLocalSave && ++restoredLocalSaveCount > ANNOTATION_LOCAL_SAVE_LIMIT) {
+      delete pane.annotationLocalSave;
+    }
     pane.pendingAnnotationCommit = Boolean(paneRecord.pendingAnnotationCommit);
     pane.snapshot = paneRecord.snapshot
       ? {

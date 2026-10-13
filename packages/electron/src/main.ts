@@ -1,3 +1,4 @@
+import { ConfirmedAnnotationLocalSaves } from "./annotation-local-save.js";
 import { createPanePaintCaptureAdapter, PANE_PAINT_DOCUMENT_RECIPE } from "./pane-paint-capture-adapter.js";
 import { FreshPanePaintReads, NativePanePaintOwners, rendererPaintMatchesAuthority, type PanePaintAuthority, type PaintOwner } from "./pane-paint-owner-bridge.js";
 import { ServerConnection } from "./server-connection.js";
@@ -78,6 +79,8 @@ import { SurfaceWsServer } from "./ws-server.js";
 import { PersistenceWriteReadiness } from "./persistence-write-readiness.js";
 import { AnnotationRegistryPublisher } from "./annotation-registry-publisher.js";
 import { AnnotationSourceCoordinator } from "./annotation-source-coordinator.js";
+import { AnnotationDoneFence } from "./annotation-done-state.js";
+import { annotationDoneContextKey, parseAnnotationDoneContext } from "./annotation-done-context.js";
 import { restoreWindowPlacement, type WindowPlacement } from "./window-placement.js";
 import { shouldDisableGpuForSoftwareCapture, surfaceWindowCaptureMode, surfaceWindowLoadQuery, surfaceWindowOptions } from "./window-options.js";
 
@@ -92,6 +95,7 @@ const SURF_ACE_WEBAUTHN_KEYCHAIN_ACCESS_GROUP = "Z7R59J7QV8.ai.surf-ace.electron
 let persistentStateWriteGuard: PersistentStateLoadResult["writeGuard"] = false;
 let persistentStateOutcomeUnknown: PersistentStateOutcomeUnknownError | null = null;
 let uncertainStateCandidate: PersistentSurfaceState | null = null;
+const confirmedAnnotationLocalSaves = new ConfirmedAnnotationLocalSaves();
 let persistenceRecoveryTimer: NodeJS.Timeout | null = null;
 let persistenceRetryDelayMs = 1_000;
 let providerEndpointAvailable = false;
@@ -225,6 +229,10 @@ let advertiser: BonjourAdvertiser | null = null;
 let configuredRegistration: ServerConnection | null = null;
 let annotationRegistryPublisher: AnnotationRegistryPublisher | null = null;
 let annotationSourceCoordinator: AnnotationSourceCoordinator | null = null;
+const annotationDoneFence = new AnnotationDoneFence((scope) => {
+  const [surfaceId] = JSON.parse(scope) as [string, number];
+  broadcastSurfaceState(surfaceId);
+});
 let advertiserTxtRefreshTimer: NodeJS.Timeout | null = null;
 let core: SurfaceCore;
 let distDir = "";
@@ -460,6 +468,7 @@ async function loadPersistentState(): Promise<PersistentSurfaceState | undefined
       primary_surface_id: result.state.primarySurfaceId,
       surface_count: result.state.surfaces?.length ?? 0,
     });
+    if (!result.writeGuard) confirmedAnnotationLocalSaves.confirm(result.state);
     return result.state;
   }
   clientInfo("state_restore_read_miss", {
@@ -489,6 +498,7 @@ async function persistState(): Promise<void> {
         if (persistentStateOutcomeUnknown) throw new Error("Local persistence is paused pending reconciliation");
         try {
           await writePersistentStateFile(stateDir, STATE_FILE_NAME, candidate);
+          confirmedAnnotationLocalSaves.confirm(candidate);
         } catch (error) {
           if (error instanceof PersistentStateOutcomeUnknownError) {
             uncertainStateCandidate = candidate;
@@ -559,6 +569,7 @@ async function reconcilePersistence(): Promise<void> {
     // state meanwhile; queue its save after reopening the persistence seam.
     const changedWhilePaused = JSON.stringify(core.getPersistentState()) !== JSON.stringify(uncertainStateCandidate);
     const verifiedCandidate = uncertainStateCandidate;
+    confirmedAnnotationLocalSaves.confirm(verifiedCandidate);
     persistentStateOutcomeUnknown = null;
     uncertainStateCandidate = null;
     persistentStateWriteGuard = false;
@@ -684,6 +695,22 @@ function flushPendingWindowState(surfaceId: string): void {
 
 function rendererWindowState(surfaceId: string): RendererWindowState {
   const state = core.getRendererWindowState(surfaceId);
+  for (const pane of state.panes) {
+    const context = parseAnnotationDoneContext({ ...pane.content, paneId: pane.paneId, paneLineageId: pane.paneLineageId });
+    if (context) {
+      pane.annotationDone = annotationDoneFence.snapshot(JSON.stringify([surfaceId, pane.paneId]), annotationDoneContextKey(context));
+      if (!pane.showDone && !pane.annotationDone.busy && confirmedAnnotationLocalSaves.has(surfaceId, context,
+          core.localAnnotationFrameId(surfaceId, pane.paneId))) {
+        pane.annotationDone = { phase: "saved", busy: false, localSaved: true };
+      }
+    }
+    if (pane.paneLineageId && pane.content.contentId) {
+      const frame = core.annotationPublisher?.openFrameFor(surfaceId, pane.paneId);
+      const delivery = (!pane.showDone || frame) && annotationRegistryPublisher?.deliveryStatus(surfaceId,
+        pane.paneId, pane.paneLineageId, pane.content.contentId, pane.content.revision, frame?.frameId);
+      if (delivery) pane.annotationDelivery = delivery;
+    }
+  }
   state.capabilityStatus = [
     persistentStateOutcomeUnknown ? "Local changes paused: saved state is being reconciled" : null,
     !providerEndpointAvailable ? "Direct connection unavailable; retrying" : null,
@@ -1281,14 +1308,18 @@ function handleShortcutInput(
       event.preventDefault();
       return;
     }
-    if (input.key.toLowerCase() === "a" && !input.meta) {
-      void annotationSourceCoordinator?.setAnnotating(surfaceId, activePaneId, true)
-        .catch((error) => clientWarn("annotation_source_mode_failed", errorDiagnosticFields(error)));
-      return;
-    }
-    if (input.key.toLowerCase() === "d" && !input.meta) {
-      void annotationSourceCoordinator?.setAnnotating(surfaceId, activePaneId, false)
-        .catch((error) => clientWarn("annotation_source_commit_failed", errorDiagnosticFields(error)));
+    if (["a", "d"].includes(input.key.toLowerCase()) && !input.meta) {
+      const scope = JSON.stringify([surfaceId, activePaneId]);
+      if (annotationDoneFence.isBusy(scope)) return;
+      const expected = parseAnnotationDoneContext({ ...activePane.content,
+        paneId: activePane.paneId, paneLineageId: activePane.paneLineageId });
+      if (!expected) return;
+      // The owning renderer shares the visible action's pending-stroke barrier,
+      // immediate fence and status retirement; main never commits around it.
+      window.webContents.send("surface:keyboard-intent", {
+        type: "annotation", action: input.key.toLowerCase() === "a" ? "enter" : "done", expected,
+      });
+      event.preventDefault();
       return;
     }
     if (input.meta && input.key === "[") {
@@ -1794,13 +1825,16 @@ function installIpc(): void {
         typeof content.url === "string" ? content.url : undefined;
       const opened = await core.transactionAsync(async () => {
         const currentPane = core.getRendererWindowState(surfaceId).panes.find((item) => item.paneId === paneId);
-        if (!currentPane?.annotationBorderVisible || currentPane.content.contentId !== contentId) return false;
+        if (!currentPane?.annotationBorderVisible || currentPane.paneLineageId !== pane.paneLineageId ||
+            currentPane.content.contentId !== contentId || currentPane.content.revision !== pane.content.revision ||
+            currentPane.content.renderVersion !== pane.content.renderVersion) return false;
         const outbox = core.annotationPublisher!;
         if (outbox.openFrameFor(surfaceId, Number(paneId))) return false;
         const previous = outbox.snapshot();
         try {
           outbox.openFrame(surfaceId, Number(paneId), {
-            contextKey: contentId, contentId, ...(url ? { url } : {}),
+            contextKey: contentId, contentId, contentRevision: pane.content.revision,
+            ...(pane.paneLineageId ? { paneLineageId: pane.paneLineageId } : {}), ...(url ? { url } : {}),
             image: image ?? "", ...(image ? {} : { failed: true as const }),
             openedAt: Number(openedAt), scrollOffset: snapshot.viewport.scrollOffset,
             viewport: { width: Math.max(1, Math.floor(bounds.width)),
@@ -1933,6 +1967,25 @@ function installIpc(): void {
     }
   });
 
+  ipcMain.handle("surface:annotation-done", async (event, payload) => {
+    const expected = parseAnnotationDoneContext(payload);
+    const surfaceId = surfaceIdForSender(event.sender);
+    if (!surfaceId || !expected || event.senderFrame !== event.sender.mainFrame || !annotationSourceCoordinator) {
+      return { phase: "stale", busy: false, localSaved: false };
+    }
+    const scope = JSON.stringify([surfaceId, expected.paneId]);
+    const context = annotationDoneContextKey(expected);
+    const isCurrent = () => {
+      if (event.sender.isDestroyed() || event.senderFrame !== event.sender.mainFrame || surfaceIdForSender(event.sender) !== surfaceId) return false;
+      const pane = core.getRendererWindowState(surfaceId).panes.find((p) => p.paneId === expected.paneId);
+      const current = pane && parseAnnotationDoneContext({ ...pane.content, paneId: pane.paneId, paneLineageId: pane.paneLineageId });
+      return !!current && annotationDoneContextKey(current) === context;
+    };
+    return annotationDoneFence.finish(scope, context, isCurrent,
+      (saved) => annotationSourceCoordinator!.setAnnotating(surfaceId, expected.paneId, false,
+        () => { saved(); annotationRegistryPublisher?.localSaved(); }, isCurrent));
+  });
+
   ipcMain.on("surface:command", (event, payload) => {
     const surfaceId = surfaceIdForSender(event.sender);
     if (!surfaceId || !payload || typeof payload !== "object") {
@@ -1965,6 +2018,8 @@ function installIpc(): void {
         break;
       case "annotate":
         try {
+          if (annotationDoneFence.isBusy(JSON.stringify([surfaceId, paneId]))) break;
+          if (payload.enabled === true) annotationDoneFence.forget(JSON.stringify([surfaceId, paneId]));
           void annotationSourceCoordinator?.setAnnotating(surfaceId, paneId, Boolean(payload.enabled))
             .catch((error) => clientWarn("annotation_source_commit_failed", errorDiagnosticFields(error)));
         } catch {
@@ -2097,7 +2152,7 @@ async function boot(): Promise<void> {
   server = createServer(core);
 
   annotationSourceCoordinator = new AnnotationSourceCoordinator(
-    core, persistState, () => annotationRegistryPublisher?.notify(),
+    core, persistState, () => annotationRegistryPublisher?.sourceSaved(),
     (error) => clientWarn("annotation_source_flush_failed", errorDiagnosticFields(error)),
     (surfaceId, paneId) => server!.completeDirectAnnotation(surfaceId, paneId),
   );
@@ -2154,6 +2209,7 @@ async function boot(): Promise<void> {
     annotationRegistryPublisher = new AnnotationRegistryPublisher(
       configuredAddress, core, persistState,
       (error) => clientWarn("annotation_publisher_failed", errorDiagnosticFields(error)),
+      undefined, () => { for (const surface of core.listSurfaces()) broadcastSurfaceState(surface.surfaceId); },
     );
     annotationRegistryPublisher.start();
   }
