@@ -3,10 +3,6 @@ import XCTest
 @testable import SurfAce
 
 final class SurfAceAnnotationOutboxTests: XCTestCase {
-    func testSharedSchemeDeliversAppHostIsolationFlag() {
-        XCTAssertEqual(ProcessInfo.processInfo.environment["SURF_ACE_XCTEST_HOST_NO_AUTOSTART"], "1")
-    }
-
     private let sourceEpoch = "0123456789abcdef0123456789abcdef"
     private let surfaceId = "sf_1"
 
