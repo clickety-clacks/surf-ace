@@ -759,8 +759,8 @@ export class SurfaceWsServer {
         scopeKind: "surface",
         triggerOperation,
       });
-      this.core.markLocklessAuthorityChanged(surfaceId);
       await this.persistLocklessState();
+      this.core.markLocklessAuthorityChanged(surfaceId, "committed");
       return appended;
     });
     if (record) {
@@ -1492,6 +1492,11 @@ export class SurfaceWsServer {
             );
             await this.persistLocklessState();
             return response;
+            }, {
+              retainUncertainEvents: true,
+              onNotificationError: (error) => persistentServerDiagnostic(
+                "warn", "mutation_notification_failed", errorDiagnosticFields(error),
+              ),
             });
           } finally {
             this.activePaneMutation = null;

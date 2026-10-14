@@ -64,6 +64,7 @@ import {
 import {
   type PaneNavigationDirection,
   SurfaceCore,
+  coreEventNeedsPersistence,
   type PersistentSurfaceState,
   type ReloadEntryIdentity,
   type RendererWindowState,
@@ -2217,17 +2218,17 @@ async function boot(): Promise<void> {
 
   core.subscribe((coreEvent) => {
     if (coreEvent.type === "lockless-authority-changed") {
-      void persistState().catch(() => {});
+      if (coreEventNeedsPersistence(coreEvent)) void persistState().catch(() => {});
       return;
     }
     if (coreEvent.type === "surface-changed") {
       broadcastSurfaceState(coreEvent.surfaceId);
-      void persistState().catch(() => {});
+      if (coreEventNeedsPersistence(coreEvent)) void persistState().catch(() => {});
       return;
     }
     if (coreEvent.type === "surface-created") {
       void createWindowForSurface(coreEvent.surfaceId);
-      void persistState().catch(() => {});
+      if (coreEventNeedsPersistence(coreEvent)) void persistState().catch(() => {});
       return;
     }
     if (coreEvent.type === "surface-removed") {
@@ -2236,7 +2237,7 @@ async function boot(): Promise<void> {
         programmaticSurfaceCloses.add(coreEvent.surfaceId);
         window.close();
       }
-      void persistState().catch(() => {});
+      if (coreEventNeedsPersistence(coreEvent)) void persistState().catch(() => {});
     }
   });
 

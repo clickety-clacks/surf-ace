@@ -343,7 +343,7 @@ export type ReloadEntryIdentity = {
   revision: number;
 };
 
-export type CoreEvent =
+export type CoreEvent = (
   | { type: "lockless-authority-changed" }
   | { surfaceId: string; type: "keyboard-focus-changed" }
   | { surfaceId: string; type: "surface-changed" }
@@ -356,7 +356,19 @@ export type CoreEvent =
   | { paneId: number; surfaceId: string; type: "annotation-committed" }
   | { contentId: string | null; direction: "back" | "forward"; paneId: number; revision: number; surfaceId: string; type: "history-navigated" }
   | { surfaceId: string; type: "topology-changed"; topology?: ReturnType<SurfaceCore["publicTopologyState"]>; admittedOccurrence?: { record: ConsumableRecord | null } }
-  | { paneId: number; surfaceId: string; type: "drawing-dirty" };
+  | { paneId: number; surfaceId: string; type: "drawing-dirty" }
+) & { persistence?: "committed" };
+
+// Committed notifications project a generation already saved by their owner.
+// Local mutations outside that transaction still need their own durable write.
+export function coreEventNeedsPersistence(event: CoreEvent): boolean {
+  return event.persistence !== "committed" && (
+    event.type === "lockless-authority-changed" ||
+    event.type === "surface-changed" ||
+    event.type === "surface-created" ||
+    event.type === "surface-removed"
+  );
+}
 
 export type PaneLabelAllocation = {
   allocationGeneration: number | null;
@@ -872,8 +884,9 @@ export class SurfaceCore {
   }
 
   private deliverCommitted(event: CoreEvent, onError: (error: unknown) => void): void {
+    const committedEvent: CoreEvent = { ...event, persistence: "committed" };
     for (const listener of this.listeners) {
-      try { listener(event); } catch (error) {
+      try { listener(committedEvent); } catch (error) {
         try { onError(error); } catch { /* notification reporting cannot reject a commit */ }
       }
     }
@@ -896,8 +909,16 @@ export class SurfaceCore {
 
   getPersistentState(): PersistentSurfaceState {
     this.reconcileAnnotationTombstones();
+    // These partitions are serialized from their current owners below. Do not
+    // deep-copy the stale loaded versions only to immediately overwrite them.
+    const metadata = { ...this.persistentState };
+    delete metadata.surfaces;
+    delete metadata.lockless;
+    delete metadata.admissionAttempts;
+    delete metadata.nextAdmissionAttemptSequence;
+    if (this.annotationPublisher) delete metadata.annotationPublisher;
     return {
-      ...structuredClone(this.persistentState),
+      ...structuredClone(metadata),
       ...(this.annotationPublisher ? { annotationPublisher: this.annotationPublisher.snapshot() } : {}),
       admissionAttempts: structuredClone(this.admissionAttempts),
       lockless: this.locklessAuthority.exportState(),
@@ -1479,14 +1500,14 @@ export class SurfaceCore {
     return attempt;
   }
 
-  markLocklessAuthorityChanged(surfaceId?: string): void {
-    this.emit({ type: "lockless-authority-changed" });
+  markLocklessAuthorityChanged(surfaceId?: string, persistence?: "committed"): void {
+    this.emit({ type: "lockless-authority-changed", ...(persistence ? { persistence } : {}) });
     const targetSurfaceId =
       surfaceId ??
       this.persistentState.primarySurfaceId ??
       this.listSurfaces()[0]?.surfaceId;
     if (targetSurfaceId) {
-      this.emit({ surfaceId: targetSurfaceId, type: "surface-changed" });
+      this.emit({ surfaceId: targetSurfaceId, type: "surface-changed", ...(persistence ? { persistence } : {}) });
     }
   }
 
