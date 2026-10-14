@@ -91,7 +91,8 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
             }
         }
         try await send(socket, op: "pane.rename", id: "control-rename", payload: [
-            "surfaceId": surfaceId, "paneId": 7, "name": "selected seven"])
+            "surfaceId": surfaceId, "paneId": 7, "name": "selected seven",
+            "expectedTopologyRevision": before.liveSurfaces[surfaceId]!.topologyRevision])
         let renamed = try await receive(socket, matchingId: "control-rename")
         XCTAssertEqual(renamed["ok"] as? Bool, true)
         try await send(socket, op: "consumable.sync", id: "explicit-sync", payload: ["scopeIds": ["pane:\(surfaceId):1"]])
@@ -105,7 +106,32 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
             XCTAssertEqual(before.liveSurfaces[surfaceId]!.panes[key]!.history, after.liveSurfaces[surfaceId]!.panes[key]!.history)
         }
         XCTAssertEqual(after.liveSurfaces[surfaceId]?.panes["7"]?.name, "selected seven")
-        for request in ["control-pair", "surfaces.list", "panes.list", "control-rename", "explicit-sync"] {
+        let scopeId = "pane:\(surfaceId):1"
+        XCTAssertEqual(before.scopes[scopeId]?.records, after.scopes[scopeId]?.records)
+        XCTAssertEqual(after.scopes[scopeId]?.cursors["control-fixture"]?.cursor,
+                       before.scopes[scopeId]?.records.first?.sequence)
+        socket.cancel(with: .normalClosure, reason: nil)
+        for _ in 0..<100 {
+            if await adapter.snapshot().controllers["control-fixture"]?.status == .dormant { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let resumed = self.socket(port: try XCTUnwrap(UInt16(exactly: runtime.serverPort)))
+        resumed.maximumMessageSize = 16 * 1_024 * 1_024; resumed.resume()
+        defer { resumed.cancel(with: .normalClosure, reason: nil) }
+        try await send(resumed, op: "pair.request", id: "control-resume", payload: [
+            "controllerInstanceId": "control-fixture", "controllerProductName": "integration-client",
+            "projectionCapacityBytes": 8 * 1_024 * 1_024,
+            "protocolFeatures": [surfAceLocklessCapability, surfAceControlProjectionCapability],
+            "protocolVersion": 1, "surfaceId": surfaceId,
+            "resume": ["pendingAcks": [], "unresolvedRequestIds": ["control-rename"]]])
+        let resumption = try await receive(resumed, matchingId: "control-resume")
+        XCTAssertEqual(resumption["ok"] as? Bool, true)
+        XCTAssertEqual(payload(resumption)["resumed"] as? Bool, true)
+        let resolutions = try XCTUnwrap(payload(resumption)["receiptResolutions"] as? [[String: Any]])
+        XCTAssertTrue(String(decoding: try JSONSerialization.data(withJSONObject: resolutions), as: UTF8.self).contains("selected seven"))
+        let resumedState = await adapter.snapshot()
+        XCTAssertEqual(after.annotationPublisher, resumedState.annotationPublisher)
+        for request in ["control-pair", "surfaces.list", "panes.list", "control-rename", "explicit-sync", "control-resume"] {
             let bytes = try XCTUnwrap(receivedMessageBytesById[request])
             XCTAssertLessThan(bytes, 16 * 1_024 * 1_024)
             print("CONTROL_RESPONSE request=\(request) bytes=\(bytes) old_authority_bytes=\(legacyBytes)")
@@ -1661,7 +1687,7 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         let discoveryPayload = payload(discovery)
         let discoveryCapabilities = try XCTUnwrap(discoveryPayload["capabilities"] as? [String: Any])
         XCTAssertEqual(
-            discoveryCapabilities["protocolFeatures"] as? [String], [surfAceLocklessCapability]
+            discoveryCapabilities["protocolFeatures"] as? [String], [surfAceLocklessCapability, surfAceControlProjectionCapability]
         )
         XCTAssertEqual(discoveryCapabilities["surfaceLifecycle"] as? Bool, true)
         let discoveryLimits = try XCTUnwrap(discoveryCapabilities["limits"] as? [String: Any])
@@ -1746,7 +1772,8 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         try await send(second, op: "panes.list", id: "read-b", payload: ["surfaceId": surface.surfaceId])
         let read = try await receive(second, matchingId: "read-b")
         let panes = try XCTUnwrap(payload(read)["panes"] as? [[String: Any]])
-        XCTAssertTrue(panes.contains { ($0["history"] as? [String: Any])?["visible"] != nil })
+        XCTAssertTrue(panes.contains { $0["currentContentId"] as? String == "content-a" })
+        XCTAssertTrue(panes.allSatisfy { $0["history"] == nil })
 
         try await send(second, op: "consumable.sync", id: "sync-b", payload: ["scopeIds": [scopeId]])
         let secondSync = try await receive(second, matchingId: "sync-b")
@@ -1892,7 +1919,7 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         )
         XCTAssertEqual(
             ((zeroLivePayload["capabilities"] as? [String: Any])?["protocolFeatures"] as? [String]),
-            [surfAceLocklessCapability]
+            [surfAceLocklessCapability, surfAceControlProjectionCapability]
         )
         XCTAssertNotNil(zeroLivePayload["surfaceSetRevision"] as? NSNumber)
         discoveryAfterLastSurface.cancel(with: .normalClosure, reason: nil)

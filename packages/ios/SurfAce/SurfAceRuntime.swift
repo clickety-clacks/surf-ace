@@ -2565,7 +2565,8 @@ final class SurfAceRuntime {
                 let snapshot = await adapter.snapshot()
                 responsePayload = [
                     "surfaceSetRevision": snapshot.surfaceSetRevision,
-                    "surfaces": try snapshot.liveSurfaces.values.sorted { $0.surfaceId < $1.surfaceId }
+                    "surfaceTombstones": snapshot.surfaceTombstones.map { Self.foundationJSON(SurfAceLocklessControlProjection.tombstone($0)) },
+                    "surfaces": snapshot.liveSurfaces.values.sorted { $0.surfaceId < $1.surfaceId }
                         .map { publicPaneLabelProjection(Self.foundationJSON(SurfAceLocklessControlProjection.surface($0))) },
                 ]
             case "panes.list":
