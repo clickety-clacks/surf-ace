@@ -1085,12 +1085,7 @@ final class SurfAceRuntime {
         _ state: SurfAceLocklessAuthorityState,
         connectedSceneKey: String? = nil
     ) throws {
-        var topologies = try SurfAceLocklessUIProjection.topologies(from: state)
-        for (surfaceId, authoritySurface) in state.liveSurfaces {
-            topologies[surfaceId]?.paneLayout = try persistedPaneLayout(
-                fromCanonical: authoritySurface.topology
-            )
-        }
+        let topologies = try SurfAceLocklessUIProjection.topologies(from: state)
 
         if let connectedSceneKey,
            let surfaceId = state.sceneSurfaceIds[connectedSceneKey],

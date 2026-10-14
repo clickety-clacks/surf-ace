@@ -1,5 +1,7 @@
 import Foundation
 import UIKit
+import SwiftUI
+import WebKit
 import XCTest
 @testable import SurfAce
 
@@ -144,6 +146,91 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
             XCTAssertLessThan(bytes, 16 * 1_024 * 1_024)
             print("CONTROL_RESPONSE request=\(request) bytes=\(bytes) old_authority_bytes=\(legacyBytes)")
         }
+    }
+
+    // One observable command sample, not a latency acceptance threshold.
+    func testContentSetReachesMountedVisiblePixels() async throws {
+        let name = "SurfAceFASTVisible-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(name, isDirectory: true)
+        addTeardownBlock {
+            defaults.removePersistentDomain(forName: name)
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let runtime = SurfAceRuntime(userDefaults: defaults,
+            locklessStateURL: directory.appendingPathComponent("state.json"),
+            configuredRegistryURL: try XCTUnwrap(URL(string: "ws://127.0.0.1:1/ws")),
+            annotationClientId: "client-fast-visible", enableFleetDiscovery: false, isolatedTestLoopback: true)
+        await runtime.start()
+        addTeardownBlock { await runtime.stop() }
+        let registered = await runtime.registerSurfaceForScene(sceneKey: name)
+        let surface = try XCTUnwrap(registered)
+        let pane = try XCTUnwrap(surface.panes.first)
+        let host = UIHostingController(rootView: SurfAceWindowView(runtime: runtime, surface: surface))
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previous = scene.windows.first(where: \.isKeyWindow)
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 1000, height: 800)
+        window.rootViewController = host; window.makeKeyAndVisible()
+        defer { window.isHidden = true; window.rootViewController = nil; previous?.makeKey() }
+        host.view.frame = window.bounds; host.view.layoutIfNeeded()
+        func webViews(_ view: UIView) -> [WKWebView] {
+            (view as? WKWebView).map { [$0] } ?? view.subviews.flatMap(webViews)
+        }
+        let web = try XCTUnwrap(webViews(host.view).first)
+        let socket = socket(port: try XCTUnwrap(UInt16(exactly: runtime.serverPort)))
+        socket.resume()
+        defer { socket.cancel(with: .normalClosure, reason: nil) }
+        try await assertOwnedRuntimeDiscovery(runtime, socket: socket, surface: surface, requestId: "fast-owned")
+        let paired = try await pair(socket, id: "fast-pair", controllerId: "fast-controller", surfaceId: surface.surfaceId)
+        XCTAssertEqual(paired["ok"] as? Bool, true)
+        // Retain ordinary semantic history so the sample includes its projection.
+        for index in 0..<4 {
+            let request = "fast-history-\(index)"
+            try await send(socket, op: "content.set", id: request, payload: [
+                "content": ["html": "<html><body>History \(index)</body></html>"],
+                "contentId": request, "contentType": "html", "friendlyChatName": "FAST fixture",
+                "paneId": pane.paneId, "surfaceId": surface.surfaceId])
+            let response = try await receive(socket, matchingId: request)
+            XCTAssertEqual(response["ok"] as? Bool, true)
+        }
+        let began = ProcessInfo.processInfo.systemUptime
+        try await send(socket, op: "content.set", id: "fast-visible", payload: [
+            "content": ["html": "<html><head><title>FAST-visible</title><style>html,body{margin:0;width:100%;height:100%;background:rgb(20,220,80)}</style></head><body>Visible command result</body></html>"],
+            "contentId": "fast-visible", "contentType": "html", "friendlyChatName": "FAST fixture",
+            "paneId": pane.paneId, "surfaceId": surface.surfaceId])
+        let response = try await receive(socket, matchingId: "fast-visible")
+        XCTAssertEqual(response["ok"] as? Bool, true)
+        let painted = expectation(description: "actual mounted WebKit result painted")
+        var visibleImage: UIImage?
+        var elapsed: Double?
+        Task { @MainActor in
+            for _ in 0..<100 {
+                if web.title == "FAST-visible", let image = try? await web.takeSnapshot(configuration: nil),
+                   let cg = image.cgImage {
+                    var pixel = [UInt8](repeating: 0, count: 4)
+                    let green = pixel.withUnsafeMutableBytes { bytes -> Bool in
+                        guard let context = CGContext(data: bytes.baseAddress, width: 1, height: 1,
+                            bitsPerComponent: 8, bytesPerRow: 4, space: CGColorSpaceCreateDeviceRGB(),
+                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+                        context.draw(cg, in: CGRect(x: 0, y: 0, width: 1, height: 1))
+                        return true
+                    }
+                    if green && pixel[1] > 180 && pixel[0] < 80 && pixel[2] < 130 {
+                        elapsed = (ProcessInfo.processInfo.systemUptime - began) * 1000
+                        visibleImage = image; painted.fulfill(); return
+                    }
+                }
+                try? await Task.sleep(for: .milliseconds(20))
+            }
+        }
+        await fulfillment(of: [painted], timeout: 15)
+        let milliseconds = try XCTUnwrap(elapsed)
+        print("FAST_VISIBLE_SAMPLE command=content.set history=4 issuance_to_visible_ms=\(milliseconds)")
+        let attachment = XCTAttachment(image: try XCTUnwrap(visibleImage))
+        attachment.name = "FAST-content-set-mounted-visible"; attachment.lifetime = .keepAlways; add(attachment)
+        XCTAssertEqual(pane.currentEntry.contentId, "fast-visible")
+        XCTAssertTrue(webViews(host.view).contains { $0 === web })
     }
 
     func testDoneHeldLocalFailureStopsSpinnerWithoutChangingAuthorityOrHistory() async throws {
