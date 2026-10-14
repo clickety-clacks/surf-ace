@@ -155,6 +155,12 @@ extension SurfAceRenderAndAnnotationDiagnosticsTests {
                     "points": .array([.object(["x": .double(1.5), "y": .integer(2),
                         "pressure": .double(0.7), "timestamp": .integer(42)])])])])
             ])
+            pane.target = .object(["targetId": .string("target"), "targetKind": .string("browser"),
+                "paneLineageId": .string(pane.paneLineageId), "targetEpoch": .integer(2),
+                "restorePolicy": .string("source"), "currentState": .string("ready"),
+                "targetHeader": .object(["title": .string("retained")]),
+                "targetPayload": .object(["url": .string("https://example.test/")]),
+                "lastApplyEvidence": .object(["accepted": .bool(true)])])
             pane.history.back = [pane.history.visible]
             pane.history.forward = [pane.history.visible]
             surface.panes["1"] = pane; state.liveSurfaces[id] = surface
