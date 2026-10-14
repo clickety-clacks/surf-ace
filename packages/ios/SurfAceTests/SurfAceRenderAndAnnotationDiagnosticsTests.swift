@@ -225,7 +225,7 @@ extension SurfAceRenderAndAnnotationDiagnosticsTests {
         XCTAssertEqual(projected.currentEntry?.strokesById["ink"]?.points.first?.x, 4)
         XCTAssertEqual(projected.backStack?.first?.provenanceDisplayName, "Updated earlier chat")
         XCTAssertEqual(projected.forwardStack?.first?.payload, .html(html: "<main>updated future</main>", baseURL: nil))
-        XCTAssertTrue(projected.annotationMode)
+        XCTAssertEqual(projected.annotationMode, true)
         let expected = try SurfAceLocklessUIProjection.topologies(from: state)
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
         XCTAssertEqual(try encoder.encode(changed[id]), try encoder.encode(expected[id]))
