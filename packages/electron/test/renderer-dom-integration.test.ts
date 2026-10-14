@@ -1540,11 +1540,15 @@ test("renderer DOM integrates authoritative connection states and live scale con
     let finish!: (response: { ok: boolean; authorityRevision: number; presentationBlocked?: boolean; presentationCleared?: boolean }) => void;
     presentationResponse = () => new Promise((resolve) => { finish = resolve; });
     toggle.click();
+    const finishOldEnter = finish;
     const changed = { ...next, geometryRevision: next.geometryRevision + 1,
       viewport: { ...next.viewport, width: 1000 } };
     stateListener!(changed);
+    const finishCurrentEnter = finish;
+    assert.notEqual(finishCurrentEnter, finishOldEnter, "viewport change registers a current-geometry request");
     const reportsBefore = reports;
-    finish({ ok: false, authorityRevision: 200, presentationBlocked: true, presentationCleared: false });
+    finishOldEnter({ ok: false, authorityRevision: 200, presentationBlocked: true, presentationCleared: false });
+    finishCurrentEnter({ ok: false, authorityRevision: 200, presentationBlocked: true, presentationCleared: false });
     await new Promise<void>((resolve) => setImmediate(resolve));
     assert.equal(root.classList.contains("pane-popped-out"), false, "stale reply cannot apply display pixels");
     assert.equal(root.querySelector(".pane-content")!.hasAttribute("inert"), true,
@@ -1568,9 +1572,13 @@ test("renderer DOM integrates authoritative connection states and live scale con
     pointer("pointercancel");
     // A late blocked reply must not undo a newer independently confirmed clear.
     toggle.click();
+    const finishLateEnter = finish;
     stateListener!({ ...changed, geometryRevision: changed.geometryRevision + 1 });
+    const finishSupersedingEnter = finish;
     ownershipListener!({ surfaceId: next.surfaceId, surfaceEpoch: next.surfaceEpoch, revision: 203, authorityRevision: 203, phase: "cleared" });
-    finish({ ok: false, authorityRevision: 202, presentationBlocked: true });
+    finishLateEnter({ ok: false, authorityRevision: 202, presentationBlocked: true });
+    if (finishSupersedingEnter !== finishLateEnter)
+      finishSupersedingEnter({ ok: false, authorityRevision: 202, presentationBlocked: true });
     await new Promise<void>((resolve) => setImmediate(resolve));
     assert.equal(root.querySelector(".pane-content")!.hasAttribute("inert"), false);
     assert.equal(pointer("pointerdown").defaultPrevented, true);
@@ -1713,7 +1721,7 @@ test("renderer DOM integrates authoritative connection states and live scale con
     let finish!: (reply: { ok: boolean; presentationBlocked?: boolean; presentationCleared?: boolean }) => void;
     presentationResponse = () => new Promise(resolve => { finish = resolve; });
     toggle.click();
-    const checkBlocked = () => {
+    const checkBlocked = async () => {
       const count = commands.length, calls = scripts.length, doneCalls = finishCalls;
       const font = roots[0]!.querySelector(".font-size-toggle");
       keyboardListener!({ type: "content-scale", paneId: 1, action: "increase" });
@@ -1721,15 +1729,16 @@ test("renderer DOM integrates authoritative connection states and live scale con
       for (const [pane, action] of [[next.panes[0]!, "enter"], [next.panes[1]!, "done"]] as const)
         keyboardListener!({ type: "annotation", action, expected: { ...pane.content,
           paneId: pane.paneId, paneLineageId: pane.paneLineageId } });
+      await new Promise<void>(resolve => setImmediate(resolve));
       assert.equal(commands.length, count);
       assert.equal(scripts.length, calls);
       assert.equal(finishCalls, doneCalls);
       assert.equal(roots[0]!.querySelector(".font-size-toggle"), font, "keyboard must not rebuild/scale shielded content");
     };
-    checkBlocked();
+    await checkBlocked();
     finish({ ok: false, presentationBlocked: true, presentationCleared: false });
     await new Promise<void>(resolve => setImmediate(resolve));
-    checkBlocked();
+    await checkBlocked();
     assert.equal(toggle.closest("[inert]"), null, "Restore remains available to retire uncertain authority");
     toggle.click();
     finish({ ok: true }); await new Promise<void>(resolve => setImmediate(resolve));
