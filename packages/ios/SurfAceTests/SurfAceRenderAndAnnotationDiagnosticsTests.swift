@@ -212,15 +212,22 @@ extension SurfAceRenderAndAnnotationDiagnosticsTests {
         XCTAssertEqual(unchanged[id]?.panes.first?.currentEntry?.contentId, "current")
         XCTAssertEqual(unchanged[id]?.panes.first?.backStack?.first?.contentId, "previous")
         pane.name = "Renamed"; pane.annotationMode = true
+        pane.target = .object(["targetId": .string("target"), "targetKind": .string("browser_url"),
+            "paneLineageId": .string(pane.paneLineageId), "targetEpoch": .integer(1),
+            "restorePolicy": .string("source"), "currentState": .string("current")])
         surface.panes["1"] = pane; state.liveSurfaces[id] = surface
         let metadataOnly = try cache.topologies(from: state, surfaceIds: [id])
         XCTAssertEqual(metadataOnly[id]?.panes.first?.name, "Renamed")
         XCTAssertEqual(metadataOnly[id]?.panes.first?.annotationMode, true)
+        XCTAssertEqual(metadataOnly[id]?.panes.first?.currentTarget?.targetEpoch, 1)
         XCTAssertEqual(metadataOnly[id]?.panes.first?.backStack?.first?.contentId, "previous")
         // Annotations and history metadata can change without a new visible revision.
         pane.history.visible.annotations = .object(["drawingData": .string(""), "strokesById": .object([
             "ink": .object(["strokeId": .string("ink"), "tool": .string("pen"), "points": .array([
                 .object(["x": .double(4), "y": .double(5), "timestamp": .integer(6)])])])])])
+        if case .object(var target) = pane.target {
+            target["targetEpoch"] = .integer(2); pane.target = .object(target)
+        }
         pane.history.back[0].provenance.friendlyChatName = "Updated earlier chat"
         pane.history.forward[0].content = .object(["html": .string("<main>updated future</main>")])
         pane.annotationMode = true
@@ -232,6 +239,7 @@ extension SurfAceRenderAndAnnotationDiagnosticsTests {
         XCTAssertEqual(projected.backStack?.first?.provenanceDisplayName, "Updated earlier chat")
         XCTAssertEqual(projected.forwardStack?.first?.payload, .html(html: "<main>updated future</main>", baseURL: nil))
         XCTAssertEqual(projected.annotationMode, true)
+        XCTAssertEqual(projected.currentTarget?.targetEpoch, 2)
         let expected = try SurfAceLocklessUIProjection.topologies(from: state)
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
         XCTAssertEqual(try encoder.encode(changed[id]), try encoder.encode(expected[id]))
