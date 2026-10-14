@@ -137,15 +137,7 @@ struct SurfAceLocklessCapacityLimits: Codable, Equatable, Sendable {
         } else if maxAnnotationPublisherStateBytesPerSurface != nil || maxAnnotationPublisherRecordsPerSurface != nil {
             throw SurfAceLocklessAuthorityError.invalidLimit("annotation_publisher")
         }
-        guard maxPaneAnnotationRestoreBytes <= maxPaneRecoverableStateBytes else {
-            throw SurfAceLocklessAuthorityError.invalidLimit("annotation_exceeds_pane")
-        }
-        guard maxRecoverableSurfaceBytes <= maxRetainedTombstoneBytes else {
-            throw SurfAceLocklessAuthorityError.invalidLimit("surface_exceeds_tombstone_pool")
-        }
-        guard maxRecoverableSurfaceBytes >= recoverableSurfaceMinimumBytes else {
-            throw SurfAceLocklessAuthorityError.invalidLimit("recoverable_surface_envelope")
-        }
+
     }
 }
 
