@@ -1640,12 +1640,12 @@ test("ordinary edits retain source and provenance across close and restart witho
     });
     assert.equal(first.ok, true, JSON.stringify(first));
     const second = await request(socket, "content.set", {
-      content: { markdown: "# Current" }, contentId: "source-markdown", contentType: "markdown",
-      friendlyChatName: "Markdown author", paneId, surfaceId: surface.surfaceId,
+      content: { lines: ["current"], scrollback: 50 }, contentId: "source-terminal", contentType: "terminal",
+      friendlyChatName: "Terminal author", paneId, surfaceId: surface.surfaceId,
     });
     assert.equal(second.ok, true, JSON.stringify(second));
     const appended = await request(socket, "content.append", {
-      contentId: "source-markdown", expectedRevision: second.payload.revision,
+      contentId: "source-terminal", expectedRevision: second.payload.revision,
       lines: ["retained addition"], paneId, surfaceId: surface.surfaceId,
     });
     assert.equal(appended.ok, true, JSON.stringify(appended));
@@ -1672,7 +1672,7 @@ test("ordinary edits retain source and provenance across close and restart witho
     assert.deepEqual(core.getRendererWindowState(surface.surfaceId).panes[0]!.content.content, { html });
     assert.equal(core.getRendererWindowState(surface.surfaceId).panes[0]!.ownerName, "HTML author — Tight Beam");
     core.navigateHistory(surface.surfaceId, paneId, "forward");
-    assert.equal(core.getRendererWindowState(surface.surfaceId).panes[0]!.ownerName, "Markdown author — Tight Beam");
+    assert.equal(core.getRendererWindowState(surface.surfaceId).panes[0]!.ownerName, "Terminal author — Tight Beam");
     const split = await request(socket, "pane.split", {
       count: 2, direction: "horizontal", expectedTopologyRevision: Number(core.topologyState(surface.surfaceId).topologyRevision),
       paneId, surfaceId: surface.surfaceId,
@@ -1698,7 +1698,7 @@ test("ordinary edits retain source and provenance across close and restart witho
       savedPane.payload as Parameters<SurfaceCore["restorePaneTombstone"]>[1], anchor, "horizontal");
     assert.equal(restored.paneId, paneId);
     const restoredVisible = restarted.getRendererWindowState(surface.surfaceId).panes.find((pane) => pane.paneId === paneId)!;
-    assert.equal(restoredVisible.ownerName, "Markdown author — Tight Beam");
+    assert.equal(restoredVisible.ownerName, "Terminal author — Tight Beam");
     restarted.navigateHistory(surface.surfaceId, paneId, "back");
     const back = restarted.getRendererWindowState(surface.surfaceId).panes.find((pane) => pane.paneId === paneId)!;
     assert.deepEqual(back.content.content, { html });
