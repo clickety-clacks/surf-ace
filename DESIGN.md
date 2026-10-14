@@ -416,7 +416,7 @@ Rules:
 4. Controller window lifecycle may be omitted only when it is not a product operation on that platform. Local-user close is always recoverable. On a capable client, any admitted controller and the local user use identical identity-independent admission rules.
 5. Accepted close atomically creates a surface tombstone containing the surface identity, full topology, live panes, nested pane tombstones, bounded consumable scopes/cursors/gaps, and restore state before removing the live projection, advancing `surfaceSetRevision`, emitting `event.surface_removed`, and closing surface sockets. Close itself discards nothing.
 6. Any admitted controller or the local user may restore a retained surface tombstone through the endpoint lifecycle seam even when zero surfaces are live. Restore reactivates the same surface/pane identities and state, consumes the surface tombstone, advances `surfaceSetRevision`, and emits ordered lifecycle events.
-7. Pane and surface tombstones share the finite client-wide count/byte pool in §4.8 and are reclaimed only by ascending `closedSequence`; each surface tombstone keeps its own fresh close-time sequence, while nested pane tombstones retain their original sequences as metadata and do not reorder the parent. Existing selection, order, and limits are unchanged and reclamation is never accelerated to free a pane number. Reclamation is the terminal-retirement boundary defined by §3.1.1.1(3). Listing or failed restore never refreshes order.
+7. Pane and surface tombstones retain their semantic state and identity reservations under §4.8 without quota-driven reclamation. Each surface tombstone keeps its fresh close-time `closedSequence`; nested pane tombstones keep their original sequences as lifecycle metadata. Listing or failed restore does not rewrite this metadata. The interim contract introduces no automatic retirement trigger. Any independently authorized terminal retirement must preserve the ordered identity, restore-right, and exact release fences in §3.1.1.1(3); retained identities are never discarded merely to free a pane number.
 8. Window lifecycle signals remain in-band and always-on; they do not require mDNS rebroadcast and do not create a permanent controller destroy path.
 
 ### 4.8 T1770 Lockless Authority, Capacity, Retention, and Retired Model
@@ -691,7 +691,7 @@ Requests that the paired Surf Ace Spatial app endpoint create a new top-level Su
 
 **Behavior:**
 1. On a platform advertising controller window lifecycle, any admitted controller may call `surface.window.open` under the same identity-independent rules as local open.
-2. The endpoint compares `expectedSurfaceSetRevision`, validates pane-creation and recoverable-state capacity, and atomically allocates the new surface and initial pane IDs before emitting `event.surface_appeared`. Registry-confirmed labels may arrive before or after that local commit; pending labels are `null` in the event and snapshots.
+2. The endpoint compares `expectedSurfaceSetRevision`, validates pane-creation admission and the separate surface-admission ledger in §5.6, and atomically allocates the new surface and initial pane IDs before emitting `event.surface_appeared`. Registry-confirmed labels may arrive before or after that local commit; pending labels are `null` in the event and snapshots.
 3. A platform may return `unsupported_operation` only when controller window lifecycle is not a product operation there.
 4. The request does not mutate pane topology inside an existing surface.
 
@@ -718,7 +718,7 @@ Splits an existing pane into N panes.
 
 **Request fields:** `paneId` (required — pane to split), `expectedTopologyRevision`, `count` (total pane count after split, including the source pane; min 2), and `direction` (`horizontal` | `vertical`).
 
-**Behavior:** The source pane retains its `paneId`, confirmed `paneLabel` if any, and content. In lockless mode the client checks the expected revision, computes `currentLivePaneCount - 1 + count`, returns `pane_capacity` without mutation when that exceeds the advertised admission cap, then performs exact recoverable-state byte checks. On success it allocates pane IDs, commits local topology and emits `event.pane_created`; labels may be confirmed separately before or after this commit.
+**Behavior:** The source pane retains its `paneId`, confirmed `paneLabel` if any, and content. In lockless mode the client checks the expected revision, computes `currentLivePaneCount - 1 + count`, returns `pane_capacity` without mutation when that exceeds the advertised admission cap, without recoverable-state byte measurement or refusal. On success it allocates pane IDs, commits local topology and emits `event.pane_created`; labels may be confirmed separately before or after this commit.
 
 **Response fields:** `panes` — array of `{ paneId, paneLabel }` for all panes in the window after the split (including existing panes).
 
