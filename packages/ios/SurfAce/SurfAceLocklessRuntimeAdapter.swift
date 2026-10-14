@@ -903,22 +903,6 @@ actor SurfAceLocklessRuntimeAdapter {
                 targetRequestId: targetRequestId
             )
             work.bytes = try SurfAceLocklessExactDurableAccounting.targetWorkBytes(work)
-            let current = SurfAceLocklessExactDurableAccounting.saturatingAdd(
-                try SurfAceLocklessTopologyOperations.surfaceBaseBytes(surface),
-                state.targetApplyWorkItems.values
-                    .filter { $0.surfaceId == surfaceId }
-                    .reduce(Int64(0)) {
-                        SurfAceLocklessExactDurableAccounting.saturatingAdd($0, $1.bytes)
-                    }
-            )
-            let prospective = SurfAceLocklessExactDurableAccounting.saturatingAdd(current, work.bytes)
-            guard prospective <= state.limits.maxSurfaceRecoverableBaseBytes else {
-                throw SurfAceLocklessRuntimeAdapterError.surfaceStateCapacity(
-                    current: current,
-                    prospective: prospective,
-                    maximum: state.limits.maxSurfaceRecoverableBaseBytes
-                )
-            }
             state.targetApplyWorkItems[identity.storageKey] = work
             return .object([
                 "operationReceipt": .object([
@@ -1043,32 +1027,12 @@ actor SurfAceLocklessRuntimeAdapter {
                   work.state == .intentCommitted else {
                 throw SurfAceLocklessRuntimeAdapterError.invalidAdmission
             }
-            guard let surface = state.liveSurfaces[work.surfaceId]
-                    ?? state.surfaceTombstones.first(where: { $0.surface.surfaceId == work.surfaceId })?.surface else {
+            guard state.liveSurfaces[work.surfaceId] != nil
+                    || state.surfaceTombstones.contains(where: { $0.surface.surfaceId == work.surfaceId }) else {
                 throw SurfAceLocklessRuntimeAdapterError.invalidAdmission
             }
-            let current = SurfAceLocklessExactDurableAccounting.saturatingAdd(
-                try SurfAceLocklessTopologyOperations.surfaceBaseBytes(surface),
-                state.targetApplyWorkItems.values
-                    .filter { $0.surfaceId == work.surfaceId }
-                    .reduce(Int64(0)) {
-                        SurfAceLocklessExactDurableAccounting.saturatingAdd($0, $1.bytes)
-                    }
-            )
-            let previousBytes = work.bytes
             work.state = .materializing
             work.bytes = try SurfAceLocklessExactDurableAccounting.targetWorkBytes(work)
-            let prospective = SurfAceLocklessExactDurableAccounting.saturatingAdd(
-                current - previousBytes,
-                work.bytes
-            )
-            guard prospective <= state.limits.maxSurfaceRecoverableBaseBytes else {
-                throw SurfAceLocklessRuntimeAdapterError.surfaceStateCapacity(
-                    current: current,
-                    prospective: prospective,
-                    maximum: state.limits.maxSurfaceRecoverableBaseBytes
-                )
-            }
             state.targetApplyWorkItems[identity.storageKey] = work
             return work
         }
