@@ -17,16 +17,16 @@ enum SurfAceLocklessUIProjection {
         if let raw = object["payload"], raw != .null {
             let fields = try Self.object(raw)
             switch try string(fields["kind"]) {
-            case "html": payload = .html(html: try string(fields["html"]), baseURL: optionalString(fields["baseURL"]))
-            case "image": payload = .image(data: try string(fields["data"]), mediaType: try string(fields["mediaType"]), alt: optionalString(fields["alt"]))
+            case "html": payload = .html(html: try string(fields["html"]), baseURL: try optionalString(fields["baseURL"]))
+            case "image": payload = .image(data: try string(fields["data"]), mediaType: try string(fields["mediaType"]), alt: try optionalString(fields["alt"]))
             case "pdf": payload = .pdf(data: try string(fields["data"]))
             case "terminal":
                 guard case .array(let lines) = fields["lines"] else { throw invalid() }
                 payload = .terminal(lines: try lines.map { try string($0) }, scrollback: try integer(fields["scrollback"]))
             case "markdown": payload = .markdown(markdown: try string(fields["markdown"]))
             case "video": payload = .video(url: try string(fields["url"]))
-            case "canvas": payload = .canvas(color: optionalString(fields["color"]), grid: optionalBool(fields["grid"]) ?? false)
-            case "browserURL": payload = .browserURL(url: try string(fields["url"]), allowedSnapshotFallback: optionalBool(fields["allowedSnapshotFallback"]), fallbackSnapshotTargetId: optionalString(fields["fallbackSnapshotTargetId"]))
+            case "canvas": payload = .canvas(color: try optionalString(fields["color"]), grid: try optionalBool(fields["grid"]) ?? false)
+            case "browserURL": payload = .browserURL(url: try string(fields["url"]), allowedSnapshotFallback: try optionalBool(fields["allowedSnapshotFallback"]), fallbackSnapshotTargetId: try optionalString(fields["fallbackSnapshotTargetId"]))
             default: throw invalid()
             }
         } else { payload = nil }
@@ -43,27 +43,32 @@ enum SurfAceLocklessUIProjection {
                 }, tool: try string(stroke["tool"]))
             }
         }
-        guard let drawing = Data(base64Encoded: optionalString(object["drawingData"]) ?? "") else { throw invalid() }
+        guard let drawing = Data(base64Encoded: try string(object["drawingData"])) else { throw invalid() }
         let reload: SurfAceContentReloadSource?
         if let raw = object["reloadSource"], raw != .null {
             let fields = try Self.object(raw)
             reload = .init(kind: try string(fields["kind"]), path: try string(fields["path"]))
         } else { reload = nil }
+        let contentType: SurfAceContentType?
+        if let raw = value.contentType {
+            guard let parsed = SurfAceContentType(rawValue: raw) else { throw invalid() }
+            contentType = parsed
+        } else { contentType = nil }
         return SurfAcePaneEntry(contentId: value.contentId, revision: try integer(.integer(value.revision)),
-            historyOwnerToken: optionalString(object["historyOwnerToken"]),
-            contentType: value.contentType.flatMap(SurfAceContentType.init(rawValue:)), payload: payload,
-            reloadSource: reload, title: optionalString(object["title"]),
-            senderDisplayName: optionalString(object["senderDisplayName"]),
+            historyOwnerToken: try optionalString(object["historyOwnerToken"]),
+            contentType: contentType, payload: payload,
+            reloadSource: reload, title: try optionalString(object["title"]),
+            senderDisplayName: try optionalString(object["senderDisplayName"]),
             provenanceDisplayName: value.provenance.friendlyChatName,
-            provenanceSessionKey: optionalString(object["provenanceSessionKey"]),
-            provenanceSource: optionalString(object["provenanceSource"]),
-            provenanceAgentId: optionalString(object["provenanceAgentId"]),
-            provenanceStreamLabel: optionalString(object["provenanceStreamLabel"]),
-            provenancePushedAt: optionalString(object["provenancePushedAt"]),
+            provenanceSessionKey: try optionalString(object["provenanceSessionKey"]),
+            provenanceSource: try optionalString(object["provenanceSource"]),
+            provenanceAgentId: try optionalString(object["provenanceAgentId"]),
+            provenanceStreamLabel: try optionalString(object["provenanceStreamLabel"]),
+            provenancePushedAt: try optionalString(object["provenancePushedAt"]),
             provenanceControllerProductName: value.provenance.controllerProductName,
-            scrollable: optionalBool(object["scrollable"]) ?? true,
-            interactive: optionalBool(object["interactive"]) ?? true,
-            url: optionalString(object["url"]), drawingData: drawing, strokesById: strokes)
+            scrollable: try optionalBool(object["scrollable"]) ?? true,
+            interactive: try optionalBool(object["interactive"]) ?? true,
+            url: try optionalString(object["url"]), drawingData: drawing, strokesById: strokes)
     }
 
     static func target(_ value: SurfAceLocklessJSON?) throws -> SurfAcePaneTargetState? {
@@ -84,14 +89,16 @@ enum SurfAceLocklessUIProjection {
     private static func string(_ value: SurfAceLocklessJSON?) throws -> String {
         guard case .string(let text) = value else { throw invalid() }; return text
     }
-    private static func optionalString(_ value: SurfAceLocklessJSON?) -> String? {
-        guard case .string(let text) = value else { return nil }; return text
+    private static func optionalString(_ value: SurfAceLocklessJSON?) throws -> String? {
+        guard let value, value != .null else { return nil }
+        return try string(value)
     }
     private static func integer(_ value: SurfAceLocklessJSON?) throws -> Int {
         guard case .integer(let number) = value, let result = Int(exactly: number) else { throw invalid() }; return result
     }
-    private static func optionalBool(_ value: SurfAceLocklessJSON?) -> Bool? {
-        guard case .bool(let value) = value else { return nil }; return value
+    private static func optionalBool(_ value: SurfAceLocklessJSON?) throws -> Bool? {
+        guard let value, value != .null else { return nil }
+        guard case .bool(let result) = value else { throw invalid() }; return result
     }
     private static func number(_ value: SurfAceLocklessJSON?) -> Double? {
         switch value { case .double(let n): return n; case .integer(let n): return Double(n); default: return nil }

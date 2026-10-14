@@ -171,6 +171,25 @@ extension SurfAceRenderAndAnnotationDiagnosticsTests {
         }
     }
 
+    func testTypedProjectionRejectsMalformedOptionalContentInsteadOfSilentlyDroppingIt() throws {
+        var state = try SurfAceLocklessAuthorityState.empty()
+        let opened = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(state: &state, expectedSurfaceSetRevision: 0)
+        let id = opened.surface.surfaceId
+        let malformed: [SurfAceLocklessJSON] = [
+            .object(["payload": .null, "title": .integer(7)]),
+            .object(["payload": .null, "interactive": .string("yes")]),
+            .object(["payload": .object(["kind": .string("html"), "html": .string("source"), "baseURL": .bool(true)])]),
+        ]
+        for content in malformed {
+            var surface = try XCTUnwrap(state.liveSurfaces[id])
+            var pane = try XCTUnwrap(surface.panes["1"])
+            pane.history.visible.content = content
+            surface.panes["1"] = pane; state.liveSurfaces[id] = surface
+            XCTAssertThrowsError(try LegacySurfAceLocklessUIProjection.topologies(from: state))
+            XCTAssertThrowsError(try SurfAceLocklessUIProjection.topologies(from: state))
+        }
+    }
+
     func testACPROV07LocklessProjectionKeepsChatAndProviderAcrossHistoryAndPersistence() throws {
         var state = try SurfAceLocklessAuthorityState.empty()
         let opened = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
