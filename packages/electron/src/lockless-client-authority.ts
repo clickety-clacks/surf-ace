@@ -294,17 +294,6 @@ function paneMaterials(tombstone: PersistentTombstone): unknown[] {
   return values;
 }
 
-function tombstoneScopes(
-  tombstone: PersistentTombstone,
-): PersistentConsumableScope[] {
-  return [
-    ...Object.values(tombstone.scopes),
-    ...nestedTombstones(tombstone).flatMap(
-      (entry) => Object.values(entry.scopes),
-    ),
-  ];
-}
-
 function refreshTombstoneBytes(tombstone: PersistentTombstone): void {
   const nested = (
     tombstone.payload as { paneTombstones?: PersistentTombstone[] }
@@ -317,13 +306,6 @@ function refreshTombstoneBytes(tombstone: PersistentTombstone): void {
     (tombstone.annotationPublisherPartitionBytes ?? 0);
 }
 
-function refreshRetainedTombstoneBytes(
-  state: PersistentLocklessClientState,
-): void {
-  for (const tombstone of state.tombstones) {
-    refreshTombstoneBytes(tombstone);
-  }
-}
 
 function scopeSurfaceId(scopeId: string): string | null {
   if (scopeId.startsWith("surface:")) {
@@ -349,19 +331,6 @@ function paneIdentityKey(value: { surfaceId: string; paneId: string; lineageId: 
 
 function paneReleaseId(value: Omit<PersistentPaneRetirement, "releaseId">): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
-}
-
-function tombstoneCloseRevision(tombstone: PersistentTombstone): number | null {
-  if (!tombstone.payload || typeof tombstone.payload !== "object") return null;
-  const payload = tombstone.payload as Record<string, unknown>;
-  const revision = tombstone.kind === "pane"
-    ? payload.closeTopologyRevision
-    : (payload.surface && typeof payload.surface === "object")
-      ? (payload.surface as Record<string, unknown>).topologyRevision
-      : null;
-  return Number.isSafeInteger(revision) && Number(revision) > 0
-    ? Number(revision)
-    : null;
 }
 
 function targetApplyWorkItemKey(
@@ -459,38 +428,21 @@ export function assertRetainedTombstoneAggregate(
   limits: LocklessCapacityLimits,
   transition: RetainedTombstoneTransition,
 ): void {
-  const exactBytes = state.tombstones.reduce((total, tombstone) => {
+  // Historical count/byte budgets do not decide which user's recovery data
+  // survives. Validate the separately owned publisher partition, not a quota
+  // over a serialization of every retained pane.
+  for (const tombstone of state.tombstones) {
     for (const candidate of [tombstone, ...nestedTombstones(tombstone)]) {
-      const { bytes, ...material } = candidate;
-      const exact = exactDurableBytes({ version: 1, ...material });
       const publisherBytes = candidate.annotationPublisherPartitionBytes ?? 0;
       if (!Number.isSafeInteger(publisherBytes) || publisherBytes < 0 ||
-          publisherBytes > (limits.maxAnnotationPublisherStateBytesPerSurface ?? 0) ||
-          candidate.kind === "pane" && publisherBytes !== 0 ||
-          bytes !== exact + publisherBytes) {
+          candidate.kind === "pane" && publisherBytes !== 0) {
         throw new LocklessAuthorityError(
           "capability_mismatch",
-          "Persisted tombstone byte accounting is invalid",
-          {
-            exactBytes: exact + publisherBytes,
-            persistedBytes: bytes,
-            tombstoneId: candidate.tombstoneId,
-          },
+          "Persisted annotation publisher partition is invalid",
+          { tombstoneId: candidate.tombstoneId },
         );
       }
     }
-    return total + tombstone.bytes;
-  }, 0);
-  if (exactBytes > limits.maxRetainedTombstoneBytes) {
-    throw new LocklessAuthorityError(
-      "tombstone_capacity",
-      "Retained tombstone aggregate exceeds the configured byte limit",
-      {
-        bytes: exactBytes,
-        maximumBytes: limits.maxRetainedTombstoneBytes,
-        transition,
-      },
-    );
   }
 }
 
@@ -903,7 +855,6 @@ export class LocklessClientAuthority {
         gapGeneration: 0,
       };
     }
-    refreshRetainedTombstoneBytes(this.state);
     this.acceptAudit(
       requestId,
       "controller.admit",
@@ -1535,48 +1486,9 @@ export class LocklessClientAuthority {
       ...tombstoneWithoutBytes,
       bytes: exactDurableBytes({ version: 1, ...tombstoneWithoutBytes }) + publisherBytes,
     };
-    if (tombstone.bytes > this.state.limits.maxRetainedTombstoneBytes) {
-      throw new LocklessAuthorityError(
-        "internal_error",
-        "Admitted close exceeded its pre-reserved tombstone envelope",
-        {
-          bytes: tombstone.bytes,
-          maximumBytes: this.state.limits.maxRetainedTombstoneBytes,
-        },
-      );
-    }
-    const proposed = [...this.state.tombstones];
-    const reclaimed: Array<{
-      reason: "count_capacity" | "byte_capacity";
-      tombstone: PersistentTombstone;
-    }> = [];
-    while (
-      proposed.length + 1 > this.state.limits.maxRetainedTombstones ||
-      proposed.reduce((total, entry) => total + entry.bytes, 0) +
-        tombstone.bytes >
-        this.state.limits.maxRetainedTombstoneBytes
-    ) {
-      const exceedsCount =
-        proposed.length + 1 >
-        this.state.limits.maxRetainedTombstones;
-      const victim = proposed.shift();
-      if (!victim) {
-        throw new LocklessAuthorityError(
-          "internal_error",
-          "Admitted close could not satisfy its pre-reserved tombstone envelope",
-        );
-      }
-      reclaimed.push({
-        reason: exceedsCount ? "count_capacity" : "byte_capacity",
-        tombstone: victim,
-      });
-    }
-    this.state.tombstones = [...proposed, tombstone];
+    this.state.tombstones.push(tombstone);
     for (const scopeId of scopeIds) {
       delete this.state.scopes[scopeId];
-    }
-    for (const { reason, tombstone: victim } of reclaimed) {
-      this.recordTombstoneReclamation(victim, reason);
     }
     return clone(tombstone);
   }
@@ -1592,166 +1504,7 @@ export class LocklessClientAuthority {
     if (publisherBytes > 0) tombstone.annotationPublisherPartitionBytes = publisherBytes;
     else delete tombstone.annotationPublisherPartitionBytes;
     refreshTombstoneBytes(tombstone);
-    while (this.state.tombstones.reduce((total, entry) => total + entry.bytes, 0) >
-           this.state.limits.maxRetainedTombstoneBytes) {
-      const victim = this.state.tombstones.shift();
-      if (!victim) throw new LocklessAuthorityError("internal_error", "Tombstone pool cannot be reconciled");
-      this.recordTombstoneReclamation(victim, "byte_capacity");
-    }
-  }
 
-  private recordTombstoneReclamation(
-    victim: PersistentTombstone, reason: "count_capacity" | "byte_capacity",
-  ): void {
-      const nested = nestedTombstones(victim);
-      const discardedRecords = tombstoneScopes(victim).flatMap(
-        (scope) => this.scopeProjectionRecords(scope),
-      );
-      const nestedLivePaneCount = victim.kind === "surface"
-        ? (
-            victim.payload as {
-              surface?: { panes?: unknown[] };
-            }
-          )?.surface?.panes?.length ?? 0
-        : 0;
-      const nestedPaneTombstoneCount = nested.filter(
-        (entry) => entry.kind === "pane",
-      ).length;
-      const unreadBytesDiscarded = discardedRecords.reduce(
-        (total, record) => total + record.bytes,
-        0,
-      );
-      const unreadFrameCount = discardedRecords.filter(
-        (record) => record.recordClass === "annotation_frame",
-      ).length;
-      const paneId = victim.kind === "pane"
-        ? (
-            victim.payload as { pane?: { paneId?: unknown } }
-          )?.pane?.paneId
-        : null;
-      const audit = this.acceptAudit(
-        newOpaqueId("reclamation"),
-        "tombstone.reclaimed",
-        null,
-        victim.surfaceId,
-        {
-          bytes: victim.bytes,
-          clientIdentity: this.clientIdentity,
-          closedSequence: victim.closedSequence,
-          kind: victim.kind,
-          maxRetainedTombstoneBytes:
-            this.state.limits.maxRetainedTombstoneBytes,
-          maxRetainedTombstones:
-            this.state.limits.maxRetainedTombstones,
-          nestedLivePaneCount,
-          nestedPaneTombstoneCount,
-          paneId: Number.isInteger(paneId) ? Number(paneId) : null,
-          reason,
-          surfaceId: victim.surfaceId,
-          tombstoneId: victim.tombstoneId,
-          unreadBytesDiscarded,
-          unreadFrameCount,
-        },
-      );
-      this.recordPaneRetirementIntents(victim, audit.commitSequence);
-      this.emit({
-        bytes: victim.bytes,
-        closedSequence: victim.closedSequence,
-        commitSequence: audit.commitSequence,
-        kind: victim.kind,
-        maxRetainedTombstoneBytes:
-          this.state.limits.maxRetainedTombstoneBytes,
-        maxRetainedTombstones:
-          this.state.limits.maxRetainedTombstones,
-        nestedLivePaneCount,
-        nestedPaneTombstoneCount,
-        reason,
-        surfaceId: victim.surfaceId,
-        tombstoneId: victim.tombstoneId,
-        type: "event.tombstone_reclaimed",
-        unreadBytesDiscarded,
-        unreadFrameCount,
-      });
-  }
-
-  private recordPaneRetirementIntents(victim: PersistentTombstone, terminalRevision: number): void {
-    const closeRevision = tombstoneCloseRevision(victim);
-    const clientId = this.clientIdentity && /^[a-f0-9]{64}$/.test(this.clientIdentity)
-      ? this.clientIdentity : null;
-    const paneValues = paneMaterials(victim);
-    const remainingPaneSlots = new Set<string>();
-    for (const retained of this.state.tombstones) {
-      for (const candidate of paneMaterials(retained)) {
-        if (!candidate || typeof candidate !== "object") continue;
-        const pane = candidate as Record<string, unknown>;
-        if (Number.isSafeInteger(pane.paneId) && Number(pane.paneId) > 0) {
-          remainingPaneSlots.add(JSON.stringify([retained.surfaceId, String(pane.paneId)]));
-        }
-      }
-    }
-    const recorded = new Set<string>();
-    for (const candidate of paneValues) {
-      if (!candidate || typeof candidate !== "object") continue;
-      const pane = candidate as Record<string, unknown>;
-      if (!Number.isSafeInteger(pane.paneId) || Number(pane.paneId) < 1) continue;
-      const lineageId = typeof pane.paneLineageId === "string" &&
-        /^pl_[A-Za-z0-9._:-]{3,128}$/.test(pane.paneLineageId)
-        ? pane.paneLineageId : null;
-      const identity = {
-        lineageId,
-        paneId: String(pane.paneId),
-        surfaceId: victim.surfaceId,
-      };
-      const identityKey = paneIdentityKey(identity);
-      const paneSlotKey = JSON.stringify([victim.surfaceId, String(pane.paneId)]);
-      if (remainingPaneSlots.has(paneSlotKey) || recorded.has(identityKey)) continue;
-      recorded.add(identityKey);
-      const existingReservation = this.state.paneIdentityReservations.find((entry) =>
-        paneIdentityKey(entry) === identityKey);
-      const hasExactReleaseEvidence = lineageId !== null && clientId !== null && closeRevision !== null &&
-        Number.isSafeInteger(pane.paneLabel) && Number(pane.paneLabel) > 0 &&
-        Number.isSafeInteger(pane.allocationGeneration) && Number(pane.allocationGeneration) > 0;
-      if (!hasExactReleaseEvidence) {
-        if (!existingReservation) {
-          this.state.paneIdentityReservations.push({
-            ...identity,
-            tombstoneId: victim.tombstoneId,
-            tombstoneKind: victim.kind,
-          });
-        } else if (existingReservation.tombstoneId !== victim.tombstoneId ||
-            existingReservation.tombstoneKind !== victim.kind) {
-          throw new LocklessAuthorityError("internal_error", "Pane identity has conflicting unverified retention evidence");
-        }
-        // The ID stays unavailable, but incomplete legacy evidence is not
-        // terminal retirement and cannot reject a later exact restore.
-        continue;
-      }
-      // A prior unverified claim remains reserved until owner-verified
-      // migration; a later exact-looking tombstone cannot turn it into release proof.
-      if (existingReservation) continue;
-      const base = {
-        allocationGeneration: Number(pane.allocationGeneration),
-        clientId,
-        closeRevision,
-        lineageId: pane.paneLineageId,
-        paneId: String(pane.paneId),
-        paneLabel: Number(pane.paneLabel),
-        surfaceId: victim.surfaceId,
-        terminalRetirementRevision: terminalRevision,
-        tombstoneId: victim.tombstoneId,
-        tombstoneKind: victim.kind,
-      } as const;
-      const release: PersistentPaneRetirement = { ...base, releaseId: paneReleaseId(base) };
-      const existing = this.state.paneRetirementAudits.find((entry) =>
-        paneRetirementKey(entry) === paneRetirementKey(release));
-      if (existing && existing.releaseId !== release.releaseId) {
-        throw new LocklessAuthorityError("internal_error", "Pane retirement identity already has conflicting evidence");
-      }
-      if (!existing) this.state.paneRetirementAudits.push(clone(release));
-      if (!this.state.pendingPaneReleases.some((entry) => entry.releaseId === release.releaseId)) {
-        this.state.pendingPaneReleases.push(clone(release));
-      }
-    }
   }
 
   private assertTombstoneNotRetired(tombstone: PersistentTombstone): void {
@@ -1894,16 +1647,6 @@ export class LocklessClientAuthority {
     const combined = [...this.state.tombstones, ...clone(tombstones)].sort(
       (left, right) => left.closedSequence - right.closedSequence,
     );
-    if (
-      combined.length > this.state.limits.maxRetainedTombstones ||
-      combined.reduce((total, entry) => total + entry.bytes, 0) >
-        this.state.limits.maxRetainedTombstoneBytes
-    ) {
-      throw new LocklessAuthorityError(
-        "tombstone_capacity",
-        "Exact tombstone restore exceeds retained pool",
-      );
-    }
     this.state.tombstones = combined;
   }
 
@@ -1937,23 +1680,6 @@ export class LocklessClientAuthority {
   advanceSurfaceSetRevision(): number {
     this.state.surfaceSetRevision += 1;
     return this.state.surfaceSetRevision;
-  }
-
-  assertPaneCreationCapacity(
-    currentLivePaneCount: number,
-    requestedResultingCount: number,
-  ): void {
-    if (requestedResultingCount > this.state.limits.maxPanesPerSurface) {
-      throw new LocklessAuthorityError(
-        "pane_capacity",
-        "Pane-creating operation exceeds maxPanesPerSurface",
-        {
-          currentLivePaneCount,
-          maxPanesPerSurface: this.state.limits.maxPanesPerSurface,
-          requestedResultingCount,
-        },
-      );
-    }
   }
 
   allocatePaneIdentity(
@@ -2106,7 +1832,6 @@ export class LocklessClientAuthority {
         (scope.records.at(-1)?.sequence ?? 0) + 1,
       );
     }
-    refreshRetainedTombstoneBytes(this.state);
   }
 
   private allScopes(): PersistentConsumableScope[] {
@@ -2494,7 +2219,6 @@ export class LocklessClientAuthority {
       }
       this.dropFullyConsumedRecords(scope);
     }
-    refreshRetainedTombstoneBytes(this.state);
     const correlation = {
       clientIdentity: this.clientIdentity,
       controllerInstanceId: victim.controllerInstanceId,

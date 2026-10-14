@@ -149,7 +149,7 @@ async function centralFixture(registryIdentity: { allocatorId: string; fleetId: 
   };
 }
 
-test("registration cannot export a release from a lifecycle transaction that later rolls back", async () => {
+test("registration waits for lifecycle rollback without exporting uncommitted identity changes", async () => {
   const central = await centralFixture();
   const clientId = "a".repeat(64);
   const surfaceId = "sf_registry_release_race";
@@ -197,7 +197,7 @@ test("registration cannot export a release from a lifecycle transaction that lat
         },
         surfaceId,
       });
-      assert.equal(core.locklessAuthority.listPendingPaneReleases().length, 1);
+      assert.equal(core.locklessAuthority.listPendingPaneReleases().length, 0);
       releaseCandidateCreated();
       await lifecycleFailure;
       throw new Error("simulated_lifecycle_persistence_failure");

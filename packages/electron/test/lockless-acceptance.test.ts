@@ -9,7 +9,6 @@ import {
   LocklessAuthorityError,
   LocklessClientAuthority,
   createEmptyLocklessClientState,
-  exactDurableBytes,
   type AuthorityEvent,
 } from "../src/lockless-client-authority.js";
 import { SurfaceCore } from "../src/surface-core.js";
@@ -306,40 +305,6 @@ test("lockless lifecycle list replaces the renderer bootstrap pane before exposi
   });
 });
 
-test("AC-CAP-03 AC-SURF-06: SURF-12 is exact and rejects a one-byte-short recoverable envelope", () => {
-  const exact = acceptanceLimits({
-    maxAdmittedControllerEntries: 3,
-    maxPaneAnnotationRestoreBytes: 601,
-    maxPaneConsumableBytes: 311,
-    maxPaneRecoverableStateBytes: 701,
-    maxPanesPerSurface: 2,
-    maxRetainedTombstones: 3,
-    maxSurfaceConsumableBytes: 401,
-    maxSurfaceRecoverableBaseBytes: 503,
-    maxConsumableCursorStateBytesPerScope: 37,
-  });
-  const expected =
-    exact.maxSurfaceRecoverableBaseBytes +
-    exact.maxSurfaceConsumableBytes +
-    exact.maxAdmittedControllerEntries *
-      exact.maxConsumableCursorStateBytesPerScope +
-    (exact.maxPanesPerSurface + exact.maxRetainedTombstones) *
-      (
-        exact.maxPaneRecoverableStateBytes +
-        exact.maxPaneConsumableBytes +
-        exact.maxAdmittedControllerEntries *
-          exact.maxConsumableCursorStateBytesPerScope
-      );
-  assert.equal(exact.maxRecoverableSurfaceBytes, expected);
-  assert.doesNotThrow(() => assertLocklessCapacityLimits(exact));
-  assert.throws(
-    () => assertLocklessCapacityLimits({
-      ...exact,
-      maxRecoverableSurfaceBytes: expected - 1,
-    }),
-    /invalid_lockless_limit:recoverable_surface_envelope/,
-  );
-});
 
 test("AC-HIST-01..05: production SurfaceCore appends mixed-controller history, restores entry state, truncates Forward, and applies cross-controller LRU", () => {
   const core = coreWithLimits();
@@ -547,7 +512,7 @@ test("AC-TOPO-01 AC-TOPO-02 AC-TOPO-03 AC-TOPO-05 AC-TOPO-06 AC-OPS-02: stale to
   });
 });
 
-test("AC-CAP-01 AC-CLOSE-01..08: P/T conservation permits exact restore over P and stale/invalid failures preserve tombstones atomically", async () => {
+test("close and restore preserve identity; stale and invalid placement preserve tombstones atomically", async () => {
   const core = coreWithLimits(acceptanceLimits({
     maxPanesPerSurface: 2,
     maxRetainedTombstones: 3,
@@ -643,62 +608,34 @@ test("AC-CAP-01 AC-CLOSE-01..08: P/T conservation permits exact restore over P a
       assert.equal(core.activePaneIds(surface.surfaceId).length, 3);
       assert.equal(core.locklessAuthority.listTombstones("pane").length, 0);
 
-      const refusedCreation = await request(socket, "pane.split", {
+      const nextCreation = await request(socket, "pane.split", {
         count: 2,
         direction: "horizontal",
         expectedTopologyRevision: restored.payload.topologyRevision,
         paneId: rootPaneId,
         surfaceId: surface.surfaceId,
       });
-      assert.equal(refusedCreation.ok, false);
-      assert.equal(refusedCreation.error.code, "pane_capacity");
-      assert.equal(core.activePaneIds(surface.surfaceId).length, 3);
+      assert.equal(nextCreation.ok, true, JSON.stringify(nextCreation));
+      assert.equal(core.activePaneIds(surface.surfaceId).length, 4);
+      assert.equal(new Set(core.activePaneIds(surface.surfaceId)).size, 4);
     } finally {
       socket.close();
     }
   });
 });
 
-test("AC-CLOSE-06 AC-CLOSE-09: retained tombstones report ordered reclamation", () => {
-  const limits = acceptanceLimits({
-    maxRetainedTombstones: 2,
-  });
-  const target = new LocklessClientAuthority(
-    createEmptyLocklessClientState(limits),
-  );
-  const events: AuthorityEvent[] = [];
-  target.subscribe((event) => events.push(event));
-  const first = target.createTombstone({
-    kind: "pane",
-    payload: { pane: { paneId: 1 } },
-    surfaceId: "surface-a",
-  });
-  const second = target.createTombstone({
-    kind: "pane",
-    payload: { pane: { paneId: 2 } },
-    surfaceId: "surface-a",
-  });
-  target.createTombstone({
-    kind: "pane",
-    payload: { pane: { paneId: 3 } },
-    surfaceId: "surface-a",
-  });
-  assert.deepEqual(
-    target.listTombstones("pane").map((entry) => entry.tombstoneId),
-    [second.tombstoneId, target.listTombstones("pane")[1]!.tombstoneId],
-  );
-  const reclaimed = events.find(
-    (event) =>
-      event.type === "event.tombstone_reclaimed" &&
-      event.tombstoneId === first.tombstoneId,
-  );
-  assert(reclaimed && reclaimed.type === "event.tombstone_reclaimed");
-  assert.equal(reclaimed.reason, "count_capacity");
-  assert.equal(reclaimed.surfaceId, "surface-a");
-  assert.equal(reclaimed.maxRetainedTombstones, 2);
-  assert.equal(reclaimed.bytes, first.bytes);
+test("closed panes remain recoverable and reserved beyond historical retention counts", () => {
+  const target = new LocklessClientAuthority(createEmptyLocklessClientState(
+    acceptanceLimits({ maxRetainedTombstones: 2 })));
+  const closed = [1, 2, 3].map((paneId) => target.createTombstone({
+    kind: "pane", payload: { pane: { paneId } }, surfaceId: "surface-a",
+  }));
+  assert.deepEqual(target.listTombstones(), closed);
+  assert.deepEqual(target.retainedPaneIds("surface-a"), [1, 2, 3]);
+  assert.deepEqual(target.listPendingPaneReleases(), []);
+  assert.deepEqual(target.restoreTombstone(closed[0]!.tombstoneId, "pane"), closed[0]);
+  assert.deepEqual(target.listTombstones(), closed.slice(1));
 });
-
 
 test("global tombstone lifecycle seam serializes concurrent cross-surface pane closes", async () => {
   const core = coreWithLimits(acceptanceLimits({
@@ -776,7 +713,7 @@ test("global tombstone lifecycle seam serializes concurrent cross-surface pane c
         ordered[1]!.response.payload.closedSequence,
         ordered[0]!.response.payload.closedSequence + 1,
       );
-      const reclaimed = await request(
+      const earlier = await request(
         ordered[0]!.socket,
         "pane.restore",
         {
@@ -788,8 +725,7 @@ test("global tombstone lifecycle seam serializes concurrent cross-surface pane c
           tombstoneId: ordered[0]!.response.payload.tombstoneId,
         },
       );
-      assert.equal(reclaimed.ok, false);
-      assert.equal(reclaimed.error.code, "tombstone_not_found");
+      assert.equal(earlier.ok, true, JSON.stringify(earlier));
       const retained = await request(
         ordered[1]!.socket,
         "pane.restore",

@@ -869,7 +869,6 @@ export class SurfaceWsServer {
     const result = await this.core.locklessAuthority.transactionAsync(
       async () => {
         const committed = await this.runLifecycleTransaction(() => {
-          this.core.locklessAuthority.assertPaneCreationCapacity(0, 1);
           const surface = this.core.createLocklessSurface(
             "Surf Ace",
             this.viewportProvider(),
@@ -2423,7 +2422,6 @@ export class SurfaceWsServer {
               surfaceId: surface.surfaceId,
             })),
           );
-          this.core.locklessAuthority.assertPaneCreationCapacity(0, 1);
           const surface = this.core.createLocklessSurface(
             "Surf Ace",
             this.viewportProvider(),
@@ -2678,12 +2676,6 @@ export class SurfaceWsServer {
             request.payload.expectedTopologyRevision,
             Number(topology.topologyRevision),
             topology,
-          );
-          const currentCount = topology.panes.length;
-          const prospectiveCount = currentCount - 1 + request.payload.count;
-          this.core.locklessAuthority.assertPaneCreationCapacity(
-            currentCount,
-            prospectiveCount,
           );
           const newPaneIds: number[] = [];
           const newPaneLabels: number[] = [];
@@ -3084,10 +3076,6 @@ export class SurfaceWsServer {
           { removedPaneIds: removed },
         );
       }
-      this.core.locklessAuthority.assertPaneCreationCapacity(
-        existing.size,
-        resultingIds.size,
-      );
       for (const [paneId, entry] of created) {
         const allocation = await claimPaneLabelOrUnnumbered(
           this.claimPaneLabel, surfaceId, paneId, entry.paneLineageId,
@@ -4317,8 +4305,6 @@ export class SurfaceWsServer {
       let hostApplied = false;
       let overlayRequest: CompositorControlRequest | null = null;
       let overlayApplied = false;
-      const rollbackRecoverable =
-        this.core.captureSurfaceMutationRollback(surfaceId);
       try {
         hostRequest = requestForCompositor(materialization);
         preflightStatus = await sendCompositorControl(this.compositorSocketPath, { type: "get_status" });
@@ -4424,13 +4410,6 @@ export class SurfaceWsServer {
           v: 1,
         };
       } catch (error) {
-        const capacityError =
-          error instanceof LocklessAuthorityError &&
-          (error.code === "surface_state_capacity" ||
-            error.code === "pane_state_capacity");
-        if (capacityError) {
-          rollbackRecoverable();
-        }
         const releasedAfterFailure = hostApplied
           ? await this.releaseNativePaneAfterFailedHost(surfaceId, materialization)
           : false;
@@ -4453,7 +4432,6 @@ export class SurfaceWsServer {
             target_id: request.payload.targetId,
           },
         );
-        if (capacityError) throw error;
         const payload: TargetApplyResponse["payload"] = {
           appliedAt,
           errorCode: "materialization_failed",
