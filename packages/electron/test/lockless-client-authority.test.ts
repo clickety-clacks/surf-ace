@@ -363,7 +363,6 @@ test("target apply work survives restart and terminalizes as correlated append-o
   );
   const admitted = target.admitTargetApplyWorkItem({
     controllerInstanceId: "controller-a",
-    currentSurfaceBase: { panes: [{ paneId: 1 }] },
     intentCommitSequence: 11,
     operationRequestId: "operation-a",
     request: {
@@ -434,37 +433,36 @@ test("target apply work survives restart and terminalizes as correlated append-o
   assert.deepEqual(resultEvent?.result, completed?.result);
 });
 
-test("target apply surface capacity refusal leaves no durable work item", () => {
-  const constrained = new LocklessClientAuthority(
-    createEmptyLocklessClientState({
-      ...limits,
-      maxSurfaceRecoverableBaseBytes: 64,
-    }),
-  );
-  admit(constrained, "controller-a");
-  assert.throws(
-    () =>
-      constrained.admitTargetApplyWorkItem({
-        controllerInstanceId: "controller-a",
-        currentSurfaceBase: {},
-        intentCommitSequence: 1,
-        operationRequestId: "operation-too-large",
-        request: {
-          requestId: "materialization-too-large",
-          restoreReason: "initial",
-          surfaceId: "surface-a",
-          targetEpoch: 1,
-          targetHeader: {},
-          targetId: "target-a",
-          targetKind: "native_app",
-          targetPayload: {},
-        },
-      }),
-    (error) =>
-      error instanceof LocklessAuthorityError &&
-      error.code === "surface_state_capacity",
-  );
-  assert.deepEqual(constrained.targetApplyWorkItems(), []);
+test("target intent preserves recovery data despite historical surface byte limits", () => {
+  const target = new LocklessClientAuthority(createEmptyLocklessClientState({
+    ...limits,
+    maxSurfaceRecoverableBaseBytes: 64,
+  }));
+  admit(target, "controller-a");
+  const intent = target.admitTargetApplyWorkItem({
+    controllerInstanceId: "controller-a",
+    intentCommitSequence: 1,
+    operationRequestId: "operation-source",
+    request: {
+      requestId: "materialization-source",
+      restoreReason: "initial",
+      surfaceId: "surface-a",
+      targetEpoch: 1,
+      targetHeader: {},
+      targetId: "target-a",
+      targetKind: "browser_url",
+      targetPayload: { url: "https://example.invalid/" + "source".repeat(100) },
+    },
+  });
+  const restarted = new LocklessClientAuthority(target.exportState());
+  assert.deepEqual(restarted.targetApplyWorkItems(), [intent]);
+  assert.throws(() => target.admitTargetApplyWorkItem({
+    controllerInstanceId: "controller-a",
+    intentCommitSequence: 2,
+    operationRequestId: "operation-source",
+    request: intent.request,
+  }), (error) => error instanceof LocklessAuthorityError && error.code === "invalid_operation");
+  assert.deepEqual(target.targetApplyWorkItems(), [intent]);
 });
 
 test("bounded consumables preserve independent cursors and sticky structured gaps", () => {

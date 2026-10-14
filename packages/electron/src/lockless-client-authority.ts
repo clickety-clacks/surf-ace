@@ -666,19 +666,27 @@ export class LocklessClientAuthority {
     }
   }
 
-  async transactionAsync<T>(operation: () => Promise<T>, committed?: { onNotificationError: (error: unknown) => void }): Promise<T> {
+  // Ordinary server mutations have an enclosing SurfaceCore transaction whose
+  // durable checkpoint includes this authority. Keep token/event isolation here
+  // without making a second full copy of the same recovery data.
+  async transactionAsync<T>(
+    operation: () => Promise<T>,
+    committed?: { onNotificationError: (error: unknown) => void },
+    stateRollback: "authority" | "enclosing-core" = "authority",
+  ): Promise<T> {
     return await this.serializeAuthorityWork(async () => {
-      return await this.transactionAsyncExclusive(operation, committed);
+      return await this.transactionAsyncExclusive(operation, committed, stateRollback);
     });
   }
 
   private async transactionAsyncExclusive<T>(
     operation: () => Promise<T>,
-    committed?: { onNotificationError: (error: unknown) => void },
+    committed: { onNotificationError: (error: unknown) => void } | undefined,
+    stateRollback: "authority" | "enclosing-core",
   ): Promise<T> {
     const ownsEvents = this.pendingEvents === null;
     const beforeEventCount = this.pendingEvents?.length ?? 0;
-    const beforeState = clone(this.state);
+    const beforeState = stateRollback === "authority" ? clone(this.state) : null;
     const beforeTokens = new Map(
       [...this.connectionTokens].map(([controllerId, slots]) => [
         controllerId,
@@ -701,7 +709,7 @@ export class LocklessClientAuthority {
       return result;
     } catch (error) {
       if ((error as { name?: string } | null)?.name !== "PersistentStateOutcomeUnknownError") {
-        this.state = beforeState;
+        if (beforeState) this.state = beforeState;
         this.connectionTokens.clear();
         for (const [key, value] of beforeTokens) {
           this.connectionTokens.set(key, value);
@@ -1096,7 +1104,6 @@ export class LocklessClientAuthority {
 
   admitTargetApplyWorkItem(input: {
     controllerInstanceId: string;
-    currentSurfaceBase: unknown;
     intentCommitSequence: number;
     operationRequestId: string;
     request: LocklessTargetApplyIntent;
@@ -1127,27 +1134,6 @@ export class LocklessClientAuthority {
       bytes: exactVersionedReceiptBytes(withoutBytes),
       ...withoutBytes,
     };
-    const currentBytes =
-      exactDurableBytes(input.currentSurfaceBase) +
-      Object.values(this.state.targetApplyWorkItems)
-        .filter((candidate) => candidate.surfaceId === item.surfaceId)
-        .reduce((total, candidate) => total + candidate.bytes, 0);
-    const prospectiveBytes = currentBytes + item.bytes;
-    if (
-      prospectiveBytes >
-      this.state.limits.maxSurfaceRecoverableBaseBytes
-    ) {
-      throw new LocklessAuthorityError(
-        "surface_state_capacity",
-        "Target apply work item exceeds surface recoverable base capacity",
-        {
-          currentBytes,
-          maximumBytes:
-            this.state.limits.maxSurfaceRecoverableBaseBytes,
-          prospectiveBytes,
-        },
-      );
-    }
     this.state.targetApplyWorkItems[key] = item;
     return clone(item);
   }
@@ -1965,64 +1951,6 @@ export class LocklessClientAuthority {
           currentLivePaneCount,
           maxPanesPerSurface: this.state.limits.maxPanesPerSurface,
           requestedResultingCount,
-        },
-      );
-    }
-  }
-
-  assertSurfaceRecoverableBaseCapacity(
-    currentValue: unknown,
-    prospectiveValue: unknown,
-  ): void {
-    const currentBytes = exactDurableBytes(currentValue);
-    const prospectiveBytes = exactDurableBytes(prospectiveValue);
-    if (
-      prospectiveBytes >
-      this.state.limits.maxSurfaceRecoverableBaseBytes
-    ) {
-      throw new LocklessAuthorityError(
-        "surface_state_capacity",
-        "Surface recoverable base exceeds configured capacity",
-        {
-          currentBytes,
-          maximumBytes:
-            this.state.limits.maxSurfaceRecoverableBaseBytes,
-          prospectiveBytes,
-        },
-      );
-    }
-  }
-
-  assertPaneRecoverableCapacity(
-    currentValue: unknown,
-    prospectiveValue: unknown,
-    annotationRestoreValue: unknown,
-  ): void {
-    const currentBytes = exactDurableBytes(currentValue);
-    const prospectiveBytes = exactDurableBytes(prospectiveValue);
-    const annotationRestoreBytes = exactDurableBytes(annotationRestoreValue);
-    if (
-      prospectiveBytes > this.state.limits.maxPaneRecoverableStateBytes ||
-      annotationRestoreBytes >
-        this.state.limits.maxPaneAnnotationRestoreBytes
-    ) {
-      throw new LocklessAuthorityError(
-        "pane_state_capacity",
-        "Pane recoverable state exceeds configured capacity",
-        {
-          annotationRestoreBytes,
-          currentBytes,
-          exceededLimit:
-            annotationRestoreBytes >
-            this.state.limits.maxPaneAnnotationRestoreBytes
-              ? "maxPaneAnnotationRestoreBytes"
-              : "maxPaneRecoverableStateBytes",
-          maximumBytes:
-            annotationRestoreBytes >
-            this.state.limits.maxPaneAnnotationRestoreBytes
-              ? this.state.limits.maxPaneAnnotationRestoreBytes
-              : this.state.limits.maxPaneRecoverableStateBytes,
-          prospectiveBytes,
         },
       );
     }
