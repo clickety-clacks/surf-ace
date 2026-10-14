@@ -188,6 +188,7 @@ type NativePaneOverlaySetRequest = Omit<NativePaneOverlaySet, "regions"> & {
 };
 
 export type CompositorControlRequest =
+  | import("./pane-presentation.js").PanePresentationControlRequest
   | CompositorAppBindingRequest
   | {
     type: "get_status";

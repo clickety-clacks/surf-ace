@@ -76,6 +76,9 @@ import {
 } from "./runtime-identity.js";
 import { isAddressInUse, isPortBoundOnIpv6Any } from "./port-selection.js";
 import { SurfaceWsServer } from "./ws-server.js";
+import { PANE_PRESENTATION_ENABLED } from "./pane-presentation-policy.js";
+import { PanePresentationCoordinator } from "./pane-presentation-coordinator.js";
+import { NativePresentationWindowBinding, panePresentationWindowRoute } from "./pane-presentation.js";
 import { PersistenceWriteReadiness } from "./persistence-write-readiness.js";
 import { AnnotationRegistryPublisher } from "./annotation-registry-publisher.js";
 import { AnnotationSourceCoordinator } from "./annotation-source-coordinator.js";
@@ -175,6 +178,15 @@ function configurePlatformWebAuthn(): void {
 configurePlatformWebAuthn();
 
 const windows = new Map<string, BrowserWindow>();
+const nativePresentationWindowBinding = new NativePresentationWindowBinding(
+  process.pid, process.env.SURF_ACE_COMPOSITOR_LAUNCH_TOKEN,
+);
+let panePresentation: PanePresentationCoordinator | null = null;
+function reconcilePresentationWindowOwnership(): void {
+  const owned = resolveCompositorControlSocketPath()
+    ? [...windows.entries()].filter(([, window]) => !window.isDestroyed()).map(([surfaceId]) => surfaceId) : null;
+  void panePresentation?.setOwnedWindows(owned).catch((error) => clientWarn("pane_presentation_ownership_retirement_failed", errorDiagnosticFields(error)));
+}
 // Remains disabled until qualified adapter/WS integration and independent review.
 const panePaintDiagnosticEnabled = false;
 const paintWindowIncarnations = new WeakMap<BrowserWindow, string>();
@@ -1461,6 +1473,8 @@ async function createWindowForSurface(surfaceId: string): Promise<BrowserWindow>
   }
 
   windows.set(surfaceId, window);
+  nativePresentationWindowBinding.recordCreatedWindow(`electron-window:${window.id}`, surfaceId);
+  reconcilePresentationWindowOwnership();
   paintWindowIncarnations.set(window, randomBytes(16).toString("hex"));
   if (panePaintDiagnosticEnabled) {
     const paintHost = window.webContents;
@@ -1528,6 +1542,7 @@ async function createWindowForSurface(surfaceId: string): Promise<BrowserWindow>
     const programmaticClose = programmaticSurfaceCloses.delete(surfaceId);
     if (programmaticClose) {
       windows.delete(surfaceId);
+      reconcilePresentationWindowOwnership();
       pendingWindowStates.delete(surfaceId);
       readyWindows.delete(surfaceId);
       setTimeout(
@@ -1547,6 +1562,7 @@ async function createWindowForSurface(surfaceId: string): Promise<BrowserWindow>
       window_label: core.surfaceWindowLabel(surfaceId),
     });
     windows.delete(surfaceId);
+    reconcilePresentationWindowOwnership();
     pendingWindowStates.delete(surfaceId);
     readyWindows.delete(surfaceId);
     if (!isQuitting) {
@@ -1781,6 +1797,44 @@ function installWebAuthnAccountSelection(): void {
 }
 
 function installIpc(): void {
+  const coordinator = new PanePresentationCoordinator(core, (surfaceId) => {
+    const socket = resolveCompositorControlSocketPath();
+    if (!socket) return null;
+    // The current compositor transport binds one main-app host. Never infer
+    // per-window coordinates from a shared socket when multiple windows exist.
+    const owned = [...windows.entries()].filter(([, window]) => !window.isDestroyed());
+    if (owned.length !== 1 || owned[0]![0] !== surfaceId) {
+      throw new Error("independently routed compositor window host is unavailable");
+    }
+    return (request) => sendCompositorControl(socket, request);
+  }, (surfaceId, error) => clientWarn("pane_presentation_retirement_failed", {
+    surface_id: surfaceId, ...errorDiagnosticFields(error),
+  }), async (surfaceId, send) => {
+    const response = await send({ type: "get_status" });
+    const owned = [...windows.entries()].filter(([, window]) => !window.isDestroyed());
+    if (owned.length !== 1 || owned[0]![0] !== surfaceId) {
+      throw new Error("compositor host window ownership changed");
+    }
+    const window = owned[0]![1];
+    const bounds = window.getContentBounds();
+    const viewport = core.getRendererWindowState(surfaceId).viewport;
+    if (bounds.width !== viewport.width || bounds.height !== viewport.height) {
+      throw new Error("renderer window viewport does not match current native content bounds");
+    }
+    nativePresentationWindowBinding.assertObservedOwner(response, `electron-window:${window.id}`, surfaceId);
+    return panePresentationWindowRoute(response, `electron-window:${window.id}`, surfaceId, viewport);
+  }, (notice) => {
+    const window = windows.get(notice.surfaceId);
+    if (window && !window.isDestroyed()) window.webContents.send("surface:pane-presentation-ownership", notice);
+  });
+  panePresentation = coordinator;
+  reconcilePresentationWindowOwnership();
+  ipcMain.handle("surface:pane-presentation", async (event, payload: unknown) => {
+    if (!PANE_PRESENTATION_ENABLED) return { ok: false, error: "pane presentation is disabled" };
+    const surfaceId = surfaceIdForSender(event.sender);
+    if (!surfaceId) return { ok: false, error: "renderer surface is unavailable" };
+    return coordinator.applyRendererOutcome(surfaceId, payload);
+  });
   ipcMain.on("surface:pane-paint-reply", (event, reply: unknown) => {
     if (!panePaintDiagnosticEnabled || !event.senderFrame || !surfaceIdForSender(event.sender)) return;
     paintRendererReads.accept(event.sender, event.senderFrame, reply);
@@ -1927,7 +1981,7 @@ function installIpc(): void {
       if ("viewport" in payload) {
         snapshot.viewport = payload.viewport as never;
       }
-      core.updatePaneSnapshot(surfaceId, Number(payload.paneId), snapshot);
+      core.updatePaneSnapshot(surfaceId, Number(payload.paneId), snapshot, payload.displayOnly === true);
     } catch {
       // Renderer snapshot updates are best-effort; stale pane ids should not crash the app.
     }

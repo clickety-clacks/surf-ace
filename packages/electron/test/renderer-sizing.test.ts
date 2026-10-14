@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { runInNewContext } from "node:vm";
 
 function rendererSourceUrl(relativePath: string): URL {
   const candidates = [
@@ -540,8 +541,30 @@ test("scrolling collapses toolbar into a bottom-left dock icon that restores con
   assert.match(source.slice(restoreIndex, ensureIndex), /view\.toolbarCollapsed = false/);
   assert.match(source.slice(ensureIndex, buildIndex), /dockEl\.className = "toolbar-dock control-button icon-button"/);
   assert.match(source.slice(ensureIndex, buildIndex), /restorePaneToolbar\(view\)/);
-  assert.match(source.slice(buildIndex), /view\.controlsEl\.classList\.toggle\("collapsed", view\.toolbarCollapsed\)/);
-  assert.match(source.slice(buildIndex), /view\.dockEl\.hidden = !view\.toolbarCollapsed/);
+  // Execute the production chrome projection, rather than requiring the old
+  // spelling that hid Restore whenever a toolbar had previously collapsed.
+  const contentIndex = source.indexOf("  const hasPushedContent", buildIndex);
+  assert.ok(contentIndex > buildIndex);
+  const projection = source.slice(buildIndex, contentIndex)
+    .replace("(view: PaneView, pane: RendererPaneState): void", "(view, pane)") + "}";
+  for (const scenario of [
+    { collapsed: true, selected: null, pending: 0, blocked: false, reachable: false },
+    { collapsed: false, selected: null, pending: 0, blocked: false, reachable: true },
+    { collapsed: true, selected: 2, pending: 0, blocked: false, reachable: true },
+    { collapsed: true, selected: null, pending: 1, blocked: false, reachable: true },
+    { collapsed: true, selected: null, pending: 0, blocked: true, reachable: true },
+  ]) {
+    let collapsed: boolean | undefined;
+    const view = { paneId: 2, toolbarCollapsed: scenario.collapsed,
+      controlsEl: { replaceChildren() {}, classList: { toggle(name: string, value: boolean) {
+        assert.equal(name, "collapsed"); collapsed = value;
+      } } }, dockEl: { hidden: true, setAttribute() {} } };
+    runInNewContext(projection + "\nbuildControls(view, {});", { view,
+      poppedOutPaneId: scenario.selected, panePresentationTransitionsPending: scenario.pending,
+      panePresentationAuthorityBlocked: scenario.blocked });
+    assert.equal(collapsed, !scenario.reachable, JSON.stringify(scenario));
+    assert.equal(view.dockEl.hidden, scenario.reachable, JSON.stringify(scenario));
+  }
   assert.match(styles, /\.toolbar-dock\s*\{[\s\S]*left:\s*22px;[\s\S]*bottom:\s*22px;/);
   assert.match(styles, /\.control-cluster\.collapsed\s*\{[\s\S]*pointer-events:\s*none;/);
 });
@@ -596,7 +619,32 @@ test("html content is loaded through the browser webview surface", async () => {
   assert.match(source.slice(browserUrlIndex), /allowPopups: true/);
   assert.doesNotMatch(source.slice(htmlIndex, browserUrlIndex), /allowPopups: true/);
   assert.match(source, /const blockStaticHtmlNavigation = \(event: Event\) =>[\s\S]*sendNavigationIntent\(view, pane\.paneId, nextUrl\)/);
-  assert.match(source, /window\.surfAce\.reportSnapshot\(\{\s*bounds: paneBounds\(view\),\s*\.\.\.paneSnapshotGeometryIdentity\(\),\s*paneId: view\.paneId,\s*\}\)/);
+  const wrapperIndex = source.indexOf("function reportSnapshot(");
+  const wrapperEnd = source.indexOf("/** Synchronous fresh DOM association", wrapperIndex);
+  const snapshotIndex = source.indexOf("function reportPaneSnapshot(");
+  const snapshotEnd = source.indexOf("function reportAllPaneSnapshots", snapshotIndex);
+  assert.ok(wrapperIndex >= 0 && wrapperEnd > wrapperIndex && snapshotEnd > snapshotIndex);
+  const snapshotProgram = source.slice(wrapperIndex, wrapperEnd)
+    .replace("(payload: Record<string, unknown>): void", "(payload)") +
+    source.slice(snapshotIndex, snapshotEnd).replace("(view: PaneView): void", "(view)");
+  const snapshots: Record<string, unknown>[] = [];
+  const bounds = { x: 10, y: 20, width: 400, height: 300 };
+  const identity = { surfaceEpoch: "epoch", topologyRevision: 4, geometryRevision: 8 };
+  const context = { window: { surfAce: { reportSnapshot(payload: Record<string, unknown>) { snapshots.push(payload); } } },
+    poppedOutPaneId: 2, resizeGesture: null, resizeCommitPending: false,
+    panePresentationTransitionsPending: 0, panePresentationAuthorityBlocked: false,
+    currentPaneFrameElement: () => ({ matches: () => true }), paneBounds: () => bounds,
+    paneSnapshotGeometryIdentity: () => identity };
+  runInNewContext(snapshotProgram + "\nreportPaneSnapshot({paneId:2});reportPaneSnapshot({paneId:1});", context);
+  assert.deepEqual(JSON.parse(JSON.stringify(snapshots)), [
+    { bounds, ...identity, paneId: 2, displayOnly: true },
+    { bounds, ...identity, paneId: 1, displayOnly: false },
+  ], "HTML snapshots retain geometry and mark only the expanded pane display-only");
+  for (const blocked of [{ resizeCommitPending: true }, { panePresentationTransitionsPending: 1 },
+    { panePresentationAuthorityBlocked: true }, { resizeGesture: {} }]) {
+    runInNewContext(snapshotProgram + "\nreportPaneSnapshot({paneId:2});", { ...context, ...blocked });
+    assert.equal(snapshots.length, 2, "provisional/uncertain presentation must not report authoritative geometry");
+  }
   assert.match(source, /webview\.addEventListener\("ipc-message", onIpcMessage\)/);
   assert.match(guestPreload, /ipcRenderer\.sendToHost\("surf-ace-content", payload\)/);
   assert.match(guestPreload, /Number\.isSafeInteger\(value\.sequence\)[\s\S]*value\.sequence as number\) < 1/);
@@ -657,14 +705,20 @@ test("browser_url webviews preserve Electron's flex display for the OOPIF child"
 });
 
 test("split flex children do not force every pane to full window height", async () => {
+  const source = await rendererSource();
   const styles = await rendererStyles();
+  assert.match(source, /view\.slotEl\.className = "pane-slot pane-layout-slot"/);
+  assert.match(source, /view\.slotEl\.style\.flexGrow = String\(layoutWeight\(node\)\)/);
+  assert.match(source, /return view\.slotEl;/);
   const splitChildRule = styles.match(
-    /\.layout-split > \.pane-shell,\n\.layout-split > \.layout-split\s*\{(?<body>[\s\S]*?)\n\}/,
+    /\.layout-split > \.pane-slot,\n\.layout-split > \.layout-split\s*\{(?<body>[\s\S]*?)\n\}/,
   )?.groups?.body ?? "";
 
   assert.match(splitChildRule, /flex:\s*1 1 0;/);
   assert.match(splitChildRule, /height:\s*auto;/);
   assert.match(splitChildRule, /min-height:\s*0;/);
+  assert.match(splitChildRule, /min-width:\s*0;/);
+  assert.match(splitChildRule, /width:\s*auto;/);
 });
 
 test("renderer chrome keeps entry-bound composite provenance in navigation chrome", async () => {

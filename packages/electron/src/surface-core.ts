@@ -280,6 +280,7 @@ type PersistentPaneRecord = {
 };
 
 export type RendererPaneState = {
+  paneLineageId: string;
   activeKeyboardPane: boolean;
   annotationBorderVisible: boolean;
   canGoBack: boolean;
@@ -676,6 +677,12 @@ function assertAdmissionAttemptLedgerWithinCapacity(
 }
 
 export class SurfaceCore {
+  // Presentation is local to this incarnation and deliberately outside SurfaceState.
+  private readonly panePresentations = new Map<string, {
+    paneId: number;
+    paneLineageId: string;
+    snapshot: PaneSnapshot;
+  }>();
   readonly locklessAuthority: LocklessClientAuthority;
   // Admission evidence is a write-ahead ledger. Transaction rollback restores
   // surface and authority state, but must never erase or rewind these records.
@@ -1726,6 +1733,7 @@ export class SurfaceCore {
       return;
     }
     this.surfaces.delete(surfaceId);
+    this.panePresentations.delete(surfaceId);
     this.emit({ surfaceId, type: "surface-removed" });
   }
 
@@ -1796,6 +1804,7 @@ export class SurfaceCore {
         const pane = surface.panes.get(paneId)!;
         const current = currentEntry(pane);
         return {
+          paneLineageId: pane.paneLineageId,
           activeKeyboardPane: surface.activeKeyboardPaneId === paneId,
           annotationBorderVisible: pane.annotating,
           canGoBack: pane.historyIndex > 0,
@@ -1941,7 +1950,7 @@ export class SurfaceCore {
     if (activePaneId === null) {
       return null;
     }
-    const paneGeometry = resolvePaneGeometrySnapshots(surface);
+    const paneGeometry = this.resolveDisplayedPaneGeometrySnapshots(surface);
     const active = paneGeometry.get(activePaneId)?.paneFrame;
     if (!active) {
       return null;
@@ -2059,7 +2068,7 @@ export class SurfaceCore {
 
   panesList(surfaceId: string): PanesListResponse["payload"] {
     const surface = this.getSurface(surfaceId);
-    const paneGeometry = resolvePaneGeometrySnapshots(surface);
+    const paneGeometry = this.resolveDisplayedPaneGeometrySnapshots(surface);
     return {
       panes: surface.paneOrder.map((paneId) => {
         const pane = surface.panes.get(paneId)!;
@@ -2094,7 +2103,7 @@ export class SurfaceCore {
     expectedIdentity: ResolvedPaneGeometryIdentity = this.resolvedPaneGeometryIdentity(surfaceId),
   ): number[] {
     const surface = this.getSurface(surfaceId);
-    const paneGeometry = resolvePaneGeometrySnapshots(surface);
+    const paneGeometry = this.resolveDisplayedPaneGeometrySnapshots(surface);
     const seen = new Set<number>();
     const missing: number[] = [];
     for (const paneId of paneIds) {
@@ -2303,7 +2312,7 @@ export class SurfaceCore {
 
   markNativePaneWindowGroups(surfaceId: string, groups: NativePaneWindowGroupStatus[]): void {
     const surface = this.getSurface(surfaceId);
-    const paneGeometry = resolvePaneGeometrySnapshots(surface);
+    const paneGeometry = this.resolveDisplayedPaneGeometrySnapshots(surface);
     let didChange = false;
     const trustedGroups = new Map<number, NativePaneWindowGroupStatus>();
     for (const group of groups) {
@@ -3719,10 +3728,26 @@ export class SurfaceCore {
     surfaceId: string,
     paneId: number,
     snapshot: Partial<PaneSnapshot>,
+    displayOnly = false,
   ): void {
     const surface = this.getSurface(surfaceId);
     const pane = this.requirePane(surfaceId, paneId);
     if (!pane) {
+      return;
+    }
+    // Display reports from an expanded pane must not replace its durable tile
+    // or tiled viewport. Geometry changes require the acknowledged presentation
+    // path; ordinary snapshot reports may refresh only ephemeral viewport data.
+    const presentation = this.currentPanePresentation(surface);
+    if (displayOnly && presentation?.paneId !== paneId) return;
+    if (presentation?.paneId === paneId) {
+      const identity = snapshotGeometryIdentity(snapshot);
+      if (!identity || !sameGeometryIdentity(identity, this.resolvedPaneGeometryIdentity(surfaceId))) return;
+      const updated = structuredClone(presentation);
+      if (snapshot.viewport !== undefined) updated.snapshot.viewport = snapshot.viewport;
+      this.validatePanePresentation(surfaceId, updated);
+      this.panePresentations.set(surfaceId, updated);
+      if (snapshot.selection !== undefined) pane.snapshot.selection = snapshot.selection;
       return;
     }
     const previousBounds = pane.snapshot.bounds;
@@ -3759,21 +3784,92 @@ export class SurfaceCore {
     }
   }
 
+  setPanePresentation(
+    surfaceId: string,
+    presentation: {
+      paneId: number;
+      paneLineageId: string;
+      snapshot: PaneSnapshot;
+    } | null,
+  ): void {
+    if (presentation === null) {
+      this.panePresentations.delete(surfaceId);
+      return;
+    }
+    this.validatePanePresentation(surfaceId, presentation);
+    this.panePresentations.set(surfaceId, structuredClone(presentation));
+  }
+
+  validatePanePresentation(
+    surfaceId: string,
+    presentation: NonNullable<Parameters<SurfaceCore["setPanePresentation"]>[1]>,
+  ): void {
+    const surface = this.getSurface(surfaceId);
+    const pane = this.expectPane(surfaceId, presentation.paneId);
+    const bounds = presentation.snapshot.bounds;
+    const identity = paneSnapshotIdentity(presentation.snapshot);
+    if (pane.paneLineageId !== presentation.paneLineageId || identity === null ||
+        !sameGeometryIdentity(identity, this.resolvedPaneGeometryIdentity(surfaceId)) ||
+        bounds === null || !isRenderableRect(bounds) || bounds.x < 0 || bounds.y < 0 ||
+        bounds.x + bounds.width > surface.viewport.width ||
+        bounds.y + bounds.height > surface.viewport.height) {
+      throw new SurfaceCoreError("invalid_payload", "Pane presentation identity or bounds are stale or invalid");
+    }
+    const viewport = presentation.snapshot.viewport;
+    const numbers = [viewport?.contentSize?.width, viewport?.contentSize?.height,
+      viewport?.visibleRect?.width, viewport?.visibleRect?.height, viewport?.visibleRect?.x,
+      viewport?.visibleRect?.y, viewport?.scrollOffset?.x, viewport?.scrollOffset?.y, viewport?.zoomLevel];
+    if (!numbers.every((value) => typeof value === "number" && Number.isFinite(value)) ||
+        viewport.zoomLevel <= 0 || viewport.contentSize.width < 0 || viewport.contentSize.height < 0 ||
+        viewport.visibleRect.width < 0 || viewport.visibleRect.height < 0) {
+      throw new SurfaceCoreError("invalid_payload", "Pane presentation viewport is invalid");
+    }
+  }
+
+  private currentPanePresentation(surface: SurfaceState) {
+    const presentation = this.panePresentations.get(surface.surfaceId);
+    if (!presentation) return null;
+    const pane = surface.panes.get(presentation.paneId);
+    const identity = paneSnapshotIdentity(presentation.snapshot);
+    if (!pane || pane.paneLineageId !== presentation.paneLineageId || !identity ||
+        !sameGeometryIdentity(identity, this.resolvedPaneGeometryIdentity(surface.surfaceId))) {
+      this.panePresentations.delete(surface.surfaceId);
+      return null;
+    }
+    return presentation;
+  }
+
+  private resolveDisplayedPaneGeometrySnapshots(surface: SurfaceState): Map<number, PaneGeometryProjection> {
+    const presentation = this.currentPanePresentation(surface);
+    if (!presentation) return resolvePaneGeometrySnapshots(surface);
+    const pane = surface.panes.get(presentation.paneId)!;
+    const panes = new Map(surface.panes);
+    panes.set(pane.paneId, { ...pane, snapshot: presentation.snapshot });
+    return resolvePaneGeometrySnapshots({ ...surface, panes });
+  }
+
   captureSnapshot(surfaceId: string, paneId: number): SnapshotResponse["payload"] {
     const pane = this.expectPane(surfaceId, paneId);
     const current = currentEntry(pane);
+    const presentation = this.currentPanePresentation(this.getSurface(surfaceId));
     return {
       contentId: protocolContentId(current),
       contentType: protocolContentType(current),
       paneId: pane.paneId as PaneId,
       revision: current.revision as Revision,
       selection: pane.snapshot.selection,
-      viewport: structuredClone(pane.snapshot.viewport),
+      viewport: structuredClone(
+        presentation?.paneId === paneId
+          ? presentation.snapshot.viewport
+          : pane.snapshot.viewport,
+      ),
     };
   }
 
   paneBounds(surfaceId: string, paneId: number): { height: number; width: number; x: number; y: number } | null {
     const pane = this.requirePane(surfaceId, paneId);
+    const presentation = this.currentPanePresentation(this.getSurface(surfaceId));
+    if (presentation?.paneId === paneId) return structuredClone(presentation.snapshot.bounds);
     return pane?.snapshot.bounds ?? null;
   }
 
