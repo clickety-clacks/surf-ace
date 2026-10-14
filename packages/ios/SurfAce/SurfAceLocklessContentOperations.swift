@@ -78,7 +78,6 @@ enum SurfAceLocklessContentOperations {
             try requireAnnotationModeInactive(pane)
             try validateContent(intent.content, type: intent.contentType)
 
-            let currentBytes = try paneBytes(pane)
             pane.history.forward.removeAll()
             pane.history.back.append(pane.history.visible)
             let revision = allocateRevision(in: &pane.history)
@@ -97,7 +96,6 @@ enum SurfAceLocklessContentOperations {
                 revision: revision
             )
             trimNonVisibleHistory(&pane.history)
-            try assertPaneCapacity(current: currentBytes, pane: pane, limits: candidate.limits)
 
             surface.panes[String(intent.paneId)] = pane
             surface.surfaceRevision += 1
@@ -130,11 +128,9 @@ enum SurfAceLocklessContentOperations {
                 throw Error.unsupportedContentType(pane.history.visible.contentType)
             }
 
-            let currentBytes = try paneBytes(pane)
             terminal["lines"] = .array(currentLines + lines.map(SurfAceLocklessJSON.string))
             pane.history.visible.content = .object(terminal)
             pane.history.visible.revision = allocateRevision(in: &pane.history)
-            try assertPaneCapacity(current: currentBytes, pane: pane, limits: candidate.limits)
 
             surface.panes[String(paneId)] = pane
             surface.surfaceRevision += 1
@@ -159,13 +155,11 @@ enum SurfAceLocklessContentOperations {
                 throw staleContent(pane)
             }
 
-            let currentBytes = try paneBytes(pane)
             pane.history.visible.annotations = emptyAnnotations
             pane.history.visible.content = emptyContent
             pane.history.visible.contentId = nil
             pane.history.visible.contentType = nil
             pane.history.visible.revision = allocateRevision(in: &pane.history)
-            try assertPaneCapacity(current: currentBytes, pane: pane, limits: candidate.limits)
 
             surface.panes[String(paneId)] = pane
             surface.surfaceRevision += 1
@@ -254,10 +248,8 @@ enum SurfAceLocklessContentOperations {
             }
             try validateContent(patchedContent, type: "html")
 
-            let currentBytes = try paneBytes(pane)
             pane.history.visible.content = patchedContent
             pane.history.visible.revision = allocateRevision(in: &pane.history)
-            try assertPaneCapacity(current: currentBytes, pane: pane, limits: candidate.limits)
 
             surface.panes[String(preparation.paneId)] = pane
             surface.surfaceRevision += 1
@@ -431,35 +423,6 @@ enum SurfAceLocklessContentOperations {
         default:
             throw Error.unsupportedContentType(type)
         }
-    }
-
-    private static func assertPaneCapacity(
-        current: Int64,
-        pane: SurfAceLocklessPaneMaterial,
-        limits: SurfAceLocklessCapacityLimits
-    ) throws {
-        let prospective = try paneBytes(pane)
-        let annotationBytes = try exactAnnotationRestoreBytes(pane)
-        if annotationBytes > limits.maxPaneAnnotationRestoreBytes {
-            throw Error.paneStateCapacity(
-                limit: "maxPaneAnnotationRestoreBytes",
-                current: current,
-                prospective: annotationBytes,
-                maximum: limits.maxPaneAnnotationRestoreBytes
-            )
-        }
-        if prospective > limits.maxPaneRecoverableStateBytes {
-            throw Error.paneStateCapacity(
-                limit: "maxPaneRecoverableStateBytes",
-                current: current,
-                prospective: prospective,
-                maximum: limits.maxPaneRecoverableStateBytes
-            )
-        }
-    }
-
-    private static func paneBytes(_ pane: SurfAceLocklessPaneMaterial) throws -> Int64 {
-        try exactPaneRecoverableBytes(pane)
     }
 
     private static func encodedBytes<Value: Encodable>(_ value: Value) throws -> Int64 {

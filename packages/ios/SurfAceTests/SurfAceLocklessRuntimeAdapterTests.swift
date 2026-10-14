@@ -879,62 +879,21 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
         ])])
     }
 
-    func testTargetWorkCapacityRefusalIsTypedAndSideEffectFree() async throws {
-        let request = Self.validTargetRequest(paneId: 1)
+    func testTargetIntentIsDurableBelowFormerSurfaceByteCap() async throws {
         let fixture = try makeFixture { state in
-            let surface = try XCTUnwrap(state.liveSurfaces["sf_1"])
-            var work = SurfAceLocklessTargetWorkItem(
-                bytes: 0,
-                controllerInstanceId: "controller-a",
-                intentCommitSequence: state.sequences.nextCommitSequence,
-                operationRequestId: "operation-capacity",
-                request: request,
-                state: .intentCommitted,
-                surfaceId: "sf_1",
-                targetEpoch: 2,
-                targetId: "target-1",
-                targetRequestId: "target-request-1"
-            )
-            work.bytes = try SurfAceLocklessExactDurableAccounting.targetWorkBytes(work)
-            state.limits.maxSurfaceRecoverableBaseBytes =
-                try SurfAceLocklessTopologyOperations.surfaceBaseBytes(surface) + work.bytes - 1
+            state.limits.maxSurfaceRecoverableBaseBytes = 1
         }
         _ = try await admit(fixture.adapter, id: "controller-a", token: "connection-a")
-        let before = await fixture.adapter.snapshot()
-
-        await XCTAssertThrowsErrorAsync {
-            _ = try await fixture.adapter.commitTargetIntent(
-                connectionToken: "connection-a",
-                operationRequestId: "operation-capacity",
-                targetRequestId: "target-request-1",
-                surfaceId: "sf_1",
-                targetId: "target-1",
-                targetEpoch: 2,
-                request: request
-            )
-        } verify: { error in
-            guard case .surfaceStateCapacity(let current, let prospective, let maximum) =
-                    error as? SurfAceLocklessRuntimeAdapterError else {
-                return XCTFail("unexpected error: \(error)")
-            }
-            XCTAssertLessThanOrEqual(current, maximum)
-            XCTAssertGreaterThan(prospective, maximum)
-        }
-
-        let after = await fixture.adapter.snapshot()
-        XCTAssertEqual(after.generation, before.generation)
-        XCTAssertEqual(after.sequences.nextCommitSequence, before.sequences.nextCommitSequence)
-        XCTAssertNil(after.targetApplyWorkItems[
-            targetIdentity(controllerId: "controller-a", operationRequestId: "operation-capacity").storageKey
-        ])
-        XCTAssertNil(after.controllers["controller-a"]?.pendingOperationReceipts["operation-capacity"])
-        let targetCapacityResolutions = try await fixture.adapter.resolveReceipts(
-            connectionToken: "connection-a", requestIds: ["operation-capacity"]
-        )
-        XCTAssertEqual(targetCapacityResolutions, [.object([
-            "outcome": .string("not_committed"),
-            "requestId": .string("operation-capacity"),
-        ])])
+        _ = try await fixture.adapter.commitTargetIntent(
+            connectionToken: "connection-a", operationRequestId: "operation-capacity",
+            targetRequestId: "target-request-1", surfaceId: "sf_1", targetId: "target-1", targetEpoch: 2,
+            request: Self.validTargetRequest(paneId: 1))
+        let state = await fixture.adapter.snapshot()
+        let work = try XCTUnwrap(state.targetApplyWorkItems[
+            targetIdentity(controllerId: "controller-a", operationRequestId: "operation-capacity").storageKey])
+        XCTAssertEqual(work.state, .intentCommitted)
+        XCTAssertEqual(work.surfaceId, "sf_1")
+        XCTAssertNotNil(state.controllers["controller-a"]?.pendingOperationReceipts["operation-capacity"])
     }
 
     func testTargetAdmissionRevalidatesLiveSurfaceAfterFormerPreflightPause() async throws {

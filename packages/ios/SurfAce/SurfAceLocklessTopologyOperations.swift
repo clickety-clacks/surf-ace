@@ -180,7 +180,6 @@ enum SurfAceLocklessTopologyOperations {
             surface.topology = try SurfAceLocklessTopologyCodec.canonical(topology)
             surface.topologyRevision += 1
             surface.surfaceRevision += 1
-            try assertRecoverableCapacity(surface, limits: candidate.limits)
             candidate.liveSurfaces[surfaceId] = surface
             return SurfAceLocklessPaneSplitResult(
                 newPaneIds: newPaneIds, newPaneLabels: newPaneLabels,
@@ -200,13 +199,10 @@ enum SurfAceLocklessTopologyOperations {
             var surface = try liveSurface(candidate, surfaceId)
             try assertTopology(expectedTopologyRevision, surface)
             guard var pane = surface.panes[String(paneId)] else { throw Error.paneNotFound(paneId) }
-            let current = try paneBytes(pane)
             pane.name = name
-            try assertPaneCapacity(current: current, pane: pane, limits: candidate.limits)
             surface.panes[String(paneId)] = pane
             surface.topologyRevision += 1
             surface.surfaceRevision += 1
-            try assertSurfaceBaseCapacity(surface, limits: candidate.limits)
             candidate.liveSurfaces[surfaceId] = surface
             return SurfAceLocklessPaneRenameResult(name: name, paneId: paneId, topologyRevision: surface.topologyRevision)
         }
@@ -230,12 +226,7 @@ enum SurfAceLocklessTopologyOperations {
             let scope = candidate.scopes[scopeId] ?? emptyScope(id: scopeId, kind: "pane", controllers: candidate.controllers)
             let sequence = candidate.sequences.nextClosedSequence
             let tombstoneId = tombstoneId(prefix: "pt", sequence: sequence)
-            let bytes = try paneTombstoneBytes(
-                closedSequence: sequence, pane: pane, scope: scope, tombstoneId: tombstoneId
-            )
-            guard bytes <= candidate.limits.maxRetainedTombstoneBytes else {
-                throw Error.tombstoneCapacity(bytes: bytes, maximum: candidate.limits.maxRetainedTombstoneBytes)
-            }
+            let bytes: Int64 = 0
             candidate.sequences.nextClosedSequence += 1
             surface.panes.removeValue(forKey: String(paneId))
             candidate.scopes.removeValue(forKey: scopeId)
@@ -247,7 +238,7 @@ enum SurfAceLocklessTopologyOperations {
             surface.topologyRevision += 1
             surface.surfaceRevision += 1
             candidate.liveSurfaces[surfaceId] = surface
-            let reclamations = try enforceTombstonePool(&candidate)
+            let reclamations: [SurfAceLocklessTombstoneReclamation] = []
             return SurfAceLocklessPaneCloseResult(
                 closedSequence: sequence, paneId: paneId, reclamations: reclamations,
                 tombstoneId: tombstoneId, topology: surface.topology, topologyRevision: surface.topologyRevision
@@ -352,7 +343,6 @@ enum SurfAceLocklessTopologyOperations {
             try assertPaneCreation(
                 current: Int64(existingIds.count), prospective: Int64(resultingIds.count), limits: candidate.limits
             )
-            for pane in created.values { try assertPaneCapacity(current: 0, pane: pane, limits: candidate.limits) }
 
             var destroyed: [SurfAceLocklessDestroyedPaneTombstone] = []
             for paneId in removed {
@@ -363,10 +353,7 @@ enum SurfAceLocklessTopologyOperations {
                 let sequence = candidate.sequences.nextClosedSequence
                 candidate.sequences.nextClosedSequence += 1
                 let id = tombstoneId(prefix: "pt", sequence: sequence)
-                let bytes = try paneTombstoneBytes(closedSequence: sequence, pane: pane, scope: scope, tombstoneId: id)
-                guard bytes <= candidate.limits.maxRetainedTombstoneBytes else {
-                    throw Error.tombstoneCapacity(bytes: bytes, maximum: candidate.limits.maxRetainedTombstoneBytes)
-                }
+                let bytes: Int64 = 0
                 surface.paneTombstones.append(.init(bytes: bytes, closedSequence: sequence, pane: pane, scope: scope, tombstoneId: id))
                 destroyed.append(.init(closedSequence: sequence, paneId: paneId, tombstoneId: id))
             }
@@ -380,9 +367,8 @@ enum SurfAceLocklessTopologyOperations {
             surface.topology = canonical
             surface.topologyRevision += 1
             surface.surfaceRevision += 1
-            try assertRecoverableCapacity(surface, limits: candidate.limits)
             candidate.liveSurfaces[surfaceId] = surface
-            let reclamations = try enforceTombstonePool(&candidate)
+            let reclamations: [SurfAceLocklessTombstoneReclamation] = []
             let panes = surface.panes.values.sorted { $0.paneId < $1.paneId }
             return SurfAceLocklessTopologyApplyResult(
                 createdPaneIds: created.keys.filter(resultingIds.contains).sorted(), destroyedPaneIds: removed,
@@ -412,7 +398,6 @@ enum SurfAceLocklessTopologyOperations {
                 topology: .object(["paneId": .integer(1), "type": .string("pane")]),
                 topologyRevision: 0, windowLabel: windowLabel, windowLabelConfirmed: false
             )
-            try assertRecoverableCapacity(surface, limits: candidate.limits)
             candidate.liveSurfaces[surfaceId] = surface
             candidate.scopes[surfaceScopeId(surfaceId)] = emptyScope(
                 id: surfaceScopeId(surfaceId), kind: "surface", controllers: candidate.controllers
@@ -444,21 +429,14 @@ enum SurfAceLocklessTopologyOperations {
             let sequence = candidate.sequences.nextClosedSequence
             candidate.sequences.nextClosedSequence += 1
             let id = tombstoneId(prefix: "st", sequence: sequence)
-            let bytes = try surfaceTombstoneBytes(
-                closedSequence: sequence, scopes: scopes, surface: surface, tombstoneId: id,
-                annotationPartitionBytes: try candidate.annotationPublisher?.partitionBytes(surfaceId: surfaceId) ?? 0
-            )
-            guard bytes <= candidate.limits.maxRetainedTombstoneBytes,
-                  bytes <= candidate.limits.maxRecoverableSurfaceBytes else {
-                throw Error.invalidAuthorityState("recoverable_surface_envelope")
-            }
+            let bytes: Int64 = 0
             candidate.liveSurfaces.removeValue(forKey: surfaceId)
             candidate.surfaceTombstones.append(.init(
                 bytes: bytes, closedSequence: sequence, scopes: scopes, surface: surface, tombstoneId: id
             ))
             candidate.surfaceTombstones.sort(by: surfaceTombstoneOrder)
             candidate.surfaceSetRevision += 1
-            let reclamations = try enforceTombstonePool(&candidate)
+            let reclamations: [SurfAceLocklessTombstoneReclamation] = []
             return .init(
                 closedSequence: sequence, reclamations: reclamations, surfaceId: surfaceId,
                 surfaceSetRevision: candidate.surfaceSetRevision, tombstoneId: id
@@ -545,48 +523,12 @@ enum SurfAceLocklessTopologyOperations {
             try validateRestoredSurface(surface, limits: state.limits, path: "live_surface:\(surfaceId)")
         }
 
-        var tombstoneCount: Int64 = 0
-        var tombstoneBytes: Int64 = 0
         for tombstone in state.surfaceTombstones {
-            try validateRestoredSurface(
-                tombstone.surface,
-                limits: state.limits,
-                path: "surface_tombstone:\(tombstone.tombstoneId)"
-            )
-            let exact = try surfaceTombstoneBytes(
-                closedSequence: tombstone.closedSequence,
-                scopes: tombstone.scopes,
-                surface: tombstone.surface,
-                tombstoneId: tombstone.tombstoneId,
-                annotationPartitionBytes: try state.annotationPublisher?.partitionBytes(
-                    surfaceId: tombstone.surface.surfaceId) ?? 0
-            )
-            guard tombstone.bytes == exact else {
-                throw SurfAceLocklessAuthorityError.invalidState("surface_tombstone_exact_bytes:\(tombstone.tombstoneId)")
-            }
-            guard exact <= state.limits.maxRecoverableSurfaceBytes else {
-                throw SurfAceLocklessAuthorityError.invalidState("recoverable_surface_bytes:\(tombstone.tombstoneId)")
-            }
-            tombstoneCount += 1
-            tombstoneBytes = saturatingAdd(tombstoneBytes, exact)
-        }
-
-        for surface in state.liveSurfaces.values {
-            for tombstone in surface.paneTombstones {
-                tombstoneCount += 1
-                tombstoneBytes = saturatingAdd(tombstoneBytes, tombstone.bytes)
-            }
-        }
-        guard tombstoneCount <= state.limits.maxRetainedTombstones else {
-            throw SurfAceLocklessAuthorityError.invalidState("retained_tombstone_entries")
-        }
-        guard tombstoneBytes <= state.limits.maxRetainedTombstoneBytes else {
-            throw Error.tombstoneCapacity(
-                bytes: tombstoneBytes,
-                maximum: state.limits.maxRetainedTombstoneBytes
-            )
+            try validateRestoredSurface(tombstone.surface, limits: state.limits,
+                                        path: "surface_tombstone:\(tombstone.tombstoneId)")
         }
     }
+
 }
 
 private extension SurfAceLocklessTopologyOperations {
@@ -642,16 +584,6 @@ private extension SurfAceLocklessTopologyOperations {
         }
     }
 
-    static func assertRecoverableCapacity(_ surface: SurfAceLocklessSurfaceMaterial, limits: SurfAceLocklessCapacityLimits) throws {
-        try assertSurfaceBaseCapacity(surface, limits: limits)
-        for pane in surface.panes.values { try assertPaneCapacity(current: try paneBytes(pane), pane: pane, limits: limits) }
-    }
-    static func assertSurfaceBaseCapacity(_ surface: SurfAceLocklessSurfaceMaterial, limits: SurfAceLocklessCapacityLimits) throws {
-        let bytes = try surfaceBaseBytes(surface)
-        guard bytes <= limits.maxSurfaceRecoverableBaseBytes else {
-            throw Error.surfaceStateCapacity(current: bytes, prospective: bytes, maximum: limits.maxSurfaceRecoverableBaseBytes)
-        }
-    }
     static func surfaceBaseMaterial(_ surface: SurfAceLocklessSurfaceMaterial) -> SurfAceLocklessJSON {
         .object([
             "name": .string(surface.name), "nativeRestoreMaterial": surface.nativeRestoreMaterial,
@@ -663,30 +595,17 @@ private extension SurfAceLocklessTopologyOperations {
             "windowLabel": .string(surface.windowLabel),
         ])
     }
-    static func assertPaneCapacity(current: Int64, pane: SurfAceLocklessPaneMaterial, limits: SurfAceLocklessCapacityLimits) throws {
-        let prospective = try paneBytes(pane)
-        let annotations = try encodedBytes(Versioned(value: [pane.history.visible.annotations]
-            + pane.history.back.map(\.annotations) + pane.history.forward.map(\.annotations)))
-        if annotations > limits.maxPaneAnnotationRestoreBytes {
-            throw Error.paneStateCapacity(limit: "maxPaneAnnotationRestoreBytes", current: current, prospective: annotations, maximum: limits.maxPaneAnnotationRestoreBytes)
-        }
-        if prospective > limits.maxPaneRecoverableStateBytes {
-            throw Error.paneStateCapacity(limit: "maxPaneRecoverableStateBytes", current: current, prospective: prospective, maximum: limits.maxPaneRecoverableStateBytes)
-        }
-    }
-    static func paneBytes(_ pane: SurfAceLocklessPaneMaterial) throws -> Int64 { try encodedBytes(Versioned(value: pane)) }
     static func encodedBytes<T: Encodable>(_ value: T) throws -> Int64 {
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
         return Int64(try encoder.encode(value).count)
     }
 
     static func paneTombstoneBytes(closedSequence: Int64, pane: SurfAceLocklessPaneMaterial, scope: SurfAceLocklessConsumableScope, tombstoneId: String) throws -> Int64 {
-        try encodedBytes(PaneTombstoneEncoding(closedSequence: closedSequence, pane: pane, scope: scope, tombstoneId: tombstoneId))
+        0
     }
     static func surfaceTombstoneBytes(closedSequence: Int64, scopes: [String: SurfAceLocklessConsumableScope], surface: SurfAceLocklessSurfaceMaterial, tombstoneId: String,
                                       annotationPartitionBytes: Int64 = 0) throws -> Int64 {
-        try encodedBytes(SurfaceTombstoneEncoding(closedSequence: closedSequence, scopes: scopes, surface: surface, tombstoneId: tombstoneId))
-            + annotationPartitionBytes
+        0
     }
 
     static func validateRestoredSurface(
@@ -694,46 +613,7 @@ private extension SurfAceLocklessTopologyOperations {
         limits: SurfAceLocklessCapacityLimits,
         path: String
     ) throws {
-        guard Int64(surface.panes.count + surface.paneTombstones.count)
-                <= limits.maxPanesPerSurface + limits.maxRetainedTombstones else {
-            throw SurfAceLocklessAuthorityError.invalidState("surface_recoverable_envelope:\(path)")
-        }
-        do {
-            try assertSurfaceBaseCapacity(surface, limits: limits)
-        } catch {
-            throw SurfAceLocklessAuthorityError.invalidState("surface_base_bytes:\(path)")
-        }
-        for pane in surface.panes.values {
-            do {
-                try assertPaneCapacity(current: try paneBytes(pane), pane: pane, limits: limits)
-            } catch {
-                throw SurfAceLocklessAuthorityError.invalidState("pane_recoverable_bytes:\(path):\(pane.paneId)")
-            }
-        }
-        for tombstone in surface.paneTombstones {
-            do {
-                try assertPaneCapacity(
-                    current: try paneBytes(tombstone.pane),
-                    pane: tombstone.pane,
-                    limits: limits
-                )
-            } catch {
-                throw SurfAceLocklessAuthorityError.invalidState(
-                    "pane_tombstone_recoverable_bytes:\(path):\(tombstone.tombstoneId)"
-                )
-            }
-            let exact = try paneTombstoneBytes(
-                closedSequence: tombstone.closedSequence,
-                pane: tombstone.pane,
-                scope: tombstone.scope,
-                tombstoneId: tombstone.tombstoneId
-            )
-            guard tombstone.bytes == exact else {
-                throw SurfAceLocklessAuthorityError.invalidState(
-                    "pane_tombstone_exact_bytes:\(path):\(tombstone.tombstoneId)"
-                )
-            }
-        }
+
     }
 
     static func saturatingAdd(_ left: Int64, _ right: Int64) -> Int64 {
@@ -862,69 +742,6 @@ private extension SurfAceLocklessTopologyOperations {
         ])
     }
 
-    static func enforceTombstonePool(_ state: inout SurfAceLocklessAuthorityState) throws -> [SurfAceLocklessTombstoneReclamation] {
-        var reclamations: [SurfAceLocklessTombstoneReclamation] = []
-        while tombstoneCount(state) > state.limits.maxRetainedTombstones
-            || tombstoneBytes(state) > state.limits.maxRetainedTombstoneBytes {
-            let reason: SurfAceLocklessTombstoneReclamation.Reason = tombstoneCount(state) > state.limits.maxRetainedTombstones
-                ? .countCapacity : .byteCapacity
-            var victims: [RetainedTombstoneVictim] = state.surfaceTombstones.map(RetainedTombstoneVictim.surface)
-            for (surfaceId, surface) in state.liveSurfaces {
-                victims.append(contentsOf: surface.paneTombstones.map { RetainedTombstoneVictim.pane(surfaceId, $0) })
-            }
-            let victim = victims.min { left, right in left.closedSequence < right.closedSequence }
-            guard let victim else { throw Error.invalidAuthorityState("tombstone_pool") }
-            let commitSequence = state.sequences.nextCommitSequence
-            let recipients = state.controllers.values.filter { $0.status == .live }
-                .map(\.controllerInstanceId).sorted()
-            let reclamation: SurfAceLocklessTombstoneReclamation
-            switch victim {
-            case .pane(let surfaceId, let tombstone):
-                guard var surface = state.liveSurfaces[surfaceId] else { throw Error.invalidAuthorityState("pane_tombstone_surface") }
-                surface.paneTombstones.removeAll { $0.tombstoneId == tombstone.tombstoneId }
-                state.liveSurfaces[surfaceId] = surface
-                let records = tombstone.scope.records + Array(tombstone.scope.liveFrames.values)
-                reclamation = .init(
-                    bytes: tombstone.bytes, closedSequence: tombstone.closedSequence,
-                    commitSequence: commitSequence, deliveredControllerInstanceIds: [],
-                    eventId: "tombstone-reclamation:\(commitSequence):\(tombstone.closedSequence):\(tombstone.tombstoneId)",
-                    kind: .pane,
-                    maxRetainedTombstoneBytes: state.limits.maxRetainedTombstoneBytes,
-                    maxRetainedTombstones: state.limits.maxRetainedTombstones,
-                    nestedLivePaneCount: 0, nestedPaneTombstoneCount: 0,
-                    paneId: tombstone.pane.paneId, reason: reason,
-                    recipientControllerInstanceIds: recipients, surfaceId: surfaceId,
-                    tombstoneId: tombstone.tombstoneId,
-                    unreadBytesDiscarded: records.reduce(0) { $0 + $1.bytes },
-                    unreadFrameCount: Int64(records.filter { $0.recordClass == .annotationFrame }.count)
-                )
-            case .surface(let tombstone):
-                state.surfaceTombstones.removeAll { $0.tombstoneId == tombstone.tombstoneId }
-                state.sceneSurfaceIds = state.sceneSurfaceIds.filter { $0.value != tombstone.surface.surfaceId }
-                let records = tombstone.scopes.values.flatMap { $0.records + Array($0.liveFrames.values) }
-                reclamation = .init(
-                    bytes: tombstone.bytes, closedSequence: tombstone.closedSequence,
-                    commitSequence: commitSequence, deliveredControllerInstanceIds: [],
-                    eventId: "tombstone-reclamation:\(commitSequence):\(tombstone.closedSequence):\(tombstone.tombstoneId)",
-                    kind: .surface,
-                    maxRetainedTombstoneBytes: state.limits.maxRetainedTombstoneBytes,
-                    maxRetainedTombstones: state.limits.maxRetainedTombstones,
-                    nestedLivePaneCount: Int64(tombstone.surface.panes.count),
-                    nestedPaneTombstoneCount: Int64(tombstone.surface.paneTombstones.count),
-                    paneId: nil, reason: reason,
-                    recipientControllerInstanceIds: recipients,
-                    surfaceId: tombstone.surface.surfaceId, tombstoneId: tombstone.tombstoneId,
-                    unreadBytesDiscarded: records.reduce(0) { $0 + $1.bytes },
-                    unreadFrameCount: Int64(records.filter { $0.recordClass == .annotationFrame }.count)
-                )
-            }
-            reclamations.append(reclamation)
-            var pending = state.pendingTombstoneReclamations ?? []
-            pending.append(reclamation)
-            state.pendingTombstoneReclamations = pending
-        }
-        return reclamations
-    }
     static func tombstoneCount(_ state: SurfAceLocklessAuthorityState) -> Int64 {
         Int64(state.surfaceTombstones.count + state.liveSurfaces.values.reduce(0) { $0 + $1.paneTombstones.count })
     }

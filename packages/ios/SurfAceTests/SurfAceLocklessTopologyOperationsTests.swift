@@ -137,6 +137,29 @@ final class SurfAceLocklessTopologyOperationsTests: XCTestCase {
         XCTAssertEqual(state, afterWinner)
     }
 
+    func testClosedPanesRemainRestorableBeyondFormerRetentionLimits() throws {
+        var state = try SurfAceLocklessAuthorityState.empty()
+        let surfaceId = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
+            state: &state, expectedSurfaceSetRevision: 0).surface.surfaceId
+        let split = try TestRegistryTopology.paneSplit(state: &state, surfaceId: surfaceId,
+            paneId: 1, count: 3, direction: "horizontal", expectedTopologyRevision: 0)
+        state.limits.maxRetainedTombstones = 1
+        state.limits.maxRetainedTombstoneBytes = 1
+        var closes: [SurfAceLocklessPaneCloseResult] = []
+        for (index, paneId) in split.newPaneIds.enumerated() {
+            closes.append(try SurfAceLocklessTopologyOperations.paneClose(state: &state,
+                surfaceId: surfaceId, paneId: paneId, expectedTopologyRevision: Int64(index + 1)))
+        }
+        XCTAssertEqual(state.liveSurfaces[surfaceId]?.paneTombstones.count, 2)
+        XCTAssertTrue(closes.allSatisfy { $0.reclamations.isEmpty })
+        state = try JSONDecoder().decode(SurfAceLocklessAuthorityState.self, from: JSONEncoder().encode(state))
+        try state.validate()
+        let restored = try TestRegistryTopology.paneRestore(state: &state, surfaceId: surfaceId,
+            tombstoneId: closes[0].tombstoneId, anchorPaneId: 1, direction: "vertical", expectedTopologyRevision: 3)
+        XCTAssertEqual(restored.paneId, split.newPaneIds[0])
+        XCTAssertEqual(state.liveSurfaces[surfaceId]?.paneTombstones.first?.tombstoneId, closes[1].tombstoneId)
+    }
+
     func testPaneCloseRestorePreservesIdentityStateAndAllocatesConflictingLabel() throws {
         var state = try SurfAceLocklessAuthorityState.empty()
         let surfaceId = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
@@ -146,11 +169,17 @@ final class SurfAceLocklessTopologyOperationsTests: XCTestCase {
             state: &state, surfaceId: surfaceId, paneId: 1, count: 2,
             direction: "horizontal", expectedTopologyRevision: 0
         )
+        state.limits.maxRetainedTombstones = 1
+        state.limits.maxRetainedTombstoneBytes = 1
         let closedPaneId = try XCTUnwrap(split.newPaneIds.first)
         let original = try XCTUnwrap(state.liveSurfaces[surfaceId]?.panes[String(closedPaneId)])
         let close = try SurfAceLocklessTopologyOperations.paneClose(
             state: &state, surfaceId: surfaceId, paneId: closedPaneId, expectedTopologyRevision: 1
         )
+        XCTAssertEqual(state.liveSurfaces[surfaceId]?.paneTombstones.count, 1)
+        XCTAssertTrue(close.reclamations.isEmpty)
+        let encoded = try JSONEncoder().encode(state)
+        state = try JSONDecoder().decode(SurfAceLocklessAuthorityState.self, from: encoded)
         state.liveSurfaces[surfaceId]?.panes["1"]?.paneLabel = original.paneLabel
 
         let restored = try TestRegistryTopology.paneRestore(
@@ -634,14 +663,14 @@ extension SurfAceLocklessTopologyOperationsTests {
         }
     }
 
-    func testACCAP02ExactPaneAnnotationAndSurfaceBaseBoundsAreAtomicAndRestorable() throws {
+    func testContentAndAnnotationsRemainRecoverableBeyondFormerByteCaps() throws {
         var state = try populatedPaneCloseFixture()
         let surfaceId = "sf_1"
-        let pane = try XCTUnwrap(state.liveSurfaces[surfaceId]?.panes["2"])
-        let paneBytes = try SurfAceLocklessContentOperations.exactPaneRecoverableBytes(pane)
-        let annotationBytes = try SurfAceLocklessContentOperations.exactAnnotationRestoreBytes(pane)
-        state.limits.maxPaneRecoverableStateBytes = paneBytes
-        state.limits.maxPaneAnnotationRestoreBytes = annotationBytes
+        state.limits.maxPaneRecoverableStateBytes = 1
+        state.limits.maxPaneAnnotationRestoreBytes = 1
+        state.limits.maxSurfaceRecoverableBaseBytes = 1
+        state.limits.maxRecoverableSurfaceBytes = 1
+        state.limits.maxRetainedTombstoneBytes = 1
         let original = state
         let closed = try SurfAceLocklessTopologyOperations.paneClose(
             state: &state, surfaceId: surfaceId, paneId: 2, expectedTopologyRevision: 1
@@ -659,15 +688,19 @@ extension SurfAceLocklessTopologyOperationsTests {
         originalWithFreshRegistryLabel.paneLabel = restoredPane.paneLabel
         XCTAssertEqual(restoredPane, originalWithFreshRegistryLabel)
 
-        let baseBytes = try SurfAceLocklessTopologyOperations.surfaceBaseBytes(
-            try XCTUnwrap(state.liveSurfaces[surfaceId])
-        )
-        state.limits.maxSurfaceRecoverableBaseBytes = baseBytes
-        XCTAssertNoThrow(try state.validate())
-        var tooSmall = state
-        tooSmall.limits.maxSurfaceRecoverableBaseBytes = baseBytes - 1
-        XCTAssertThrowsError(try tooSmall.validate())
+        let beforeWindowClose = try XCTUnwrap(state.liveSurfaces[surfaceId])
+        let windowClose = try SurfAceLocklessTopologyOperations.surfaceWindowClose(
+            state: &state, surfaceId: surfaceId, expectedSurfaceSetRevision: state.surfaceSetRevision,
+            expectedTopologyRevision: beforeWindowClose.topologyRevision)
+        XCTAssertTrue(windowClose.reclamations.isEmpty)
+        state = try JSONDecoder().decode(SurfAceLocklessAuthorityState.self, from: JSONEncoder().encode(state))
+        try state.validate()
+        _ = try SurfAceLocklessTopologyOperations.surfaceWindowRestore(
+            state: &state, tombstoneId: windowClose.tombstoneId,
+            expectedSurfaceSetRevision: state.surfaceSetRevision)
         XCTAssertEqual(state.liveSurfaces[surfaceId]?.panes["2"], originalWithFreshRegistryLabel)
+        XCTAssertEqual(state.liveSurfaces[surfaceId]?.panes["1"]?.history,
+                       beforeWindowClose.panes["1"]?.history)
     }
 
     func testACCLOSE01CloseAtomicallyPreservesMixedHistoryProvenanceAnnotationsAndUnreadCursors() throws {

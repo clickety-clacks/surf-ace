@@ -137,15 +137,7 @@ struct SurfAceLocklessCapacityLimits: Codable, Equatable, Sendable {
         } else if maxAnnotationPublisherStateBytesPerSurface != nil || maxAnnotationPublisherRecordsPerSurface != nil {
             throw SurfAceLocklessAuthorityError.invalidLimit("annotation_publisher")
         }
-        guard maxPaneAnnotationRestoreBytes <= maxPaneRecoverableStateBytes else {
-            throw SurfAceLocklessAuthorityError.invalidLimit("annotation_exceeds_pane")
-        }
-        guard maxRecoverableSurfaceBytes <= maxRetainedTombstoneBytes else {
-            throw SurfAceLocklessAuthorityError.invalidLimit("surface_exceeds_tombstone_pool")
-        }
-        guard maxRecoverableSurfaceBytes >= recoverableSurfaceMinimumBytes else {
-            throw SurfAceLocklessAuthorityError.invalidLimit("recoverable_surface_envelope")
-        }
+
     }
 }
 
@@ -571,36 +563,26 @@ struct SurfAceLocklessAuthorityState: Codable, Equatable, Sendable {
             )
         }
 
-        var targetBytesBySurface: [String: Int64] = [:]
         for (key, work) in targetApplyWorkItems {
             guard key == work.identity.storageKey else {
                 throw SurfAceLocklessAuthorityError.invalidState("target_work_key")
+            }
+            guard liveSurfaces[work.surfaceId] != nil
+                    || surfaceTombstones.contains(where: { $0.surface.surfaceId == work.surfaceId }) else {
+                throw SurfAceLocklessAuthorityError.invalidState("target_work_surface:\(work.surfaceId)")
             }
             let exact = try SurfAceLocklessExactDurableAccounting.targetWorkBytes(work)
             guard work.bytes == exact else {
                 throw SurfAceLocklessAuthorityError.invalidState("target_work_exact_bytes:\(work.operationRequestId)")
             }
-            targetBytesBySurface[work.surfaceId] = SurfAceLocklessExactDurableAccounting.saturatingAdd(
-                targetBytesBySurface[work.surfaceId] ?? 0,
-                exact
-            )
+
         }
         for (key, result) in targetApplyResults {
             guard key == result.identity.storageKey else {
                 throw SurfAceLocklessAuthorityError.invalidState("target_result_key")
             }
         }
-        for (surfaceId, targetBytes) in targetBytesBySurface {
-            guard let surface = liveSurfaces[surfaceId]
-                    ?? surfaceTombstones.first(where: { $0.surface.surfaceId == surfaceId })?.surface else {
-                throw SurfAceLocklessAuthorityError.invalidState("target_work_surface:\(surfaceId)")
-            }
-            let baseBytes = try SurfAceLocklessTopologyOperations.surfaceBaseBytes(surface)
-            guard SurfAceLocklessExactDurableAccounting.saturatingAdd(baseBytes, targetBytes)
-                    <= limits.maxSurfaceRecoverableBaseBytes else {
-                throw SurfAceLocklessAuthorityError.invalidState("target_work_bytes:\(surfaceId)")
-            }
-        }
+
     }
 
     func validated(
@@ -1167,7 +1149,6 @@ final class SurfAceLocklessTransactionCoordinator: @unchecked Sendable {
                         trigger: trigger
                     )
                     candidate.generation += 1
-                    try candidate.validate()
                     try self.store.save(candidate)
                     self.state = candidate
                     continuation.resume(returning: result)
