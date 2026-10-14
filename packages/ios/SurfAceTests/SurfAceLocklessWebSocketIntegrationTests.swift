@@ -76,6 +76,14 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         XCTAssertEqual(payload(paired)["projection"] as? String, "control")
         XCTAssertTrue((payload(paired)["scopes"] as? [Any])?.isEmpty == true)
         XCTAssertFalse((payload(paired)["scopeSummaries"] as? [Any])?.isEmpty ?? true)
+        let afterAdmission = await adapter.snapshot()
+        _ = try await adapter.commitLocalMutation(operation: "test.seed_unread_after_admission") { state, _ in
+            _ = try SurfAceLocklessConsumableOperations.appendCommittedRecord(in: &state,
+                scopeId: "pane:\(surfaceId):1", scopeKind: "pane", recordId: "later-unread-content",
+                recordClass: .content, payload: .object(["html": .string("explicit retained content")]))
+            return .null
+        }
+        let unread = await adapter.snapshot()
         for op in ["surfaces.list", "panes.list"] {
             try await send(socket, op: op, id: op, payload: ["surfaceId": surfaceId])
             let listed = try await receive(socket, matchingId: op)
@@ -107,9 +115,9 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         }
         XCTAssertEqual(after.liveSurfaces[surfaceId]?.panes["7"]?.name, "selected seven")
         let scopeId = "pane:\(surfaceId):1"
-        XCTAssertEqual(before.scopes[scopeId]?.records, after.scopes[scopeId]?.records)
+        XCTAssertEqual(unread.scopes[scopeId]?.records, after.scopes[scopeId]?.records)
         XCTAssertEqual(after.scopes[scopeId]?.cursors["control-fixture"]?.cursor,
-                       before.scopes[scopeId]?.records.first?.sequence)
+                       afterAdmission.scopes[scopeId]?.cursors["control-fixture"]?.cursor)
         socket.cancel(with: .normalClosure, reason: nil)
         for _ in 0..<100 {
             if await adapter.snapshot().controllers["control-fixture"]?.status == .dormant { break }
@@ -123,7 +131,7 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
             "projectionCapacityBytes": 8 * 1_024 * 1_024,
             "protocolFeatures": [surfAceLocklessCapability, surfAceControlProjectionCapability],
             "protocolVersion": 1, "surfaceId": surfaceId,
-            "resume": ["pendingAcks": [], "unresolvedRequestIds": ["control-rename"]]])
+            "resume": ["pendingAcks": [], "scopes": [:], "unresolvedRequestIds": ["control-rename"]]])
         let resumption = try await receive(resumed, matchingId: "control-resume")
         XCTAssertEqual(resumption["ok"] as? Bool, true)
         XCTAssertEqual(payload(resumption)["resumed"] as? Bool, true)
