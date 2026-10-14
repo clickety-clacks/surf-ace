@@ -211,6 +211,12 @@ extension SurfAceRenderAndAnnotationDiagnosticsTests {
         let unchanged = try cache.topologies(from: state, surfaceIds: [id])
         XCTAssertEqual(unchanged[id]?.panes.first?.currentEntry?.contentId, "current")
         XCTAssertEqual(unchanged[id]?.panes.first?.backStack?.first?.contentId, "previous")
+        pane.name = "Renamed"; pane.annotationMode = true
+        surface.panes["1"] = pane; state.liveSurfaces[id] = surface
+        let metadataOnly = try cache.topologies(from: state, surfaceIds: [id])
+        XCTAssertEqual(metadataOnly[id]?.panes.first?.name, "Renamed")
+        XCTAssertEqual(metadataOnly[id]?.panes.first?.annotationMode, true)
+        XCTAssertEqual(metadataOnly[id]?.panes.first?.backStack?.first?.contentId, "previous")
         // Annotations and history metadata can change without a new visible revision.
         pane.history.visible.annotations = .object(["drawingData": .string(""), "strokesById": .object([
             "ink": .object(["strokeId": .string("ink"), "tool": .string("pen"), "points": .array([

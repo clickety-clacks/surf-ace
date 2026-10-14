@@ -176,7 +176,9 @@ struct SurfAceLocklessUIProjectionCache {
                 if let prior = panesBySurface[surfaceId]?[key], prior.source == source {
                     pane = prior
                 } else {
-                    pane = .init(source: source, topology: try .init(projecting: source))
+                    let prior = panesBySurface[surfaceId]?[key]
+                    pane = .init(source: source, topology: try .init(projecting: source,
+                        reusing: prior?.topology, previous: prior?.source))
                 }
                 projected[key] = pane
                 panes.append(pane.topology)
@@ -192,12 +194,22 @@ struct SurfAceLocklessUIProjectionCache {
 }
 
 private extension SurfAcePersistedPaneTopology {
-    init(projecting pane: SurfAceLocklessPaneMaterial) throws {
+    init(projecting pane: SurfAceLocklessPaneMaterial,
+         reusing prior: SurfAcePersistedPaneTopology? = nil,
+         previous: SurfAceLocklessPaneMaterial? = nil) throws {
         annotationMode = pane.annotationMode
-        backStack = try pane.history.back.map(SurfAceLocklessUIProjection.paneEntry)
-        currentEntry = try SurfAceLocklessUIProjection.paneEntry(pane.history.visible)
-        currentTarget = try SurfAceLocklessUIProjection.target(pane.target)
-        forwardStack = try pane.history.forward.map(SurfAceLocklessUIProjection.paneEntry)
+        if let prior, previous?.paneLineageId == pane.paneLineageId,
+           previous?.history == pane.history {
+            // Labels/names/mode changes do not require converting retained history.
+            backStack = prior.backStack; currentEntry = prior.currentEntry; forwardStack = prior.forwardStack
+        } else {
+            backStack = try pane.history.back.map(SurfAceLocklessUIProjection.paneEntry)
+            currentEntry = try SurfAceLocklessUIProjection.paneEntry(pane.history.visible)
+            forwardStack = try pane.history.forward.map(SurfAceLocklessUIProjection.paneEntry)
+        }
+        if let prior, previous?.paneLineageId == pane.paneLineageId, previous?.target == pane.target {
+            currentTarget = prior.currentTarget
+        } else { currentTarget = try SurfAceLocklessUIProjection.target(pane.target) }
         guard let id = Int(exactly: pane.paneId), let label = Int(exactly: pane.paneLabel) else {
             throw SurfAceLocklessAuthorityError.invalidState("ui_projection_identity")
         }
