@@ -5,6 +5,8 @@ import { pathToFileURL } from "node:url";
 
 import { parseHTML } from "linkedom";
 import { queuedAuthorityRace } from "./pane-presentation-authority-race.js";
+import { SurfaceCore } from "../src/surface-core.js";
+import { splitResizeMatches, splitResizeGeometryIsValid } from "../src/split-resize.js";
 
 type ConnectionBar = "connected" | "connecting" | "disconnected";
 
@@ -57,6 +59,19 @@ function state(connectionBar: ConnectionBar, twoPanes = false, annotatingPane = 
   };
 }
 
+function realViewportFixture() {
+  const core = new SurfaceCore({ persistentState: { primarySurfaceId: null, version: 1 }, now: () => 1 });
+  const { surfaceId } = core.ensurePrimarySurface("viewport continuity", { width: 1200, height: 800, scale: 1 });
+  core.applyProviderBootstrapTopology(surfaceId, { initialPaneId: 1, initialPaneLabel: 1, windowLabel: "a" });
+  core.paneSplit(surfaceId, { paneId: 1, direction: "vertical", count: 2, newPaneIds: [2], newPaneLabels: [2] });
+  for (const paneId of [1, 2]) core.contentSet(surfaceId, {
+    paneId: paneId as never, contentId: `ct_viewport_${paneId}` as never, revision: 1 as never,
+    historyOwnerToken: `hot_viewport_${paneId}`, contentType: "html",
+    content: { html: `<html><body>retained state ${paneId}</body></html>` },
+  });
+  return { core, surfaceId, state: () => core.getRendererWindowState(surfaceId) };
+}
+
 test("renderer DOM integrates authoritative connection states and live scale controls", async () => {
   const { document, window } = parseHTML(
     "<!doctype html><html lang=\"en\"><body><div id=\"app\"></div><div id=\"provenance-announcer\" aria-atomic=\"true\" aria-live=\"polite\"></div></body></html>",
@@ -68,6 +83,7 @@ test("renderer DOM integrates authoritative connection states and live scale con
   let provenanceWidth = 200;
   let nonceCounter = 0;
   let textMetricScale = 1;
+  let syncStateViewport = true;
   const commands: unknown[] = [];
   const presentations: Record<string, unknown>[] = [];
   let presentationResponse: (() => Promise<{ ok: boolean; error?: string; revision?: number; authorityRevision?: number; presentationCleared?: boolean; presentationBlocked?: boolean }>) | null = null;
@@ -94,7 +110,7 @@ test("renderer DOM integrates authoritative connection states and live scale con
     onKeyboardIntent(listener: (intent: unknown) => void) { keyboardListener = listener; },
     onState(listener: (next: unknown) => void) {
       stateListener = (next: any) => {
-        Object.assign(window, { innerWidth: next.viewport.width, innerHeight: next.viewport.height });
+        if (syncStateViewport) Object.assign(window, { innerWidth: next.viewport.width, innerHeight: next.viewport.height });
         listener(next);
       };
     },
@@ -1562,6 +1578,168 @@ test("renderer DOM integrates authoritative connection states and live scale con
     assert.equal(commits, 0);
     presentationResponse = null;
     Object.assign(surfAce, { reportSnapshot: oldSnapshot, reportOverlayRegions: oldOverlay });
+  });
+
+  await test("real core viewport epoch keeps mounted divider slots while presentation is disabled", async () => {
+    surfAce.panePresentationEnabled = false;
+    const f = realViewportFixture();
+    const before = f.state();
+    stateListener!(before);
+    const roots = [...document.querySelectorAll<HTMLElement>(".pane-shell")];
+    const guests = roots.map(root => root.querySelector("webview"));
+    const rectangle = Object.getOwnPropertyDescriptor(window.HTMLElement.prototype, "getBoundingClientRect")!;
+    Object.defineProperty(window.HTMLElement.prototype, "getBoundingClientRect", { configurable: true,
+      value(this: HTMLElement) {
+        if (!this.isConnected) return { x: 0, y: 0, width: 0, height: 0, left: 0, top: 0, right: 0, bottom: 0 };
+        return rectangle.value.call(this);
+      } });
+    try {
+      f.core.setViewport(f.surfaceId, { width: 1000, height: 700, scale: 1 });
+      const resized = f.state();
+      assert.notEqual(resized.surfaceEpoch, before.surfaceEpoch, "real viewport rotates epoch");
+      stateListener!(resized);
+      assert.equal(document.querySelector(".pane-pop-out"), null);
+      assert.deepEqual([...document.querySelectorAll(".pane-shell")], roots);
+      assert.deepEqual(roots.map(root => root.querySelector("webview")), guests);
+      const commits: any[] = [];
+      Object.assign(surfAce, { async resizeSplit(payload: any) {
+        commits.push(payload);
+        const current = f.state();
+        assert.equal(splitResizeMatches(current, payload.expected), true);
+        assert.equal(splitResizeGeometryIsValid(payload.geometry, current.panes.map(pane => pane.paneId)), true,
+          "release must measure positive connected slots, not detached replacement slots");
+        f.core.resizeSplit(f.surfaceId, payload.path, payload.weights);
+        return true;
+      } });
+      const handle = document.querySelector<HTMLElement>(".split-resize-handle")!;
+      Object.assign(handle, { setPointerCapture() {}, hasPointerCapture: () => false, releasePointerCapture() {} });
+      const pointer = (target: EventTarget, type: string, x: number) => {
+        const event = new window.Event(type, { bubbles: true, cancelable: true });
+        Object.assign(event, { pointerId: 301, clientX: x, clientY: x }); target.dispatchEvent(event);
+      };
+      pointer(handle, "pointerdown", 100); pointer(window, "pointerup", 140);
+      await new Promise<void>(resolve => setImmediate(resolve));
+      assert.equal(commits.length, 1);
+      assert.notDeepEqual(f.state().layout, resized.layout, "ordinary divider release commits current weights");
+      for (const candidate of commits[0].geometry) assert.ok(candidate.bounds.width > 0 && candidate.bounds.height > 0);
+      // A genuine replacement still retires the old host before building its slot.
+      const replaced = { ...resized, surfaceEpoch: `${resized.surfaceEpoch}:replacement`,
+        panes: resized.panes.map(pane => ({ ...pane, paneLineageId: `${pane.paneLineageId}:replacement` })) };
+      stateListener!(replaced);
+      assert.equal(guests[0]!.isConnected, false);
+      assert.ok([...document.querySelectorAll<HTMLElement>(".pane-layout-slot")].every(slot => slot.isConnected));
+    } finally {
+      Object.defineProperty(window.HTMLElement.prototype, "getBoundingClientRect", rectangle);
+      surfAce.panePresentationEnabled = true;
+    }
+  });
+
+  await test("real core viewport epoch retains Solo hosts and desired Restore in both event/reply orders", async () => {
+    for (const stateFirst of [false, true]) for (const restoreHeld of [false, true]) {
+      const f = realViewportFixture();
+      stateListener!(f.state());
+      const root = document.querySelectorAll<HTMLElement>(".pane-shell")[1]!;
+      const guest = root.querySelector("webview")!;
+      const slots = [...document.querySelectorAll<HTMLElement>(".pane-layout-slot")];
+      const weights = slots.map(slot => slot.style.flexGrow);
+      const toggle = root.querySelector<HTMLButtonElement>(".pane-pop-out")!;
+      (guest as any).sessionCounter = 17;
+      presentationResponse = null;
+      toggle.click(); await new Promise<void>(resolve => setImmediate(resolve));
+      assert.equal(root.classList.contains("pane-popped-out"), true);
+      const before = f.state();
+      const replies: Array<(reply: { ok: boolean; presentationBlocked?: boolean; presentationCleared?: boolean }) => void> = [];
+      presentationResponse = () => new Promise(resolve => { replies.push(resolve); });
+      if (restoreHeld) toggle.click();
+      const requestStart = presentations.length;
+      syncStateViewport = false;
+      f.core.setViewport(f.surfaceId, { width: 1000, height: 700, scale: 1 });
+      const resized = f.state();
+      assert.notEqual(resized.surfaceEpoch, before.surfaceEpoch);
+      const resizeEvent = () => {
+        Object.assign(window, { innerWidth: resized.viewport.width, innerHeight: resized.viewport.height });
+        window.dispatchEvent(new window.Event("resize"));
+      };
+      if (stateFirst) {
+        stateListener!(resized);
+        assert.equal(presentations.length, requestStart, "no request before browser bounds match current core epoch");
+        resizeEvent();
+      } else {
+        resizeEvent();
+        assert.equal(presentations.length, requestStart, "no request under old core epoch");
+        stateListener!(resized);
+      }
+      syncStateViewport = true;
+      const reack = presentations.at(-1)!;
+      assert.equal((reack.identity as any).surfaceEpoch, resized.surfaceEpoch);
+      assert.equal(reack.paneId, restoreHeld ? null : 2);
+      assert.equal(root.querySelector("webview"), guest);
+      assert.equal((guest as any).sessionCounter, 17);
+      assert.equal(root.querySelector(".pane-content")!.hasAttribute("inert"), true);
+      assert.deepEqual([...document.querySelectorAll(".pane-layout-slot")], slots);
+      const settle = async (index: number) => {
+        replies[index]!({ ok: true }); await new Promise<void>(resolve => setImmediate(resolve));
+      };
+      if (restoreHeld) {
+        assert.equal(replies.length, 2);
+        // Both stale Restore reply orders must preserve the newer null intent.
+        const order = stateFirst ? [1, 0] : [0, 1];
+        await settle(order[0]!);
+        if (order[0] === 0) assert.equal(root.querySelector(".pane-content")!.hasAttribute("inert"), true);
+        await settle(order[1]!);
+      } else { assert.equal(replies.length, 1); await settle(0); }
+      assert.equal(root.classList.contains("pane-popped-out"), !restoreHeld);
+      assert.equal(root.querySelector(".pane-content")!.hasAttribute("inert"), false);
+      assert.deepEqual(slots.map(slot => slot.style.flexGrow), weights);
+      assert.deepEqual(f.state().layout, resized.layout);
+      assert.equal(root.querySelector("webview"), guest);
+      presentationResponse = null;
+      if (!restoreHeld) { toggle.click(); await new Promise<void>(resolve => setImmediate(resolve)); }
+      assert.equal(root.classList.contains("pane-popped-out"), false);
+    }
+    syncStateViewport = true;
+  });
+
+  await test("keyboard scale, scroll and annotation obey held-enter and failed-retirement shields", async () => {
+    const f = realViewportFixture();
+    f.core.setAnnotating(f.surfaceId, 2, true);
+    const next = f.state();
+    stateListener!(next);
+    const roots = [...document.querySelectorAll<HTMLElement>(".pane-shell")];
+    const guest = roots[0]!.querySelector("webview") as HTMLElement & { executeJavaScript: (code: string) => Promise<unknown> };
+    const scripts: string[] = [];
+    guest.executeJavaScript = async code => { scripts.push(code); return null; };
+    const toggle = roots[0]!.querySelector<HTMLButtonElement>(".pane-pop-out")!;
+    let finish!: (reply: { ok: boolean; presentationBlocked?: boolean; presentationCleared?: boolean }) => void;
+    presentationResponse = () => new Promise(resolve => { finish = resolve; });
+    toggle.click();
+    const checkBlocked = () => {
+      const count = commands.length, calls = scripts.length, doneCalls = finishCalls;
+      const font = roots[0]!.querySelector(".font-size-toggle");
+      keyboardListener!({ type: "content-scale", paneId: 1, action: "increase" });
+      keyboardListener!({ type: "scroll", paneId: 1, direction: "down", amount: "line" });
+      for (const [pane, action] of [[next.panes[0]!, "enter"], [next.panes[1]!, "done"]] as const)
+        keyboardListener!({ type: "annotation", action, expected: { ...pane.content,
+          paneId: pane.paneId, paneLineageId: pane.paneLineageId } });
+      assert.equal(commands.length, count);
+      assert.equal(scripts.length, calls);
+      assert.equal(finishCalls, doneCalls);
+      assert.equal(roots[0]!.querySelector(".font-size-toggle"), font, "keyboard must not rebuild/scale shielded content");
+    };
+    checkBlocked();
+    finish({ ok: false, presentationBlocked: true, presentationCleared: false });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    checkBlocked();
+    assert.equal(toggle.closest("[inert]"), null, "Restore remains available to retire uncertain authority");
+    toggle.click();
+    finish({ ok: true }); await new Promise<void>(resolve => setImmediate(resolve));
+    const font = roots[0]!.querySelector(".font-size-toggle");
+    keyboardListener!({ type: "content-scale", paneId: 1, action: "increase" });
+    assert.notEqual(roots[0]!.querySelector(".font-size-toggle"), font, "confirmed Restore reopens keyboard scale");
+    const calls = scripts.length;
+    keyboardListener!({ type: "scroll", paneId: 1, direction: "down", amount: "line" });
+    assert.equal(scripts.length, calls + 1, "confirmed Restore reopens guest scroll");
+    presentationResponse = null;
   });
 
   await test("separator previews latest frame and sends one fenced release, cancel and failure restore", async () => {

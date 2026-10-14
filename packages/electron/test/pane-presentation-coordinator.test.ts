@@ -417,3 +417,53 @@ test("failed ownership retirement stays uncertain and Restore retries original s
   assert.deepEqual(f.core.paneBounds(f.surfaceId, f.paneId), f.bounds);
   assert.ok(restores[1]! > restores[0]!);
 });
+
+test("real viewport epochs retire stale native acknowledgement before current-generation reacquisition", async () => {
+  const f = fixture(true);
+  let firstSent!: () => void;
+  const sent = new Promise<void>(resolve => { firstSent = resolve; });
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const controls: Array<Extract<CompositorControlRequest, { type: "pane_presentation.set" }>> = [];
+  let holdFirst = true;
+  const currentHost = () => {
+    const viewport = f.core.getRendererWindowState(f.surfaceId).viewport;
+    return { ...host, source_rect: { x: 0, y: 0, width: viewport.width, height: viewport.height },
+      logical_rect: { x: 0, y: 0, width: viewport.width, height: viewport.height } };
+  };
+  const coordinator = new PanePresentationCoordinator(f.core, () => async wire => {
+    if (wire.type === "get_status") return { ok: true, status: {
+      pane_presentation_host: currentHost(), capabilities: { [PANE_PRESENTATION_CAPABILITY]: 1 },
+    } };
+    if (wire.type !== "pane_presentation.set") throw Error("unexpected control");
+    controls.push(structuredClone(wire));
+    if (wire.request.selected && holdFirst) { holdFirst = false; firstSent(); await held; }
+    return ack(wire);
+  }, undefined, async surfaceId => ({ window_id: `window:${surfaceId}`,
+    renderer_surface_id: surfaceId, host: currentHost() }));
+  const first = coordinator.applyRendererOutcome(f.surfaceId, { identity: f.identity, paneId: f.paneId,
+    bounds: f.presentation.snapshot.bounds, viewport: f.presentation.snapshot.viewport });
+  await sent;
+  f.core.setViewport(f.surfaceId, { width: 1100, height: 760, scale: 1 });
+  const identity = f.core.resolvedPaneGeometryIdentity(f.surfaceId);
+  assert.notEqual(identity.surfaceEpoch, f.identity.surfaceEpoch);
+  // Current tiled observations remain mandatory; stale snapshots are not rebased.
+  const viewport = { ...f.presentation.snapshot.viewport,
+    contentSize: { width: 400, height: 300 }, visibleRect: { x: 0, y: 0, width: 400, height: 300 } };
+  f.core.updatePaneSnapshot(f.surfaceId, f.paneId, { ...identity, bounds: f.bounds, viewport });
+  const second = coordinator.applyRendererOutcome(f.surfaceId, { identity, paneId: f.paneId,
+    bounds: { x: 12, y: 12, width: 1076, height: 736 }, viewport });
+  release();
+  const old = await first, current = await second;
+  assert.equal(old.ok, false, "old epoch acknowledgement cannot commit selection");
+  assert.equal(current.ok, true);
+  assert.deepEqual(controls.map(control => [control.request.selected?.renderer_pane_id ?? null,
+    control.request.presentation_generation.surface_epoch]), [
+    [f.paneId, f.identity.surfaceEpoch], [null, f.identity.surfaceEpoch], [f.paneId, identity.surfaceEpoch],
+  ], "retire exact old generation before sending new selection");
+  assert.equal(f.core.captureSnapshot(f.surfaceId, f.paneId).viewport.visibleRect.width, 400);
+  const restored = await coordinator.applyRendererOutcome(f.surfaceId, { identity, paneId: null });
+  assert.equal(restored.ok, true);
+  assert.equal(restored.presentationCleared, true);
+  assert.deepEqual(f.core.paneBounds(f.surfaceId, f.paneId), f.bounds);
+});

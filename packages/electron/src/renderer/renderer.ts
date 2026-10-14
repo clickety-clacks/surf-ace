@@ -1546,7 +1546,8 @@ let panePresentationResizePending = false;
 // resize must preserve an outstanding Restore even while its pane is visible.
 let desiredPopOutPaneId: number | null = null;
 function reacknowledgePanePopOutViewport(): void {
-  if (poppedOutPaneId === null) return;
+  const ownerPaneId = poppedOutPaneId ?? desiredPopOutPaneId;
+  if (ownerPaneId === null) return;
   panePresentationResizePending = true;
   panePresentationIntent++; // Any preceding viewport request is now obsolete.
   applyPanePopOut();
@@ -1555,7 +1556,7 @@ function reacknowledgePanePopOutViewport(): void {
   // give this viewport a request that can actually settle its pending owner.
   if (!latestState || window.innerWidth !== latestState.viewport.width ||
       window.innerHeight !== latestState.viewport.height) return;
-  const selected = paneViews.get(poppedOutPaneId);
+  const selected = paneViews.get(ownerPaneId);
   if (selected) void requestPanePopOut(selected, desiredPopOutPaneId);
 }
 
@@ -3759,6 +3760,22 @@ function patchSameLayoutWindow(previousState: RendererWindowState, state: Render
   return true;
 }
 
+// setViewport rotates surfaceEpoch even when pane/content sessions are unchanged.
+// Treat only that narrowly identified geometry transition as a host continuation;
+// a surface, topology, lineage or content replacement still retires old views.
+function isViewportEpochContinuation(previous: RendererWindowState, state: RendererWindowState): boolean {
+  if (previous.surfaceId !== state.surfaceId || previous.surfaceEpoch === state.surfaceEpoch ||
+      previous.topologyRevision !== state.topologyRevision || state.geometryRevision <= previous.geometryRevision ||
+      JSON.stringify(previous.viewport) === JSON.stringify(state.viewport) ||
+      JSON.stringify(previous.layout) !== JSON.stringify(state.layout) || previous.panes.length !== state.panes.length) return false;
+  const oldPanes = new Map(previous.panes.map(pane => [pane.paneId, pane]));
+  return state.panes.every(pane => {
+    const old = oldPanes.get(pane.paneId);
+    return !!old && old.paneLineageId === pane.paneLineageId && contentKey(old) === contentKey(pane) &&
+      old.externalNative === pane.externalNative;
+  });
+}
+
 function renderWindow(state: RendererWindowState): void {
   rendererDiagnostic("render_window_start", {
     hasAppRoot: Boolean(appRoot),
@@ -3769,10 +3786,11 @@ function renderWindow(state: RendererWindowState): void {
   });
   announceReachedHistoryEntries(state);
   const previousState = latestState;
+  const viewportContinuation = !!previousState && isViewportEpochContinuation(previousState, state);
   if (previousState && (previousState.surfaceId !== state.surfaceId ||
-      previousState.surfaceEpoch !== state.surfaceEpoch ||
+      (previousState.surfaceEpoch !== state.surfaceEpoch && !viewportContinuation) ||
       previousState.topologyRevision !== state.topologyRevision ||
-      layoutKey(previousState) !== layoutKey(state) ||
+      JSON.stringify(previousState.layout) !== JSON.stringify(state.layout) ||
       (poppedOutPaneId !== null && !state.panes.some((pane) => pane.paneId === poppedOutPaneId &&
         pane.paneLineageId === previousState.panes.find((previous) => previous.paneId === poppedOutPaneId)?.paneLineageId)))) {
     poppedOutPaneId = null;
@@ -3809,16 +3827,21 @@ function renderWindow(state: RendererWindowState): void {
   updateConnectionErrorBanner(wrapper, state);
   const layoutRoot = wrapper.querySelector(".layout-root")!;
   const hosts = wrapper.querySelector(".pane-host-layer")!;
-  // Only the cheap layout skeleton is rebuilt. Guest ancestors never move.
-  layoutRoot.replaceChildren(...(state.layout ? [renderLayout(state.layout, panesById)] : []));
+  // Retire replaced views before renderLayout obtains their slot elements.
+  // A viewport-only epoch transition retains the actual content hosts and slots.
   for (const [id, view] of paneViews) {
-    if (!panesById.has(id) || (previousState &&
-        (previousState.surfaceEpoch !== state.surfaceEpoch || previousState.surfaceId !== state.surfaceId))) {
+    const pane = panesById.get(id);
+    const previousPane = previousState?.panes.find(previous => previous.paneId === id);
+    if (!pane || (previousState && (previousState.surfaceId !== state.surfaceId ||
+        (previousState.surfaceEpoch !== state.surfaceEpoch && !viewportContinuation) ||
+        previousPane?.paneLineageId !== pane.paneLineageId))) {
       resetDynamicContent(view);
       view.rootEl.remove();
       paneViews.delete(id);
     }
   }
+  // Only the cheap layout skeleton is rebuilt. Guest ancestors never move.
+  layoutRoot.replaceChildren(...(state.layout ? [renderLayout(state.layout, panesById)] : []));
   for (const pane of state.panes) {
     const view = ensurePaneView(pane.paneId);
     if (view.rootEl.parentElement !== hosts) hosts.appendChild(view.rootEl);
@@ -3831,6 +3854,7 @@ function renderWindow(state: RendererWindowState): void {
     }
   }
   positionPaneHosts();
+  if (viewportContinuation) reacknowledgePanePopOutViewport();
   showResizeStatus();
   rendererDiagnostic("render_window_committed", {
     appChildCount: appRoot.childElementCount,
@@ -3923,7 +3947,7 @@ async function init(): Promise<void> {
   });
 
   window.surfAce.onKeyboardIntent((intent) => {
-    if (panePresentationResizePending) return;
+    if (panePresentationResizePending || panePresentationTransitionsPending > 0 || panePresentationAuthorityBlocked) return;
     if (poppedOutPaneId !== null && intent && typeof intent === "object" &&
         "paneId" in intent && intent.paneId !== poppedOutPaneId) return;
     if (intent && typeof intent === "object" && (intent as { type?: unknown }).type === "annotation") {
