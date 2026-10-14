@@ -1634,6 +1634,18 @@ test("ordinary edits retain source and provenance across close and restart witho
     assert.equal((await pair(socket, "tight-beam", surface.surfaceId)).ok, true);
     const paneId = Number(core.panesList(surface.surfaceId).panes[0]!.paneId);
     const html = "<main>" + "retained source".repeat(1000) + "</main>";
+    const markdown = await request(socket, "content.set", {
+      content: { markdown: "# Document" }, contentId: "source-document", contentType: "markdown",
+      friendlyChatName: "Document author", paneId, surfaceId: surface.surfaceId,
+    });
+    assert.equal(markdown.ok, true, JSON.stringify(markdown));
+    const beforeUnsupported = core.capturePaneTombstonePayload(surface.surfaceId, paneId).pane;
+    const unsupported = await request(socket, "content.append", {
+      contentId: "source-document", expectedRevision: markdown.payload.revision,
+      lines: ["must not append"], paneId, surfaceId: surface.surfaceId,
+    });
+    assert.equal(unsupported.error.code, "unsupported_operation_for_content_type");
+    assert.deepEqual(core.capturePaneTombstonePayload(surface.surfaceId, paneId).pane, beforeUnsupported);
     const first = await request(socket, "content.set", {
       content: { html }, contentId: "source-html", contentType: "html",
       friendlyChatName: "HTML author", paneId, surfaceId: surface.surfaceId,
