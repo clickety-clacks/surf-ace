@@ -180,7 +180,6 @@ enum SurfAceLocklessTopologyOperations {
             surface.topology = try SurfAceLocklessTopologyCodec.canonical(topology)
             surface.topologyRevision += 1
             surface.surfaceRevision += 1
-            try assertRecoverableCapacity(surface, limits: candidate.limits)
             candidate.liveSurfaces[surfaceId] = surface
             return SurfAceLocklessPaneSplitResult(
                 newPaneIds: newPaneIds, newPaneLabels: newPaneLabels,
@@ -200,13 +199,10 @@ enum SurfAceLocklessTopologyOperations {
             var surface = try liveSurface(candidate, surfaceId)
             try assertTopology(expectedTopologyRevision, surface)
             guard var pane = surface.panes[String(paneId)] else { throw Error.paneNotFound(paneId) }
-            let current = try paneBytes(pane)
             pane.name = name
-            try assertPaneCapacity(current: current, pane: pane, limits: candidate.limits)
             surface.panes[String(paneId)] = pane
             surface.topologyRevision += 1
             surface.surfaceRevision += 1
-            try assertSurfaceBaseCapacity(surface, limits: candidate.limits)
             candidate.liveSurfaces[surfaceId] = surface
             return SurfAceLocklessPaneRenameResult(name: name, paneId: paneId, topologyRevision: surface.topologyRevision)
         }
@@ -352,7 +348,6 @@ enum SurfAceLocklessTopologyOperations {
             try assertPaneCreation(
                 current: Int64(existingIds.count), prospective: Int64(resultingIds.count), limits: candidate.limits
             )
-            for pane in created.values { try assertPaneCapacity(current: 0, pane: pane, limits: candidate.limits) }
 
             var destroyed: [SurfAceLocklessDestroyedPaneTombstone] = []
             for paneId in removed {
@@ -380,7 +375,6 @@ enum SurfAceLocklessTopologyOperations {
             surface.topology = canonical
             surface.topologyRevision += 1
             surface.surfaceRevision += 1
-            try assertRecoverableCapacity(surface, limits: candidate.limits)
             candidate.liveSurfaces[surfaceId] = surface
             let reclamations = try enforceTombstonePool(&candidate)
             let panes = surface.panes.values.sorted { $0.paneId < $1.paneId }
@@ -412,7 +406,6 @@ enum SurfAceLocklessTopologyOperations {
                 topology: .object(["paneId": .integer(1), "type": .string("pane")]),
                 topologyRevision: 0, windowLabel: windowLabel, windowLabelConfirmed: false
             )
-            try assertRecoverableCapacity(surface, limits: candidate.limits)
             candidate.liveSurfaces[surfaceId] = surface
             candidate.scopes[surfaceScopeId(surfaceId)] = emptyScope(
                 id: surfaceScopeId(surfaceId), kind: "surface", controllers: candidate.controllers
@@ -642,16 +635,6 @@ private extension SurfAceLocklessTopologyOperations {
         }
     }
 
-    static func assertRecoverableCapacity(_ surface: SurfAceLocklessSurfaceMaterial, limits: SurfAceLocklessCapacityLimits) throws {
-        try assertSurfaceBaseCapacity(surface, limits: limits)
-        for pane in surface.panes.values { try assertPaneCapacity(current: try paneBytes(pane), pane: pane, limits: limits) }
-    }
-    static func assertSurfaceBaseCapacity(_ surface: SurfAceLocklessSurfaceMaterial, limits: SurfAceLocklessCapacityLimits) throws {
-        let bytes = try surfaceBaseBytes(surface)
-        guard bytes <= limits.maxSurfaceRecoverableBaseBytes else {
-            throw Error.surfaceStateCapacity(current: bytes, prospective: bytes, maximum: limits.maxSurfaceRecoverableBaseBytes)
-        }
-    }
     static func surfaceBaseMaterial(_ surface: SurfAceLocklessSurfaceMaterial) -> SurfAceLocklessJSON {
         .object([
             "name": .string(surface.name), "nativeRestoreMaterial": surface.nativeRestoreMaterial,
@@ -663,18 +646,6 @@ private extension SurfAceLocklessTopologyOperations {
             "windowLabel": .string(surface.windowLabel),
         ])
     }
-    static func assertPaneCapacity(current: Int64, pane: SurfAceLocklessPaneMaterial, limits: SurfAceLocklessCapacityLimits) throws {
-        let prospective = try paneBytes(pane)
-        let annotations = try encodedBytes(Versioned(value: [pane.history.visible.annotations]
-            + pane.history.back.map(\.annotations) + pane.history.forward.map(\.annotations)))
-        if annotations > limits.maxPaneAnnotationRestoreBytes {
-            throw Error.paneStateCapacity(limit: "maxPaneAnnotationRestoreBytes", current: current, prospective: annotations, maximum: limits.maxPaneAnnotationRestoreBytes)
-        }
-        if prospective > limits.maxPaneRecoverableStateBytes {
-            throw Error.paneStateCapacity(limit: "maxPaneRecoverableStateBytes", current: current, prospective: prospective, maximum: limits.maxPaneRecoverableStateBytes)
-        }
-    }
-    static func paneBytes(_ pane: SurfAceLocklessPaneMaterial) throws -> Int64 { try encodedBytes(Versioned(value: pane)) }
     static func encodedBytes<T: Encodable>(_ value: T) throws -> Int64 {
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
         return Int64(try encoder.encode(value).count)
@@ -698,30 +669,7 @@ private extension SurfAceLocklessTopologyOperations {
                 <= limits.maxPanesPerSurface + limits.maxRetainedTombstones else {
             throw SurfAceLocklessAuthorityError.invalidState("surface_recoverable_envelope:\(path)")
         }
-        do {
-            try assertSurfaceBaseCapacity(surface, limits: limits)
-        } catch {
-            throw SurfAceLocklessAuthorityError.invalidState("surface_base_bytes:\(path)")
-        }
-        for pane in surface.panes.values {
-            do {
-                try assertPaneCapacity(current: try paneBytes(pane), pane: pane, limits: limits)
-            } catch {
-                throw SurfAceLocklessAuthorityError.invalidState("pane_recoverable_bytes:\(path):\(pane.paneId)")
-            }
-        }
         for tombstone in surface.paneTombstones {
-            do {
-                try assertPaneCapacity(
-                    current: try paneBytes(tombstone.pane),
-                    pane: tombstone.pane,
-                    limits: limits
-                )
-            } catch {
-                throw SurfAceLocklessAuthorityError.invalidState(
-                    "pane_tombstone_recoverable_bytes:\(path):\(tombstone.tombstoneId)"
-                )
-            }
             let exact = try paneTombstoneBytes(
                 closedSequence: tombstone.closedSequence,
                 pane: tombstone.pane,

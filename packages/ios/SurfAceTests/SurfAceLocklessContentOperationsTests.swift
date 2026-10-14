@@ -136,7 +136,7 @@ final class SurfAceLocklessContentOperationsTests: XCTestCase {
         ]))
     }
 
-    func testAnnotationGuardAndExactPaneCapacityRejectWithoutMutation() throws {
+    func testAnnotationGuardRejectsWithoutMutation() throws {
         var annotating = try authority()
         var surface = try XCTUnwrap(annotating.liveSurfaces["sf_1"])
         surface.panes["1"]?.annotationMode = true
@@ -153,78 +153,25 @@ final class SurfAceLocklessContentOperationsTests: XCTestCase {
         }
         XCTAssertEqual(annotating, beforeAnnotation)
 
-        var bounded = try authority()
-        bounded.limits.maxPaneRecoverableStateBytes = 1
-        let beforeCapacity = bounded
-        XCTAssertThrowsError(try SurfAceLocklessContentOperations.set(
-            state: &bounded,
-            intent: .init(
-                content: markdown("too large"), contentId: "large", contentType: "markdown",
-                controllerProductName: nil, friendlyChatName: nil, paneId: 1, surfaceId: "sf_1"
-            )
-        )) { error in
-            guard case .paneStateCapacity(let limit, _, _, let maximum) = error as? SurfAceLocklessContentOperationError else {
-                return XCTFail("unexpected error \(error)")
-            }
-            XCTAssertEqual(limit, "maxPaneRecoverableStateBytes")
-            XCTAssertEqual(maximum, 1)
-        }
-        XCTAssertEqual(bounded, beforeCapacity)
     }
 
-    func testExactPaneAndAnnotationLimitsAcceptEqualityAndRejectOneByteBelow() throws {
-        var measured = try authority()
-        _ = try SurfAceLocklessContentOperations.set(
-            state: &measured,
-            intent: .init(
-                content: markdown("at limit"), contentId: "at-limit", contentType: "markdown",
-                controllerProductName: nil, friendlyChatName: nil, paneId: 1, surfaceId: "sf_1"
-            )
-        )
-        let prospectivePane = try pane(measured)
-        let paneBytes = try SurfAceLocklessContentOperations.exactPaneRecoverableBytes(prospectivePane)
-        let annotationBytes = try SurfAceLocklessContentOperations.exactAnnotationRestoreBytes(prospectivePane)
-
-        var atLimit = try authority()
-        atLimit.limits.maxPaneRecoverableStateBytes = paneBytes
-        atLimit.limits.maxPaneAnnotationRestoreBytes = annotationBytes
-        XCTAssertNoThrow(try SurfAceLocklessContentOperations.set(
-            state: &atLimit,
-            intent: .init(
-                content: markdown("at limit"), contentId: "at-limit", contentType: "markdown",
-                controllerProductName: nil, friendlyChatName: nil, paneId: 1, surfaceId: "sf_1"
-            )
-        ))
-
-        var paneTooSmall = try authority()
-        paneTooSmall.limits.maxPaneRecoverableStateBytes = paneBytes - 1
-        let beforePane = paneTooSmall
-        XCTAssertThrowsError(try SurfAceLocklessContentOperations.set(
-            state: &paneTooSmall,
-            intent: .init(
-                content: markdown("at limit"), contentId: "at-limit", contentType: "markdown",
-                controllerProductName: nil, friendlyChatName: nil, paneId: 1, surfaceId: "sf_1"
-            )
-        ))
-        XCTAssertEqual(paneTooSmall, beforePane)
-
-        var annotationTooSmall = try authority()
-        annotationTooSmall.limits.maxPaneAnnotationRestoreBytes = annotationBytes - 1
-        let beforeAnnotation = annotationTooSmall
-        XCTAssertThrowsError(try SurfAceLocklessContentOperations.set(
-            state: &annotationTooSmall,
-            intent: .init(
-                content: markdown("at limit"), contentId: "at-limit", contentType: "markdown",
-                controllerProductName: nil, friendlyChatName: nil, paneId: 1, surfaceId: "sf_1"
-            )
-        )) { error in
-            guard case .paneStateCapacity(let limit, _, _, let maximum) = error as? SurfAceLocklessContentOperationError else {
-                return XCTFail("unexpected error \(error)")
-            }
-            XCTAssertEqual(limit, "maxPaneAnnotationRestoreBytes")
-            XCTAssertEqual(maximum, annotationBytes - 1)
-        }
-        XCTAssertEqual(annotationTooSmall, beforeAnnotation)
+    func testContentHistoryAndSourceSurviveBelowFormerPaneByteCaps() throws {
+        var state = try authority()
+        state.limits.maxPaneRecoverableStateBytes = 1
+        state.limits.maxPaneAnnotationRestoreBytes = 1
+        state.limits.maxSurfaceRecoverableBaseBytes = 1
+        _ = try SurfAceLocklessContentOperations.set(state: &state, intent: .init(
+            content: markdown("recoverable source"), contentId: "first", contentType: "markdown",
+            controllerProductName: "Provider", friendlyChatName: "User", paneId: 1, surfaceId: "sf_1"))
+        let first = try pane(state).history.visible
+        _ = try SurfAceLocklessContentOperations.set(state: &state, intent: .init(
+            content: markdown("new source"), contentId: "second", contentType: "markdown",
+            controllerProductName: "Other", friendlyChatName: "Next", paneId: 1, surfaceId: "sf_1"))
+        XCTAssertEqual(try pane(state).history.back.last, first)
+        let restored = try JSONDecoder().decode(SurfAceLocklessAuthorityState.self,
+                                               from: JSONEncoder().encode(state))
+        XCTAssertEqual(restored.liveSurfaces["sf_1"]?.panes["1"]?.history, try pane(state).history)
+        XCTAssertEqual(restored.liveSurfaces["sf_1"]?.panes["1"]?.paneLineageId, try pane(state).paneLineageId)
     }
 
     func testPatchPreparationDetectsInterleavingBeforeCommit() throws {
