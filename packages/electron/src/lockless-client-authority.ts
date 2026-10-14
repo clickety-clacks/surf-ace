@@ -1682,6 +1682,21 @@ export class LocklessClientAuthority {
     return this.state.surfaceSetRevision;
   }
 
+  assertPaneCreationCapacity(
+    currentLivePaneCount: number,
+    requestedResultingCount: number,
+  ): void {
+    if (requestedResultingCount > this.state.limits.maxPanesPerSurface) {
+      throw new LocklessAuthorityError(
+        "pane_capacity",
+        "Pane-creating operation exceeds maxPanesPerSurface",
+        { currentLivePaneCount,
+          maxPanesPerSurface: this.state.limits.maxPanesPerSurface,
+          requestedResultingCount },
+      );
+    }
+  }
+
   allocatePaneIdentity(
     usedPaneIds: Iterable<number>,
   ): { paneId: number } {

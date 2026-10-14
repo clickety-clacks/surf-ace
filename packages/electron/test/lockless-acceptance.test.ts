@@ -608,6 +608,13 @@ test("close and restore preserve identity; stale and invalid placement preserve 
       assert.equal(core.activePaneIds(surface.surfaceId).length, 3);
       assert.equal(core.locklessAuthority.listTombstones("pane").length, 0);
 
+      let creationAllocations = 0;
+      const allocateIdentity = core.locklessAuthority.allocatePaneIdentity.bind(core.locklessAuthority);
+      core.locklessAuthority.allocatePaneIdentity = (usedIds) => {
+        creationAllocations += 1;
+        return allocateIdentity(usedIds);
+      };
+      const beforeCreation = core.getPersistentState();
       const nextCreation = await request(socket, "pane.split", {
         count: 2,
         direction: "horizontal",
@@ -615,9 +622,42 @@ test("close and restore preserve identity; stale and invalid placement preserve 
         paneId: rootPaneId,
         surfaceId: surface.surfaceId,
       });
-      assert.equal(nextCreation.ok, true, JSON.stringify(nextCreation));
-      assert.equal(core.activePaneIds(surface.surfaceId).length, 4);
-      assert.equal(new Set(core.activePaneIds(surface.surfaceId)).size, 4);
+      assert.equal(nextCreation.ok, false, JSON.stringify(nextCreation));
+      assert.equal(nextCreation.error.code, "pane_capacity");
+      assert.deepEqual(core.getPersistentState().surfaces, beforeCreation.surfaces);
+      assert.deepEqual(core.getPersistentState().lockless?.tombstones, beforeCreation.lockless?.tombstones);
+      assert.equal(core.activePaneIds(surface.surfaceId).length, 3);
+
+      const topologyCreation = await request(socket, "topology.apply", {
+        allowDestroyPaneIds: [],
+        desired: {
+          type: "split", direction: "horizontal",
+          children: [
+            ...core.activePaneIds(surface.surfaceId).map((paneId) => ({ type: "pane", paneId })),
+            { type: "pane", name: "Must not allocate" },
+          ],
+        },
+        expectedTopologyRevision: restored.payload.topologyRevision,
+        surfaceId: surface.surfaceId, target: { root: true },
+      });
+      assert.equal(topologyCreation.ok, false, JSON.stringify(topologyCreation));
+      assert.equal(topologyCreation.error.code, "pane_capacity");
+      assert.deepEqual(core.getPersistentState().surfaces, beforeCreation.surfaces);
+      assert.deepEqual(core.getPersistentState().lockless?.tombstones, beforeCreation.lockless?.tombstones);
+      assert.equal(creationAllocations, 0);
+      const rearranged = await request(socket, "topology.apply", {
+        allowDestroyPaneIds: [],
+        desired: {
+          type: "split", direction: "vertical",
+          children: core.activePaneIds(surface.surfaceId).map((paneId) => ({ type: "pane", paneId })),
+        },
+        expectedTopologyRevision: restored.payload.topologyRevision,
+        surfaceId: surface.surfaceId, target: { root: true },
+      });
+      assert.equal(rearranged.ok, true, JSON.stringify(rearranged));
+      assert.equal(core.activePaneIds(surface.surfaceId).length, 3);
+      assert.equal(creationAllocations, 0);
+
     } finally {
       socket.close();
     }

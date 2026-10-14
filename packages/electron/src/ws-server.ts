@@ -869,6 +869,7 @@ export class SurfaceWsServer {
     const result = await this.core.locklessAuthority.transactionAsync(
       async () => {
         const committed = await this.runLifecycleTransaction(() => {
+          this.core.locklessAuthority.assertPaneCreationCapacity(0, 1);
           const surface = this.core.createLocklessSurface(
             "Surf Ace",
             this.viewportProvider(),
@@ -2427,6 +2428,7 @@ export class SurfaceWsServer {
               surfaceId: surface.surfaceId,
             })),
           );
+          this.core.locklessAuthority.assertPaneCreationCapacity(0, 1);
           const surface = this.core.createLocklessSurface(
             "Surf Ace",
             this.viewportProvider(),
@@ -2681,6 +2683,10 @@ export class SurfaceWsServer {
             request.payload.expectedTopologyRevision,
             Number(topology.topologyRevision),
             topology,
+          );
+          this.core.locklessAuthority.assertPaneCreationCapacity(
+            topology.panes.length,
+            topology.panes.length - 1 + request.payload.count,
           );
           const newPaneIds: number[] = [];
           const newPaneLabels: number[] = [];
@@ -2942,6 +2948,44 @@ export class SurfaceWsServer {
       const existing = new Map(
         current.panes.map((pane) => [Number(pane.paneId), pane]),
       );
+      // Count creation intent before allocating any identity or registry label.
+      const prospectiveIds = new Set(existing.keys());
+      if ("root" in request.payload.target) prospectiveIds.clear();
+      else {
+        if (!prospectiveIds.delete(request.payload.target.paneId)) {
+          throw new SurfaceCoreError("invalid_payload", "topology.apply target pane is not live");
+        }
+      }
+      let newPaneCount = 0;
+      const countDesired = (value: unknown): void => {
+        if (!value || typeof value !== "object") {
+          throw new SurfaceCoreError("invalid_payload", "topology.apply desired node must be an object");
+        }
+        const node = value as { type?: unknown; paneId?: unknown; children?: unknown[]; direction?: unknown };
+        if (node.type === "pane") {
+          if (node.paneId === undefined) newPaneCount += 1;
+          else {
+            const paneId = Number(node.paneId);
+            if (!existing.has(paneId)) {
+              throw new SurfaceCoreError("invalid_payload", "topology.apply cannot allocate a caller-selected paneId");
+            }
+            prospectiveIds.add(paneId);
+          }
+          return;
+        }
+        if (node.type !== "split" ||
+            (node.direction !== "horizontal" && node.direction !== "vertical") ||
+            !Array.isArray(node.children) || node.children.length < 2) {
+          throw new SurfaceCoreError("invalid_payload", "topology.apply desired split is malformed");
+        }
+        node.children.forEach(countDesired);
+      };
+      countDesired(request.payload.desired);
+      if (newPaneCount > 0) {
+        this.core.locklessAuthority.assertPaneCreationCapacity(
+          existing.size, prospectiveIds.size + newPaneCount,
+        );
+      }
       const retained = this.core.locklessAuthority.retainedPaneIds(surfaceId);
       const usedIds = new Set([
         ...existing.keys(),
