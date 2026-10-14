@@ -429,6 +429,7 @@ final class SurfAceRuntime {
         sender: SurfAceOutboundSender,
         socket: SurfAceWebSocket
     )] = [:]
+    @ObservationIgnored private var controlProjectionConnections: Set<String> = []
     @ObservationIgnored private var locklessDeliveryActive = false
     @ObservationIgnored private var locklessDeliveryWaiters: [CheckedContinuation<Void, Never>] = []
     @ObservationIgnored private var locklessAdmissionDeliveryBarriers: Set<String> = []
@@ -2347,7 +2348,7 @@ final class SurfAceRuntime {
             if readiness.readyForAdmission {
                 let state = readiness.state
                 let limits = (try? Self.jsonObject(state.limits)) ?? [:]
-                let tombstones = (try? state.surfaceTombstones.map(Self.jsonObject)) ?? []
+                let tombstones = state.surfaceTombstones.map { Self.foundationJSON(SurfAceLocklessControlProjection.tombstone($0)) }
                 let liveControllerCount = state.controllers.values.filter { $0.status == .live }.count
                 return [
                     "v": 1,
@@ -2439,7 +2440,11 @@ final class SurfAceRuntime {
             )
             locklessConnectionsByConnectionUUID[connectionUUID] = (controllerInstanceId, surfaceId, sender, socket)
             let admittedState = await adapter.snapshot()
-            let state = publicPaneLabelProjection(try Self.jsonObject(admittedState))
+            let controlProjection = protocolFeatures.contains(surfAceControlProjectionCapability)
+            if controlProjection { controlProjectionConnections.insert(connectionUUID) }
+            let state = publicPaneLabelProjection(controlProjection
+                ? Self.foundationJSON(SurfAceLocklessControlProjection.state(admittedState))
+                : try Self.jsonObject(admittedState))
             let limits = try Self.jsonObject(admission.limits)
             let admittedScopeIds: [String]
             if let surfaceId, let surface = admittedState.liveSurfaces[surfaceId] {
@@ -2449,9 +2454,15 @@ final class SurfAceRuntime {
             } else {
                 admittedScopeIds = []
             }
-            let scopes = try await adapter.consumableSnapshots(
+            let snapshots = try await adapter.consumableSnapshots(
                 connectionToken: connectionUUID, scopeIds: admittedScopeIds
-            ).map(Self.jsonObject)
+            )
+            let scopes = controlProjection ? [] : try snapshots.map(Self.jsonObject)
+            let summaries: [[String: Any]] = try controlProjection ? snapshots.map { snapshot in
+                ["scopeId": snapshot.scopeId, "cursor": try Self.jsonObject(snapshot.cursor),
+                 "firstRetainedSequence": snapshot.firstRetainedSequence,
+                 "lastRetainedSequence": snapshot.lastRetainedSequence]
+            } : []
             return SurfAceProcessedRequestResult(
                 responseObject: [
                     "v": 1,
@@ -2462,7 +2473,7 @@ final class SurfAceRuntime {
                     "sentAt": timestampNow(),
                     "payload": [
                         "capabilities": [
-                            "protocolFeatures": [surfAceLocklessCapability],
+                            "protocolFeatures": [surfAceLocklessCapability, surfAceControlProjectionCapability],
                             "limits": limits,
                             "surfaceLifecycle": true,
                         ],
@@ -2472,6 +2483,8 @@ final class SurfAceRuntime {
                         "receiptResolutions": admission.receiptResolutions.map(Self.foundationJSON),
                         "resumed": admission.resumed,
                         "scopes": scopes,
+                        "scopeSummaries": summaries,
+                        "projection": controlProjection ? "control" : "material",
                         "sessionId": connectionUUID,
                         "state": state,
                         "surfaceId": surfaceId as Any? ?? NSNull(),
@@ -2553,7 +2566,7 @@ final class SurfAceRuntime {
                 responsePayload = [
                     "surfaceSetRevision": snapshot.surfaceSetRevision,
                     "surfaces": try snapshot.liveSurfaces.values.sorted { $0.surfaceId < $1.surfaceId }
-                        .map { publicPaneLabelProjection(try Self.jsonObject($0)) },
+                        .map { publicPaneLabelProjection(Self.foundationJSON(SurfAceLocklessControlProjection.surface($0))) },
                 ]
             case "panes.list":
                 let snapshot = await adapter.snapshot()
@@ -2563,7 +2576,7 @@ final class SurfAceRuntime {
                 }
                 responsePayload = [
                     "panes": try surface.panes.values.sorted { $0.paneId < $1.paneId }.map { pane in
-                        guard var value = try Self.jsonObject(pane) as? [String: Any] else {
+                        guard var value = Self.foundationJSON(SurfAceLocklessControlProjection.pane(pane)) as? [String: Any] else {
                             throw SurfAceLocklessRuntimeAdapterError.invalidAdmission
                         }
                         let confirmed = confirmedPaneLabels["\(surfaceId):\(pane.paneLineageId)"] == pane.paneLabel
@@ -2574,6 +2587,7 @@ final class SurfAceRuntime {
                     "surfaceId": surfaceId,
                     "windowLabel": surface.windowLabel,
                     "topologyRevision": surface.topologyRevision,
+                    "topology": Self.foundationJSON(surface.topology),
                 ]
             case "operation.receipt.sync":
                 guard let requestIds = payload["requestIds"] as? [String] else {
@@ -3416,7 +3430,7 @@ final class SurfAceRuntime {
                             ])
                         }),
                         "operationReceipt": Self.locklessReceiptJSON(requestId: id, sequence: sequence),
-                        "panes": try Self.locklessJSON(result.panes),
+                        "panes": .array(result.panes.map(SurfAceLocklessControlProjection.pane)),
                         "preservedPaneIds": .array(result.preservedPaneIds.map(SurfAceLocklessJSON.integer)),
                         "topology": result.topology,
                         "topologyRevision": .integer(result.topologyRevision),
@@ -3458,7 +3472,7 @@ final class SurfAceRuntime {
                     )
                     let terminal: SurfAceLocklessJSON = .object([
                         "operationReceipt": Self.locklessReceiptJSON(requestId: id, sequence: sequence),
-                        "surface": try Self.locklessJSON(result.surface),
+                        "surface": SurfAceLocklessControlProjection.surface(result.surface),
                         "surfaceSetRevision": .integer(result.surfaceSetRevision),
                     ])
                     _ = try SurfAceLocklessConsumableOperations.appendCommittedRecord(
@@ -3518,7 +3532,7 @@ final class SurfAceRuntime {
                     )
                     let terminal: SurfAceLocklessJSON = .object([
                         "operationReceipt": Self.locklessReceiptJSON(requestId: id, sequence: sequence),
-                        "surface": try Self.locklessJSON(result.surface),
+                        "surface": SurfAceLocklessControlProjection.surface(result.surface),
                         "surfaceSetRevision": .integer(result.surfaceSetRevision),
                         "tombstoneId": .string(result.tombstoneId),
                     ])
@@ -3926,7 +3940,7 @@ final class SurfAceRuntime {
                     continue
                 }
                 var envelopes: [[String: Any]] = []
-                if !projection.delta.records.isEmpty {
+                if !controlProjectionConnections.contains(projection.connectionToken), !projection.delta.records.isEmpty {
                     envelopes.append([
                         "v": 1, "type": "event", "op": "event.lockless_consumable_delta",
                         "eventId": randomHex(prefix: "ev", byteCount: 8), "sentAt": timestampNow(),
@@ -4408,6 +4422,7 @@ final class SurfAceRuntime {
     private func handleSocketTermination(connectionUUID: String) async {
         terminatedConnectionUUIDs.insert(connectionUUID)
         endLocklessAdmissionDeliveryBarrier(connectionUUID: connectionUUID)
+        controlProjectionConnections.remove(connectionUUID)
         if locklessConnectionsByConnectionUUID.removeValue(forKey: connectionUUID) != nil {
             try? await locklessAdapter?.disconnect(
                 connectionToken: connectionUUID,

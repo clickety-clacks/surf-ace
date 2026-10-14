@@ -5,6 +5,113 @@ import XCTest
 
 @MainActor
 final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
+    private var receivedMessageBytesById: [String: Int] = [:]
+
+    func testSevenPaneControlFlowDoesNotTransmitRecoveryPayloads() async throws {
+        let name = "SurfAceControlProjection-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(name, isDirectory: true)
+        addTeardownBlock { defaults.removePersistentDomain(forName: name); try? FileManager.default.removeItem(at: directory) }
+        let runtime = SurfAceRuntime(userDefaults: defaults, locklessStateURL: directory.appendingPathComponent("state.json"),
+            configuredRegistryURL: try XCTUnwrap(URL(string: "ws://127.0.0.1:1/ws")),
+            annotationClientId: "client-control-projection", enableFleetDiscovery: false, isolatedTestLoopback: true)
+        await runtime.start(); addTeardownBlock { await runtime.stop() }
+        let registered = await runtime.registerSurfaceForScene(sceneKey: name)
+        let surface = try XCTUnwrap(registered)
+        let adapter = try runtime.locklessAuthorityForLocalMutation()
+        let surfaceId = surface.surfaceId
+        _ = try await adapter.commitLocalMutation(operation: "test.seed_large_recovery") { state, _ in
+            let revision = state.liveSurfaces[surfaceId]!.topologyRevision
+            _ = try SurfAceLocklessTopologyOperations.paneSplit(state: &state, surfaceId: surfaceId,
+                paneId: 1, count: 7, direction: "vertical", expectedTopologyRevision: revision)
+            var material = state.liveSurfaces[surfaceId]!
+            for key in material.panes.keys.sorted() {
+                var pane = material.panes[key]!
+                pane.history.visible.contentId = "content-\(key)"
+                pane.history.visible.contentType = "html"
+                pane.history.visible.content = .object(["html": .string(String(repeating: "x", count: 4_000_000))])
+                pane.history.visible.annotations = .object(["drawingData": .string(""), "strokesById": .object([
+                    "saved-stroke": .object(["strokeId": .string("saved-stroke"), "tool": .string("pen"),
+                        "points": .array([.object(["x": .double(1), "y": .double(2), "timestamp": .integer(3)])])])])])
+                var earlier = pane.history.visible; earlier.contentId = "earlier-\(key)"
+                pane.history.back = [earlier]
+                pane.target = .object(["targetId": .string("target-\(key)"), "targetKind": .string("browser_url"),
+                    "paneLineageId": .string(pane.paneLineageId), "targetEpoch": .integer(1),
+                    "restorePolicy": .string("source"), "currentState": .string("current"),
+                    "targetPayload": .object(["html": .string("explicit target payload")])])
+                material.panes[key] = pane
+            }
+            state.liveSurfaces[surfaceId] = material
+            // Pending delivery is an independent concern and must survive listing/targeting.
+            if var publisher = state.annotationPublisher {
+                _ = try publisher.append(surfaceId: surfaceId, record: ["paneId": 1,
+                    "frameId": "fr_0123456789abcdef0123456789abcdef", "kind": "live_delta",
+                    "contentId": "content-1", "revision": 0, "contentType": "html",
+                    "sourceTimestamp": "2026-10-14T23:00:00.000Z",
+                    "viewport": ["scrollOffset": ["x": 0, "y": 0], "visibleRect": ["x": 0, "y": 0, "width": 100, "height": 100],
+                                 "contentSize": ["width": 100, "height": 100], "zoomLevel": 1],
+                    "payload": ["strokes": []]])
+                try publisher.markUnhealthy(surfaceId: surfaceId, code: "fixture_pending")
+                state.annotationPublisher = publisher
+            }
+            try SurfAceLocklessConsumableOperations.ensureScope(in: &state, scopeId: "pane:\(surfaceId):1", scopeKind: "pane")
+            _ = try SurfAceLocklessConsumableOperations.appendCommittedRecord(in: &state,
+                scopeId: "pane:\(surfaceId):1", scopeKind: "pane", recordId: "explicit-content",
+                recordClass: .content, payload: .object(["html": .string("explicit retained content")]))
+            return .null
+        }
+        let before = await adapter.snapshot()
+        let legacyBytes = try JSONEncoder().encode(before).count
+        XCTAssertGreaterThan(legacyBytes, 51_445_021)
+        let socket = socket(port: try XCTUnwrap(UInt16(exactly: runtime.serverPort)))
+        socket.maximumMessageSize = 16 * 1_024 * 1_024; socket.resume()
+        defer { socket.cancel(with: .normalClosure, reason: nil) }
+        try await send(socket, op: "pair.request", id: "control-pair", payload: [
+            "controllerInstanceId": "control-fixture", "controllerProductName": "integration-client",
+            "projectionCapacityBytes": 8 * 1_024 * 1_024,
+            "protocolFeatures": [surfAceLocklessCapability, surfAceControlProjectionCapability],
+            "protocolVersion": 1, "surfaceId": surfaceId])
+        let paired = try await receive(socket, matchingId: "control-pair")
+        XCTAssertEqual(paired["ok"] as? Bool, true)
+        XCTAssertEqual(payload(paired)["projection"] as? String, "control")
+        XCTAssertTrue((payload(paired)["scopes"] as? [Any])?.isEmpty == true)
+        XCTAssertFalse((payload(paired)["scopeSummaries"] as? [Any])?.isEmpty ?? true)
+        for op in ["surfaces.list", "panes.list"] {
+            try await send(socket, op: op, id: op, payload: ["surfaceId": surfaceId])
+            let listed = try await receive(socket, matchingId: op)
+            XCTAssertEqual(listed["ok"] as? Bool, true)
+            if op == "panes.list" {
+                let panes = try XCTUnwrap(payload(listed)["panes"] as? [[String: Any]])
+                XCTAssertEqual(panes.count, 7)
+                let selected = try XCTUnwrap(panes.first { ($0["paneId"] as? Int) == 7 })
+                XCTAssertEqual(selected["currentContentId"] as? String, "content-7")
+                XCTAssertNil(selected["history"])
+                XCTAssertNotNil(selected["paneLineageId"])
+                XCTAssertNotNil((selected["currentTarget"] as? [String: Any])?["targetEpoch"])
+            }
+        }
+        try await send(socket, op: "pane.rename", id: "control-rename", payload: [
+            "surfaceId": surfaceId, "paneId": 7, "name": "selected seven"])
+        let renamed = try await receive(socket, matchingId: "control-rename")
+        XCTAssertEqual(renamed["ok"] as? Bool, true)
+        try await send(socket, op: "consumable.sync", id: "explicit-sync", payload: ["scopeIds": ["pane:\(surfaceId):1"]])
+        let explicit = try await receive(socket, matchingId: "explicit-sync")
+        XCTAssertEqual(explicit["ok"] as? Bool, true)
+        let explicitJSON = String(decoding: try JSONSerialization.data(withJSONObject: explicit), as: UTF8.self)
+        XCTAssertTrue(explicitJSON.contains("explicit retained content"))
+        let after = await adapter.snapshot()
+        XCTAssertEqual(before.annotationPublisher, after.annotationPublisher)
+        for key in before.liveSurfaces[surfaceId]!.panes.keys {
+            XCTAssertEqual(before.liveSurfaces[surfaceId]!.panes[key]!.history, after.liveSurfaces[surfaceId]!.panes[key]!.history)
+        }
+        XCTAssertEqual(after.liveSurfaces[surfaceId]?.panes["7"]?.name, "selected seven")
+        for request in ["control-pair", "surfaces.list", "panes.list", "control-rename", "explicit-sync"] {
+            let bytes = try XCTUnwrap(receivedMessageBytesById[request])
+            XCTAssertLessThan(bytes, 16 * 1_024 * 1_024)
+            print("CONTROL_RESPONSE request=\(request) bytes=\(bytes) old_authority_bytes=\(legacyBytes)")
+        }
+    }
+
     func testDoneHeldLocalFailureStopsSpinnerWithoutChangingAuthorityOrHistory() async throws {
         try await assertDoneLocalFailure(storageFault: false)
     }
@@ -1911,6 +2018,7 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
             @unknown default: continue
             }
             if let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                if let id = object["id"] as? String { receivedMessageBytesById[id] = data.count }
                 return object
             }
         }
