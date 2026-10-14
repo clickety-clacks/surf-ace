@@ -691,7 +691,7 @@ Requests that the paired Surf Ace Spatial app endpoint create a new top-level Su
 
 **Behavior:**
 1. On a platform advertising controller window lifecycle, any admitted controller may call `surface.window.open` under the same identity-independent rules as local open.
-2. The endpoint compares `expectedSurfaceSetRevision`, validates pane-creation admission and the separate surface-admission ledger in §5.6, and atomically allocates the new surface and initial pane IDs before emitting `event.surface_appeared`. Registry-confirmed labels may arrive before or after that local commit; pending labels are `null` in the event and snapshots.
+2. The endpoint compares `expectedSurfaceSetRevision`, validates pane-creation admission and the separate surface-admission ledger in §6.0, and atomically allocates the new surface and initial pane IDs before emitting `event.surface_appeared`. Registry-confirmed labels may arrive before or after that local commit; pending labels are `null` in the event and snapshots.
 3. A platform may return `unsupported_operation` only when controller window lifecycle is not a product operation there.
 4. The request does not mutate pane topology inside an existing surface.
 
@@ -919,7 +919,7 @@ Required behavior:
 | `duplicate_controller_id` | Lockless admission found the same instance ID already live |
 | `controller_capacity` | All admitted-controller entries are live and the advertised bound is full |
 | `pane_capacity` | Pane-creating prospective live count exceeds the advertised admission cap |
-| `surface_state_capacity` | Separate surface-admission ledger capacity (§5.6); never an ordinary mutation, content recovery, or retained-tombstone byte refusal |
+| `surface_state_capacity` | Separate surface-admission ledger capacity (§6.0); never an ordinary mutation, content recovery, or retained-tombstone byte refusal |
 | `pane_state_capacity` | Retired ordinary pane/annotation recoverable-byte refusal; retained only for legacy response compatibility |
 | `tombstone_capacity` | Retired retained-tombstone byte refusal; retained only for legacy response compatibility |
 | `not_paired` | Operation attempted before successful pair |
