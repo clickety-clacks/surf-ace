@@ -82,7 +82,7 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
         XCTAssertTrue(SurfAceLocklessTargetAdmission.platformPermitsLockless)
         XCTAssertTrue(SurfAceLocklessTargetAdmission.implementationComplete)
         XCTAssertEqual(SurfAceLocklessTargetAdmission.unroutedNetworkOperations, [])
-        XCTAssertEqual(SurfAceLocklessTargetAdmission.advertisedProtocolFeatures, [surfAceLocklessCapability])
+        XCTAssertEqual(SurfAceLocklessTargetAdmission.advertisedProtocolFeatures, [surfAceLocklessCapability, surfAceControlProjectionCapability])
         XCTAssertTrue(SurfAceLocklessTargetAdmission.isLocklessRequest([
             "protocolFeatures": [surfAceLocklessCapability],
         ]))
