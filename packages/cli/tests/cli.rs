@@ -14,6 +14,8 @@ use surf_ace_cli::wire::{DirectWire, Envelope, WireFailure, WireResponse};
 use tempfile::TempDir;
 use tungstenite::{accept, Message};
 
+const WEBSOCKET_FRAME_LIMIT_BYTES: usize = 16 * 1024 * 1024;
+
 struct FakeWire {
     ack_accepted: bool,
     close_count: usize,
@@ -24,6 +26,12 @@ struct FakeWire {
     pair_response_fault: Option<ResponseEnvelopeFault>,
     pair_controller_instance_id_override: Option<Value>,
     pair_surface_id_override: Option<Value>,
+    pair_projection: Option<String>,
+    pair_protocol_features: Option<Vec<String>>,
+    scope_summaries: Vec<Value>,
+    sync_snapshots: Vec<Value>,
+    sync_response_fault: Option<ResponseEnvelopeFault>,
+    snapshot_payload: Option<Value>,
     panes_list_payload: Value,
     panes_list_rejection: Option<String>,
     panes_list_response_fault: Option<ResponseEnvelopeFault>,
@@ -64,6 +72,12 @@ impl FakeWire {
             pair_response_fault: None,
             pair_controller_instance_id_override: None,
             pair_surface_id_override: None,
+            pair_projection: None,
+            pair_protocol_features: None,
+            scope_summaries: vec![],
+            sync_snapshots: vec![],
+            sync_response_fault: None,
+            snapshot_payload: None,
             panes_list_payload: json!({
                 "panes": [{
                     "paneId": 1,
@@ -205,32 +219,38 @@ impl DirectWire for FakeWire {
         }
         let mut response = match op {
             "pair.request" => {
-                let mut response = Self::response(
-                    id,
-                    "pair.request",
-                    json!({
-                    "capabilities": {},
-                    "controllerInstanceId": self
-                        .pair_controller_instance_id_override
-                        .clone()
-                        .unwrap_or_else(|| payload["controllerInstanceId"].clone()),
-                    "limits": {
-                        "maxPendingOperationReceiptBytesPerController": 65536,
-                        "maxPendingOperationReceiptsPerController": 16
-                    },
-                    "mode": "lockless",
-                    "receiptResolutions": self.resolutions,
-                    "resumed": false,
-                    "scopes": self.scopes.clone(),
-                    "sessionId": "session_test",
-                    "state": null,
-                    "surfaceId": self
-                        .pair_surface_id_override
-                        .clone()
-                        .unwrap_or_else(|| payload.get("surfaceId").cloned().unwrap_or(Value::Null)),
-                    "surfaceSetRevision": 1
-                    }),
-                );
+                let mut pair_payload = json!({
+                "capabilities": {},
+                "controllerInstanceId": self
+                    .pair_controller_instance_id_override
+                    .clone()
+                    .unwrap_or_else(|| payload["controllerInstanceId"].clone()),
+                "limits": {
+                    "maxPendingOperationReceiptBytesPerController": 65536,
+                    "maxPendingOperationReceiptsPerController": 16
+                },
+                "mode": "lockless",
+                "receiptResolutions": self.resolutions,
+                "resumed": false,
+                "scopes": self.scopes.clone(),
+                "sessionId": "session_test",
+                "state": null,
+                "surfaceId": self
+                    .pair_surface_id_override
+                    .clone()
+                    .unwrap_or_else(|| payload.get("surfaceId").cloned().unwrap_or(Value::Null)),
+                "surfaceSetRevision": 1
+                });
+                if let Some(projection) = self.pair_projection.as_deref() {
+                    pair_payload["projection"] = json!(projection);
+                    if projection == "control" {
+                        pair_payload["scopeSummaries"] = json!(self.scope_summaries);
+                    }
+                }
+                if let Some(features) = &self.pair_protocol_features {
+                    pair_payload["capabilities"]["protocolFeatures"] = json!(features);
+                }
+                let mut response = Self::response(id, "pair.request", pair_payload);
                 if let Some(fault) = self.pair_response_fault {
                     fault.apply(&mut response.response);
                 }
@@ -249,6 +269,17 @@ impl DirectWire for FakeWire {
             "consumable.ack" => {
                 Self::response(id, "consumable.ack.result", json!({ "accepted": true }))
             }
+            "consumable.sync" => {
+                let mut response = Self::response(
+                    id,
+                    "consumable.sync",
+                    json!({ "snapshots": self.sync_snapshots }),
+                );
+                if let Some(fault) = self.sync_response_fault {
+                    fault.apply(&mut response.response);
+                }
+                response
+            }
             "surfaces.list" => Self::response(
                 id,
                 "surfaces.list.result",
@@ -262,9 +293,13 @@ impl DirectWire for FakeWire {
                 }
                 response
             }
-            "snapshot.get" => {
-                Self::response(id, "snapshot.result", json!({ "snapshotId": "sn_1" }))
-            }
+            "snapshot.get" => Self::response(
+                id,
+                "snapshot.result",
+                self.snapshot_payload
+                    .clone()
+                    .unwrap_or_else(|| json!({ "snapshotId": "sn_1" })),
+            ),
             "target.apply" => Self::response(
                 id,
                 "target.apply.result",
@@ -2459,7 +2494,15 @@ fn receipt_ack_projects_direct_target_result_before_clearing_correlation() {
         "targetRequestId": "target_request_1"
     });
     let mut wire = FakeWire::ordinary();
-    wire.scopes = vec![json!({
+    wire.pair_projection = Some("control".into());
+    wire.pair_protocol_features = Some(vec!["control_projection_v1".into()]);
+    wire.scope_summaries = vec![json!({
+        "cursor": { "cursor": 1, "gap": null, "gapGeneration": 0 },
+        "firstRetainedSequence": 1,
+        "lastRetainedSequence": 0,
+        "scopeId": "surface:sf_1"
+    })];
+    wire.sync_snapshots = vec![json!({
         "cursor": { "cursor": 1, "gap": null, "gapGeneration": 0 },
         "firstRetainedSequence": 1,
         "lastRetainedSequence": 0,
@@ -2503,6 +2546,12 @@ fn receipt_ack_projects_direct_target_result_before_clearing_correlation() {
         &mut wire,
     )
     .unwrap();
+    let sync_request = wire
+        .payloads
+        .iter()
+        .find(|(operation, _)| operation == "consumable.sync")
+        .unwrap();
+    assert_eq!(sync_request.1["scopeIds"], json!(["surface:sf_1"]));
     let persisted: Value =
         serde_json::from_slice(&fs::read(temp.path().join("controller-state.json")).unwrap())
             .unwrap();
@@ -3523,53 +3572,81 @@ fn pane_describe_refuses_duplicate_live_controller_wrong_surface_unpaired_and_di
 }
 
 #[test]
-fn production_path_uses_lifecycle_discovery_then_surface_scoped_connection() {
+fn cli_targeted_mutation_discovers_before_pair_on_one_bounded_connection() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = format!("ws://{}", listener.local_addr().unwrap());
     let server = thread::spawn(move || {
-        let (lifecycle_stream, _) = listener.accept().unwrap();
-        let mut lifecycle = accept(lifecycle_stream).unwrap();
-        let pair = read_request(&mut lifecycle);
-        assert_eq!(pair["op"], "pair.request");
-        assert_eq!(
-            pair["payload"]["protocolFeatures"][0],
-            "surf-ace.lockless-multi-controller.v1"
-        );
-        assert_eq!(pair["payload"]["controllerProductName"], "Clawline");
-        assert!(pair["payload"].get("surfaceId").is_none());
-        send_response(
-            &mut lifecycle,
-            pair["id"].as_str().unwrap(),
-            "pair.response",
-            pair_payload(pair["payload"]["controllerInstanceId"].clone()),
-        );
-        let list = read_request(&mut lifecycle);
+        let (stream, _) = listener.accept().unwrap();
+        let mut socket = accept(stream).unwrap();
+        let (list, list_request_bytes) = read_request_with_bytes(&mut socket);
         assert_eq!(list["op"], "surfaces.list");
-        send_response(
-            &mut lifecycle,
+        assert!(list["payload"].as_object().unwrap().is_empty());
+        let list_bytes = send_response_with_bytes(
+            &mut socket,
             list["id"].as_str().unwrap(),
             "surfaces.list.result",
-            json!({ "surfaces": [{ "surfaceId": "sf_1" }] }),
+            json!({ "surfaces": [{ "surfaceId": "sf_aleph" }] }),
         );
 
-        let (surface_stream, _) = listener.accept().unwrap();
-        let mut surface = accept(surface_stream).unwrap();
-        let pair = read_request(&mut surface);
-        assert_eq!(pair["payload"]["surfaceId"], "sf_1");
-        let mut surface_pair = pair_payload(pair["payload"]["controllerInstanceId"].clone());
-        surface_pair["surfaceId"] = json!("sf_1");
-        send_response(
-            &mut surface,
+        let (pair, pair_request_bytes) = read_request_with_bytes(&mut socket);
+        assert_eq!(pair["op"], "pair.request");
+        assert_eq!(pair["payload"]["surfaceId"], "sf_aleph");
+        assert_eq!(pair["payload"]["controllerProductName"], "Clawline");
+        assert!(pair["payload"]["protocolFeatures"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|feature| feature == "control_projection_v1"));
+        let mut surface_pair =
+            control_pair_payload(pair["payload"]["controllerInstanceId"].clone());
+        surface_pair["surfaceId"] = json!("sf_aleph");
+        surface_pair["state"] = json!({ "panes": (64..=70).map(|pane_id| json!({
+            "paneId": pane_id,
+            "paneLabel": pane_id - 63,
+            "currentContentId": format!("content-{pane_id}"),
+            "currentRevision": 12,
+            "contentType": "markdown"
+        })).collect::<Vec<_>>() });
+        surface_pair["scopeSummaries"] = json!((64..=70)
+            .map(|pane_id| json!({
+                "cursor": { "cursor": 0, "gap": null, "gapGeneration": 0 },
+                "firstRetainedSequence": 1,
+                "lastRetainedSequence": 0,
+                "scopeId": format!("pane:sf_aleph:{pane_id}")
+            }))
+            .collect::<Vec<_>>());
+        let pair_bytes = send_response_with_bytes(
+            &mut socket,
             pair["id"].as_str().unwrap(),
-            "pair.response",
+            "pair.request",
             surface_pair,
         );
-        let push = read_request(&mut surface);
+        let (sync, sync_request_bytes) = read_request_with_bytes(&mut socket);
+        assert_eq!(sync["op"], "consumable.sync");
+        assert_eq!(sync["payload"]["scopeIds"], json!(["pane:sf_aleph:70"]));
+        let sync_response_bytes = send_response_with_bytes(
+            &mut socket,
+            sync["id"].as_str().unwrap(),
+            "consumable.sync",
+            json!({
+                "snapshots": [{
+                    "cursor": { "cursor": 0, "gap": null, "gapGeneration": 0 },
+                    "firstRetainedSequence": 1,
+                    "lastRetainedSequence": 0,
+                    "records": [],
+                    "scopeId": "pane:sf_aleph:70",
+                    "version": 1
+                }]
+            }),
+        );
+        let (push, push_request_bytes) = read_request_with_bytes(&mut socket);
         assert_eq!(push["op"], "content.set");
+        assert_eq!(push["payload"]["surfaceId"], "sf_aleph");
+        assert_eq!(push["payload"]["paneId"], 70);
         assert_eq!(push["payload"]["friendlyChatName"], "OpenClaw");
         let push_id = push["id"].as_str().unwrap();
-        send_response(
-            &mut surface,
+        let push_bytes = send_response_with_bytes(
+            &mut socket,
             push_id,
             "content.set.result",
             json!({
@@ -3580,25 +3657,45 @@ fn production_path_uses_lifecycle_discovery_then_surface_scoped_connection() {
                 }
             }),
         );
-        let ack = read_request(&mut surface);
+        let (ack, ack_request_bytes) = read_request_with_bytes(&mut socket);
         assert_eq!(ack["op"], "operation.receipt.ack");
         assert_eq!(ack["payload"]["requestId"], push_id);
-        send_response(
-            &mut surface,
+        let ack_bytes = send_response_with_bytes(
+            &mut socket,
             ack["id"].as_str().unwrap(),
             "operation.receipt.ack.result",
             json!({ "accepted": true }),
         );
-        let release = read_request(&mut surface);
+        let (release, release_request_bytes) = read_request_with_bytes(&mut socket);
         assert_eq!(release["op"], "operation.receipt.ack");
         assert_eq!(release["payload"]["requestId"], push_id);
         assert_eq!(release["payload"]["release"], true);
-        send_response(
-            &mut surface,
+        let release_bytes = send_response_with_bytes(
+            &mut socket,
             release["id"].as_str().unwrap(),
             "operation.receipt.ack.result",
             json!({ "accepted": true, "release": true }),
         );
+        expect_orderly_close(&mut socket);
+
+        let frame_sizes = [
+            ("pre-pair surfaces.list request", list_request_bytes),
+            ("pre-pair surfaces.list response", list_bytes),
+            ("scoped pair.request", pair_request_bytes),
+            ("scoped pair.response", pair_bytes),
+            ("target consumable.sync request", sync_request_bytes),
+            ("target consumable.sync response", sync_response_bytes),
+            ("content.set request", push_request_bytes),
+            ("content.set response", push_bytes),
+            ("receipt ack request", ack_request_bytes),
+            ("receipt ack response", ack_bytes),
+            ("receipt release request", release_request_bytes),
+            ("receipt release response", release_bytes),
+        ];
+        assert!(frame_sizes
+            .iter()
+            .all(|(_, bytes)| *bytes < WEBSOCKET_FRAME_LIMIT_BYTES));
+        frame_sizes
     });
 
     let temp = TempDir::new().unwrap();
@@ -3606,8 +3703,8 @@ fn production_path_uses_lifecycle_discovery_then_surface_scoped_connection() {
         &temp,
         Command::Push,
         json!({
-            "surfaceId": "sf_1",
-            "paneId": 1,
+            "surfaceId": "sf_aleph",
+            "paneId": 70,
             "contentId": "c_1",
             "contentType": "markdown",
             "content": { "markdown": "hello" },
@@ -3620,7 +3717,556 @@ fn production_path_uses_lifecycle_discovery_then_surface_scoped_connection() {
         output.result["payload"]["operationReceipt"]["commitSequence"],
         11
     );
-    server.join().unwrap();
+    let frame_sizes = server.join().unwrap();
+    eprintln!("loopback targeted mutation WebSocket payload sizes: {frame_sizes:?}");
+    assert!(
+        frame_sizes.iter().map(|(_, bytes)| *bytes).max().unwrap() < WEBSOCKET_FRAME_LIMIT_BYTES
+    );
+}
+
+#[test]
+fn control_pair_summaries_preserve_unread_records_and_pending_ack_intents() {
+    let temp = TempDir::new().unwrap();
+    let retained = json!({
+        "bytes": 32,
+        "payload": { "value": "retained-before-compact-pair" },
+        "recordClass": "annotation_frame",
+        "recordId": "unread-1",
+        "sequence": 1
+    });
+    let mut initial = FakeWire::ordinary();
+    initial.scopes = vec![json!({
+        "cursor": { "cursor": 1, "gap": null, "gapGeneration": 0 },
+        "firstRetainedSequence": 1,
+        "lastRetainedSequence": 1,
+        "records": [retained.clone()],
+        "scopeId": "pane:sf_aleph:70",
+        "version": 1
+    })];
+    execute_with_wire(invocation(&temp, Command::List, json!({})), &mut initial).unwrap();
+
+    let mut read = invocation(
+        &temp,
+        Command::Read,
+        json!({ "scopeId": "pane:sf_aleph:70" }),
+    );
+    read.endpoint = None;
+    read.product_label = None;
+    let read_result = execute(read).unwrap();
+    assert_eq!(read_result.result["cacheStatus"], "current");
+    assert_eq!(read_result.result["acknowledgement"]["cursor"], 2);
+
+    let mut control = FakeWire::ordinary();
+    control.pair_projection = Some("control".into());
+    control.pair_protocol_features = Some(vec![
+        "surf-ace.lockless-multi-controller.v1".into(),
+        "control_projection_v1".into(),
+    ]);
+    control.scope_summaries = vec![
+        json!({
+            "cursor": { "cursor": 1, "gap": null, "gapGeneration": 0 },
+            "firstRetainedSequence": 1,
+            "lastRetainedSequence": 2,
+            "scopeId": "pane:sf_aleph:70"
+        }),
+        json!({
+            "cursor": { "cursor": 1, "gap": null, "gapGeneration": 0 },
+            "firstRetainedSequence": 1,
+            "lastRetainedSequence": 1,
+            "scopeId": "pane:sf_aleph:69"
+        }),
+    ];
+    let unread = json!({
+        "bytes": 37,
+        "payload": { "value": "still-unread-after-summary" },
+        "recordClass": "content",
+        "recordId": "unread-2",
+        "sequence": 2
+    });
+    control.sync_snapshots = vec![json!({
+        "cursor": { "cursor": 2, "gap": null, "gapGeneration": 0 },
+        "firstRetainedSequence": 1,
+        "lastRetainedSequence": 2,
+        "records": [unread.clone()],
+        "scopeId": "pane:sf_aleph:70",
+        "version": 1
+    })];
+    let output = execute_with_wire(
+        invocation(
+            &temp,
+            Command::Push,
+            json!({
+                "surfaceId": "sf_aleph",
+                "paneId": 70,
+                "contentId": "content-new",
+                "contentType": "markdown",
+                "content": { "markdown": "targeted" }
+            }),
+        ),
+        &mut control,
+    )
+    .unwrap();
+    assert_eq!(
+        output.result["payload"]["operationReceipt"]["commitSequence"],
+        7
+    );
+    let acknowledgement_requests = control
+        .payloads
+        .iter()
+        .filter(|(operation, _)| operation == "consumable.ack")
+        .map(|(_, payload)| payload)
+        .collect::<Vec<_>>();
+    assert_eq!(acknowledgement_requests.len(), 1);
+    assert_eq!(acknowledgement_requests[0]["scopeId"], "pane:sf_aleph:70");
+    assert_eq!(acknowledgement_requests[0]["cursor"], 2);
+    let requested_sync_scopes = control
+        .payloads
+        .iter()
+        .find(|(operation, _)| operation == "consumable.sync")
+        .unwrap();
+    assert_eq!(
+        requested_sync_scopes.1["scopeIds"],
+        json!(["pane:sf_aleph:70"])
+    );
+
+    let persisted: Value =
+        serde_json::from_slice(&fs::read(temp.path().join("controller-state.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        persisted["acknowledgementOutbox"].as_array().unwrap().len(),
+        0
+    );
+    assert_eq!(
+        persisted["scopes"]["pane:sf_aleph:70"]["records"],
+        json!([unread])
+    );
+    assert_eq!(
+        persisted["scopes"]["pane:sf_aleph:70"]["lastRetainedSequence"],
+        2
+    );
+    assert_eq!(persisted["scopes"]["pane:sf_aleph:70"]["clientCursor"], 2);
+    assert_eq!(
+        persisted["scopes"]["pane:sf_aleph:70"]["synchronized"],
+        false
+    );
+    assert!(persisted["scopes"].get("pane:sf_aleph:69").is_none());
+    assert!(!control
+        .payloads
+        .iter()
+        .filter(|(operation, _)| operation == "consumable.ack")
+        .any(|(_, payload)| payload["scopeId"] == "pane:sf_aleph:69"));
+
+    let mut resumed = FakeWire::ordinary();
+    resumed.pair_projection = Some("control".into());
+    resumed.pair_protocol_features = Some(vec![
+        "surf-ace.lockless-multi-controller.v1".into(),
+        "control_projection_v1".into(),
+    ]);
+    execute_with_wire(invocation(&temp, Command::List, json!({})), &mut resumed).unwrap();
+    let resume_scopes = &resumed
+        .payloads
+        .iter()
+        .find(|(operation, _)| operation == "pair.request")
+        .unwrap()
+        .1["resume"]["scopes"];
+    assert_eq!(resume_scopes["pane:sf_aleph:70"]["cursor"], 2);
+    assert!(resume_scopes.get("pane:sf_aleph:69").is_none());
+}
+
+#[test]
+fn control_scope_summaries_do_not_invent_or_drop_zero_resume_cursors() {
+    let temp = TempDir::new().unwrap();
+    let mut initial = FakeWire::ordinary();
+    initial.scopes = vec![json!({
+        "cursor": { "cursor": 0, "gap": null, "gapGeneration": 0 },
+        "firstRetainedSequence": 1,
+        "lastRetainedSequence": 0,
+        "records": [],
+        "scopeId": "pane:sf_aleph:70",
+        "version": 1
+    })];
+    execute_with_wire(invocation(&temp, Command::List, json!({})), &mut initial).unwrap();
+
+    let mut control = FakeWire::ordinary();
+    control.pair_projection = Some("control".into());
+    control.pair_protocol_features = Some(vec![
+        "surf-ace.lockless-multi-controller.v1".into(),
+        "control_projection_v1".into(),
+    ]);
+    control.scope_summaries = vec![
+        json!({
+            "cursor": { "cursor": 0, "gap": null, "gapGeneration": 0 },
+            "firstRetainedSequence": 1,
+            "lastRetainedSequence": 0,
+            "scopeId": "pane:sf_aleph:70"
+        }),
+        json!({
+            "cursor": { "cursor": 0, "gap": null, "gapGeneration": 0 },
+            "firstRetainedSequence": 1,
+            "lastRetainedSequence": 0,
+            "scopeId": "pane:sf_aleph:69"
+        }),
+    ];
+    execute_with_wire(invocation(&temp, Command::List, json!({})), &mut control).unwrap();
+
+    let pair_payload = &control
+        .payloads
+        .iter()
+        .find(|(operation, _)| operation == "pair.request")
+        .unwrap()
+        .1;
+    assert_eq!(
+        pair_payload["resume"]["scopes"]["pane:sf_aleph:70"]["cursor"],
+        0
+    );
+    assert!(pair_payload["resume"]["scopes"]
+        .get("pane:sf_aleph:69")
+        .is_none());
+
+    let persisted: Value =
+        serde_json::from_slice(&fs::read(temp.path().join("controller-state.json")).unwrap())
+            .unwrap();
+    assert_eq!(persisted["scopes"]["pane:sf_aleph:70"]["clientCursor"], 0);
+    assert!(persisted["scopes"].get("pane:sf_aleph:69").is_none());
+}
+
+#[test]
+fn control_projection_requires_server_capability_and_well_formed_scope_metadata() {
+    let temp = TempDir::new().unwrap();
+    let mut unadvertised = FakeWire::ordinary();
+    unadvertised.pair_projection = Some("control".into());
+    let error = execute_with_wire(
+        invocation(&temp, Command::List, json!({})),
+        &mut unadvertised,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error, CliError::Protocol(code) if code == "control_projection_not_advertised")
+    );
+    assert_eq!(unadvertised.close_count, 1);
+    assert_eq!(unadvertised.operations, vec!["pair.request"]);
+
+    let mut malformed = FakeWire::ordinary();
+    malformed.pair_projection = Some("control".into());
+    malformed.pair_protocol_features = Some(vec!["control_projection_v1".into()]);
+    malformed.scope_summaries = vec![json!({ "scopeId": "pane:sf_1:1" })];
+    let error =
+        execute_with_wire(invocation(&temp, Command::List, json!({})), &mut malformed).unwrap_err();
+    assert!(
+        matches!(error, CliError::Protocol(code) if code == "invalid_control_projection_scope_summary")
+    );
+    assert_eq!(malformed.close_count, 1);
+    assert_eq!(malformed.operations, vec!["pair.request"]);
+
+    let mut material_in_control = FakeWire::ordinary();
+    material_in_control.pair_projection = Some("control".into());
+    material_in_control.pair_protocol_features = Some(vec!["control_projection_v1".into()]);
+    material_in_control.scopes = vec![json!({
+        "cursor": { "cursor": 1, "gap": null, "gapGeneration": 0 },
+        "firstRetainedSequence": 1,
+        "lastRetainedSequence": 1,
+        "records": [],
+        "scopeId": "pane:sf_1:1",
+        "version": 1
+    })];
+    let error = execute_with_wire(
+        invocation(&temp, Command::List, json!({})),
+        &mut material_in_control,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error, CliError::Protocol(code) if code == "control_projection_contains_material_scopes")
+    );
+    assert_eq!(material_in_control.close_count, 1);
+}
+
+#[test]
+fn control_projection_rejects_invalid_target_sync_before_mutation() {
+    let temp = TempDir::new().unwrap();
+    let mut wire = FakeWire::ordinary();
+    wire.pair_projection = Some("control".into());
+    wire.pair_protocol_features = Some(vec!["control_projection_v1".into()]);
+    wire.scope_summaries = vec![json!({
+        "cursor": { "cursor": 0, "gap": null, "gapGeneration": 0 },
+        "firstRetainedSequence": 1,
+        "lastRetainedSequence": 0,
+        "scopeId": "pane:sf_1:1"
+    })];
+    wire.sync_response_fault = Some(ResponseEnvelopeFault::WrongOperation);
+
+    let error = execute_with_wire(
+        invocation(
+            &temp,
+            Command::Push,
+            json!({
+                "surfaceId": "sf_1",
+                "paneId": 1,
+                "contentId": "c_1",
+                "contentType": "markdown",
+                "content": { "markdown": "must not be sent" }
+            }),
+        ),
+        &mut wire,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error, CliError::Protocol(code) if code == "response_operation_mismatch:consumable.sync")
+    );
+    assert_eq!(wire.operations, vec!["pair.request", "consumable.sync"]);
+    assert!(!wire
+        .operations
+        .iter()
+        .any(|operation| operation == "content.set"));
+    let persisted: Value =
+        serde_json::from_slice(&fs::read(temp.path().join("controller-state.json")).unwrap())
+            .unwrap();
+    assert_eq!(persisted["unresolved"], json!({}));
+    assert!(persisted["scopes"].get("pane:sf_1:1").is_none());
+}
+
+#[test]
+fn control_projection_keeps_explicit_capture_read_available() {
+    let temp = TempDir::new().unwrap();
+    let mut wire = FakeWire::ordinary();
+    wire.pair_projection = Some("control".into());
+    wire.pair_protocol_features = Some(vec![
+        "surf-ace.lockless-multi-controller.v1".into(),
+        "control_projection_v1".into(),
+    ]);
+    wire.snapshot_payload = Some(json!({
+        "image": "cG5n",
+        "snapshotId": "sn_control"
+    }));
+
+    let output = execute_with_wire(
+        invocation(
+            &temp,
+            Command::CapturePane,
+            json!({ "includeDrawings": true, "paneId": 70, "surfaceId": "sf_aleph" }),
+        ),
+        &mut wire,
+    )
+    .unwrap();
+
+    assert_eq!(output.result["payload"]["image"], "cG5n");
+    assert_eq!(wire.operations, vec!["pair.request", "snapshot.get"]);
+    assert_eq!(
+        wire.payloads
+            .iter()
+            .find(|(operation, _)| operation == "snapshot.get")
+            .unwrap()
+            .1["includeDrawings"],
+        true
+    );
+}
+
+#[test]
+fn control_pair_resume_still_reconciles_uncertain_mutation_receipts() {
+    let temp = TempDir::new().unwrap();
+    let mut first = FakeWire::ordinary();
+    first.fail_after_send_on = Some("content.set".into());
+    let error = execute_with_wire(
+        invocation(
+            &temp,
+            Command::Push,
+            json!({
+                "surfaceId": "sf_aleph",
+                "paneId": 70,
+                "contentId": "content-unknown",
+                "contentType": "markdown",
+                "content": { "markdown": "outcome unknown" }
+            }),
+        ),
+        &mut first,
+    )
+    .unwrap_err();
+    assert!(matches!(error, CliError::OutcomeUnknown { .. }));
+
+    let state: Value =
+        serde_json::from_slice(&fs::read(temp.path().join("controller-state.json")).unwrap())
+            .unwrap();
+    let request_id = state["unresolved"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .next()
+        .unwrap();
+    let mut resumed = FakeWire::ordinary();
+    resumed.pair_projection = Some("control".into());
+    resumed.pair_protocol_features = Some(vec![
+        "surf-ace.lockless-multi-controller.v1".into(),
+        "control_projection_v1".into(),
+    ]);
+    resumed.resolutions = vec![json!({
+        "outcome": "not_committed",
+        "requestId": request_id
+    })];
+
+    let result =
+        execute_with_wire(invocation(&temp, Command::List, json!({})), &mut resumed).unwrap();
+    assert_eq!(result.reconciliations[0]["outcome"], "not_committed");
+    assert_eq!(
+        resumed
+            .payloads
+            .iter()
+            .find(|(operation, _)| operation == "pair.request")
+            .unwrap()
+            .1["resume"]["unresolvedRequestIds"],
+        json!([request_id])
+    );
+    assert!(!resumed
+        .operations
+        .iter()
+        .any(|operation| operation == "operation.receipt.sync"));
+    let repaired: Value =
+        serde_json::from_slice(&fs::read(temp.path().join("controller-state.json")).unwrap())
+            .unwrap();
+    assert_eq!(repaired["unresolved"], json!({}));
+}
+
+#[test]
+fn cli_seven_pane_listing_uses_compact_control_projection_under_frame_cap() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("ws://{}", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let mut measured = Vec::new();
+        let panes = (64..=70)
+            .map(|pane_id| {
+                json!({
+                    "paneId": pane_id,
+                    "paneLabel": pane_id - 63,
+                    "currentContentId": format!("content-{pane_id}"),
+                    "currentRevision": 12,
+                    "contentType": "markdown"
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let (stream, _) = listener.accept().unwrap();
+        let mut list_socket = accept(stream).unwrap();
+        let (pair, request_bytes) = read_request_with_bytes(&mut list_socket);
+        measured.push(("list pair.request", request_bytes));
+        assert_eq!(pair["op"], "pair.request");
+        assert!(pair["payload"].get("surfaceId").is_none());
+        assert!(pair["payload"]["protocolFeatures"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|feature| feature == "control_projection_v1"));
+        let mut paired = control_pair_payload(pair["payload"]["controllerInstanceId"].clone());
+        paired["state"] = json!({ "panes": panes });
+        measured.push((
+            "list pair.response",
+            send_response_with_bytes(
+                &mut list_socket,
+                pair["id"].as_str().unwrap(),
+                "pair.request",
+                paired,
+            ),
+        ));
+        let (list, request_bytes) = read_request_with_bytes(&mut list_socket);
+        measured.push(("surfaces.list request", request_bytes));
+        assert_eq!(list["op"], "surfaces.list");
+        measured.push((
+            "surfaces.list response",
+            send_response_with_bytes(
+                &mut list_socket,
+                list["id"].as_str().unwrap(),
+                "surfaces.list.result",
+                json!({
+                    "surfaces": [{
+                        "surfaceId": "sf_aleph",
+                        "name": "Aleph",
+                        "windowLabel": "g",
+                        "viewport": { "width": 4096, "height": 4096, "scale": 1 }
+                    }]
+                }),
+            ),
+        ));
+        expect_orderly_close(&mut list_socket);
+
+        let (stream, _) = listener.accept().unwrap();
+        let mut pane_socket = accept(stream).unwrap();
+        let (pair, request_bytes) = read_request_with_bytes(&mut pane_socket);
+        measured.push(("pane describe pair.request", request_bytes));
+        assert_eq!(pair["op"], "pair.request");
+        assert_eq!(pair["payload"]["surfaceId"], "sf_aleph");
+        assert!(pair["payload"]["protocolFeatures"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|feature| feature == "control_projection_v1"));
+        let mut paired = control_pair_payload(pair["payload"]["controllerInstanceId"].clone());
+        paired["surfaceId"] = json!("sf_aleph");
+        paired["state"] = json!({ "panes": (64..=70).map(|pane_id| json!({
+            "paneId": pane_id,
+            "paneLabel": pane_id - 63,
+            "currentContentId": format!("content-{pane_id}"),
+            "currentRevision": 12,
+            "contentType": "markdown"
+        })).collect::<Vec<_>>() });
+        measured.push((
+            "pane describe pair.response",
+            send_response_with_bytes(
+                &mut pane_socket,
+                pair["id"].as_str().unwrap(),
+                "pair.request",
+                paired,
+            ),
+        ));
+        let (panes_list, request_bytes) = read_request_with_bytes(&mut pane_socket);
+        measured.push(("panes.list request", request_bytes));
+        assert_eq!(panes_list["op"], "panes.list");
+        measured.push((
+            "panes.list response",
+            send_response_with_bytes(
+                &mut pane_socket,
+                panes_list["id"].as_str().unwrap(),
+                "panes.list",
+                json!({
+                    "panes": (64..=70).map(|pane_id| json!({
+                        "paneId": pane_id,
+                        "paneLineageId": format!("pl_{pane_id}"),
+                        "currentTarget": null
+                    })).collect::<Vec<_>>()
+                }),
+            ),
+        ));
+        expect_orderly_close(&mut pane_socket);
+
+        assert!(measured
+            .iter()
+            .all(|(_, bytes)| *bytes < WEBSOCKET_FRAME_LIMIT_BYTES));
+        measured
+    });
+
+    let temp = TempDir::new().unwrap();
+    let mut list = invocation(&temp, Command::List, json!({}));
+    list.endpoint = Some(endpoint.clone());
+    let listed = execute(list).unwrap();
+    let controller_id = listed.controller_instance_id.clone().unwrap();
+    assert_eq!(
+        listed.result["payload"]["surfaces"][0]["surfaceId"],
+        "sf_aleph"
+    );
+
+    let mut describe = invocation(
+        &temp,
+        Command::PaneDescribe,
+        pane_describe_input(&controller_id, "sf_aleph", 70),
+    );
+    describe.endpoint = Some(endpoint);
+    let pane = execute(describe).unwrap();
+    assert_eq!(pane.result["paneId"], 70);
+    assert_eq!(pane.result["paneLineageId"], "pl_70");
+    assert_eq!(pane.result["currentTarget"], Value::Null);
+    assert_eq!(pane.result["targetEpoch"], Value::Null);
+
+    let frame_sizes = server.join().unwrap();
+    eprintln!("loopback seven-pane listing WebSocket payload sizes: {frame_sizes:?}");
+    assert!(
+        frame_sizes.iter().map(|(_, bytes)| *bytes).max().unwrap() < WEBSOCKET_FRAME_LIMIT_BYTES
+    );
 }
 
 #[test]
@@ -4386,12 +5032,19 @@ fn general_cli_manifest_uses_only_the_public_surf_ace_identity() {
 }
 
 fn read_request(socket: &mut tungstenite::WebSocket<std::net::TcpStream>) -> Value {
+    read_request_with_bytes(socket).0
+}
+
+fn read_request_with_bytes(
+    socket: &mut tungstenite::WebSocket<std::net::TcpStream>,
+) -> (Value, usize) {
     loop {
         match socket.read().unwrap() {
             Message::Text(text) => {
+                let bytes = text.as_bytes().len();
                 let envelope: Value = serde_json::from_str(&text).unwrap();
                 assert_canonical_request_envelope(&envelope);
-                return envelope;
+                return (envelope, bytes);
             }
             Message::Close(_) => panic!("connection closed before request"),
             _ => {}
@@ -4433,20 +5086,27 @@ fn send_response(
     op: &str,
     payload: Value,
 ) {
-    socket
-        .send(Message::Text(
-            serde_json::to_string(&json!({
-                "id": id,
-                "ok": true,
-                "op": op,
-                "payload": payload,
-                "type": "response",
-                "v": 1
-            }))
-            .unwrap()
-            .into(),
-        ))
-        .unwrap();
+    let _ = send_response_with_bytes(socket, id, op, payload);
+}
+
+fn send_response_with_bytes(
+    socket: &mut tungstenite::WebSocket<std::net::TcpStream>,
+    id: &str,
+    op: &str,
+    payload: Value,
+) -> usize {
+    let encoded = serde_json::to_string(&json!({
+        "id": id,
+        "ok": true,
+        "op": op,
+        "payload": payload,
+        "type": "response",
+        "v": 1
+    }))
+    .unwrap();
+    let byte_count = encoded.len();
+    socket.send(Message::Text(encoded.into())).unwrap();
+    byte_count
 }
 
 fn pair_payload(controller_instance_id: Value) -> Value {
@@ -4466,6 +5126,17 @@ fn pair_payload(controller_instance_id: Value) -> Value {
         "surfaceId": null,
         "surfaceSetRevision": 1
     })
+}
+
+fn control_pair_payload(controller_instance_id: Value) -> Value {
+    let mut payload = pair_payload(controller_instance_id);
+    payload["capabilities"]["protocolFeatures"] = json!([
+        "surf-ace.lockless-multi-controller.v1",
+        "control_projection_v1"
+    ]);
+    payload["projection"] = json!("control");
+    payload["scopeSummaries"] = json!([]);
+    payload
 }
 
 #[test]
@@ -4549,60 +5220,34 @@ fn production_empty_scope_lifecycle_routes_pending_acks_after_listing() {
         "topology":{"panes":[{"paneId":1},{"paneId":2}]}}]})
     };
     let a_server = thread::spawn(move || {
-        // Actual execute path: lifecycle discovery, scoped operation, lifecycle revisit.
-        for stage in 0..3 {
+        // Discovery stays pre-pair on the same socket; the later lifecycle revisit
+        // routes durable acknowledgements only after the listing identifies client A.
+        for stage in 0..2 {
             let (stream, _) = a_listener.accept().unwrap();
             stream
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
             let mut socket = accept(stream).unwrap();
-            let pair = read_request(&mut socket);
-            assert_eq!(pair["op"], "pair.request");
-            let mut response = pair_payload(pair["payload"]["controllerInstanceId"].clone());
             if stage == 1 {
-                assert_eq!(pair["payload"]["surfaceId"], "sf_a");
-                response["surfaceId"] = json!("sf_a");
-                response["scopes"] = json!([1, 2].map(|pane| json!({
-                    "scopeId":format!("pane:sf_a:{pane}"),"version":1,
-                    "cursor":{"cursor":1,"gap":null,"gapGeneration":0},
-                    "firstRetainedSequence":1,"lastRetainedSequence":1,
-                    "records":[{"bytes":32,"payload":{"contentId":format!("a-{pane}")},
-                        "recordClass":"content","recordId":format!("a-{pane}"),"sequence":1}]
-                })));
-            } else {
+                let pair = read_request(&mut socket);
+                assert_eq!(pair["op"], "pair.request");
                 assert!(pair["payload"].get("surfaceId").is_none());
+                let response = pair_payload(pair["payload"]["controllerInstanceId"].clone());
                 assert_eq!(response["scopes"], json!([]));
-            }
-            send_response(
-                &mut socket,
-                pair["id"].as_str().unwrap(),
-                "pair.response",
-                response,
-            );
-            let operation = read_request(&mut socket);
-            if stage == 1 {
-                assert_eq!(operation["op"], "snapshot.get");
-                assert_eq!(
-                    operation["payload"].get("includeImage"),
-                    None,
-                    "capture-pane has no image suppression option"
-                );
                 send_response(
                     &mut socket,
-                    operation["id"].as_str().unwrap(),
-                    "snapshot.result",
-                    json!({"snapshotId":"sn_a", "image":"cG5n"}),
+                    pair["id"].as_str().unwrap(),
+                    "pair.response",
+                    response,
                 );
-            } else {
-                assert_eq!(operation["op"], "surfaces.list");
+                let list = read_request(&mut socket);
+                assert_eq!(list["op"], "surfaces.list");
                 send_response(
                     &mut socket,
-                    operation["id"].as_str().unwrap(),
+                    list["id"].as_str().unwrap(),
                     "surfaces.list.result",
                     listed("sf_a"),
                 );
-            }
-            if stage == 2 {
                 for pane in [1, 2] {
                     let ack = read_request(&mut socket);
                     assert_eq!(ack["op"], "consumable.ack");
@@ -4617,6 +5262,46 @@ fn production_empty_scope_lifecycle_routes_pending_acks_after_listing() {
                         json!({"accepted":true}),
                     );
                 }
+            } else {
+                let list = read_request(&mut socket);
+                assert_eq!(list["op"], "surfaces.list");
+                send_response(
+                    &mut socket,
+                    list["id"].as_str().unwrap(),
+                    "surfaces.list.result",
+                    listed("sf_a"),
+                );
+                let pair = read_request(&mut socket);
+                assert_eq!(pair["op"], "pair.request");
+                assert_eq!(pair["payload"]["surfaceId"], "sf_a");
+                let mut response = pair_payload(pair["payload"]["controllerInstanceId"].clone());
+                response["surfaceId"] = json!("sf_a");
+                response["scopes"] = json!([1, 2].map(|pane| json!({
+                    "scopeId":format!("pane:sf_a:{pane}"),"version":1,
+                    "cursor":{"cursor":1,"gap":null,"gapGeneration":0},
+                    "firstRetainedSequence":1,"lastRetainedSequence":1,
+                    "records":[{"bytes":32,"payload":{"contentId":format!("a-{pane}")},
+                        "recordClass":"content","recordId":format!("a-{pane}"),"sequence":1}]
+                })));
+                send_response(
+                    &mut socket,
+                    pair["id"].as_str().unwrap(),
+                    "pair.response",
+                    response,
+                );
+                let operation = read_request(&mut socket);
+                assert_eq!(operation["op"], "snapshot.get");
+                assert_eq!(
+                    operation["payload"].get("includeImage"),
+                    None,
+                    "capture-pane has no image suppression option"
+                );
+                send_response(
+                    &mut socket,
+                    operation["id"].as_str().unwrap(),
+                    "snapshot.result",
+                    json!({"snapshotId":"sn_a", "image":"cG5n"}),
+                );
             }
             expect_orderly_close(&mut socket);
         }
