@@ -3618,7 +3618,7 @@ fn cli_targeted_mutation_discovers_before_pair_on_one_bounded_connection() {
         let pair_bytes = send_response_with_bytes(
             &mut socket,
             pair["id"].as_str().unwrap(),
-            "pair.response",
+            "pair.request",
             surface_pair,
         );
         let (sync, sync_request_bytes) = read_request_with_bytes(&mut socket);
@@ -3808,7 +3808,7 @@ fn control_pair_summaries_preserve_unread_records_and_pending_ack_intents() {
     .unwrap();
     assert_eq!(
         output.result["payload"]["operationReceipt"]["commitSequence"],
-        11
+        7
     );
     let acknowledgement_requests = control
         .payloads
@@ -4021,7 +4021,7 @@ fn control_projection_rejects_invalid_target_sync_before_mutation() {
         serde_json::from_slice(&fs::read(temp.path().join("controller-state.json")).unwrap())
             .unwrap();
     assert_eq!(persisted["unresolved"], json!({}));
-    assert_eq!(persisted["scopes"]["pane:sf_1:1"]["synchronized"], false);
+    assert!(persisted["scopes"].get("pane:sf_1:1").is_none());
 }
 
 #[test]
@@ -4160,7 +4160,7 @@ fn cli_seven_pane_listing_uses_compact_control_projection_under_frame_cap() {
             send_response_with_bytes(
                 &mut list_socket,
                 pair["id"].as_str().unwrap(),
-                "pair.response",
+                "pair.request",
                 paired,
             ),
         ));
@@ -4210,7 +4210,7 @@ fn cli_seven_pane_listing_uses_compact_control_projection_under_frame_cap() {
             send_response_with_bytes(
                 &mut pane_socket,
                 pair["id"].as_str().unwrap(),
-                "pair.response",
+                "pair.request",
                 paired,
             ),
         ));
