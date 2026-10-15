@@ -1064,9 +1064,9 @@ test("registration negotiates rc11 endpoint leases only behind the writer fence"
     assert.equal(legacyResponse.prePairDescribeV1, false);
     assert.equal(legacyResponse.endpointLease, null);
     const legacySurface = (legacyResponse.surfaces as Array<{
-      panes: Array<{ paneId: string; paneLabel: number; paneLineageId: string }>;
+      panes: Array<{ paneId: string; paneLabel: number; paneLineageId: string; paneAddress: string }>;
     }>)[0];
-    assert.deepEqual(legacySurface?.panes, [{ paneId, paneLabel: 1, paneLineageId }],
+    assert.deepEqual(legacySurface?.panes, [{ paneId, paneLabel: 1, paneLineageId, paneAddress: "a1" }],
       "the deployed client receives its number-only pane assignment");
 
     const registration = {
