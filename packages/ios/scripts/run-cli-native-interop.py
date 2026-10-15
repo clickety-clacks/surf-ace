@@ -90,7 +90,7 @@ def run_cli(ready):
         call('sync',{'surfaceId':sid,'scopeIds':[scope]})
         assert not any(f['op']=='consumable.ack' for f in frames)
         initial=call('read',{'scopeId':scope},True)['result']['currentContentRecord']['payload']
-        assert initial['contentId']=='content-7' and len(initial['content']['html'])==4_000_000
+        assert initial['contentId']=='content-7' and initial['content']['html']=='<p>Selected original source</p>'
         assert 'saved-stroke' in initial['annotations']['strokesById']
         call('push',{'surfaceId':sid,'paneId':7,'contentId':'rust-new-content','contentType':'html','content':{'html':'<p>Rust native integration</p>'},'friendlyChatName':'B180 fixture'})
         # Receiving a snapshot does not read/ACK it.

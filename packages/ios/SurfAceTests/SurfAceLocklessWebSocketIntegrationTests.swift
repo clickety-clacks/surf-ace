@@ -201,6 +201,12 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
             _ = try SurfAceLocklessConsumableOperations.appendCommittedRecord(in: &state,
                 scopeId: "pane:\(surfaceId):1", scopeKind: "pane", recordId: "explicit-content",
                 recordClass: .content, payload: .object(["html": .string("explicit retained content")]))
+            // Keep total recovery state > original 51 MB failure while the explicit
+            // selected record fits existing consumable limits. Unrelated pane 1 is large.
+            state.liveSurfaces[surfaceId]!.panes["1"]!.history.visible.content = .object([
+                "html": .string(String(repeating: "x", count: 8_000_000))])
+            state.liveSurfaces[surfaceId]!.panes["7"]!.history.visible.content = .object([
+                "html": .string("<p>Selected original source</p>")])
             let selected = state.liveSurfaces[surfaceId]!.panes["7"]!
             _ = try SurfAceLocklessConsumableOperations.appendCommittedRecord(in: &state,
                 scopeId: "pane:\(surfaceId):7", scopeKind: "pane", recordId: "selected-existing-content",
