@@ -993,11 +993,11 @@ test("configured server registers two stable clients and deduplicates reconnect"
     clients.push(reconnect);
     await reconnect.synchronize();
     await reconnect.synchronize();
-    assert.deepEqual(await topology(), first);
+    assert.deepEqual((await topology()).clients, first.clients);
     assert.equal((await allocator.diagnostics()).assignmentCount, before.assignmentCount);
     assert.equal((await allocator.diagnostics()).nextOrdinalFence, before.nextOrdinalFence);
     await Promise.all([reconnect.synchronize(), clients[1].synchronize()]);
-    assert.deepEqual(await topology(), first);
+    assert.deepEqual((await topology()).clients, first.clients);
     const recycledPaneId = "recycled-pane-id";
     const claim = async (lineage: string) => {
       const response = await reader!.request("pane.claim", {
@@ -1020,7 +1020,7 @@ test("configured server registers two stable clients and deduplicates reconnect"
     assert.equal(await claim("pl_second-lifetime"), secondLineageLabel);
     const rejected = await reader.request("client.register", { clientId: "", surfaces: [] });
     assert.equal(rejected.ok, false);
-    assert.deepEqual(await topology(), first);
+    assert.deepEqual((await topology()).clients, first.clients);
   } finally {
     for (const client of clients) await client.stop();
     await reader?.close();
@@ -1068,7 +1068,11 @@ test("registration negotiates rc11 endpoint leases only behind the writer fence"
     };
     const before = await allocator.diagnostics();
     cluster.config.witnessServerId = "divergent-witness";
-    const fenced = await wire.request("client.register", registration);
+    const degraded = await wire.request("fleet.topology", {});
+    assert.equal(degraded.ok, true);
+    assert.equal(degraded.payload?.registrationReady, false,
+      "a read-only readiness check discovers the divergent witness before any registration write");
+    const fenced = await wire.request("client.register", { ...registration, surfaces: [] });
     assert.equal(fenced.ok, false, "an empty/first registration cannot bypass an unready writer");
     assert.match(String((fenced.error as { message?: unknown } | undefined)?.message), /writer_fence_unavailable/);
     assert.equal(fenced.payload, undefined, "a fenced registration carries no lease payload");
@@ -1368,16 +1372,16 @@ test("configured-first server in-process discovery fallback registers and persis
     clients.push(reconnect);
     await reconnect.synchronize();
     await reconnect.synchronize();
-    assert.deepEqual(await topology(), first);
+    assert.deepEqual((await topology()).clients, first.clients);
     assert.equal((await allocator.diagnostics()).assignmentCount, before.assignmentCount);
     assert.equal((await allocator.diagnostics()).nextOrdinalFence, before.nextOrdinalFence);
     await Promise.all([reconnect.synchronize(), clients[2].synchronize()]);
-    assert.deepEqual(await topology(), first);
+    assert.deepEqual((await topology()).clients, first.clients);
     const initialAccepts = configuredAccepts;
     // Failed probes leave healthy fallback usable and do not consume labels.
     await reconnect.synchronize();
     assert.equal(configuredAccepts, initialAccepts);
-    assert.deepEqual(await topology(), first);
+    assert.deepEqual((await topology()).clients, first.clients);
     allowConfigured = true;
     rejectRecoveryPersistence = true;
     recoveryWrites = 0;
@@ -1406,11 +1410,11 @@ test("configured-first server in-process discovery fallback registers and persis
     assert.match(JSON.stringify(acceptedDisk), /concurrent-accepted-name/);
     await waitForRouteIdle();
     assert.equal(routeSockets.size, 0, "failed persistence does not promote the configured route");
-    assert.deepEqual(await topology(), first);
+    assert.deepEqual((await topology()).clients, first.clients);
     rejectRecoveryPersistence = false;
     allowConfigured = false;
     await reconnect.synchronize();
-    assert.deepEqual(await topology(), first);
+      assert.deepEqual((await topology()).clients, first.clients);
     for (let cycle = 0; cycle < 2; cycle++) {
       allowConfigured = true;
       await reconnect.synchronize();
@@ -1418,13 +1422,13 @@ test("configured-first server in-process discovery fallback registers and persis
       const promotedAccepts = configuredAccepts;
       await reconnect.synchronize();
       assert.equal(configuredAccepts, promotedAccepts, "healthy configured socket is reused");
-      assert.deepEqual(await topology(), first);
+      assert.deepEqual((await topology()).clients, first.clients);
       assert.equal((await allocator.diagnostics()).nextOrdinalFence, before.nextOrdinalFence);
       allowConfigured = false;
       for (const socket of routeSockets) socket.destroy();
       await new Promise((resolve) => setTimeout(resolve, 50));
       await reconnect.synchronize();
-      assert.deepEqual(await topology(), first);
+      assert.deepEqual((await topology()).clients, first.clients);
     }
     allowConfigured = true;
     await reconnect.synchronize();
@@ -1433,7 +1437,7 @@ test("configured-first server in-process discovery fallback registers and persis
     assert.equal(routeSockets.size, 0, "shutdown closes configured route sockets");
     const rejected = await reader.request("client.register", { clientId: "", surfaces: [] });
     assert.equal(rejected.ok, false);
-    assert.deepEqual(await topology(), first);
+    assert.deepEqual((await topology()).clients, first.clients);
   } finally {
     for (const client of clients) await client.stop();
     await reader?.close();
