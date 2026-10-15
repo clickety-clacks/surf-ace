@@ -3685,6 +3685,12 @@ fn cli_targeted_mutation_discovers_before_pair_on_one_bounded_connection() {
             "operation.receipt.ack.result",
             json!({ "accepted": true, "release": true }),
         );
+        let (refresh, refresh_request_bytes) = read_request_with_bytes(&mut socket);
+        assert_eq!(refresh["op"], "consumable.sync");
+        assert_eq!(refresh["payload"]["scopeIds"], json!(["pane:sf_aleph:70"]));
+        let refresh_response_bytes = send_response_with_bytes(&mut socket, refresh["id"].as_str().unwrap(),
+            "consumable.sync", json!({"snapshots":[pane_scope_snapshot("pane:sf_aleph:70", 1,
+                vec![pane_content_record("sf_aleph",70,1,Some("c_1"),None)])]}));
         expect_orderly_close(&mut socket);
 
         let frame_sizes = [
@@ -3700,6 +3706,8 @@ fn cli_targeted_mutation_discovers_before_pair_on_one_bounded_connection() {
             ("receipt ack response", ack_bytes),
             ("receipt release request", release_request_bytes),
             ("receipt release response", release_bytes),
+            ("committed payload refresh request", refresh_request_bytes),
+            ("committed payload refresh response", refresh_response_bytes),
         ];
         assert!(frame_sizes
             .iter()
