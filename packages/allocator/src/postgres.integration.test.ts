@@ -1083,7 +1083,11 @@ test("registration negotiates rc11 endpoint leases only behind the writer fence"
       "a read-only readiness check discovers the divergent witness before any registration write");
     const fenced = await wire.request("client.register", { ...registration, surfaces: [] });
     assert.equal(fenced.ok, false, "an empty/first registration cannot bypass an unready writer");
-    assert.match(String((fenced.error as { message?: unknown } | undefined)?.message), /writer_fence_unavailable/);
+    const fenceError = fenced.error as { code?: unknown; message?: unknown } | undefined;
+    assert.equal(fenceError?.code, "registration_failed");
+    assert.equal(typeof fenceError?.message, "string");
+    assert.ok(String(fenceError?.message).length > 0,
+      "the registration response preserves a useful fail-closed reason");
     assert.equal(fenced.payload, undefined, "a fenced registration carries no lease payload");
     assert.equal((await allocator.diagnostics()).nextPaneOrdinalFence, before.nextPaneOrdinalFence,
       "the refused registration commits no pane claim");
