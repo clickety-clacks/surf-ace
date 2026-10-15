@@ -5220,60 +5220,34 @@ fn production_empty_scope_lifecycle_routes_pending_acks_after_listing() {
         "topology":{"panes":[{"paneId":1},{"paneId":2}]}}]})
     };
     let a_server = thread::spawn(move || {
-        // Actual execute path: lifecycle discovery, scoped operation, lifecycle revisit.
-        for stage in 0..3 {
+        // Discovery stays pre-pair on the same socket; the later lifecycle revisit
+        // routes durable acknowledgements only after the listing identifies client A.
+        for stage in 0..2 {
             let (stream, _) = a_listener.accept().unwrap();
             stream
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
             let mut socket = accept(stream).unwrap();
-            let pair = read_request(&mut socket);
-            assert_eq!(pair["op"], "pair.request");
-            let mut response = pair_payload(pair["payload"]["controllerInstanceId"].clone());
             if stage == 1 {
-                assert_eq!(pair["payload"]["surfaceId"], "sf_a");
-                response["surfaceId"] = json!("sf_a");
-                response["scopes"] = json!([1, 2].map(|pane| json!({
-                    "scopeId":format!("pane:sf_a:{pane}"),"version":1,
-                    "cursor":{"cursor":1,"gap":null,"gapGeneration":0},
-                    "firstRetainedSequence":1,"lastRetainedSequence":1,
-                    "records":[{"bytes":32,"payload":{"contentId":format!("a-{pane}")},
-                        "recordClass":"content","recordId":format!("a-{pane}"),"sequence":1}]
-                })));
-            } else {
+                let pair = read_request(&mut socket);
+                assert_eq!(pair["op"], "pair.request");
                 assert!(pair["payload"].get("surfaceId").is_none());
+                let response = pair_payload(pair["payload"]["controllerInstanceId"].clone());
                 assert_eq!(response["scopes"], json!([]));
-            }
-            send_response(
-                &mut socket,
-                pair["id"].as_str().unwrap(),
-                "pair.response",
-                response,
-            );
-            let operation = read_request(&mut socket);
-            if stage == 1 {
-                assert_eq!(operation["op"], "snapshot.get");
-                assert_eq!(
-                    operation["payload"].get("includeImage"),
-                    None,
-                    "capture-pane has no image suppression option"
-                );
                 send_response(
                     &mut socket,
-                    operation["id"].as_str().unwrap(),
-                    "snapshot.result",
-                    json!({"snapshotId":"sn_a", "image":"cG5n"}),
+                    pair["id"].as_str().unwrap(),
+                    "pair.response",
+                    response,
                 );
-            } else {
-                assert_eq!(operation["op"], "surfaces.list");
+                let list = read_request(&mut socket);
+                assert_eq!(list["op"], "surfaces.list");
                 send_response(
                     &mut socket,
-                    operation["id"].as_str().unwrap(),
+                    list["id"].as_str().unwrap(),
                     "surfaces.list.result",
                     listed("sf_a"),
                 );
-            }
-            if stage == 2 {
                 for pane in [1, 2] {
                     let ack = read_request(&mut socket);
                     assert_eq!(ack["op"], "consumable.ack");
@@ -5288,6 +5262,46 @@ fn production_empty_scope_lifecycle_routes_pending_acks_after_listing() {
                         json!({"accepted":true}),
                     );
                 }
+            } else {
+                let list = read_request(&mut socket);
+                assert_eq!(list["op"], "surfaces.list");
+                send_response(
+                    &mut socket,
+                    list["id"].as_str().unwrap(),
+                    "surfaces.list.result",
+                    listed("sf_a"),
+                );
+                let pair = read_request(&mut socket);
+                assert_eq!(pair["op"], "pair.request");
+                assert_eq!(pair["payload"]["surfaceId"], "sf_a");
+                let mut response = pair_payload(pair["payload"]["controllerInstanceId"].clone());
+                response["surfaceId"] = json!("sf_a");
+                response["scopes"] = json!([1, 2].map(|pane| json!({
+                    "scopeId":format!("pane:sf_a:{pane}"),"version":1,
+                    "cursor":{"cursor":1,"gap":null,"gapGeneration":0},
+                    "firstRetainedSequence":1,"lastRetainedSequence":1,
+                    "records":[{"bytes":32,"payload":{"contentId":format!("a-{pane}")},
+                        "recordClass":"content","recordId":format!("a-{pane}"),"sequence":1}]
+                })));
+                send_response(
+                    &mut socket,
+                    pair["id"].as_str().unwrap(),
+                    "pair.response",
+                    response,
+                );
+                let operation = read_request(&mut socket);
+                assert_eq!(operation["op"], "snapshot.get");
+                assert_eq!(
+                    operation["payload"].get("includeImage"),
+                    None,
+                    "capture-pane has no image suppression option"
+                );
+                send_response(
+                    &mut socket,
+                    operation["id"].as_str().unwrap(),
+                    "snapshot.result",
+                    json!({"snapshotId":"sn_a", "image":"cG5n"}),
+                );
             }
             expect_orderly_close(&mut socket);
         }
