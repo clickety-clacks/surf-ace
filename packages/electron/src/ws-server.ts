@@ -1498,6 +1498,9 @@ export class SurfaceWsServer {
               onNotificationError: (error) => persistentServerDiagnostic(
                 "warn", "mutation_notification_failed", errorDiagnosticFields(error),
               ),
+              ...(["target.register", "content.set", "content.append", "content.patch", "content.clear", "pane.rename"]
+                .includes(request.op) && session.surfaceId
+                ? { rollbackSurfaceId: session.surfaceId } : {}),
             });
           } finally {
             this.activePaneMutation = null;

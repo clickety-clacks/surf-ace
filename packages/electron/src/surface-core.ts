@@ -815,6 +815,7 @@ export class SurfaceCore {
   async transactionAsync<T>(operation: () => Promise<T>, committed?: {
     retainUncertainEvents: boolean;
     onNotificationError: (error: unknown) => void;
+    rollbackSurfaceId?: string;
   }): Promise<T> {
     if (this.activeAsyncTransaction !== null &&
         this.transactionContext.getStore() === this.activeAsyncTransaction) {
@@ -845,15 +846,21 @@ export class SurfaceCore {
   private async transactionAsyncExclusive<T>(operation: () => Promise<T>, committed?: {
     retainUncertainEvents: boolean;
     onNotificationError: (error: unknown) => void;
+    rollbackSurfaceId?: string;
   }): Promise<T> {
-    const before = this.getPersistentState();
+    const rollback = committed?.rollbackSurfaceId && this.surfaces.has(committed.rollbackSurfaceId)
+      ? this.captureOrdinarySurfaceRollback(committed.rollbackSurfaceId)
+      : (() => {
+          const before = this.getPersistentState();
+          return () => this.restorePersistentState(before);
+        })();
     this.pendingEvents = [];
     let result: T;
     try {
       result = await operation();
     } catch (error) {
       if ((error as { name?: string } | null)?.name !== "PersistentStateOutcomeUnknownError") {
-        this.restorePersistentState(before);
+        rollback();
       } else if (committed?.retainUncertainEvents) {
         this.deferredVerifiedEvents = { state: JSON.stringify(this.getPersistentState()), events: this.pendingEvents };
       }
@@ -869,7 +876,7 @@ export class SurfaceCore {
     } else {
       // Preserve the legacy notification/rollback policy for other callers.
       try { for (const event of events) this.deliver(event); }
-      catch (error) { this.restorePersistentState(before); throw error; }
+      catch (error) { rollback(); throw error; }
     }
     return result;
   }
@@ -890,6 +897,20 @@ export class SurfaceCore {
         try { onError(error); } catch { /* notification reporting cannot reject a commit */ }
       }
     }
+  }
+
+  // The caller selects this only for operations confined to one existing
+  // surface plus authority receipts. Other surfaces keep their live instances.
+  private captureOrdinarySurfaceRollback(surfaceId: string): () => void {
+    this.reconcileAnnotationTombstones();
+    const restoreSurface = this.captureSurfaceMutationRollback(surfaceId);
+    const authority = this.locklessAuthority.exportState();
+    const publisher = this.annotationPublisher?.snapshot();
+    return () => {
+      restoreSurface();
+      this.locklessAuthority.restorePersistentState(authority);
+      if (publisher) this.annotationPublisher?.restore(publisher);
+    };
   }
 
   private restorePersistentState(state: PersistentSurfaceState): void {
