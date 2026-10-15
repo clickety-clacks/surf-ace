@@ -1089,10 +1089,11 @@ test("registration negotiates rc11 endpoint leases only behind the writer fence"
     assert.ok(String(fenceError?.message).length > 0,
       "the registration response preserves a useful fail-closed reason");
     assert.equal(fenced.payload, undefined, "a fenced registration carries no lease payload");
+
+    cluster.config.witnessServerId = originalWitnessId;
     assert.equal((await allocator.diagnostics()).nextPaneOrdinalFence, before.nextPaneOrdinalFence,
       "the refused registration commits no pane claim");
 
-    cluster.config.witnessServerId = originalWitnessId;
     const restoredReadiness = await wire.request("fleet.topology", {});
     assert.equal(restoredReadiness.ok, true);
     assert.equal(restoredReadiness.payload?.registrationReady, true,
