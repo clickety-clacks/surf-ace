@@ -999,11 +999,11 @@ test("configured server registers two stable clients and deduplicates reconnect"
     await Promise.all([reconnect.synchronize(), clients[1].synchronize()]);
     assert.deepEqual((await topology()).clients, first.clients);
     const recycledPaneId = "recycled-pane-id";
-    const claim = async (lineage: string) => {
+    const claim = async (paneId: string, lineage: string) => {
       const response = await reader!.request("pane.claim", {
         clientId: fixtures[0].clientId,
         surfaceId: fixtures[0].surface.surfaceId,
-        paneId: recycledPaneId,
+        paneId,
         paneLineageId: lineage,
       });
       assert.equal(response.ok, true, JSON.stringify(response));
@@ -1011,13 +1011,21 @@ test("configured server registers two stable clients and deduplicates reconnect"
       assert.ok(Number.isSafeInteger(label) && label > 0);
       return label;
     };
-    const firstLineageLabel = await claim("pl_first-lifetime");
-    assert.equal(await claim("pl_first-lifetime"), firstLineageLabel,
+    const firstLineageLabel = await claim(recycledPaneId, "pl_first-lifetime");
+    assert.equal(await claim(recycledPaneId, "pl_first-lifetime"), firstLineageLabel,
       "reconnect must reuse the same durable pane claim");
-    const secondLineageLabel = await claim("pl_second-lifetime");
+    const recycledIdentity = await reader.request("pane.claim", {
+      clientId: fixtures[0].clientId,
+      surfaceId: fixtures[0].surface.surfaceId,
+      paneId: recycledPaneId,
+      paneLineageId: "pl_second-lifetime",
+    });
+    assert.equal(recycledIdentity.ok, false,
+      "a generation-unaware deployed client cannot reuse a pane ID with a new lineage");
+    const secondLineageLabel = await claim("fresh-pane-id", "pl_second-lifetime");
     assert.ok(secondLineageLabel > firstLineageLabel,
-      "a reused paneId with new lineage must receive a fresh fleet ordinal");
-    assert.equal(await claim("pl_second-lifetime"), secondLineageLabel);
+      "a new pane identity receives a fresh fleet ordinal");
+    assert.equal(await claim("fresh-pane-id", "pl_second-lifetime"), secondLineageLabel);
     const rejected = await reader.request("client.register", { clientId: "", surfaces: [] });
     assert.equal(rejected.ok, false);
     assert.deepEqual((await topology()).clients, first.clients);
@@ -1034,6 +1042,7 @@ test("registration negotiates rc11 endpoint leases only behind the writer fence"
   let allocator: AllocatorServer | null = null;
   let wire: WireClient | null = null;
   const originalWitnessId = cluster.config.witnessServerId;
+  let bodyError: unknown;
   try {
     const recovery = await PostgresCustodyAdapter.initializeAbsentFleet(cluster.config, "alloc_rc11-compatibility");
     await recovery.release();
@@ -1189,10 +1198,19 @@ test("registration negotiates rc11 endpoint leases only behind the writer fence"
     assert.throws(() => assertRc11ConfiguredRegistration(deployedR3Reply, clientId, directEndpoint),
       /invalid_registration_response/,
       "the exact deployed r3 response shape cannot satisfy a configured rc11 client; roll clients back before the registry");
+  } catch (error) {
+    bodyError = error;
+    throw error;
   } finally {
     cluster.config.witnessServerId = originalWitnessId;
     await wire?.close();
-    await allocator?.close();
+    if (allocator) {
+      try {
+        await allocator.close();
+      } catch (error) {
+        if (bodyError === undefined) throw error;
+      }
+    }
     await cluster.stop();
   }
 });
