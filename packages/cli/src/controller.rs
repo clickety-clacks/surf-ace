@@ -14,6 +14,7 @@ use uuid::Uuid;
 
 const LOCKLESS_CAPABILITY: &str = "surf-ace.lockless-multi-controller.v1";
 const RECEIPT_CAPABILITY: &str = "operation-receipt-replay-v1";
+const CONTROL_PROJECTION_V1: &str = "control_projection_v1";
 const DISCOVERY_TIMEOUT: Duration = Duration::from_millis(2_000);
 const DISCOVERY_REGISTRY_MAX_BYTES: usize = 1_048_576;
 const DISCOVERY_DESCRIBE_MAX_BYTES: usize = 65_536;
@@ -58,14 +59,12 @@ pub fn execute(invocation: Invocation) -> Result<CliOutput, CliError> {
     let mut root = open_invocation_state(&invocation)?;
     validate_expected_controller(&invocation, &root)?;
     let surface_id = operation_surface_id(&invocation)?;
+    let mut operation_wire = WebSocketWire::connect_direct(&endpoint).map_err(CliError::Wire)?;
     if invocation.command != crate::command::Command::PaneDescribe {
         if let Some(surface_id) = surface_id.as_deref() {
-            let mut lifecycle = WebSocketWire::connect_direct(&endpoint).map_err(CliError::Wire)?;
-            discover_surface(&invocation, &mut root, &mut lifecycle, surface_id)?;
-            lifecycle.close().map_err(CliError::Wire)?;
+            discover_surface(&mut root, &mut operation_wire, surface_id)?;
         }
     }
-    let mut operation_wire = WebSocketWire::connect_direct(&endpoint).map_err(CliError::Wire)?;
     execute_locked(
         invocation,
         &mut root,
@@ -1385,7 +1384,7 @@ fn execute_locked(
         "controllerInstanceId": controller_id,
         "controllerProductName": product_label,
         "projectionCapacityBytes": invocation.projection_capacity_bytes,
-        "protocolFeatures": [LOCKLESS_CAPABILITY, RECEIPT_CAPABILITY],
+        "protocolFeatures": [LOCKLESS_CAPABILITY, RECEIPT_CAPABILITY, CONTROL_PROJECTION_V1],
         "protocolVersion": 1,
         "resume": resume_payload(root.state(), true),
     });
@@ -1413,6 +1412,13 @@ fn execute_locked(
             "lockless_capability_not_admitted".into(),
         ));
     }
+    let control_projection = match validate_pair_projection(pair_payload) {
+        Ok(control_projection) => control_projection,
+        Err(error) => {
+            let _ = wire.close();
+            return Err(error);
+        }
+    };
     if pair_payload
         .get("controllerInstanceId")
         .and_then(Value::as_str)
@@ -1427,17 +1433,16 @@ fn execute_locked(
     }
     verify_receipt_limits(pair_payload)?;
     if let Err(error) = (|| {
-        apply_synchronization(root, pair_payload, &pair.events)?;
-        finalize_acknowledged_receipts(root, wire)?;
-        flush_acknowledgements(
+        apply_synchronization(
             root,
-            wire,
-            pair_payload
-                .get("scopes")
-                .and_then(Value::as_array)
-                .map(Vec::as_slice)
-                .unwrap_or(&[]),
-        )
+            pair_payload,
+            &pair.events,
+            control_projection,
+            surface_id,
+        )?;
+        finalize_acknowledged_receipts(root, wire)?;
+        let acknowledgement_scopes = acknowledgement_scopes(pair_payload, control_projection);
+        flush_acknowledgements(root, wire, &acknowledgement_scopes)
     })() {
         let _ = mark_all_unsynchronized(root);
         let _ = wire.close();
@@ -1468,7 +1473,26 @@ fn execute_locked(
         .command
         .wire_payload(invocation.input.clone())
         .map_err(CliError::Input)?;
-    let result = if let Some((surface_id, pane_id)) = pane_target {
+    let projection_scopes = if control_projection {
+        projection_scopes_for_command(invocation.command, &payload)
+    } else {
+        vec![]
+    };
+    if control_projection && invocation.command != crate::command::Command::Sync {
+        synchronize_operation_scopes(root, wire, pair_payload, invocation.command, &payload)?;
+    }
+    let result = if invocation.command == crate::command::Command::Sync {
+        let scopes = projection_scopes_for_command(invocation.command, &payload);
+        for scope in &scopes { mark_scope_unsynchronized(root, scope)?; }
+        if control_projection {
+            synchronize_operation_scopes(root, wire, pair_payload, invocation.command, &payload)?;
+        } else {
+            synchronize_scope_payloads(root, wire, scopes.clone())?;
+        }
+        let current = scopes.iter().all(|id| root.state().scopes.get(id)
+            .is_some_and(|scope| scope.synchronized));
+        json!({"ok":true,"scopeIds":scopes,"cacheStatus":if current {"current"} else {"unsynchronized"}})
+    } else if let Some((surface_id, pane_id)) = pane_target {
         let pane_result = (|| {
             let response = request_without_correlation(wire, op, payload)?;
             let response_payload =
@@ -1500,7 +1524,28 @@ fn execute_locked(
         }
         terminal_envelope(&response.response)
     };
-    mark_all_synchronized(root, pair_payload.get("synchronizationCutoff"))?;
+    if control_projection {
+        if invocation.command.is_mutation()
+            && result.get("ok").and_then(Value::as_bool) == Some(true)
+        {
+            for scope_id in &projection_scopes {
+                mark_scope_unsynchronized(root, scope_id)?;
+            }
+            // A content/annotation commit does not push payload deltas in control
+            // mode. Hydrate only its scope so subsequent explicit local reads can
+            // see that committed result. target.apply only commits an async intent.
+            if invocation.command != crate::command::Command::TargetApply {
+                if let Err(error) = synchronize_scope_payloads(root, wire, projection_scopes) {
+                    let _ = wire.close();
+                    return Err(CliError::ProjectionAfterCommit {
+                        committed: Box::new(result), cause: error.to_string(),
+                    });
+                }
+            }
+        }
+    } else {
+        mark_all_synchronized(root, pair_payload.get("synchronizationCutoff"))?;
+    }
     wire.close().map_err(CliError::Wire)?;
     reconciliations.sort_by(|left, right| {
         left.get("requestId")
@@ -1617,7 +1662,8 @@ fn execute_local(invocation: Invocation) -> Result<CliOutput, CliError> {
             return json!({
                 "acknowledgement": null,
                 "cacheStatus": "unsynchronized",
-                "consumableLoss": null,
+                "consumableLoss": state.unfetched_scope_gaps.get(&scope_id)
+                    .and_then(|metadata| metadata.get("gap")),
                 "currentContentRecord": null,
                 "records": [],
                 "scopeId": scope_id,
@@ -1791,6 +1837,7 @@ fn forget_closed_scopes(
         state
             .acknowledgement_outbox
             .retain(|intent| !matches_closed_scope(&intent.scope_id));
+        state.unfetched_scope_gaps.retain(|scope_id, _| !matches_closed_scope(scope_id));
     })?;
     Ok(())
 }
@@ -1815,41 +1862,13 @@ fn operation_surface_id(invocation: &Invocation) -> Result<Option<String>, CliEr
 }
 
 fn discover_surface(
-    invocation: &Invocation,
     root: &mut LockedStateRoot,
     wire: &mut dyn DirectWire,
     surface_id: &str,
 ) -> Result<(), CliError> {
-    let product_label = invocation
-        .product_label
-        .as_deref()
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| CliError::Input("missing_product_label".into()))?;
-    let controller_id = root.state().controller_instance_id.clone();
-    let pair = request_without_correlation(
-        wire,
-        "pair.request",
-        json!({
-            "controllerInstanceId": controller_id,
-            "controllerProductName": product_label,
-            "projectionCapacityBytes": invocation.projection_capacity_bytes,
-            "protocolFeatures": [LOCKLESS_CAPABILITY, RECEIPT_CAPABILITY],
-            "protocolVersion": 1,
-            "resume": resume_payload(root.state(), false),
-        }),
-    )?;
-    let payload = successful_payload(&pair.response, "pair.request")?;
-    if payload.get("mode").and_then(Value::as_str) != Some("lockless")
-        || payload.get("controllerInstanceId").and_then(Value::as_str) != Some(&controller_id)
-    {
-        return Err(CliError::Protocol("lifecycle_pair_mismatch".into()));
-    }
-    verify_receipt_limits(payload)?;
-    apply_synchronization(root, payload, &pair.events)?;
     let listed = request_without_correlation(wire, "surfaces.list", json!({}))?;
-    successful_payload(&listed.response, "surfaces.list")?;
-    apply_wire_events(root, &listed)?;
     let listed_payload = successful_payload(&listed.response, "surfaces.list")?;
+    apply_wire_events(root, &listed)?;
     let exists = listed_payload
         .get("surfaces")
         .and_then(Value::as_array)
@@ -1906,7 +1925,6 @@ fn perform_mutation(
             });
         }
     };
-    apply_wire_events(root, &response)?;
     let terminal = terminal_envelope(&response.response);
     let precommit_error = response
         .response
@@ -1914,6 +1932,9 @@ fn perform_mutation(
         .as_ref()
         .and_then(|error| error.get("code"))
         .and_then(Value::as_str);
+    if response.response.ok == Some(false) {
+        apply_wire_events(root, &response)?;
+    }
     if response.response.ok == Some(false)
         && (precommit_error == Some("receipt_capacity")
             || (op == "target.apply"
@@ -1939,6 +1960,13 @@ fn perform_mutation(
         correlation.phase = CorrelationPhase::ReceiptPersisted;
         correlation.terminal_response = Some(terminal.clone());
     })?;
+    // A projection failure cannot erase an already returned, durable terminal
+    // receipt or turn its known commit back into a generic/uncertain result.
+    if let Err(error) = apply_wire_events(root, &response) {
+        return Err(CliError::ProjectionAfterCommit {
+            committed: Box::new(terminal), cause: error.to_string(),
+        });
+    }
     acknowledge_receipt(root, wire, &request_id)?;
     if response.response.ok == Some(true) && !closed_scopes.is_empty() {
         forget_closed_scopes(root, &closed_scopes)?;
@@ -2124,17 +2152,7 @@ fn listed_acknowledgement_scopes(payload: &Map<String, Value>) -> Vec<Value> {
         let Some(surface_id) = surface.get("surfaceId").and_then(Value::as_str) else {
             continue;
         };
-        // Match the protocol’s encodeURIComponent scope component.
-        let encoded: String = surface_id
-            .bytes()
-            .map(|byte| {
-                if byte.is_ascii_alphanumeric() || b"-_.!~*()\x27".contains(&byte) {
-                    char::from(byte).to_string()
-                } else {
-                    format!("%{byte:02X}")
-                }
-            })
-            .collect();
+        let encoded = encoded_surface_id(surface_id);
         scopes.push(json!({"scopeId": format!("surface:{encoded}")}));
         for pane in surface
             .pointer("/topology/panes")
@@ -2150,15 +2168,29 @@ fn listed_acknowledgement_scopes(payload: &Map<String, Value>) -> Vec<Value> {
     scopes
 }
 
+fn encoded_surface_id(surface_id: &str) -> String {
+    // Match the protocol’s encodeURIComponent scope component.
+    surface_id
+        .bytes()
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
+                char::from(byte).to_string()
+            } else {
+                format!("%{byte:02X}")
+            }
+        })
+        .collect()
+}
+
 fn flush_acknowledgements(
     root: &mut LockedStateRoot,
     wire: &mut dyn DirectWire,
-    synchronized_scopes: &[Value],
+    eligible_scopes: &[Value],
 ) -> Result<(), CliError> {
     for intent in root.state().acknowledgement_outbox.clone() {
-        // One controller state can visit multiple clients. Keep other clients
-        // pending until a connection synchronizes their scopes.
-        if !synchronized_scopes.iter().any(|scope| {
+        // A pair summary may identify an owned scope, but only a pre-existing
+        // durable intent plus an accepted explicit ACK advances its cursor.
+        if !eligible_scopes.iter().any(|scope| {
             scope.get("scopeId").and_then(Value::as_str) == Some(intent.scope_id.as_str())
         }) {
             continue;
@@ -2192,6 +2224,217 @@ fn flush_acknowledgements(
     Ok(())
 }
 
+fn projection_scopes_for_command(command: crate::command::Command, payload: &Value) -> Vec<String> {
+    let Some(surface_id) = payload.get("surfaceId").and_then(Value::as_str) else {
+        return vec![];
+    };
+    let encoded_surface_id = encoded_surface_id(surface_id);
+    match command {
+        crate::command::Command::Sync => payload.get("scopeIds").and_then(Value::as_array)
+            .into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect(),
+        crate::command::Command::Push
+        | crate::command::Command::Clear
+        | crate::command::Command::AnnotationsRemove => payload
+            .get("paneId")
+            .and_then(Value::as_u64)
+            .map(|pane_id| vec![format!("pane:{encoded_surface_id}:{pane_id}")])
+            .unwrap_or_default(),
+        crate::command::Command::TargetApply => {
+            vec![format!("surface:{encoded_surface_id}")]
+        }
+        _ => vec![],
+    }
+}
+
+fn synchronize_operation_scopes(
+    root: &mut LockedStateRoot,
+    wire: &mut dyn DirectWire,
+    pair_payload: &Map<String, Value>,
+    command: crate::command::Command,
+    operation_payload: &Value,
+) -> Result<(), CliError> {
+    let required_scope_ids = projection_scopes_for_command(command, operation_payload);
+    if required_scope_ids.is_empty() {
+        return Ok(());
+    }
+    let summaries = pair_payload
+        .get("scopeSummaries")
+        .and_then(Value::as_array)
+        .ok_or_else(|| CliError::Protocol("invalid_control_projection_scope_summaries".into()))?;
+    let available_scope_ids = summaries
+        .iter()
+        .filter_map(|summary| summary.get("scopeId").and_then(Value::as_str))
+        .collect::<BTreeSet<_>>();
+    for scope_id in &required_scope_ids {
+        if !available_scope_ids.contains(scope_id.as_str()) {
+            return Err(CliError::Protocol(
+                "control_projection_missing_operation_scope".into(),
+            ));
+        }
+    }
+    synchronize_scope_payloads(root, wire, required_scope_ids)
+}
+
+fn synchronize_scope_payloads(
+    root: &mut LockedStateRoot,
+    wire: &mut dyn DirectWire,
+    required_scope_ids: Vec<String>,
+) -> Result<(), CliError> {
+    // Matching cursor, gap and retention metadata lets an existing local
+    // snapshot remain current. The summaries themselves never supply records
+    // or move a cursor; fetch only operation-relevant scopes that are stale.
+    let scopes_to_sync = required_scope_ids
+        .into_iter()
+        .filter(|scope_id| {
+            !root
+                .state()
+                .scopes
+                .get(scope_id)
+                .is_some_and(|scope| scope.synchronized)
+        })
+        .collect::<Vec<_>>();
+    if scopes_to_sync.is_empty() {
+        return Ok(());
+    }
+    let response = request_without_correlation(
+        wire,
+        "consumable.sync",
+        json!({ "scopeIds": scopes_to_sync.clone() }),
+    )?;
+    let payload = match control_sync_successful_payload(&response.response) {
+        Ok(payload) => payload,
+        Err(error) => {
+            apply_wire_events(root, &response)?;
+            return Err(error);
+        }
+    };
+    let snapshots = payload
+        .get("snapshots")
+        .and_then(Value::as_array)
+        .ok_or_else(|| CliError::Protocol("invalid_consumable_sync_snapshots".into()))?;
+    let expected = scopes_to_sync
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let mut seen = BTreeSet::new();
+    for snapshot in snapshots {
+        let scope_id = snapshot
+            .get("scopeId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| CliError::Protocol("invalid_consumable_sync_snapshot".into()))?;
+        if !expected.contains(scope_id) || !seen.insert(scope_id) {
+            return Err(CliError::Protocol(
+                "unexpected_consumable_sync_snapshot_scope".into(),
+            ));
+        }
+        validate_consumable_sync_snapshot(snapshot)?;
+    }
+    if seen != expected {
+        return Err(CliError::Protocol(
+            "missing_consumable_sync_snapshot_scope".into(),
+        ));
+    }
+    for snapshot in snapshots {
+        apply_snapshot(root, snapshot)?;
+    }
+    apply_wire_events(root, &response)?;
+    Ok(())
+}
+
+fn control_sync_successful_payload(response: &Envelope) -> Result<&Map<String, Value>, CliError> {
+    if response.envelope_type != "response" {
+        return Err(CliError::Protocol(
+            "invalid_response_type:consumable.sync".into(),
+        ));
+    }
+    if response.v != 1 {
+        return Err(CliError::Protocol(
+            "unsupported_response_version:consumable.sync".into(),
+        ));
+    }
+    if response.op != "consumable.sync" {
+        return Err(CliError::Protocol(
+            "response_operation_mismatch:consumable.sync".into(),
+        ));
+    }
+    if response.ok == Some(false) {
+        let code = response
+            .error
+            .as_ref()
+            .and_then(|error| error.get("code"))
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        return Err(CliError::Rejected {
+            operation: "consumable.sync".into(),
+            code: code.into(),
+        });
+    }
+    if response.ok != Some(true) {
+        return Err(CliError::Protocol(
+            "missing_response_success:consumable.sync".into(),
+        ));
+    }
+    response
+        .payload
+        .as_ref()
+        .and_then(Value::as_object)
+        .ok_or_else(|| CliError::Protocol("invalid_response:consumable.sync".into()))
+}
+
+fn validate_consumable_sync_snapshot(snapshot: &Value) -> Result<(), CliError> {
+    let valid = snapshot.get("version").and_then(Value::as_u64) == Some(1)
+        && snapshot
+            .pointer("/cursor/cursor")
+            .and_then(Value::as_u64)
+            .is_some()
+        && snapshot
+            .pointer("/cursor/gapGeneration")
+            .and_then(Value::as_u64)
+            .is_some()
+        && snapshot
+            .pointer("/cursor/gap")
+            .is_none_or(|gap| gap.is_null() || gap.is_object())
+        && snapshot
+            .get("firstRetainedSequence")
+            .and_then(Value::as_u64)
+            .is_some()
+        && snapshot
+            .get("lastRetainedSequence")
+            .and_then(Value::as_u64)
+            .is_some()
+        && snapshot.get("records").and_then(Value::as_array).is_some();
+    if !valid {
+        return Err(CliError::Protocol(
+            "invalid_consumable_sync_snapshot".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn acknowledgement_scopes(
+    pair_payload: &Map<String, Value>,
+    control_projection: bool,
+) -> Vec<Value> {
+    if control_projection {
+        return pair_payload
+            .get("scopeSummaries")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|summary| summary.get("scopeId").and_then(Value::as_str))
+            .map(|scope_id| json!({ "scopeId": scope_id }))
+            .collect();
+    }
+    pair_payload
+        .get("scopes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|scope| scope.get("scopeId").and_then(Value::as_str))
+        .map(|scope_id| json!({ "scopeId": scope_id }))
+        .collect()
+}
+
 fn request_without_correlation(
     wire: &mut dyn DirectWire,
     op: &str,
@@ -2207,6 +2450,8 @@ fn apply_synchronization(
     root: &mut LockedStateRoot,
     pair_payload: &Map<String, Value>,
     events: &[Envelope],
+    control_projection: bool,
+    surface_id: Option<&str>,
 ) -> Result<(), CliError> {
     let result = (|| {
         if let Some(scopes) = pair_payload.get("scopes").and_then(Value::as_array) {
@@ -2214,12 +2459,164 @@ fn apply_synchronization(
                 apply_snapshot(root, scope)?;
             }
         }
+        if control_projection {
+            apply_control_scope_summaries(root, pair_payload, surface_id)?;
+        }
         apply_events(root, events)
     })();
     if let Err(error) = result {
         mark_all_unsynchronized(root)?;
         return Err(error);
     }
+    Ok(())
+}
+
+fn validate_pair_projection(payload: &Map<String, Value>) -> Result<bool, CliError> {
+    match payload.get("projection") {
+        Some(Value::String(projection)) if projection == "control" => {
+            let features = payload
+                .get("capabilities")
+                .and_then(Value::as_object)
+                .and_then(|capabilities| capabilities.get("protocolFeatures"))
+                .and_then(Value::as_array)
+                .ok_or_else(|| CliError::Protocol("control_projection_not_advertised".into()))?;
+            if !features
+                .iter()
+                .any(|feature| feature.as_str() == Some(CONTROL_PROJECTION_V1))
+            {
+                return Err(CliError::Protocol(
+                    "control_projection_not_advertised".into(),
+                ));
+            }
+            if !payload.get("scopeSummaries").is_some_and(Value::is_array) {
+                return Err(CliError::Protocol(
+                    "invalid_control_projection_scope_summaries".into(),
+                ));
+            }
+            if !payload
+                .get("scopes")
+                .and_then(Value::as_array)
+                .is_some_and(Vec::is_empty)
+            {
+                return Err(CliError::Protocol(
+                    "control_projection_contains_material_scopes".into(),
+                ));
+            }
+            Ok(true)
+        }
+        Some(Value::String(projection)) if projection == "material" => Ok(false),
+        None => Ok(false),
+        Some(_) => Err(CliError::Protocol("invalid_pair_projection".into())),
+    }
+}
+
+fn apply_control_scope_summaries(
+    root: &mut LockedStateRoot,
+    pair_payload: &Map<String, Value>,
+    surface_id: Option<&str>,
+) -> Result<(), CliError> {
+    let summaries = pair_payload
+        .get("scopeSummaries")
+        .and_then(Value::as_array)
+        .ok_or_else(|| CliError::Protocol("invalid_control_projection_scope_summaries".into()))?;
+    let mut seen = BTreeSet::new();
+    let mut parsed = Vec::with_capacity(summaries.len());
+    for summary in summaries {
+        let scope_id = summary
+            .get("scopeId")
+            .and_then(Value::as_str)
+            .filter(|scope_id| !scope_id.is_empty())
+            .ok_or_else(|| CliError::Protocol("invalid_control_projection_scope_summary".into()))?;
+        let cursor = summary
+            .pointer("/cursor/cursor")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| CliError::Protocol("invalid_control_projection_scope_summary".into()))?;
+        let gap_generation = summary
+            .pointer("/cursor/gapGeneration")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| CliError::Protocol("invalid_control_projection_scope_summary".into()))?;
+        let gap = summary
+            .pointer("/cursor/gap")
+            .or(Some(&Value::Null))
+            .filter(|gap| gap.is_null() || gap.is_object())
+            .ok_or_else(|| CliError::Protocol("invalid_control_projection_scope_summary".into()))?;
+        let first = summary
+            .get("firstRetainedSequence")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| CliError::Protocol("invalid_control_projection_scope_summary".into()))?;
+        let last = summary
+            .get("lastRetainedSequence")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| CliError::Protocol("invalid_control_projection_scope_summary".into()))?;
+        if !seen.insert(scope_id.to_owned()) {
+            return Err(CliError::Protocol(
+                "duplicate_control_projection_scope_summary".into(),
+            ));
+        }
+        parsed.push((
+            scope_id.to_owned(),
+            cursor,
+            gap_generation,
+            gap.clone(),
+            first,
+            last,
+        ));
+    }
+
+    let paired_scope_prefixes = surface_id.map(|surface_id| {
+        let encoded = encoded_surface_id(surface_id);
+        (format!("surface:{encoded}"), format!("pane:{encoded}:"))
+    });
+    if let Some((surface_scope, pane_prefix)) = paired_scope_prefixes.as_ref() {
+        if parsed.iter().any(|entry| {
+            let scope_id = &entry.0;
+            scope_id != surface_scope && !scope_id.starts_with(pane_prefix)
+        }) {
+            return Err(CliError::Protocol(
+                "control_projection_scope_summary_surface_mismatch".into(),
+            ));
+        }
+    }
+    root.mutate(|state| {
+        if let Some((surface_scope, pane_prefix)) = paired_scope_prefixes.as_ref() {
+            for (scope_id, scope) in &mut state.scopes {
+                let belongs_to_surface =
+                    scope_id == surface_scope || scope_id.starts_with(pane_prefix);
+                if belongs_to_surface && !seen.contains(scope_id) {
+                    scope.synchronized = false;
+                }
+            }
+        } else {
+            for (scope_id, scope) in &mut state.scopes {
+                if !seen.contains(scope_id) {
+                    scope.synchronized = false;
+                }
+            }
+        }
+        for (scope_id, cursor, gap_generation, gap, first, last) in parsed {
+            if let Some(scope) = state.scopes.get_mut(&scope_id) {
+                let gap_matches = scope.gap.as_ref().unwrap_or(&Value::Null) == &gap;
+                // A historical accepted gap generation can remain after the gap itself
+                // is cleared. It does not make otherwise matching retained state stale.
+                let gap_generation_matches = gap.is_null()
+                    || scope
+                        .gap
+                        .as_ref()
+                        .and_then(|value| value.get("generation"))
+                        .and_then(Value::as_u64)
+                        == Some(gap_generation);
+                let matches_snapshot = scope.synchronized
+                    && scope.client_cursor == cursor
+                    && scope.first_retained_sequence == first
+                    && scope.last_retained_sequence == last
+                    && gap_matches
+                    && gap_generation_matches;
+                if !matches_snapshot {
+                    scope.synchronized = false;
+                }
+            }
+        }
+    })?;
     Ok(())
 }
 
@@ -2232,6 +2629,11 @@ fn apply_events(root: &mut LockedStateRoot, events: &[Envelope]) -> Result<(), C
             }
             "event.lockless_consumable_delta" => apply_delta(root, payload)?,
             "event.consumable_overflow" => apply_gap(root, payload)?,
+            "event.consumable_available" => {
+                if let Some(scope_id) = payload.get("scopeId").and_then(Value::as_str) {
+                    mark_scope_unsynchronized(root, scope_id)?;
+                }
+            }
             "event.target_apply_result" => apply_target_result_event(root, payload)?,
             _ => {}
         }
@@ -2368,6 +2770,7 @@ fn apply_snapshot(root: &mut LockedStateRoot, snapshot: &Value) -> Result<(), Cl
         synchronization_cutoff: snapshot.get("synchronizationCutoff").cloned(),
     };
     root.mutate(|state| {
+        state.unfetched_scope_gaps.remove(&scope_id);
         state.scopes.insert(scope_id, scope);
     })?;
     Ok(())
@@ -2458,8 +2861,14 @@ fn apply_gap(root: &mut LockedStateRoot, payload: &Value) -> Result<(), CliError
         .and_then(Value::as_u64)
         .ok_or_else(|| CliError::Protocol("invalid_consumable_gap".into()))?;
     root.mutate(|state| {
-        let scope = state.scopes.get_mut(&scope_id).ok_or(())?;
+        let Some(scope) = state.scopes.get_mut(&scope_id) else {
+            state.unfetched_scope_gaps.insert(scope_id.clone(), json!({
+                "gap": gap, "firstRetainedSequence": first, "lastRetainedSequence": last
+            }));
+            return Ok::<(), ()>(());
+        };
         scope.gap = Some(gap);
+        scope.synchronized = false;
         scope.first_retained_sequence = first;
         scope.last_retained_sequence = scope.last_retained_sequence.max(last);
         scope.current_content_record = None;
@@ -2744,6 +3153,15 @@ fn mark_all_unsynchronized(root: &mut LockedStateRoot) -> Result<(), CliError> {
     Ok(())
 }
 
+fn mark_scope_unsynchronized(root: &mut LockedStateRoot, scope_id: &str) -> Result<(), CliError> {
+    root.mutate(|state| {
+        if let Some(scope) = state.scopes.get_mut(scope_id) {
+            scope.synchronized = false;
+        }
+    })?;
+    Ok(())
+}
+
 fn mark_all_synchronized(
     root: &mut LockedStateRoot,
     cutoff: Option<&Value>,
@@ -2771,6 +3189,7 @@ pub enum CliError {
         request_id: String,
         cause: String,
     },
+    ProjectionAfterCommit { committed: Box<Value>, cause: String },
     Protocol(String),
     Rejected {
         operation: String,
@@ -2788,6 +3207,7 @@ impl CliError {
             Self::Input(_) => "invalid_input",
             Self::Discovery { code, .. } => code,
             Self::OutcomeUnknown { .. } => "outcome_unknown",
+            Self::ProjectionAfterCommit { .. } => "projection_unavailable_after_commit",
             Self::Protocol(_) => "protocol_error",
             Self::Rejected { .. } => "operation_rejected",
             Self::State(_) => "state_error",
@@ -2802,6 +3222,9 @@ impl CliError {
             Self::Discovery { details, .. } => details.clone(),
             Self::OutcomeUnknown { request_id, cause } => {
                 json!({ "cause": cause, "requestId": request_id })
+            }
+            Self::ProjectionAfterCommit { committed, cause } => {
+                json!({ "committedResponse": committed, "cause": cause, "cacheStatus": "unsynchronized" })
             }
             Self::Rejected { operation, code } => {
                 json!({ "operation": operation, "rejectionCode": code })
@@ -2819,6 +3242,7 @@ impl std::fmt::Display for CliError {
             Self::OutcomeUnknown { request_id, cause } => {
                 write!(formatter, "outcome_unknown:{request_id}:{cause}")
             }
+            Self::ProjectionAfterCommit { cause, .. } => write!(formatter, "projection_unavailable_after_commit:{cause}"),
             Self::Protocol(value) => write!(formatter, "protocol_error:{value}"),
             Self::Rejected { operation, code } => {
                 write!(formatter, "operation_rejected:{operation}:{code}")

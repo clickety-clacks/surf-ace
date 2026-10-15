@@ -2,6 +2,54 @@ import Foundation
 
 let surfAceTargetCapabilities = ["target.browser_url.v1"]
 
+// Control/discovery views contain routing material, never the recovery payload.
+let surfAceControlProjectionCapability = "control_projection_v1"
+
+enum SurfAceLocklessControlProjection {
+    static func pane(_ pane: SurfAceLocklessPaneMaterial) -> SurfAceLocklessJSON {
+        let entry = pane.history.visible
+        var target: SurfAceLocklessJSON = .null
+        if case .object(let fields) = pane.target {
+            let keys = Set(["targetId", "targetKind", "paneLineageId", "targetEpoch", "restorePolicy", "currentState"])
+            target = .object(fields.filter { keys.contains($0.key) })
+        }
+        return .object([
+            "paneId": .integer(pane.paneId), "paneLabel": .integer(pane.paneLabel),
+            "paneLineageId": .string(pane.paneLineageId), "name": pane.name.map(SurfAceLocklessJSON.string) ?? .null,
+            "activeContentId": entry.contentId.map(SurfAceLocklessJSON.string) ?? .null,
+            "currentContentId": entry.contentId.map(SurfAceLocklessJSON.string) ?? .null,
+            "currentRevision": .integer(entry.revision),
+            "contentType": entry.contentType.map(SurfAceLocklessJSON.string) ?? .null,
+            "annotationMode": .bool(pane.annotationMode), "currentTarget": target,
+        ])
+    }
+
+    static func surface(_ surface: SurfAceLocklessSurfaceMaterial) -> SurfAceLocklessJSON {
+        .object([
+            "surfaceId": .string(surface.surfaceId), "name": .string(surface.name),
+            "windowLabel": .string(surface.windowLabel), "surfaceRevision": .integer(surface.surfaceRevision),
+            "topologyRevision": .integer(surface.topologyRevision), "topology": surface.topology,
+            "panes": .object(surface.panes.mapValues(pane)),
+            "paneTombstones": .array(surface.paneTombstones.map { closed in .object([
+                "tombstoneId": .string(closed.tombstoneId), "closedSequence": .integer(closed.closedSequence),
+                "pane": pane(closed.pane),
+            ]) }),
+        ])
+    }
+
+    static func tombstone(_ closed: SurfAceLocklessSurfaceTombstone) -> SurfAceLocklessJSON {
+        .object(["tombstoneId": .string(closed.tombstoneId),
+                 "closedSequence": .integer(closed.closedSequence), "surface": surface(closed.surface)])
+    }
+
+    static func state(_ state: SurfAceLocklessAuthorityState) -> SurfAceLocklessJSON {
+        .object(["version": .integer(Int64(state.version)), "generation": .integer(state.generation),
+            "capability": .string(state.capability), "surfaceSetRevision": .integer(state.surfaceSetRevision),
+            "liveSurfaces": .object(state.liveSurfaces.mapValues(surface)),
+            "surfaceTombstones": .array(state.surfaceTombstones.map(tombstone))])
+    }
+}
+
 enum SurfAceLocklessTargetAdmission {
     #if os(iOS)
     static let platformPermitsLockless = true
@@ -33,7 +81,7 @@ enum SurfAceLocklessTargetAdmission {
     }
 
     static var advertisedProtocolFeatures: [String] {
-        platformPermitsLockless && implementationComplete ? [surfAceLocklessCapability] : []
+        platformPermitsLockless && implementationComplete ? [surfAceLocklessCapability, surfAceControlProjectionCapability] : []
     }
 
     static func isLocklessRequest(_ payload: [String: Any]) -> Bool {
