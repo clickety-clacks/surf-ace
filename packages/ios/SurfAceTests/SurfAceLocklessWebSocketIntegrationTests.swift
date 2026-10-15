@@ -211,6 +211,12 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
             "surfaceId": surfaceId, "completionPath": completion.path, "authorityBytes": legacyBytes]
         let line = "B180_NATIVE_READY " + String(decoding: try JSONSerialization.data(withJSONObject: ready, options: [.sortedKeys]), as: UTF8.self) + "\n"
         FileHandle.standardOutput.write(Data(line.utf8))
+        let claim = completion.appendingPathExtension("claimed")
+        for _ in 0..<30 {
+            if FileManager.default.fileExists(atPath: claim.path) { break }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        try XCTSkipUnless(FileManager.default.fileExists(atPath: claim.path), "requires the actual Rust CLI companion runner")
         for _ in 0..<900 {
             if FileManager.default.fileExists(atPath: completion.path) { break }
             try await Task.sleep(for: .milliseconds(100))
