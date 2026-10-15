@@ -201,6 +201,14 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
             _ = try SurfAceLocklessConsumableOperations.appendCommittedRecord(in: &state,
                 scopeId: "pane:\(surfaceId):1", scopeKind: "pane", recordId: "explicit-content",
                 recordClass: .content, payload: .object(["html": .string("explicit retained content")]))
+            let selected = state.liveSurfaces[surfaceId]!.panes["7"]!
+            _ = try SurfAceLocklessConsumableOperations.appendCommittedRecord(in: &state,
+                scopeId: "pane:\(surfaceId):7", scopeKind: "pane", recordId: "selected-existing-content",
+                recordClass: .content, payload: .object([
+                    "surfaceId": .string(surfaceId), "paneId": .integer(7),
+                    "contentId": .string("content-7"), "contentType": .string("html"),
+                    "revision": .integer(0), "historyEntryId": .string(selected.history.visible.historyEntryId),
+                    "content": selected.history.visible.content, "annotations": selected.history.visible.annotations]))
             return .null
         }
         let before = await adapter.snapshot()

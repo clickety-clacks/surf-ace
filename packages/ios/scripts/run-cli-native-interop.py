@@ -75,7 +75,7 @@ def run_cli(ready):
             if not local:args+=['--endpoint',endpoint,'--product-label','B180 native integration']
             args+=[command,'--input-json',json.dumps(payload)]
             done=subprocess.run(args,capture_output=True,text=True,timeout=20)
-            obj=json.loads(done.stdout);commands.append({'command':command,'exit':done.returncode,'output':obj})
+            obj=json.loads(done.stdout);commands.append({'command':command,'exit':done.returncode,'output':obj if command!='read' else {'ok':obj.get('ok'),'cacheStatus':obj.get('result',{}).get('cacheStatus'),'currentContentId':obj.get('result',{}).get('currentContentRecord',{}).get('payload',{}).get('contentId')}})
             assert done.returncode==0, (command,obj,done.stderr)
             return obj
         listed=call('list',{});cid=listed['controllerInstanceId'];sid=ready['surfaceId']
@@ -87,12 +87,17 @@ def run_cli(ready):
         cold=call('read',{'scopeId':scope},True)
         assert cold['result']['cacheStatus']=='unsynchronized'
         assert cold['result']['currentContentRecord'] is None
+        call('sync',{'surfaceId':sid,'scopeIds':[scope]})
+        assert not any(f['op']=='consumable.ack' for f in frames)
+        initial=call('read',{'scopeId':scope},True)['result']['currentContentRecord']['payload']
+        assert initial['contentId']=='content-7' and len(initial['content']['html'])==4_000_000
+        assert 'saved-stroke' in initial['annotations']['strokesById']
         call('push',{'surfaceId':sid,'paneId':7,'contentId':'rust-new-content','contentType':'html','content':{'html':'<p>Rust native integration</p>'},'friendlyChatName':'B180 fixture'})
         # Receiving a snapshot does not read/ACK it.
         state=json.loads((root/'controller-state.json').read_text())
         assert state['scopes'][scope]['synchronized'] is True
         assert state['acknowledgementOutbox']==[]
-        assert not any(f['op']=='consumable.ack' for f in frames)
+        assert len([f for f in frames if f['op']=='consumable.ack'])==1 # earlier explicit read only
         read=call('read',{'scopeId':scope},True)
         assert read['result']['cacheStatus']=='current'
         assert read['result']['currentContentRecord']['payload']['contentId']=='rust-new-content'

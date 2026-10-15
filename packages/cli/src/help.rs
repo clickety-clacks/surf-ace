@@ -536,6 +536,12 @@ fn command_spec(command: Command) -> Value {
             "Correlated content.set result and operationReceipt.",
             vec!["missing_endpoint", "missing_product_label", "outcome_unknown", "still_pending"],
         ),
+        Command::Sync => (
+            "direct-client", "client_projection_sync",
+            "Fetch only the selected consumable payload scopes into the local projection.",
+            "Snapshot before buffered events; does not read records or create acknowledgement intents. Follow with local read.",
+            vec!["missing_endpoint", "missing_product_label", "control_projection_missing_operation_scope"],
+        ),
         Command::Read => (
             "local-projection",
             "local_projection_read",
@@ -646,6 +652,7 @@ fn wire_operation(command: Command) -> Value {
         Command::PaneDescribe => json!(["pair.request", "panes.list"]),
         Command::Push => json!("content.set"),
         Command::Read => json!("local projection; no network operation"),
+        Command::Sync => json!("consumable.sync"),
         Command::TopologyIntent => {
             json!({ "split": "pane.split", "close": "pane.close", "restore": "pane.restore", "rename": "pane.rename" })
         }
@@ -703,6 +710,7 @@ fn input_schema(command: Command) -> Value {
                 json!([{ "oneOf": content_variants }]),
             )
         }
+        Command::Sync => object(&["surfaceId", "scopeIds"], json!({"surfaceId":string_schema(),"scopeIds":{"type":"array","minItems":1,"uniqueItems":true,"items":string_schema()}}), false),
         Command::Read => object(&["scopeId"], json!({ "scopeId": string_schema() }), false),
         Command::TopologyIntent => json!({
             "oneOf": [

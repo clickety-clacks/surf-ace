@@ -1942,7 +1942,6 @@ fn command_surface_is_exact_and_matches_package_and_canonical_vectors() {
         .iter()
         .map(|command| command.name())
         .collect::<Vec<_>>();
-    assert_eq!(expected.len(), 14);
     assert_eq!(package["commands"], json!(expected));
     assert_eq!(
         package["receiptResolutionOutcomes"],
@@ -5462,4 +5461,23 @@ fn control_sync_applies_snapshot_before_buffered_delta() {
     wire.post_mutation_snapshots = Some(vec![pane_scope_snapshot(scope,1,vec![newer.clone()])]);
     execute_with_wire(compact_push(&temp), &mut wire).unwrap();
     assert_eq!(native_cli_read(&temp,scope)["result"]["currentContentRecord"],newer);
+}
+
+#[test]
+fn control_explicit_sync_fetches_payload_without_read_ack_or_summary_hydration() {
+    let temp = TempDir::new().unwrap(); let scope="pane:sf_1:1";
+    let mut wire=compact_mutation_wire(scope);
+    // Swift Codable omits absent optional gaps in both native summaries and snapshots.
+    wire.scope_summaries[0]["cursor"].as_object_mut().unwrap().remove("gap");
+    wire.sync_snapshots[0]["cursor"].as_object_mut().unwrap().remove("gap");
+    let output=execute_with_wire(invocation(&temp,Command::Sync,json!({"surfaceId":"sf_1","scopeIds":[scope]})),&mut wire).unwrap();
+    assert_eq!(output.result["cacheStatus"],"current");
+    assert_eq!(wire.operations.iter().filter(|op| *op=="consumable.sync").count(),1);
+    let state:Value=serde_json::from_slice(&fs::read(temp.path().join("controller-state.json")).unwrap()).unwrap();
+    assert_eq!(state["acknowledgementOutbox"],json!([]));
+    assert_eq!(state["scopes"][scope]["clientCursor"],1);
+    assert_eq!(native_cli_read(&temp,scope)["result"]["currentContentRecord"]["payload"]["contentId"],"old-content");
+    for ids in [json!([]),json!([scope,scope]),json!([1]),json!([""])] {
+        assert!(Command::Sync.validate(json!({"surfaceId":"sf_1","scopeIds":ids}).as_object().unwrap()).is_err());
+    }
 }

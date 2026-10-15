@@ -13,6 +13,7 @@ pub enum Command {
     PaneDescribe,
     Push,
     Read,
+    Sync,
     TopologyIntent,
     TopologyRealize,
     Clear,
@@ -24,13 +25,14 @@ pub enum Command {
 }
 
 impl Command {
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::FleetList,
         Self::WindowDescribe,
         Self::List,
         Self::PaneDescribe,
         Self::Push,
         Self::Read,
+        Self::Sync,
         Self::TopologyIntent,
         Self::TopologyRealize,
         Self::Clear,
@@ -55,6 +57,7 @@ impl Command {
             Self::PaneDescribe => "pane-describe",
             Self::Push => "push",
             Self::Read => "read",
+            Self::Sync => "sync",
             Self::TopologyIntent => "topology-intent",
             Self::TopologyRealize => "topology-realize",
             Self::Clear => "clear",
@@ -78,6 +81,7 @@ impl Command {
                 | Self::List
                 | Self::PaneDescribe
                 | Self::Read
+                | Self::Sync
                 | Self::CapturePane
         )
     }
@@ -91,6 +95,7 @@ impl Command {
             Self::PaneDescribe => Ok("panes.list"),
             Self::Push => Ok("content.set"),
             Self::Read => Err("read_is_local".into()),
+            Self::Sync => Ok("consumable.sync"),
             Self::TopologyIntent => match string(input, "action")? {
                 "split" => Ok("pane.split"),
                 "close" => Ok("pane.close"),
@@ -144,6 +149,15 @@ impl Command {
                 content_value(input)?;
                 optional_object(input, "display")?;
                 optional_string(input, "friendlyChatName")?;
+            }
+            Self::Sync => {
+                exact_fields(input, &["surfaceId", "scopeIds"], &[])?;
+                required_string(input, "surfaceId")?;
+                let ids = required(input,"scopeIds")?.as_array().ok_or("invalid_input:scopeIds")?;
+                let mut seen = std::collections::BTreeSet::new();
+                if ids.is_empty() || ids.iter().any(|v| v.as_str().is_none_or(|id| id.is_empty() || !seen.insert(id))) {
+                    return Err("invalid_input:scopeIds".into());
+                }
             }
             Self::Read => {
                 exact_fields(input, &["scopeId"], &[])?;

@@ -1478,10 +1478,19 @@ fn execute_locked(
     } else {
         vec![]
     };
-    if control_projection {
+    if control_projection && invocation.command != crate::command::Command::Sync {
         synchronize_operation_scopes(root, wire, pair_payload, invocation.command, &payload)?;
     }
-    let result = if let Some((surface_id, pane_id)) = pane_target {
+    let result = if invocation.command == crate::command::Command::Sync {
+        let scopes = projection_scopes_for_command(invocation.command, &payload);
+        for scope in &scopes { mark_scope_unsynchronized(root, scope)?; }
+        if control_projection {
+            synchronize_operation_scopes(root, wire, pair_payload, invocation.command, &payload)?;
+        } else {
+            synchronize_scope_payloads(root, wire, scopes.clone())?;
+        }
+        json!({"ok":true,"scopeIds":scopes,"cacheStatus":"current"})
+    } else if let Some((surface_id, pane_id)) = pane_target {
         let pane_result = (|| {
             let response = request_without_correlation(wire, op, payload)?;
             let response_payload =
@@ -2208,6 +2217,8 @@ fn projection_scopes_for_command(command: crate::command::Command, payload: &Val
     };
     let encoded_surface_id = encoded_surface_id(surface_id);
     match command {
+        crate::command::Command::Sync => payload.get("scopeIds").and_then(Value::as_array)
+            .into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect(),
         crate::command::Command::Push
         | crate::command::Command::Clear
         | crate::command::Command::AnnotationsRemove => payload
@@ -2369,7 +2380,7 @@ fn validate_consumable_sync_snapshot(snapshot: &Value) -> Result<(), CliError> {
             .is_some()
         && snapshot
             .pointer("/cursor/gap")
-            .is_some_and(|gap| gap.is_null() || gap.is_object())
+            .is_none_or(|gap| gap.is_null() || gap.is_object())
         && snapshot
             .get("firstRetainedSequence")
             .and_then(Value::as_u64)
@@ -2513,6 +2524,7 @@ fn apply_control_scope_summaries(
             .ok_or_else(|| CliError::Protocol("invalid_control_projection_scope_summary".into()))?;
         let gap = summary
             .pointer("/cursor/gap")
+            .or(Some(&Value::Null))
             .filter(|gap| gap.is_null() || gap.is_object())
             .ok_or_else(|| CliError::Protocol("invalid_control_projection_scope_summary".into()))?;
         let first = summary
