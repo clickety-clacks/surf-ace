@@ -231,6 +231,20 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(100))
         }
         try XCTSkipUnless(FileManager.default.fileExists(atPath: claim.path), "requires the actual Rust CLI companion runner")
+        let listed = completion.appendingPathExtension("listed")
+        for _ in 0..<200 {
+            if FileManager.default.fileExists(atPath: listed.path) { break }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        _ = try Data(contentsOf: listed)
+        _ = try await adapter.commitLocalMutation(operation: "test.seed_new_unread_after_cli_admission") { state, _ in
+            _ = try SurfAceLocklessConsumableOperations.appendCommittedRecord(in: &state,
+                scopeId: "pane:\(surfaceId):1", scopeKind: "pane", recordId: "new-unread-after-rust-admission",
+                recordClass: .content, payload: .object(["html": .string("new unread sibling content")]))
+            return .null
+        }
+        let unread = await adapter.snapshot()
+        try Data("unread seeded".utf8).write(to: completion.appendingPathExtension("unread"))
         for _ in 0..<900 {
             if FileManager.default.fileExists(atPath: completion.path) { break }
             try await Task.sleep(for: .milliseconds(100))
@@ -251,9 +265,11 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         XCTAssertEqual(newSeven.back.last, oldSeven.visible)
         XCTAssertEqual(Array(newSeven.back.dropLast()), oldSeven.back)
         let unreadId = "pane:\(surfaceId):1"
-        XCTAssertEqual(before.scopes[unreadId]?.records, after.scopes[unreadId]?.records)
+        XCTAssertEqual(unread.scopes[unreadId]?.records, after.scopes[unreadId]?.records)
         let cliId = try XCTUnwrap(report["controllerId"] as? String)
-        XCTAssertLessThanOrEqual(after.scopes[unreadId]?.cursors[cliId]?.cursor ?? 1, 1)
+        let unreadCursor = try XCTUnwrap(unread.scopes[unreadId]?.cursors[cliId]?.cursor)
+        XCTAssertEqual(after.scopes[unreadId]?.cursors[cliId]?.cursor, unreadCursor)
+        XCTAssertTrue(after.scopes[unreadId]?.records.contains { $0.recordId == "new-unread-after-rust-admission" && $0.sequence >= unreadCursor } == true)
         XCTAssertLessThan(try XCTUnwrap(report["maxResponseBytes"] as? Int), 16 * 1_024 * 1_024)
     }
 

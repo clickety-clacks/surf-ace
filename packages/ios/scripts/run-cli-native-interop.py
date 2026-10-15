@@ -80,6 +80,11 @@ def run_cli(ready):
             return obj
         listed=call('list',{});cid=listed['controllerInstanceId'];sid=ready['surfaceId']
         assert len(listed['result']['payload']['surfaces'])==1
+        Path(ready['completionPath']+'.listed').write_text(cid)
+        deadline=time.monotonic()+20
+        while not Path(ready['completionPath']+'.unread').exists():
+            if time.monotonic()>deadline:raise TimeoutError('native sibling unread append')
+            time.sleep(.05)
         described=call('pane-describe',{'surfaceId':sid,'paneId':7,'expectedControllerInstanceId':cid})
         assert described['result']['paneId']==7
         assert described['result']['paneLineageId']
