@@ -5481,3 +5481,74 @@ fn control_explicit_sync_fetches_payload_without_read_ack_or_summary_hydration()
         assert!(Command::Sync.validate(json!({"surfaceId":"sf_1","scopeIds":ids}).as_object().unwrap()).is_err());
     }
 }
+
+fn compact_review_sibling_gap() -> Envelope {
+    event("event.consumable_overflow", json!({
+        "scopeId":"pane:sf_1:2","firstRetainedSequence":4,"lastRetainedSequence":5,
+        "gap":{"cause":"source_overflow","generation":1,"lastLostSequence":3,
+            "lossExtent":"exact","recordClasses":["content"]}
+    }))
+}
+
+#[test]
+fn compact_review_unfetched_sibling_loss_does_not_fail_listing_or_ack_payload() {
+    let temp=TempDir::new().unwrap(); let mut wire=compact_mutation_wire("pane:sf_1:1");
+    wire.response_events.insert("surfaces.list".into(),vec![compact_review_sibling_gap()]);
+    execute_with_wire(invocation(&temp,Command::List,json!({})),&mut wire).unwrap();
+    let read=native_cli_read(&temp,"pane:sf_1:2");
+    assert_eq!(read["result"]["cacheStatus"],"unsynchronized");
+    assert_eq!(read["result"]["consumableLoss"]["generation"],1);
+    assert_eq!(read["result"]["acknowledgement"],Value::Null);
+    let state:Value=serde_json::from_slice(&fs::read(temp.path().join("controller-state.json")).unwrap()).unwrap();
+    assert!(state["scopes"].get("pane:sf_1:2").is_none());
+    assert_eq!(state["unfetchedScopeGaps"]["pane:sf_1:2"]["lastRetainedSequence"],5);
+    assert_eq!(state["acknowledgementOutbox"],json!([]));
+    assert!(!wire.operations.iter().any(|op| op=="consumable.sync" || op=="consumable.ack"));
+}
+
+#[test]
+fn compact_review_sibling_loss_preserves_selected_sync_and_successful_mutation_receipt() {
+    for operation in ["consumable.sync","content.set"] {
+        let temp=TempDir::new().unwrap(); let mut wire=compact_mutation_wire("pane:sf_1:1");
+        wire.response_events.insert(operation.into(),vec![compact_review_sibling_gap()]);
+        let output=execute_with_wire(compact_push(&temp),&mut wire).unwrap();
+        assert_eq!(output.result["payload"]["operationReceipt"]["commitSequence"],7);
+        let state:Value=serde_json::from_slice(&fs::read(temp.path().join("controller-state.json")).unwrap()).unwrap();
+        assert_eq!(state["unresolved"],json!({}));
+        assert_eq!(state["scopes"]["pane:sf_1:1"]["synchronized"],true);
+        assert!(state["scopes"].get("pane:sf_1:2").is_none());
+        assert_eq!(state["unfetchedScopeGaps"]["pane:sf_1:2"]["gap"]["generation"],1);
+        assert_eq!(state["acknowledgementOutbox"],json!([]));
+        assert!(wire.payloads.iter().filter(|(op,_)|op=="consumable.sync")
+            .all(|(_,p)|p["scopeIds"]==json!(["pane:sf_1:1"])));
+        assert_eq!(wire.payloads.iter().filter(|(op,_)|op=="operation.receipt.ack").count(),2);
+    }
+}
+
+#[test]
+fn compact_review_known_commit_is_persisted_before_projection_failure() {
+    let temp=TempDir::new().unwrap();let mut wire=compact_mutation_wire("pane:sf_1:1");
+    wire.response_events.insert("content.set".into(),vec![event("event.lockless_consumable_delta",
+        json!({"scopeId":"pane:sf_1:1","records":[pane_content_record("sf_1",1,4,Some("invalid-jump"),None)]}))]);
+    let error=execute_with_wire(compact_push(&temp),&mut wire).unwrap_err();
+    assert_eq!(error.code(),"projection_unavailable_after_commit");
+    assert_eq!(error.details()["committedResponse"]["payload"]["operationReceipt"]["commitSequence"],7);
+    let state:Value=serde_json::from_slice(&fs::read(temp.path().join("controller-state.json")).unwrap()).unwrap();
+    let correlation=state["unresolved"].as_object().unwrap().values().next().unwrap();
+    assert_eq!(correlation["phase"],"receipt_persisted");
+    assert_eq!(correlation["terminalResponse"]["ok"],true);
+    assert_eq!(wire.operations.iter().filter(|op|*op=="content.set").count(),1);
+    assert!(!wire.operations.iter().any(|op|op=="operation.receipt.ack"));
+}
+
+#[test]
+fn compact_review_sync_reports_final_availability_invalidation() {
+    let temp=TempDir::new().unwrap();let scope="pane:sf_1:1";
+    let mut wire=compact_mutation_wire(scope);
+    wire.response_events.insert("consumable.sync".into(),vec![event("event.consumable_available",json!({"scopeId":scope}))]);
+    let output=execute_with_wire(invocation(&temp,Command::Sync,json!({"surfaceId":"sf_1","scopeIds":[scope]})),&mut wire).unwrap();
+    assert_eq!(output.result["cacheStatus"],"unsynchronized");
+    let read=native_cli_read(&temp,scope);
+    assert_eq!(read["result"]["cacheStatus"],output.result["cacheStatus"]);
+    assert_eq!(read["result"]["currentContentRecord"],Value::Null);
+}
