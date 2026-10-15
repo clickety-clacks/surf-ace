@@ -3593,12 +3593,12 @@ fn cli_targeted_mutation_discovers_before_pair_on_one_bounded_connection() {
             &mut socket,
             list["id"].as_str().unwrap(),
             "surfaces.list.result",
-            json!({ "surfaces": [{ "surfaceId": "sf_aleph" }] }),
+            json!({ "surfaces": [{ "surfaceId": "sf_fixture" }] }),
         );
 
         let (pair, pair_request_bytes) = read_request_with_bytes(&mut socket);
         assert_eq!(pair["op"], "pair.request");
-        assert_eq!(pair["payload"]["surfaceId"], "sf_aleph");
+        assert_eq!(pair["payload"]["surfaceId"], "sf_fixture");
         assert_eq!(pair["payload"]["controllerProductName"], "Clawline");
         assert!(pair["payload"]["protocolFeatures"]
             .as_array()
@@ -3607,7 +3607,7 @@ fn cli_targeted_mutation_discovers_before_pair_on_one_bounded_connection() {
             .any(|feature| feature == "control_projection_v1"));
         let mut surface_pair =
             control_pair_payload(pair["payload"]["controllerInstanceId"].clone());
-        surface_pair["surfaceId"] = json!("sf_aleph");
+        surface_pair["surfaceId"] = json!("sf_fixture");
         surface_pair["state"] = json!({ "panes": (64..=70).map(|pane_id| json!({
             "paneId": pane_id,
             "paneLabel": pane_id - 63,
@@ -3620,7 +3620,7 @@ fn cli_targeted_mutation_discovers_before_pair_on_one_bounded_connection() {
                 "cursor": { "cursor": 0, "gap": null, "gapGeneration": 0 },
                 "firstRetainedSequence": 1,
                 "lastRetainedSequence": 0,
-                "scopeId": format!("pane:sf_aleph:{pane_id}")
+                "scopeId": format!("pane:sf_fixture:{pane_id}")
             }))
             .collect::<Vec<_>>());
         let pair_bytes = send_response_with_bytes(
@@ -3631,7 +3631,7 @@ fn cli_targeted_mutation_discovers_before_pair_on_one_bounded_connection() {
         );
         let (sync, sync_request_bytes) = read_request_with_bytes(&mut socket);
         assert_eq!(sync["op"], "consumable.sync");
-        assert_eq!(sync["payload"]["scopeIds"], json!(["pane:sf_aleph:70"]));
+        assert_eq!(sync["payload"]["scopeIds"], json!(["pane:sf_fixture:70"]));
         let sync_response_bytes = send_response_with_bytes(
             &mut socket,
             sync["id"].as_str().unwrap(),
@@ -3642,14 +3642,14 @@ fn cli_targeted_mutation_discovers_before_pair_on_one_bounded_connection() {
                     "firstRetainedSequence": 1,
                     "lastRetainedSequence": 0,
                     "records": [],
-                    "scopeId": "pane:sf_aleph:70",
+                    "scopeId": "pane:sf_fixture:70",
                     "version": 1
                 }]
             }),
         );
         let (push, push_request_bytes) = read_request_with_bytes(&mut socket);
         assert_eq!(push["op"], "content.set");
-        assert_eq!(push["payload"]["surfaceId"], "sf_aleph");
+        assert_eq!(push["payload"]["surfaceId"], "sf_fixture");
         assert_eq!(push["payload"]["paneId"], 70);
         assert_eq!(push["payload"]["friendlyChatName"], "OpenClaw");
         let push_id = push["id"].as_str().unwrap();
@@ -3686,10 +3686,10 @@ fn cli_targeted_mutation_discovers_before_pair_on_one_bounded_connection() {
         );
         let (refresh, refresh_request_bytes) = read_request_with_bytes(&mut socket);
         assert_eq!(refresh["op"], "consumable.sync");
-        assert_eq!(refresh["payload"]["scopeIds"], json!(["pane:sf_aleph:70"]));
+        assert_eq!(refresh["payload"]["scopeIds"], json!(["pane:sf_fixture:70"]));
         let refresh_response_bytes = send_response_with_bytes(&mut socket, refresh["id"].as_str().unwrap(),
-            "consumable.sync", json!({"snapshots":[pane_scope_snapshot("pane:sf_aleph:70", 1,
-                vec![pane_content_record("sf_aleph",70,1,Some("c_1"),None)])]}));
+            "consumable.sync", json!({"snapshots":[pane_scope_snapshot("pane:sf_fixture:70", 1,
+                vec![pane_content_record("sf_fixture",70,1,Some("c_1"),None)])]}));
         expect_orderly_close(&mut socket);
 
         let frame_sizes = [
@@ -3719,7 +3719,7 @@ fn cli_targeted_mutation_discovers_before_pair_on_one_bounded_connection() {
         &temp,
         Command::Push,
         json!({
-            "surfaceId": "sf_aleph",
+            "surfaceId": "sf_fixture",
             "paneId": 70,
             "contentId": "c_1",
             "contentType": "markdown",
@@ -3756,7 +3756,7 @@ fn control_pair_summaries_preserve_unread_records_and_pending_ack_intents() {
         "firstRetainedSequence": 1,
         "lastRetainedSequence": 1,
         "records": [retained.clone()],
-        "scopeId": "pane:sf_aleph:70",
+        "scopeId": "pane:sf_fixture:70",
         "version": 1
     })];
     execute_with_wire(invocation(&temp, Command::List, json!({})), &mut initial).unwrap();
@@ -3764,7 +3764,7 @@ fn control_pair_summaries_preserve_unread_records_and_pending_ack_intents() {
     let mut read = invocation(
         &temp,
         Command::Read,
-        json!({ "scopeId": "pane:sf_aleph:70" }),
+        json!({ "scopeId": "pane:sf_fixture:70" }),
     );
     read.endpoint = None;
     read.product_label = None;
@@ -3783,13 +3783,13 @@ fn control_pair_summaries_preserve_unread_records_and_pending_ack_intents() {
             "cursor": { "cursor": 1, "gap": null, "gapGeneration": 0 },
             "firstRetainedSequence": 1,
             "lastRetainedSequence": 2,
-            "scopeId": "pane:sf_aleph:70"
+            "scopeId": "pane:sf_fixture:70"
         }),
         json!({
             "cursor": { "cursor": 1, "gap": null, "gapGeneration": 0 },
             "firstRetainedSequence": 1,
             "lastRetainedSequence": 1,
-            "scopeId": "pane:sf_aleph:69"
+            "scopeId": "pane:sf_fixture:69"
         }),
     ];
     let unread = json!({
@@ -3804,7 +3804,7 @@ fn control_pair_summaries_preserve_unread_records_and_pending_ack_intents() {
         "firstRetainedSequence": 1,
         "lastRetainedSequence": 2,
         "records": [unread.clone()],
-        "scopeId": "pane:sf_aleph:70",
+        "scopeId": "pane:sf_fixture:70",
         "version": 1
     })];
     let output = execute_with_wire(
@@ -3812,7 +3812,7 @@ fn control_pair_summaries_preserve_unread_records_and_pending_ack_intents() {
             &temp,
             Command::Push,
             json!({
-                "surfaceId": "sf_aleph",
+                "surfaceId": "sf_fixture",
                 "paneId": 70,
                 "contentId": "content-new",
                 "contentType": "markdown",
@@ -3833,7 +3833,7 @@ fn control_pair_summaries_preserve_unread_records_and_pending_ack_intents() {
         .map(|(_, payload)| payload)
         .collect::<Vec<_>>();
     assert_eq!(acknowledgement_requests.len(), 1);
-    assert_eq!(acknowledgement_requests[0]["scopeId"], "pane:sf_aleph:70");
+    assert_eq!(acknowledgement_requests[0]["scopeId"], "pane:sf_fixture:70");
     assert_eq!(acknowledgement_requests[0]["cursor"], 2);
     let requested_sync_scopes = control
         .payloads
@@ -3842,7 +3842,7 @@ fn control_pair_summaries_preserve_unread_records_and_pending_ack_intents() {
         .unwrap();
     assert_eq!(
         requested_sync_scopes.1["scopeIds"],
-        json!(["pane:sf_aleph:70"])
+        json!(["pane:sf_fixture:70"])
     );
 
     let persisted: Value =
@@ -3853,24 +3853,24 @@ fn control_pair_summaries_preserve_unread_records_and_pending_ack_intents() {
         0
     );
     assert_eq!(
-        persisted["scopes"]["pane:sf_aleph:70"]["records"],
+        persisted["scopes"]["pane:sf_fixture:70"]["records"],
         json!([unread])
     );
     assert_eq!(
-        persisted["scopes"]["pane:sf_aleph:70"]["lastRetainedSequence"],
+        persisted["scopes"]["pane:sf_fixture:70"]["lastRetainedSequence"],
         2
     );
-    assert_eq!(persisted["scopes"]["pane:sf_aleph:70"]["clientCursor"], 2);
+    assert_eq!(persisted["scopes"]["pane:sf_fixture:70"]["clientCursor"], 2);
     assert_eq!(
-        persisted["scopes"]["pane:sf_aleph:70"]["synchronized"],
+        persisted["scopes"]["pane:sf_fixture:70"]["synchronized"],
         true
     );
-    assert!(persisted["scopes"].get("pane:sf_aleph:69").is_none());
+    assert!(persisted["scopes"].get("pane:sf_fixture:69").is_none());
     assert!(!control
         .payloads
         .iter()
         .filter(|(operation, _)| operation == "consumable.ack")
-        .any(|(_, payload)| payload["scopeId"] == "pane:sf_aleph:69"));
+        .any(|(_, payload)| payload["scopeId"] == "pane:sf_fixture:69"));
 
     let mut resumed = FakeWire::ordinary();
     resumed.pair_projection = Some("control".into());
@@ -3885,8 +3885,8 @@ fn control_pair_summaries_preserve_unread_records_and_pending_ack_intents() {
         .find(|(operation, _)| operation == "pair.request")
         .unwrap()
         .1["resume"]["scopes"];
-    assert_eq!(resume_scopes["pane:sf_aleph:70"]["cursor"], 2);
-    assert!(resume_scopes.get("pane:sf_aleph:69").is_none());
+    assert_eq!(resume_scopes["pane:sf_fixture:70"]["cursor"], 2);
+    assert!(resume_scopes.get("pane:sf_fixture:69").is_none());
 }
 
 #[test]
@@ -3898,7 +3898,7 @@ fn control_scope_summaries_do_not_invent_or_drop_zero_resume_cursors() {
         "firstRetainedSequence": 1,
         "lastRetainedSequence": 0,
         "records": [],
-        "scopeId": "pane:sf_aleph:70",
+        "scopeId": "pane:sf_fixture:70",
         "version": 1
     })];
     execute_with_wire(invocation(&temp, Command::List, json!({})), &mut initial).unwrap();
@@ -3914,13 +3914,13 @@ fn control_scope_summaries_do_not_invent_or_drop_zero_resume_cursors() {
             "cursor": { "cursor": 0, "gap": null, "gapGeneration": 0 },
             "firstRetainedSequence": 1,
             "lastRetainedSequence": 0,
-            "scopeId": "pane:sf_aleph:70"
+            "scopeId": "pane:sf_fixture:70"
         }),
         json!({
             "cursor": { "cursor": 0, "gap": null, "gapGeneration": 0 },
             "firstRetainedSequence": 1,
             "lastRetainedSequence": 0,
-            "scopeId": "pane:sf_aleph:69"
+            "scopeId": "pane:sf_fixture:69"
         }),
     ];
     execute_with_wire(invocation(&temp, Command::List, json!({})), &mut control).unwrap();
@@ -3932,18 +3932,18 @@ fn control_scope_summaries_do_not_invent_or_drop_zero_resume_cursors() {
         .unwrap()
         .1;
     assert_eq!(
-        pair_payload["resume"]["scopes"]["pane:sf_aleph:70"]["cursor"],
+        pair_payload["resume"]["scopes"]["pane:sf_fixture:70"]["cursor"],
         0
     );
     assert!(pair_payload["resume"]["scopes"]
-        .get("pane:sf_aleph:69")
+        .get("pane:sf_fixture:69")
         .is_none());
 
     let persisted: Value =
         serde_json::from_slice(&fs::read(temp.path().join("controller-state.json")).unwrap())
             .unwrap();
-    assert_eq!(persisted["scopes"]["pane:sf_aleph:70"]["clientCursor"], 0);
-    assert!(persisted["scopes"].get("pane:sf_aleph:69").is_none());
+    assert_eq!(persisted["scopes"]["pane:sf_fixture:70"]["clientCursor"], 0);
+    assert!(persisted["scopes"].get("pane:sf_fixture:69").is_none());
 }
 
 #[test]
@@ -4058,7 +4058,7 @@ fn control_projection_keeps_explicit_capture_read_available() {
         invocation(
             &temp,
             Command::CapturePane,
-            json!({ "includeDrawings": true, "paneId": 70, "surfaceId": "sf_aleph" }),
+            json!({ "includeDrawings": true, "paneId": 70, "surfaceId": "sf_fixture" }),
         ),
         &mut wire,
     )
@@ -4086,7 +4086,7 @@ fn control_pair_resume_still_reconciles_uncertain_mutation_receipts() {
             &temp,
             Command::Push,
             json!({
-                "surfaceId": "sf_aleph",
+                "surfaceId": "sf_fixture",
                 "paneId": 70,
                 "contentId": "content-unknown",
                 "contentType": "markdown",
@@ -4191,7 +4191,7 @@ fn cli_seven_pane_listing_uses_compact_control_projection_under_frame_cap() {
                 "surfaces.list.result",
                 json!({
                     "surfaces": [{
-                        "surfaceId": "sf_aleph",
+                        "surfaceId": "sf_fixture",
                         "name": "Aleph",
                         "windowLabel": "g",
                         "viewport": { "width": 4096, "height": 4096, "scale": 1 }
@@ -4206,14 +4206,14 @@ fn cli_seven_pane_listing_uses_compact_control_projection_under_frame_cap() {
         let (pair, request_bytes) = read_request_with_bytes(&mut pane_socket);
         measured.push(("pane describe pair.request", request_bytes));
         assert_eq!(pair["op"], "pair.request");
-        assert_eq!(pair["payload"]["surfaceId"], "sf_aleph");
+        assert_eq!(pair["payload"]["surfaceId"], "sf_fixture");
         assert!(pair["payload"]["protocolFeatures"]
             .as_array()
             .unwrap()
             .iter()
             .any(|feature| feature == "control_projection_v1"));
         let mut paired = control_pair_payload(pair["payload"]["controllerInstanceId"].clone());
-        paired["surfaceId"] = json!("sf_aleph");
+        paired["surfaceId"] = json!("sf_fixture");
         paired["state"] = json!({ "panes": (64..=70).map(|pane_id| json!({
             "paneId": pane_id,
             "paneLabel": pane_id - 63,
@@ -4263,13 +4263,13 @@ fn cli_seven_pane_listing_uses_compact_control_projection_under_frame_cap() {
     let controller_id = listed.controller_instance_id.clone().unwrap();
     assert_eq!(
         listed.result["payload"]["surfaces"][0]["surfaceId"],
-        "sf_aleph"
+        "sf_fixture"
     );
 
     let mut describe = invocation(
         &temp,
         Command::PaneDescribe,
-        pane_describe_input(&controller_id, "sf_aleph", 70),
+        pane_describe_input(&controller_id, "sf_fixture", 70),
     );
     describe.endpoint = Some(endpoint);
     let pane = execute(describe).unwrap();
@@ -5551,4 +5551,29 @@ fn compact_review_sync_reports_final_availability_invalidation() {
     let read=native_cli_read(&temp,scope);
     assert_eq!(read["result"]["cacheStatus"],output.result["cacheStatus"]);
     assert_eq!(read["result"]["currentContentRecord"],Value::Null);
+}
+
+#[test]
+fn compact_review_gap_metadata_waits_for_explicit_snapshot_before_read_ack() {
+    let temp=TempDir::new().unwrap();let scope="pane:sf_1:2";
+    let mut listing=compact_mutation_wire("pane:sf_1:1");
+    listing.response_events.insert("surfaces.list".into(),vec![compact_review_sibling_gap()]);
+    execute_with_wire(invocation(&temp,Command::List,json!({})),&mut listing).unwrap();
+    let mut sync=compact_mutation_wire(scope);
+    let gap=compact_review_sibling_gap().payload.unwrap()["gap"].clone();
+    sync.scope_summaries=vec![json!({"scopeId":scope,"cursor":{"cursor":4,"gap":gap,"gapGeneration":1},"firstRetainedSequence":4,"lastRetainedSequence":4})];
+    let mut snapshot=pane_scope_snapshot(scope,4,vec![pane_content_record("sf_1",2,4,Some("retained-after-gap"),None)]);
+    snapshot["cursor"]["gap"]=gap;snapshot["cursor"]["gapGeneration"]=json!(1);
+    sync.sync_snapshots=vec![snapshot];
+    execute_with_wire(invocation(&temp,Command::Sync,json!({"surfaceId":"sf_1","scopeIds":[scope]})),&mut sync).unwrap();
+    let pair=&sync.payloads.iter().find(|(op,_)|op=="pair.request").unwrap().1;
+    assert!(pair["resume"]["scopes"].get(scope).is_none());
+    let state:Value=serde_json::from_slice(&fs::read(temp.path().join("controller-state.json")).unwrap()).unwrap();
+    assert!(state.get("unfetchedScopeGaps").is_none());
+    assert_eq!(state["acknowledgementOutbox"],json!([]));
+    assert_eq!(state["scopes"][scope]["clientCursor"],4);
+    let read=native_cli_read(&temp,scope);
+    assert_eq!(read["result"]["consumableLoss"]["generation"],1);
+    assert_eq!(read["result"]["acknowledgement"]["cursor"],5);
+    assert_eq!(read["result"]["acknowledgement"]["gapGeneration"],1);
 }

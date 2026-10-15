@@ -1489,7 +1489,9 @@ fn execute_locked(
         } else {
             synchronize_scope_payloads(root, wire, scopes.clone())?;
         }
-        json!({"ok":true,"scopeIds":scopes,"cacheStatus":"current"})
+        let current = scopes.iter().all(|id| root.state().scopes.get(id)
+            .is_some_and(|scope| scope.synchronized));
+        json!({"ok":true,"scopeIds":scopes,"cacheStatus":if current {"current"} else {"unsynchronized"}})
     } else if let Some((surface_id, pane_id)) = pane_target {
         let pane_result = (|| {
             let response = request_without_correlation(wire, op, payload)?;
@@ -1660,7 +1662,8 @@ fn execute_local(invocation: Invocation) -> Result<CliOutput, CliError> {
             return json!({
                 "acknowledgement": null,
                 "cacheStatus": "unsynchronized",
-                "consumableLoss": null,
+                "consumableLoss": state.unfetched_scope_gaps.get(&scope_id)
+                    .and_then(|metadata| metadata.get("gap")),
                 "currentContentRecord": null,
                 "records": [],
                 "scopeId": scope_id,
@@ -1834,6 +1837,7 @@ fn forget_closed_scopes(
         state
             .acknowledgement_outbox
             .retain(|intent| !matches_closed_scope(&intent.scope_id));
+        state.unfetched_scope_gaps.retain(|scope_id, _| !matches_closed_scope(scope_id));
     })?;
     Ok(())
 }
@@ -1921,7 +1925,6 @@ fn perform_mutation(
             });
         }
     };
-    apply_wire_events(root, &response)?;
     let terminal = terminal_envelope(&response.response);
     let precommit_error = response
         .response
@@ -1929,6 +1932,9 @@ fn perform_mutation(
         .as_ref()
         .and_then(|error| error.get("code"))
         .and_then(Value::as_str);
+    if response.response.ok == Some(false) {
+        apply_wire_events(root, &response)?;
+    }
     if response.response.ok == Some(false)
         && (precommit_error == Some("receipt_capacity")
             || (op == "target.apply"
@@ -1954,6 +1960,13 @@ fn perform_mutation(
         correlation.phase = CorrelationPhase::ReceiptPersisted;
         correlation.terminal_response = Some(terminal.clone());
     })?;
+    // A projection failure cannot erase an already returned, durable terminal
+    // receipt or turn its known commit back into a generic/uncertain result.
+    if let Err(error) = apply_wire_events(root, &response) {
+        return Err(CliError::ProjectionAfterCommit {
+            committed: Box::new(terminal), cause: error.to_string(),
+        });
+    }
     acknowledge_receipt(root, wire, &request_id)?;
     if response.response.ok == Some(true) && !closed_scopes.is_empty() {
         forget_closed_scopes(root, &closed_scopes)?;
@@ -2757,6 +2770,7 @@ fn apply_snapshot(root: &mut LockedStateRoot, snapshot: &Value) -> Result<(), Cl
         synchronization_cutoff: snapshot.get("synchronizationCutoff").cloned(),
     };
     root.mutate(|state| {
+        state.unfetched_scope_gaps.remove(&scope_id);
         state.scopes.insert(scope_id, scope);
     })?;
     Ok(())
@@ -2847,7 +2861,12 @@ fn apply_gap(root: &mut LockedStateRoot, payload: &Value) -> Result<(), CliError
         .and_then(Value::as_u64)
         .ok_or_else(|| CliError::Protocol("invalid_consumable_gap".into()))?;
     root.mutate(|state| {
-        let scope = state.scopes.get_mut(&scope_id).ok_or(())?;
+        let Some(scope) = state.scopes.get_mut(&scope_id) else {
+            state.unfetched_scope_gaps.insert(scope_id.clone(), json!({
+                "gap": gap, "firstRetainedSequence": first, "lastRetainedSequence": last
+            }));
+            return Ok::<(), ()>(());
+        };
         scope.gap = Some(gap);
         scope.synchronized = false;
         scope.first_retained_sequence = first;

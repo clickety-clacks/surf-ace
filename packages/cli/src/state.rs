@@ -64,6 +64,10 @@ pub struct DurableState {
     pub controller_instance_id: String,
     #[serde(default)]
     pub scopes: BTreeMap<String, ScopeProjection>,
+    // Loss for admitted scopes whose payload was never fetched. Keeping this
+    // separate prevents metadata from inventing payload cursors or read ACKs.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub unfetched_scope_gaps: BTreeMap<String, Value>,
     #[serde(default)]
     pub acknowledgement_outbox: Vec<AcknowledgementIntent>,
     #[serde(default)]
@@ -78,6 +82,7 @@ impl DurableState {
             version: 1,
             controller_instance_id: format!("ctl_{}", Uuid::new_v4().simple()),
             scopes: BTreeMap::new(),
+            unfetched_scope_gaps: BTreeMap::new(),
             acknowledgement_outbox: vec![],
             unresolved: BTreeMap::new(),
             resume_metadata: Value::Object(Default::default()),

@@ -3,12 +3,12 @@
 import json, os, re, signal, socket, struct, subprocess, sys, threading, time, traceback
 from pathlib import Path
 SOURCE=Path(__file__).resolve().parents[3]
-DEVICE='02E997DF-3D52-40B8-A1A0-C7E56D42D8D6'
+DEVICE=sys.argv[2]
 REV=sys.argv[1]
 assert subprocess.check_output(['git','rev-parse','HEAD'],cwd=SOURCE,text=True).strip()==REV
 assert not subprocess.check_output(['git','status','--porcelain'],cwd=SOURCE,text=True).strip()
-LOG=Path('/tmp/asg-a423-native-'+REV[:7]+'.log')
-REPORT=Path('/tmp/asg-a423-interop-'+REV[:7]+'.json')
+LOG=Path('/tmp/surf-control-native-'+REV[:7]+'.log')
+REPORT=Path('/tmp/surf-control-interop-'+REV[:7]+'.json')
 frames=[]; commands=[]; workers=[]; errors=[]
 class Frames:
     def __init__(self,direction): self.buffer=b''; self.handshake=True; self.direction=direction; self.fragments=b''
@@ -69,9 +69,9 @@ def run_cli(ready):
     result={'ok':False};listener=None
     try:
         endpoint,listener=start_proxy(ready['endpoint'])
-        root=Path('/tmp/asg-a423-cli-native-'+REV[:7]); root.mkdir(exist_ok=False)
+        root=Path('/tmp/surf-control-cli-'+REV[:7]); root.mkdir(exist_ok=False)
         def call(command,payload,local=False):
-            args=['/tmp/asg-a423-cargo-target/debug/surf-ace','--state-root',str(root)]
+            args=[os.environ.get('SURF_ACE_CLI_BINARY',str(SOURCE/'packages/cli/target/debug/surf-ace')),'--state-root',str(root)]
             if not local:args+=['--endpoint',endpoint,'--product-label','B180 native integration']
             args+=[command,'--input-json',json.dumps(payload)]
             done=subprocess.run(args,capture_output=True,text=True,timeout=20)
@@ -130,7 +130,7 @@ def run_cli(ready):
         Path(ready['completionPath']).write_text(json.dumps(result))
         print('RUST_NATIVE_RESULT '+json.dumps({'ok':result['ok'],'report':str(REPORT),'error':result.get('error')}),flush=True)
 
-command=['xcodebuild','-project','packages/ios/SurfAce.xcodeproj','-scheme','SurfAce','-testPlan','SurfAceUnitTests','-configuration','Debug','-sdk','iphonesimulator','-destination','platform=iOS Simulator,id='+DEVICE,'-derivedDataPath','/tmp/asg-a423-native-dd','-parallel-testing-enabled','NO','-maximum-concurrent-test-simulator-destinations','1','-test-timeouts-enabled','YES','-collect-test-diagnostics','never','-default-test-execution-time-allowance','120']
+command=['xcodebuild','-project','packages/ios/SurfAce.xcodeproj','-scheme','SurfAce','-testPlan','SurfAceUnitTests','-configuration','Debug','-sdk','iphonesimulator','-destination','platform=iOS Simulator,id='+DEVICE,'-derivedDataPath','/tmp/surf-control-native-dd','-parallel-testing-enabled','NO','-maximum-concurrent-test-simulator-destinations','1','-test-timeouts-enabled','YES','-collect-test-diagnostics','never','-default-test-execution-time-allowance','120']
 for test in ['SurfAceLocklessWebSocketIntegrationTests/testRustCLISevenPaneControlInterop','SurfAceLocklessWebSocketIntegrationTests/testSevenPaneControlFlowDoesNotTransmitRecoveryPayloads','SurfAceLocklessWebSocketIntegrationTests/testTwoControllersShareAuthorityReceiptsReadsEventsAndReconnectLocklessly','SurfAceLocklessRuntimeAdapterTests/testCompleteNativeTargetAdvertisesAndRejectsRequestsWithoutTheCurrentCapability']:
     command+=['-only-testing:SurfAceTests/'+test]
 command+=['test']
