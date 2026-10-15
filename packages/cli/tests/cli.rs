@@ -5443,3 +5443,15 @@ fn compact_mutation_wire(scope: &str) -> FakeWire {
 fn compact_push(temp: &TempDir) -> Invocation {
     invocation(temp, Command::Push, json!({"surfaceId":"sf_1","paneId":1,"contentId":"committed-new","contentType":"markdown","content":{"markdown":"new"}}))
 }
+
+#[test]
+fn control_sync_applies_snapshot_before_buffered_delta() {
+    let temp = TempDir::new().unwrap();
+    let scope = "pane:sf_1:1";
+    let mut wire = compact_mutation_wire(scope);
+    let newer = pane_content_record("sf_1",1,2,Some("buffered-new"),None);
+    wire.response_events.insert("consumable.sync".into(), vec![event("event.lockless_consumable_delta",json!({"scopeId":scope,"records":[newer.clone()]}))]);
+    wire.post_mutation_snapshots = Some(vec![pane_scope_snapshot(scope,1,vec![newer.clone()])]);
+    execute_with_wire(compact_push(&temp), &mut wire).unwrap();
+    assert_eq!(native_cli_read(&temp,scope)["result"]["currentContentRecord"],newer);
+}
