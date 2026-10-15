@@ -190,6 +190,80 @@ extension SurfAceRenderAndAnnotationDiagnosticsTests {
         }
     }
 
+    func testScopedProjectionKeepsSameRevisionAnnotationsAndHistoryFresh() throws {
+        var state = try SurfAceLocklessAuthorityState.empty()
+        let first = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(state: &state, expectedSurfaceSetRevision: 0)
+        let second = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(state: &state, expectedSurfaceSetRevision: state.surfaceSetRevision)
+        let id = first.surface.surfaceId
+        var surface = try XCTUnwrap(state.liveSurfaces[id])
+        var pane = try XCTUnwrap(surface.panes["1"])
+        pane.history.visible.contentId = "current"; pane.history.visible.contentType = "html"
+        pane.history.visible.content = .object(["html": .string("<main>current</main>")])
+        var previous = pane.history.visible; previous.contentId = "previous"
+        var future = pane.history.visible; future.contentId = "future"
+        pane.history.back = [previous]; pane.history.forward = [future]
+        surface.panes["1"] = pane; state.liveSurfaces[id] = surface
+        var cache = SurfAceLocklessUIProjectionCache()
+        let initial = try cache.topologies(from: state, surfaceIds: [id])
+        XCTAssertEqual(Set(initial.keys), [id])
+        XCTAssertNil(initial[second.surface.surfaceId])
+        state.generation += 1 // An unrelated authority commit does not change display material.
+        let unchanged = try cache.topologies(from: state, surfaceIds: [id])
+        XCTAssertEqual(unchanged[id]?.panes.first?.currentEntry?.contentId, "current")
+        XCTAssertEqual(unchanged[id]?.panes.first?.backStack?.first?.contentId, "previous")
+        pane.name = "Renamed"; pane.annotationMode = true
+        pane.target = .object(["targetId": .string("target"), "targetKind": .string("browser_url"),
+            "paneLineageId": .string(pane.paneLineageId), "targetEpoch": .integer(1),
+            "restorePolicy": .string("source"), "currentState": .string("current")])
+        surface.panes["1"] = pane; state.liveSurfaces[id] = surface
+        let metadataOnly = try cache.topologies(from: state, surfaceIds: [id])
+        XCTAssertEqual(metadataOnly[id]?.panes.first?.name, "Renamed")
+        XCTAssertEqual(metadataOnly[id]?.panes.first?.annotationMode, true)
+        XCTAssertEqual(metadataOnly[id]?.panes.first?.currentTarget?.targetEpoch, 1)
+        XCTAssertEqual(metadataOnly[id]?.panes.first?.backStack?.first?.contentId, "previous")
+        // Annotations and history metadata can change without a new visible revision.
+        pane.history.visible.annotations = .object(["drawingData": .string(""), "strokesById": .object([
+            "ink": .object(["strokeId": .string("ink"), "tool": .string("pen"), "points": .array([
+                .object(["x": .double(4), "y": .double(5), "timestamp": .integer(6)])])])])])
+        if case .object(var target) = pane.target {
+            target["targetEpoch"] = .integer(2); pane.target = .object(target)
+        }
+        pane.history.back[0].provenance.friendlyChatName = "Updated earlier chat"
+        pane.history.forward[0].content = .object(["html": .string("<main>updated future</main>")])
+        pane.annotationMode = true
+        surface.panes["1"] = pane; state.liveSurfaces[id] = surface
+        let changed = try cache.topologies(from: state, surfaceIds: [id])
+        let projected = try XCTUnwrap(changed[id]?.panes.first)
+        XCTAssertEqual(projected.currentEntry?.revision, initial[id]?.panes.first?.currentEntry?.revision)
+        XCTAssertEqual(projected.currentEntry?.strokesById["ink"]?.points.first?.x, 4)
+        XCTAssertEqual(projected.backStack?.first?.provenanceDisplayName, "Updated earlier chat")
+        XCTAssertEqual(projected.forwardStack?.first?.payload, .html(html: "<main>updated future</main>", baseURL: nil))
+        XCTAssertEqual(projected.annotationMode, true)
+        XCTAssertEqual(projected.currentTarget?.targetEpoch, 2)
+        let expected = try SurfAceLocklessUIProjection.topologies(from: state)
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        XCTAssertEqual(try encoder.encode(changed[id]), try encoder.encode(expected[id]))
+    }
+
+    func testScopedProjectionCannotConfuseSamePaneNumberAcrossWindowsOrRemount() throws {
+        var state = try SurfAceLocklessAuthorityState.empty()
+        let a = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(state: &state, expectedSurfaceSetRevision: 0)
+        let b = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(state: &state, expectedSurfaceSetRevision: state.surfaceSetRevision)
+        var cache = SurfAceLocklessUIProjectionCache()
+        let first = try cache.topologies(from: state, surfaceIds: [a.surface.surfaceId])
+        let other = try cache.topologies(from: state, surfaceIds: [b.surface.surfaceId])
+        XCTAssertEqual(first[a.surface.surfaceId]?.panes.first?.paneId, other[b.surface.surfaceId]?.panes.first?.paneId)
+        XCTAssertNotEqual(first[a.surface.surfaceId]?.panes.first?.paneLineageId, other[b.surface.surfaceId]?.panes.first?.paneLineageId)
+        XCTAssertTrue(try cache.topologies(from: state, surfaceIds: []).isEmpty)
+        var changed = try XCTUnwrap(state.liveSurfaces[a.surface.surfaceId])
+        changed.panes["1"]?.name = "Updated while unmounted"
+        state.liveSurfaces[a.surface.surfaceId] = changed
+        let remounted = try cache.topologies(from: state, surfaceIds: [a.surface.surfaceId])
+        XCTAssertEqual(remounted[a.surface.surfaceId]?.panes.first?.name, "Updated while unmounted")
+        XCTAssertEqual(remounted[a.surface.surfaceId]?.panes.first?.paneLineageId, first[a.surface.surfaceId]?.panes.first?.paneLineageId)
+        XCTAssertNil(remounted[b.surface.surfaceId])
+    }
+
     func testACPROV07LocklessProjectionKeepsChatAndProviderAcrossHistoryAndPersistence() throws {
         var state = try SurfAceLocklessAuthorityState.empty()
         let opened = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
