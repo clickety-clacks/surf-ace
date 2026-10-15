@@ -150,13 +150,66 @@ enum SurfAceLocklessUIProjection {
     }
 }
 
+// Ephemeral rendering material only. Durable authority remains in the coordinator.
+// Value-semantic source equality includes history, annotations, lineage and target;
+// a revision number alone cannot safely identify unchanged annotation material.
+struct SurfAceLocklessUIProjectionCache {
+    private struct PaneProjection {
+        var source: SurfAceLocklessPaneMaterial
+        var topology: SurfAcePersistedPaneTopology
+    }
+    private var panesBySurface: [String: [String: PaneProjection]] = [:]
+
+    mutating func topologies(
+        from state: SurfAceLocklessAuthorityState,
+        surfaceIds: Set<String>
+    ) throws -> [String: SurfAcePersistedSurfaceTopology] {
+        var next: [String: [String: PaneProjection]] = [:]
+        var result: [String: SurfAcePersistedSurfaceTopology] = [:]
+        for surfaceId in surfaceIds.sorted() {
+            guard let surface = state.liveSurfaces[surfaceId] else { continue }
+            var projected: [String: PaneProjection] = [:]
+            var panes: [SurfAcePersistedPaneTopology] = []
+            for source in surface.panes.values.sorted(by: { $0.paneId < $1.paneId }) {
+                let key = String(source.paneId)
+                let pane: PaneProjection
+                if let prior = panesBySurface[surfaceId]?[key], prior.source == source {
+                    pane = prior
+                } else {
+                    let prior = panesBySurface[surfaceId]?[key]
+                    pane = .init(source: source, topology: try .init(projecting: source,
+                        reusing: prior?.topology, previous: prior?.source))
+                }
+                projected[key] = pane
+                panes.append(pane.topology)
+            }
+            result[surfaceId] = try .init(projecting: surface, projectedPanes: panes)
+            next[surfaceId] = projected
+        }
+        // Publish the cache only after every requested surface converted successfully;
+        // prune unmounted/closed panes instead of retaining obsolete render material.
+        panesBySurface = next
+        return result
+    }
+}
+
 private extension SurfAcePersistedPaneTopology {
-    init(projecting pane: SurfAceLocklessPaneMaterial) throws {
+    init(projecting pane: SurfAceLocklessPaneMaterial,
+         reusing prior: SurfAcePersistedPaneTopology? = nil,
+         previous: SurfAceLocklessPaneMaterial? = nil) throws {
         annotationMode = pane.annotationMode
-        backStack = try pane.history.back.map(SurfAceLocklessUIProjection.paneEntry)
-        currentEntry = try SurfAceLocklessUIProjection.paneEntry(pane.history.visible)
-        currentTarget = try SurfAceLocklessUIProjection.target(pane.target)
-        forwardStack = try pane.history.forward.map(SurfAceLocklessUIProjection.paneEntry)
+        if let prior, previous?.paneLineageId == pane.paneLineageId,
+           previous?.history == pane.history {
+            // Labels/names/mode changes do not require converting retained history.
+            backStack = prior.backStack; currentEntry = prior.currentEntry; forwardStack = prior.forwardStack
+        } else {
+            backStack = try pane.history.back.map(SurfAceLocklessUIProjection.paneEntry)
+            currentEntry = try SurfAceLocklessUIProjection.paneEntry(pane.history.visible)
+            forwardStack = try pane.history.forward.map(SurfAceLocklessUIProjection.paneEntry)
+        }
+        if let prior, previous?.paneLineageId == pane.paneLineageId, previous?.target == pane.target {
+            currentTarget = prior.currentTarget
+        } else { currentTarget = try SurfAceLocklessUIProjection.target(pane.target) }
         guard let id = Int(exactly: pane.paneId), let label = Int(exactly: pane.paneLabel) else {
             throw SurfAceLocklessAuthorityError.invalidState("ui_projection_identity")
         }
@@ -165,9 +218,11 @@ private extension SurfAcePersistedPaneTopology {
 }
 
 private extension SurfAcePersistedSurfaceTopology {
-    init(projecting surface: SurfAceLocklessSurfaceMaterial) throws {
+    init(projecting surface: SurfAceLocklessSurfaceMaterial,
+         projectedPanes: [SurfAcePersistedPaneTopology]? = nil) throws {
         windowLabel = surface.windowLabel; name = surface.name
         paneLayout = try persistedPaneLayout(fromCanonical: surface.topology)
-        panes = try surface.panes.values.sorted { $0.paneId < $1.paneId }.map { try .init(projecting: $0) }
+        if let projectedPanes { panes = projectedPanes }
+        else { panes = try surface.panes.values.sorted { $0.paneId < $1.paneId }.map { try .init(projecting: $0) } }
     }
 }

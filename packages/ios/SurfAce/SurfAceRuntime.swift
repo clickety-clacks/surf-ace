@@ -1080,11 +1080,17 @@ final class SurfAceRuntime {
         }
     }
 
+    @ObservationIgnored private var authorityUIProjection = SurfAceLocklessUIProjectionCache()
+
     private func projectLocklessAuthorityState(
         _ state: SurfAceLocklessAuthorityState,
         connectedSceneKey: String? = nil
     ) throws {
-        let topologies = try SurfAceLocklessUIProjection.topologies(from: state)
+        var projectedSurfaceIds = Set(surfaces.map(\.surfaceId))
+        if let connectedSceneKey, let surfaceId = state.sceneSurfaceIds[connectedSceneKey] {
+            projectedSurfaceIds.insert(surfaceId)
+        }
+        let topologies = try authorityUIProjection.topologies(from: state, surfaceIds: projectedSurfaceIds)
 
         if let connectedSceneKey,
            let surfaceId = state.sceneSurfaceIds[connectedSceneKey],
