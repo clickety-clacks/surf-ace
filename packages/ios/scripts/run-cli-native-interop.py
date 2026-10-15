@@ -98,7 +98,7 @@ def run_cli(ready):
         state=json.loads((root/'controller-state.json').read_text())
         assert state['scopes'][scope]['synchronized'] is True
         assert state['acknowledgementOutbox']==[]
-        assert len([f for f in frames if f['op']=='consumable.ack'])==earlier_intents # only pre-existing explicit-read intents
+        assert len([f for f in frames if f['direction']=='request' and f['op']=='consumable.ack'])==earlier_intents # only pre-existing explicit-read intents
         read=call('read',{'scopeId':scope},True)
         assert read['result']['cacheStatus']=='current'
         assert read['result']['currentContentRecord']['payload']['contentId']=='rust-new-content'
@@ -110,9 +110,9 @@ def run_cli(ready):
         again=call('read',{'scopeId':scope},True)
         assert again['result']['currentContentRecord']['payload']['contentId']=='rust-new-content'
         assert 'pane:'+sid+':1' not in state['scopes']
-        acks=[f for f in frames if f['op']=='consumable.ack']
+        acks=[f for f in frames if f['direction']=='request' and f['op']=='consumable.ack']
         assert acks and all(f['scope']['scopeId']==scope for f in acks)
-        syncs=[f for f in frames if f['op']=='consumable.sync']
+        syncs=[f for f in frames if f['direction']=='request' and f['op']=='consumable.sync']
         assert syncs and all(f['scope']['scopeIds']==[scope] for f in syncs)
         maximum=max(f['bytes'] for f in frames if f['direction']=='response')
         assert maximum<16*1024*1024
