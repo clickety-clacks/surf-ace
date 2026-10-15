@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Private native-runtime/Rust-CLI business integration; never connects to production."""
-import json, os, re, signal, socket, struct, subprocess, sys, threading, time
+import json, os, re, signal, socket, struct, subprocess, sys, threading, time, traceback
 from pathlib import Path
 SOURCE=Path(__file__).resolve().parents[3]
 DEVICE='02E997DF-3D52-40B8-A1A0-C7E56D42D8D6'
@@ -92,12 +92,13 @@ def run_cli(ready):
         initial=call('read',{'scopeId':scope},True)['result']['currentContentRecord']['payload']
         assert initial['contentId']=='content-7' and initial['content']['html']=='<p>Selected original source</p>'
         assert 'saved-stroke' in initial['annotations']['strokesById']
+        earlier_intents=len(json.loads((root/'controller-state.json').read_text())['acknowledgementOutbox'])
         call('push',{'surfaceId':sid,'paneId':7,'contentId':'rust-new-content','contentType':'html','content':{'html':'<p>Rust native integration</p>'},'friendlyChatName':'B180 fixture'})
         # Receiving a snapshot does not read/ACK it.
         state=json.loads((root/'controller-state.json').read_text())
         assert state['scopes'][scope]['synchronized'] is True
         assert state['acknowledgementOutbox']==[]
-        assert len([f for f in frames if f['op']=='consumable.ack'])==1 # earlier explicit read only
+        assert len([f for f in frames if f['op']=='consumable.ack'])==earlier_intents # only pre-existing explicit-read intents
         read=call('read',{'scopeId':scope},True)
         assert read['result']['cacheStatus']=='current'
         assert read['result']['currentContentRecord']['payload']['contentId']=='rust-new-content'
@@ -117,7 +118,7 @@ def run_cli(ready):
         assert maximum<16*1024*1024
         result.update(ok=True,controllerId=cid,maxResponseBytes=maximum,authorityBytes=ready['authorityBytes'],frames=frames,commands=commands,stateAfter=state)
     except Exception as e:
-        result.update(error=repr(e),frames=frames,commands=commands)
+        result.update(error=repr(e),traceback=traceback.format_exc(),frames=frames,commands=commands)
     finally:
         if listener:listener.close()
         REPORT.write_text(json.dumps(result,indent=2))
