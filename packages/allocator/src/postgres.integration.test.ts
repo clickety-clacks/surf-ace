@@ -1006,7 +1006,7 @@ test("configured server registers two stable clients and deduplicates reconnect"
         paneId: recycledPaneId,
         paneLineageId: lineage,
       });
-      assert.equal(response.ok, true);
+      assert.equal(response.ok, true, JSON.stringify(response));
       const label = (response.payload as { paneLabel: number }).paneLabel;
       assert.ok(Number.isSafeInteger(label) && label > 0);
       return label;
@@ -1080,8 +1080,12 @@ test("registration negotiates rc11 endpoint leases only behind the writer fence"
       "the refused registration commits no pane claim");
 
     cluster.config.witnessServerId = originalWitnessId;
+    const restoredReadiness = await wire.request("fleet.topology", {});
+    assert.equal(restoredReadiness.ok, true);
+    assert.equal(restoredReadiness.payload?.registrationReady, true,
+      "read-only validation accepts the restored original witness before retry");
     const accepted = await wire.request("client.register", registration);
-    assert.equal(accepted.ok, true, "retry succeeds after the actual witness is restored");
+    assert.equal(accepted.ok, true, JSON.stringify(accepted));
     assertRc11ConfiguredRegistration(accepted, clientId, directEndpoint);
     const acceptedPayload = accepted.payload as {
       completedPaneReleaseIds: string[];
