@@ -75,7 +75,7 @@ def run_cli(ready):
             if not local:args+=['--endpoint',endpoint,'--product-label','B180 native integration']
             args+=[command,'--input-json',json.dumps(payload)]
             done=subprocess.run(args,capture_output=True,text=True,timeout=20)
-            obj=json.loads(done.stdout);commands.append({'command':command,'exit':done.returncode,'output':obj if command!='read' else {'ok':obj.get('ok'),'cacheStatus':obj.get('result',{}).get('cacheStatus'),'currentContentId':obj.get('result',{}).get('currentContentRecord',{}).get('payload',{}).get('contentId')}})
+            obj=json.loads(done.stdout);commands.append({'command':command,'exit':done.returncode,'output':obj if command!='read' else {'ok':obj.get('ok'),'cacheStatus':obj.get('result',{}).get('cacheStatus'),'currentContentId':(obj.get('result',{}).get('currentContentRecord') or {}).get('payload',{}).get('contentId')}})
             assert done.returncode==0, (command,obj,done.stderr)
             return obj
         listed=call('list',{});cid=listed['controllerInstanceId'];sid=ready['surfaceId']
