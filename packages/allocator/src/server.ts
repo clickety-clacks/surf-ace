@@ -17,14 +17,32 @@ import {
   type LabelClaimPayload,
   type LabelReconfirmPayload,
 } from "./domain.js";
-import { PostgresCustodyAdapter, type AdapterTestHooks, type AnnotationInfo, type PostgresCustodyConfig } from "./custody.js";
+import { PostgresCustodyAdapter, type AdapterTestHooks, type AnnotationInfo, type PaneRetirementEvidence, type PostgresCustodyConfig } from "./custody.js";
 import { parseAllocatorRequest } from "./validation.js";
+import { EndpointLeaseBook, validateDirectEndpoint, type EndpointLease } from "./endpoint-leases.js";
+
+const DEFAULT_MAX_ENDPOINT_LEASE_MS = 15_000;
+
+type RegisteredClientProjection = {
+  clientId: string;
+  directEndpoint: string | null;
+  endpointLease: EndpointLease | null;
+  allocationGenerationV1: boolean;
+  prePairDescribeV1: boolean;
+  registryIdentity: { allocatorId: string; fleetId: string };
+  surfaces: Array<{
+    surfaceId: string;
+    windowLabel: string;
+    panes: Array<{ allocationGeneration?: number; paneId: string; paneLineageId: string; paneLabel: number; paneAddress: string }>;
+  }>;
+};
 
 export type AllocatorServerConfig = {
   custody: PostgresCustodyConfig;
   hostLockPath: string;
   listenHost: string;
   listenPort: number;
+  maxEndpointLeaseMs?: number;
 };
 
 export type AllocatorDiagnostics = {
@@ -41,6 +59,8 @@ export type AllocatorDiagnostics = {
   lifecycle: "active" | "destroyed";
   nextOrdinalFence: number;
   nextPaneOrdinalFence: number;
+  nextPaneAllocationGenerationFence: number;
+  paneLabelReuseEnabled: boolean;
   primaryHeadHash: string;
   primaryHeadSeq: number;
   serveStatus: string;
@@ -70,15 +90,33 @@ export class AllocatorServer {
   private readonly startedAt = Date.now();
   private readonly annotationRoles = new WeakMap<WebSocket, "publisher" | "consumer">();
   private readonly annotationLeases = new Map<string, AnnotationLease>();
-  private readonly registeredClients = new Map<string, unknown>();
+  private readonly registeredClients = new Map<string, RegisteredClientProjection>();
   private registrationTail: Promise<unknown> = Promise.resolve();
 
   private async registerClient(payload: unknown): Promise<unknown> {
-    const value = payload as { clientId?: unknown; surfaces?: unknown };
+    const value = payload as {
+      clientId?: unknown;
+      directEndpoint?: unknown;
+      allocationGenerationV1?: unknown;
+      prePairDescribeV1?: unknown;
+      pendingPaneReleases?: unknown;
+      surfaces?: unknown;
+    };
     if (!value || typeof value.clientId !== "string" || !/^[a-f0-9]{64}$/.test(value.clientId) ||
         !Array.isArray(value.surfaces)) throw new Error("invalid_registration");
+    if (value.prePairDescribeV1 !== undefined && typeof value.prePairDescribeV1 !== "boolean") {
+      throw new Error("invalid_registration");
+    }
+    if (value.allocationGenerationV1 !== undefined && typeof value.allocationGenerationV1 !== "boolean") {
+      throw new Error("invalid_registration");
+    }
+    const directEndpoint = validateDirectEndpoint(value.directEndpoint);
+    const allocationGenerationV1 = value.allocationGenerationV1 === true;
+    const prePairDescribeV1 = value.prePairDescribeV1 === true;
     const clientId = value.clientId;
-    const surfaces = value.surfaces as Array<{ surfaceId: string; panes: Array<{ paneId: string; paneLabel: number; paneLineageId: string }> }>;
+    const surfaces = value.surfaces as Array<{ surfaceId: string; panes: Array<{
+      allocationGeneration?: number | null; paneId: string; paneLabel: number; paneLineageId: string;
+    }> }>;
     const ids = new Set<string>();
     for (const surface of surfaces) {
       if (!surface || typeof surface.surfaceId !== "string" || !/^sf_[A-Za-z0-9._:-]{3,64}$/.test(surface.surfaceId) ||
@@ -88,9 +126,16 @@ export class AllocatorServer {
       for (const pane of surface.panes) {
         if (!pane || typeof pane.paneId !== "string" || !/^[A-Za-z0-9._:-]{1,64}$/.test(pane.paneId) ||
             typeof pane.paneLineageId !== "string" || !/^pl_[A-Za-z0-9._:-]{3,128}$/.test(pane.paneLineageId) ||
+            !Number.isSafeInteger(pane.paneLabel) || pane.paneLabel < 0 ||
+            (pane.allocationGeneration !== undefined && pane.allocationGeneration !== null &&
+              (!Number.isSafeInteger(pane.allocationGeneration) || pane.allocationGeneration < 1)) ||
             paneIds.has(pane.paneId)) throw new Error("invalid_pane");
         paneIds.add(pane.paneId);
       }
+    }
+    const pendingPaneReleases = value.pendingPaneReleases ?? [];
+    if (!Array.isArray(pendingPaneReleases) || (!allocationGenerationV1 && pendingPaneReleases.length > 0)) {
+      throw new Error("invalid_pane_release");
     }
     const state = await this.custody.readAcceptedState();
     const hash = (text: string) => createHash("sha256").update(text).digest("hex");
@@ -109,9 +154,23 @@ export class AllocatorServer {
       });
       const panes = [];
       for (const pane of surface.panes) {
-        const paneLabel = await this.custody.claimPane(clientId, surface.surfaceId, pane.paneId, pane.paneLineageId);
-        panes.push({ paneId: pane.paneId, paneLineageId: pane.paneLineageId,
-          paneLabel, paneAddress: assignment.windowLabel + paneLabel });
+        if (allocationGenerationV1) {
+          const allocated = await this.custody.claimPaneWithGeneration(
+            clientId, surface.surfaceId, pane.paneId, pane.paneLineageId,
+          );
+          if ((pane.paneLabel > 0 && pane.paneLabel !== allocated.paneLabel) ||
+              (pane.allocationGeneration !== undefined && pane.allocationGeneration !== null &&
+                pane.allocationGeneration !== allocated.allocationGeneration)) {
+            throw new Error("stale_pane_allocation_reference");
+          }
+          panes.push({ ...allocated, paneId: pane.paneId, paneLineageId: pane.paneLineageId,
+            paneAddress: assignment.windowLabel + allocated.paneLabel });
+        } else {
+          const paneLabel = await this.custody.claimPane(clientId, surface.surfaceId, pane.paneId, pane.paneLineageId);
+          if (pane.paneLabel > 0 && pane.paneLabel !== paneLabel) throw new Error("stale_pane_allocation_reference");
+          panes.push({ paneId: pane.paneId, paneLineageId: pane.paneLineageId,
+            paneLabel, paneAddress: assignment.windowLabel + paneLabel });
+        }
       }
       registered.push({
         surfaceId: surface.surfaceId,
@@ -119,16 +178,76 @@ export class AllocatorServer {
         panes,
       });
     }
-    const result = {
+    const completedPaneReleaseIds: string[] = [];
+    const releaseIds = new Set<string>();
+    for (const rawRelease of pendingPaneReleases) {
+      if (!rawRelease || typeof rawRelease !== "object" || Array.isArray(rawRelease)) {
+        throw new Error("invalid_pane_release");
+      }
+      const release = rawRelease as Record<string, unknown>;
+      if (typeof release.releaseId !== "string" || !/^[a-f0-9]{64}$/.test(release.releaseId) ||
+          releaseIds.has(release.releaseId) || release.clientId !== clientId ||
+          typeof release.surfaceId !== "string" || typeof release.paneId !== "string" ||
+          typeof release.lineageId !== "string" || !Number.isSafeInteger(release.paneLabel) ||
+          Number(release.paneLabel) < 1 || !Number.isSafeInteger(release.allocationGeneration) ||
+          Number(release.allocationGeneration) < 1 ||
+          (release.tombstoneKind !== "pane" && release.tombstoneKind !== "surface") ||
+          typeof release.tombstoneId !== "string" ||
+          !Number.isSafeInteger(release.closeRevision) || Number(release.closeRevision) < 1 ||
+          !Number.isSafeInteger(release.terminalRetirementRevision) || Number(release.terminalRetirementRevision) < 1) {
+        throw new Error("invalid_pane_release");
+      }
+      const evidence: PaneRetirementEvidence = {
+        allocationGeneration: Number(release.allocationGeneration),
+        clientId,
+        closeRevision: Number(release.closeRevision),
+        lineageId: release.lineageId,
+        paneId: release.paneId,
+        paneLabel: Number(release.paneLabel),
+        surfaceId: release.surfaceId,
+        terminalRetirementRevision: Number(release.terminalRetirementRevision),
+        tombstoneId: release.tombstoneId,
+        tombstoneKind: release.tombstoneKind,
+      };
+      if (release.releaseId !== paneReleaseIntentId(evidence)) {
+        throw new Error("invalid_pane_release");
+      }
+      await this.custody.releasePaneGeneration(evidence);
+      releaseIds.add(release.releaseId);
+      completedPaneReleaseIds.push(release.releaseId);
+    }
+    const surfaceIds = surfaces.map((surface) => surface.surfaceId).sort();
+    const leaseSignature = JSON.stringify({
+      allocatorId: state.allocatorId,
       clientId,
+      directEndpoint,
+      fleetId: state.fleetId,
+      prePairDescribeV1,
+      surfaceIds,
+    });
+    if (directEndpoint !== null && prePairDescribeV1 &&
+        (!this.custody.registrationReady || this.authority.serveStatus !== "serving")) {
+      throw new AllocatorError("writer_fence_unavailable", "endpoint lease requires a validated serving writer");
+    }
+    const endpointLease = this.endpointLeases.renew(
+      clientId,
+      leaseSignature,
+      directEndpoint !== null && prePairDescribeV1,
+    );
+    const result: RegisteredClientProjection = {
+      clientId,
+      directEndpoint,
+      endpointLease,
+      allocationGenerationV1,
+      prePairDescribeV1,
       registryIdentity: { allocatorId: state.allocatorId, fleetId: state.fleetId },
       surfaces: registered,
     };
     this.registeredClients.set(clientId, result);
-    return result;
+    return { ...result, completedPaneReleaseIds };
   }
 
-  private async claimPane(payload: unknown): Promise<{ paneLabel: number }> {
+  private async claimPane(payload: unknown): Promise<{ allocationGeneration?: number; paneLabel: number }> {
     const value = payload as { clientId?: unknown; surfaceId?: unknown; paneId?: unknown; paneLineageId?: unknown };
     if (!value || typeof value.clientId !== "string" || !/^[a-f0-9]{64}$/.test(value.clientId) ||
         typeof value.surfaceId !== "string" || !/^sf_[A-Za-z0-9._:-]{3,64}$/.test(value.surfaceId) ||
@@ -136,10 +255,14 @@ export class AllocatorServer {
         typeof value.paneLineageId !== "string" || !/^pl_[A-Za-z0-9._:-]{3,128}$/.test(value.paneLineageId)) {
       throw new Error("invalid_pane_claim");
     }
-    const registered = this.registeredClients.get(value.clientId) as
-      | { surfaces: Array<{ surfaceId: string }> } | undefined;
+    const registered = this.registeredClients.get(value.clientId);
     if (!registered?.surfaces.some((surface) => surface.surfaceId === value.surfaceId)) {
       throw new Error("surface_not_registered");
+    }
+    if (registered.allocationGenerationV1) {
+      return await this.custody.claimPaneWithGeneration(
+        value.clientId, value.surfaceId, value.paneId, value.paneLineageId,
+      );
     }
     return { paneLabel: await this.custody.claimPane(value.clientId, value.surfaceId, value.paneId, value.paneLineageId) };
   }
@@ -147,13 +270,16 @@ export class AllocatorServer {
   private async fleetTopology(): Promise<unknown> {
     const registrationReady = await this.authority.refreshReadiness();
     const state = await this.custody.readAcceptedState();
+    const registryServerTimeMs = this.endpointLeases.serverTimeMs();
     return {
       clients: [...this.registeredClients.values()],
+      maxEndpointLeaseMs: this.endpointLeases.maxEndpointLeaseMs,
       registrationReady,
       registryIdentity: {
         allocatorId: state.allocatorId,
         fleetId: state.fleetId,
       },
+      registryServerTimeMs,
     };
   }
 
@@ -164,6 +290,7 @@ export class AllocatorServer {
     private readonly authority: WindowLabelAuthority,
     private readonly webSocketServer: WebSocketServer,
     private readonly annotationVerified: boolean,
+    private readonly endpointLeases: EndpointLeaseBook,
   ) {}
 
   static async start(config: AllocatorServerConfig, testHooks: AdapterTestHooks = {}): Promise<AllocatorServer> {
@@ -201,7 +328,18 @@ export class AllocatorServer {
           webSocketServer.once("listening", resolve);
           webSocketServer.once("error", reject);
         });
-        const server = new AllocatorServer(config, hostLock, custody, authority, webSocketServer, annotationVerified);
+        const server = new AllocatorServer(
+          config,
+          hostLock,
+          custody,
+          authority,
+          webSocketServer,
+          annotationVerified,
+          new EndpointLeaseBook(
+            custody.token.leaseGeneration,
+            config.maxEndpointLeaseMs ?? DEFAULT_MAX_ENDPOINT_LEASE_MS,
+          ),
+        );
         webSocketServer.on("connection", (socket) => server.accept(socket));
         return server;
       } catch (error) {
@@ -245,6 +383,8 @@ export class AllocatorServer {
       lifecycle: state.lifecycle,
       nextOrdinalFence: state.nextOrdinalFence,
       nextPaneOrdinalFence: state.nextPaneOrdinalFence,
+      nextPaneAllocationGenerationFence: state.nextPaneAllocationGenerationFence,
+      paneLabelReuseEnabled: state.paneLabelReuseEnabled,
       primaryHeadHash: state.headHash,
       primaryHeadSeq: state.headSeq,
       serveStatus: this.authority.serveStatus !== "serving"
@@ -641,6 +781,21 @@ export class AllocatorServer {
   }
 }
 
+function paneReleaseIntentId(evidence: PaneRetirementEvidence): string {
+  return createHash("sha256").update(JSON.stringify({
+    allocationGeneration: evidence.allocationGeneration,
+    clientId: evidence.clientId,
+    closeRevision: evidence.closeRevision,
+    lineageId: evidence.lineageId,
+    paneId: evidence.paneId,
+    paneLabel: evidence.paneLabel,
+    surfaceId: evidence.surfaceId,
+    terminalRetirementRevision: evidence.terminalRetirementRevision,
+    tombstoneId: evidence.tombstoneId,
+    tombstoneKind: evidence.tombstoneKind,
+  })).digest("hex");
+}
+
 function annotationLimits(info: AnnotationInfo) {
   return {
   journalRecords: info.maxJournalRecords, journalAndSourceMetadataBytes: info.maxJournalAndMetadataBytes,
@@ -729,4 +884,8 @@ function validateServerConfig(config: AllocatorServerConfig): void {
     throw new TypeError("allocator listenHost and listenPort must be explicit and valid");
   }
   if (!config.hostLockPath) throw new TypeError("allocator hostLockPath is required");
+  const leaseLimit = config.maxEndpointLeaseMs ?? DEFAULT_MAX_ENDPOINT_LEASE_MS;
+  if (!Number.isSafeInteger(leaseLimit) || leaseLimit < 1) {
+    throw new TypeError("maxEndpointLeaseMs must be a positive safe integer");
+  }
 }

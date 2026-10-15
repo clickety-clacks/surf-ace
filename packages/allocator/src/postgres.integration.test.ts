@@ -21,6 +21,7 @@ import { SurfaceCore } from "../../electron/src/surface-core.js";
 import { AnnotationSourceCoordinator } from "../../electron/src/annotation-source-coordinator.js";
 import { SurfaceWsServer } from "../../electron/src/ws-server.js";
 import { AnnotationJournal } from "./annotation-journal.js";
+import { endpointLeaseGenerationRange } from "./endpoint-leases.js";
 import {
   type SurfAceDiscoveryEndpoint,
   type SurfAceDiscoveryService,
@@ -960,6 +961,12 @@ test("configured server registers two stable clients and deduplicates reconnect"
     assert.deepEqual((reconfirmed.payload as { registryIdentity: unknown }).registryIdentity, {
       allocatorId: "alloc_registration-test", fleetId: cluster.config.fleetId,
     });
+    const legacyPayload = reconfirmed.payload as Record<string, unknown>;
+    assert.equal(legacyPayload.directEndpoint, null);
+    assert.equal(legacyPayload.prePairDescribeV1, false);
+    assert.equal(legacyPayload.endpointLease, null);
+    assert.equal(legacyPayload.allocationGenerationV1, false);
+    assert.deepEqual(legacyPayload.completedPaneReleaseIds, []);
     const topology = async () => {
       const response = await reader!.request("fleet.topology");
       assert.equal(response.ok, true);
@@ -1021,6 +1028,196 @@ test("configured server registers two stable clients and deduplicates reconnect"
     await cluster.stop();
   }
 });
+
+test("registration negotiates rc11 endpoint leases only behind the writer fence", { timeout: 90_000 }, async () => {
+  const cluster = await startCluster();
+  let allocator: AllocatorServer | null = null;
+  let wire: WireClient | null = null;
+  const originalWitnessId = cluster.config.witnessServerId;
+  try {
+    const recovery = await PostgresCustodyAdapter.initializeAbsentFleet(cluster.config, "alloc_rc11-compatibility");
+    await recovery.release();
+    allocator = await AllocatorServer.start(serverConfig(cluster));
+    wire = await WireClient.connect(allocator.address.url);
+
+    const legacyClientId = createHash("sha256").update("deployed-v0.2.7-r3-client").digest("hex");
+    const legacy = await wire.request("client.register", { clientId: legacyClientId, surfaces: [] });
+    assert.equal(legacy.ok, true, "the deployed r3 registration shape remains accepted");
+    const legacyResponse = legacy.payload as Record<string, unknown>;
+    assert.equal(legacyResponse.directEndpoint, null);
+    assert.equal(legacyResponse.prePairDescribeV1, false);
+    assert.equal(legacyResponse.endpointLease, null);
+
+    const clientId = createHash("sha256").update("candidate-v0.2.9-rc11-client").digest("hex");
+    const directEndpoint = "wss://client.example:19001/ws";
+    const registration = {
+      clientId,
+      directEndpoint,
+      allocationGenerationV1: true,
+      prePairDescribeV1: true,
+      pendingPaneReleases: [],
+      surfaces: [{
+        surfaceId: "sf_rc11-compatibility",
+        panes: [{
+          allocationGeneration: null,
+          paneId: "pane-1",
+          paneLabel: 0,
+          paneLineageId: "pl_rc11-compatibility",
+        }],
+      }],
+    };
+    const before = await allocator.diagnostics();
+    cluster.config.witnessServerId = "divergent-witness";
+    const fenced = await wire.request("client.register", registration);
+    assert.equal(fenced.ok, false, "an empty/first registration cannot bypass an unready writer");
+    assert.match(String((fenced.error as { message?: unknown } | undefined)?.message), /writer_fence_unavailable/);
+    assert.equal(fenced.payload, undefined, "a fenced registration carries no lease payload");
+    assert.equal((await allocator.diagnostics()).nextPaneOrdinalFence, before.nextPaneOrdinalFence,
+      "the refused registration commits no pane claim");
+
+    cluster.config.witnessServerId = originalWitnessId;
+    const accepted = await wire.request("client.register", registration);
+    assert.equal(accepted.ok, true, "retry succeeds after the actual witness is restored");
+    assertRc11ConfiguredRegistration(accepted, clientId, directEndpoint);
+    const acceptedPayload = accepted.payload as {
+      completedPaneReleaseIds: string[];
+      endpointLease: { leaseGeneration: number; registrationObservedAtMs: number; leaseExpiresAtMs: number };
+      surfaces: Array<{ panes: Array<{ allocationGeneration: number; paneLabel: number }> }>;
+    };
+    const writerLeaseGeneration = (await allocator.diagnostics()).leaseGeneration;
+    assert.equal(acceptedPayload.endpointLease.leaseGeneration,
+      endpointLeaseGenerationRange(writerLeaseGeneration).first,
+      "the issued endpoint lease derives from this server's actual custody generation");
+    assert.deepEqual(acceptedPayload.completedPaneReleaseIds, []);
+    assert.ok(acceptedPayload.surfaces[0]?.panes[0]?.allocationGeneration > 0);
+    assert.ok(acceptedPayload.surfaces[0]?.panes[0]?.paneLabel > 0);
+    assert.equal((await allocator.diagnostics()).paneLabelReuseEnabled, false,
+      "compatibility does not enable pane-label reuse");
+
+    const renewed = await wire.request("client.register", registration);
+    assert.equal(renewed.ok, true);
+    const renewedLease = (renewed.payload as typeof acceptedPayload).endpointLease;
+    assert.equal(renewedLease.leaseGeneration, acceptedPayload.endpointLease.leaseGeneration);
+    assert.equal(renewedLease.registrationObservedAtMs, acceptedPayload.endpointLease.registrationObservedAtMs);
+    assert.ok(renewedLease.leaseExpiresAtMs >= acceptedPayload.endpointLease.leaseExpiresAtMs);
+
+    const pane = acceptedPayload.surfaces[0]?.panes[0];
+    assert.ok(pane);
+    const retirement = {
+      allocationGeneration: pane.allocationGeneration,
+      clientId,
+      closeRevision: 1,
+      lineageId: "pl_rc11-compatibility",
+      paneId: "pane-1",
+      paneLabel: pane.paneLabel,
+      surfaceId: "sf_rc11-compatibility",
+      terminalRetirementRevision: 2,
+      tombstoneId: "pt_rc11-compatibility",
+      tombstoneKind: "pane" as const,
+    };
+    const releaseId = createHash("sha256").update(JSON.stringify(retirement)).digest("hex");
+    const releaseRegistration = {
+      ...registration,
+      pendingPaneReleases: [{ ...retirement, releaseId }],
+      surfaces: [{ surfaceId: "sf_rc11-compatibility", panes: [] }],
+    };
+    const released = await wire.request("client.register", releaseRegistration);
+    assert.equal(released.ok, true);
+    const releasedPayload = released.payload as typeof acceptedPayload;
+    assert.deepEqual(releasedPayload.completedPaneReleaseIds, [releaseId],
+      "the release ACK names only the durable exact-generation retirement");
+    assert.deepEqual(releasedPayload.surfaces[0]?.panes, []);
+    const retriedRelease = await wire.request("client.register", releaseRegistration);
+    assert.equal(retriedRelease.ok, true);
+    assert.deepEqual((retriedRelease.payload as typeof acceptedPayload).completedPaneReleaseIds, [releaseId],
+      "an identical release retry returns its idempotent completion identity");
+    const nextPaneRegistration = {
+      ...registration,
+      surfaces: [{
+        surfaceId: "sf_rc11-compatibility",
+        panes: [{ allocationGeneration: null, paneId: "pane-2", paneLabel: 0, paneLineageId: "pl_rc11-next" }],
+      }],
+    };
+    const nextPane = await wire.request("client.register", nextPaneRegistration);
+    assert.equal(nextPane.ok, true);
+    assert.equal(((nextPane.payload as typeof acceptedPayload).surfaces[0]?.panes[0])?.paneLabel, 2,
+      "an acknowledged retirement does not enable label reuse during compatibility rollout");
+
+    const partialClientId = createHash("sha256").update("candidate-without-prepair-capability").digest("hex");
+    const partial = await wire.request("client.register", {
+      clientId: partialClientId,
+      directEndpoint,
+      allocationGenerationV1: true,
+      prePairDescribeV1: false,
+      pendingPaneReleases: [],
+      surfaces: [],
+    });
+    assert.equal(partial.ok, true);
+    const partialPayload = partial.payload as Record<string, unknown>;
+    assert.equal(partialPayload.directEndpoint, directEndpoint, "the endpoint is the supplied configuration");
+    assert.equal(partialPayload.prePairDescribeV1, false);
+    assert.equal(partialPayload.endpointLease, null, "lease issuance requires negotiated pre-pair support");
+
+    const invalidClientId = createHash("sha256").update("invalid-direct-endpoint").digest("hex");
+    const invalid = await wire.request("client.register", {
+      clientId: invalidClientId,
+      directEndpoint: "http://client.example:19001/ws",
+      allocationGenerationV1: true,
+      prePairDescribeV1: true,
+      pendingPaneReleases: [],
+      surfaces: [],
+    });
+    assert.equal(invalid.ok, false);
+    assert.match(String((invalid.error as { message?: unknown } | undefined)?.message), /invalid_direct_endpoint/);
+
+    const deployedR3Reply = {
+      type: "response", v: 1, op: "client.register", ok: true,
+      payload: {
+        clientId,
+        registryIdentity: { allocatorId: "alloc_rc11-compatibility", fleetId: cluster.config.fleetId },
+        surfaces: [],
+      },
+    };
+    assert.throws(() => assertRc11ConfiguredRegistration(deployedR3Reply, clientId, directEndpoint),
+      /invalid_registration_response/,
+      "the exact deployed r3 response shape cannot satisfy a configured rc11 client; roll clients back before the registry");
+  } finally {
+    cluster.config.witnessServerId = originalWitnessId;
+    await wire?.close();
+    await allocator?.close();
+    await cluster.stop();
+  }
+});
+
+function assertRc11ConfiguredRegistration(
+  response: Record<string, unknown>,
+  clientId: string,
+  directEndpoint: string,
+): void {
+  // Response admission follows ConfiguredServerRegistration at rc11 source b23ed0d.
+  if (response.type !== "response" || response.v !== 1 || response.op !== "client.register" || response.ok !== true) {
+    throw new Error("invalid_registration_response");
+  }
+  const payload = response.payload as Record<string, unknown> | undefined;
+  const lease = payload?.endpointLease as Record<string, unknown> | null | undefined;
+  if (payload?.clientId !== clientId || payload.directEndpoint !== directEndpoint ||
+      payload.prePairDescribeV1 !== true || !lease ||
+      !Number.isSafeInteger(lease.leaseGeneration) || Number(lease.leaseGeneration) < 1 ||
+      !Number.isSafeInteger(lease.registrationObservedAtMs) ||
+      !Number.isSafeInteger(lease.leaseExpiresAtMs) ||
+      Number(lease.leaseExpiresAtMs) <= Number(lease.registrationObservedAtMs) ||
+      !Array.isArray(payload.completedPaneReleaseIds) || !Array.isArray(payload.surfaces)) {
+    throw new Error("invalid_registration_response");
+  }
+  for (const surface of payload.surfaces as Array<Record<string, unknown>>) {
+    if (!Array.isArray(surface.panes)) throw new Error("invalid_registration_response");
+    for (const pane of surface.panes as Array<Record<string, unknown>>) {
+      if (!Number.isSafeInteger(pane.allocationGeneration) || Number(pane.allocationGeneration) < 1) {
+        throw new Error("invalid_registration_response");
+      }
+    }
+  }
+}
 
 test("configured-first server in-process discovery fallback registers and persists clients", { timeout: 90_000 }, async () => {
   const cluster = await startCluster();
@@ -1274,6 +1471,44 @@ test("v0.2.3 custody migrates without changing its witnessed head", { timeout: 1
     const state = await scalar(cluster.adminUrl,
       "SELECT surf_ace_allocator.read_accepted_state('fleet-test')->>'nextPaneOrdinalFence'");
     assert.equal(state, "1");
+
+    await adminQuery(cluster.adminUrl, `BEGIN;
+      SET ROLE surf_ace_allocator_owner;
+      UPDATE surf_ace_allocator.fleets SET next_pane_ordinal_fence = 2 WHERE fleet_id = 'fleet-test';
+      SELECT * FROM surf_ace_allocator.append_event('fleet-test', jsonb_build_object(
+        'allocatorId', 'alloc_migration-test', 'clientId', repeat('a', 64),
+        'fleetId', 'fleet-test', 'lineageId', 'pl_migrated_legacy_pane',
+        'paneId', 'pane-legacy', 'paneLabel', 1, 'surfaceId', 'sf_migrated_legacy',
+        'type', 'pane-claimed'));
+      RESET ROLE;
+      COMMIT;
+    `);
+    await adminQuery(cluster.adminUrl,
+      await readFile(new URL("../sql/004_pane_label_reuse.sql", import.meta.url), "utf8"));
+    const migratedLabel = await scalar(cluster.adminUrl,
+      "SELECT surf_ace_allocator.read_accepted_state('fleet-test')->'paneMappings'->0->>'paneLabel'");
+    const migratedGeneration = await scalar(cluster.adminUrl,
+      "SELECT surf_ace_allocator.read_accepted_state('fleet-test')->'paneMappings'->0->>'allocationGeneration'");
+    const migratedFence = await scalar(cluster.adminUrl,
+      "SELECT surf_ace_allocator.read_accepted_state('fleet-test')->>'nextPaneAllocationGenerationFence'");
+    assert.deepEqual([migratedLabel, migratedGeneration, migratedFence], ["1", "1", "1"],
+      "the rollout preserves the existing label and adds generation authority without renumbering it");
+
+    const rollbackWriter = await PostgresCustodyAdapter.acquireWriter(cluster.config);
+    try {
+      assert.equal(await rollbackWriter.claimPane(
+        "a".repeat(64), "sf_migrated_legacy", "pane-legacy", "pl_migrated_legacy_pane",
+      ), 1, "the deployed number-only claim remains readable after schema rollout");
+      assert.equal(await rollbackWriter.claimPane(
+        "a".repeat(64), "sf_migrated_legacy", "pane-next", "pl_migrated_next_pane",
+      ), 2, "the deployed claim path continues monotonic allocation after schema rollout");
+      const rolledForwardState = await rollbackWriter.readAcceptedState();
+      assert.equal(rolledForwardState.paneLabelReuseEnabled, false,
+        "candidate rollout leaves reuse disabled for deployed clients and rollback readers");
+      assert.equal(rolledForwardState.paneMappings.find((pane) => pane.paneId === "pane-legacy")?.paneLabel, 1);
+    } finally {
+      await rollbackWriter.release();
+    }
   } finally {
     await cluster.stop();
   }
@@ -1911,6 +2146,7 @@ fsync = on
       await adminQuery(adminUrl, stdout);
     } else {
       await PostgresCustodyAdapter.installSchema(adminUrl);
+      await adminQuery(adminUrl, await readFile(new URL("../sql/004_pane_label_reuse.sql", import.meta.url), "utf8"));
     }
     await adminQuery(adminUrl, `
       CREATE ROLE allocator_writer LOGIN IN ROLE surf_ace_allocator_writer;
