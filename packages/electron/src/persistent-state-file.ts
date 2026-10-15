@@ -195,6 +195,7 @@ async function loadExplicitlyAcceptedState(
   stateDir: string,
   fileName: string,
   selector: PersistentStateSelector,
+  retainAcceptedContents?: (contents: string) => void,
 ): Promise<PersistentStateLoadResult> {
   const statePath = path.join(stateDir, fileName);
   const selectorPath = path.join(stateDir, persistentStateSelectorFileName(fileName));
@@ -220,7 +221,9 @@ async function loadExplicitlyAcceptedState(
 
   const backupPath = path.join(stateDir, backupStateFileName(fileName));
   const primaryContents = await readMatchingContents(statePath, selector.acceptedSha256);
-  const backupContents = await readMatchingContents(backupPath, selector.acceptedSha256);
+  const backupContents = primaryContents === undefined
+    ? await readMatchingContents(backupPath, selector.acceptedSha256)
+    : undefined;
   let acceptedContents = primaryContents ?? backupContents;
   let recoverySource: PersistentStateRecoverySource = primaryContents ? "primary" : "backup";
   if (!acceptedContents) {
@@ -252,6 +255,7 @@ async function loadExplicitlyAcceptedState(
         version: 1,
       }));
     }
+    retainAcceptedContents?.(acceptedContents);
     return {
       recoveredFromBackup: recoverySource === "backup",
       recoverySource,
@@ -372,9 +376,12 @@ export async function writePersistentStateFile(
   }
   let previousContents: string | undefined;
   if (selector) {
-    const loaded = await loadExplicitlyAcceptedState(stateDir, fileName, selector);
+    const loaded = await loadExplicitlyAcceptedState(stateDir, fileName, selector, (accepted) => {
+      // Retain the bytes already matched to the accepted selector. Re-reading
+      // primary both copies the full state and can pick up unverified bytes.
+      previousContents = accepted;
+    });
     if (loaded.writeGuard) throw loaded.error;
-    if (loaded.state) previousContents = await fs.readFile(statePath, "utf8");
   } else {
     try {
       previousContents = await fs.readFile(statePath, "utf8");

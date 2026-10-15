@@ -691,3 +691,38 @@ test("persistent state guards parsed saved surfaces when any saved surface does 
     false,
   );
 });
+
+
+test("a new commit backs up only the predecessor bytes matched to the accepted generation", async () => {
+  const stateDir = await temporaryStateDir();
+  const statePath = path.join(stateDir, STATE_FILE_NAME);
+  const previous = multiWindowState();
+  await writePersistentStateFile(stateDir, STATE_FILE_NAME, previous);
+  const next = { ...previous, primarySurfaceId: "sf_next" as never };
+  const unaccepted = JSON.stringify({ ...previous, primarySurfaceId: "sf_unaccepted" });
+  const originalReadFile = fs.readFile;
+  const originalRename = fs.rename;
+  let primaryReads = 0;
+  const backupWrites: string[] = [];
+  fs.readFile = (async (...args: Parameters<typeof fs.readFile>) => {
+    if (String(args[0]) === statePath && ++primaryReads > 1) return unaccepted;
+    return await originalReadFile(...args);
+  }) as typeof fs.readFile;
+  fs.rename = (async (...args: Parameters<typeof fs.rename>) => {
+    if (String(args[1]) === path.join(stateDir, backupStateFileName(STATE_FILE_NAME))) {
+      backupWrites.push(await originalReadFile(args[0], "utf8"));
+    }
+    return await originalRename(...args);
+  }) as typeof fs.rename;
+  try {
+    await writePersistentStateFile(stateDir, STATE_FILE_NAME, next);
+  } finally {
+    fs.readFile = originalReadFile;
+    fs.rename = originalRename;
+  }
+  assert.deepEqual(JSON.parse(backupWrites[0]!), previous);
+  assert.deepEqual(JSON.parse(backupWrites.at(-1)!), next);
+  const restored = await loadPersistentStateFile(stateDir, STATE_FILE_NAME);
+  assert.equal(restored.writeGuard, false);
+  assert.deepEqual(restored.state, next);
+});
