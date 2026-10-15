@@ -40,6 +40,7 @@ export const TIGHTBEAM_LINUX_SERVER_FILES = Object.freeze([
   "schemas/allocator/001_allocator.sql",
   "schemas/allocator/002_fleet_panes.sql",
   "schemas/allocator/003_annotation_journal.sql",
+  "schemas/allocator/004_pane_label_reuse.sql",
   "schemas/protocol/schema.json",
   "server/central-server.cjs",
   "service/surf-ace-server@.service",
@@ -84,6 +85,9 @@ export async function verifyTightbeamLinuxStage(stageDir) {
   if (!/foreground launcher/.test(guide) || !/does not install or enable a service/.test(guide)) {
     throw new Error("tightbeam_linux_foreground_service_boundary_missing");
   }
+  if (!/004_pane_label_reuse\.sql/.test(guide) || !/does not apply SQL migrations on startup/.test(guide)) {
+    throw new Error("tightbeam_linux_pane_generation_migration_boundary_missing");
+  }
   const unit = await fs.readFile(path.join(result.stageDir, "service/surf-ace-server@.service"), "utf8");
   for (const line of [
     "Type=simple",
@@ -113,8 +117,21 @@ export async function verifyTightbeamLinuxStage(stageDir) {
     /cacheStatus=current/,
     /consumableLoss=null/,
     /does not auto-migrate/,
+    /004_pane_label_reuse\.sql/,
+    /pane-label reuse remains disabled/,
+    /restore the verified pre-migration backup into a new cluster/i,
   ]) {
     if (!pattern.test(operations)) throw new Error(`tightbeam_linux_operations_contract_missing:${pattern.source}`);
+  }
+  const paneMigration = await fs.readFile(path.join(result.stageDir, "schemas/allocator/004_pane_label_reuse.sql"), "utf8");
+  for (const pattern of [
+    /^BEGIN;/m,
+    /^COMMIT;/m,
+    /pane_label_reuse_enabled boolean NOT NULL DEFAULT false/,
+    /allocator lease must be released before pane-generation migration/,
+    /'type', 'pane-generation-migrated'/,
+  ]) {
+    if (!pattern.test(paneMigration)) throw new Error(`tightbeam_linux_pane_generation_migration_contract_missing:${pattern.source}`);
   }
   return result;
 }
@@ -140,11 +157,12 @@ export async function verifyTightbeamCliStage(stageDir) {
 }
 
 const linuxServerReadme = [
-  "# Surf Ace standalone Linux server and CLI",
+  "# Surf Ace standalone Linux registry server",
   "",
-  "This package provides the standalone `surf-ace` CLI, callable",
+  "This server-only archive provides the registry runtime, callable",
   "`server/central-server.cjs` module, foreground `bin/surf-ace-server` launcher,",
-  "optional systemd unit template, and protocol/allocator schemas.",
+  "optional systemd unit template, and protocol/allocator schemas. It does not",
+  "include a separate client CLI archive or an Electron app archive.",
   "The foreground launcher (`bin/surf-ace-server`) validates the existing server",
   "configuration, starts one owner,",
   "reports readiness without credentials and exposes a bounded WebSocket handshake health check at `/ws`,",
@@ -156,7 +174,13 @@ const linuxServerReadme = [
   "`schemas/allocator/002_fleet_panes.sql` migration to a stopped v0.2.3 fleet",
   "after backup and staging proof. Apply the reviewed",
   "`schemas/allocator/003_annotation_journal.sql` to a stopped, backed-up",
-  "fleet before enabling annotation watch or publisher traffic. The packaged server configuration",
+  "fleet before enabling annotation watch or publisher traffic. Apply",
+  "`schemas/allocator/004_pane_label_reuse.sql` to a stopped fleet after a",
+  "verified backup and staging validation, with the writer lease released and",
+  "no restore in progress. Migration 004 preserves historical pane labels,",
+  "adds allocator-owned generation records, and leaves pane-label reuse",
+  "disabled until separately enabled by its readiness procedure. The server",
+  "does not apply SQL migrations on startup. The packaged server configuration",
   "uses the existing AllocatorServerConfig fields and a single owned host lock.",
   "The callable module remains available for embedding by one process owner:",
   "",
@@ -174,8 +198,7 @@ const linuxServerReadme = [
   "and the existing PostgreSQL custody URLs. The package performs no database",
   "initialization or in-place schema migration. `docs/OPERATIONS.md` describes the",
   "PG16 backup, staged restore, validation, and rollback procedure. The systemd",
-  "template is a file for operator review; the archive does not install it. A",
-  "separate CLI-only archive is available for clients that do not own the server.",
+  "template is a file for operator review; the archive does not install it.",
   "",
 ].join("\n");
 
@@ -234,6 +257,7 @@ export async function assembleTightbeamLinuxStage({ sourceDir, stageDir, target 
     "schemas/allocator/001_allocator.sql": path.join(source, "packages/allocator/sql/001_allocator.sql"),
     "schemas/allocator/002_fleet_panes.sql": path.join(source, "packages/allocator/sql/002_fleet_panes.sql"),
     "schemas/allocator/003_annotation_journal.sql": path.join(source, "packages/allocator/sql/003_annotation_journal.sql"),
+    "schemas/allocator/004_pane_label_reuse.sql": path.join(source, "packages/allocator/sql/004_pane_label_reuse.sql"),
     "schemas/protocol/schema.json": path.join(source, "packages/electron/dist/schema.json"),
     "server/central-server.cjs": path.join(source, "packages/electron/dist/central-server.cjs"),
     "service/surf-ace-server@.service": path.join(toolingRoot, "scripts/release/templates/surf-ace-server@.service"),

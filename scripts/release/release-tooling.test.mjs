@@ -1443,6 +1443,14 @@ test("Tightbeam Linux stage contains only the standalone CLI, callable server cl
     "packages/allocator/sql/001_allocator.sql": "-- schema\n",
     "packages/allocator/sql/002_fleet_panes.sql": "-- migration\n",
     "packages/allocator/sql/003_annotation_journal.sql": "-- annotation migration\n",
+    "packages/allocator/sql/004_pane_label_reuse.sql": [
+      "BEGIN;",
+      "ALTER TABLE surf_ace_allocator.fleets ADD COLUMN pane_label_reuse_enabled boolean NOT NULL DEFAULT false;",
+      "-- allocator lease must be released before pane-generation migration",
+      "jsonb_build_object('type', 'pane-generation-migrated')",
+      "COMMIT;",
+      "",
+    ].join("\n"),
   };
   for (const [relative, contents] of Object.entries(files)) {
     const file = path.join(source, relative);
@@ -1467,6 +1475,8 @@ test("Tightbeam Linux stage contains only the standalone CLI, callable server cl
   assert.match(guide, /await service\.close\(\)/);
   assert.match(guide, /already-provisioned PostgreSQL (?:16 )?custody/);
   assert.match(guide, /003_annotation_journal\.sql/);
+  assert.match(guide, /004_pane_label_reuse\.sql/);
+  assert.match(guide, /does not apply SQL migrations on startup/);
   assert.match(guide, /foreground launcher/);
   assert.match(guide, /does not install or enable a service/);
   assert.doesNotMatch(actual.join("\n"), /surf-ace-runtime|controller\/dist\/main\.js/);
@@ -1480,6 +1490,9 @@ test("Tightbeam Linux stage contains only the standalone CLI, callable server cl
   assert.match(operations, /pg_dump --format=custom/);
   assert.match(operations, /pg_restore --clean --if-exists --exit-on-error/);
   assert.match(operations, /discard-staging-and-retain-original/);
+  assert.match(operations, /004_pane_label_reuse\.sql/);
+  assert.match(operations, /pane-label reuse remains disabled/);
+  assert.match(operations, /restore the verified pre-migration backup into a new cluster/i);
 
   await fs.chmod(path.join(stage, "bin/surf-ace"), 0o644);
   await assert.rejects(verifyTightbeamLinuxStage(stage), /tightbeam_linux_runtime_cli_not_executable/);

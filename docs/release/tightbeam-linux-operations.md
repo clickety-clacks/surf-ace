@@ -89,6 +89,42 @@ lease, an in-progress restore, or an unsupported state version. The v0.2.7
 server does not auto-migrate; annotation watch and publisher operations remain
 unavailable until 003 is verified.
 
+### Registry server 0.2.9-rc15: pane-generation migration 004
+
+The 0.2.9-rc15 registry server calls the generation-aware pane claim and release
+functions installed by `schemas/allocator/004_pane_label_reuse.sql`. Apply this
+migration before starting that server. Server startup does not run SQL
+migrations, initialize PostgreSQL, or enable pane-label reuse. Starting the
+server against a schema without migration 004 is not a supported upgrade path.
+
+Migration 004 is transactional. It requires a stopped writer with its lease
+released and no restore in progress. Its preflight rejects incomplete journals,
+duplicate historical pane labels or lineages, and unreconciled pane-label
+fences. It adds generation-fence and schema-version columns, appends separate
+`pane-generation-migrated` custody events for legacy claims without rewriting
+their historical event bytes, and preserves their pane labels. The migration
+sets pane-label reuse to false, so pane-label reuse remains disabled. Reuse stays
+off until a separate readiness operation validates the allocator's required
+state; this package does not
+enable it or bypass writer fencing.
+
+Take and verify a base backup plus a custom-format `pg_dump`, then restore to a
+disposable PostgreSQL 16 staging cluster and run migration 004 there before any
+serving change. Compare the allocator projection and journal head before and
+after, and validate legacy claim lookup and current generation-aware claim and
+release behavior on staging. The migration's stopped-writer requirement means
+the service is unavailable while it is applied; this package does not estimate
+that interruption or authorize a live change.
+
+If migration 004 raises an error before commit, its transaction rolls back.
+After a successful migration, do not attempt an in-place downgrade, drop its
+columns/functions, rewrite the custody journal, or rewind allocation fences. A
+server-binary rollback alone does not undo the database change. The rollback
+boundary is to restore the verified pre-migration backup into a new cluster,
+followed by independent state validation and an explicitly planned cutover.
+Never restore over the existing database or start a second writer during
+recovery.
+
 Before touching the serving database, capture a PostgreSQL base backup and a
 schema/data `pg_dump` in a restricted run directory. Restore the backup into
 a disposable staging cluster with its own witness and apply 002 there first;
