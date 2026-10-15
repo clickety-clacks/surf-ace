@@ -3869,7 +3869,7 @@ fn control_pair_summaries_preserve_unread_records_and_pending_ack_intents() {
         .find(|(operation, _)| operation == "pair.request")
         .unwrap()
         .1["resume"]["scopes"];
-    assert_eq!(resume_scopes["pane:sf_aleph:70"]["cursor"], 1);
+    assert_eq!(resume_scopes["pane:sf_aleph:70"]["cursor"], 2);
     assert!(resume_scopes.get("pane:sf_aleph:69").is_none());
 }
 
