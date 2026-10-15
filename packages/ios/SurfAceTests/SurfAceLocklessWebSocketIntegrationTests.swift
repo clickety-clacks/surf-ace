@@ -207,7 +207,7 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         let legacyBytes = try JSONEncoder().encode(before).count
         XCTAssertGreaterThan(legacyBytes, 51_445_021)
         let completion = directory.appendingPathComponent("rust-result.json")
-        let ready: [String: Any] = ["endpoint": "ws://127.0.0.1:\(runtime.serverPort)",
+        let ready: [String: Any] = ["endpoint": "ws://127.0.0.1:\(runtime.serverPort)/ws",
             "surfaceId": surfaceId, "completionPath": completion.path, "authorityBytes": legacyBytes]
         let line = "B180_NATIVE_READY " + String(decoding: try JSONSerialization.data(withJSONObject: ready, options: [.sortedKeys]), as: UTF8.self) + "\n"
         FileHandle.standardOutput.write(Data(line.utf8))
@@ -223,7 +223,9 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         }
         let result = try XCTUnwrap(try? Data(contentsOf: completion), "actual Rust controller did not return a result")
         let report = try XCTUnwrap(try JSONSerialization.jsonObject(with: result) as? [String: Any])
-        XCTAssertEqual(report["ok"] as? Bool, true, String(decoding: result, as: UTF8.self))
+        guard report["ok"] as? Bool == true else {
+            XCTFail(String(decoding: result, as: UTF8.self)); return
+        }
         let after = await adapter.snapshot()
         XCTAssertEqual(before.annotationPublisher, after.annotationPublisher)
         for key in before.liveSurfaces[surfaceId]!.panes.keys where key != "7" {

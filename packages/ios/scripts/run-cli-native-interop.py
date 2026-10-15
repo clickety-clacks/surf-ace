@@ -2,7 +2,7 @@
 """Private native-runtime/Rust-CLI business integration; never connects to production."""
 import json, os, re, signal, socket, struct, subprocess, sys, threading, time
 from pathlib import Path
-SOURCE=Path('/tmp/asg-a423-coupled-control')
+SOURCE=Path(__file__).resolve().parents[3]
 DEVICE='02E997DF-3D52-40B8-A1A0-C7E56D42D8D6'
 REV=sys.argv[1]
 assert subprocess.check_output(['git','rev-parse','HEAD'],cwd=SOURCE,text=True).strip()==REV
@@ -62,7 +62,7 @@ def start_proxy(endpoint):
             b=socket.create_connection(('127.0.0.1',port));
             for x,y,d in [(a,b,'request'),(b,a,'response')]: threading.Thread(target=relay,args=(x,y,d),daemon=True).start()
     threading.Thread(target=accept,daemon=True).start()
-    return 'ws://127.0.0.1:'+str(listener.getsockname()[1]),listener
+    return 'ws://127.0.0.1:'+str(listener.getsockname()[1])+'/ws',listener
 
 def run_cli(ready):
     Path(ready['completionPath']+'.claimed').write_text('actual Rust companion running')
