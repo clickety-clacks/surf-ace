@@ -761,7 +761,7 @@ export class PostgresCustodyAdapter<M extends LeaseMode> {
           pane.surfaceId === surfaceId && pane.lineageId === lineageId);
         const byPane = state.paneMappings.find((pane) => pane.clientId === clientId &&
           pane.surfaceId === surfaceId && pane.paneId === paneId);
-        if ((byLineage && byLineage.paneId !== paneId) || (byPane && byPane.lineageId !== lineageId)) {
+        if ((byLineage && byLineage.paneId !== paneId) || (!byLineage && byPane)) {
           throw new AllocatorError("assignment_conflict", "pane identity conflicts with allocator history");
         }
       });

@@ -1049,16 +1049,26 @@ test("registration negotiates rc11 endpoint leases only behind the writer fence"
     allocator = await AllocatorServer.start(serverConfig(cluster));
     wire = await WireClient.connect(allocator.address.url);
 
-    const legacyClientId = createHash("sha256").update("deployed-v0.2.7-r3-client").digest("hex");
-    const legacy = await wire.request("client.register", { clientId: legacyClientId, surfaces: [] });
+    const clientId = createHash("sha256").update("deployed-client-upgraded-in-place").digest("hex");
+    const surfaceId = "sf_rc11-compatibility";
+    const paneId = "pane-1";
+    const paneLineageId = "pl_rc11-compatibility";
+    const directEndpoint = "wss://client.example:19001/ws";
+    const legacy = await wire.request("client.register", {
+      clientId,
+      surfaces: [{ surfaceId, panes: [{ paneId, paneLabel: 0, paneLineageId }] }],
+    });
     assert.equal(legacy.ok, true, "the deployed r3 registration shape remains accepted");
     const legacyResponse = legacy.payload as Record<string, unknown>;
     assert.equal(legacyResponse.directEndpoint, null);
     assert.equal(legacyResponse.prePairDescribeV1, false);
     assert.equal(legacyResponse.endpointLease, null);
+    const legacySurface = (legacyResponse.surfaces as Array<{
+      panes: Array<{ paneId: string; paneLabel: number; paneLineageId: string }>;
+    }>)[0];
+    assert.deepEqual(legacySurface?.panes, [{ paneId, paneLabel: 1, paneLineageId }],
+      "the deployed client receives its number-only pane assignment");
 
-    const clientId = createHash("sha256").update("candidate-v0.2.9-rc11-client").digest("hex");
-    const directEndpoint = "wss://client.example:19001/ws";
     const registration = {
       clientId,
       directEndpoint,
@@ -1066,12 +1076,12 @@ test("registration negotiates rc11 endpoint leases only behind the writer fence"
       prePairDescribeV1: true,
       pendingPaneReleases: [],
       surfaces: [{
-        surfaceId: "sf_rc11-compatibility",
+        surfaceId,
         panes: [{
           allocationGeneration: null,
-          paneId: "pane-1",
+          paneId,
           paneLabel: 0,
-          paneLineageId: "pl_rc11-compatibility",
+          paneLineageId,
         }],
       }],
     };
@@ -1505,11 +1515,16 @@ test("v0.2.3 custody migrates without changing its witnessed head", { timeout: 1
 
     await adminQuery(cluster.adminUrl, `BEGIN;
       SET ROLE surf_ace_allocator_owner;
-      UPDATE surf_ace_allocator.fleets SET next_pane_ordinal_fence = 2 WHERE fleet_id = 'fleet-test';
+      UPDATE surf_ace_allocator.fleets SET next_pane_ordinal_fence = 3 WHERE fleet_id = 'fleet-test';
       SELECT * FROM surf_ace_allocator.append_event('fleet-test', jsonb_build_object(
         'allocatorId', 'alloc_migration-test', 'clientId', repeat('a', 64),
         'fleetId', 'fleet-test', 'lineageId', 'pl_migrated_legacy_pane',
         'paneId', 'pane-legacy', 'paneLabel', 1, 'surfaceId', 'sf_migrated_legacy',
+        'type', 'pane-claimed'));
+      SELECT * FROM surf_ace_allocator.append_event('fleet-test', jsonb_build_object(
+        'allocatorId', 'alloc_migration-test', 'clientId', repeat('a', 64),
+        'fleetId', 'fleet-test', 'lineageId', 'pl_migrated_reused_lineage',
+        'paneId', 'pane-legacy', 'paneLabel', 2, 'surfaceId', 'sf_migrated_legacy',
         'type', 'pane-claimed'));
       RESET ROLE;
       COMMIT;
@@ -1520,23 +1535,50 @@ test("v0.2.3 custody migrates without changing its witnessed head", { timeout: 1
       "SELECT surf_ace_allocator.read_accepted_state('fleet-test')->'paneMappings'->0->>'paneLabel'");
     const migratedGeneration = await scalar(cluster.adminUrl,
       "SELECT surf_ace_allocator.read_accepted_state('fleet-test')->'paneMappings'->0->>'allocationGeneration'");
+    const reusedPaneLabel = await scalar(cluster.adminUrl,
+      "SELECT surf_ace_allocator.read_accepted_state('fleet-test')->'paneMappings'->1->>'paneLabel'");
+    const reusedLineage = await scalar(cluster.adminUrl,
+      "SELECT surf_ace_allocator.read_accepted_state('fleet-test')->'paneMappings'->1->>'lineageId'");
+    const reusedGeneration = await scalar(cluster.adminUrl,
+      "SELECT surf_ace_allocator.read_accepted_state('fleet-test')->'paneMappings'->1->>'allocationGeneration'");
     const migratedFence = await scalar(cluster.adminUrl,
       "SELECT surf_ace_allocator.read_accepted_state('fleet-test')->>'nextPaneAllocationGenerationFence'");
-    assert.deepEqual([migratedLabel, migratedGeneration, migratedFence], ["1", "1", "1"],
-      "the rollout preserves the existing label and adds generation authority without renumbering it");
+    assert.deepEqual([migratedLabel, migratedGeneration, reusedPaneLabel, reusedLineage,
+      reusedGeneration, migratedFence], ["1", "1", "2", "pl_migrated_reused_lineage", "2", "2"],
+    "migration preserves both historical labels and derives distinct allocator generations");
 
     const rollbackWriter = await PostgresCustodyAdapter.acquireWriter(cluster.config);
     try {
       assert.equal(await rollbackWriter.claimPane(
         "a".repeat(64), "sf_migrated_legacy", "pane-legacy", "pl_migrated_legacy_pane",
       ), 1, "the deployed number-only claim remains readable after schema rollout");
-      assert.equal(await rollbackWriter.claimPane(
-        "a".repeat(64), "sf_migrated_legacy", "pane-next", "pl_migrated_next_pane",
-      ), 2, "the deployed claim path continues monotonic allocation after schema rollout");
+      assert.deepEqual(await rollbackWriter.claimPaneWithGeneration(
+        "a".repeat(64), "sf_migrated_legacy", "pane-legacy", "pl_migrated_reused_lineage",
+      ), { paneLabel: 2, allocationGeneration: 2 },
+      "current registration resumes the exact migrated lineage despite an older lineage sharing its pane ID");
+      await assert.rejects(rollbackWriter.claimPaneWithGeneration(
+        "a".repeat(64), "sf_migrated_legacy", "pane-legacy", "pl_migrated_unknown_lineage",
+      ), (error) => error instanceof AllocatorError && error.code === "assignment_conflict",
+      "an unknown lineage cannot inherit a reused pane ID from historical state");
+
+      const legacyLabel = await rollbackWriter.claimPane(
+        "a".repeat(64), "sf_migrated_legacy", "pane-after-migration", "pl_post_migration_legacy",
+      );
+      assert.equal(legacyLabel, 3, "legacy registration retains monotonic label allocation after migration");
+      const legacyState = await rollbackWriter.readAcceptedState();
+      const legacyMapping = legacyState.paneMappings.find((pane) => pane.lineageId === "pl_post_migration_legacy");
+      assert.equal(legacyMapping?.allocationGeneration, 3,
+        "the allocator records its own generation for a post-migration legacy claim");
+      assert.deepEqual(await rollbackWriter.claimPaneWithGeneration(
+        "a".repeat(64), "sf_migrated_legacy", "pane-after-migration", "pl_post_migration_legacy",
+      ), { paneLabel: 3, allocationGeneration: 3 },
+      "a current client can resume a legacy claim made after migration without fabricated generation data");
       const rolledForwardState = await rollbackWriter.readAcceptedState();
       assert.equal(rolledForwardState.paneLabelReuseEnabled, false,
         "candidate rollout leaves reuse disabled for deployed clients and rollback readers");
       assert.equal(rolledForwardState.paneMappings.find((pane) => pane.paneId === "pane-legacy")?.paneLabel, 1);
+      assert.equal(rolledForwardState.nextPaneOrdinalFence, 4,
+        "legacy claims continue using fresh fleet labels without reuse");
     } finally {
       await rollbackWriter.release();
     }

@@ -162,6 +162,7 @@ DECLARE
   fleet surf_ace_allocator.fleets%ROWTYPE;
   prior jsonb;
   label bigint;
+  generation_value bigint;
 BEGIN
   PERFORM surf_ace_allocator.assert_role('surf_ace_allocator_writer');
   PERFORM surf_ace_allocator.assert_token(p_fleet_id, p_generation, p_lease_id, 'writer');
@@ -205,11 +206,22 @@ BEGIN
       AND (j.event->>'paneId' = p_pane_id OR j.event->>'lineageId' = p_lineage_id)) THEN
     RAISE EXCEPTION 'pane identity conflicts with allocator history' USING ERRCODE = '23505';
   END IF;
+  -- A legacy caller still receives only the pane label, but the allocator
+  -- records its own generation so a later generation-aware registration can
+  -- resume this exact identity without inventing client authority.
+  generation_value := fleet.next_pane_allocation_generation_fence + 1;
+  IF generation_value > 9007199254740991 THEN
+    RAISE EXCEPTION 'pane allocation generation exceeds safe integer range' USING ERRCODE = '22003';
+  END IF;
   label := fleet.next_pane_ordinal_fence;
   IF label > 9007199254740991 THEN RAISE EXCEPTION 'pane ordinal exceeds safe integer range' USING ERRCODE = '22003'; END IF;
-  UPDATE surf_ace_allocator.fleets SET next_pane_ordinal_fence = label + 1 WHERE fleet_id = p_fleet_id;
+  UPDATE surf_ace_allocator.fleets SET
+    next_pane_ordinal_fence = label + 1,
+    next_pane_allocation_generation_fence = generation_value
+  WHERE fleet_id = p_fleet_id;
   PERFORM * FROM surf_ace_allocator.append_event(p_fleet_id, jsonb_build_object(
-    'allocatorId', fleet.allocator_id, 'clientId', p_client_id, 'fleetId', p_fleet_id,
+    'allocatorId', fleet.allocator_id, 'allocationGeneration', generation_value,
+    'clientId', p_client_id, 'fleetId', p_fleet_id,
     'paneId', p_pane_id, 'lineageId', p_lineage_id, 'paneLabel', label,
     'surfaceId', p_surface_id, 'type', 'pane-claimed'
   ));
