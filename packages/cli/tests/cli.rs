@@ -30,6 +30,8 @@ struct FakeWire {
     pair_protocol_features: Option<Vec<String>>,
     scope_summaries: Vec<Value>,
     sync_snapshots: Vec<Value>,
+    post_mutation_snapshots: Option<Vec<Value>>,
+    fail_post_mutation_sync: bool,
     sync_response_fault: Option<ResponseEnvelopeFault>,
     snapshot_payload: Option<Value>,
     panes_list_payload: Value,
@@ -76,6 +78,8 @@ impl FakeWire {
             pair_protocol_features: None,
             scope_summaries: vec![],
             sync_snapshots: vec![],
+            post_mutation_snapshots: None,
+            fail_post_mutation_sync: false,
             sync_response_fault: None,
             snapshot_payload: None,
             panes_list_payload: json!({
@@ -270,10 +274,15 @@ impl DirectWire for FakeWire {
                 Self::response(id, "consumable.ack.result", json!({ "accepted": true }))
             }
             "consumable.sync" => {
+                let committed = self.operations.iter().any(|op| matches!(op.as_str(), "content.set" | "content.clear" | "annotations.remove"));
+                if committed && self.fail_post_mutation_sync {
+                    return Err(WireFailure::AfterSend { code: "post_commit_fetch_lost".into() });
+                }
+                let snapshots = if committed { self.post_mutation_snapshots.as_ref().unwrap_or(&self.sync_snapshots) } else { &self.sync_snapshots };
                 let mut response = Self::response(
                     id,
                     "consumable.sync",
-                    json!({ "snapshots": self.sync_snapshots }),
+                    json!({ "snapshots": snapshots }),
                 );
                 if let Some(fault) = self.sync_response_fault {
                     fault.apply(&mut response.response);
@@ -3847,7 +3856,7 @@ fn control_pair_summaries_preserve_unread_records_and_pending_ack_intents() {
     assert_eq!(persisted["scopes"]["pane:sf_aleph:70"]["clientCursor"], 2);
     assert_eq!(
         persisted["scopes"]["pane:sf_aleph:70"]["synchronized"],
-        false
+        true
     );
     assert!(persisted["scopes"].get("pane:sf_aleph:69").is_none());
     assert!(!control
@@ -5380,4 +5389,57 @@ fn production_empty_scope_lifecycle_routes_pending_acks_after_listing() {
     );
     a_server.join().unwrap();
     assert_eq!(state()["acknowledgementOutbox"], json!([]));
+}
+
+#[test]
+fn control_mutation_refreshes_only_committed_payload_without_reading_or_acking_it() {
+    let temp = TempDir::new().unwrap();
+    let scope = "pane:sf_1:1";
+    let mut wire = compact_mutation_wire(scope);
+    let committed = pane_content_record("sf_1", 1, 2, Some("committed-new"), None);
+    wire.post_mutation_snapshots = Some(vec![pane_scope_snapshot(scope, 1, vec![committed.clone()])]);
+    execute_with_wire(compact_push(&temp), &mut wire).unwrap();
+    let state: Value = serde_json::from_slice(&fs::read(temp.path().join("controller-state.json")).unwrap()).unwrap();
+    assert_eq!(state["scopes"][scope]["synchronized"], true);
+    assert_eq!(state["scopes"][scope]["clientCursor"], 1);
+    assert_eq!(state["acknowledgementOutbox"], json!([]));
+    let syncs = wire.payloads.iter().filter(|(op,_)| op == "consumable.sync").collect::<Vec<_>>();
+    assert_eq!(syncs.len(), 2);
+    assert!(syncs.iter().all(|(_,p)| p["scopeIds"] == json!([scope])));
+    assert!(!wire.operations.iter().any(|op| op == "consumable.ack"));
+    let read = native_cli_read(&temp, scope);
+    assert_eq!(read["result"]["cacheStatus"], "current");
+    assert_eq!(read["result"]["currentContentRecord"], committed);
+}
+
+#[test]
+fn control_postcommit_fetch_failure_preserves_known_commit_and_unread_cache() {
+    let temp = TempDir::new().unwrap();
+    let scope = "pane:sf_1:1";
+    let mut wire = compact_mutation_wire(scope);
+    wire.fail_post_mutation_sync = true;
+    let error = execute_with_wire(compact_push(&temp), &mut wire).unwrap_err();
+    assert_eq!(error.code(), "projection_unavailable_after_commit");
+    assert_eq!(error.details()["committedResponse"]["ok"], true);
+    assert_eq!(error.details()["committedResponse"]["payload"]["operationReceipt"]["commitSequence"], 7);
+    let state: Value = serde_json::from_slice(&fs::read(temp.path().join("controller-state.json")).unwrap()).unwrap();
+    assert_eq!(state["scopes"][scope]["synchronized"], false);
+    assert_eq!(state["scopes"][scope]["records"][0]["payload"]["contentId"], "old-content");
+    assert_eq!(state["unresolved"], json!({}));
+    assert_eq!(state["acknowledgementOutbox"], json!([]));
+    assert_eq!(wire.operations.iter().filter(|op| *op == "content.set").count(), 1);
+    assert_eq!(native_cli_read(&temp, scope)["result"]["currentContentRecord"], Value::Null);
+}
+
+fn compact_mutation_wire(scope: &str) -> FakeWire {
+    let mut wire = FakeWire::ordinary();
+    wire.pair_projection = Some("control".into());
+    wire.pair_protocol_features = Some(vec!["control_projection_v1".into()]);
+    wire.scope_summaries = vec![json!({"scopeId":scope,"cursor":{"cursor":1,"gap":null,"gapGeneration":0},"firstRetainedSequence":1,"lastRetainedSequence":1})];
+    wire.sync_snapshots = vec![pane_scope_snapshot(scope, 1, vec![pane_content_record("sf_1",1,1,Some("old-content"),None)])];
+    wire
+}
+
+fn compact_push(temp: &TempDir) -> Invocation {
+    invocation(temp, Command::Push, json!({"surfaceId":"sf_1","paneId":1,"contentId":"committed-new","contentType":"markdown","content":{"markdown":"new"}}))
 }

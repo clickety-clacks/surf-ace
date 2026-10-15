@@ -1517,8 +1517,19 @@ fn execute_locked(
         if invocation.command.is_mutation()
             && result.get("ok").and_then(Value::as_bool) == Some(true)
         {
-            for scope_id in projection_scopes {
-                mark_scope_unsynchronized(root, &scope_id)?;
+            for scope_id in &projection_scopes {
+                mark_scope_unsynchronized(root, scope_id)?;
+            }
+            // A content/annotation commit does not push payload deltas in control
+            // mode. Hydrate only its scope so subsequent explicit local reads can
+            // see that committed result. target.apply only commits an async intent.
+            if invocation.command != crate::command::Command::TargetApply {
+                if let Err(error) = synchronize_scope_payloads(root, wire, projection_scopes) {
+                    let _ = wire.close();
+                    return Err(CliError::ProjectionAfterCommit {
+                        committed: Box::new(result), cause: error.to_string(),
+                    });
+                }
             }
         }
     } else {
@@ -2140,7 +2151,7 @@ fn encoded_surface_id(surface_id: &str) -> String {
     surface_id
         .bytes()
         .map(|byte| {
-            if byte.is_ascii_alphanumeric() || b"-_.!~*()\x27".contains(&byte) {
+            if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
                 char::from(byte).to_string()
             } else {
                 format!("%{byte:02X}")
@@ -2237,6 +2248,14 @@ fn synchronize_operation_scopes(
             ));
         }
     }
+    synchronize_scope_payloads(root, wire, required_scope_ids)
+}
+
+fn synchronize_scope_payloads(
+    root: &mut LockedStateRoot,
+    wire: &mut dyn DirectWire,
+    required_scope_ids: Vec<String>,
+) -> Result<(), CliError> {
     // Matching cursor, gap and retention metadata lets an existing local
     // snapshot remain current. The summaries themselves never supply records
     // or move a cursor; fetch only operation-relevant scopes that are stale.
@@ -3139,6 +3158,7 @@ pub enum CliError {
         request_id: String,
         cause: String,
     },
+    ProjectionAfterCommit { committed: Box<Value>, cause: String },
     Protocol(String),
     Rejected {
         operation: String,
@@ -3156,6 +3176,7 @@ impl CliError {
             Self::Input(_) => "invalid_input",
             Self::Discovery { code, .. } => code,
             Self::OutcomeUnknown { .. } => "outcome_unknown",
+            Self::ProjectionAfterCommit { .. } => "projection_unavailable_after_commit",
             Self::Protocol(_) => "protocol_error",
             Self::Rejected { .. } => "operation_rejected",
             Self::State(_) => "state_error",
@@ -3170,6 +3191,9 @@ impl CliError {
             Self::Discovery { details, .. } => details.clone(),
             Self::OutcomeUnknown { request_id, cause } => {
                 json!({ "cause": cause, "requestId": request_id })
+            }
+            Self::ProjectionAfterCommit { committed, cause } => {
+                json!({ "committedResponse": committed, "cause": cause, "cacheStatus": "unsynchronized" })
             }
             Self::Rejected { operation, code } => {
                 json!({ "operation": operation, "rejectionCode": code })
@@ -3187,6 +3211,7 @@ impl std::fmt::Display for CliError {
             Self::OutcomeUnknown { request_id, cause } => {
                 write!(formatter, "outcome_unknown:{request_id}:{cause}")
             }
+            Self::ProjectionAfterCommit { cause, .. } => write!(formatter, "projection_unavailable_after_commit:{cause}"),
             Self::Protocol(value) => write!(formatter, "protocol_error:{value}"),
             Self::Rejected { operation, code } => {
                 write!(formatter, "operation_rejected:{operation}:{code}")
