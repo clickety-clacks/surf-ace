@@ -4194,23 +4194,45 @@ test("a locally opened surface keeps its provisional letter out of public topolo
 });
 
 
-test("ordinary surface rollback restores failed content and authority without replacing another live surface", async () => {
+test("ordinary pane rollback restores failed content and authority without replacing sibling or other live panes", async () => {
   const core = new SurfaceCore();
   const viewport = { width: 800, height: 600, scale: 1 };
   const first = core.ensurePrimarySurface("changed", viewport);
   const paneId = applyProviderBootstrap(core, first.surfaceId, 1);
+  core.paneSplit(first.surfaceId, {
+    count: 2,
+    direction: "horizontal",
+    newPaneIds: [2],
+    newPaneLabels: [2],
+    paneId,
+  });
+  const sibling = core.getSurface(first.surfaceId).panes.get(2)!;
   const other = core.createAdditionalSurface("untouched", viewport);
   const otherPane = [...other.panes.values()][0]!;
   otherPane.externalNative = true;
+  core.locklessContentPush(first.surfaceId, {
+    content: { lines: ["prior"] },
+    contentId: "ct_prior",
+    contentType: "terminal",
+    paneId,
+  }, "fixture");
   const before = core.getPersistentState();
   const projected: string[] = [];
   core.subscribe((event) => projected.push(event.type));
   await assert.rejects(core.transactionAsync(async () => {
-    core.locklessPaneRename(first.surfaceId, paneId, "must roll back");
-    core.locklessAuthority.auditAccepted("rq_failed", "pane.rename", "controller", first.surfaceId, null);
+    core.locklessContentPush(first.surfaceId, {
+      content: { lines: ["rejected"] },
+      contentId: "ct_rejected",
+      contentType: "terminal",
+      paneId,
+    }, "fixture");
+    core.locklessAuthority.auditAccepted("rq_failed", "content.set", "controller", first.surfaceId, null);
     throw new Error("definite store failure");
-  }, { retainUncertainEvents: true, rollbackSurfaceId: first.surfaceId, onNotificationError: () => {} }), /definite store failure/);
+  }, { retainUncertainEvents: true, rollbackPane: { paneId, surfaceId: first.surfaceId }, onNotificationError: () => {} }), /definite store failure/);
   assert.deepEqual(core.getPersistentState(), before);
+  assert.equal(core.getRendererWindowState(first.surfaceId).panes[0]?.content.contentId, "ct_prior");
+  assert.equal(core.getSurface(first.surfaceId).panes.get(2), sibling,
+    "a rejected command on one pane does not recreate its sibling pane");
   assert.equal(core.getSurface(other.surfaceId), other);
   assert.equal(core.getSurface(other.surfaceId).panes.get(otherPane.paneId), otherPane);
   assert.equal(otherPane.externalNative, true, "another live guest is not recreated by a rejected command");
@@ -4228,7 +4250,7 @@ test("ordinary scoped rollback retains unknown candidate and publishes only exac
   await assert.rejects(core.transactionAsync(async () => {
     core.locklessPaneRename(surface.surfaceId, paneId, "candidate");
     throw new PersistentStateOutcomeUnknownError(new Error("selector outcome unknown"));
-  }, { retainUncertainEvents: true, rollbackSurfaceId: surface.surfaceId, onNotificationError: () => {} }), /outcome is unknown/);
+  }, { retainUncertainEvents: true, rollbackPane: { paneId, surfaceId: surface.surfaceId }, onNotificationError: () => {} }), /outcome is unknown/);
   assert.deepEqual(projected, []);
   const candidate = core.getPersistentState();
   const stale = structuredClone(candidate);

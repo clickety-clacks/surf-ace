@@ -1494,17 +1494,39 @@ export class LocklessClientAuthority {
   }
 
   reconcileAnnotationPublisherPartition(tombstoneId: string, publisherBytes: number): void {
+    const tombstone = this.state.tombstones.find((entry) =>
+      entry.tombstoneId === tombstoneId && entry.kind === "surface");
+    if (!tombstone) return;
+    this.setAnnotationPublisherPartition(tombstone, publisherBytes);
+  }
+
+  reconcileAnnotationPublisherPartitions(
+    partitionBytes: ((surfaceId: string) => number) | null,
+  ): void {
+    for (const tombstone of this.state.tombstones) {
+      if (tombstone.kind !== "surface") continue;
+      if (!partitionBytes) {
+        if ((tombstone.annotationPublisherPartitionBytes ?? 0) > 0) {
+          throw new TypeError("retained annotation publisher requires its source state");
+        }
+        continue;
+      }
+      this.setAnnotationPublisherPartition(tombstone, partitionBytes(tombstone.surfaceId));
+    }
+  }
+
+  private setAnnotationPublisherPartition(
+    tombstone: PersistentTombstone,
+    publisherBytes: number,
+  ): void {
     if (!Number.isSafeInteger(publisherBytes) || publisherBytes < 0 ||
         publisherBytes > (this.state.limits.maxAnnotationPublisherStateBytesPerSurface ?? 0)) {
       throw new LocklessAuthorityError("internal_error", "Invalid annotation publisher tombstone charge");
     }
-    const tombstone = this.state.tombstones.find((entry) =>
-      entry.tombstoneId === tombstoneId && entry.kind === "surface");
-    if (!tombstone || (tombstone.annotationPublisherPartitionBytes ?? 0) === publisherBytes) return;
+    if ((tombstone.annotationPublisherPartitionBytes ?? 0) === publisherBytes) return;
     if (publisherBytes > 0) tombstone.annotationPublisherPartitionBytes = publisherBytes;
     else delete tombstone.annotationPublisherPartitionBytes;
     refreshTombstoneBytes(tombstone);
-
   }
 
   private assertTombstoneNotRetired(tombstone: PersistentTombstone): void {

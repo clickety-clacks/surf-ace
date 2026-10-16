@@ -1499,8 +1499,13 @@ export class SurfaceWsServer {
                 "warn", "mutation_notification_failed", errorDiagnosticFields(error),
               ),
               ...(["target.register", "content.set", "content.append", "content.patch", "content.clear", "pane.rename"]
-                .includes(request.op) && session.surfaceId
-                ? { rollbackSurfaceId: session.surfaceId } : {}),
+                .includes(request.op) && session.surfaceId &&
+                  Number.isSafeInteger((request.payload as { paneId?: number }).paneId)
+                ? { rollbackPane: {
+                    paneId: Number((request.payload as { paneId: number }).paneId),
+                    surfaceId: session.surfaceId,
+                  } }
+                : {}),
             });
           } finally {
             this.activePaneMutation = null;
