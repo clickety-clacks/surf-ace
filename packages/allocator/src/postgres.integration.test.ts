@@ -21,6 +21,7 @@ import { SurfaceCore } from "../../electron/src/surface-core.js";
 import { AnnotationSourceCoordinator } from "../../electron/src/annotation-source-coordinator.js";
 import { SurfaceWsServer } from "../../electron/src/ws-server.js";
 import { AnnotationJournal } from "./annotation-journal.js";
+import { endpointLeaseGenerationRange } from "./endpoint-leases.js";
 import {
   type SurfAceDiscoveryEndpoint,
   type SurfAceDiscoveryService,
@@ -960,6 +961,12 @@ test("configured server registers two stable clients and deduplicates reconnect"
     assert.deepEqual((reconfirmed.payload as { registryIdentity: unknown }).registryIdentity, {
       allocatorId: "alloc_registration-test", fleetId: cluster.config.fleetId,
     });
+    const legacyPayload = reconfirmed.payload as Record<string, unknown>;
+    assert.equal(legacyPayload.directEndpoint, null);
+    assert.equal(legacyPayload.prePairDescribeV1, false);
+    assert.equal(legacyPayload.endpointLease, null);
+    assert.equal(legacyPayload.allocationGenerationV1, false);
+    assert.deepEqual(legacyPayload.completedPaneReleaseIds, []);
     const topology = async () => {
       const response = await reader!.request("fleet.topology");
       assert.equal(response.ok, true);
@@ -986,34 +993,42 @@ test("configured server registers two stable clients and deduplicates reconnect"
     clients.push(reconnect);
     await reconnect.synchronize();
     await reconnect.synchronize();
-    assert.deepEqual(await topology(), first);
+    assert.deepEqual((await topology()).clients, first.clients);
     assert.equal((await allocator.diagnostics()).assignmentCount, before.assignmentCount);
     assert.equal((await allocator.diagnostics()).nextOrdinalFence, before.nextOrdinalFence);
     await Promise.all([reconnect.synchronize(), clients[1].synchronize()]);
-    assert.deepEqual(await topology(), first);
+    assert.deepEqual((await topology()).clients, first.clients);
     const recycledPaneId = "recycled-pane-id";
-    const claim = async (lineage: string) => {
+    const claim = async (paneId: string, lineage: string) => {
       const response = await reader!.request("pane.claim", {
         clientId: fixtures[0].clientId,
         surfaceId: fixtures[0].surface.surfaceId,
-        paneId: recycledPaneId,
+        paneId,
         paneLineageId: lineage,
       });
-      assert.equal(response.ok, true);
+      assert.equal(response.ok, true, JSON.stringify(response));
       const label = (response.payload as { paneLabel: number }).paneLabel;
       assert.ok(Number.isSafeInteger(label) && label > 0);
       return label;
     };
-    const firstLineageLabel = await claim("pl_first-lifetime");
-    assert.equal(await claim("pl_first-lifetime"), firstLineageLabel,
+    const firstLineageLabel = await claim(recycledPaneId, "pl_first-lifetime");
+    assert.equal(await claim(recycledPaneId, "pl_first-lifetime"), firstLineageLabel,
       "reconnect must reuse the same durable pane claim");
-    const secondLineageLabel = await claim("pl_second-lifetime");
+    const recycledIdentity = await reader.request("pane.claim", {
+      clientId: fixtures[0].clientId,
+      surfaceId: fixtures[0].surface.surfaceId,
+      paneId: recycledPaneId,
+      paneLineageId: "pl_second-lifetime",
+    });
+    assert.equal(recycledIdentity.ok, false,
+      "a generation-unaware deployed client cannot reuse a pane ID with a new lineage");
+    const secondLineageLabel = await claim("fresh-pane-id", "pl_second-lifetime");
     assert.ok(secondLineageLabel > firstLineageLabel,
-      "a reused paneId with new lineage must receive a fresh fleet ordinal");
-    assert.equal(await claim("pl_second-lifetime"), secondLineageLabel);
+      "a new pane identity receives a fresh fleet ordinal");
+    assert.equal(await claim("fresh-pane-id", "pl_second-lifetime"), secondLineageLabel);
     const rejected = await reader.request("client.register", { clientId: "", surfaces: [] });
     assert.equal(rejected.ok, false);
-    assert.deepEqual(await topology(), first);
+    assert.deepEqual((await topology()).clients, first.clients);
   } finally {
     for (const client of clients) await client.stop();
     await reader?.close();
@@ -1021,6 +1036,229 @@ test("configured server registers two stable clients and deduplicates reconnect"
     await cluster.stop();
   }
 });
+
+test("registration negotiates rc11 endpoint leases only behind the writer fence", { timeout: 90_000 }, async () => {
+  const cluster = await startCluster();
+  let allocator: AllocatorServer | null = null;
+  let wire: WireClient | null = null;
+  const originalWitnessId = cluster.config.witnessServerId;
+  let bodyError: unknown;
+  try {
+    const recovery = await PostgresCustodyAdapter.initializeAbsentFleet(cluster.config, "alloc_rc11-compatibility");
+    await recovery.release();
+    allocator = await AllocatorServer.start(serverConfig(cluster));
+    wire = await WireClient.connect(allocator.address.url);
+
+    const clientId = createHash("sha256").update("deployed-client-upgraded-in-place").digest("hex");
+    const surfaceId = "sf_rc11-compatibility";
+    const paneId = "pane-1";
+    const paneLineageId = "pl_rc11-compatibility";
+    const directEndpoint = "wss://client.example:19001/ws";
+    const legacy = await wire.request("client.register", {
+      clientId,
+      surfaces: [{ surfaceId, panes: [{ paneId, paneLabel: 0, paneLineageId }] }],
+    });
+    assert.equal(legacy.ok, true, "the deployed r3 registration shape remains accepted");
+    const legacyResponse = legacy.payload as Record<string, unknown>;
+    assert.equal(legacyResponse.directEndpoint, null);
+    assert.equal(legacyResponse.prePairDescribeV1, false);
+    assert.equal(legacyResponse.endpointLease, null);
+    const legacySurface = (legacyResponse.surfaces as Array<{
+      panes: Array<{ paneId: string; paneLabel: number; paneLineageId: string; paneAddress: string }>;
+    }>)[0];
+    assert.deepEqual(legacySurface?.panes, [{ paneId, paneLabel: 1, paneLineageId, paneAddress: "a1" }],
+      "the deployed client receives its number-only pane assignment");
+
+    const registration = {
+      clientId,
+      directEndpoint,
+      allocationGenerationV1: true,
+      prePairDescribeV1: true,
+      pendingPaneReleases: [],
+      surfaces: [{
+        surfaceId,
+        panes: [{
+          allocationGeneration: null,
+          paneId,
+          paneLabel: 0,
+          paneLineageId,
+        }],
+      }],
+    };
+    const before = await allocator.diagnostics();
+    cluster.config.witnessServerId = "divergent-witness";
+    const degraded = await wire.request("fleet.topology", {});
+    assert.equal(degraded.ok, true);
+    assert.equal(degraded.payload?.registrationReady, false,
+      "a read-only readiness check discovers the divergent witness before any registration write");
+    const fenced = await wire.request("client.register", { ...registration, surfaces: [] });
+    assert.equal(fenced.ok, false, "an empty/first registration cannot bypass an unready writer");
+    const fenceError = fenced.error as { code?: unknown; message?: unknown } | undefined;
+    assert.equal(fenceError?.code, "registration_failed");
+    assert.equal(typeof fenceError?.message, "string");
+    assert.ok(String(fenceError?.message).length > 0,
+      "the registration response preserves a useful fail-closed reason");
+    assert.equal(fenced.payload, undefined, "a fenced registration carries no lease payload");
+
+    cluster.config.witnessServerId = originalWitnessId;
+    assert.equal((await allocator.diagnostics()).nextPaneOrdinalFence, before.nextPaneOrdinalFence,
+      "the refused registration commits no pane claim");
+
+    const restoredReadiness = await wire.request("fleet.topology", {});
+    assert.equal(restoredReadiness.ok, true);
+    assert.equal(restoredReadiness.payload?.registrationReady, true,
+      "read-only validation accepts the restored original witness before retry");
+    const accepted = await wire.request("client.register", registration);
+    assert.equal(accepted.ok, true, JSON.stringify(accepted));
+    assertRc11ConfiguredRegistration(accepted, clientId, directEndpoint);
+    const acceptedPayload = accepted.payload as {
+      completedPaneReleaseIds: string[];
+      endpointLease: { leaseGeneration: number; registrationObservedAtMs: number; leaseExpiresAtMs: number };
+      surfaces: Array<{ panes: Array<{ allocationGeneration: number; paneLabel: number }> }>;
+    };
+    const writerLeaseGeneration = (await allocator.diagnostics()).leaseGeneration;
+    assert.equal(acceptedPayload.endpointLease.leaseGeneration,
+      endpointLeaseGenerationRange(writerLeaseGeneration).first,
+      "the issued endpoint lease derives from this server's actual custody generation");
+    assert.deepEqual(acceptedPayload.completedPaneReleaseIds, []);
+    assert.ok(acceptedPayload.surfaces[0]?.panes[0]?.allocationGeneration > 0);
+    assert.ok(acceptedPayload.surfaces[0]?.panes[0]?.paneLabel > 0);
+    assert.equal((await allocator.diagnostics()).paneLabelReuseEnabled, false,
+      "compatibility does not enable pane-label reuse");
+
+    const renewed = await wire.request("client.register", registration);
+    assert.equal(renewed.ok, true);
+    const renewedLease = (renewed.payload as typeof acceptedPayload).endpointLease;
+    assert.equal(renewedLease.leaseGeneration, acceptedPayload.endpointLease.leaseGeneration);
+    assert.equal(renewedLease.registrationObservedAtMs, acceptedPayload.endpointLease.registrationObservedAtMs);
+    assert.ok(renewedLease.leaseExpiresAtMs >= acceptedPayload.endpointLease.leaseExpiresAtMs);
+
+    const pane = acceptedPayload.surfaces[0]?.panes[0];
+    assert.ok(pane);
+    const retirement = {
+      allocationGeneration: pane.allocationGeneration,
+      clientId,
+      closeRevision: 1,
+      lineageId: "pl_rc11-compatibility",
+      paneId: "pane-1",
+      paneLabel: pane.paneLabel,
+      surfaceId: "sf_rc11-compatibility",
+      terminalRetirementRevision: 2,
+      tombstoneId: "pt_rc11-compatibility",
+      tombstoneKind: "pane" as const,
+    };
+    const releaseId = createHash("sha256").update(JSON.stringify(retirement)).digest("hex");
+    const releaseRegistration = {
+      ...registration,
+      pendingPaneReleases: [{ ...retirement, releaseId }],
+      surfaces: [{ surfaceId: "sf_rc11-compatibility", panes: [] }],
+    };
+    const released = await wire.request("client.register", releaseRegistration);
+    assert.equal(released.ok, true);
+    const releasedPayload = released.payload as typeof acceptedPayload;
+    assert.deepEqual(releasedPayload.completedPaneReleaseIds, [releaseId],
+      "the release ACK names only the durable exact-generation retirement");
+    assert.deepEqual(releasedPayload.surfaces[0]?.panes, []);
+    const retriedRelease = await wire.request("client.register", releaseRegistration);
+    assert.equal(retriedRelease.ok, true);
+    assert.deepEqual((retriedRelease.payload as typeof acceptedPayload).completedPaneReleaseIds, [releaseId],
+      "an identical release retry returns its idempotent completion identity");
+    const nextPaneRegistration = {
+      ...registration,
+      surfaces: [{
+        surfaceId: "sf_rc11-compatibility",
+        panes: [{ allocationGeneration: null, paneId: "pane-2", paneLabel: 0, paneLineageId: "pl_rc11-next" }],
+      }],
+    };
+    const nextPane = await wire.request("client.register", nextPaneRegistration);
+    assert.equal(nextPane.ok, true);
+    assert.equal(((nextPane.payload as typeof acceptedPayload).surfaces[0]?.panes[0])?.paneLabel, 2,
+      "an acknowledged retirement does not enable label reuse during compatibility rollout");
+
+    const partialClientId = createHash("sha256").update("candidate-without-prepair-capability").digest("hex");
+    const partial = await wire.request("client.register", {
+      clientId: partialClientId,
+      directEndpoint,
+      allocationGenerationV1: true,
+      prePairDescribeV1: false,
+      pendingPaneReleases: [],
+      surfaces: [],
+    });
+    assert.equal(partial.ok, true);
+    const partialPayload = partial.payload as Record<string, unknown>;
+    assert.equal(partialPayload.directEndpoint, directEndpoint, "the endpoint is the supplied configuration");
+    assert.equal(partialPayload.prePairDescribeV1, false);
+    assert.equal(partialPayload.endpointLease, null, "lease issuance requires negotiated pre-pair support");
+
+    const invalidClientId = createHash("sha256").update("invalid-direct-endpoint").digest("hex");
+    const invalid = await wire.request("client.register", {
+      clientId: invalidClientId,
+      directEndpoint: "http://client.example:19001/ws",
+      allocationGenerationV1: true,
+      prePairDescribeV1: true,
+      pendingPaneReleases: [],
+      surfaces: [],
+    });
+    assert.equal(invalid.ok, false);
+    assert.match(String((invalid.error as { message?: unknown } | undefined)?.message), /invalid_direct_endpoint/);
+
+    const deployedR3Reply = {
+      type: "response", v: 1, op: "client.register", ok: true,
+      payload: {
+        clientId,
+        registryIdentity: { allocatorId: "alloc_rc11-compatibility", fleetId: cluster.config.fleetId },
+        surfaces: [],
+      },
+    };
+    assert.throws(() => assertRc11ConfiguredRegistration(deployedR3Reply, clientId, directEndpoint),
+      /invalid_registration_response/,
+      "the exact deployed r3 response shape cannot satisfy a configured rc11 client; roll clients back before the registry");
+  } catch (error) {
+    bodyError = error;
+    throw error;
+  } finally {
+    cluster.config.witnessServerId = originalWitnessId;
+    await wire?.close();
+    if (allocator) {
+      try {
+        await allocator.close();
+      } catch (error) {
+        if (bodyError === undefined) throw error;
+      }
+    }
+    await cluster.stop();
+  }
+});
+
+function assertRc11ConfiguredRegistration(
+  response: Record<string, unknown>,
+  clientId: string,
+  directEndpoint: string,
+): void {
+  // Response admission follows ConfiguredServerRegistration at rc11 source b23ed0d.
+  if (response.type !== "response" || response.v !== 1 || response.op !== "client.register" || response.ok !== true) {
+    throw new Error("invalid_registration_response");
+  }
+  const payload = response.payload as Record<string, unknown> | undefined;
+  const lease = payload?.endpointLease as Record<string, unknown> | null | undefined;
+  if (payload?.clientId !== clientId || payload.directEndpoint !== directEndpoint ||
+      payload.prePairDescribeV1 !== true || !lease ||
+      !Number.isSafeInteger(lease.leaseGeneration) || Number(lease.leaseGeneration) < 1 ||
+      !Number.isSafeInteger(lease.registrationObservedAtMs) ||
+      !Number.isSafeInteger(lease.leaseExpiresAtMs) ||
+      Number(lease.leaseExpiresAtMs) <= Number(lease.registrationObservedAtMs) ||
+      !Array.isArray(payload.completedPaneReleaseIds) || !Array.isArray(payload.surfaces)) {
+    throw new Error("invalid_registration_response");
+  }
+  for (const surface of payload.surfaces as Array<Record<string, unknown>>) {
+    if (!Array.isArray(surface.panes)) throw new Error("invalid_registration_response");
+    for (const pane of surface.panes as Array<Record<string, unknown>>) {
+      if (!Number.isSafeInteger(pane.allocationGeneration) || Number(pane.allocationGeneration) < 1) {
+        throw new Error("invalid_registration_response");
+      }
+    }
+  }
+}
 
 test("configured-first server in-process discovery fallback registers and persists clients", { timeout: 90_000 }, async () => {
   const cluster = await startCluster();
@@ -1171,16 +1409,16 @@ test("configured-first server in-process discovery fallback registers and persis
     clients.push(reconnect);
     await reconnect.synchronize();
     await reconnect.synchronize();
-    assert.deepEqual(await topology(), first);
+    assert.deepEqual((await topology()).clients, first.clients);
     assert.equal((await allocator.diagnostics()).assignmentCount, before.assignmentCount);
     assert.equal((await allocator.diagnostics()).nextOrdinalFence, before.nextOrdinalFence);
     await Promise.all([reconnect.synchronize(), clients[2].synchronize()]);
-    assert.deepEqual(await topology(), first);
+    assert.deepEqual((await topology()).clients, first.clients);
     const initialAccepts = configuredAccepts;
     // Failed probes leave healthy fallback usable and do not consume labels.
     await reconnect.synchronize();
     assert.equal(configuredAccepts, initialAccepts);
-    assert.deepEqual(await topology(), first);
+    assert.deepEqual((await topology()).clients, first.clients);
     allowConfigured = true;
     rejectRecoveryPersistence = true;
     recoveryWrites = 0;
@@ -1209,11 +1447,11 @@ test("configured-first server in-process discovery fallback registers and persis
     assert.match(JSON.stringify(acceptedDisk), /concurrent-accepted-name/);
     await waitForRouteIdle();
     assert.equal(routeSockets.size, 0, "failed persistence does not promote the configured route");
-    assert.deepEqual(await topology(), first);
+    assert.deepEqual((await topology()).clients, first.clients);
     rejectRecoveryPersistence = false;
     allowConfigured = false;
     await reconnect.synchronize();
-    assert.deepEqual(await topology(), first);
+      assert.deepEqual((await topology()).clients, first.clients);
     for (let cycle = 0; cycle < 2; cycle++) {
       allowConfigured = true;
       await reconnect.synchronize();
@@ -1221,13 +1459,13 @@ test("configured-first server in-process discovery fallback registers and persis
       const promotedAccepts = configuredAccepts;
       await reconnect.synchronize();
       assert.equal(configuredAccepts, promotedAccepts, "healthy configured socket is reused");
-      assert.deepEqual(await topology(), first);
+      assert.deepEqual((await topology()).clients, first.clients);
       assert.equal((await allocator.diagnostics()).nextOrdinalFence, before.nextOrdinalFence);
       allowConfigured = false;
       for (const socket of routeSockets) socket.destroy();
       await new Promise((resolve) => setTimeout(resolve, 50));
       await reconnect.synchronize();
-      assert.deepEqual(await topology(), first);
+      assert.deepEqual((await topology()).clients, first.clients);
     }
     allowConfigured = true;
     await reconnect.synchronize();
@@ -1236,7 +1474,7 @@ test("configured-first server in-process discovery fallback registers and persis
     assert.equal(routeSockets.size, 0, "shutdown closes configured route sockets");
     const rejected = await reader.request("client.register", { clientId: "", surfaces: [] });
     assert.equal(rejected.ok, false);
-    assert.deepEqual(await topology(), first);
+    assert.deepEqual((await topology()).clients, first.clients);
   } finally {
     for (const client of clients) await client.stop();
     await reader?.close();
@@ -1277,11 +1515,16 @@ test("v0.2.3 custody migrates without changing its witnessed head", { timeout: 1
 
     await adminQuery(cluster.adminUrl, `BEGIN;
       SET ROLE surf_ace_allocator_owner;
-      UPDATE surf_ace_allocator.fleets SET next_pane_ordinal_fence = 2 WHERE fleet_id = 'fleet-test';
+      UPDATE surf_ace_allocator.fleets SET next_pane_ordinal_fence = 3 WHERE fleet_id = 'fleet-test';
       SELECT * FROM surf_ace_allocator.append_event('fleet-test', jsonb_build_object(
         'allocatorId', 'alloc_migration-test', 'clientId', repeat('a', 64),
         'fleetId', 'fleet-test', 'lineageId', 'pl_migrated_legacy_pane',
         'paneId', 'pane-legacy', 'paneLabel', 1, 'surfaceId', 'sf_migrated_legacy',
+        'type', 'pane-claimed'));
+      SELECT * FROM surf_ace_allocator.append_event('fleet-test', jsonb_build_object(
+        'allocatorId', 'alloc_migration-test', 'clientId', repeat('a', 64),
+        'fleetId', 'fleet-test', 'lineageId', 'pl_migrated_reused_lineage',
+        'paneId', 'pane-legacy', 'paneLabel', 2, 'surfaceId', 'sf_migrated_legacy',
         'type', 'pane-claimed'));
       RESET ROLE;
       COMMIT;
@@ -1292,10 +1535,53 @@ test("v0.2.3 custody migrates without changing its witnessed head", { timeout: 1
       "SELECT surf_ace_allocator.read_accepted_state('fleet-test')->'paneMappings'->0->>'paneLabel'");
     const migratedGeneration = await scalar(cluster.adminUrl,
       "SELECT surf_ace_allocator.read_accepted_state('fleet-test')->'paneMappings'->0->>'allocationGeneration'");
+    const reusedPaneLabel = await scalar(cluster.adminUrl,
+      "SELECT surf_ace_allocator.read_accepted_state('fleet-test')->'paneMappings'->1->>'paneLabel'");
+    const reusedLineage = await scalar(cluster.adminUrl,
+      "SELECT surf_ace_allocator.read_accepted_state('fleet-test')->'paneMappings'->1->>'lineageId'");
+    const reusedGeneration = await scalar(cluster.adminUrl,
+      "SELECT surf_ace_allocator.read_accepted_state('fleet-test')->'paneMappings'->1->>'allocationGeneration'");
     const migratedFence = await scalar(cluster.adminUrl,
       "SELECT surf_ace_allocator.read_accepted_state('fleet-test')->>'nextPaneAllocationGenerationFence'");
-    assert.deepEqual([migratedLabel, migratedGeneration, migratedFence], ["1", "1", "1"],
-      "legacy migration binds the existing label to a generation without renumbering it");
+    assert.deepEqual([migratedLabel, migratedGeneration, reusedPaneLabel, reusedLineage,
+      reusedGeneration, migratedFence], ["1", "1", "2", "pl_migrated_reused_lineage", "2", "2"],
+    "migration preserves both historical labels and derives distinct allocator generations");
+
+    const rollbackWriter = await PostgresCustodyAdapter.acquireWriter(cluster.config);
+    try {
+      assert.equal(await rollbackWriter.claimPane(
+        "a".repeat(64), "sf_migrated_legacy", "pane-legacy", "pl_migrated_legacy_pane",
+      ), 1, "the deployed number-only claim remains readable after schema rollout");
+      assert.deepEqual(await rollbackWriter.claimPaneWithGeneration(
+        "a".repeat(64), "sf_migrated_legacy", "pane-legacy", "pl_migrated_reused_lineage",
+      ), { paneLabel: 2, allocationGeneration: 2 },
+      "current registration resumes the exact migrated lineage despite an older lineage sharing its pane ID");
+      await assert.rejects(rollbackWriter.claimPaneWithGeneration(
+        "a".repeat(64), "sf_migrated_legacy", "pane-legacy", "pl_migrated_unknown_lineage",
+      ), (error) => error instanceof AllocatorError && error.code === "assignment_conflict",
+      "an unknown lineage cannot inherit a reused pane ID from historical state");
+
+      const legacyLabel = await rollbackWriter.claimPane(
+        "a".repeat(64), "sf_migrated_legacy", "pane-after-migration", "pl_post_migration_legacy",
+      );
+      assert.equal(legacyLabel, 3, "legacy registration retains monotonic label allocation after migration");
+      const legacyState = await rollbackWriter.readAcceptedState();
+      const legacyMapping = legacyState.paneMappings.find((pane) => pane.lineageId === "pl_post_migration_legacy");
+      assert.equal(legacyMapping?.allocationGeneration, 3,
+        "the allocator records its own generation for a post-migration legacy claim");
+      assert.deepEqual(await rollbackWriter.claimPaneWithGeneration(
+        "a".repeat(64), "sf_migrated_legacy", "pane-after-migration", "pl_post_migration_legacy",
+      ), { paneLabel: 3, allocationGeneration: 3 },
+      "a current client can resume a legacy claim made after migration without fabricated generation data");
+      const rolledForwardState = await rollbackWriter.readAcceptedState();
+      assert.equal(rolledForwardState.paneLabelReuseEnabled, false,
+        "candidate rollout leaves reuse disabled for deployed clients and rollback readers");
+      assert.equal(rolledForwardState.paneMappings.find((pane) => pane.paneId === "pane-legacy")?.paneLabel, 1);
+      assert.equal(rolledForwardState.nextPaneOrdinalFence, 4,
+        "legacy claims continue using fresh fleet labels without reuse");
+    } finally {
+      await rollbackWriter.release();
+    }
   } finally {
     await cluster.stop();
   }
