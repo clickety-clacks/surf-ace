@@ -2191,6 +2191,114 @@ test("annotation pressure compacts only acknowledged history and refuses when re
   }
 });
 
+test("pane allocation generations release exact tombstoned identities and gate safe reuse", { timeout: 180_000 }, async () => {
+  const cluster = await startCluster();
+  let writer: Awaited<ReturnType<typeof PostgresCustodyAdapter.acquireWriter>> | null = null;
+  try {
+    const recovery = await PostgresCustodyAdapter.initializeAbsentFleet(cluster.config, "alloc_pane-reuse");
+    await recovery.release();
+    writer = await PostgresCustodyAdapter.acquireWriter(cluster.config);
+    const clientId = "a".repeat(64);
+    const firstIdentity = { clientId, surfaceId: "sf_pane_reuse", paneId: "pane-1", lineageId: "pl_pane_reuse_1" };
+    const first = await writer.claimPaneWithGeneration(
+      firstIdentity.clientId, firstIdentity.surfaceId, firstIdentity.paneId, firstIdentity.lineageId,
+    );
+    assert.deepEqual(first, { paneLabel: 1, allocationGeneration: 1 });
+    const preReleaseSnapshot = restoreSnapshot(await writer.readAcceptedState());
+    assert.equal((await writer.readAcceptedState()).paneLabelReuseEnabled, false);
+    const offlineReservation = await writer.claimPaneWithGeneration(
+      clientId, "sf_pane_reuse", "pane-offline", "pl_pane_reuse_offline",
+    );
+    assert.deepEqual(offlineReservation, { paneLabel: 2, allocationGeneration: 2 },
+      "an allocation without an exact retirement release remains reserved while its client is offline");
+    const retirement = {
+      ...firstIdentity, paneLabel: first.paneLabel, allocationGeneration: first.allocationGeneration,
+      tombstoneId: "pt_first", tombstoneKind: "pane" as const, closeRevision: 1,
+      terminalRetirementRevision: 2,
+    };
+    await assert.rejects(writer.releasePaneGeneration({
+      ...retirement, allocationGeneration: first.allocationGeneration + 1,
+    }), (error) => error instanceof AllocatorError && error.code === "assignment_conflict");
+    assert.equal((await writer.readAcceptedState()).paneMappings[0]?.paneLabel, first.paneLabel,
+      "a wrong-generation retirement cannot make the number available");
+    await writer.releasePaneGeneration(retirement);
+    await writer.releasePaneGeneration(retirement);
+    const second = await writer.claimPaneWithGeneration(clientId, "sf_pane_reuse", "pane-2", "pl_pane_reuse_2");
+    assert.deepEqual(second, { paneLabel: 3, allocationGeneration: 3 }, "reuse stays off until fleet compatibility is attested");
+
+    await adminQuery(cluster.adminUrl, `BEGIN;
+      SET ROLE surf_ace_allocator_owner;
+      SELECT surf_ace_allocator.set_pane_label_reuse_ready('fleet-test',
+        '{"allocator":true,"clients":true,"backupReaders":true,"referenceResolvers":true,"rollbackReaders":true}'::jsonb);
+      RESET ROLE;
+      COMMIT;`);
+    const legacyReconnection = await writer.claimPane(
+      clientId, "sf_pane_reuse", "pane-2", "pl_pane_reuse_2",
+    );
+    assert.equal(legacyReconnection, 3);
+    assert.equal((await writer.readAcceptedState()).paneLabelReuseEnabled, false,
+      "a generation-unaware reconnect closes the gate even for an existing claim");
+    await adminQuery(cluster.adminUrl, `BEGIN;
+      SET ROLE surf_ace_allocator_owner;
+      SELECT surf_ace_allocator.set_pane_label_reuse_ready('fleet-test',
+        '{"allocator":true,"clients":true,"backupReaders":true,"referenceResolvers":true,"rollbackReaders":true}'::jsonb);
+      RESET ROLE;
+      COMMIT;`);
+    const reused = await writer.claimPaneWithGeneration(clientId, "sf_pane_reuse", "pane-3", "pl_pane_reuse_3");
+    assert.deepEqual(reused, { paneLabel: 1, allocationGeneration: 4 });
+
+    await writer.release();
+    writer = null;
+    const restoreRecovery = await PostgresCustodyAdapter.acquireRecovery(cluster.config);
+    try {
+      const restoreId = `restore_pane_reuse_${Date.now()}`;
+      const witness = await restoreRecovery.readWitness();
+      await restoreRecovery.stageRestore(restoreId, `${restoreId}_idem`, preReleaseSnapshot, witness);
+      const ready = await restoreRecovery.markRestoreReady(restoreId);
+      await restoreRecovery.activateRestore(restoreId, ready);
+      const restored = await restoreRecovery.readAcceptedState();
+      assert.equal(restored.nextPaneAllocationGenerationFence, 4,
+        "rollback to an older snapshot replays later allocation generations");
+      assert.equal(restored.paneLabelReuseEnabled, true,
+        "allocator restore replays the owner compatibility gate state");
+      assert.deepEqual(restored.paneMappings.map(({ paneLabel, allocationGeneration }) => ({ paneLabel, allocationGeneration })), [
+        { paneLabel: 1, allocationGeneration: 4 },
+        { paneLabel: 2, allocationGeneration: 2 },
+        { paneLabel: 3, allocationGeneration: 3 },
+      ], "an old snapshot cannot resurrect a retired allocation or displace the new occupant");
+    } finally {
+      await restoreRecovery.release();
+    }
+    writer = await PostgresCustodyAdapter.acquireWriter(cluster.config);
+
+    await assert.rejects(writer.claimPaneWithGeneration(
+      firstIdentity.clientId, firstIdentity.surfaceId, firstIdentity.paneId, firstIdentity.lineageId,
+    ), /terminally retired pane identity/);
+    await assert.rejects(writer.releasePaneGeneration({
+      ...retirement, closeRevision: retirement.closeRevision + 1,
+    }), /pane release identity already has different evidence/,
+    "a retry with changed tombstone evidence cannot release an allocation");
+
+    const legacyLabel = await writer.claimPane(clientId, "sf_pane_reuse", "pane-legacy", "pl_pane_reuse_legacy");
+    assert.equal(legacyLabel, 4, "generation-unaware claims use the monotonic fence");
+    const afterLegacy = await writer.readAcceptedState();
+    assert.equal(afterLegacy.paneLabelReuseEnabled, false, "legacy claim closes the reuse gate");
+    const afterLegacyNew = await writer.claimPaneWithGeneration(clientId, "sf_pane_reuse", "pane-4", "pl_pane_reuse_4");
+    assert.deepEqual(afterLegacyNew, { paneLabel: 5, allocationGeneration: 5 });
+    const active = await writer.readAcceptedState();
+    assert.deepEqual(active.paneMappings.map(({ paneLabel, allocationGeneration }) => ({ paneLabel, allocationGeneration })), [
+      { paneLabel: 1, allocationGeneration: 4 },
+      { paneLabel: 2, allocationGeneration: 2 },
+      { paneLabel: 3, allocationGeneration: 3 },
+      { paneLabel: 4, allocationGeneration: null },
+      { paneLabel: 5, allocationGeneration: 5 },
+    ]);
+  } finally {
+    await writer?.release();
+    await cluster.stop();
+  }
+});
+
 async function startCluster(schemaVersion: "current" | "v0.2.3" = "current"): Promise<TestCluster> {
   const root = await mkdtemp(join(process.cwd(), ".allocator-pg-"));
   const primaryData = join(root, "primary");
@@ -2414,6 +2522,8 @@ function restoreSnapshot(state: AcceptedState): RestoreSnapshot {
     mappings: state.mappings.map((mapping) => ({ ...mapping })),
     nextOrdinalFence: state.nextOrdinalFence,
     nextPaneOrdinalFence: state.nextPaneOrdinalFence,
+    nextPaneAllocationGenerationFence: state.nextPaneAllocationGenerationFence,
+    paneLabelReuseEnabled: state.paneLabelReuseEnabled,
     paneMappings: state.paneMappings.map((mapping) => ({ ...mapping })),
     stateVersion: state.stateVersion,
     transactions: state.transactions.map((transaction) => ({ ...transaction })),

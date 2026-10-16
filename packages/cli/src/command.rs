@@ -8,9 +8,12 @@ const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
 #[serde(rename_all = "kebab-case")]
 pub enum Command {
     FleetList,
+    WindowDescribe,
     List,
+    PaneDescribe,
     Push,
     Read,
+    Sync,
     TopologyIntent,
     TopologyRealize,
     Clear,
@@ -22,11 +25,14 @@ pub enum Command {
 }
 
 impl Command {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 15] = [
         Self::FleetList,
+        Self::WindowDescribe,
         Self::List,
+        Self::PaneDescribe,
         Self::Push,
         Self::Read,
+        Self::Sync,
         Self::TopologyIntent,
         Self::TopologyRealize,
         Self::Clear,
@@ -46,9 +52,12 @@ impl Command {
     pub const fn name(self) -> &'static str {
         match self {
             Self::FleetList => "fleet-list",
+            Self::WindowDescribe => "window-describe",
             Self::List => "list",
+            Self::PaneDescribe => "pane-describe",
             Self::Push => "push",
             Self::Read => "read",
+            Self::Sync => "sync",
             Self::TopologyIntent => "topology-intent",
             Self::TopologyRealize => "topology-realize",
             Self::Clear => "clear",
@@ -67,7 +76,13 @@ impl Command {
     pub const fn is_mutation(self) -> bool {
         !matches!(
             self,
-            Self::FleetList | Self::List | Self::Read | Self::CapturePane
+            Self::FleetList
+                | Self::WindowDescribe
+                | Self::List
+                | Self::PaneDescribe
+                | Self::Read
+                | Self::Sync
+                | Self::CapturePane
         )
     }
 
@@ -75,9 +90,12 @@ impl Command {
         self.validate(input)?;
         match self {
             Self::FleetList => Err("fleet_list_requires_registry".into()),
+            Self::WindowDescribe => Err("window_describe_requires_registry".into()),
             Self::List => Ok("surfaces.list"),
+            Self::PaneDescribe => Ok("panes.list"),
             Self::Push => Ok("content.set"),
             Self::Read => Err("read_is_local".into()),
+            Self::Sync => Ok("consumable.sync"),
             Self::TopologyIntent => match string(input, "action")? {
                 "split" => Ok("pane.split"),
                 "close" => Ok("pane.close"),
@@ -107,6 +125,13 @@ impl Command {
                     return Err("invalid_input:fleet_list_properties".into());
                 }
             }
+            Self::WindowDescribe => {
+                exact_fields(input, &["windowLabel"], &[])?;
+                let label = required_string(input, "windowLabel")?;
+                if label.len() > 64 || !label.bytes().all(|byte| byte.is_ascii_lowercase()) {
+                    return Err("invalid_input:windowLabel".into());
+                }
+            }
             Self::List => {
                 if !input.is_empty() {
                     return Err("invalid_input:list_properties".into());
@@ -125,9 +150,28 @@ impl Command {
                 optional_object(input, "display")?;
                 optional_string(input, "friendlyChatName")?;
             }
+            Self::Sync => {
+                exact_fields(input, &["surfaceId", "scopeIds"], &[])?;
+                required_string(input, "surfaceId")?;
+                let ids = required(input,"scopeIds")?.as_array().ok_or("invalid_input:scopeIds")?;
+                let mut seen = std::collections::BTreeSet::new();
+                if ids.is_empty() || ids.iter().any(|v| v.as_str().is_none_or(|id| id.is_empty() || !seen.insert(id))) {
+                    return Err("invalid_input:scopeIds".into());
+                }
+            }
             Self::Read => {
                 exact_fields(input, &["scopeId"], &[])?;
                 required_string(input, "scopeId")?;
+            }
+            Self::PaneDescribe => {
+                exact_fields(
+                    input,
+                    &["expectedControllerInstanceId", "paneId", "surfaceId"],
+                    &[],
+                )?;
+                required_string(input, "expectedControllerInstanceId")?;
+                required_string(input, "surfaceId")?;
+                positive_integer(input, "paneId")?;
             }
             Self::TopologyIntent => {
                 required_string(input, "surfaceId")?;
@@ -349,6 +393,10 @@ impl Command {
             }
             Self::SurfaceIntent => {
                 input.remove("action");
+            }
+            Self::PaneDescribe => {
+                input.remove("expectedControllerInstanceId");
+                input.remove("paneId");
             }
             _ => {}
         }

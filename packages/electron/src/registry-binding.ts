@@ -34,7 +34,8 @@ export function matchesProvisionedClaims(
       const expectedPane = panes.get(pane.paneId);
       if (!expectedPane || seenPanes.has(pane.paneId) ||
           expectedPane.paneLabel !== pane.paneLabel ||
-          expectedPane.paneLineageId !== pane.paneLineageId) return false;
+          expectedPane.paneLineageId !== pane.paneLineageId ||
+          (expectedPane.allocationGeneration ?? null) !== (pane.allocationGeneration ?? null)) return false;
       seenPanes.add(pane.paneId);
     }
   }
@@ -58,7 +59,9 @@ export async function loadProvisionedRegistryBinding(stateDir: string): Promise<
         typeof claim.surfaceId === "string" && typeof claim.windowLabel === "string" &&
         Array.isArray(claim.panes) && claim.panes.length > 0 && claim.panes.every((pane) =>
           typeof pane.paneId === "string" && Number.isSafeInteger(pane.paneLabel) && pane.paneLabel > 0 &&
-          typeof pane.paneLineageId === "string"))) {
+          typeof pane.paneLineageId === "string" &&
+          (pane.allocationGeneration === undefined || pane.allocationGeneration === null ||
+            (Number.isSafeInteger(pane.allocationGeneration) && pane.allocationGeneration > 0))))) {
     throw new Error("invalid_provisioned_registry_binding");
   }
   return value;

@@ -1,6 +1,10 @@
+import { ConfirmedAnnotationLocalSaves } from "./annotation-local-save.js";
+import { createPanePaintCaptureAdapter, PANE_PAINT_DOCUMENT_RECIPE } from "./pane-paint-capture-adapter.js";
+import { FreshPanePaintReads, NativePanePaintOwners, rendererPaintMatchesAuthority, type PanePaintAuthority, type PaintOwner } from "./pane-paint-owner-bridge.js";
 import { ServerConnection } from "./server-connection.js";
+import { splitResizeMatches, splitResizeIsNoOp } from "./split-resize.js";
 import fs from "node:fs/promises";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 
@@ -16,6 +20,7 @@ import {
   type ContextMenuParams,
   type MenuItemConstructorOptions,
   type WebContents,
+  type WebFrameMain,
 } from "electron";
 
 import type { ContentSetRequest, RuntimeAppBindingDiagnostics, Stroke } from "../../protocol/src/index.js";
@@ -71,8 +76,14 @@ import {
 } from "./runtime-identity.js";
 import { isAddressInUse, isPortBoundOnIpv6Any } from "./port-selection.js";
 import { SurfaceWsServer } from "./ws-server.js";
+import { PANE_PRESENTATION_ENABLED } from "./pane-presentation-policy.js";
+import { PanePresentationCoordinator } from "./pane-presentation-coordinator.js";
+import { NativePresentationWindowBinding, panePresentationWindowRoute } from "./pane-presentation.js";
+import { PersistenceWriteReadiness } from "./persistence-write-readiness.js";
 import { AnnotationRegistryPublisher } from "./annotation-registry-publisher.js";
 import { AnnotationSourceCoordinator } from "./annotation-source-coordinator.js";
+import { AnnotationDoneFence } from "./annotation-done-state.js";
+import { annotationDoneContextKey, parseAnnotationDoneContext } from "./annotation-done-context.js";
 import { restoreWindowPlacement, type WindowPlacement } from "./window-placement.js";
 import { shouldDisableGpuForSoftwareCapture, surfaceWindowCaptureMode, surfaceWindowLoadQuery, surfaceWindowOptions } from "./window-options.js";
 
@@ -87,6 +98,7 @@ const SURF_ACE_WEBAUTHN_KEYCHAIN_ACCESS_GROUP = "Z7R59J7QV8.ai.surf-ace.electron
 let persistentStateWriteGuard: PersistentStateLoadResult["writeGuard"] = false;
 let persistentStateOutcomeUnknown: PersistentStateOutcomeUnknownError | null = null;
 let uncertainStateCandidate: PersistentSurfaceState | null = null;
+const confirmedAnnotationLocalSaves = new ConfirmedAnnotationLocalSaves();
 let persistenceRecoveryTimer: NodeJS.Timeout | null = null;
 let persistenceRetryDelayMs = 1_000;
 let providerEndpointAvailable = false;
@@ -166,6 +178,44 @@ function configurePlatformWebAuthn(): void {
 configurePlatformWebAuthn();
 
 const windows = new Map<string, BrowserWindow>();
+const nativePresentationWindowBinding = new NativePresentationWindowBinding(
+  process.pid, process.env.SURF_ACE_COMPOSITOR_LAUNCH_TOKEN,
+);
+let panePresentation: PanePresentationCoordinator | null = null;
+function reconcilePresentationWindowOwnership(): void {
+  const owned = resolveCompositorControlSocketPath()
+    ? [...windows.entries()].filter(([, window]) => !window.isDestroyed()).map(([surfaceId]) => surfaceId) : null;
+  void panePresentation?.setOwnedWindows(owned).catch((error) => clientWarn("pane_presentation_ownership_retirement_failed", errorDiagnosticFields(error)));
+}
+// Remains disabled until qualified adapter/WS integration and independent review.
+const panePaintDiagnosticEnabled = false;
+const paintWindowIncarnations = new WeakMap<BrowserWindow, string>();
+function nativePaintFrameKey(frame: WebFrameMain): string {
+  if (frame.isDestroyed() || frame.detached || ![frame.frameTreeNodeId,frame.processId,frame.routingId].every(value=>Number.isSafeInteger(value)&&value>=0) || frame.processId===0) throw Error("native frame unavailable");
+  return `${frame.frameTreeNodeId}:${frame.processId}:${frame.routingId}`;
+}
+function currentPaintOwner(surfaceId: string): PaintOwner<BrowserWindow, WebContents, WebFrameMain> | null {
+  try {
+    const window = windows.get(surfaceId), incarnation = window && paintWindowIncarnations.get(window);
+    if (!window || !incarnation || window.isDestroyed() || window.webContents.isDestroyed()) return null;
+    const frame = window.webContents.mainFrame;
+    if (frame.isDestroyed() || frame.detached) return null;
+    return { window, host: window.webContents, frame, surfaceId, windowInstanceId: incarnation, hostId: window.webContents.id, hostFrameKey: nativePaintFrameKey(frame) };
+  } catch { return null; }
+}
+const paintRendererReads = new FreshPanePaintReads<BrowserWindow, WebContents, WebFrameMain>({
+  owner: currentPaintOwner,
+  send: (owner, request) => {
+    if (!panePaintDiagnosticEnabled) throw Error("pane paint disabled");
+    owner.host.send("surface:pane-paint-read", request);
+  },
+});
+const paintNativeOwners = new NativePanePaintOwners<BrowserWindow, WebContents, WebFrameMain, WebContents>({
+  owner: currentPaintOwner, guestId: guest => guest.id, host: guest => guest.hostWebContents,
+  frame: guest => guest.mainFrame, frameKey: nativePaintFrameKey,
+  alive: guest => !guest.isDestroyed(),
+});
+
 const programmaticSurfaceCloses = new Set<string>();
 const pendingWindowStates = new Map<string, RendererWindowState>();
 const browserUrlWebContentsPanes = new Map<number, { paneId: number; surfaceId: string }>();
@@ -191,6 +241,10 @@ let advertiser: BonjourAdvertiser | null = null;
 let configuredRegistration: ServerConnection | null = null;
 let annotationRegistryPublisher: AnnotationRegistryPublisher | null = null;
 let annotationSourceCoordinator: AnnotationSourceCoordinator | null = null;
+const annotationDoneFence = new AnnotationDoneFence((scope) => {
+  const [surfaceId] = JSON.parse(scope) as [string, number];
+  broadcastSurfaceState(surfaceId);
+});
 let advertiserTxtRefreshTimer: NodeJS.Timeout | null = null;
 let core: SurfaceCore;
 let distDir = "";
@@ -199,6 +253,7 @@ let isQuitting = false;
 let server: SurfaceWsServer;
 let stateDir = "";
 let stateWrite = Promise.resolve();
+const persistentStateWriteReadiness = new PersistenceWriteReadiness();
 
 function candidatePorts(preferredPort: number): number[] {
   if (EXPLICIT_WS_PORT) {
@@ -224,6 +279,9 @@ function createServer(coreValue: SurfaceCore): SurfaceWsServer {
       hostName: shortHostName(),
       getOverlayDiagnostics: (surfaceId) => overlayDiagnostics.get(surfaceId) ?? null,
       getRuntimeAppBinding: refreshRuntimeAppBindingDiagnostics,
+      beginApplicationStateMutation: () => persistentStateWriteReadiness.beginAuthorityMutation(),
+      isApplicationStateReady: () => persistentStateWriteReadiness.isReady &&
+        !persistentStateWriteGuard && !persistentStateOutcomeUnknown,
       onNativeMaterialized: (surfaceId, materialization) => {
         recordNativePaneInstances(surfaceId, materialization);
         broadcastSurfaceState(surfaceId);
@@ -422,6 +480,7 @@ async function loadPersistentState(): Promise<PersistentSurfaceState | undefined
       primary_surface_id: result.state.primarySurfaceId,
       surface_count: result.state.surfaces?.length ?? 0,
     });
+    if (!result.writeGuard) confirmedAnnotationLocalSaves.confirm(result.state);
     return result.state;
   }
   clientInfo("state_restore_read_miss", {
@@ -441,34 +500,37 @@ async function persistState(): Promise<void> {
     });
     throw new PersistentStateWriteGuardError(persistentStateWriteGuard);
   }
-  // Bind this write to the state that requested it. A later source mutation
-  // must enqueue its own write before the publisher can send its bytes.
-  const candidate = core.getPersistentState();
-  stateWrite = stateWrite
-    .catch(() => {})
-    .then(async () => {
-      if (persistentStateOutcomeUnknown) throw new Error("Local persistence is paused pending reconciliation");
-      try {
-        await writePersistentStateFile(stateDir, STATE_FILE_NAME, candidate);
-      } catch (error) {
-        if (error instanceof PersistentStateOutcomeUnknownError) {
-          uncertainStateCandidate = candidate;
+  await persistentStateWriteReadiness.track(async () => {
+    // Bind this write to the state that requested it. A later source mutation
+    // must enqueue its own write before the publisher can send its bytes.
+    const candidate = core.getPersistentState();
+    stateWrite = stateWrite
+      .catch(() => {})
+      .then(async () => {
+        if (persistentStateOutcomeUnknown) throw new Error("Local persistence is paused pending reconciliation");
+        try {
+          await writePersistentStateFile(stateDir, STATE_FILE_NAME, candidate);
+          confirmedAnnotationLocalSaves.confirm(candidate);
+        } catch (error) {
+          if (error instanceof PersistentStateOutcomeUnknownError) {
+            uncertainStateCandidate = candidate;
+          }
+          throw error;
         }
-        throw error;
+      });
+    try {
+      await stateWrite;
+    } catch (error) {
+      if (error instanceof PersistentStateOutcomeUnknownError) {
+        persistentStateOutcomeUnknown = error;
+        persistentStateWriteGuard = "ambiguous-persistence";
+        server?.failStopPersistence(error);
+        for (const surface of core.listSurfaces()) broadcastSurfaceState(surface.surfaceId);
+        schedulePersistenceReconciliation();
       }
-    });
-  try {
-    await stateWrite;
-  } catch (error) {
-    if (error instanceof PersistentStateOutcomeUnknownError) {
-      persistentStateOutcomeUnknown = error;
-      persistentStateWriteGuard = "ambiguous-persistence";
-      server?.failStopPersistence(error);
-      for (const surface of core.listSurfaces()) broadcastSurfaceState(surface.surfaceId);
-      schedulePersistenceReconciliation();
+      throw error;
     }
-    throw error;
-  }
+  });
 }
 
 async function persistRegistryState(): Promise<void> {
@@ -518,12 +580,16 @@ async function reconcilePersistence(): Promise<void> {
     // durable. Independent local interaction may have advanced in-memory
     // state meanwhile; queue its save after reopening the persistence seam.
     const changedWhilePaused = JSON.stringify(core.getPersistentState()) !== JSON.stringify(uncertainStateCandidate);
+    const verifiedCandidate = uncertainStateCandidate;
+    confirmedAnnotationLocalSaves.confirm(verifiedCandidate);
     persistentStateOutcomeUnknown = null;
     uncertainStateCandidate = null;
     persistentStateWriteGuard = false;
     persistenceRetryDelayMs = 1_000;
     core.resumeAdmissionAfterVerifiedPersistence();
     server.resumeAfterVerifiedPersistence();
+    core.publishVerifiedTransactionEvents(verifiedCandidate, (error) =>
+      clientWarn("state_reconciliation_notification_failed", errorDiagnosticFields(error)));
     clientInfo("state_persistence_reconciled");
     for (const surface of core.listSurfaces()) broadcastSurfaceState(surface.surfaceId);
     if (changedWhilePaused) void persistState().catch((error) => {
@@ -544,6 +610,53 @@ function surfaceIdForSender(contents: WebContents): string | null {
     }
   }
   return null;
+}
+
+function currentPaintAuthority(surfaceId: string, paneId: number): PanePaintAuthority | null {
+  try {
+    const surface = core.getSurface(surfaceId), pane = surface.panes.get(paneId), entry = pane?.history[pane.historyIndex];
+    if (!pane || pane.externalNative || !entry?.contentId || (entry.contentType !== "html" && entry.contentType !== "browser_url")
+      || !pane.snapshot.bounds || pane.snapshot.surfaceEpoch !== surface.surfaceEpoch
+      || pane.snapshot.topologyRevision !== surface.topologyRevision || pane.snapshot.geometryRevision !== surface.geometryRevision) return null;
+    return { surfaceId, surfaceEpoch: surface.surfaceEpoch, paneId, paneLineageId: pane.paneLineageId,
+      topologyRevision: surface.topologyRevision, geometryRevision: surface.geometryRevision, contentId: entry.contentId,
+      contentType: entry.contentType, contentRevision: entry.revision, renderVersion: pane.latestContentEventAt, paneRect: { ...pane.snapshot.bounds } };
+  } catch { return null; }
+}
+// Not registered with service/WS: pending native document/projection and capture qualification.
+async function readOwnedPanePaintAssociation(surfaceId: string, paneId: number, signal: AbortSignal) {
+  if (!panePaintDiagnosticEnabled || signal.aborted) return null;
+  const before = currentPaintAuthority(surfaceId, paneId);
+  if (!before) return null;
+  const renderer = await paintRendererReads.read(surfaceId, paneId, signal, 2000);
+  const current = currentPaintAuthority(surfaceId, paneId);
+  if (signal.aborted || !renderer || !current || JSON.stringify(current) !== JSON.stringify(before) || !rendererPaintMatchesAuthority(renderer,current)) return null;
+  const native = paintNativeOwners.read(surfaceId, renderer.guestId);
+  if (!native) return null;
+  return { authority: current, renderer, native };
+}
+
+// Prepared private adapter, never supplied to the default-disabled service or public WS dispatcher.
+function makePanePaintCaptureAdapter(surfaceId: string, paneId: number) {
+  if (!panePaintDiagnosticEnabled || resolveCompositorControlSocketPath()) return null;
+  return createPanePaintCaptureAdapter({
+    associate: signal => readOwnedPanePaintAssociation(surfaceId, paneId, signal),
+    document: async (association, signal) => {
+      if (signal.aborted) throw Error("cancelled document read");
+      const facts = await association.native.frame.executeJavaScript(PANE_PAINT_DOCUMENT_RECIPE);
+      if (signal.aborted) throw Error("cancelled document read");
+      return facts;
+    },
+    guestUrl: association => association.native.guest.getURL(),
+    guestZoom: association => association.native.guest.getZoomFactor(),
+    hostFacts: association => {
+      const [width,height] = association.native.owner.window.getContentSize();
+      return { width,height,visible:association.native.owner.window.isVisible(),zoom:association.native.owner.host.getZoomFactor() };
+    },
+    capture: (target, association) => target === "GUEST"
+      ? association.native.guest.capturePage()
+      : association.native.owner.window.capturePage({ ...association.authority.paneRect }),
+  });
 }
 
 function rendererDiagnosticFields(
@@ -594,6 +707,22 @@ function flushPendingWindowState(surfaceId: string): void {
 
 function rendererWindowState(surfaceId: string): RendererWindowState {
   const state = core.getRendererWindowState(surfaceId);
+  for (const pane of state.panes) {
+    const context = parseAnnotationDoneContext({ ...pane.content, paneId: pane.paneId, paneLineageId: pane.paneLineageId });
+    if (context) {
+      pane.annotationDone = annotationDoneFence.snapshot(JSON.stringify([surfaceId, pane.paneId]), annotationDoneContextKey(context));
+      if (!pane.showDone && !pane.annotationDone.busy && confirmedAnnotationLocalSaves.has(surfaceId, context,
+          core.localAnnotationFrameId(surfaceId, pane.paneId))) {
+        pane.annotationDone = { phase: "saved", busy: false, localSaved: true };
+      }
+    }
+    if (pane.paneLineageId && pane.content.contentId) {
+      const frame = core.annotationPublisher?.openFrameFor(surfaceId, pane.paneId);
+      const delivery = (!pane.showDone || frame) && annotationRegistryPublisher?.deliveryStatus(surfaceId,
+        pane.paneId, pane.paneLineageId, pane.content.contentId, pane.content.revision, frame?.frameId);
+      if (delivery) pane.annotationDelivery = delivery;
+    }
+  }
   state.capabilityStatus = [
     persistentStateOutcomeUnknown ? "Local changes paused: saved state is being reconciled" : null,
     !providerEndpointAvailable ? "Direct connection unavailable; retrying" : null,
@@ -1118,17 +1247,28 @@ function handleShortcutInput(
   event: ShortcutEvent,
   input: ShortcutInput,
   focusedPaneId?: number | null,
+  guestInput = false,
 ): void {
     if (input.type !== "keyDown") {
       return;
     }
-    if (focusedPaneId && focusedPaneId > 0) {
-      core.setActiveKeyboardPane(surfaceId, focusedPaneId);
+    // A guest without a current binding must never borrow another pane's focus.
+    if (guestInput && (!focusedPaneId || focusedPaneId <= 0)) {
+      return;
     }
     const state = rendererWindowState(surfaceId);
     const activePaneId = focusedPaneId && focusedPaneId > 0 ? focusedPaneId : core.activeKeyboardPaneId(surfaceId);
     const activePane = state.panes.find((pane) => pane.paneId === activePaneId);
     if (!activePaneId || !activePane) {
+      return;
+    }
+    if (focusedPaneId && focusedPaneId > 0) {
+      core.setActiveKeyboardPane(surfaceId, focusedPaneId);
+    }
+    // Content owns ordinary typing and terminal navigation. Keep explicit
+    // Command shortcuts, but reserve unmodified chrome shortcuts for chrome.
+    const contentOwnsInput = guestInput || activePane.externalNative || activePane.content.contentType === "terminal";
+    if (contentOwnsInput && !input.meta) {
       return;
     }
     const command = input.meta;
@@ -1180,14 +1320,18 @@ function handleShortcutInput(
       event.preventDefault();
       return;
     }
-    if (input.key.toLowerCase() === "a" && !input.meta) {
-      void annotationSourceCoordinator?.setAnnotating(surfaceId, activePaneId, true)
-        .catch((error) => clientWarn("annotation_source_mode_failed", errorDiagnosticFields(error)));
-      return;
-    }
-    if (input.key.toLowerCase() === "d" && !input.meta) {
-      void annotationSourceCoordinator?.setAnnotating(surfaceId, activePaneId, false)
-        .catch((error) => clientWarn("annotation_source_commit_failed", errorDiagnosticFields(error)));
+    if (["a", "d"].includes(input.key.toLowerCase()) && !input.meta) {
+      const scope = JSON.stringify([surfaceId, activePaneId]);
+      if (annotationDoneFence.isBusy(scope)) return;
+      const expected = parseAnnotationDoneContext({ ...activePane.content,
+        paneId: activePane.paneId, paneLineageId: activePane.paneLineageId });
+      if (!expected) return;
+      // The owning renderer shares the visible action's pending-stroke barrier,
+      // immediate fence and status retirement; main never commits around it.
+      window.webContents.send("surface:keyboard-intent", {
+        type: "annotation", action: input.key.toLowerCase() === "a" ? "enter" : "done", expected,
+      });
+      event.preventDefault();
       return;
     }
     if (input.meta && input.key === "[") {
@@ -1210,7 +1354,7 @@ function wireWebContentsShortcuts(
   focusedPaneId: () => number | null,
 ): void {
   contents.on("before-input-event", (event, input) => {
-    handleShortcutInput(surfaceId, window, event, input, focusedPaneId());
+    handleShortcutInput(surfaceId, window, event, input, focusedPaneId(), contents !== window.webContents);
   });
 }
 
@@ -1221,6 +1365,13 @@ function wireWindowShortcuts(surfaceId: string, window: BrowserWindow): void {
 function wireWindowInputMenus(surfaceId: string, window: BrowserWindow): void {
   wireEditableContextMenu(window.webContents, window);
   window.webContents.on("did-attach-webview", (_event, webContents) => {
+    if (panePaintDiagnosticEnabled && paintNativeOwners.attach(surfaceId, webContents)) {
+      webContents.on("did-start-navigation", (_event, _url, _inPlace, mainFrame) => {
+        if (mainFrame) paintNativeOwners.navigation(webContents);
+      });
+      webContents.on("render-process-gone", () => paintNativeOwners.retire(webContents));
+      webContents.once("destroyed", () => paintNativeOwners.retire(webContents));
+    }
     wireEditableContextMenu(webContents, window);
     wireWebContentsShortcuts(surfaceId, window, webContents, () => {
       const binding = browserUrlWebContentsPanes.get(webContents.id);
@@ -1322,6 +1473,18 @@ async function createWindowForSurface(surfaceId: string): Promise<BrowserWindow>
   }
 
   windows.set(surfaceId, window);
+  nativePresentationWindowBinding.recordCreatedWindow(`electron-window:${window.id}`, surfaceId);
+  reconcilePresentationWindowOwnership();
+  paintWindowIncarnations.set(window, randomBytes(16).toString("hex"));
+  if (panePaintDiagnosticEnabled) {
+    const paintHost = window.webContents;
+    const retirePaintOwner = () => { paintRendererReads.invalidate(paintHost); paintNativeOwners.retireHost(paintHost); };
+    window.webContents.on("did-start-navigation", (_event, _url, _inPlace, mainFrame) => {
+      if (mainFrame) { retirePaintOwner(); paintWindowIncarnations.set(window, randomBytes(16).toString("hex")); }
+    });
+    window.webContents.on("render-process-gone", retirePaintOwner);
+    window.once("closed", retirePaintOwner);
+  }
   clientInfo("window_created", {
     pane_ids: core.activePaneIds(surfaceId).join(","),
     surface_id: surfaceId,
@@ -1379,6 +1542,7 @@ async function createWindowForSurface(surfaceId: string): Promise<BrowserWindow>
     const programmaticClose = programmaticSurfaceCloses.delete(surfaceId);
     if (programmaticClose) {
       windows.delete(surfaceId);
+      reconcilePresentationWindowOwnership();
       pendingWindowStates.delete(surfaceId);
       readyWindows.delete(surfaceId);
       setTimeout(
@@ -1398,6 +1562,7 @@ async function createWindowForSurface(surfaceId: string): Promise<BrowserWindow>
       window_label: core.surfaceWindowLabel(surfaceId),
     });
     windows.delete(surfaceId);
+    reconcilePresentationWindowOwnership();
     pendingWindowStates.delete(surfaceId);
     readyWindows.delete(surfaceId);
     if (!isQuitting) {
@@ -1632,6 +1797,68 @@ function installWebAuthnAccountSelection(): void {
 }
 
 function installIpc(): void {
+  const coordinator = new PanePresentationCoordinator(core, (surfaceId) => {
+    const socket = resolveCompositorControlSocketPath();
+    if (!socket) return null;
+    // The current compositor transport binds one main-app host. Never infer
+    // per-window coordinates from a shared socket when multiple windows exist.
+    const owned = [...windows.entries()].filter(([, window]) => !window.isDestroyed());
+    if (owned.length !== 1 || owned[0]![0] !== surfaceId) {
+      throw new Error("independently routed compositor window host is unavailable");
+    }
+    return (request) => sendCompositorControl(socket, request);
+  }, (surfaceId, error) => clientWarn("pane_presentation_retirement_failed", {
+    surface_id: surfaceId, ...errorDiagnosticFields(error),
+  }), async (surfaceId, send) => {
+    const response = await send({ type: "get_status" });
+    const owned = [...windows.entries()].filter(([, window]) => !window.isDestroyed());
+    if (owned.length !== 1 || owned[0]![0] !== surfaceId) {
+      throw new Error("compositor host window ownership changed");
+    }
+    const window = owned[0]![1];
+    const bounds = window.getContentBounds();
+    const viewport = core.getRendererWindowState(surfaceId).viewport;
+    if (bounds.width !== viewport.width || bounds.height !== viewport.height) {
+      throw new Error("renderer window viewport does not match current native content bounds");
+    }
+    nativePresentationWindowBinding.assertObservedOwner(response, `electron-window:${window.id}`, surfaceId);
+    return panePresentationWindowRoute(response, `electron-window:${window.id}`, surfaceId, viewport);
+  }, (notice) => {
+    const window = windows.get(notice.surfaceId);
+    if (window && !window.isDestroyed()) window.webContents.send("surface:pane-presentation-ownership", notice);
+  });
+  panePresentation = coordinator;
+  reconcilePresentationWindowOwnership();
+  ipcMain.handle("surface:pane-presentation", async (event, payload: unknown) => {
+    if (!PANE_PRESENTATION_ENABLED) return { ok: false, error: "pane presentation is disabled" };
+    const surfaceId = surfaceIdForSender(event.sender);
+    if (!surfaceId) return { ok: false, error: "renderer surface is unavailable" };
+    return coordinator.applyRendererOutcome(surfaceId, payload);
+  });
+  ipcMain.on("surface:pane-paint-reply", (event, reply: unknown) => {
+    if (!panePaintDiagnosticEnabled || !event.senderFrame || !surfaceIdForSender(event.sender)) return;
+    paintRendererReads.accept(event.sender, event.senderFrame, reply);
+  });
+  ipcMain.handle("surface:resize-split", async (event, payload: unknown) => {
+    const surfaceId = surfaceIdForSender(event.sender);
+    if (!surfaceId || !payload || typeof payload !== "object") return false;
+    const request = payload as { path?: unknown; weights?: unknown; expected?: unknown; geometry?: unknown };
+    if (!Array.isArray(request.path) || request.path.some((index) => !Number.isSafeInteger(index) || index < 0) ||
+        !Array.isArray(request.weights) || request.weights.some((weight) => typeof weight !== "number" || !Number.isFinite(weight) || weight <= 0) ||
+        !request.expected || typeof request.expected !== "object") return false;
+    const expected = request.expected as import("./split-resize.js").SplitResizeExpectation;
+    try {
+      if (!server) return false;
+      return await server.resizeSplit(surfaceId, request.path, request.weights, expected,
+        request.geometry as import("./split-resize.js").SplitResizeGeometry[]);
+    } catch {
+      return false;
+    } finally {
+      // Definite failure reads back the committed state; uncertainty reads back
+      // the retained guarded candidate. Neither uses a stale renderer cache.
+      broadcastSurfaceState(surfaceId);
+    }
+  });
   ipcMain.handle("surface:annotation-open", async (event, payload: { paneId?: unknown; openedAt?: unknown }) => {
     const surfaceId = surfaceIdForSender(event.sender);
     const paneId = payload?.paneId;
@@ -1652,13 +1879,16 @@ function installIpc(): void {
         typeof content.url === "string" ? content.url : undefined;
       const opened = await core.transactionAsync(async () => {
         const currentPane = core.getRendererWindowState(surfaceId).panes.find((item) => item.paneId === paneId);
-        if (!currentPane?.annotationBorderVisible || currentPane.content.contentId !== contentId) return false;
+        if (!currentPane?.annotationBorderVisible || currentPane.paneLineageId !== pane.paneLineageId ||
+            currentPane.content.contentId !== contentId || currentPane.content.revision !== pane.content.revision ||
+            currentPane.content.renderVersion !== pane.content.renderVersion) return false;
         const outbox = core.annotationPublisher!;
         if (outbox.openFrameFor(surfaceId, Number(paneId))) return false;
         const previous = outbox.snapshot();
         try {
           outbox.openFrame(surfaceId, Number(paneId), {
-            contextKey: contentId, contentId, ...(url ? { url } : {}),
+            contextKey: contentId, contentId, contentRevision: pane.content.revision,
+            ...(pane.paneLineageId ? { paneLineageId: pane.paneLineageId } : {}), ...(url ? { url } : {}),
             image: image ?? "", ...(image ? {} : { failed: true as const }),
             openedAt: Number(openedAt), scrollOffset: snapshot.viewport.scrollOffset,
             viewport: { width: Math.max(1, Math.floor(bounds.width)),
@@ -1751,7 +1981,7 @@ function installIpc(): void {
       if ("viewport" in payload) {
         snapshot.viewport = payload.viewport as never;
       }
-      core.updatePaneSnapshot(surfaceId, Number(payload.paneId), snapshot);
+      core.updatePaneSnapshot(surfaceId, Number(payload.paneId), snapshot, payload.displayOnly === true);
     } catch {
       // Renderer snapshot updates are best-effort; stale pane ids should not crash the app.
     }
@@ -1791,6 +2021,25 @@ function installIpc(): void {
     }
   });
 
+  ipcMain.handle("surface:annotation-done", async (event, payload) => {
+    const expected = parseAnnotationDoneContext(payload);
+    const surfaceId = surfaceIdForSender(event.sender);
+    if (!surfaceId || !expected || event.senderFrame !== event.sender.mainFrame || !annotationSourceCoordinator) {
+      return { phase: "stale", busy: false, localSaved: false };
+    }
+    const scope = JSON.stringify([surfaceId, expected.paneId]);
+    const context = annotationDoneContextKey(expected);
+    const isCurrent = () => {
+      if (event.sender.isDestroyed() || event.senderFrame !== event.sender.mainFrame || surfaceIdForSender(event.sender) !== surfaceId) return false;
+      const pane = core.getRendererWindowState(surfaceId).panes.find((p) => p.paneId === expected.paneId);
+      const current = pane && parseAnnotationDoneContext({ ...pane.content, paneId: pane.paneId, paneLineageId: pane.paneLineageId });
+      return !!current && annotationDoneContextKey(current) === context;
+    };
+    return annotationDoneFence.finish(scope, context, isCurrent,
+      (saved) => annotationSourceCoordinator!.setAnnotating(surfaceId, expected.paneId, false,
+        () => { saved(); annotationRegistryPublisher?.localSaved(); }, isCurrent));
+  });
+
   ipcMain.on("surface:command", (event, payload) => {
     const surfaceId = surfaceIdForSender(event.sender);
     if (!surfaceId || !payload || typeof payload !== "object") {
@@ -1823,6 +2072,8 @@ function installIpc(): void {
         break;
       case "annotate":
         try {
+          if (annotationDoneFence.isBusy(JSON.stringify([surfaceId, paneId]))) break;
+          if (payload.enabled === true) annotationDoneFence.forget(JSON.stringify([surfaceId, paneId]));
           void annotationSourceCoordinator?.setAnnotating(surfaceId, paneId, Boolean(payload.enabled))
             .catch((error) => clientWarn("annotation_source_commit_failed", errorDiagnosticFields(error)));
         } catch {
@@ -1914,6 +2165,7 @@ async function boot(): Promise<void> {
   const persistentState = await loadPersistentState();
   const identity = await loadOrCreateIdentity(stateDir);
   const configuredAddress = process.env.SURF_ACE_SERVER?.trim();
+  const configuredDirectEndpoint = process.env.SURF_ACE_DIRECT_ENDPOINT?.trim() || null;
   identityFingerprint = identity.fingerprintPrefix;
   clientInfo("identity_loaded", {
     fingerprint: identityFingerprint,
@@ -1954,7 +2206,7 @@ async function boot(): Promise<void> {
   server = createServer(core);
 
   annotationSourceCoordinator = new AnnotationSourceCoordinator(
-    core, persistState, () => annotationRegistryPublisher?.notify(),
+    core, persistState, () => annotationRegistryPublisher?.sourceSaved(),
     (error) => clientWarn("annotation_source_flush_failed", errorDiagnosticFields(error)),
     (surfaceId, paneId) => server!.completeDirectAnnotation(surfaceId, paneId),
   );
@@ -1999,6 +2251,7 @@ async function boot(): Promise<void> {
   });
   configuredRegistration = new ServerConnection({
     configuredAddress,
+    directEndpoint: configuredDirectEndpoint,
     clientId: registrationClientId(identity.publicKeyPem),
     core,
     persist: persistRegistryState,
@@ -2010,6 +2263,7 @@ async function boot(): Promise<void> {
     annotationRegistryPublisher = new AnnotationRegistryPublisher(
       configuredAddress, core, persistState,
       (error) => clientWarn("annotation_publisher_failed", errorDiagnosticFields(error)),
+      undefined, () => { for (const surface of core.listSurfaces()) broadcastSurfaceState(surface.surfaceId); },
     );
     annotationRegistryPublisher.start();
   }

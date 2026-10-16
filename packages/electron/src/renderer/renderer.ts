@@ -1,3 +1,7 @@
+import type { RendererPaintDescriptor, RendererPaintRequest } from "../pane-paint-owner-bridge.js";
+import { AnnotationDoneFence, type AnnotationDoneState } from "../annotation-done-state.js";
+import { annotationDoneContextKey, parseAnnotationDoneContext } from "../annotation-done-context.js";
+import { browserContentScaleScript } from "./browser-content-scale.js";
 import {
   isMarkedOverlayVisible,
   visibleOverlayRect,
@@ -58,6 +62,14 @@ type VideoContent = string;
 type CanvasContent = "" | { color?: string; grid?: boolean };
 type BrowserUrlContent = { url: string };
 type ContentReloadSource = { kind: "file"; path: string };
+type BrowserContentScaleMode = "host-transform" | "public-terminal-font";
+type BrowserContentScaleState = {
+  mode: BrowserContentScaleMode;
+  modeSequence: number;
+  nonce: string;
+  revision: number;
+  scale: number;
+};
 type BrowserUrlWebViewElement = HTMLElement & {
   canGoBack?: () => boolean;
   canGoForward?: () => boolean;
@@ -123,6 +135,7 @@ type PaneContentValue =
   | VideoContent;
 
 type RendererPaneState = {
+  paneLineageId: string;
   activeKeyboardPane: boolean;
   annotationBorderVisible: boolean;
   canGoBack: boolean;
@@ -155,6 +168,9 @@ type RendererPaneState = {
   name: string | null;
   ownerName: string | null;
   paneId: number;
+  paneLineageId?: string;
+  annotationDone?: AnnotationDoneState;
+  annotationDelivery?: { phase: "waiting" | "sending" | "sent" | "rejected"; error?: boolean };
   displayId: string;
   provenanceName: string | null;
   provenance: {
@@ -232,6 +248,7 @@ type PaneView = {
   currentContentSignature: DuplicateRepushSignature | null;
   currentDrawingsKey: string;
   currentHtmlFrameCleanup: (() => void) | null;
+  currentBrowserFrame: BrowserUrlWebViewElement | null;
   currentRenderToken: number;
   currentScrollHandler: (() => void) | null;
   currentWebViewResizeObserver: ResizeObserver | null;
@@ -240,6 +257,8 @@ type PaneView = {
   dockEl: HTMLButtonElement;
   lastNavigation: NavigationMemo | null;
   paneId: number;
+  slotEl: HTMLDivElement;
+  popOutButton: HTMLButtonElement;
   rootEl: HTMLDivElement;
   scale: number;
   scrollEl: HTMLDivElement;
@@ -272,8 +291,12 @@ const provenanceAnnouncer = document.querySelector(
   "#provenance-announcer",
 ) as HTMLDivElement | null;
 const paneViews = new Map<number, PaneView>();
+let poppedOutPaneId: number | null = null;
+const browserContentScaleStates = new WeakMap<BrowserUrlWebViewElement, BrowserContentScaleState>();
+const paintRendererFrameIds = new WeakMap<BrowserUrlWebViewElement, string>();
 const pendingStrokeDelivery = new Map<number, Promise<void>>();
 const annotationIntentEpoch = new Map<number, number>();
+const localAnnotationDone = new AnnotationDoneFence((scope) => rebuildPaneControls(Number(scope)));
 const pendingHistoryAnnouncements = new Map<number, string>();
 const provenanceLabels = new Set<HTMLElement>();
 let bootstrap: Bootstrap | null = null;
@@ -306,6 +329,7 @@ type SurfAceOverlayKind =
   | "pane-label"
   | "pane-handle"
   | "reload"
+  | "pane-pop-out"
   | "duplicate-repush-close";
 
 function errorDiagnosticFields(error: unknown): Record<string, string> {
@@ -366,6 +390,11 @@ function duplicateRepushSignature(pane: RendererPaneState): DuplicateRepushSigna
 }
 
 function isDuplicateRepush(view: PaneView, pane: RendererPaneState, nextSignature: DuplicateRepushSignature | null): boolean {
+  const frame = currentPaneFrameElement(view);
+  if (!frame || frame !== view.currentBrowserFrame || !frame.isConnected ||
+      !view.contentEl.contains(frame) || !frame.matches("webview.content-browser-url-frame")) {
+    return false;
+  }
   if (!nextSignature || !view.currentContentSignature) {
     return false;
   }
@@ -377,6 +406,9 @@ function isDuplicateRepush(view: PaneView, pane: RendererPaneState, nextSignatur
 function paneRenderKey(state: RendererWindowState, pane: RendererPaneState): string {
   return JSON.stringify({
     annotationBorderVisible: pane.annotationBorderVisible,
+    annotationDone: pane.annotationDone,
+    annotationDelivery: pane.annotationDelivery,
+    paneLineageId: pane.paneLineageId,
     canGoBack: pane.canGoBack,
     canGoForward: pane.canGoForward,
     connectionBar: state.connectionBar,
@@ -431,6 +463,11 @@ function paneBounds(view: PaneView) {
   };
 }
 
+function tiledPaneBounds(view: PaneView) {
+  const rect = view.slotEl.getBoundingClientRect();
+  return { height: rect.height, width: rect.width, x: rect.x, y: rect.y };
+}
+
 function paneSnapshotGeometryIdentity(): {
   geometryRevision: number;
   surfaceEpoch: string;
@@ -446,10 +483,63 @@ function paneSnapshotGeometryIdentity(): {
   };
 }
 
+function reportSnapshot(payload: Record<string, unknown>): void {
+  window.surfAce.reportSnapshot({ ...payload, displayOnly: payload.paneId === poppedOutPaneId });
+}
+/** Synchronous fresh DOM association only; this neither asserts guest paint nor reads caller code. */
+function readPanePaintDescriptor(input: unknown): RendererPaintDescriptor | null {
+  if (!input || typeof input !== "object" || !latestState || resizeGesture || resizeCommitPending) return null;
+  const request = input as RendererPaintRequest;
+  if (!/^[a-f0-9]{32}$/.test(request.nonce) || request.surfaceId !== latestState.surfaceId || !Number.isSafeInteger(request.paneId)) return null;
+  const pane = latestState.panes.find(p => p.paneId === request.paneId), view = paneViews.get(request.paneId);
+  if (!pane || !view || pane.externalNative || !pane.content.contentId || !["html", "browser_url"].includes(pane.content.contentType ?? "") || view.currentContentKey !== contentKey(pane)) return null;
+  const frame = view.currentBrowserFrame, scale = frame && browserContentScaleStates.get(frame);
+  if (!frame || !scale || scale.modeSequence < 1 || frame.dataset.guestReady !== "true" || frame !== currentPaneFrameElement(view) || !frame.isConnected || !view.rootEl.isConnected
+    || !view.contentEl.contains(frame) || !frame.matches("webview.content-browser-url-frame")) return null;
+  let guestId: number;
+  try { guestId = frame.getWebContentsId?.() ?? 0; } catch { return null; }
+  if (!Number.isSafeInteger(guestId) || guestId < 1 || frame.clientWidth <= 0 || frame.clientHeight <= 0) return null;
+  const rectangle = (r: DOMRect): { x: number; y: number; width: number; height: number } => ({ x: r.x, y: r.y, width: r.width, height: r.height });
+  const paneRect = paneBounds(view), frameRect = rectangle(frame.getBoundingClientRect());
+  let clip = { ...frameRect }, opacity = 1, hostVisible = true;
+  for (let element: HTMLElement | null = frame; element; element = element.parentElement) {
+    const style = getComputedStyle(element), alpha = Number(style.opacity);
+    if (Number(style.zoom) !== 1 || (element !== frame && style.transform !== "none") || style.clipPath !== "none"
+      || style.maskImage !== "none" || style.filter !== "none") return null;
+    const clips = [style.overflowX,style.overflowY].some(value=>["hidden","clip","scroll","auto"].includes(value));
+    if (clips && [style.borderTopLeftRadius,style.borderTopRightRadius,style.borderBottomLeftRadius,style.borderBottomRightRadius,
+      style.borderLeftWidth,style.borderRightWidth,style.borderTopWidth,style.borderBottomWidth].some(value=>parseFloat(value)!==0)) return null;
+    if (element === frame && [style.borderLeftWidth,style.borderRightWidth,style.borderTopWidth,style.borderBottomWidth,
+      style.paddingLeft,style.paddingRight,style.paddingTop,style.paddingBottom].some(value => parseFloat(value) !== 0)) return null;
+    if (!Number.isFinite(alpha) || alpha < 0 || alpha > 1) return null;
+    opacity *= alpha;
+    if (style.display === "none" || style.visibility !== "visible") hostVisible = false;
+    if (element !== frame && [style.overflowX, style.overflowY].some(v => ["hidden", "clip", "scroll", "auto"].includes(v))) {
+      const r = element.getBoundingClientRect();
+      const clipX = ["hidden", "clip", "scroll", "auto"].includes(style.overflowX), clipY = ["hidden", "clip", "scroll", "auto"].includes(style.overflowY);
+      const left = clipX ? Math.max(clip.x,r.x) : clip.x, top = clipY ? Math.max(clip.y,r.y) : clip.y;
+      clip = { x: left, y: top, width: (clipX ? Math.min(clip.x+clip.width,r.right) : clip.x+clip.width)-left,
+        height: (clipY ? Math.min(clip.y+clip.height,r.bottom) : clip.y+clip.height)-top };
+    }
+  }
+  if (clip.width <= 0 || clip.height <= 0 || opacity === 0) return null;
+  let rendererFrameInstanceId = paintRendererFrameIds.get(frame);
+  if (!rendererFrameInstanceId) { rendererFrameInstanceId = crypto.randomUUID(); paintRendererFrameIds.set(frame, rendererFrameInstanceId); }
+  const style = getComputedStyle(frame);
+  return { paneId: pane.paneId, surfaceId: latestState.surfaceId, ...paneSnapshotGeometryIdentity(),
+    contentId: pane.content.contentId, contentRevision: pane.content.revision, contentType: pane.content.contentType as "html" | "browser_url",
+    contentKey: view.currentContentKey, rendererFrameInstanceId, renderGeneration: view.currentRenderToken, guestId,
+    paneRect, frameRect, clipRect: clip, frameCssWidth: frame.clientWidth, frameCssHeight: frame.clientHeight,
+    transform: style.transform, transformOrigin: style.transformOrigin, opacity, hostVisible, devicePixelRatio: window.devicePixelRatio,
+    scaleMode: scale.mode, scaleSequence: scale.modeSequence, scaleNonce: scale.nonce, scaleRevision: scale.revision };
+}
+window.surfAce.onPanePaintRead?.(readPanePaintDescriptor);
+
 function reportPaneSnapshot(view: PaneView): void {
+  if (resizeGesture || resizeCommitPending || panePresentationTransitionsPending > 0 || panePresentationAuthorityBlocked) return; // Provisional geometry must never become an authoritative snapshot.
   const frame = currentPaneFrameElement(view);
   if (frame?.matches("webview.content-browser-url-frame")) {
-    window.surfAce.reportSnapshot({
+    reportSnapshot({
       bounds: paneBounds(view),
       ...paneSnapshotGeometryIdentity(),
       paneId: view.paneId,
@@ -458,7 +548,7 @@ function reportPaneSnapshot(view: PaneView): void {
   }
   const selection = currentSelectionWithin(view);
   const viewport = currentViewport(view);
-  window.surfAce.reportSnapshot({
+  reportSnapshot({
     bounds: paneBounds(view),
     ...paneSnapshotGeometryIdentity(),
     paneId: view.paneId,
@@ -541,6 +631,7 @@ function collectMarkedOverlayRegions(pane: RendererPaneState, view: PaneView): O
       return [];
     }
     const marker = element.getAttribute(OVERLAY_MARKER_ATTRIBUTE) ?? undefined;
+    if (panePresentationResizePending && view.paneId === poppedOutPaneId && marker !== "pane-pop-out") return [];
     const metadata = overlayMetadataForMarker(marker);
     const region = overlayRegionForElement(
       pane,
@@ -555,6 +646,7 @@ function collectMarkedOverlayRegions(pane: RendererPaneState, view: PaneView): O
 }
 
 function reportCompositorOverlayRegions(updateReason: "layout" | "resize" | "visibility"): void {
+  if (resizeGesture || resizeCommitPending || panePresentationTransitionsPending > 0 || panePresentationAuthorityBlocked) return;
   overlayRevision += 1;
   if (!latestState) {
     window.surfAce.reportOverlayRegions({
@@ -570,8 +662,11 @@ function reportCompositorOverlayRegions(updateReason: "layout" | "resize" | "vis
   const regions: OverlayRegionReport[] = [];
   for (const pane of latestState.panes) {
     const view = paneViews.get(pane.paneId);
-    if (view) {
-      regions.push(...collectMarkedOverlayRegions(pane, view));
+    if (view && (poppedOutPaneId === null || pane.paneId === poppedOutPaneId)) {
+      regions.push(...collectMarkedOverlayRegions(pane, view).map((region) => ({
+        ...region,
+        zIndex: (region.zIndex ?? 0) + (poppedOutPaneId === null ? 0 : 100),
+      })));
     }
   }
   window.surfAce.reportOverlayRegions({
@@ -1040,6 +1135,8 @@ function announceReachedHistoryEntries(state: RendererWindowState): void {
 type LucideIconName =
   | "chevron-left"
   | "chevron-right"
+  | "maximize"
+  | "minimize"
   | "minus"
   | "panel-bottom-open"
   | "pen-line"
@@ -1068,6 +1165,8 @@ function createLucideIcon(name: LucideIconName): SVGSVGElement {
     "chevron-right": [
       "m9 18 6-6-6-6",
     ],
+    maximize: ["M8 3H3v5", "M16 3h5v5", "M21 16v5h-5", "M3 16v5h5"],
+    minimize: ["M3 8h5V3", "M21 8h-5V3", "M16 21v-5h5", "M8 21v-5H3"],
     minus: [
       "M5 12h14",
     ],
@@ -1381,7 +1480,192 @@ function bindDrawing(view: PaneView): void {
 }
 
 function isPaneChromeTarget(target: EventTarget | null): boolean {
-  return target instanceof Element && Boolean(target.closest(".control-cluster, .toolbar-dock"));
+  return target instanceof Element && Boolean(target.closest(".control-cluster, .toolbar-dock, .pane-pop-out"));
+}
+
+function shieldPaneToolbar(view: PaneView): void {
+  const pending = panePresentationTransitionsPending > 0 || panePresentationAuthorityBlocked ||
+    (view.paneId === poppedOutPaneId && panePresentationResizePending);
+  // Controls are rebuilt independently of presentation geometry. Derive their
+  // shield each time, keeping the retained recovery toggle outside inert.
+  for (const pill of view.controlsEl.children) {
+    pill.toggleAttribute("inert", pending && !pill.contains(view.popOutButton));
+    if (pill.contains(view.popOutButton)) for (const control of pill.children) {
+      control.toggleAttribute("inert", pending && control !== view.popOutButton);
+    }
+  }
+}
+
+function applyPanePopOut(): void {
+  for (const view of paneViews.values()) {
+    const expanded = view.paneId === poppedOutPaneId;
+    const covered = poppedOutPaneId !== null && !expanded;
+    view.rootEl.classList.toggle("pane-popped-out", expanded);
+    const pending = panePresentationTransitionsPending > 0 || panePresentationAuthorityBlocked ||
+      (expanded && panePresentationResizePending);
+    view.rootEl.classList.toggle("pane-presentation-pending", pending);
+    for (const element of [view.contentEl, view.scrollEl, view.annotationCanvas, view.annotationShield]) {
+      element.toggleAttribute("inert", pending);
+    }
+    // The retained Solo/Restore toggle stays operable inside the toolbar while
+    // other controls are shielded by pending or uncertain native authority.
+    shieldPaneToolbar(view);
+    view.controlsEl.classList.toggle("collapsed", view.toolbarCollapsed && !expanded && !pending);
+    view.dockEl.hidden = !view.toolbarCollapsed || expanded || pending;
+    const bounds = expanded ? acknowledgedPopOutBounds : null;
+    for (const [property, value] of Object.entries({ left: bounds?.x, top: bounds?.y,
+      width: bounds?.width, height: bounds?.height })) {
+      if (value === undefined) view.rootEl.style.removeProperty(property);
+      else view.rootEl.style.setProperty(property, `${value}px`);
+    }
+    view.slotEl.classList.toggle("pane-covered", covered);
+    view.rootEl.toggleAttribute("inert", covered);
+    if (covered) view.rootEl.setAttribute("aria-hidden", "true");
+    else view.rootEl.removeAttribute("aria-hidden");
+    const restore = expanded || panePresentationAuthorityBlocked;
+    view.popOutButton.replaceChildren(createLucideIcon(restore ? "minimize" : "maximize"));
+    view.popOutButton.title = restore ? "Restore pane to its tile" : "Solo pane within this window";
+    view.popOutButton.setAttribute("aria-label", `${restore ? "Restore" : "Solo"} pane ${view.paneId}`);
+    view.popOutButton.setAttribute("aria-expanded", String(expanded));
+    view.popOutButton.setAttribute("aria-pressed", String(expanded));
+  }
+  appRoot.classList.toggle("has-pane-pop-out", poppedOutPaneId !== null);
+  positionPaneHosts();
+}
+
+let panePresentationTransitionsPending = 0;
+let panePresentationAuthorityBlocked = false;
+let panePresentationIntent = 0;
+let panePresentationMainRevision = 0;
+let panePresentationConfirmedClearRevision = 0;
+let panePresentationAuthorityRevision = 0;
+let panePresentationAuthorityClearRevision = 0;
+let acknowledgedPopOutBounds: { x: number; y: number; width: number; height: number } | null = null;
+let panePresentationResizePending = false;
+// Requested user intent is distinct from the last acknowledged display. A
+// resize must preserve an outstanding Restore even while its pane is visible.
+let desiredPopOutPaneId: number | null = null;
+function reacknowledgePanePopOutViewport(): void {
+  const ownerPaneId = poppedOutPaneId ?? desiredPopOutPaneId;
+  if (ownerPaneId === null) return;
+  panePresentationResizePending = true;
+  panePresentationIntent++; // Any preceding viewport request is now obsolete.
+  applyPanePopOut();
+  // Browser resize and authoritative geometry can arrive in either order.
+  // Keep the previous acknowledged projection shielded until both agree, then
+  // give this viewport a request that can actually settle its pending owner.
+  if (!latestState || window.innerWidth !== latestState.viewport.width ||
+      window.innerHeight !== latestState.viewport.height) return;
+  const selected = paneViews.get(ownerPaneId);
+  if (selected) void requestPanePopOut(selected, desiredPopOutPaneId);
+}
+
+async function togglePanePopOut(view: PaneView): Promise<void> {
+  await requestPanePopOut(view, panePresentationAuthorityBlocked || poppedOutPaneId === view.paneId ? null : view.paneId);
+}
+
+async function requestPanePopOut(view: PaneView, selected: number | null): Promise<void> {
+  if (!latestState || window.surfAce.panePresentationEnabled !== true) return;
+  if (resizeCommitPending) {
+    view.popOutButton.title = "Wait for the divider resize to finish";
+    return;
+  }
+  cancelResizeGesture();
+  desiredPopOutPaneId = selected;
+  const intent = ++panePresentationIntent;
+  panePresentationTransitionsPending++;
+  applyPanePopOut();
+  let failureTitle: string | null = null;
+  try {
+    const identity = paneSnapshotGeometryIdentity();
+    const surfaceId = latestState.surfaceId;
+    const selectedLineage = paneStateFor(view)?.paneLineageId;
+    const width = latestState.viewport.width;
+    const height = latestState.viewport.height;
+    const inset = Math.max(8, Math.min(24, Math.min(width, height) * 0.02));
+    const bounds = { x: inset, y: inset, width: width - inset * 2, height: height - inset * 2 };
+    const viewport = currentViewport(view);
+    viewport.visibleRect.width = Math.max(0, bounds.width - 4);
+    viewport.visibleRect.height = Math.max(0, bounds.height - 4);
+    let response: { ok: boolean; error?: string; presentationCleared?: boolean; presentationBlocked?: boolean; revision?: number; authorityRevision?: number };
+    try {
+      response = await window.surfAce.setPanePresentation({ identity, paneId: selected,
+        ...(selected === null ? {} : { bounds, viewport }) });
+    } catch (error) {
+      response = { ok: false, presentationBlocked: true, error: error instanceof Error ? error.message : "Pane presentation failed" };
+    }
+    // Native authority outlives a stale display request. A geometry change may
+    // invalidate this reply's pixels without retiring its acknowledged selection.
+    const currentAuthority = latestState?.surfaceId === surfaceId &&
+      latestState.surfaceEpoch === identity.surfaceEpoch;
+    const responseRevision = response.authorityRevision;
+    const revisionIsCurrent = Number.isSafeInteger(responseRevision) &&
+      Number(responseRevision) >= panePresentationAuthorityRevision;
+    if (currentAuthority && !response.ok) {
+      if (response.presentationBlocked && (responseRevision === undefined ||
+          (revisionIsCurrent && Number(responseRevision) > panePresentationAuthorityClearRevision))) {
+        panePresentationAuthorityBlocked = true;
+        cancelResizeGesture();
+      } else if (response.presentationCleared && revisionIsCurrent) {
+        panePresentationAuthorityBlocked = false;
+        panePresentationAuthorityClearRevision = Number(responseRevision);
+      }
+      if (revisionIsCurrent) panePresentationAuthorityRevision = Number(responseRevision);
+    }
+    if (intent !== panePresentationIntent || !latestState || latestState.surfaceId !== surfaceId ||
+        JSON.stringify(paneSnapshotGeometryIdentity()) !== JSON.stringify(identity) ||
+        paneViews.get(view.paneId) !== view || paneStateFor(view)?.paneLineageId !== selectedLineage) return;
+    if (!response.ok) {
+      if (response.presentationCleared) {
+        if (responseRevision !== undefined && !revisionIsCurrent) return;
+        panePresentationAuthorityBlocked = false;
+        poppedOutPaneId = null;
+        desiredPopOutPaneId = null;
+        acknowledgedPopOutBounds = null;
+        panePresentationResizePending = false;
+        applyPanePopOut();
+        setAllPaneChromeMetrics();
+        refreshDynamicPaneFrames();
+        reportAllPaneSnapshots();
+        scheduleCompositorOverlayRegionReport("layout");
+      }
+      failureTitle = response.error ?? "Pane presentation is unavailable";
+      return;
+    }
+    if (response.revision !== undefined) {
+      if (!Number.isSafeInteger(response.revision) || response.revision < panePresentationMainRevision) return;
+      panePresentationMainRevision = response.revision;
+    }
+    if (response.authorityRevision !== undefined && !revisionIsCurrent) return;
+    if (revisionIsCurrent) panePresentationAuthorityRevision = Number(responseRevision);
+    cancelResizeGesture(); // Defense against a gesture introduced outside divider admission.
+    panePresentationAuthorityBlocked = false;
+    if (selected === null && response.revision !== undefined) {
+      panePresentationConfirmedClearRevision = response.revision;
+    }
+    if (selected === null && revisionIsCurrent) panePresentationAuthorityClearRevision = Number(responseRevision);
+    poppedOutPaneId = selected;
+    acknowledgedPopOutBounds = selected === null ? null : bounds;
+    panePresentationResizePending = false;
+    applyPanePopOut();
+    // Focusing the pane changes input ownership, never the split tree or content.
+    rememberPaneContext(view.paneId);
+    view.popOutButton.focus();
+    setAllPaneChromeMetrics();
+    refreshDynamicPaneFrames();
+    reportAllPaneSnapshots();
+    scheduleCompositorOverlayRegionReport("layout");
+  } finally {
+    panePresentationTransitionsPending--;
+    applyPanePopOut();
+    if (failureTitle && intent === panePresentationIntent && paneViews.get(view.paneId) === view) {
+      view.popOutButton.title = failureTitle;
+    }
+    if (panePresentationTransitionsPending === 0) {
+      reportAllPaneSnapshots();
+      scheduleCompositorOverlayRegionReport("layout");
+    }
+  }
 }
 
 function attachCommonEvents(view: PaneView): void {
@@ -1425,7 +1709,8 @@ function rebuildPaneControls(paneId: number): void {
 }
 
 function collapsePaneToolbar(view: PaneView): void {
-  if (view.toolbarCollapsed || paneStateFor(view)?.annotationBorderVisible) {
+  if (view.toolbarCollapsed || paneStateFor(view)?.annotationBorderVisible ||
+      poppedOutPaneId === view.paneId || panePresentationTransitionsPending > 0 || panePresentationAuthorityBlocked) {
     return;
   }
   view.toolbarCollapsed = true;
@@ -1452,6 +1737,17 @@ function ensurePaneView(paneId: number): PaneView {
   });
   const rootEl = document.createElement("div");
   rootEl.className = "pane-shell";
+  const slotEl = document.createElement("div");
+  slotEl.className = "pane-slot";
+  // Tiled slot and retained content host live in separate layers.
+  const popOutButton = surfAceOverlay(createIconButton("maximize", `Solo pane ${paneId}`, "pane-pop-out"), "pane-pop-out");
+  popOutButton.type = "button";
+  popOutButton.setAttribute("aria-expanded", "false");
+  popOutButton.setAttribute("aria-pressed", "false");
+  popOutButton.addEventListener("click", (event) => {
+    event.stopPropagation();
+    void togglePanePopOut(view);
+  });
   const scrollEl = document.createElement("div");
   scrollEl.className = "pane-scroll";
   const contentEl = document.createElement("div");
@@ -1512,6 +1808,7 @@ function ensurePaneView(paneId: number): PaneView {
     currentContentSignature: null,
     currentDrawingsKey: "",
     currentHtmlFrameCleanup: null,
+    currentBrowserFrame: null,
     currentRenderToken: 0,
     currentScrollHandler: null,
     currentWebViewResizeObserver: null,
@@ -1520,6 +1817,8 @@ function ensurePaneView(paneId: number): PaneView {
     duplicateRepushEl,
     lastNavigation: null,
     paneId,
+    slotEl,
+    popOutButton,
     rootEl,
     scale: CONTENT_SCALE_DEFAULT,
     scrollEl,
@@ -1555,8 +1854,9 @@ function setToast(view: PaneView, message: string | null): void {
 
 function buildControls(view: PaneView, pane: RendererPaneState): void {
   view.controlsEl.replaceChildren();
-  view.controlsEl.classList.toggle("collapsed", view.toolbarCollapsed);
-  view.dockEl.hidden = !view.toolbarCollapsed;
+  const keepRestoreReachable = poppedOutPaneId === view.paneId || panePresentationTransitionsPending > 0 || panePresentationAuthorityBlocked;
+  view.controlsEl.classList.toggle("collapsed", view.toolbarCollapsed && !keepRestoreReachable);
+  view.dockEl.hidden = !view.toolbarCollapsed || keepRestoreReachable;
   view.dockEl.setAttribute("aria-expanded", String(view.toolbarCollapsed));
   const hasPushedContent = pane.content.contentId !== null;
   if (isBrowserUrlPane(pane) && !pane.showDone) {
@@ -1664,29 +1964,75 @@ function buildControls(view: PaneView, pane: RendererPaneState): void {
     scale: view.scale,
   });
   const annotate = surfAceOverlay(createIconButton("pen-line", "Sketch", "annotate"), "annotation-control");
+  const doneContext = parseAnnotationDoneContext({ ...pane.content, paneId: pane.paneId, paneLineageId: pane.paneLineageId });
+  const doneKey = doneContext ? annotationDoneContextKey(doneContext) : "unavailable";
+  const doneScope = String(pane.paneId);
+  let localDone = localAnnotationDone.snapshot(doneScope, doneKey);
+  if (pane.showDone && localDone.phase === "saved" && !localDone.busy) {
+    localAnnotationDone.forget(doneScope);
+    localDone = localAnnotationDone.snapshot(doneScope, doneKey);
+  }
+  const doneState = !localDone.busy && pane.annotationDone?.phase === "saved" && pane.annotationDone.localSaved
+    ? pane.annotationDone : localDone.phase !== "idle" ? localDone : (pane.annotationDone ?? localDone);
+  const doneBusy = localAnnotationDone.isBusy(doneScope) || doneState.busy;
+  annotate.disabled = doneBusy;
   annotate.addEventListener("click", () => {
+    if (localAnnotationDone.isBusy(doneScope) || pane.annotationDone?.busy) return;
+    localAnnotationDone.forget(doneScope);
     rememberPaneContext(pane.paneId);
     annotationIntentEpoch.set(pane.paneId, (annotationIntentEpoch.get(pane.paneId) ?? 0) + 1);
     window.surfAce.command({ enabled: true, paneId: pane.paneId, type: "annotate" });
   });
   annotate.classList.toggle("active", pane.showDone);
   annotationPill.appendChild(annotate);
+  if (window.surfAce.panePresentationEnabled === true) annotationPill.appendChild(view.popOutButton);
 
-  if (pane.showDone) {
+  if (pane.showDone || doneBusy) {
+    const spinning = doneBusy && doneState.phase !== "waiting";
     const done = surfAceOverlay(createButton("Done", "done"), "annotation-control");
+    done.textContent = doneBusy ? (spinning ? "Saving…" : "Waiting…") : "Done";
+    done.disabled = doneBusy || !doneContext;
+    done.setAttribute("aria-busy", String(doneBusy));
+    done.classList.toggle("annotation-saving", spinning);
     done.addEventListener("click", () => {
+      if (!doneContext || localAnnotationDone.isBusy(doneScope) || pane.annotationDone?.busy) return;
       rememberPaneContext(pane.paneId);
       const epoch = (annotationIntentEpoch.get(pane.paneId) ?? 0) + 1;
       annotationIntentEpoch.set(pane.paneId, epoch);
-      void (pendingStrokeDelivery.get(pane.paneId) ?? Promise.resolve()).then(() => {
-        if (annotationIntentEpoch.get(pane.paneId) === epoch) {
-          window.surfAce.command({ enabled: false, paneId: pane.paneId, type: "annotate" });
-        }
+      const isCurrent = () => {
+        const currentPane = latestState?.panes.find((p) => p.paneId === pane.paneId);
+        const current = currentPane && parseAnnotationDoneContext({ ...currentPane.content,
+          paneId: currentPane.paneId, paneLineageId: currentPane.paneLineageId });
+        return paneViews.get(pane.paneId) === view && annotationIntentEpoch.get(pane.paneId) === epoch &&
+          !!current && annotationDoneContextKey(current) === doneKey;
+      };
+      void localAnnotationDone.finish(doneScope, doneKey, isCurrent, async (saved) => {
+        await (pendingStrokeDelivery.get(pane.paneId) ?? Promise.resolve());
+        if (!isCurrent()) throw new Error("annotation context changed");
+        const result = await window.surfAce.finishAnnotation(doneContext);
+        if (result.localSaved) saved();
+        if (result.phase !== "saved") throw new Error("annotation completion pending");
       });
     });
     annotationPill.appendChild(done);
   }
+  if (!doneBusy && (pane.annotationDelivery || ["saved", "waiting", "unknown"].includes(doneState.phase))) {
+    const status = document.createElement("span");
+    status.className = "annotation-local-status";
+    status.setAttribute("role", "status");
+    const delivery = doneState.phase === "unknown" ? undefined : pane.annotationDelivery;
+    status.textContent = delivery?.phase === "sent" ? "Sent to registry" :
+      delivery?.phase === "sending" ? "Saved locally · Sending" :
+      delivery?.phase === "rejected" ? "Saved locally · Registry rejected this record" :
+      delivery?.phase === "waiting" ? (delivery.error ? "Saved locally · Waiting · Delivery outcome unconfirmed" : "Saved locally · Waiting") :
+      doneState.phase === "saved" ? "Saved locally" :
+      doneState.localSaved ? "Saved locally · Waiting" : pane.showDone
+        ? "Save outcome unknown · Try Done again" : "Save outcome unknown · Waiting for reconciliation";
+    if (delivery?.phase === "sent") status.title = "Accepted by the registry; consumer processing is not confirmed.";
+    annotationPill.appendChild(status);
+  }
   view.controlsEl.appendChild(annotationPill);
+  shieldPaneToolbar(view);
 }
 
 function sendNavigationIntent(view: PaneView, paneId: number, url: string): void {
@@ -1809,13 +2155,14 @@ function isBrowserUrlKeyboardScrollResult(value: unknown): value is BrowserUrlKe
 }
 
 function reportBrowserUrlKeyboardScroll(view: PaneView, result: BrowserUrlKeyboardScrollResult): void {
+  if (resizeGesture) return;
   window.surfAce.command({
     paneId: view.paneId,
     type: "scroll",
     viewport: result.viewport,
     visibleText: result.visibleText,
   });
-  window.surfAce.reportSnapshot({
+  reportSnapshot({
     bounds: paneBounds(view),
     ...paneSnapshotGeometryIdentity(),
     paneId: view.paneId,
@@ -1843,23 +2190,97 @@ function isRendererScalableContentType(pane: RendererPaneState | null): boolean 
   );
 }
 
-function applyBrowserContentScale(view: PaneView, webview: BrowserUrlWebViewElement): void {
+function runReadyGuestScript(
+  view: PaneView,
+  webview: BrowserUrlWebViewElement,
+  code: string,
+): Promise<unknown> | null {
+  if (webview.dataset.guestReady !== "true" || !webview.isConnected || currentPaneFrameElement(view) !== webview) return null;
+  try {
+    return webview.executeJavaScript?.(code)?.catch(() => null) ?? null;
+  } catch {
+    // A guest can disappear while its host-side ready notification is queued.
+    return null;
+  }
+}
+
+function newBrowserScaleNonce(): string {
+  const bytes = new Uint8Array(16);
+  window.crypto.getRandomValues(bytes);
+  return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function isBrowserContentScaleMode(value: unknown): value is BrowserContentScaleMode {
+  return value === "host-transform" || value === "public-terminal-font";
+}
+
+function applyBrowserScaleMode(
+  view: PaneView,
+  webview: BrowserUrlWebViewElement,
+  state: BrowserContentScaleState,
+  mode: BrowserContentScaleMode,
+  sequence: number,
+): boolean {
+  if (browserContentScaleStates.get(webview) !== state || !webview.isConnected ||
+      currentPaneFrameElement(view) !== webview || !Number.isSafeInteger(sequence) ||
+      sequence <= state.modeSequence) return false;
+  state.modeSequence = sequence;
+  if (state.mode !== mode) {
+    state.mode = mode;
+    applyPaneFrameSize(view, webview);
+  }
+  return true;
+}
+
+function applyBrowserContentScale(
+  view: PaneView,
+  webview: BrowserUrlWebViewElement,
+): Promise<BrowserContentScaleMode | null> {
   const scale = Math.round(WEB_CONTENT_BASE_SCALE * view.scale * 1000) / 1000;
-  const scalePromise = webview.executeJavaScript?.(
-    `(() => {
-      const scale = ${JSON.stringify(scale)};
-      document.documentElement.style.zoom = scale === 1 ? "" : String(scale);
-      document.body?.style.setProperty("--surf-ace-content-scale", String(scale));
-    })()`,
+  const previous = browserContentScaleStates.get(webview);
+  const state: BrowserContentScaleState = {
+    mode: previous?.mode ?? "public-terminal-font",
+    modeSequence: 0,
+    nonce: newBrowserScaleNonce(),
+    revision: (previous?.revision ?? 0) + 1,
+    scale,
+  };
+  browserContentScaleStates.set(webview, state);
+  applyPaneFrameSize(view, webview);
+  const result = runReadyGuestScript(
+    view,
+    webview,
+    browserContentScaleScript(scale, state.nonce, state.revision),
   );
-  void scalePromise?.catch(() => {});
+  if (!result) return Promise.resolve(null);
+  return result.then((value) => {
+    if (!value || typeof value !== "object") return null;
+    const observation = value as { mode?: unknown; sequence?: unknown };
+    const mode = observation.mode;
+    const sequence = observation.sequence;
+    if (!isBrowserContentScaleMode(mode) || !Number.isSafeInteger(sequence) || (sequence as number) < 1) return null;
+    applyBrowserScaleMode(view, webview, state, mode, sequence as number);
+    return browserContentScaleStates.get(webview) === state ? state.mode : null;
+  });
+}
+
+function resetBrowserContentScaleMode(view: PaneView, webview: BrowserUrlWebViewElement): void {
+  const previous = browserContentScaleStates.get(webview);
+  browserContentScaleStates.set(webview, {
+    mode: "public-terminal-font",
+    modeSequence: 0,
+    nonce: newBrowserScaleNonce(),
+    revision: (previous?.revision ?? 0) + 1,
+    scale: Math.round(WEB_CONTENT_BASE_SCALE * view.scale * 1000) / 1000,
+  });
+  applyPaneFrameSize(view, webview);
 }
 
 function applyContentScale(view: PaneView): void {
   view.contentEl.style.setProperty("--surf-ace-content-scale", String(view.scale));
   const frame = currentPaneFrameElement(view);
   if (frame?.matches("webview.content-browser-url-frame")) {
-    applyBrowserContentScale(view, frame as BrowserUrlWebViewElement);
+    void applyBrowserContentScale(view, frame as BrowserUrlWebViewElement);
   }
   reportPaneSnapshot(view);
 }
@@ -1956,14 +2377,37 @@ function applyPaneFrameSize(view: PaneView, element: HTMLElement): boolean {
   const height = Math.max(1, Math.floor(rect.height));
   view.contentEl.style.height = `${height}px`;
   view.contentEl.style.minHeight = `${height}px`;
-  element.style.width = `${width}px`;
-  element.style.height = `${height}px`;
   if (element.matches("webview.content-browser-url-frame")) {
+    const webview = element as BrowserUrlWebViewElement;
+    const scaleState = browserContentScaleStates.get(webview);
+    const hostScale = scaleState?.mode === "host-transform" ? scaleState.scale : 1;
+    const logicalWidth = width / hostScale;
+    const logicalHeight = height / hostScale;
+    const widthCss = `${logicalWidth}px`;
+    const heightCss = `${logicalHeight}px`;
+    const transform = hostScale === 1 ? "" : `scale(${hostScale})`;
+    const changed = element.style.width !== widthCss || element.style.height !== heightCss ||
+      element.style.minWidth !== widthCss || element.style.minHeight !== heightCss ||
+      element.style.transform !== transform ||
+      (element.style.transformOrigin !== "0 0" && element.style.transformOrigin !== "0px 0px");
+    element.style.inset = "0 auto auto 0";
+    element.style.width = widthCss;
+    element.style.height = heightCss;
+    element.style.minWidth = widthCss;
+    element.style.minHeight = heightCss;
+    element.style.transformOrigin = "0 0";
+    element.style.transform = transform;
     element.setAttribute("autosize", "on");
-    element.setAttribute("minwidth", String(width));
-    element.setAttribute("minheight", String(height));
-    element.setAttribute("maxwidth", String(width));
-    element.setAttribute("maxheight", String(height));
+    element.setAttribute("minwidth", String(Math.max(1, Math.ceil(logicalWidth))));
+    element.setAttribute("minheight", String(Math.max(1, Math.ceil(logicalHeight))));
+    element.setAttribute("maxwidth", String(Math.max(1, Math.ceil(logicalWidth))));
+    element.setAttribute("maxheight", String(Math.max(1, Math.ceil(logicalHeight))));
+    if (changed && element.dataset.guestReady === "true") {
+      runReadyGuestScript(view, webview, `window.dispatchEvent(new Event("resize"))`);
+    }
+  } else {
+    element.style.width = `${width}px`;
+    element.style.height = `${height}px`;
   }
   return true;
 }
@@ -2164,8 +2608,9 @@ function browserUrlViewportMismatch(
   if (!isBrowserUrlGuestMetrics(guest)) {
     return null;
   }
-  const hostHeight = webview.clientHeight || Math.round(webview.getBoundingClientRect().height);
-  const hostWidth = webview.clientWidth || Math.round(webview.getBoundingClientRect().width);
+  const coordinateScale = browserHostCoordinateScale(webview);
+  const hostHeight = webview.clientHeight || Math.round(webview.getBoundingClientRect().height / coordinateScale);
+  const hostWidth = webview.clientWidth || Math.round(webview.getBoundingClientRect().width / coordinateScale);
   const tolerance = 2;
   if (hostHeight <= 0 || hostWidth <= 0) {
     return null;
@@ -2193,9 +2638,11 @@ function nudgeBrowserUrlWebViewResize(view: PaneView, webview: BrowserUrlWebView
   }
   const width = Math.max(1, Math.floor(rect.width));
   const height = Math.max(1, Math.floor(rect.height));
+  const scaleState = browserContentScaleStates.get(webview);
+  const hostScale = scaleState?.mode === "host-transform" ? scaleState.scale : 1;
   webview.style.display = "flex";
-  webview.style.width = `${Math.max(1, width - 1)}px`;
-  webview.style.height = `${Math.max(1, height - 1)}px`;
+  webview.style.width = `${Math.max(1, width - 1) / hostScale}px`;
+  webview.style.height = `${Math.max(1, height - 1) / hostScale}px`;
   void webview.offsetHeight;
   applyPaneFrameSize(view, webview);
 }
@@ -2338,6 +2785,37 @@ function htmlDocumentDataUrl(html: HtmlContent): string {
   return `data:text/html;charset=utf-8,${encodeURIComponent(htmlDocumentForBrowser(html))}`;
 }
 
+function browserHostCoordinateScale(webview: BrowserUrlWebViewElement): number {
+  const state = browserContentScaleStates.get(webview);
+  return state?.mode === "host-transform" ? state.scale : 1;
+}
+
+function scaleBrowserPoint(value: unknown, scale: number): unknown {
+  if (scale === 1 || !value || typeof value !== "object") return value;
+  const point = value as Record<string, unknown>;
+  if (typeof point.x !== "number" || typeof point.y !== "number") return value;
+  return { ...point, x: point.x * scale, y: point.y * scale };
+}
+
+function scaleBrowserSelection(value: unknown, scale: number): unknown {
+  if (scale === 1 || !value || typeof value !== "object") return value;
+  const selection = value as Record<string, unknown>;
+  const rect = selection.boundingRect;
+  if (!rect || typeof rect !== "object") return value;
+  const bounds = rect as Record<string, unknown>;
+  if ([bounds.x, bounds.y, bounds.width, bounds.height].some((part) => typeof part !== "number")) return value;
+  return {
+    ...selection,
+    boundingRect: {
+      ...bounds,
+      height: (bounds.height as number) * scale,
+      width: (bounds.width as number) * scale,
+      x: (bounds.x as number) * scale,
+      y: (bounds.y as number) * scale,
+    },
+  };
+}
+
 function wireBrowserContentEvents(view: PaneView, paneId: number, webview: BrowserUrlWebViewElement): void {
   const onIpcMessage = (event: Event) => {
     const message = event as BrowserContentIpcEvent;
@@ -2348,6 +2826,17 @@ function wireBrowserContentEvents(view: PaneView, paneId: number, webview: Brows
     if (!payload) {
       return;
     }
+    if (payload.type === "scale-mode") {
+      const state = browserContentScaleStates.get(webview);
+      const mode = payload.mode;
+      const sequence = payload.sequence;
+      if (state && payload.nonce === state.nonce && payload.revision === state.revision &&
+          isBrowserContentScaleMode(mode) && Number.isSafeInteger(sequence) && (sequence as number) >= 1) {
+        applyBrowserScaleMode(view, webview, state, mode, sequence as number);
+      }
+      return;
+    }
+    if (resizeGesture && (payload.type === "scroll" || payload.type === "ready")) return;
     if (payload.type === "scroll") {
       collapsePaneToolbar(view);
       window.surfAce.command({
@@ -2356,7 +2845,7 @@ function wireBrowserContentEvents(view: PaneView, paneId: number, webview: Brows
         viewport: payload.viewport,
         visibleText: payload.visibleText,
       });
-      window.surfAce.reportSnapshot({
+      reportSnapshot({
         bounds: paneBounds(view),
         ...paneSnapshotGeometryIdentity(),
         paneId,
@@ -2368,7 +2857,7 @@ function wireBrowserContentEvents(view: PaneView, paneId: number, webview: Brows
       collapsePaneToolbar(view);
       window.surfAce.command({
         paneId,
-        selection: payload.selection ?? null,
+        selection: scaleBrowserSelection(payload.selection ?? null, browserHostCoordinateScale(webview)),
         type: "selection",
       });
     } else if (payload.type === "tap") {
@@ -2377,7 +2866,7 @@ function wireBrowserContentEvents(view: PaneView, paneId: number, webview: Brows
         kind: payload.kind,
         nearestContent: payload.nearestContent,
         paneId,
-        position: payload.position,
+        position: scaleBrowserPoint(payload.position, browserHostCoordinateScale(webview)),
         type: "tap",
       });
     } else if (payload.type === "focus") {
@@ -2387,7 +2876,7 @@ function wireBrowserContentEvents(view: PaneView, paneId: number, webview: Brows
       collapsePaneToolbar(view);
       sendNavigationIntent(view, paneId, String(payload.url ?? ""));
     } else if (payload.type === "ready") {
-      window.surfAce.reportSnapshot({
+      reportSnapshot({
         bounds: paneBounds(view),
         ...paneSnapshotGeometryIdentity(),
         paneId,
@@ -2524,6 +3013,7 @@ function resetDynamicContent(view: PaneView): number {
   view.currentRenderToken += 1;
   view.currentHtmlFrameCleanup?.();
   view.currentHtmlFrameCleanup = null;
+  view.currentBrowserFrame = null;
   clearWebViewSizer(view);
   view.currentScrollHandler = null;
   view.scrollEl.scrollLeft = 0;
@@ -2550,6 +3040,7 @@ function renderBrowserContent(
   });
   const browserView = document.createElement("webview") as BrowserUrlWebViewElement;
   browserView.className = "content-html-frame content-browser-url-frame";
+  view.currentBrowserFrame = browserView;
   if (options?.allowPopups) {
     browserView.setAttribute("allowpopups", "true");
   }
@@ -2611,22 +3102,24 @@ function renderBrowserContent(
     void resetBrowserUrlGuestScroll(browserView).finally(() => {
       const eventReason = reason === "dom-ready:guest-viewport" ? "dom-ready" : "did-finish-load";
       reportBrowserUrlDiagnostics(view, browserView, eventReason);
-      applyBrowserContentScale(view, browserView);
-      void verifyBrowserUrlGuestViewport(view, browserView, reason).then(({ mismatch }) => {
-        if (renderToken !== view.currentRenderToken) {
-          return;
-        }
-        if (mismatch) {
-          reportNavigation(
-            "failed",
-            `webview guest viewport stuck at ${mismatch.guestHeight}x${mismatch.guestWidth} for host ${mismatch.hostHeight}x${mismatch.hostWidth}`,
-          );
-          return;
-        }
-        reportNavigation("applied");
-        window.setTimeout(() => {
-          reportPaneSnapshot(view);
-        }, 0);
+      void applyBrowserContentScale(view, browserView).then(() => {
+        if (renderToken !== view.currentRenderToken) return;
+        void verifyBrowserUrlGuestViewport(view, browserView, reason).then(({ mismatch }) => {
+          if (renderToken !== view.currentRenderToken) {
+            return;
+          }
+          if (mismatch) {
+            reportNavigation(
+              "failed",
+              `webview guest viewport stuck at ${mismatch.guestHeight}x${mismatch.guestWidth} for host ${mismatch.hostHeight}x${mismatch.hostWidth}`,
+            );
+            return;
+          }
+          reportNavigation("applied");
+          window.setTimeout(() => {
+            reportPaneSnapshot(view);
+          }, 0);
+        });
       });
     });
   };
@@ -2643,9 +3136,13 @@ function renderBrowserContent(
       // Guest scale initialization runs from dom-ready, when guest methods are available.
     },
   );
+  let guestLoadGeneration = 0;
   browserView.addEventListener(
     "did-start-loading",
     () => {
+      guestLoadGeneration += 1;
+      delete browserView.dataset.guestReady;
+      resetBrowserContentScaleMode(view, browserView);
       syncBrowserControlButtons(view);
       rendererDiagnostic("browser_content_did_start_loading", {
         currentUrl: browserUrlElementCurrentUrl(browserView),
@@ -2687,6 +3184,7 @@ function renderBrowserContent(
   browserView.addEventListener(
     "dom-ready",
     () => {
+      browserView.dataset.guestReady = "true";
       syncBrowserControlButtons(view);
       rendererDiagnostic("browser_content_dom_ready", {
         currentUrl: browserUrlElementCurrentUrl(browserView),
@@ -2719,7 +3217,23 @@ function renderBrowserContent(
   browserView.addEventListener("will-frame-navigate", blockStaticHtmlNavigation);
   browserView.addEventListener("did-navigate", () => syncBrowserControlButtons(view));
   browserView.addEventListener("did-navigate-in-page", () => syncBrowserControlButtons(view));
-  browserView.addEventListener("did-stop-loading", () => syncBrowserControlButtons(view));
+  browserView.addEventListener("did-stop-loading", () => {
+    syncBrowserControlButtons(view);
+    // A loading cycle can finish without replacing the document or emitting
+    // dom-ready. Recover readiness from the guest, never from the spinner alone.
+    const generation = guestLoadGeneration;
+    try {
+      void browserView.executeJavaScript?.("document.readyState").then((readyState) => {
+        if (generation !== guestLoadGeneration || renderToken !== view.currentRenderToken ||
+            currentPaneFrameElement(view) !== browserView || !browserView.isConnected ||
+            (readyState !== "interactive" && readyState !== "complete")) return;
+        browserView.dataset.guestReady = "true";
+        applyBrowserContentScale(view, browserView);
+      }).catch(() => {});
+    } catch {
+      // A detached guest or one still navigating cannot establish readiness.
+    }
+  });
   browserView.addEventListener(
     "did-fail-load",
     (event) => {
@@ -2928,10 +3442,109 @@ function layoutWeight(node: LayoutNode): number {
   return typeof node.weight === "number" && Number.isFinite(node.weight) && node.weight > 0 ? node.weight : 1;
 }
 
-function attachResizeHandle(handle: HTMLElement, split: HTMLElement, node: Extract<LayoutNode, { type: "split" }>, path: number[], index: number): void {
+type ResizeGesture = {
+  expected: { surfaceEpoch: string; topologyRevision: number; geometryRevision: number; layout: LayoutNode | null };
+  path: number[];
+  weights: number[];
+  stop: () => void;
+};
+let resizeGesture: ResizeGesture | null = null;
+let resizeCommitPending = false;
+let resizeStatus = "";
+
+function layoutNodeAt(node: LayoutNode | null, path: number[]): LayoutNode | null {
+  for (const index of path) {
+    if (node?.type !== "split") return null;
+    node = node.children[index] ?? null;
+  }
+  return node;
+}
+
+function layoutIdentity(state: RendererWindowState): string {
+  return JSON.stringify([state.surfaceId, state.surfaceEpoch, state.topologyRevision, state.geometryRevision, state.viewport, state.layout]);
+}
+
+function positionPaneHosts(): void {
+  const wrapper = appRoot.firstElementChild as HTMLElement | null;
+  const layer = wrapper?.querySelector(".pane-host-layer") as HTMLElement | null;
+  if (!layer) return;
+  const origin = layer.getBoundingClientRect();
+  for (const slot of wrapper!.querySelectorAll<HTMLElement>(".pane-layout-slot")) {
+    const view = paneViews.get(Number(slot.dataset.paneId));
+    if (!view || !view.rootEl.isConnected) continue;
+    if (view.paneId === poppedOutPaneId) continue;
+    const rect = slot.getBoundingClientRect();
+    Object.assign(view.rootEl.style, {
+      left: `${rect.left - origin.left}px`, top: `${rect.top - origin.top}px`,
+      width: `${rect.width}px`, height: `${rect.height}px`,
+      borderTop: slot.dataset.borderTop ? "1px solid rgba(116, 141, 182, 0.14)" : "",
+      borderLeft: slot.dataset.borderLeft ? "1px solid rgba(116, 141, 182, 0.14)" : "",
+    });
+  }
+}
+
+function updateSplitElement(split: HTMLElement, node: Extract<LayoutNode, { type: "split" }>): void {
+  const children = [...split.children].filter((child) => !child.classList.contains("split-resize-handle")) as HTMLElement[];
+  const handles = [...split.children].filter((child) => child.classList.contains("split-resize-handle")) as HTMLElement[];
+  const total = node.children.reduce((sum, child) => sum + layoutWeight(child), 0);
+  let cumulative = 0;
+  node.children.forEach((child, index) => {
+    children[index]!.style.flexGrow = String(layoutWeight(child));
+    cumulative += layoutWeight(child);
+    const handle = handles[index];
+    if (handle) handle.style[node.direction === "vertical" ? "left" : "top"] = `${cumulative / total * 100}%`;
+    if (child.type === "split") updateSplitElement(children[index]!, child);
+  });
+}
+
+function refreshLayoutGeometry(): void {
+  positionPaneHosts();
+  setAllPaneChromeMetrics();
+  refreshDynamicPaneFrames();
+  if (!resizeGesture) reportAllPaneSnapshots();
+}
+
+function restoreCommittedLayout(): void {
+  const node = latestState?.layout;
+  const element = appRoot.querySelector(".layout-root")?.firstElementChild as HTMLElement | null;
+  if (node?.type === "split" && element) updateSplitElement(element, node);
+  refreshLayoutGeometry();
+}
+
+function cancelResizeGesture(): void {
+  const gesture = resizeGesture;
+  if (!gesture) return;
+  resizeGesture = null;
+  gesture.stop();
+  restoreCommittedLayout();
+  scheduleCompositorOverlayRegionReport("layout");
+}
+
+function showResizeStatus(): void {
+  const wrapper = appRoot.firstElementChild;
+  if (!wrapper) return;
+  let status = wrapper.querySelector(".resize-status") as HTMLElement | null;
+  if (!resizeStatus) { status?.remove(); return; }
+  if (!status) {
+    status = document.createElement("div");
+    status.className = "resize-status";
+    status.setAttribute("role", "status");
+    wrapper.appendChild(status);
+  }
+  status.textContent = resizeStatus;
+}
+
+function attachResizeHandle(handle: HTMLElement, split: HTMLElement, _node: Extract<LayoutNode, { type: "split" }>, path: number[], index: number): void {
   handle.addEventListener("pointerdown", (event) => {
+    if (poppedOutPaneId !== null || panePresentationTransitionsPending > 0 || panePresentationAuthorityBlocked ||
+        resizeCommitPending || resizeGesture || !latestState) return;
+    const node = layoutNodeAt(latestState.layout, path);
+    if (node?.type !== "split") return;
     event.preventDefault();
     handle.setPointerCapture(event.pointerId);
+    resizeStatus = "";
+    showResizeStatus();
+    const initialIdentity = layoutIdentity(latestState);
     const start = node.direction === "vertical" ? event.clientX : event.clientY;
     const splitRect = split.getBoundingClientRect();
     const extent = node.direction === "vertical" ? splitRect.width : splitRect.height;
@@ -2939,67 +3552,120 @@ function attachResizeHandle(handle: HTMLElement, split: HTMLElement, node: Extra
     const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
     const before = weights[index] ?? 1;
     const after = weights[index + 1] ?? 1;
-    const minWeight = Math.max(0.05, totalWeight * 0.05);
-    const onMove = (moveEvent: PointerEvent) => {
-      const current = node.direction === "vertical" ? moveEvent.clientX : moveEvent.clientY;
-      const deltaWeight = extent > 0 ? ((current - start) / extent) * totalWeight : 0;
-      const pairTotal = before + after;
-      const nextBefore = Math.min(Math.max(minWeight, before + deltaWeight), Math.max(minWeight, pairTotal - minWeight));
-      const nextWeights = [...weights];
-      nextWeights[index] = nextBefore;
-      nextWeights[index + 1] = Math.max(minWeight, pairTotal - nextBefore);
-      window.surfAce.command({ path, type: "resize-split", weights: nextWeights });
+    const pairTotal = before + after;
+    const minWeight = Math.min(pairTotal / 2, Math.max(0.05, totalWeight * 0.05));
+    let frame: number | null = null;
+    const gesture: ResizeGesture = {
+      expected: { surfaceEpoch: latestState.surfaceEpoch, topologyRevision: latestState.topologyRevision, geometryRevision: latestState.geometryRevision,
+        layout: structuredClone(latestState.layout) },
+      path: [...path], weights: [...weights], stop: () => {},
     };
-    const onUp = () => {
+    const updateWeights = (moveEvent: PointerEvent) => {
+      const current = node.direction === "vertical" ? moveEvent.clientX : moveEvent.clientY;
+      if (current === start) {
+        gesture.weights[index] = before;
+        gesture.weights[index + 1] = after;
+        return;
+      }
+      const deltaWeight = extent > 0 ? ((current - start) / extent) * totalWeight : 0;
+      const nextBefore = Math.min(Math.max(minWeight, before + deltaWeight), pairTotal - minWeight);
+      gesture.weights[index] = nextBefore;
+      gesture.weights[index + 1] = pairTotal - nextBefore;
+    };
+    const preview = () => {
+      frame = null;
+      if (resizeGesture !== gesture || !latestState || layoutIdentity(latestState) !== initialIdentity) return;
+      const provisional = { ...node, children: node.children.map((child, i) => ({ ...child, weight: gesture.weights[i] })) };
+      updateSplitElement(split, provisional);
+      refreshLayoutGeometry();
+    };
+    const onMove = (moveEvent: PointerEvent) => {
+      if (moveEvent.pointerId !== event.pointerId) return;
+      updateWeights(moveEvent);
+      if (frame === null) frame = window.requestAnimationFrame(preview);
+    };
+    const cancel = () => cancelResizeGesture();
+    const onKey = (key: KeyboardEvent) => { if (key.key === "Escape") cancel(); };
+    const onUp = (upEvent: PointerEvent) => {
+      if (upEvent.pointerId !== event.pointerId || resizeGesture !== gesture) return;
+      if (poppedOutPaneId !== null || panePresentationTransitionsPending > 0 || panePresentationAuthorityBlocked) {
+        cancelResizeGesture();
+        return;
+      }
+      updateWeights(upEvent);
+      // Measure final flex geometry without publishing provisional snapshots or topology.
+      const finalNode = { ...node, children: node.children.map((child, i) => ({ ...child, weight: gesture.weights[i] })) };
+      updateSplitElement(split, finalNode);
+      refreshLayoutGeometry();
+      const geometry = latestState!.panes.map((pane) => ({ paneId: pane.paneId, bounds: tiledPaneBounds(paneViews.get(pane.paneId)!) }));
+      resizeGesture = null;
+      gesture.stop();
+      // Restore authoritative bounds before sending the one final mutation.
+      restoreCommittedLayout();
+      if (gesture.weights.every((weight, i) => Math.abs(weight - weights[i]!) < 1e-9)) return;
+      resizeCommitPending = true;
+      void window.surfAce.resizeSplit({ path: gesture.path, weights: gesture.weights, expected: gesture.expected, geometry })
+        .then((ok) => { resizeStatus = ok ? "" : "Resize couldn’t be confirmed"; })
+        .catch(() => { resizeStatus = "Resize couldn’t be confirmed"; })
+        .finally(() => {
+          resizeCommitPending = false;
+          restoreCommittedLayout();
+          showResizeStatus();
+          scheduleCompositorOverlayRegionReport("layout");
+        });
+    };
+    gesture.stop = () => {
+      if (frame !== null) window.cancelAnimationFrame(frame);
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
-      scheduleCompositorOverlayRegionReport("layout");
+      window.removeEventListener("pointercancel", cancel);
+      window.removeEventListener("blur", cancel);
+      window.removeEventListener("keydown", onKey);
+      handle.removeEventListener("lostpointercapture", cancel);
+      if (handle.hasPointerCapture?.(event.pointerId)) handle.releasePointerCapture(event.pointerId);
     };
+    resizeGesture = gesture;
     window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp, { once: true });
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", cancel);
+    window.addEventListener("blur", cancel);
+    window.addEventListener("keydown", onKey);
+    handle.addEventListener("lostpointercapture", cancel);
   });
 }
 
 function renderLayout(node: LayoutNode, panesById: Map<number, RendererPaneState>, path: number[] = []): HTMLElement {
   if (node.type === "pane") {
-    const pane = panesById.get(node.paneId);
-    if (!pane) {
-      const fallback = document.createElement("div");
-      return fallback;
-    }
     const view = ensurePaneView(node.paneId);
-    updatePane(view, pane);
-    view.rootEl.style.flexGrow = String(layoutWeight(node));
-    return view.rootEl;
+    view.slotEl.className = "pane-slot pane-layout-slot";
+    view.slotEl.dataset.paneId = String(node.paneId);
+    view.slotEl.style.flexGrow = String(layoutWeight(node));
+    return view.slotEl;
   }
   const split = document.createElement("div");
   split.className = `layout-split direction-${node.direction}`;
   split.style.flexGrow = String(layoutWeight(node));
-  const totalWeight = node.children.reduce((sum, child) => sum + layoutWeight(child), 0);
-  let cumulativeWeight = 0;
   for (const [index, child] of node.children.entries()) {
     const childEl = renderLayout(child, panesById, [...path, index]);
-    childEl.style.flexGrow = String(layoutWeight(child));
+    if (index > 0 && child.type === "pane") {
+      childEl.dataset[node.direction === "vertical" ? "borderLeft" : "borderTop"] = "true";
+    }
     split.appendChild(childEl);
-    cumulativeWeight += layoutWeight(child);
     if (index < node.children.length - 1) {
       const handle = document.createElement("div");
       handle.className = `split-resize-handle split-resize-handle-${node.direction}`;
-      const percent = totalWeight > 0 ? (cumulativeWeight / totalWeight) * 100 : 0;
-      if (node.direction === "vertical") {
-        handle.style.left = `${percent}%`;
-      } else {
-        handle.style.top = `${percent}%`;
-      }
       attachResizeHandle(handle, split, node, path, index);
       split.appendChild(handle);
     }
   }
+  updateSplitElement(split, node);
   return split;
 }
 
 function layoutKey(state: RendererWindowState): string {
-  return JSON.stringify(state.layout);
+  const shape = (node: LayoutNode | null): unknown => node?.type === "split"
+    ? [node.direction, node.children.map(shape)] : node?.type === "pane" ? node.paneId : null;
+  return JSON.stringify([state.surfaceId, state.surfaceEpoch, shape(state.layout)]);
 }
 
 function chromeKey(state: RendererWindowState): string {
@@ -3041,6 +3707,9 @@ function patchSameLayoutWindow(previousState: RendererWindowState, state: Render
 
   wrapper.className = `surface-window connection-${state.connectionBar}`;
   updateConnectionErrorBanner(wrapper, state);
+  const layoutChanged = JSON.stringify(previousState.layout) !== JSON.stringify(state.layout);
+  const split = wrapper.querySelector(".layout-root")?.firstElementChild as HTMLElement | null;
+  if (state.layout?.type === "split" && split && !resizeGesture) updateSplitElement(split, state.layout);
   const nextChromeKey = chromeKey(state);
   const chromeStateChanged = latestChromeKey !== nextChromeKey;
   const previousPanes = new Map(previousState.panes.map((pane) => [pane.paneId, pane]));
@@ -3063,11 +3732,14 @@ function patchSameLayoutWindow(previousState: RendererWindowState, state: Render
     }
   }
   latestChromeKey = nextChromeKey;
-  if (viewportChanged) {
+  if (viewportChanged || layoutChanged || previousState.geometryRevision !== state.geometryRevision) {
+    positionPaneHosts();
+    reacknowledgePanePopOutViewport();
     setAllPaneChromeMetrics();
     refreshDynamicPaneFrames();
     reportAllPaneSnapshots();
     window.requestAnimationFrame(() => {
+      positionPaneHosts();
       setAllPaneChromeMetrics();
       refreshDynamicPaneFrames();
       reportAllPaneSnapshots();
@@ -3088,6 +3760,22 @@ function patchSameLayoutWindow(previousState: RendererWindowState, state: Render
   return true;
 }
 
+// setViewport rotates surfaceEpoch even when pane/content sessions are unchanged.
+// Treat only that narrowly identified geometry transition as a host continuation;
+// a surface, topology, lineage or content replacement still retires old views.
+function isViewportEpochContinuation(previous: RendererWindowState, state: RendererWindowState): boolean {
+  if (previous.surfaceId !== state.surfaceId || previous.surfaceEpoch === state.surfaceEpoch ||
+      previous.topologyRevision !== state.topologyRevision || state.geometryRevision <= previous.geometryRevision ||
+      JSON.stringify(previous.viewport) === JSON.stringify(state.viewport) ||
+      JSON.stringify(previous.layout) !== JSON.stringify(state.layout) || previous.panes.length !== state.panes.length) return false;
+  const oldPanes = new Map(previous.panes.map(pane => [pane.paneId, pane]));
+  return state.panes.every(pane => {
+    const old = oldPanes.get(pane.paneId);
+    return !!old && old.paneLineageId === pane.paneLineageId && contentKey(old) === contentKey(pane) &&
+      old.externalNative === pane.externalNative;
+  });
+}
+
 function renderWindow(state: RendererWindowState): void {
   rendererDiagnostic("render_window_start", {
     hasAppRoot: Boolean(appRoot),
@@ -3098,6 +3786,22 @@ function renderWindow(state: RendererWindowState): void {
   });
   announceReachedHistoryEntries(state);
   const previousState = latestState;
+  const viewportContinuation = !!previousState && isViewportEpochContinuation(previousState, state);
+  if (previousState && (previousState.surfaceId !== state.surfaceId ||
+      (previousState.surfaceEpoch !== state.surfaceEpoch && !viewportContinuation) ||
+      previousState.topologyRevision !== state.topologyRevision ||
+      JSON.stringify(previousState.layout) !== JSON.stringify(state.layout) ||
+      (poppedOutPaneId !== null && !state.panes.some((pane) => pane.paneId === poppedOutPaneId &&
+        pane.paneLineageId === previousState.panes.find((previous) => previous.paneId === poppedOutPaneId)?.paneLineageId)))) {
+    poppedOutPaneId = null;
+    desiredPopOutPaneId = null;
+    acknowledgedPopOutBounds = null;
+    panePresentationResizePending = false;
+    panePresentationIntent++;
+    applyPanePopOut();
+  }
+
+  if (resizeGesture && previousState && layoutIdentity(previousState) !== layoutIdentity(state)) cancelResizeGesture();
   if (previousState) {
     latestState = state;
     if (patchSameLayoutWindow(previousState, state)) {
@@ -3108,17 +3812,50 @@ function renderWindow(state: RendererWindowState): void {
   latestLayoutKey = layoutKey(state);
   latestChromeKey = chromeKey(state);
   const panesById = new Map(state.panes.map((pane) => [pane.paneId, pane]));
-  const wrapper = document.createElement("div");
+  let wrapper = appRoot.firstElementChild as HTMLDivElement | null;
+  if (!wrapper?.classList.contains("surface-window")) {
+    wrapper = document.createElement("div");
+    wrapper.className = "surface-window";
+    const layoutRoot = document.createElement("div");
+    layoutRoot.className = "layout-root";
+    const hosts = document.createElement("div");
+    hosts.className = "pane-host-layer";
+    wrapper.append(layoutRoot, hosts);
+    appRoot.replaceChildren(wrapper);
+  }
   wrapper.className = `surface-window connection-${state.connectionBar}`;
   updateConnectionErrorBanner(wrapper, state);
-  const layoutRoot = document.createElement("div");
-  layoutRoot.className = "layout-root";
-  if (state.layout) {
-    layoutRoot.appendChild(renderLayout(state.layout, panesById));
-  } else {
+  const layoutRoot = wrapper.querySelector(".layout-root")!;
+  const hosts = wrapper.querySelector(".pane-host-layer")!;
+  // Retire replaced views before renderLayout obtains their slot elements.
+  // A viewport-only epoch transition retains the actual content hosts and slots.
+  for (const [id, view] of paneViews) {
+    const pane = panesById.get(id);
+    const previousPane = previousState?.panes.find(previous => previous.paneId === id);
+    if (!pane || (previousState && (previousState.surfaceId !== state.surfaceId ||
+        (previousState.surfaceEpoch !== state.surfaceEpoch && !viewportContinuation) ||
+        previousPane?.paneLineageId !== pane.paneLineageId))) {
+      resetDynamicContent(view);
+      view.rootEl.remove();
+      paneViews.delete(id);
+    }
   }
-  wrapper.append(layoutRoot);
-  appRoot.replaceChildren(wrapper);
+  // Only the cheap layout skeleton is rebuilt. Guest ancestors never move.
+  layoutRoot.replaceChildren(...(state.layout ? [renderLayout(state.layout, panesById)] : []));
+  for (const pane of state.panes) {
+    const view = ensurePaneView(pane.paneId);
+    if (view.rootEl.parentElement !== hosts) hosts.appendChild(view.rootEl);
+    const previousPane = previousState?.panes.find((previous) => previous.paneId === pane.paneId);
+    if (!previousState || !previousPane || view.currentContentKey === "" ||
+        paneRenderKey(previousState, previousPane) !== paneRenderKey(state, pane)) {
+      updatePane(view, pane);
+    } else {
+      view.rootEl.classList.toggle("keyboard-active", pane.activeKeyboardPane);
+    }
+  }
+  positionPaneHosts();
+  if (viewportContinuation) reacknowledgePanePopOutViewport();
+  showResizeStatus();
   rendererDiagnostic("render_window_committed", {
     appChildCount: appRoot.childElementCount,
     contentHostCount: appRoot.querySelectorAll(".pane-content").length,
@@ -3130,6 +3867,7 @@ function renderWindow(state: RendererWindowState): void {
   refreshDynamicPaneFrames();
   reportAllPaneSnapshots();
   window.requestAnimationFrame(() => {
+    positionPaneHosts();
     setAllPaneChromeMetrics();
     refreshDynamicPaneFrames();
     reportAllPaneSnapshots();
@@ -3173,7 +3911,61 @@ async function init(): Promise<void> {
     renderWindow(nextState as RendererWindowState);
   });
 
+  window.surfAce.onPanePresentationOwnership((payload) => {
+    if (window.surfAce.panePresentationEnabled !== true) return;
+    if (!payload || typeof payload !== "object" || !latestState) return;
+    const notice = payload as { surfaceId?: unknown; surfaceEpoch?: unknown; revision?: unknown; authorityRevision?: unknown; phase?: unknown };
+    if (notice.surfaceId !== latestState.surfaceId || notice.surfaceEpoch !== latestState.surfaceEpoch ||
+        !Number.isSafeInteger(notice.revision) || Number(notice.revision) <= 0 ||
+        Number(notice.revision) < panePresentationMainRevision ||
+        (notice.phase !== "blocked" && notice.phase !== "cleared")) return;
+    if (notice.phase === "blocked" && Number(notice.revision) <= panePresentationConfirmedClearRevision) return;
+    if (notice.authorityRevision !== undefined) {
+      if (!Number.isSafeInteger(notice.authorityRevision) || Number(notice.authorityRevision) < panePresentationAuthorityRevision) return;
+      if (notice.phase === "blocked" && Number(notice.authorityRevision) <= panePresentationAuthorityClearRevision) return;
+      panePresentationAuthorityRevision = Number(notice.authorityRevision);
+      if (notice.phase === "cleared") panePresentationAuthorityClearRevision = Number(notice.authorityRevision);
+    }
+    panePresentationMainRevision = Number(notice.revision);
+    panePresentationIntent++;
+    cancelResizeGesture();
+    panePresentationAuthorityBlocked = notice.phase === "blocked";
+    if (notice.phase === "cleared") {
+      panePresentationConfirmedClearRevision = Number(notice.revision);
+      poppedOutPaneId = null;
+      desiredPopOutPaneId = null;
+      acknowledgedPopOutBounds = null;
+      panePresentationResizePending = false;
+    } else {
+      panePresentationResizePending = poppedOutPaneId !== null;
+    }
+    applyPanePopOut();
+    setAllPaneChromeMetrics();
+    refreshDynamicPaneFrames();
+    reportAllPaneSnapshots();
+    scheduleCompositorOverlayRegionReport("layout");
+  });
+
   window.surfAce.onKeyboardIntent((intent) => {
+    if (panePresentationResizePending || panePresentationTransitionsPending > 0 || panePresentationAuthorityBlocked) return;
+    if (poppedOutPaneId !== null && intent && typeof intent === "object" &&
+        "paneId" in intent && intent.paneId !== poppedOutPaneId) return;
+    if (intent && typeof intent === "object" && (intent as { type?: unknown }).type === "annotation") {
+      const request = intent as { action?: unknown; expected?: unknown };
+      const expected = parseAnnotationDoneContext(request.expected);
+      if (!expected || (request.action !== "enter" && request.action !== "done")) return;
+      if (poppedOutPaneId !== null && expected.paneId !== poppedOutPaneId) return;
+      const pane = latestState?.panes.find((p) => p.paneId === expected.paneId);
+      const current = pane && parseAnnotationDoneContext({ ...pane.content,
+        paneId: pane.paneId, paneLineageId: pane.paneLineageId });
+      if (!current || annotationDoneContextKey(current) !== annotationDoneContextKey(expected) ||
+          localAnnotationDone.isBusy(String(expected.paneId)) || pane?.annotationDone?.busy) return;
+      const view = paneViews.get(expected.paneId);
+      const action = view?.controlsEl.querySelector<HTMLButtonElement>(
+        request.action === "enter" ? '.annotate' : '.done');
+      if (action && !action.disabled) action.click();
+      return;
+    }
     if (isKeyboardScrollIntent(intent)) {
       scrollPaneByKeyboard(intent);
       return;
@@ -3197,6 +3989,10 @@ async function init(): Promise<void> {
   });
 
   window.addEventListener("resize", () => {
+    reacknowledgePanePopOutViewport();
+
+    cancelResizeGesture();
+    positionPaneHosts();
     refreshProvenanceWidths();
     if (!latestState) {
       return;

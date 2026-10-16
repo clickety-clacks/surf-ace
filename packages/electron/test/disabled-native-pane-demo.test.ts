@@ -10,10 +10,6 @@ async function demoSource(): Promise<string> {
   return fs.readFile(path.join(packageDir, "scripts", "disabled-native-pane-demo.mjs"), "utf8");
 }
 
-async function nativePointerSource(): Promise<string> {
-  return fs.readFile(path.join(packageDir, "scripts", "surf-ace-native-pointer-tester.mjs"), "utf8");
-}
-
 test("disabled native pane demo cannot register production-trusted Surf Ace surfaces", async () => {
   const source = await demoSource();
 
@@ -38,14 +34,4 @@ test("disabled native pane demo contains no executable pointer proof behavior", 
   assert.doesNotMatch(source, /function pointerProofHtml/);
   assert.doesNotMatch(source, /dot\.style\.left|dot\.style\.top/);
   assert.doesNotMatch(source, /WEB POINTER|NATIVE POINTER/);
-});
-
-test("native pointer proof enables SGR mouse tracking and preserves the full title", async () => {
-  const source = await nativePointerSource();
-
-  assert.match(source, /NATIVE POINTER/);
-  assert.doesNotMatch(source, /NATIVE OINTER/);
-  assert.match(source, /\?1006h/);
-  assert.match(source, /\\x1b\\\[<\(\\d\+\);\(\\d\+\);\(\\d\+\)\(\[Mm\]\)/);
-  assert.match(source, /writeAt\(x, y,/);
 });

@@ -1,0 +1,17 @@
+{
+  "files": {
+    "surf-ace-private-binding-candidate.mjs": "114f75017582096b1de5f8b4effbc036a8d49b025cc7784ce2f7bb4b9f41ae1d",
+    "surf-ace-private-binding-candidate.test.mjs": "a2bc60786bcb744b550a3f9e9056da7a8507eef41ade3bdd81e5ccc5b7b3e9ae",
+    "surf-ace-private-binding-crash-proxy.mjs": "108d17cfc66ccb3b58046a687214ec8b936048c83593cbb51ebd8f7f4c655448",
+    "surf-ace-private-binding-crash-vehicle.py": "f8aa8078d74fc0d06aa30a285febf329ce5e7ac8ea5e6620144332e2bc76a220",
+    "surf-ace-private-binding-selector-hook.c": "2b777680a7f3113463d2cb8e3403128cc74a1ff0b136c112f903193766ad8fb7",
+    "surf-ace-private-binding-selector-hook.test.py": "773b46df439a3e4e275d949b5bd5c371d07177e44041e8834c8bf5129a1f2646",
+    "surf-ace-private-binding-verifier.mjs": "06d79fc0f53ed8e1232ee2eba79669f5e604e35063a0f44e1244290a0b1e7415",
+    "surf-ace-private-foreign-first-claims.mjs": "e7459bd0ab13a4620f2ae68d5da5e7afc488091a5fba5f5d02f93c488676df52",
+    "surf-ace-private-foreign-first-seed-owner.mjs": "ea8c3c5f8edc82fb9552cd213b6bfbf07fd6ed6c5c1a4f2925243fc74dbffd40",
+    "surf-ace-private-foreign-first-topology.mjs": "33f6dd227a716b10269198b6790f96643f73b96f7a910fa05dbafbd0d777f9b4",
+    "surf-ace-private-foreign-first-vehicle.py": "5826e46a97a03799a6e75e5dd86374f7376e8c9d387f8cb0da776be34e4fa023",
+    "surf-ace-private-packaged-crash-guard.sh": "2761aac85aa6f9d5b722dc3cd9fc31eb4d8dab8f7916819ff863bcb7a74f8beb"
+  },
+  "version": 1
+}

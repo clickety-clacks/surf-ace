@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		5AF228E0173AB3C0DFE59AE2 /* SurfAceControllerReclamationAccountingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1347B6FD8BF6E7D5A01B00C /* SurfAceControllerReclamationAccountingTests.swift */; };
 		A9A100000000000000000002 /* SurfAceResizeUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9A100000000000000000001 /* SurfAceResizeUITests.swift */; };
 		A70100000000000000000002 /* SurfAceAnnotationOutbox.swift in Sources */ = {isa = PBXBuildFile; fileRef = A70100000000000000000001 /* SurfAceAnnotationOutbox.swift */; };
 		A70100000000000000000003 /* SurfAceAnnotationOutbox.swift in Sources */ = {isa = PBXBuildFile; fileRef = A70100000000000000000001 /* SurfAceAnnotationOutbox.swift */; };
@@ -88,6 +89,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		E1347B6FD8BF6E7D5A01B00C /* SurfAceControllerReclamationAccountingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceControllerReclamationAccountingTests.swift; sourceTree = "<group>"; };
 		A9A100000000000000000001 /* SurfAceResizeUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceResizeUITests.swift; sourceTree = "<group>"; };
 		A9A100000000000000000003 /* SurfAceResizeUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = SurfAceResizeUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		A70100000000000000000001 /* SurfAceAnnotationOutbox.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceAnnotationOutbox.swift; sourceTree = "<group>"; };
@@ -204,6 +206,7 @@
 				A70100000000000000000004 /* SurfAceAnnotationOutboxTests.swift */,
 				04C326A4A4CAEBC592588722 /* SurfAceBrowserURLTargetApplyTests.swift */,
 				176B99B74BDA8681EC051935 /* SurfAceHTTPServerTests.swift */,
+				E1347B6FD8BF6E7D5A01B00C /* SurfAceControllerReclamationAccountingTests.swift */,
 				ADB3646A9F5E90D276388CA8 /* SurfAceLocklessAuthorityTests.swift */,
 				87046210EFA9F81BBA3D0C2B /* SurfAceLocklessConsumableOperationsTests.swift */,
 				C8E71C758987FB7BBCD96EAC /* SurfAceLocklessContentOperationsTests.swift */,
@@ -429,6 +432,7 @@
 				A70100000000000000000005 /* SurfAceAnnotationOutboxTests.swift in Sources */,
 				68DC9BCC2BBCFA3ACA7A30AF /* SurfAceBrowserURLTargetApplyTests.swift in Sources */,
 				B8B3B9200301ABE819FC7EEF /* SurfAceHTTPServerTests.swift in Sources */,
+				5AF228E0173AB3C0DFE59AE2 /* SurfAceControllerReclamationAccountingTests.swift in Sources */,
 				4036988D4651F0C568C6F9C7 /* SurfAceLocklessAuthorityTests.swift in Sources */,
 				CDA9169098C0D1C6292C3ECD /* SurfAceLocklessConsumableOperationsTests.swift in Sources */,
 				BF6C8A7C9C1DDD55979F661C /* SurfAceLocklessContentOperationsTests.swift in Sources */,

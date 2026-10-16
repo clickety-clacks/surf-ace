@@ -41,6 +41,8 @@ import {
   snapshotGetRequestSchema,
   snapshotHintEventSchema,
   snapshotResponseSchema,
+  surfaceDescribeRequestSchema,
+  surfaceDescribeResponseSchema,
   surfaceAppearedEventSchema,
   surfaceRemovedEventSchema,
   surfaceResumedEventSchema,
@@ -70,6 +72,11 @@ export const SURF_ACE_LOCKLESS_TARGET_SCHEMAS = {
 } as const;
 
 export const SURF_ACE_PROTOCOL_SCHEMAS = {
+  "surface.describe": {
+    request: surfaceDescribeRequestSchema,
+    response: surfaceDescribeResponseSchema,
+    errorResponse: errorResponseSchema,
+  },
   "surfaces.list": {
     request: surfacesListRequestSchema,
     response: surfacesListResponseSchema,

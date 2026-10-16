@@ -6,11 +6,12 @@ import { ServerConnection } from "../src/server-connection.js";
 import { ConfiguredServerRegistration } from "../src/configured-server.js";
 import { matchesProvisionedClaims } from "../src/registry-binding.js";
 import { SurfaceCore } from "../src/surface-core.js";
+import { createEmptyLocklessClientState, DEFAULT_LOCKLESS_LIMITS } from "../src/lockless-client-authority.js";
 
 test("owner-verified claims compare by identity without accepting omissions or duplicates", () => {
   const first = { surfaceId: "sf_first", windowLabel: "d", panes: [
-    { paneId: "1", paneLabel: 703, paneLineageId: "pl_first" },
-    { paneId: "2", paneLabel: 704, paneLineageId: "pl_second" },
+    { allocationGeneration: 1, paneId: "1", paneLabel: 703, paneLineageId: "pl_first" },
+    { allocationGeneration: 2, paneId: "2", paneLabel: 704, paneLineageId: "pl_second" },
   ] };
   const second = { surfaceId: "sf_second", windowLabel: "e", panes: [] };
   const provisioned = {
@@ -126,12 +127,15 @@ async function centralFixture(registryIdentity: { allocatorId: string; fleetId: 
         type: "response", v: 1, id: message.id, op: message.op, ok,
         payload: { clientId: message.payload.clientId,
           ...(responseIdentity ? { registryIdentity: responseIdentity } : {}),
+          completedPaneReleaseIds: (message.payload.pendingPaneReleases ?? []).map((release: any) => release.releaseId),
           surfaces: message.payload.surfaces.map((surface: any, i: number) => ({
             surfaceId: surface.surfaceId,
             windowLabel: windowLabel ?? String.fromCharCode(97 + i),
             ...(assignPaneLabels ? {
               panes: (surface.panes ?? []).map((pane: any, paneIndex: number) => ({
-                ...pane, paneLabel: paneLabelBase + i * 100 + paneIndex,
+                ...pane,
+                allocationGeneration: pane.allocationGeneration ?? paneLabelBase + i * 100 + paneIndex,
+                paneLabel: paneLabelBase + i * 100 + paneIndex,
               })),
             } : {}),
           })) },
@@ -145,6 +149,95 @@ async function centralFixture(registryIdentity: { allocatorId: string; fleetId: 
   };
 }
 
+test("registration cannot export a release from a lifecycle transaction that later rolls back", async () => {
+  const central = await centralFixture();
+  const clientId = "a".repeat(64);
+  const surfaceId = "sf_registry_release_race";
+  const lockless = createEmptyLocklessClientState({
+    ...DEFAULT_LOCKLESS_LIMITS,
+    maxRetainedTombstones: 1,
+  });
+  const core = new SurfaceCore({
+    clientIdentity: clientId,
+    persistentState: { lockless, primarySurfaceId: surfaceId, version: 1 },
+  });
+  const surface = core.ensurePrimarySurface("Release race", { width: 800, height: 600, scale: 1 });
+  core.admitSurfaceToLockless(surface.surfaceId);
+  core.bindRegistryIdentity({ clientId, allocatorId: "alloc_fixture", fleetId: "fixture-fleet" });
+  const retained = core.locklessAuthority.createTombstone({
+    kind: "pane",
+    payload: {
+      closeTopologyRevision: 4,
+      pane: {
+        allocationGeneration: 6,
+        paneId: 8,
+        paneLabel: 708,
+        paneLineageId: "pl_release_race_retained",
+      },
+    },
+    surfaceId,
+  });
+
+  let allowLifecycleFailure = (): void => {};
+  const lifecycleFailure = new Promise<void>((resolve) => { allowLifecycleFailure = resolve; });
+  let releaseCandidateCreated = (): void => {};
+  const releaseCandidate = new Promise<void>((resolve) => { releaseCandidateCreated = resolve; });
+  const lifecycle = core.locklessAuthority.transactionAsync(() =>
+    core.transactionAsync(async () => {
+      core.locklessAuthority.createTombstone({
+        kind: "pane",
+        payload: {
+          closeTopologyRevision: 5,
+          pane: {
+            allocationGeneration: 7,
+            paneId: 9,
+            paneLabel: 709,
+            paneLineageId: "pl_release_race_newer",
+          },
+        },
+        surfaceId,
+      });
+      assert.equal(core.locklessAuthority.listPendingPaneReleases().length, 1);
+      releaseCandidateCreated();
+      await lifecycleFailure;
+      throw new Error("simulated_lifecycle_persistence_failure");
+    }),
+  );
+  await releaseCandidate;
+
+  const persistedReleaseCounts: number[] = [];
+  const registration = new ConfiguredServerRegistration(central.address, clientId, core,
+    async () => { persistedReleaseCounts.push(core.locklessAuthority.listPendingPaneReleases().length); },
+    () => {}, 500);
+  try {
+    const synchronizing = registration.synchronize();
+    await until(() => central.identityRequests.length === 1);
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    assert.equal(central.requests.length, 0,
+      "registration waits behind the uncommitted lifecycle decision");
+    assert.deepEqual(persistedReleaseCounts, [],
+      "it does not persist or export the uncommitted release candidate");
+
+    allowLifecycleFailure();
+    await assert.rejects(lifecycle, /simulated_lifecycle_persistence_failure/);
+    assert.deepEqual(core.locklessAuthority.listTombstones("pane").map((entry) => entry.tombstoneId),
+      [retained.tombstoneId]);
+    assert.deepEqual(core.locklessAuthority.listPendingPaneReleases(), []);
+
+    await until(() => central.requests.length === 1);
+    assert.deepEqual(central.requests[0]!.message.payload.pendingPaneReleases, []);
+    assert.ok(persistedReleaseCounts.every((count) => count === 0));
+    central.reply(0);
+    await synchronizing;
+    assert.deepEqual(core.locklessAuthority.listTombstones("pane").map((entry) => entry.tombstoneId),
+      [retained.tombstoneId]);
+  } finally {
+    allowLifecycleFailure();
+    await registration.stop();
+    await central.close();
+  }
+});
+
 test("confirmed fleet pane labels remain visible through a transient central disconnect", async () => {
   const central = await centralFixture();
   const core = new SurfaceCore();
@@ -156,6 +249,7 @@ test("confirmed fleet pane labels remain visible through a transient central dis
   try {
     const connecting = registration.synchronize();
     await until(() => central.requests.length === 1);
+    assert.equal(central.requests[0]!.message.payload.allocationGenerationV1, true);
     central.reply(0, true, true);
     await connecting;
 
@@ -458,7 +552,7 @@ test("legacy labels wait for verified pin; foreign and missing identities never 
   const pane = [...surface.panes.values()][0]!;
   const assignment = [{
     surfaceId: surface.surfaceId, windowLabel: "d", panes: [{
-      paneId: String(pane.paneId), paneLineageId: pane.paneLineageId, paneLabel: 703,
+      allocationGeneration: 1, paneId: String(pane.paneId), paneLineageId: pane.paneLineageId, paneLabel: 703,
     }],
   }];
   core.applyWindowLabels(assignment);
@@ -529,7 +623,7 @@ test("tombstone-only legacy labels refuse foreign-first binding and recover with
   const surface = core.ensurePrimarySurface("Retained legacy", { width: 800, height: 600, scale: 1 });
   const pane = [...surface.panes.values()][0]!;
   const assignment = [{ surfaceId: surface.surfaceId, windowLabel: "d", panes: [{
-    paneId: String(pane.paneId), paneLineageId: pane.paneLineageId, paneLabel: 703,
+    allocationGeneration: 1, paneId: String(pane.paneId), paneLineageId: pane.paneLineageId, paneLabel: 703,
   }] }];
   core.applyWindowLabels(assignment);
   core.applyRegistryPaneLabels(assignment);

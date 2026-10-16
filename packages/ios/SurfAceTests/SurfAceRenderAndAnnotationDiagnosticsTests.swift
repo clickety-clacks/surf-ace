@@ -129,6 +129,141 @@ extension SurfAceRenderAndAnnotationDiagnosticsTests {
         XCTAssertEqual(provenance.accessibilityLabel, "Pushed by OpenClaw, using Clawline")
     }
 
+    func testTypedProjectionPreservesContentHistoryAnnotationsAndTargetWithoutWireRoundTrip() throws {
+        var state = try SurfAceLocklessAuthorityState.empty()
+        let opened = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(state: &state, expectedSurfaceSetRevision: 0)
+        let id = opened.surface.surfaceId
+        let payloads: [(String, SurfAceLocklessJSON)] = [
+            ("html", .object(["html": .string("<main>source</main>"), "baseUrl": .string("https://example.test/")])),
+            ("image", .object(["data": .string("aW1hZ2U="), "mediaType": .string("image/png"), "alt": .string("Image")])),
+            ("pdf", .object(["data": .string("cGRm")])),
+            ("terminal", .object(["lines": .array([.string("line")]), "scrollback": .integer(20)])),
+            ("markdown", .object(["markdown": .string("# source")])),
+            ("video", .object(["url": .string("https://example.test/video")])),
+            ("canvas", .object(["color": .string("blue"), "grid": .bool(true)])),
+        ]
+        for (kind, payload) in payloads {
+            var surface = try XCTUnwrap(state.liveSurfaces[id])
+            var pane = try XCTUnwrap(surface.panes["1"])
+            pane.history.visible.contentType = kind
+            pane.history.visible.content = payload
+            pane.history.visible.provenance = .init(friendlyChatName: "User chat", controllerProductName: "Provider")
+            pane.history.visible.annotations = .object([
+                "drawingData": .string(Data([1, 2, 3]).base64EncodedString()),
+                "strokesById": .object(["stroke": .object([
+                    "strokeId": .string("stroke"), "tool": .string("pen"),
+                    "points": .array([.object(["x": .double(1.5), "y": .integer(2),
+                        "pressure": .double(0.7), "timestamp": .integer(42)])])])])
+            ])
+            pane.target = .object(["targetId": .string("target"), "targetKind": .string("browser"),
+                "paneLineageId": .string(pane.paneLineageId), "targetEpoch": .integer(2),
+                "restorePolicy": .string("source"), "currentState": .string("ready"),
+                "targetHeader": .object(["title": .string("retained")]),
+                "targetPayload": .object(["url": .string("https://example.test/")]),
+                "lastApplyEvidence": .object(["accepted": .bool(true)])])
+            pane.history.back = [pane.history.visible]
+            pane.history.forward = [pane.history.visible]
+            surface.panes["1"] = pane; state.liveSurfaces[id] = surface
+            let actual = try SurfAceLocklessUIProjection.topologies(from: state)
+            let expected = try LegacySurfAceLocklessUIProjection.topologies(from: state)
+            let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+            XCTAssertEqual(try encoder.encode(actual), try encoder.encode(expected), kind)
+        }
+    }
+
+    func testTypedProjectionRejectsMalformedOptionalContentInsteadOfSilentlyDroppingIt() throws {
+        var state = try SurfAceLocklessAuthorityState.empty()
+        let opened = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(state: &state, expectedSurfaceSetRevision: 0)
+        let id = opened.surface.surfaceId
+        let malformed: [SurfAceLocklessJSON] = [
+            .object(["payload": .null, "title": .integer(7)]),
+            .object(["payload": .null, "interactive": .string("yes")]),
+            .object(["payload": .object(["kind": .string("html"), "html": .string("source"), "baseURL": .bool(true)])]),
+        ]
+        for content in malformed {
+            var surface = try XCTUnwrap(state.liveSurfaces[id])
+            var pane = try XCTUnwrap(surface.panes["1"])
+            pane.history.visible.content = content
+            surface.panes["1"] = pane; state.liveSurfaces[id] = surface
+            XCTAssertThrowsError(try LegacySurfAceLocklessUIProjection.topologies(from: state))
+            XCTAssertThrowsError(try SurfAceLocklessUIProjection.topologies(from: state))
+        }
+    }
+
+    func testScopedProjectionKeepsSameRevisionAnnotationsAndHistoryFresh() throws {
+        var state = try SurfAceLocklessAuthorityState.empty()
+        let first = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(state: &state, expectedSurfaceSetRevision: 0)
+        let second = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(state: &state, expectedSurfaceSetRevision: state.surfaceSetRevision)
+        let id = first.surface.surfaceId
+        var surface = try XCTUnwrap(state.liveSurfaces[id])
+        var pane = try XCTUnwrap(surface.panes["1"])
+        pane.history.visible.contentId = "current"; pane.history.visible.contentType = "html"
+        pane.history.visible.content = .object(["html": .string("<main>current</main>")])
+        var previous = pane.history.visible; previous.contentId = "previous"
+        var future = pane.history.visible; future.contentId = "future"
+        pane.history.back = [previous]; pane.history.forward = [future]
+        surface.panes["1"] = pane; state.liveSurfaces[id] = surface
+        var cache = SurfAceLocklessUIProjectionCache()
+        let initial = try cache.topologies(from: state, surfaceIds: [id])
+        XCTAssertEqual(Set(initial.keys), [id])
+        XCTAssertNil(initial[second.surface.surfaceId])
+        state.generation += 1 // An unrelated authority commit does not change display material.
+        let unchanged = try cache.topologies(from: state, surfaceIds: [id])
+        XCTAssertEqual(unchanged[id]?.panes.first?.currentEntry?.contentId, "current")
+        XCTAssertEqual(unchanged[id]?.panes.first?.backStack?.first?.contentId, "previous")
+        pane.name = "Renamed"; pane.annotationMode = true
+        pane.target = .object(["targetId": .string("target"), "targetKind": .string("browser_url"),
+            "paneLineageId": .string(pane.paneLineageId), "targetEpoch": .integer(1),
+            "restorePolicy": .string("source"), "currentState": .string("current")])
+        surface.panes["1"] = pane; state.liveSurfaces[id] = surface
+        let metadataOnly = try cache.topologies(from: state, surfaceIds: [id])
+        XCTAssertEqual(metadataOnly[id]?.panes.first?.name, "Renamed")
+        XCTAssertEqual(metadataOnly[id]?.panes.first?.annotationMode, true)
+        XCTAssertEqual(metadataOnly[id]?.panes.first?.currentTarget?.targetEpoch, 1)
+        XCTAssertEqual(metadataOnly[id]?.panes.first?.backStack?.first?.contentId, "previous")
+        // Annotations and history metadata can change without a new visible revision.
+        pane.history.visible.annotations = .object(["drawingData": .string(""), "strokesById": .object([
+            "ink": .object(["strokeId": .string("ink"), "tool": .string("pen"), "points": .array([
+                .object(["x": .double(4), "y": .double(5), "timestamp": .integer(6)])])])])])
+        if case .object(var target) = pane.target {
+            target["targetEpoch"] = .integer(2); pane.target = .object(target)
+        }
+        pane.history.back[0].provenance.friendlyChatName = "Updated earlier chat"
+        pane.history.forward[0].content = .object(["html": .string("<main>updated future</main>")])
+        pane.annotationMode = true
+        surface.panes["1"] = pane; state.liveSurfaces[id] = surface
+        let changed = try cache.topologies(from: state, surfaceIds: [id])
+        let projected = try XCTUnwrap(changed[id]?.panes.first)
+        XCTAssertEqual(projected.currentEntry?.revision, initial[id]?.panes.first?.currentEntry?.revision)
+        XCTAssertEqual(projected.currentEntry?.strokesById["ink"]?.points.first?.x, 4)
+        XCTAssertEqual(projected.backStack?.first?.provenanceDisplayName, "Updated earlier chat")
+        XCTAssertEqual(projected.forwardStack?.first?.payload, .html(html: "<main>updated future</main>", baseURL: nil))
+        XCTAssertEqual(projected.annotationMode, true)
+        XCTAssertEqual(projected.currentTarget?.targetEpoch, 2)
+        let expected = try SurfAceLocklessUIProjection.topologies(from: state)
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        XCTAssertEqual(try encoder.encode(changed[id]), try encoder.encode(expected[id]))
+    }
+
+    func testScopedProjectionCannotConfuseSamePaneNumberAcrossWindowsOrRemount() throws {
+        var state = try SurfAceLocklessAuthorityState.empty()
+        let a = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(state: &state, expectedSurfaceSetRevision: 0)
+        let b = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(state: &state, expectedSurfaceSetRevision: state.surfaceSetRevision)
+        var cache = SurfAceLocklessUIProjectionCache()
+        let first = try cache.topologies(from: state, surfaceIds: [a.surface.surfaceId])
+        let other = try cache.topologies(from: state, surfaceIds: [b.surface.surfaceId])
+        XCTAssertEqual(first[a.surface.surfaceId]?.panes.first?.paneId, other[b.surface.surfaceId]?.panes.first?.paneId)
+        XCTAssertNotEqual(first[a.surface.surfaceId]?.panes.first?.paneLineageId, other[b.surface.surfaceId]?.panes.first?.paneLineageId)
+        XCTAssertTrue(try cache.topologies(from: state, surfaceIds: []).isEmpty)
+        var changed = try XCTUnwrap(state.liveSurfaces[a.surface.surfaceId])
+        changed.panes["1"]?.name = "Updated while unmounted"
+        state.liveSurfaces[a.surface.surfaceId] = changed
+        let remounted = try cache.topologies(from: state, surfaceIds: [a.surface.surfaceId])
+        XCTAssertEqual(remounted[a.surface.surfaceId]?.panes.first?.name, "Updated while unmounted")
+        XCTAssertEqual(remounted[a.surface.surfaceId]?.panes.first?.paneLineageId, first[a.surface.surfaceId]?.panes.first?.paneLineageId)
+        XCTAssertNil(remounted[b.surface.surfaceId])
+    }
+
     func testACPROV07LocklessProjectionKeepsChatAndProviderAcrossHistoryAndPersistence() throws {
         var state = try SurfAceLocklessAuthorityState.empty()
         let opened = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
@@ -1624,5 +1759,84 @@ private final class RecordingPaneBridge: SurfAcePaneBridging {
 
     func clearDrawings() {
         clearDrawingsCallCount += 1
+    }
+}
+
+
+private enum LegacySurfAceLocklessUIProjection {
+    static func topologies(
+        from state: SurfAceLocklessAuthorityState
+    ) throws -> [String: SurfAcePersistedSurfaceTopology] {
+        try state.validate()
+        var values: [String: SurfAceLocklessJSON] = [:]
+        for surface in state.liveSurfaces.values.sorted(by: { $0.surfaceId < $1.surfaceId }) {
+            values[surface.surfaceId] = try surfaceTopology(surface)
+        }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return try JSONDecoder().decode(
+            [String: SurfAcePersistedSurfaceTopology].self,
+            from: encoder.encode(SurfAceLocklessJSON.object(values))
+        )
+    }
+
+    private static func surfaceTopology(
+        _ surface: SurfAceLocklessSurfaceMaterial
+    ) throws -> SurfAceLocklessJSON {
+        let panes: [SurfAceLocklessJSON] = surface.panes.values
+            .sorted { $0.paneId < $1.paneId }
+            .map { pane in
+                .object([
+                    "annotationMode": .bool(pane.annotationMode),
+                    "backStack": .array(pane.history.back.map(entry)),
+                    "currentEntry": entry(pane.history.visible),
+                    "currentTarget": pane.target ?? .null,
+                    "forwardStack": .array(pane.history.forward.map(entry)),
+                    "name": pane.name.map(SurfAceLocklessJSON.string) ?? .null,
+                    "paneId": .integer(pane.paneId),
+                    "paneLabel": .integer(pane.paneLabel),
+                    "paneLineageId": .string(pane.paneLineageId),
+                ])
+            }
+        return .object([
+            "name": .string(surface.name),
+            "paneLayout": try SurfAceLocklessTopologyCodec.persistedProjection(surface.topology),
+            "panes": .array(panes),
+            "windowLabel": .string(surface.windowLabel),
+        ])
+    }
+
+    private static func entry(_ value: SurfAceLocklessHistoryEntry) -> SurfAceLocklessJSON {
+        var object: [String: SurfAceLocklessJSON]
+        if case .object(let content) = value.content {
+            if content["payload"] != nil || value.contentType == nil {
+                object = content
+            } else {
+                var payload = content
+                payload["kind"] = value.contentType.map(SurfAceLocklessJSON.string)
+                if let baseURL = payload.removeValue(forKey: "baseUrl") {
+                    payload["baseURL"] = baseURL
+                }
+                object = [
+                    "interactive": .bool(true),
+                    "payload": .object(payload),
+                    "scrollable": .bool(true),
+                ]
+            }
+        } else {
+            object = ["payload": value.content]
+        }
+        object["interactive"] = object["interactive"] ?? .bool(true)
+        object["scrollable"] = object["scrollable"] ?? .bool(true)
+        object["contentId"] = value.contentId.map(SurfAceLocklessJSON.string) ?? .null
+        object["contentType"] = value.contentType.map(SurfAceLocklessJSON.string) ?? .null
+        object["revision"] = .integer(value.revision)
+        object["provenanceDisplayName"] = value.provenance.friendlyChatName.map(SurfAceLocklessJSON.string) ?? .null
+        object["provenanceControllerProductName"] = value.provenance.controllerProductName.map(SurfAceLocklessJSON.string) ?? .null
+        if case .object(let annotations) = value.annotations {
+            object["drawingData"] = annotations["drawingData"] ?? .string("")
+            object["strokesById"] = annotations["strokesById"] ?? .object([:])
+        }
+        return .object(object)
     }
 }

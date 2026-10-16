@@ -68,7 +68,8 @@ body.compositor-hosted .pane-shell {
   width: 100%;
 }
 
-.connection-status-banner {
+.connection-status-banner,
+.resize-status {
   position: absolute;
   top: 8px;
   right: 8px;
@@ -88,7 +89,34 @@ body.compositor-hosted .pane-shell {
 .layout-root {
   height: 100%;
   width: 100%;
+  pointer-events: none;
 }
+
+.pane-host-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.pane-host-layer > .pane-shell {
+  position: absolute;
+  pointer-events: auto;
+}
+
+.pane-layout-slot {
+  flex: 1 1 0;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+}
+
+.layout-split > .pane-layout-slot {
+  height: auto;
+  width: auto;
+}
+
+.layout-split.direction-horizontal > .pane-layout-slot { width: 100%; }
+.layout-split.direction-vertical > .pane-layout-slot { height: 100%; }
 
 .layout-split {
   display: flex;
@@ -116,7 +144,15 @@ body.compositor-hosted .pane-shell {
   overflow: hidden;
 }
 
-.layout-split > .pane-shell,
+.pane-slot {
+  position: relative;
+  height: 100%;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+
+.layout-split > .pane-slot,
 .layout-split > .layout-split {
   flex: 1 1 0;
   height: auto;
@@ -125,18 +161,19 @@ body.compositor-hosted .pane-shell {
   width: auto;
 }
 
-.layout-split.direction-horizontal > .pane-shell,
+.layout-split.direction-horizontal > .pane-slot,
 .layout-split.direction-horizontal > .layout-split {
   width: 100%;
 }
 
-.layout-split.direction-vertical > .pane-shell,
+.layout-split.direction-vertical > .pane-slot,
 .layout-split.direction-vertical > .layout-split {
   height: 100%;
 }
 
 .split-resize-handle {
   position: absolute;
+  pointer-events: auto;
   z-index: 18;
   background: rgba(255, 255, 255, 0.08);
   touch-action: none;
@@ -224,16 +261,50 @@ body.compositor-hosted .pane-shell.native-backed .pane-content {
   background: linear-gradient(to left, var(--keyboard-focus-edge-color), var(--keyboard-focus-clear-color));
 }
 
-.direction-horizontal > .pane-shell + .pane-shell {
+.direction-horizontal > .pane-slot + .pane-slot {
   border-top: 1px solid rgba(116, 141, 182, 0.14);
 }
 
-.direction-vertical > .pane-shell + .pane-shell {
+.direction-vertical > .pane-slot + .pane-slot {
   border-left: 1px solid rgba(116, 141, 182, 0.14);
 }
 
 .pane-shell.annotating {
   box-shadow: inset 0 0 0 2px var(--accent);
+}
+
+.has-pane-pop-out::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  background: rgba(3, 8, 17, 0.7);
+  pointer-events: auto;
+}
+
+.pane-shell.pane-popped-out {
+  position: fixed;
+  /* Bounds are pinned to the acknowledged compositor presentation. */
+  right: auto;
+  bottom: auto;
+  box-sizing: border-box;
+  z-index: 100;
+  border: 2px solid var(--accent);
+  border-radius: 12px;
+  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.65);
+}
+
+.pane-covered {
+  pointer-events: none;
+}
+
+.pane-pop-out {
+  flex: 0 0 auto;
+}
+
+.pane-pop-out:focus-visible {
+  outline: 3px solid var(--text);
+  outline-offset: 2px;
 }
 
 .pane-shell.annotating .pane-scroll {
@@ -913,4 +984,30 @@ body.compositor-hosted .pane-shell.native-backed .pane-content {
   letter-spacing: 0.09em;
   text-transform: uppercase;
   backdrop-filter: blur(14px);
+}
+
+.pane-presentation-pending .pane-content,
+.pane-presentation-pending .pane-scroll,
+.pane-presentation-pending .annotation-canvas,
+.pane-presentation-pending .annotation-shield {
+  pointer-events: none;
+}
+
+.resize-status { top: auto; bottom: 8px; }
+
+.annotation-saving::before {
+  content: "";
+  display: inline-block;
+  width: 0.7em;
+  height: 0.7em;
+  margin-right: 0.4em;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: annotation-saving-spin 0.8s linear infinite;
+}
+.annotation-local-status { font-size: 0.75rem; padding: 0 0.4rem; }
+@keyframes annotation-saving-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .annotation-saving::before { animation: none; }
 }

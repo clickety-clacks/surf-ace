@@ -190,7 +190,7 @@ async function withServer<T>(
 
 function applyRegistryInitialTopology(core: SurfaceCore): Array<{
   surfaceId: string;
-  panes: Array<{ paneId: string; paneLineageId: string; paneLabel: number }>;
+  panes: Array<{ allocationGeneration: number; paneId: string; paneLineageId: string; paneLabel: number }>;
 }> {
   const assignments = core.listSurfaces().map(({ surfaceId }, surfaceIndex) => {
     const panes = core.panesList(surfaceId).panes;
@@ -204,6 +204,7 @@ function applyRegistryInitialTopology(core: SurfaceCore): Array<{
     return {
       surfaceId,
       panes: core.panesList(surfaceId).panes.map((pane) => ({
+        allocationGeneration: paneLabel,
         paneId: String(pane.paneId),
         paneLineageId: pane.paneLineageId,
         paneLabel,
@@ -222,7 +223,16 @@ async function withRegistryServer<T>(
   operation: (context: { server: SurfaceWsServer; url: string }) => Promise<T>,
 ): Promise<T> {
   applyRegistryInitialTopology(core);
-  return withServer(core, operation, async () => nextRegistryPaneLabel++);
+  const claims = new Map<string, { allocationGeneration: number; paneLabel: number }>();
+  return withServer(core, operation, async (surfaceId, paneId, paneLineageId) => {
+    const key = `${surfaceId}\0${paneId}\0${paneLineageId}`;
+    const existing = claims.get(key);
+    if (existing) return existing;
+    const paneLabel = nextRegistryPaneLabel++;
+    const allocation = { allocationGeneration: paneLabel, paneLabel };
+    claims.set(key, allocation);
+    return allocation;
+  });
 }
 
 function persistedPane(core: SurfaceCore, surfaceId: string) {

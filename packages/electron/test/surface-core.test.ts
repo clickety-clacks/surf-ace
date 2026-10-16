@@ -20,13 +20,21 @@ import {
 import { LocklessAuthorityError } from "../src/lockless-client-authority.js";
 
 function confirmFixturePaneLabels(core: SurfaceCore): void {
-  core.confirmRegistryPaneLabels(core.listSurfaces().map((surface) => ({
-    surfaceId: surface.surfaceId,
-    panes: [...surface.panes.values()].filter((pane) => pane.paneLabel > 0).map((pane) => ({
-      paneId: String(pane.paneId), paneLineageId: pane.paneLineageId,
-      paneLabel: pane.paneLabel,
-    })),
-  })));
+  const assignments = core.listSurfaces().flatMap((surface) => {
+    const panes = [...surface.panes.values()];
+    if (panes.length === 0 || panes.some((pane) => pane.paneLabel < 1)) return [];
+    return [{
+      surfaceId: surface.surfaceId,
+      panes: panes.map((pane) => ({
+        allocationGeneration: pane.allocationGeneration ?? 1,
+        paneId: String(pane.paneId),
+        paneLineageId: pane.paneLineageId,
+        paneLabel: pane.paneLabel,
+      })),
+    }];
+  });
+  core.applyRegistryPaneLabels(assignments);
+  core.confirmRegistryPaneLabels(assignments);
 }
 
 function applyProviderBootstrap(
@@ -473,6 +481,25 @@ test("surface core replaces the bootstrap pane with the provider initial pane", 
   assert.equal(windowState.panes[0]?.activeKeyboardPane, true);
 });
 
+test("lockless admission does not reuse a terminally retired pane ID when replacing bootstrap", () => {
+  const surfaceId = "sf_retired_bootstrap";
+  const lockless = createEmptyLocklessClientState(DEFAULT_LOCKLESS_LIMITS);
+  lockless.paneIdentityReservations.push({
+    lineageId: "pl_retired_bootstrap",
+    paneId: "1",
+    surfaceId,
+    tombstoneId: "pt_retired_bootstrap",
+    tombstoneKind: "pane",
+  });
+  const core = new SurfaceCore({
+    persistentState: { lockless, primarySurfaceId: surfaceId, version: 1 },
+  });
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  core.admitSurfaceToLockless(surface.surfaceId);
+
+  assert.equal(core.getRendererWindowState(surfaceId).panes[0]?.paneId, 2);
+});
+
 test("surface core marks unresolved single-pane geometry as non-authoritative", () => {
   const core = new SurfaceCore({
     persistentState: {
@@ -510,6 +537,86 @@ test("surface core marks unresolved single-pane geometry as non-authoritative", 
     }),
     /has no authoritative resolved Surf Ace geometry snapshot/,
   );
+});
+
+test("pane presentation exposes displayed geometry but persists and restores tiled bounds", () => {
+  const core = new SurfaceCore({ persistentState: { primarySurfaceId: null, version: 1 }, now: () => 1 });
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  const paneId = applyProviderBootstrap(core, surface.surfaceId, 7);
+  const tiled = { height: 300, width: 400, x: 0, y: 0 };
+  updateResolvedPaneSnapshot(core, surface.surfaceId, paneId, {
+    bounds: tiled, viewport: { contentSize: { height: 300, width: 400 },
+      visibleRect: { height: 300, width: 400, x: 0, y: 0 }, scrollOffset: { x: 0, y: 0 }, zoomLevel: 1 },
+  });
+  const identity = core.resolvedPaneGeometryIdentity(surface.surfaceId);
+  const paneLineageId = core.panesList(surface.surfaceId).panes[0]!.paneLineageId;
+  assert.ok(paneLineageId, "the bootstrapped pane must have a confirmed lineage");
+  const saved = core.getPersistentState();
+  const nativePlan = () => core.projectNativePaneMaterialization(surface.surfaceId, {
+    paneLineageId, requestId: "presentation-test", restoreReason: "resume_restore",
+    surfaceId: surface.surfaceId as never, targetEpoch: 1, targetId: "test-terminal",
+    targetKind: "terminal_app",
+    targetHeader: {
+      payloadSchemaVersion: 1, replaySemantics: "launch_equivalent",
+      requiredCapabilities: ["target.terminal_app.v1"], safeToLogFields: ["command", "args"],
+      safetyClass: "process", summary: "synthetic terminal",
+    },
+    targetPayload: { args: [], command: "btop", envPolicy: "surface_default", pty: true, restartPolicy: "manual_only" },
+  });
+  const tiledPlan = nativePlan();
+  const displayed = { height: 760, width: 1160, x: 20, y: 20 };
+  const presentation = {
+    paneId, paneLineageId,
+    snapshot: { ...identity, bounds: displayed, selection: null,
+      viewport: { contentSize: { height: 760, width: 1160 },
+        visibleRect: { height: 760, width: 1160, x: 0, y: 0 }, scrollOffset: { x: 0, y: 0 }, zoomLevel: 1 } },
+  };
+  core.setPanePresentation(surface.surfaceId, presentation);
+  assert.deepEqual(core.paneBounds(surface.surfaceId, paneId), displayed);
+  assert.deepEqual(core.panesList(surface.surfaceId).panes[0]!.geometry.paneFrame, displayed);
+  assert.equal(core.captureSnapshot(surface.surfaceId, paneId).viewport.visibleRect.width, 1160);
+  assert.deepEqual(nativePlan(), tiledPlan, "host plan must retain tiled geometry while compositor displays pop-out");
+  assert.equal(core.validateNativePaneMaterializationLayout(surface.surfaceId, tiledPlan), null);
+  assert.deepEqual(core.getPersistentState(), saved);
+  presentation.snapshot.bounds.width = 5;
+  assert.equal(core.paneBounds(surface.surfaceId, paneId)!.width, 1160, "presentation input must be copied");
+  const restarted = new SurfaceCore({ persistentState: saved, now: () => 1 });
+  restarted.restorePersistedSurfaces("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  assert.deepEqual(restarted.paneBounds(surface.surfaceId, paneId), tiled);
+  core.setPanePresentation(surface.surfaceId, null);
+  assert.deepEqual(core.paneBounds(surface.surfaceId, paneId), tiled);
+  assert.deepEqual(core.getPersistentState(), saved);
+});
+
+test("pane presentation is window-local and stale topology or lineage cannot re-enter", () => {
+  const core = new SurfaceCore({ persistentState: { primarySurfaceId: null, version: 1 } });
+  const primary = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  const secondary = core.createAdditionalSurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  const paneId = applyProviderBootstrap(core, primary.surfaceId, 7);
+  const otherPaneId = applyProviderBootstrap(core, secondary.surfaceId, 19, "b");
+  resolvePaneSnapshot(core, primary.surfaceId, paneId);
+  resolvePaneSnapshot(core, secondary.surfaceId, otherPaneId);
+  const otherBounds = core.paneBounds(secondary.surfaceId, otherPaneId);
+  const paneLineageId = core.panesList(primary.surfaceId).panes[0]!.paneLineageId;
+  assert.ok(paneLineageId, "the bootstrapped pane must have a confirmed lineage");
+  const presentation = {
+    paneId, paneLineageId,
+    snapshot: { ...core.resolvedPaneGeometryIdentity(primary.surfaceId),
+      bounds: { height: 760, width: 1160, x: 20, y: 20 }, selection: null,
+      viewport: { contentSize: { height: 760, width: 1160 },
+        visibleRect: { height: 760, width: 1160, x: 0, y: 0 }, scrollOffset: { x: 0, y: 0 }, zoomLevel: 1 } },
+  };
+  assert.throws(() => core.setPanePresentation(primary.surfaceId, {
+    ...presentation, paneLineageId: "foreign-lineage",
+  }), /stale or invalid/);
+  core.setPanePresentation(primary.surfaceId, presentation);
+  assert.deepEqual(core.paneBounds(secondary.surfaceId, otherPaneId), otherBounds);
+  core.paneSplit(primary.surfaceId, {
+    count: 2, direction: "horizontal", newPaneIds: [9], newPaneLabels: [9], paneId,
+  });
+  assert.throws(() => core.setPanePresentation(primary.surfaceId, presentation), /stale or invalid/);
+  assert.equal(core.panesList(primary.surfaceId).panes[0]!.geometry.geometryUnavailable, true);
+  assert.deepEqual(core.paneBounds(secondary.surfaceId, otherPaneId), otherBounds);
 });
 
 test("surface core rejects stale pane bounds until the current geometry revision resolves", () => {
@@ -987,7 +1094,7 @@ test("surface core preserves resize weights in topology and renderer geometry", 
         type: "split",
       },
       panes: [
-        { name: null, paneId: 7 as never, paneLabel: 1 },
+        { name: null, paneId: 7 as never, paneLabel: 7 },
         { name: null, paneId: 9 as never, paneLabel: 2 },
       ],
       topologyRevision: 1 as never,
@@ -1153,16 +1260,16 @@ test("same pane id, different initial pane label - Electron bootstrap enforces p
     initialPaneLabel: 7,
     windowLabel: "a",
   });
-  core.applyProviderBootstrapTopology(surface.surfaceId, {
+  confirmFixturePaneLabels(core);
+  assert.throws(() => core.applyProviderBootstrapTopology(surface.surfaceId, {
     initialPaneId: 7,
     initialPaneLabel: 41,
     windowLabel: "a",
-  });
-  confirmFixturePaneLabels(core);
+  }), /Provider bootstrap cannot change a confirmed pane label/);
 
   const windowState = core.getRendererWindowState(surface.surfaceId);
   assert.equal(windowState.panes[0]?.paneId, 7);
-  assert.equal(windowState.panes[0]?.label, "41");
+  assert.equal(windowState.panes[0]?.label, "7");
 });
 
 test("surface core ignores snapshot updates for stale pane ids", () => {
@@ -2285,7 +2392,7 @@ test("surface core topology.apply reuses existing pane content and replaces prov
       type: "split",
     },
     panes: [
-      { name: "Left", paneId: initialPaneId as never, paneLabel: 41 },
+      { name: "Left", paneId: initialPaneId as never, paneLabel: 7 },
       { name: "Right", paneId: 9 as never, paneLabel: 42 },
     ],
     topologyRevision: 3 as never,
@@ -2296,7 +2403,7 @@ test("surface core topology.apply reuses existing pane content and replaces prov
 
   assert.equal(applied.topologyRevision, 3);
   assert.deepEqual(applied.panes.map((pane) => [pane.paneId, pane.paneLabel, pane.name]), [
-    [initialPaneId, 41, "Left"],
+    [initialPaneId, 7, "Left"],
     [9, 42, "Right"],
   ]);
 
@@ -2311,7 +2418,7 @@ test("surface core topology.apply reuses existing pane content and replaces prov
     type: "split",
   });
   assert.equal(windowState.panes.find((pane) => pane.paneId === initialPaneId)?.content.contentId, "ct_preserved");
-  assert.equal(windowState.panes.find((pane) => pane.paneId === initialPaneId)?.label, "41");
+  assert.equal(windowState.panes.find((pane) => pane.paneId === initialPaneId)?.label, "7");
   assert.equal(windowState.panes.find((pane) => pane.paneId === 9)?.label, "42");
 });
 
@@ -2457,7 +2564,7 @@ test("surface core commits topology.apply provider window relabels atomically", 
   assert.doesNotThrow(() => core.topologyApply(surface.surfaceId, {
     layout: { paneId: paneId as never, type: "pane" },
     panes: [
-      { name: "Docs", paneId: paneId as never, paneLabel: 41 },
+      { name: "Docs", paneId: paneId as never, paneLabel: 7 },
     ],
     topologyRevision: 4 as never,
     windowLabel: "b",
@@ -2469,7 +2576,7 @@ test("surface core commits topology.apply provider window relabels atomically", 
   assert.equal(acceptedWindowState.windowLabel, "");
   core.applyWindowLabelOnly(surface.surfaceId, "b");
   assert.equal(core.getRendererWindowState(surface.surfaceId).windowLabel, "b");
-  assert.deepEqual(acceptedWindowState.panes.map((pane) => pane.label), ["41"]);
+  assert.deepEqual(acceptedWindowState.panes.map((pane) => pane.label), ["7"]);
 });
 
 test("surface core rejects provider window relabels that collide with another live surface", () => {
@@ -3894,7 +4001,7 @@ test("pane number projections require exact registry confirmation", () => {
   const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
   const pane = [...surface.panes.values()][0]!;
   const assignment = { surfaceId: surface.surfaceId, panes: [{
-    paneId: String(pane.paneId), paneLineageId: pane.paneLineageId, paneLabel: 97,
+    allocationGeneration: 1, paneId: String(pane.paneId), paneLineageId: pane.paneLineageId, paneLabel: 97,
   }] };
 
   assert.equal(core.panesList(surface.surfaceId).panes[0]?.paneLabel, null);
@@ -3910,6 +4017,12 @@ test("pane number projections require exact registry confirmation", () => {
   assert.equal(core.panesList(surface.surfaceId).panes[0]?.paneLabel, 97);
   assert.equal(core.pairState(surface.surfaceId).panes[0]?.paneLabel, 97);
   assert.equal(core.publicTopologyState(surface.surfaceId).panes[0]?.paneLabel, 97);
+  assert.throws(() => core.applyRegistryPaneLabels([{ ...assignment, panes: [{
+    ...assignment.panes[0]!, allocationGeneration: 2,
+  }] }]), /Invalid or duplicate registry pane assignment/,
+  "a stale allocation generation cannot inherit the current pane number");
+  assert.equal(core.publicTopologyState(surface.surfaceId).panes[0]?.paneLabel, 97,
+    "refusing a stale generation preserves the confirmed current allocation");
   core.applyWindowLabelOnly(surface.surfaceId, "a");
   assert.equal(core.publicTopologyState(surface.surfaceId).windowLabel, "a");
 
