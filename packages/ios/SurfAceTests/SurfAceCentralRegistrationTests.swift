@@ -1218,6 +1218,83 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         }
     }
 
+    func testRegistrationKeepsLegacyRequestAndAcceptsNullableLeaseProjection() throws {
+        let expected = SurfAceRegistryIdentity(allocatorId: "alloc_home", fleetId: "fleet-home")
+        let request = try SurfAceRegistrationWire.requestData(
+            clientId: "stable-client", surfaces: [], id: "register-1"
+        )
+        let requestObject = try XCTUnwrap(JSONSerialization.jsonObject(with: request) as? [String: Any])
+        let requestPayload = try XCTUnwrap(requestObject["payload"] as? [String: Any])
+        XCTAssertEqual(Set(requestPayload.keys), Set(["clientId", "surfaces"]))
+
+        let legacyServer = Data(#"{"id":"register-1","op":"client.register","ok":true,"payload":{"clientId":"stable-client","registryIdentity":{"allocatorId":"alloc_home","fleetId":"fleet-home"},"surfaces":[]}}"#.utf8)
+        let legacyReply = try SurfAceRegistrationWire.registration(
+            from: legacyServer, requestId: "register-1", clientId: "stable-client",
+            surfaces: [], expectedIdentity: expected
+        )
+        XCTAssertNil(legacyReply.projection.directEndpoint)
+        XCTAssertFalse(legacyReply.projection.prePairDescribeV1)
+        XCTAssertFalse(legacyReply.projection.allocationGenerationV1)
+        XCTAssertNil(legacyReply.projection.endpointLease)
+        XCTAssertEqual(legacyReply.projection.completedPaneReleaseIds, [])
+
+        let reviewedRegistry = Data(#"{"id":"register-1","op":"client.register","ok":true,"payload":{"clientId":"stable-client","registryIdentity":{"allocatorId":"alloc_home","fleetId":"fleet-home"},"surfaces":[],"directEndpoint":null,"prePairDescribeV1":false,"allocationGenerationV1":false,"endpointLease":null,"completedPaneReleaseIds":[]}}"#.utf8)
+        let reviewedReply = try SurfAceRegistrationWire.registration(
+            from: reviewedRegistry, requestId: "register-1", clientId: "stable-client",
+            surfaces: [], expectedIdentity: expected
+        )
+        XCTAssertEqual(reviewedReply.projection, legacyReply.projection)
+        XCTAssertEqual(reviewedReply.assignments, [])
+    }
+
+    func testRegistrationProjectionRequiresMatchingEndpointAndLeaseCapability() throws {
+        let expected = SurfAceRegistryIdentity(allocatorId: "alloc_home", fleetId: "fleet-home")
+        let endpoint = "wss://client.example/ws"
+        let leasedResponse = Data(#"{"id":"register-1","op":"client.register","ok":true,"payload":{"clientId":"stable-client","registryIdentity":{"allocatorId":"alloc_home","fleetId":"fleet-home"},"surfaces":[],"directEndpoint":"wss://client.example/ws","prePairDescribeV1":true,"allocationGenerationV1":false,"endpointLease":{"leaseGeneration":41,"registrationObservedAtMs":1000,"leaseExpiresAtMs":2000},"completedPaneReleaseIds":[]}}"#.utf8)
+        let reply = try SurfAceRegistrationWire.registration(
+            from: leasedResponse, requestId: "register-1", clientId: "stable-client",
+            surfaces: [], expectedIdentity: expected,
+            expectedDirectEndpoint: endpoint, expectedPrePairDescribeV1: true
+        )
+        XCTAssertEqual(reply.projection.directEndpoint, endpoint)
+        XCTAssertTrue(reply.projection.prePairDescribeV1)
+        XCTAssertEqual(reply.projection.endpointLease, .init(
+            leaseGeneration: 41, registrationObservedAtMs: 1000, leaseExpiresAtMs: 2000
+        ))
+
+        XCTAssertThrowsError(try SurfAceRegistrationWire.registration(
+            from: leasedResponse, requestId: "register-1", clientId: "stable-client",
+            surfaces: [], expectedIdentity: expected
+        ))
+        XCTAssertThrowsError(try SurfAceRegistrationWire.registration(
+            from: leasedResponse, requestId: "register-1", clientId: "stable-client",
+            surfaces: [], expectedIdentity: expected,
+            expectedDirectEndpoint: "wss://other.example/ws", expectedPrePairDescribeV1: true
+        ))
+    }
+
+    func testRegistrationRejectsMalformedOrIncompleteEndpointLease() throws {
+        let expected = SurfAceRegistryIdentity(allocatorId: "alloc_home", fleetId: "fleet-home")
+        let invalidPayloads = [
+            #"{"directEndpoint":"wss://client.example/ws","prePairDescribeV1":true,"endpointLease":{"leaseGeneration":0,"registrationObservedAtMs":1000,"leaseExpiresAtMs":2000}}"#,
+            #"{"directEndpoint":"wss://client.example/ws","prePairDescribeV1":true,"endpointLease":{"leaseGeneration":41,"registrationObservedAtMs":-1,"leaseExpiresAtMs":2000}}"#,
+            #"{"directEndpoint":"wss://client.example/ws","prePairDescribeV1":true,"endpointLease":{"leaseGeneration":41,"registrationObservedAtMs":2000,"leaseExpiresAtMs":2000}}"#,
+            #"{"directEndpoint":"wss://client.example/ws","prePairDescribeV1":true,"endpointLease":{"leaseGeneration":41,"registrationObservedAtMs":1000,"leaseExpiresAtMs":9007199254740992}}"#,
+            #"{"directEndpoint":"wss://user:example@client.example/ws","prePairDescribeV1":true,"endpointLease":{"leaseGeneration":41,"registrationObservedAtMs":1000,"leaseExpiresAtMs":2000}}"#,
+            #"{"directEndpoint":"wss://client.example/ws","prePairDescribeV1":true,"endpointLease":null}"#
+        ]
+        for payloadFields in invalidPayloads {
+            let response = Data("""
+            {"id":"register-1","op":"client.register","ok":true,"payload":{"clientId":"stable-client","registryIdentity":{"allocatorId":"alloc_home","fleetId":"fleet-home"},"surfaces":[],\(payloadFields.dropFirst().dropLast())}}
+            """.utf8)
+            XCTAssertThrowsError(try SurfAceRegistrationWire.registration(
+                from: response, requestId: "register-1", clientId: "stable-client",
+                surfaces: [], expectedIdentity: expected,
+                expectedDirectEndpoint: "wss://client.example/ws", expectedPrePairDescribeV1: true
+            ))
+        }
+    }
+
     func testProductionAllocatorAssignsDistinctLabelsAndRetainsIdentityOnReconnect() async throws {
         guard let address = ProcessInfo.processInfo.environment["SURF_ACE_TEST_ALLOCATOR"],
               let url = URL(string: address) else { throw XCTSkip("isolated allocator not supplied") }
