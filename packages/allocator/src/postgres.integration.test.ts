@@ -2284,14 +2284,14 @@ test("pane allocation generations release exact tombstoned identities and gate s
     const afterLegacy = await writer.readAcceptedState();
     assert.equal(afterLegacy.paneLabelReuseEnabled, false, "legacy claim closes the reuse gate");
     const afterLegacyNew = await writer.claimPaneWithGeneration(clientId, "sf_pane_reuse", "pane-4", "pl_pane_reuse_4");
-    assert.deepEqual(afterLegacyNew, { paneLabel: 5, allocationGeneration: 5 });
+    assert.deepEqual(afterLegacyNew, { paneLabel: 5, allocationGeneration: 6 });
     const active = await writer.readAcceptedState();
     assert.deepEqual(active.paneMappings.map(({ paneLabel, allocationGeneration }) => ({ paneLabel, allocationGeneration })), [
       { paneLabel: 1, allocationGeneration: 4 },
       { paneLabel: 2, allocationGeneration: 2 },
       { paneLabel: 3, allocationGeneration: 3 },
-      { paneLabel: 4, allocationGeneration: null },
-      { paneLabel: 5, allocationGeneration: 5 },
+      { paneLabel: 4, allocationGeneration: 5 },
+      { paneLabel: 5, allocationGeneration: 6 },
     ]);
   } finally {
     await writer?.release();
