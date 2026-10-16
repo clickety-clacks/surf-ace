@@ -626,24 +626,7 @@ export function assertLocklessCapacityLimits(
   if ((limits.maxAnnotationPublisherStateBytesPerSurface ?? 0) > 67_108_864) {
     throw new Error("invalid_lockless_limit:annotation_publisher_state");
   }
-  if (
-    limits.maxPaneAnnotationRestoreBytes >
-    limits.maxPaneRecoverableStateBytes
-  ) {
-    throw new Error("invalid_lockless_limit:annotation_exceeds_pane");
-  }
-  if (
-    limits.maxRecoverableSurfaceBytes >
-    limits.maxRetainedTombstoneBytes
-  ) {
-    throw new Error("invalid_lockless_limit:surface_exceeds_tombstone_pool");
-  }
-  if (
-    limits.maxRecoverableSurfaceBytes <
-    locklessRecoverableSurfaceMinimumBytes(limits)
-  ) {
-    throw new Error("invalid_lockless_limit:recoverable_surface_envelope");
-  }
+
 }
 
 const LOCKLESS_REQUEST_FIELDS: Record<

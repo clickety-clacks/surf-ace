@@ -61,7 +61,7 @@ test("publisher partition survives the Electron surface state serialization boun
     /invalid persisted annotation publisher state/);
 });
 
-test("configured publisher reserves its full partition before lockless admission", () => {
+test("publisher recovery identity is independent of historical pane payload budgets", () => {
   const legacy = new SurfaceCore().getPersistentState();
   const core = new SurfaceCore({ annotationClientId: clientId, persistentState: legacy });
   const limits = core.locklessAuthority.limits;
@@ -74,11 +74,10 @@ test("configured publisher reserves its full partition before lockless admission
 
   const tooSmall = structuredClone(legacy);
   tooSmall.lockless!.limits.maxRetainedTombstoneBytes = 640 * 1024 * 1024;
-  assert.throws(() => new SurfaceCore({ annotationClientId: clientId, persistentState: tooSmall }),
-    /invalid_lockless_limit:surface_exceeds_tombstone_pool/);
+  assert.doesNotThrow(() => new SurfaceCore({ annotationClientId: clientId, persistentState: tooSmall }));
 });
 
-test("tombstone reclamation retains an unaccepted publisher gap across restart", () => {
+test("later close retains earlier recovery and unaccepted publisher gap across restart", () => {
   const core = new SurfaceCore({ annotationClientId: clientId });
   const sourceSurface = "sf_source_history";
   core.annotationPublisher!.lose(sourceSurface, "frame_image_unavailable");
@@ -94,7 +93,7 @@ test("tombstone reclamation retains an unaccepted publisher gap across restart",
     kind: "surface", surfaceId: "sf_later_surface", payload: { surface: "later" },
   });
   assert.equal(core.locklessAuthority.listTombstones().some((entry) =>
-    entry.tombstoneId === sourceTombstone.tombstoneId), false);
+    entry.tombstoneId === sourceTombstone.tombstoneId), true);
   const restored = new SurfaceCore({ annotationClientId: clientId,
     persistentState: core.getPersistentState() });
   assert.equal(restored.annotationPublisher!.partitionBytes(sourceSurface), sourceBytes);

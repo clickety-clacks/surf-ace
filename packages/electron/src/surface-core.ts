@@ -1537,35 +1537,6 @@ export class SurfaceCore {
         surface.windowLabel = candidate;
         surface.windowLabelConfirmed = false;
       }
-      const prospective = serializeSurface(surface);
-      const surfaceBase = ({
-        panes: _panes,
-        ...base
-      }: PersistentSurfaceRecord) => base;
-      this.locklessAuthority.assertSurfaceRecoverableBaseCapacity(
-        surfaceBase(rollback),
-        surfaceBase(prospective),
-      );
-      for (const pane of prospective.panes) {
-        this.locklessAuthority.assertPaneRecoverableCapacity(
-          rollback.panes.find((entry) => entry.paneId === pane.paneId) ?? pane,
-          pane,
-          pane.history.map((entry) => entry.annotations),
-        );
-      }
-      const retainedPaneCount = this.locklessAuthority
-        .listTombstones("pane")
-        .filter((entry) => entry.surfaceId === surfaceId).length;
-      if (
-        surface.panes.size + retainedPaneCount >
-        this.locklessAuthority.limits.maxPanesPerSurface +
-          this.locklessAuthority.limits.maxRetainedTombstones
-      ) {
-        throw new LocklessAuthorityError(
-          "pane_capacity",
-          "Surface exceeds the lockless live-plus-tombstone envelope",
-        );
-      }
       if (admissionAttemptSequence !== undefined) {
         this.advanceSurfaceAdmissionAttempt(
           admissionAttemptSequence,
@@ -1653,10 +1624,24 @@ export class SurfaceCore {
   captureSurfaceRecoverableBase(
     surfaceId: string,
   ): Omit<PersistentSurfaceRecord, "panes"> {
-    const { panes: _panes, ...base } = serializeSurface(
-      this.getSurface(surfaceId),
-    );
-    return base;
+    // This work-item metadata does not contain pane history or drawings.
+    // Reading it must not materialize every pane only to discard those copies.
+    const surface = this.getSurface(surfaceId);
+    return {
+      activeKeyboardPaneId: surface.activeKeyboardPaneId,
+      focusIntentRevision: surface.focusIntentRevision,
+      geometryRevision: surface.geometryRevision,
+      layout: surface.layout ? structuredClone(surface.layout) : null,
+      name: surface.name,
+      paneOrder: [...surface.paneOrder],
+      surfaceEpochRevision: surface.surfaceEpochRevision,
+      surfaceId: surface.surfaceId,
+      topologyRevision: surface.topologyRevision,
+      viewport: cloneViewport(surface.viewport),
+      windowPlacement: cloneWindowPlacement(surface.windowPlacement),
+      windowLabel: surface.windowLabel,
+      windowLabelConfirmed: surface.windowLabelConfirmed,
+    };
   }
 
   restoreSurfaceTombstone(

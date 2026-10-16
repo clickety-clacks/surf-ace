@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
 import {
@@ -11,7 +12,6 @@ import {
   exactDurableBytes,
   navigateLocklessHistory,
   type PersistentLocklessClientState,
-  type RetainedTombstoneTransition,
 } from "../src/lockless-client-authority.js";
 import {
   SURF_ACE_LOCKLESS_V1_CAPABILITY,
@@ -45,7 +45,7 @@ function authority(): LocklessClientAuthority {
   return new LocklessClientAuthority(createEmptyLocklessClientState(limits));
 }
 
-test("retained publisher growth reclaims the oldest tombstone at the byte boundary", () => {
+test("publisher growth preserves both recoverable surfaces despite historical byte budgets", () => {
   const withPublisher = { ...limits, maxAnnotationPublisherStateBytesPerSurface: 1_024 };
   const roomy = { ...withPublisher,
     maxRecoverableSurfaceBytes: locklessRecoverableSurfaceMinimumBytes(withPublisher),
@@ -61,8 +61,8 @@ test("retained publisher growth reclaims the oldest tombstone at the byte bounda
     annotationPublisherPartitionBytes: 1, payload: { blob: "b".repeat(18_000) } });
   target.configureLimits({ ...roomy, maxRetainedTombstoneBytes: first.bytes + second.bytes });
   target.reconcileAnnotationPublisherPartition(first.tombstoneId, 900);
-  assert.deepEqual(target.listTombstones().map((entry) => entry.tombstoneId), [second.tombstoneId]);
-  assert.deepEqual(reclaimed, [first.tombstoneId]);
+  assert.deepEqual(target.listTombstones().map((entry) => entry.tombstoneId), [first.tombstoneId, second.tombstoneId]);
+  assert.deepEqual(reclaimed, []);
 });
 
 function admit(
@@ -363,7 +363,6 @@ test("target apply work survives restart and terminalizes as correlated append-o
   );
   const admitted = target.admitTargetApplyWorkItem({
     controllerInstanceId: "controller-a",
-    currentSurfaceBase: { panes: [{ paneId: 1 }] },
     intentCommitSequence: 11,
     operationRequestId: "operation-a",
     request: {
@@ -434,37 +433,36 @@ test("target apply work survives restart and terminalizes as correlated append-o
   assert.deepEqual(resultEvent?.result, completed?.result);
 });
 
-test("target apply surface capacity refusal leaves no durable work item", () => {
-  const constrained = new LocklessClientAuthority(
-    createEmptyLocklessClientState({
-      ...limits,
-      maxSurfaceRecoverableBaseBytes: 64,
-    }),
-  );
-  admit(constrained, "controller-a");
-  assert.throws(
-    () =>
-      constrained.admitTargetApplyWorkItem({
-        controllerInstanceId: "controller-a",
-        currentSurfaceBase: {},
-        intentCommitSequence: 1,
-        operationRequestId: "operation-too-large",
-        request: {
-          requestId: "materialization-too-large",
-          restoreReason: "initial",
-          surfaceId: "surface-a",
-          targetEpoch: 1,
-          targetHeader: {},
-          targetId: "target-a",
-          targetKind: "native_app",
-          targetPayload: {},
-        },
-      }),
-    (error) =>
-      error instanceof LocklessAuthorityError &&
-      error.code === "surface_state_capacity",
-  );
-  assert.deepEqual(constrained.targetApplyWorkItems(), []);
+test("target intent preserves recovery data despite historical surface byte limits", () => {
+  const target = new LocklessClientAuthority(createEmptyLocklessClientState({
+    ...limits,
+    maxSurfaceRecoverableBaseBytes: 64,
+  }));
+  admit(target, "controller-a");
+  const intent = target.admitTargetApplyWorkItem({
+    controllerInstanceId: "controller-a",
+    intentCommitSequence: 1,
+    operationRequestId: "operation-source",
+    request: {
+      requestId: "materialization-source",
+      restoreReason: "initial",
+      surfaceId: "surface-a",
+      targetEpoch: 1,
+      targetHeader: {},
+      targetId: "target-a",
+      targetKind: "browser_url",
+      targetPayload: { url: "https://example.invalid/" + "source".repeat(100) },
+    },
+  });
+  const restarted = new LocklessClientAuthority(target.exportState());
+  assert.deepEqual(restarted.targetApplyWorkItems(), [intent]);
+  assert.throws(() => target.admitTargetApplyWorkItem({
+    controllerInstanceId: "controller-a",
+    intentCommitSequence: 2,
+    operationRequestId: "operation-source",
+    request: intent.request,
+  }), (error) => error instanceof LocklessAuthorityError && error.code === "invalid_operation");
+  assert.deepEqual(target.targetApplyWorkItems(), [intent]);
 });
 
 test("bounded consumables preserve independent cursors and sticky structured gaps", () => {
@@ -533,7 +531,7 @@ test("scope snapshots use first-unread cursors and include current live frames",
   );
 });
 
-test("latest-wins records coalesce and tombstones reclaim oldest sequence", () => {
+test("latest-wins scroll coalescing does not evict recoverable pane state", () => {
   const target = authority();
   const events: Array<Record<string, unknown>> = [];
   target.subscribe((event) =>
@@ -568,42 +566,16 @@ test("latest-wins records coalesce and tombstones reclaim oldest sequence", () =
     payload: { paneId: 2 },
     surfaceId: "surface-a",
   });
-  target.createTombstone({
-    kind: "pane",
-    payload: { paneId: 3 },
-    surfaceId: "surface-a",
+  const third = target.createTombstone({
+    kind: "pane", payload: { paneId: 3 }, surfaceId: "surface-a",
   });
-  assert.deepEqual(
-    target.listTombstones().map((entry) => entry.tombstoneId),
-    [second.tombstoneId, target.listTombstones()[1]?.tombstoneId],
-  );
-  assert.equal(
-    target.listTombstones().some((entry) => entry.tombstoneId === first.tombstoneId),
-    false,
-  );
-  const reclaimed = events.find(
-    (event) =>
-      event.type === "event.tombstone_reclaimed" &&
-      event.tombstoneId === first.tombstoneId,
-  );
-  assert.equal(reclaimed?.reason, "count_capacity");
-  const reclamationAudit = events.find(
-    (event) =>
-      event.type === "diagnostic.lockless_audit" &&
-      event.record.operation === "tombstone.reclaimed" &&
-      event.record.resultCorrelation?.tombstoneId === first.tombstoneId,
-  );
-  assert.equal(
-    reclaimed?.type === "event.tombstone_reclaimed"
-      ? reclaimed.commitSequence
-      : null,
-    reclamationAudit?.type === "diagnostic.lockless_audit"
-      ? reclamationAudit.record.commitSequence
-      : null,
-  );
+  assert.deepEqual(target.listTombstones().map((entry) => entry.tombstoneId),
+    [first.tombstoneId, second.tombstoneId, third.tombstoneId]);
+  assert.equal(events.some((event) => event.type === "event.tombstone_reclaimed"), false);
+  assert.deepEqual(target.listPendingPaneReleases(), []);
 });
 
-test("surface reclamation releases only generation-bound panes after its final nested restore path", () => {
+test("nested recovery reservations and historical terminal retirement survive restart without quota eviction", () => {
   const clientId = "a".repeat(64);
   const state = createEmptyLocklessClientState(limits);
   const pane = (paneId: number, paneLabel: number, allocationGeneration: number | null, paneLineageId: string) => ({
@@ -675,26 +647,30 @@ test("surface reclamation releases only generation-bound panes after its final n
   target.createTombstone({ kind: "pane", payload: { pane: pane(3, 13, 8, "pl_next_one") }, surfaceId: "sf_next" });
   target.createTombstone({ kind: "pane", payload: { pane: pane(4, 14, 9, "pl_next_two") }, surfaceId: "sf_next" });
 
-  const releases = target.listPendingPaneReleases();
-  assert.deepEqual(releases.map(({ paneId, paneLabel, allocationGeneration, tombstoneKind, tombstoneId, closeRevision }) => ({
-    paneId, paneLabel, allocationGeneration, tombstoneKind, tombstoneId, closeRevision,
-  })), [
-    { paneId: "1", paneLabel: 11, allocationGeneration: 6, tombstoneKind: "surface", tombstoneId: "st_reuse_surface", closeRevision: 4 },
-    { paneId: "2", paneLabel: 12, allocationGeneration: 7, tombstoneKind: "surface", tombstoneId: "st_reuse_surface", closeRevision: 4 },
-  ]);
-  assert.ok(releases.every((release) => release.terminalRetirementRevision > 0));
-  assert.deepEqual(target.unavailablePaneIds("sf_reuse_surface"), [1, 2, 5],
-    "released and unverified pane identities keep their old internal IDs out of future allocations");
-  assert.deepEqual(
-    target.allocatePaneIdentity([
-      ...target.retainedPaneIds("sf_reuse_surface"),
-      ...target.unavailablePaneIds("sf_reuse_surface"),
-    ]),
-    { paneId: 3 },
-  );
+  assert.equal(target.listTombstones().some((entry) => entry.tombstoneId === staleParent.tombstoneId), true);
+  assert.deepEqual(target.listPendingPaneReleases(), []);
+  assert.deepEqual(target.retainedPaneIds("sf_reuse_surface"), [1, 5, 2]);
 
-  const recovered = new LocklessClientAuthority(target.exportState(), () => 101, clientId);
+  // Historical committed retirement is a different fact from today's close.
+  // Load its durable audit/release evidence; do not manufacture it by quota.
+  const historical = target.exportState();
+  historical.tombstones = [];
+  const releases = [
+    { allocationGeneration: 6, clientId, closeRevision: 4, lineageId: "pl_live_surface_pane",
+      paneId: "1", paneLabel: 11, surfaceId: "sf_reuse_surface", terminalRetirementRevision: 8,
+      tombstoneId: "st_reuse_surface", tombstoneKind: "surface" as const },
+    { allocationGeneration: 7, clientId, closeRevision: 4, lineageId: "pl_nested_surface_pane",
+      paneId: "2", paneLabel: 12, surfaceId: "sf_reuse_surface", terminalRetirementRevision: 8,
+      tombstoneId: "st_reuse_surface", tombstoneKind: "surface" as const },
+  ].map((evidence) => ({ ...evidence, releaseId: createHash("sha256").update(JSON.stringify(evidence)).digest("hex") }));
+  historical.paneRetirementAudits = releases;
+  historical.pendingPaneReleases = releases;
+  historical.paneIdentityReservations = [{ lineageId: "pl_legacy_pane", paneId: "5",
+    surfaceId: "sf_reuse_surface", tombstoneId: "st_reuse_surface", tombstoneKind: "surface" }];
+  const recovered = new LocklessClientAuthority(historical, () => 101, clientId);
   assert.deepEqual(recovered.listPendingPaneReleases(), releases);
+  assert.deepEqual(recovered.unavailablePaneIds("sf_reuse_surface"), [1, 2, 5]);
+  assert.deepEqual(recovered.allocatePaneIdentity(recovered.unavailablePaneIds("sf_reuse_surface")), { paneId: 3 });
   recovered.acknowledgePaneReleases(releases.map((release) => release.releaseId));
   assert.deepEqual(recovered.listPendingPaneReleases(), []);
   assert.equal(recovered.exportState().paneRetirementAudits.length, 2);
@@ -711,7 +687,7 @@ test("surface reclamation releases only generation-bound panes after its final n
   );
 });
 
-test("a reclaimed legacy tombstone without a committed topology revision cannot release its pane label", () => {
+test("legacy close retains recovery and cannot invent terminal release evidence", () => {
   const state = createEmptyLocklessClientState({ ...limits, maxRetainedTombstones: 2 });
   const authority = new LocklessClientAuthority(state, () => 100);
   let staleCopy: ReturnType<LocklessClientAuthority["createTombstone"]> | null = null;
@@ -730,10 +706,10 @@ test("a reclaimed legacy tombstone without a committed topology revision cannot 
     });
     if (paneId === 1) staleCopy = structuredClone(tombstone);
   }
-  assert.deepEqual(authority.listTombstones().map(({ closedSequence }) => closedSequence), [2, 3]);
+  assert.deepEqual(authority.listTombstones().map(({ closedSequence }) => closedSequence), [1, 2, 3]);
   assert.deepEqual(authority.listPendingPaneReleases(), [],
     "legacy retention order is not a committed close/topology revision or release proof");
-  assert.deepEqual(authority.unavailablePaneIds("sf_legacy_retained_1"), [1],
+  assert.deepEqual(authority.retainedPaneIds("sf_legacy_retained_1"), [1],
     "legacy IDs remain reserved even when their label cannot be released");
   const staleState = authority.exportState();
   staleState.tombstones = [staleCopy!];
@@ -780,141 +756,39 @@ function retainedAggregateFixture(identityOrder: "forward" | "reverse"): {
   };
 }
 
-test("AC-CLOSE-07: a valid admitted close at the retained byte bound succeeds without tombstone_capacity under identity reversal", () => {
-  const results = ["forward", "reverse"].map((identityOrder) => {
-    const probe = authority();
-    const probeTombstone = probe.createTombstone({
-      kind: "pane",
-      payload: {
-        pane: {
-          blob: "",
-          closerControllerInstanceId: "controller-a",
-          paneId: 1,
-          provenance: { controllerInstanceId: "controller-b" },
-        },
-      },
-      surfaceId: "surface-a",
-    });
-    const maximumBytes = Math.max(
-      limits.maxRecoverableSurfaceBytes,
-      probeTombstone.bytes + 1,
-    );
-    const target = new LocklessClientAuthority(
-      createEmptyLocklessClientState({
-        ...limits,
-        maxRetainedTombstoneBytes: maximumBytes,
-      }),
-    );
+test("close and restart retain large source regardless of closer and provenance", () => {
+  for (const identityOrder of ["forward", "reverse"] as const) {
+    const target = authority();
     admit(target, "controller-a");
     admit(target, "controller-b");
-    const [closerControllerInstanceId, creatorControllerInstanceId] =
-      identityOrder === "forward"
-        ? ["controller-a", "controller-b"]
-        : ["controller-b", "controller-a"];
-    const committed = target.createTombstone({
-      kind: "pane",
-      payload: {
-        pane: {
-          blob: "x".repeat(maximumBytes - probeTombstone.bytes),
-          closerControllerInstanceId,
-          paneId: 1,
-          provenance: { controllerInstanceId: creatorControllerInstanceId },
-        },
-      },
-      surfaceId: "surface-a",
-    });
-    assert.equal(committed.bytes, maximumBytes);
-    assert.equal(target.listTombstones()[0]?.bytes, maximumBytes);
-    return committed.bytes;
-  });
-  assert.deepEqual(results, [results[0], results[0]]);
+    const [closer, creator] = identityOrder === "forward"
+      ? ["controller-a", "controller-b"] : ["controller-b", "controller-a"];
+    const source = { pane: { paneId: 1, blob: "source".repeat(10_000),
+      closerControllerInstanceId: closer, provenance: { controllerInstanceId: creator } } };
+    const closed = target.createTombstone({ kind: "pane", payload: source, surfaceId: "surface-a" });
+    const restarted = new LocklessClientAuthority(target.exportState());
+    assert.deepEqual(restarted.restoreTombstone(closed.tombstoneId, "pane").payload, source);
+  }
 });
 
-test("AC-CLOSE-07: admission restart and configuration reject aggregate bound+1 atomically and accept equality under identity reversal", () => {
-  const observed: number[] = [];
+test("restart and admission preserve retained content beyond historical byte budgets", () => {
   for (const identityOrder of ["forward", "reverse"] as const) {
     const fixture = retainedAggregateFixture(identityOrder);
-    assert.ok(
-      fixture.aggregateBytes - 1 >= fixture.state.limits.maxRecoverableSurfaceBytes,
-    );
-    const equalityLimits = {
-      ...fixture.state.limits,
-      maxRetainedTombstoneBytes: fixture.aggregateBytes,
-    };
-    const exceededLimits = {
-      ...equalityLimits,
-      maxRetainedTombstoneBytes: fixture.aggregateBytes - 1,
-    };
-    const source = structuredClone(fixture.state);
-    const transitions: RetainedTombstoneTransition[] = [
-      "admission",
-      "restart",
-      "configuration",
-    ];
-    for (const transition of transitions) {
-      assert.throws(
-        () =>
-          assertRetainedTombstoneAggregate(
-            fixture.state,
-            exceededLimits,
-            transition,
-          ),
-        (error) =>
-          error instanceof LocklessAuthorityError &&
-          error.code === "tombstone_capacity" &&
-          error.details?.bytes === fixture.aggregateBytes &&
-          error.details?.maximumBytes === fixture.aggregateBytes - 1 &&
-          error.details?.transition === transition,
-      );
-      assert.deepEqual(fixture.state, source);
-      assert.doesNotThrow(() =>
-        assertRetainedTombstoneAggregate(
-          fixture.state,
-          equalityLimits,
-          transition,
-        )
-      );
+    const reduced = { ...fixture.state.limits, maxRetainedTombstoneBytes: fixture.aggregateBytes - 1 };
+    const source = structuredClone(fixture.state.tombstones);
+    for (const transition of ["admission", "restart", "configuration"] as const) {
+      assert.doesNotThrow(() => assertRetainedTombstoneAggregate(fixture.state, reduced, transition));
+      assert.deepEqual(fixture.state.tombstones, source);
     }
-
-    const restartSource = structuredClone(fixture.state);
-    restartSource.limits = exceededLimits;
-    assert.throws(
-      () => new LocklessClientAuthority(restartSource),
-      (error) =>
-        error instanceof LocklessAuthorityError &&
-        error.code === "tombstone_capacity" &&
-        error.details?.transition === "restart",
-    );
-    assert.deepEqual(restartSource.tombstones, fixture.state.tombstones);
-    const restarted = new LocklessClientAuthority({
-      ...structuredClone(fixture.state),
-      limits: equalityLimits,
-    });
-    assert.equal(restarted.listTombstones().length, 2);
-
-    const configured = new LocklessClientAuthority(fixture.state);
-    const priorGeneration = configured.exportState();
-    assert.throws(
-      () => configured.configureLimits(exceededLimits),
-      (error) =>
-        error instanceof LocklessAuthorityError &&
-        error.code === "tombstone_capacity" &&
-        error.details?.transition === "configuration",
-    );
-    assert.deepEqual(configured.exportState(), priorGeneration);
-    assert.doesNotThrow(() => configured.configureLimits(equalityLimits));
-    assert.equal(
-      configured.limits.maxRetainedTombstoneBytes,
-      fixture.aggregateBytes,
-    );
-
+    const restarted = new LocklessClientAuthority({ ...fixture.state, limits: reduced });
     admit(restarted, "controller-a");
-    observed.push(fixture.aggregateBytes);
+    assert.deepEqual(restarted.listTombstones(), source);
+    restarted.configureLimits(reduced);
+    assert.deepEqual(restarted.listTombstones(), source);
   }
-  assert.deepEqual(observed, [observed[0], observed[0]]);
 });
 
-test("AC-SURF-05: bounded global surface tombstone reclamation follows closed sequence and audits nested unread disposition", () => {
+test("surface close retains nested unread frames and scopes across unrelated later closes", () => {
   const target = authority();
   const events: Array<Record<string, unknown>> = [];
   target.subscribe((event) =>
@@ -974,35 +848,12 @@ test("AC-SURF-05: bounded global surface tombstone reclamation follows closed se
     surfaceId: "surface-c",
   });
 
-  const audit = events.find(
-    (event) =>
-      event.type === "diagnostic.lockless_audit" &&
-      (event.record as {
-        operation?: string;
-        resultCorrelation?: Record<string, unknown>;
-      }).operation === "tombstone.reclaimed" &&
-      (event.record as {
-        resultCorrelation?: Record<string, unknown>;
-      }).resultCorrelation?.tombstoneId === surfaceTombstone.tombstoneId,
-  ) as {
-    record: {
-      commitSequence: number;
-      resultCorrelation: Record<string, unknown>;
-    };
-  };
-  const reclaimed = events.find(
-    (event) =>
-      event.type === "event.tombstone_reclaimed" &&
-      event.tombstoneId === surfaceTombstone.tombstoneId,
-  );
-  assert.equal(audit.record.resultCorrelation.nestedLivePaneCount, 2);
-  assert.equal(audit.record.resultCorrelation.nestedPaneTombstoneCount, 1);
-  assert.equal(audit.record.resultCorrelation.unreadFrameCount, 1);
-  assert.equal(
-    audit.record.resultCorrelation.unreadBytesDiscarded,
-    discardedRecords.reduce((total, record) => total + record.bytes, 0),
-  );
-  assert.equal(reclaimed?.commitSequence, audit.record.commitSequence);
+  const recovered = new LocklessClientAuthority(target.exportState());
+  const retained = recovered.listTombstones().find((entry) => entry.tombstoneId === surfaceTombstone.tombstoneId);
+  assert.deepEqual(retained, surfaceTombstone);
+  assert.ok(discardedRecords.some((record) => record.recordClass === "annotation_frame"));
+  assert.equal(events.some((event) => event.type === "event.tombstone_reclaimed"), false);
+  assert.deepEqual(recovered.listPendingPaneReleases(), []);
 });
 
 test("pane tombstones contain and restore authoritative cursor scope state", () => {
@@ -1354,62 +1205,28 @@ test("authority FIFO isolates persisted work, ordinary mutations, failure rollba
   assert.equal(restored.scopeSnapshot("controller-a", "surface:surface-b").records.length, 1);
 });
 
-test("nested retained tombstone bytes remain exact after later controller admission and restart", () => {
+test("later controller admission retains nested content and authoritative cursors across restart", () => {
   const target = authority();
   target.ensureScope("surface:surface-a", "surface");
   target.ensureScope("pane:surface-a:1", "pane");
   admit(target, "controller-a");
   target.appendConsumable({
-    payload: { value: "retained" },
-    recordClass: "tap",
-    scopeId: "pane:surface-a:1",
-    scopeKind: "pane",
-    triggerOperation: "test.tombstone-admission",
+    payload: { value: "retained" }, recordClass: "tap", scopeId: "pane:surface-a:1",
+    scopeKind: "pane", triggerOperation: "test.tombstone-admission",
   });
-
-  target.createTombstone({
-    kind: "pane",
-    payload: { pane: { paneId: 1, value: "pane" } },
-    surfaceId: "surface-a",
-  });
+  target.createTombstone({ kind: "pane", payload: { pane: { paneId: 1, value: "pane" } }, surfaceId: "surface-a" });
   const paneTombstones = target.takePaneTombstonesForSurface("surface-a");
   target.createTombstone({
-    kind: "surface",
-    payload: {
-      paneTombstones,
-      surface: { surfaceId: "surface-a", value: "surface" },
-    },
+    kind: "surface", payload: { paneTombstones, surface: { surfaceId: "surface-a", value: "surface" } },
     surfaceId: "surface-a",
   });
-
-  // Admission legitimately adds the new controller's cursor to every retained
-  // scope, including nested pane tombstones. That mutation must update each
-  // child and enclosing tombstone's durable byte field before persistence.
   admit(target, "controller-b");
   const exported = target.exportState();
   const restored = new LocklessClientAuthority(exported);
   const retained = restored.listTombstones("surface")[0]!;
-  const nested = (retained.payload as { paneTombstones: typeof paneTombstones })
-    .paneTombstones[0]!;
-  assert.equal(
-    nested.bytes,
-    exactDurableBytes({
-      version: 1,
-      ...(({ bytes: _bytes, ...material }) => material)(nested),
-    }),
-  );
-  assert.equal(
-    retained.bytes,
-    exactDurableBytes({
-      version: 1,
-      ...(({ bytes: _bytes, ...material }) => material)(retained),
-    }),
-  );
-
-  const malformed = structuredClone(exported);
-  malformed.tombstones[0]!.bytes -= 1;
-  assert.throws(
-    () => new LocklessClientAuthority(malformed),
-    /Persisted tombstone byte accounting is invalid/,
-  );
+  const nested = (retained.payload as { paneTombstones: typeof paneTombstones }).paneTombstones[0]!;
+  assert.deepEqual((nested.payload as { pane: unknown }).pane, { paneId: 1, value: "pane" });
+  assert.ok(nested.scopes["pane:surface-a:1"]!.cursors["controller-a"]);
+  assert.ok(nested.scopes["pane:surface-a:1"]!.cursors["controller-b"]);
+  assert.deepEqual(restored.listTombstones(), exported.tombstones);
 });

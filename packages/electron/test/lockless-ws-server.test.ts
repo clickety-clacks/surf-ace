@@ -1606,6 +1606,125 @@ test("canonical target-admission cases execute Electron authority semantics", as
   }
 });
 
+test("ordinary edits retain source and provenance across close and restart without payload quotas", async () => {
+  const viewport = { height: 800, scale: 2, width: 1200 };
+  const lockless = createEmptyLocklessClientState({
+    ...DEFAULT_LOCKLESS_LIMITS,
+    maxPaneRecoverableStateBytes: 4096,
+    maxPaneAnnotationRestoreBytes: 4096,
+    maxSurfaceRecoverableBaseBytes: 4096,
+  });
+  const core = new SurfaceCore({ persistentState: { lockless, primarySurfaceId: null, version: 1 } });
+  const surface = core.ensurePrimarySurface("Source recovery", viewport);
+  initializeRegistryBootstrapPanes(core);
+  const port = nextPort++;
+  const server = new SurfaceWsServer({
+    capturePaneImage: async () => { throw new Error("ordinary edits must not capture an image"); },
+    claimPaneLabel: claimTestRegistryPaneLabel,
+    compositorSocketPath: null,
+    core,
+    endpointName: "Source recovery",
+    hostName: "localhost",
+    port,
+    viewport: () => viewport,
+  });
+  await server.start();
+  const socket = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+  try {
+    assert.equal((await pair(socket, "tight-beam", surface.surfaceId)).ok, true);
+    const paneId = Number(core.panesList(surface.surfaceId).panes[0]!.paneId);
+    const html = "<main>" + "retained source".repeat(1000) + "</main>";
+    const markdown = await request(socket, "content.set", {
+      content: { markdown: "# Document" }, contentId: "source-document", contentType: "markdown",
+      friendlyChatName: "Document author", paneId, surfaceId: surface.surfaceId,
+    });
+    assert.equal(markdown.ok, true, JSON.stringify(markdown));
+    const beforeUnsupported = core.capturePaneTombstonePayload(surface.surfaceId, paneId).pane;
+    const unsupported = await request(socket, "content.append", {
+      contentId: "source-document", expectedRevision: markdown.payload.revision,
+      lines: ["must not append"], paneId, surfaceId: surface.surfaceId,
+    });
+    assert.equal(unsupported.error.code, "unsupported_operation_for_content_type");
+    assert.deepEqual(core.capturePaneTombstonePayload(surface.surfaceId, paneId).pane, beforeUnsupported);
+    const first = await request(socket, "content.set", {
+      content: { html }, contentId: "source-html", contentType: "html",
+      friendlyChatName: "HTML author", paneId, surfaceId: surface.surfaceId,
+    });
+    assert.equal(first.ok, true, JSON.stringify(first));
+    const second = await request(socket, "content.set", {
+      content: { lines: ["current"], scrollback: 50 }, contentId: "source-terminal", contentType: "terminal",
+      friendlyChatName: "Terminal author", paneId, surfaceId: surface.surfaceId,
+    });
+    assert.equal(second.ok, true, JSON.stringify(second));
+    const appended = await request(socket, "content.append", {
+      contentId: "source-terminal", expectedRevision: second.payload.revision,
+      lines: ["retained addition"], paneId, surfaceId: surface.surfaceId,
+    });
+    assert.equal(appended.ok, true, JSON.stringify(appended));
+    const beforeStale = core.capturePaneTombstonePayload(surface.surfaceId, paneId).pane;
+    const stale = await request(socket, "content.clear", {
+      expectedRevision: second.payload.revision, paneId, surfaceId: surface.surfaceId,
+    });
+    assert.equal(stale.error.code, "stale_content");
+    assert.deepEqual(core.capturePaneTombstonePayload(surface.surfaceId, paneId).pane, beforeStale);
+    const registered = await request(socket, "target.register", {
+      expectedPreviousTargetEpoch: null, idempotencyKey: "retained-source-target",
+      launchedAt: new Date().toISOString(), paneId, registrationState: "before_attach",
+      surfaceId: surface.surfaceId, targetHeader: {}, targetKind: "markdown",
+      targetPayload: { markdown: "registered source".repeat(1000) },
+    });
+    assert.equal(registered.ok, true, JSON.stringify(registered));
+    assert.deepEqual(registered.payload.target.targetPayload, { markdown: "registered source".repeat(1000) });
+    const renamed = await request(socket, "pane.rename", {
+      expectedTopologyRevision: Number(core.topologyState(surface.surfaceId).topologyRevision),
+      name: "Retained source", paneId, surfaceId: surface.surfaceId,
+    });
+    assert.equal(renamed.ok, true, JSON.stringify(renamed));
+    core.navigateHistory(surface.surfaceId, paneId, "back");
+    assert.deepEqual(core.getRendererWindowState(surface.surfaceId).panes[0]!.content.content, { html });
+    assert.equal(core.getRendererWindowState(surface.surfaceId).panes[0]!.ownerName, "HTML author — Tight Beam");
+    core.navigateHistory(surface.surfaceId, paneId, "forward");
+    assert.equal(core.getRendererWindowState(surface.surfaceId).panes[0]!.ownerName, "Terminal author — Tight Beam");
+    const split = await request(socket, "pane.split", {
+      count: 2, direction: "horizontal", expectedTopologyRevision: Number(core.topologyState(surface.surfaceId).topologyRevision),
+      paneId, surfaceId: surface.surfaceId,
+    });
+    assert.equal(split.ok, true, JSON.stringify(split));
+    const closed = await request(socket, "pane.close", {
+      expectedTopologyRevision: split.payload.topologyRevision, paneId, surfaceId: surface.surfaceId,
+    });
+    assert.equal(closed.ok, true, JSON.stringify(closed));
+    const restarted = new SurfaceCore({ persistentState: core.getPersistentState() });
+    restarted.restorePersistedSurfaces("Source recovery", viewport);
+    restarted.admitSurfaceToLockless(surface.surfaceId);
+    const retained = restarted.locklessAuthority.listTombstones("pane")
+      .find((entry) => entry.tombstoneId === closed.payload.tombstoneId);
+    assert.ok(retained, "closed pane remains available after restart");
+    assert.deepEqual(retained.payload, core.locklessAuthority.listTombstones("pane")
+      .find((entry) => entry.tombstoneId === closed.payload.tombstoneId)!.payload);
+    assert.ok(restarted.locklessAuthority.retainedPaneIds(surface.surfaceId).includes(paneId),
+      "recoverable closed identity remains reserved");
+    const anchor = Number(restarted.panesList(surface.surfaceId).panes[0]!.paneId);
+    const savedPane = restarted.locklessAuthority.restoreTombstone(closed.payload.tombstoneId, "pane");
+    const restored = restarted.restorePaneTombstone(surface.surfaceId,
+      savedPane.payload as Parameters<SurfaceCore["restorePaneTombstone"]>[1], anchor, "horizontal");
+    assert.equal(restored.paneId, paneId);
+    const restoredVisible = restarted.getRendererWindowState(surface.surfaceId).panes.find((pane) => pane.paneId === paneId)!;
+    assert.equal(restoredVisible.ownerName, "Terminal author — Tight Beam");
+    restarted.navigateHistory(surface.surfaceId, paneId, "back");
+    const back = restarted.getRendererWindowState(surface.surfaceId).panes.find((pane) => pane.paneId === paneId)!;
+    assert.deepEqual(back.content.content, { html });
+    assert.equal(back.ownerName, "HTML author — Tight Beam");
+    const beforeCollision = restarted.getPersistentState();
+    assert.throws(() => restarted.restorePaneTombstone(surface.surfaceId,
+      savedPane.payload as Parameters<SurfaceCore["restorePaneTombstone"]>[1], anchor, "horizontal"), /already live/);
+    assert.deepEqual(restarted.getPersistentState(), beforeCollision);
+  } finally {
+    socket.close();
+    await server.stop();
+  }
+});
+
 test("AC-TOPO-04: split rename resize close restore and realization share stable IDs and one topology revision seam", async () => {
   const core = new SurfaceCore();
   const surface = core.ensurePrimarySurface("Surf Ace", {
@@ -2314,9 +2433,6 @@ test("restart from materializing terminalizes unknown without re-invoking target
   );
   seed.locklessAuthority.admitTargetApplyWorkItem({
     controllerInstanceId: "tight-beam-restart",
-    currentSurfaceBase: seed.captureSurfaceTombstonePayload(
-      surface.surfaceId,
-    ),
     intentCommitSequence: intent.commitSequence,
     operationRequestId: requestId,
     request: {
@@ -2403,9 +2519,6 @@ test("restart from committed target intent persists materializing and invokes ex
   );
   seed.locklessAuthority.admitTargetApplyWorkItem({
     controllerInstanceId: "tight-beam-restart-intent",
-    currentSurfaceBase: seed.captureSurfaceTombstonePayload(
-      surface.surfaceId,
-    ),
     intentCommitSequence: intent.commitSequence,
     operationRequestId: requestId,
     request: {
@@ -2470,9 +2583,9 @@ test("restart from committed target intent persists materializing and invokes ex
   }
 });
 
-test("target apply charges surface base separately from retained pane history", { timeout: 15_000 }, async (t) => {
+test("target apply durably preserves history regardless of historical base byte limit", { timeout: 15_000 }, async (t) => {
   for (const oversizedBase of [false, true]) {
-    await t.test(oversizedBase ? "genuine oversized base refuses before commit" : "large legal history survives durable intent and application", async () => {
+    await t.test(oversizedBase ? "large base retains durable intent and source" : "history retains durable intent and source", async () => {
       const core = new SurfaceCore();
       const viewport = { height: 800, scale: 2, width: 1200 };
       const surface = core.ensurePrimarySurface("Partition fixture", viewport);
@@ -2531,8 +2644,8 @@ test("target apply charges surface base separately from retained pane history", 
         assert.ok(Buffer.byteLength(JSON.stringify(before)) > DEFAULT_LOCKLESS_LIMITS.maxSurfaceRecoverableBaseBytes);
         assert.ok(Buffer.byteLength(JSON.stringify(before.panes[0])) < DEFAULT_LOCKLESS_LIMITS.maxPaneRecoverableStateBytes);
         assert.equal(baseBytes > DEFAULT_LOCKLESS_LIMITS.maxSurfaceRecoverableBaseBytes, oversizedBase);
-        gatePersistence = !oversizedBase;
-        const resultEvent = oversizedBase ? null : nextEvent(socket, "event.target_apply_result");
+        gatePersistence = true;
+        const resultEvent = nextEvent(socket, "event.target_apply_result");
         const responsePromise = request(socket, "target.apply", {
           paneId,
           requestId: "partition-navigation",
@@ -2551,42 +2664,31 @@ test("target apply charges surface base separately from retained pane history", 
           targetKind: "browser_url",
           targetPayload: { url: "https://example.invalid/partition" },
         });
-        if (oversizedBase) {
-          const rejected = await responsePromise;
-          assert.equal(rejected.ok, false);
-          assert.equal(rejected.error.code, "surface_state_capacity");
-          assert.equal(rejected.error.details.currentBytes, baseBytes);
-          assert.equal(rejected.error.details.prospectiveBytes, baseBytes);
-          assert.equal(materializationInvocations, 0);
-          assert.deepEqual(core.locklessAuthority.targetApplyWorkItems(), []);
-          assert.deepEqual(core.captureSurfaceTombstonePayload(surface.surfaceId).panes, before.panes);
-        } else {
-          await Promise.race([
-            persisting,
-            responsePromise.then((response) => assert.equal(response.ok, true, JSON.stringify(response))),
-          ]);
-          assert.equal(materializationInvocations, 0, "materialization waits for durable intent");
-          assert.ok(savedIntent);
-          const recovered = new SurfaceCore({ persistentState: structuredClone(savedIntent) });
-          recovered.restorePersistedSurfaces("Partition fixture", viewport);
-          assert.equal(recovered.locklessAuthority.targetApplyWorkItems()[0]?.state, "intent_committed");
-          assert.deepEqual(recovered.captureSurfaceTombstonePayload(surface.surfaceId).panes[0]!.history, before.panes[0]!.history);
-          gatePersistence = false;
-          releasePersistence();
-          const accepted = await responsePromise;
-          assert.equal(accepted.ok, true, JSON.stringify(accepted));
-          assert.equal(accepted.payload.status, "intent_committed");
-          assert.ok(accepted.payload.operationReceipt.commitSequence > 0);
-          await materializing;
-          server.resolveBrowserUrlNavigation(surface.surfaceId, Number(paneId), {
-            status: "applied", targetId: "partition-target", url: "https://example.invalid/partition",
-          });
-          const result = await resultEvent!;
-          assert.equal(result.payload.status, "applied");
-          assert.equal(result.payload.intentCommitSequence, accepted.payload.operationReceipt.commitSequence);
-          assert.equal(materializationInvocations, 1);
-          assert.deepEqual(core.captureSurfaceTombstonePayload(surface.surfaceId).panes[0]!.history.slice(0, before.panes[0]!.history.length), before.panes[0]!.history);
-        }
+        await Promise.race([
+          persisting,
+          responsePromise.then((response) => assert.equal(response.ok, true, JSON.stringify(response))),
+        ]);
+        assert.equal(materializationInvocations, 0, "materialization waits for durable intent");
+        assert.ok(savedIntent);
+        const recovered = new SurfaceCore({ persistentState: structuredClone(savedIntent) });
+        recovered.restorePersistedSurfaces("Partition fixture", viewport);
+        assert.equal(recovered.locklessAuthority.targetApplyWorkItems()[0]?.state, "intent_committed");
+        assert.deepEqual(recovered.captureSurfaceTombstonePayload(surface.surfaceId).panes[0]!.history, before.panes[0]!.history);
+        gatePersistence = false;
+        releasePersistence();
+        const accepted = await responsePromise;
+        assert.equal(accepted.ok, true, JSON.stringify(accepted));
+        assert.equal(accepted.payload.status, "intent_committed");
+        assert.ok(accepted.payload.operationReceipt.commitSequence > 0);
+        await materializing;
+        server.resolveBrowserUrlNavigation(surface.surfaceId, Number(paneId), {
+          status: "applied", targetId: "partition-target", url: "https://example.invalid/partition",
+        });
+        const result = await resultEvent!;
+        assert.equal(result.payload.status, "applied");
+        assert.equal(result.payload.intentCommitSequence, accepted.payload.operationReceipt.commitSequence);
+        assert.equal(materializationInvocations, 1);
+        assert.deepEqual(core.captureSurfaceTombstonePayload(surface.surfaceId).panes[0]!.history.slice(0, before.panes[0]!.history.length), before.panes[0]!.history);
       } finally {
         gatePersistence = false;
         releasePersistence();
