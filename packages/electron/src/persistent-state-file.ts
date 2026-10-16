@@ -37,6 +37,7 @@ export type PersistentStateLoadResult =
   | {
       recoveredFromBackup: boolean;
       recoverySource: PersistentStateRecoverySource;
+      serializedContents?: string;
       state: PersistentSurfaceState;
       writeGuard: false | "unrestorable-primary";
     }
@@ -259,6 +260,7 @@ async function loadExplicitlyAcceptedState(
     return {
       recoveredFromBackup: recoverySource === "backup",
       recoverySource,
+      serializedContents: acceptedContents,
       state,
       writeGuard: false,
     };
@@ -303,26 +305,31 @@ export async function loadPersistentStateFile(stateDir: string, fileName: string
     };
   }
   try {
+    const serializedContents = await fs.readFile(statePath, "utf8");
     return {
       recoveredFromBackup: false,
       recoverySource: "primary",
-      state: await readStateFile(statePath),
+      serializedContents,
+      state: JSON.parse(serializedContents) as PersistentSurfaceState,
       writeGuard: false,
     };
   } catch (primaryError) {
     try {
       const backupPath = path.join(stateDir, backupStateFileName(fileName));
-      const state = await readStateFile(backupPath);
+      const serializedContents = await fs.readFile(backupPath, "utf8");
+      const state = JSON.parse(serializedContents) as PersistentSurfaceState;
       await atomicWriteFile(statePath, JSON.stringify(state, null, 2)).catch(() => {});
       return {
         recoveredFromBackup: true,
         recoverySource: "backup",
+        serializedContents,
         state,
         writeGuard: false,
       };
     } catch {
       const temporaryRecovery = await loadNewestTemporaryState(stateDir, fileName).catch(() => undefined);
       if (temporaryRecovery) {
+        const serializedContents = await fs.readFile(temporaryRecovery.filePath, "utf8");
         await atomicWriteFile(statePath, JSON.stringify(temporaryRecovery.state, null, 2)).catch(() => {});
         await atomicWriteFile(
           path.join(stateDir, backupStateFileName(fileName)),
@@ -331,6 +338,7 @@ export async function loadPersistentStateFile(stateDir: string, fileName: string
         return {
           recoveredFromBackup: false,
           recoverySource: "temporary",
+          serializedContents,
           state: temporaryRecovery.state,
           writeGuard: false,
         };
@@ -356,8 +364,16 @@ export async function writePersistentStateFile(
   fileName: string,
   state: PersistentSurfaceState,
 ): Promise<void> {
+  await writePersistentStateFileContents(stateDir, fileName, JSON.stringify(state, null, 2));
+}
+
+/** Persist an immutable candidate already encoded at the mutation boundary. */
+export async function writePersistentStateFileContents(
+  stateDir: string,
+  fileName: string,
+  contents: string,
+): Promise<void> {
   await fs.mkdir(stateDir, { recursive: true });
-  const contents = JSON.stringify(state, null, 2);
   const statePath = path.join(stateDir, fileName);
   const backupPath = path.join(stateDir, backupStateFileName(fileName));
   const selectorPath = path.join(stateDir, persistentStateSelectorFileName(fileName));

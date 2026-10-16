@@ -735,6 +735,15 @@ export class LocklessClientAuthority {
     return clone(this.state);
   }
 
+  /**
+   * Borrow the live state only for a synchronous JSON serialization. The caller
+   * must not retain or mutate this reference; encoding finishes before this
+   * method's caller can yield to another event-loop task.
+   */
+  stateForSynchronousSerialization(): PersistentLocklessClientState {
+    return this.state;
+  }
+
   get limits(): LocklessCapacityLimits {
     return clone(this.state.limits);
   }

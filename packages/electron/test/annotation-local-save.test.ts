@@ -94,6 +94,21 @@ test("confirmed record is copied and mutable candidate/result cannot rewrite its
  assert.equal(saved(proof,core,id,paneId),true);
 });
 
+test("synchronous snapshot confirmation binds the saved frame to its captured context",()=>{
+ const {core,id,paneId}=setup();core.setAnnotating(id,paneId,true);core.setAnnotating(id,paneId,false);
+ const snapshot=core.capturePersistentStateSnapshot(),proof=new ConfirmedAnnotationLocalSaves();
+ proof.confirmCandidates(snapshot.annotationLocalSaveCandidates);
+ assert.equal(saved(proof,core,id,paneId),true);
+ const savedFrame=core.localAnnotationFrameId(id,paneId);
+ core.setAnnotating(id,paneId,true);
+ assert.notEqual(core.localAnnotationFrameId(id,paneId),savedFrame);
+ assert.equal(saved(proof,core,id,paneId),false);
+ core.setAnnotating(id,paneId,false);
+ proof.confirmCandidates(snapshot.annotationLocalSaveCandidates);
+ assert.equal(saved(proof,core,id,paneId),false,
+  "a durable candidate from an earlier frame cannot confirm the later frame");
+});
+
 test("restoration caps optional per-surface save markers without evicting panes/history",()=>{
  const {core,id,paneId}=setup();core.setAnnotating(id,paneId,true);core.setAnnotating(id,paneId,false);
  const state=core.getPersistentState(),surface=state.surfaces![0]!,original=surface.panes[0]!;

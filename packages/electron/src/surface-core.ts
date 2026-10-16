@@ -73,7 +73,13 @@ import {
   type LocklessSurfaceAdmissionAttempt,
 } from "../../protocol/src/lockless.js";
 import { cloneWindowPlacement, type WindowPlacement } from "./window-placement.js";
-import { ANNOTATION_LOCAL_SAVE_LIMIT, parseAnnotationLocalSave, validLocalAnnotationFrameId, type AnnotationLocalSave } from "./annotation-local-save.js";
+import {
+  ANNOTATION_LOCAL_SAVE_LIMIT,
+  parseAnnotationLocalSave,
+  validLocalAnnotationFrameId,
+  type AnnotationLocalSave,
+  type ConfirmedAnnotationLocalSaveCandidate,
+} from "./annotation-local-save.js";
 import { AnnotationPublisherOutbox, ANNOTATION_PUBLISHER_MAX_BYTES, type PersistentAnnotationPublisher } from "./annotation-publisher-outbox.js";
 
 type ContentPayload = ContentSetRequest["payload"]["content"];
@@ -216,6 +222,11 @@ export type PersistentSurfaceState = {
   registryEndpointLease?: PersistentRegistryEndpointLease | null;
   surfaces?: PersistentSurfaceRecord[];
   version: 1;
+};
+
+export type PersistentSurfaceStateSnapshot = {
+  annotationLocalSaveCandidates: ConfirmedAnnotationLocalSaveCandidate[];
+  contents: string;
 };
 
 export type PersistentRegistryBinding = {
@@ -863,7 +874,10 @@ export class SurfaceCore {
       if ((error as { name?: string } | null)?.name !== "PersistentStateOutcomeUnknownError") {
         rollback();
       } else if (committed?.retainUncertainEvents) {
-        this.deferredVerifiedEvents = { state: JSON.stringify(this.getPersistentState()), events: this.pendingEvents };
+        this.deferredVerifiedEvents = {
+          state: this.capturePersistentStateSnapshot().contents,
+          events: this.pendingEvents,
+        };
       }
       this.pendingEvents = null;
       throw error;
@@ -882,9 +896,13 @@ export class SurfaceCore {
     return result;
   }
 
-  publishVerifiedTransactionEvents(state: PersistentSurfaceState, onError: (error: unknown) => void): boolean {
+  publishVerifiedTransactionEvents(
+    state: PersistentSurfaceState | string,
+    onError: (error: unknown) => void,
+  ): boolean {
     const pending = this.deferredVerifiedEvents;
-    if (!pending || pending.state !== JSON.stringify(state)) return false;
+    const contents = typeof state === "string" ? state : JSON.stringify(state, null, 2);
+    if (!pending || pending.state !== contents) return false;
     // Retire before invoking callbacks: repeated reconciliation cannot duplicate.
     this.deferredVerifiedEvents = null;
     for (const event of pending.events) this.deliverCommitted(event, onError);
@@ -967,6 +985,58 @@ export class SurfaceCore {
       lockless: this.locklessAuthority.exportState(),
       nextAdmissionAttemptSequence: this.nextAdmissionAttemptSequence,
       surfaces: this.listSurfaces().map((surface) => serializeSurface(surface)),
+    };
+  }
+
+  /**
+   * Capture the exact durable candidate bytes before the caller queues an
+   * asynchronous write. Unlike getPersistentState(), this does not deep-copy
+   * the owned state graph: it projects borrowed live roots and synchronously
+   * encodes them, so no later mutation can change this candidate.
+   */
+  capturePersistentStateSnapshot(): PersistentSurfaceStateSnapshot {
+    this.reconcileAnnotationTombstones();
+    const metadata = { ...this.persistentState };
+    delete metadata.surfaces;
+    delete metadata.lockless;
+    delete metadata.admissionAttempts;
+    delete metadata.nextAdmissionAttemptSequence;
+    if (this.annotationPublisher) delete metadata.annotationPublisher;
+    const surfaces = this.listSurfaces();
+    const state = {
+      ...metadata,
+      ...(this.annotationPublisher
+        ? { annotationPublisher: this.annotationPublisher.stateForSynchronousSerialization() }
+        : {}),
+      admissionAttempts: this.admissionAttempts,
+      lockless: this.locklessAuthority.stateForSynchronousSerialization(),
+      nextAdmissionAttemptSequence: this.nextAdmissionAttemptSequence,
+      surfaces: surfaces.map((surface) => serializeSurface(surface, false)),
+    };
+    const annotationLocalSaveCandidates = surfaces.flatMap((surface) =>
+      surface.paneOrder.flatMap((paneId) => {
+        const pane = surface.panes.get(paneId);
+        if (!pane) return [];
+        const entry = currentEntry(pane);
+        return [{
+          surfaceId: surface.surfaceId,
+          paneId: pane.paneId,
+          annotating: pane.annotating,
+          frameId: pane.annotationLocalFrameId,
+          localSave: pane.annotationLocalSave ? structuredClone(pane.annotationLocalSave) : undefined,
+          context: entry ? {
+            contentId: entry.contentId,
+            paneId: pane.paneId,
+            paneLineageId: pane.paneLineageId,
+            renderVersion: pane.latestContentEventAt,
+            revision: entry.revision,
+          } : null,
+        }];
+      }),
+    );
+    return {
+      annotationLocalSaveCandidates,
+      contents: JSON.stringify(state, null, 2),
     };
   }
 
@@ -4378,14 +4448,15 @@ function createPaneState(
   };
 }
 
-function serializeSurface(surface: SurfaceState): PersistentSurfaceRecord {
+function serializeSurface(surface: SurfaceState, clonePayloads = true): PersistentSurfaceRecord {
+  const copy = <T>(value: T): T => clonePayloads ? structuredClone(value) : value;
   return {
     activeKeyboardPaneId: surface.activeKeyboardPaneId,
     focusIntentRevision: surface.focusIntentRevision,
     geometryRevision: surface.geometryRevision,
-    layout: surface.layout ? structuredClone(surface.layout) : null,
+    layout: surface.layout ? copy(surface.layout) : null,
     name: surface.name,
-    paneOrder: [...surface.paneOrder],
+    paneOrder: clonePayloads ? [...surface.paneOrder] : surface.paneOrder,
     panes: surface.paneOrder
       .map((paneId) => surface.panes.get(paneId))
       .filter((pane): pane is PaneState => Boolean(pane))
@@ -4393,13 +4464,13 @@ function serializeSurface(surface: SurfaceState): PersistentSurfaceRecord {
         annotating: pane.annotating,
         annotationFrameOpen: pane.annotationFrameOpen,
         ...(pane.annotationLocalFrameId ? { annotationLocalFrameId: pane.annotationLocalFrameId } : {}),
-        ...(pane.annotationLocalSave ? { annotationLocalSave: structuredClone(pane.annotationLocalSave) } : {}),
+        ...(pane.annotationLocalSave ? { annotationLocalSave: copy(pane.annotationLocalSave) } : {}),
         deliveredClosedFrameCount: pane.deliveredClosedFrameCount,
-        dirtyStrokeIds: [...pane.dirtyStrokeIds],
+        dirtyStrokeIds: clonePayloads ? [...pane.dirtyStrokeIds] : pane.dirtyStrokeIds,
         externalNative: false,
         firstDirtyStrokeAt: pane.firstDirtyStrokeAt,
         flushInFlight: false,
-        history: pane.history.map(persistedHistoryEntry),
+        history: clonePayloads ? pane.history.map(persistedHistoryEntry) : pane.history,
         historyIndex: pane.historyIndex,
         lastDirtyStrokeAt: pane.lastDirtyStrokeAt,
         lastSuccessfulFlushAt: pane.lastSuccessfulFlushAt,
@@ -4411,14 +4482,14 @@ function serializeSurface(surface: SurfaceState): PersistentSurfaceRecord {
         paneLabel: pane.paneLabel,
         paneLineageId: pane.paneLineageId,
         pendingAnnotationCommit: pane.pendingAnnotationCommit,
-        snapshot: structuredClone(pane.snapshot),
+        snapshot: copy(pane.snapshot),
         toast: pane.toast,
       })),
     surfaceEpochRevision: surface.surfaceEpochRevision,
     surfaceId: surface.surfaceId,
     topologyRevision: surface.topologyRevision,
-    viewport: cloneViewport(surface.viewport),
-    windowPlacement: cloneWindowPlacement(surface.windowPlacement),
+    viewport: clonePayloads ? cloneViewport(surface.viewport) : surface.viewport,
+    windowPlacement: clonePayloads ? cloneWindowPlacement(surface.windowPlacement) : surface.windowPlacement,
     windowLabel: surface.windowLabel,
     windowLabelConfirmed: surface.windowLabelConfirmed,
   };

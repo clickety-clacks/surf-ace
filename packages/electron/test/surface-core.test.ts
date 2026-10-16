@@ -4239,6 +4239,38 @@ test("ordinary pane rollback restores failed content and authority without repla
   assert.deepEqual(projected, []);
 });
 
+test("captured durable bytes are an immutable restartable generation", () => {
+  const core = new SurfaceCore();
+  const viewport = { width: 800, height: 600, scale: 1 };
+  const surface = core.ensurePrimarySurface("snapshot", viewport);
+  const paneId = applyProviderBootstrap(core, surface.surfaceId, 1);
+  core.locklessContentPush(surface.surfaceId, {
+    content: { lines: ["accepted"] },
+    contentId: "ct_accepted",
+    contentType: "terminal",
+    paneId,
+  }, "fixture");
+
+  const expected = core.getPersistentState();
+  const snapshot = core.capturePersistentStateSnapshot();
+  assert.equal(snapshot.contents, JSON.stringify(expected, null, 2));
+  const accepted = JSON.parse(snapshot.contents) as typeof expected;
+  const restarted = new SurfaceCore({ persistentState: accepted });
+  restarted.restorePersistedSurfaces("snapshot", viewport);
+  assert.equal(
+    restarted.getRendererWindowState(surface.surfaceId).panes[0]?.content.contentId,
+    "ct_accepted",
+  );
+
+  core.locklessContentPush(surface.surfaceId, {
+    content: { lines: ["later"] },
+    contentId: "ct_later",
+    contentType: "terminal",
+    paneId,
+  }, "fixture");
+  assert.equal(snapshot.contents, JSON.stringify(accepted, null, 2));
+});
+
 test("ordinary scoped rollback retains unknown candidate and publishes only exact verified acceptance", async () => {
   const core = new SurfaceCore();
   const viewport = { width: 800, height: 600, scale: 1 };

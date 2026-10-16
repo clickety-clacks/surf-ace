@@ -15,6 +15,7 @@ import {
   persistentStateSelectorFileName,
   shouldGuardUnrestorablePersistentState,
   writePersistentStateFile,
+  writePersistentStateFileContents,
 } from "../src/persistent-state-file.js";
 
 const STATE_FILE_NAME = "surface-core-state.json";
@@ -225,6 +226,20 @@ test("persistent state writes primary and last-good backup as valid JSON", async
     JSON.parse(await fs.readFile(path.join(stateDir, backupStateFileName(STATE_FILE_NAME)), "utf8")),
     state,
   );
+});
+
+test("pre-encoded candidate bytes remain the exact accepted generation", async () => {
+  const stateDir = await temporaryStateDir();
+  const state = multiWindowState();
+  const contents = JSON.stringify(state, null, 3);
+
+  await writePersistentStateFileContents(stateDir, STATE_FILE_NAME, contents);
+
+  const loaded = await loadPersistentStateFile(stateDir, STATE_FILE_NAME);
+  assert.equal(loaded.writeGuard, false);
+  assert.equal(loaded.serializedContents, contents);
+  assert.deepEqual(loaded.state, state);
+  assert.equal(await fs.readFile(path.join(stateDir, STATE_FILE_NAME), "utf8"), contents);
 });
 
 test("selector acknowledgement ambiguity can be reconciled to the exact committed generation", async () => {
