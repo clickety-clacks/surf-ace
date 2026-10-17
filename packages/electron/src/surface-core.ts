@@ -3056,10 +3056,8 @@ export class SurfaceCore {
         throw new SurfaceCoreError("invalid_operation", "Cannot clear content while annotating");
       }
       assertRevision(pane, payload.revision);
-      if (pane.historyIndex < pane.history.length - 1) {
-        pane.history = pane.history.slice(0, pane.historyIndex + 1);
-      }
-      pane.history.push({
+      const nextHistory = pane.history.slice(0, pane.historyIndex + 1);
+      nextHistory.push({
         annotations: [],
         content: null,
         contentId: null,
@@ -3067,7 +3065,8 @@ export class SurfaceCore {
         ownerToken: null,
         revision: payload.revision,
       });
-      pane.historyIndex = pane.history.length - 1;
+      pane.history = nextHistory;
+      pane.historyIndex = nextHistory.length - 1;
       trimHistory(pane);
       pane.toast = null;
       pane.externalNative = false;
@@ -3091,9 +3090,6 @@ export class SurfaceCore {
     }
     assertRevision(pane, payload.revision);
 
-    if (pane.historyIndex < pane.history.length - 1) {
-      pane.history = pane.history.slice(0, pane.historyIndex + 1);
-    }
     const nextEntry: HistoryEntry = {
       annotations: payload.restoredDrawings ? structuredClone(payload.restoredDrawings) : [],
       content: cloneContent(payload.content),
@@ -3104,12 +3100,14 @@ export class SurfaceCore {
       reloadSource: cloneReloadSource(payload.reloadSource) ?? undefined,
       revision: payload.revision,
     };
+    const nextHistory = pane.history.slice(0, pane.historyIndex + 1);
     if (shouldReplaceVisibleEntry(pane, payload.historyOwnerToken)) {
-      pane.history[pane.historyIndex] = nextEntry;
+      nextHistory[pane.historyIndex] = nextEntry;
     } else {
-      pane.history.push(nextEntry);
-      pane.historyIndex = pane.history.length - 1;
+      nextHistory.push(nextEntry);
+      pane.historyIndex = nextHistory.length - 1;
     }
+    pane.history = nextHistory;
     trimHistory(pane);
     pane.toast = null;
     pane.externalNative = false;
@@ -3480,10 +3478,6 @@ export class SurfaceCore {
       throw new SurfaceCoreError("invalid_operation", "Cannot replace content while annotating");
     }
 
-    if (pane.historyIndex < pane.history.length - 1) {
-      pane.history = pane.history.slice(0, pane.historyIndex + 1);
-    }
-
     const nextEntry: HistoryEntry = {
       annotations: [],
       content: cloneContent(payload.content),
@@ -3494,12 +3488,14 @@ export class SurfaceCore {
       reloadSource: cloneReloadSource(payload.reloadSource) ?? undefined,
       revision: payload.revision,
     };
+    const nextHistory = pane.history.slice(0, pane.historyIndex + 1);
     if (shouldReplaceVisibleEntry(pane, payload.historyOwnerToken)) {
-      pane.history[pane.historyIndex] = nextEntry;
+      nextHistory[pane.historyIndex] = nextEntry;
     } else {
-      pane.history.push(nextEntry);
-      pane.historyIndex = pane.history.length - 1;
+      nextHistory.push(nextEntry);
+      pane.historyIndex = nextHistory.length - 1;
     }
+    pane.history = nextHistory;
     trimHistory(pane);
     pane.toast = null;
     pane.externalNative = false;
