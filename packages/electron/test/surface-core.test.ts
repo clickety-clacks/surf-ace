@@ -4228,7 +4228,12 @@ test("ordinary pane rollback restores failed content and authority without repla
     }, "fixture");
     core.locklessAuthority.auditAccepted("rq_failed", "content.set", "controller", first.surfaceId, null);
     throw new Error("definite store failure");
-  }, { retainUncertainEvents: true, rollbackPane: { paneId, surfaceId: first.surfaceId }, onNotificationError: () => {} }), /definite store failure/);
+  }, { retainUncertainEvents: true, rollbackPane: {
+    controllerInstanceId: "controller",
+    paneId,
+    requestId: "rq_failed",
+    surfaceId: first.surfaceId,
+  }, onNotificationError: () => {} }), /definite store failure/);
   assert.deepEqual(core.getPersistentState(), before);
   assert.equal(core.getRendererWindowState(first.surfaceId).panes[0]?.content.contentId, "ct_prior");
   assert.equal(core.getSurface(first.surfaceId).panes.get(2), sibling,
@@ -4282,7 +4287,12 @@ test("ordinary scoped rollback retains unknown candidate and publishes only exac
   await assert.rejects(core.transactionAsync(async () => {
     core.locklessPaneRename(surface.surfaceId, paneId, "candidate");
     throw new PersistentStateOutcomeUnknownError(new Error("selector outcome unknown"));
-  }, { retainUncertainEvents: true, rollbackPane: { paneId, surfaceId: surface.surfaceId }, onNotificationError: () => {} }), /outcome is unknown/);
+  }, { retainUncertainEvents: true, rollbackPane: {
+    controllerInstanceId: "controller",
+    paneId,
+    requestId: "rq_unknown",
+    surfaceId: surface.surfaceId,
+  }, onNotificationError: () => {} }), /outcome is unknown/);
   assert.deepEqual(projected, []);
   const candidate = core.getPersistentState();
   const stale = structuredClone(candidate);

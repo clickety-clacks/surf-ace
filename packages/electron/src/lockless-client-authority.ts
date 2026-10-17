@@ -542,6 +542,25 @@ export function navigateLocklessHistory<T>(
   return clone(history.visible);
 }
 
+type OrdinaryMutationRollbackJournal = {
+  controllerInstanceId: string;
+  createdScopeIds: Set<string>;
+  nextCommitSequence: number;
+  priorReceipt: PersistentOperationReceipt | undefined;
+  requestId: string;
+  scopeStates: Map<
+    PersistentConsumableScope,
+    Pick<PersistentConsumableScope, "cursors" | "liveFrames" | "nextSequence" | "records">
+  >;
+  removedConnectionTokens: Map<string, Map<string, string>>;
+  removedControllers: Map<string, PersistentControllerEntry>;
+};
+
+export type OrdinaryMutationRollback = {
+  commit(): void;
+  rollback(): void;
+};
+
 export class LocklessClientAuthority {
   private authorityWorkTail: Promise<void> = Promise.resolve();
   private readonly connectionTokens = new Map<
@@ -550,6 +569,7 @@ export class LocklessClientAuthority {
   >();
   private readonly listeners = new Set<(event: AuthorityEvent) => void>();
   private pendingEvents: AuthorityEvent[] | null = null;
+  private ordinaryMutationRollbackJournal: OrdinaryMutationRollbackJournal | null = null;
   private state: PersistentLocklessClientState;
 
   constructor(
@@ -733,6 +753,93 @@ export class LocklessClientAuthority {
 
   exportState(): PersistentLocklessClientState {
     return clone(this.state);
+  }
+
+  /**
+   * Journal only the authority partitions an ordinary mutation changes. Scope
+   * payloads and retained record objects stay shared; mutators replace the
+   * touched scope roots so a definite write failure can restore their prior
+   * references without copying retained content.
+   */
+  captureOrdinaryMutationRollback(
+    controllerInstanceId: string,
+    requestId: string,
+  ): OrdinaryMutationRollback {
+    if (this.ordinaryMutationRollbackJournal) {
+      throw new Error("An ordinary mutation rollback journal is already active");
+    }
+    const journal: OrdinaryMutationRollbackJournal = {
+      controllerInstanceId,
+      createdScopeIds: new Set(),
+      nextCommitSequence: this.state.nextCommitSequence,
+      priorReceipt: this.state.controllers[controllerInstanceId]
+        ?.pendingOperationReceipts[requestId],
+      requestId,
+      scopeStates: new Map(),
+      removedConnectionTokens: new Map(),
+      removedControllers: new Map(),
+    };
+    this.ordinaryMutationRollbackJournal = journal;
+    let finished = false;
+    const finish = (): void => {
+      if (finished) return;
+      finished = true;
+      if (this.ordinaryMutationRollbackJournal === journal) {
+        this.ordinaryMutationRollbackJournal = null;
+      }
+    };
+    return {
+      commit: finish,
+      rollback: () => {
+        if (finished) return;
+        for (const [scope, before] of journal.scopeStates) {
+          scope.cursors = before.cursors;
+          scope.liveFrames = before.liveFrames;
+          scope.nextSequence = before.nextSequence;
+          scope.records = before.records;
+        }
+        for (const scopeId of journal.createdScopeIds) {
+          delete this.state.scopes[scopeId];
+        }
+        for (const [id, controller] of journal.removedControllers) {
+          this.state.controllers[id] = controller;
+        }
+        for (const [id, tokens] of journal.removedConnectionTokens) {
+          this.connectionTokens.set(id, tokens);
+        }
+        this.state.nextCommitSequence = journal.nextCommitSequence;
+        const receipts = this.state.controllers[controllerInstanceId]
+          ?.pendingOperationReceipts;
+        if (receipts) {
+          if (journal.priorReceipt === undefined) delete receipts[requestId];
+          else receipts[requestId] = journal.priorReceipt;
+        }
+        finish();
+      },
+    };
+  }
+
+  private captureOrdinaryScopeMutation(scope: PersistentConsumableScope): void {
+    const journal = this.ordinaryMutationRollbackJournal;
+    if (!journal || journal.scopeStates.has(scope)) return;
+    journal.scopeStates.set(scope, {
+      cursors: scope.cursors,
+      liveFrames: scope.liveFrames,
+      nextSequence: scope.nextSequence,
+      records: scope.records,
+    });
+  }
+
+  private captureOrdinaryControllerRemoval(controllerInstanceId: string): void {
+    const journal = this.ordinaryMutationRollbackJournal;
+    const controller = this.state.controllers[controllerInstanceId];
+    if (journal && controller && !journal.removedControllers.has(controllerInstanceId)) {
+      journal.removedControllers.set(controllerInstanceId, controller);
+    }
+    const tokens = this.connectionTokens.get(controllerInstanceId);
+    if (journal && tokens && !journal.removedConnectionTokens.has(controllerInstanceId)) {
+      journal.removedConnectionTokens.set(controllerInstanceId, tokens);
+    }
   }
 
   /**
@@ -1228,6 +1335,7 @@ export class LocklessClientAuthority {
         gapGeneration: 0,
       };
     }
+    this.ordinaryMutationRollbackJournal?.createdScopeIds.add(scopeId);
     this.state.scopes[scopeId] = created;
     return created;
   }
@@ -1251,6 +1359,7 @@ export class LocklessClientAuthority {
     triggerOperation: string;
   }): { record: ConsumableRecord; retained: boolean } {
     const scope = this.ensureScope(input.scopeId, input.scopeKind);
+    this.captureOrdinaryScopeMutation(scope);
     const sequence = scope.nextSequence++;
     const candidateWithoutBytes = {
       payload: clone(input.payload),
@@ -1283,7 +1392,10 @@ export class LocklessClientAuthority {
       );
       return { record: clone(candidate), retained: false };
     }
-    scope.records.push(candidate);
+    // Replace the record array rather than mutating the prior root. The active
+    // ordinary rollback journal can then retain the old array reference without
+    // cloning any retained payloads.
+    scope.records = [...scope.records, candidate];
     const victims: ConsumableRecord[] = [];
     while (
       scope.records.length > maxRecords ||
@@ -1966,6 +2078,8 @@ export class LocklessClientAuthority {
       controllerInstanceId: string;
       gap: ConsumableGap;
     }> = [];
+    this.captureOrdinaryScopeMutation(scope);
+    scope.cursors = { ...scope.cursors };
     for (const [controllerInstanceId, cursor] of Object.entries(
       scope.cursors,
     )) {
@@ -1974,9 +2088,7 @@ export class LocklessClientAuthority {
       }
       const generation = cursor.gapGeneration + 1;
       const previous = cursor.gap;
-      cursor.cursor = Math.max(cursor.cursor, firstRetained);
-      cursor.gapGeneration = generation;
-      cursor.gap = {
+      const gap: ConsumableGap = {
         cause,
         droppedBytes:
           previous?.lossExtent === "unknown"
@@ -2031,9 +2143,16 @@ export class LocklessClientAuthority {
           ...new Set([...(previous?.recordClasses ?? []), ...classes]),
         ],
       };
+      const updatedCursor: ConsumableCursorProjection = {
+        ...cursor,
+        cursor: Math.max(cursor.cursor, firstRetained),
+        gap,
+        gapGeneration: generation,
+      };
+      scope.cursors[controllerInstanceId] = updatedCursor;
       affected.push({
         controllerInstanceId,
-        gap: clone(cursor.gap),
+        gap: clone(gap),
       });
     }
     const eventCount = lostRecords.filter((record) =>
@@ -2098,13 +2217,20 @@ export class LocklessClientAuthority {
   private dropFullyConsumedRecords(scope: PersistentConsumableScope): void {
     const cursors = Object.values(scope.cursors);
     if (cursors.length === 0) {
-      scope.records = [];
+      if (scope.records.length > 0) {
+        this.captureOrdinaryScopeMutation(scope);
+        scope.records = [];
+      }
       return;
     }
     const floor = Math.min(...cursors.map((cursor) => cursor.cursor));
-    scope.records = scope.records.filter(
+    const retained = scope.records.filter(
       (record) => record.sequence >= floor,
     );
+    if (retained.length !== scope.records.length) {
+      this.captureOrdinaryScopeMutation(scope);
+      scope.records = retained;
+    }
   }
 
   private dormantEntries(): PersistentControllerEntry[] {
@@ -2251,18 +2377,30 @@ export class LocklessClientAuthority {
           (scope) => scope.cursors[victim.controllerInstanceId],
         ),
     ).length;
+    this.captureOrdinaryControllerRemoval(victim.controllerInstanceId);
     delete this.state.controllers[victim.controllerInstanceId];
     this.connectionTokens.delete(victim.controllerInstanceId);
     for (const scope of this.allScopes()) {
-      delete scope.cursors[victim.controllerInstanceId];
+      if (scope.cursors[victim.controllerInstanceId]) {
+        this.captureOrdinaryScopeMutation(scope);
+        const cursors = { ...scope.cursors };
+        delete cursors[victim.controllerInstanceId];
+        scope.cursors = cursors;
+      }
+      let liveFrames: Record<string, ConsumableRecord> | null = null;
       for (const [frameId, frame] of Object.entries(scope.liveFrames)) {
         const retainedForAnotherController = Object.values(
           scope.cursors,
         ).some((cursor) => cursor.cursor <= frame.sequence);
         if (!retainedForAnotherController) {
-          delete scope.liveFrames[frameId];
+          if (liveFrames === null) {
+            this.captureOrdinaryScopeMutation(scope);
+            liveFrames = { ...scope.liveFrames };
+          }
+          delete liveFrames[frameId];
         }
       }
+      if (liveFrames !== null) scope.liveFrames = liveFrames;
       this.dropFullyConsumedRecords(scope);
     }
     const correlation = {

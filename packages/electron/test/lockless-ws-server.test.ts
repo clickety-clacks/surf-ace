@@ -4778,6 +4778,108 @@ test("socket-path known pre-state persistence failure rolls back and reuses the 
   }
 });
 
+test("content write refusal restores unread capacity loss, cursor gap, and request receipt", async () => {
+  const core = new SurfaceCore();
+  const surface = core.ensurePrimarySurface("Surf Ace", {
+    height: 800, scale: 2, width: 1200,
+  });
+  initializeRegistryBootstrapPanes(core);
+  core.locklessAuthority.configureLimits({
+    ...DEFAULT_LOCKLESS_LIMITS,
+    maxPaneConsumableRecords: 1,
+  });
+  let refuseNextWrite = false;
+  const port = nextPort++;
+  const server = new SurfaceWsServer({
+    capturePaneImage: async () => null,
+    compositorSocketPath: null,
+    core,
+    endpointName: "Surf Ace",
+    hostName: "localhost",
+    persistLocklessState: async () => {
+      if (!refuseNextWrite) return;
+      refuseNextWrite = false;
+      throw new PersistentStateWriteGuardError("injected pre-write refusal");
+    },
+    port,
+    viewport: () => ({ height: 800, scale: 2, width: 1200 }),
+  });
+  await server.start();
+  const socket = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+  const controllerInstanceId = "content-rollback-client";
+  try {
+    assert.equal((await pair(socket, controllerInstanceId, surface.surfaceId)).ok, true);
+    const paneId = Number(core.panesList(surface.surfaceId).panes[0]!.paneId);
+    const first = await request(socket, "content.set", {
+      content: { markdown: "# retained unread" },
+      contentId: "retained-unread",
+      contentType: "markdown",
+      friendlyChatName: "Author",
+      paneId,
+      surfaceId: surface.surfaceId,
+    });
+    assert.equal(first.ok, true, JSON.stringify(first));
+
+    const scopeId = locklessPaneScopeId(surface.surfaceId, paneId);
+    const beforeState = core.getPersistentState();
+    const beforeScope = core.locklessAuthority.scopeSnapshot(
+      controllerInstanceId,
+      scopeId,
+    );
+    assert.equal(beforeScope.records.length, 1);
+    assert.equal(beforeScope.cursor.cursor, 1);
+    assert.equal(beforeScope.cursor.gap, null);
+    assert.equal(core.captureSnapshot(surface.surfaceId, paneId).contentId, "retained-unread");
+
+    const failedRequestId = "rq_content_capacity_failure";
+    refuseNextWrite = true;
+    const failed = await request(socket, "content.set", {
+      content: { markdown: "# rejected replacement" },
+      contentId: "rejected-replacement",
+      contentType: "markdown",
+      friendlyChatName: "Author",
+      paneId,
+      surfaceId: surface.surfaceId,
+    }, { id: failedRequestId });
+    assert.equal(failed.ok, false, JSON.stringify(failed));
+    assert.equal(failed.error?.code, "internal_error");
+    assert.equal(core.captureSnapshot(surface.surfaceId, paneId).contentId, "retained-unread");
+    assert.deepEqual(
+      core.locklessAuthority.scopeSnapshot(controllerInstanceId, scopeId),
+      beforeScope,
+      "a failed content write must restore the evicted unread record and cursor gap state",
+    );
+    assert.equal(
+      core.getPersistentState().lockless?.nextCommitSequence,
+      beforeState.lockless?.nextCommitSequence,
+      "consumable overflow and operation audit sequences are rolled back together",
+    );
+    assert.deepEqual(
+      core.locklessAuthority.resolveOperationReceipts(controllerInstanceId, [failedRequestId]),
+      [{ outcome: "not_committed", requestId: failedRequestId }],
+    );
+
+    const retried = await request(socket, "content.set", {
+      content: { markdown: "# accepted replacement" },
+      contentId: "accepted-replacement",
+      contentType: "markdown",
+      friendlyChatName: "Author",
+      paneId,
+      surfaceId: surface.surfaceId,
+    }, { id: failedRequestId });
+    assert.equal(retried.ok, true, JSON.stringify(retried));
+    assert.equal(core.captureSnapshot(surface.surfaceId, paneId).contentId, "accepted-replacement");
+    const afterRetry = core.locklessAuthority.scopeSnapshot(controllerInstanceId, scopeId);
+    assert.deepEqual(afterRetry.records.map((record) => record.sequence), [2]);
+    assert.equal(afterRetry.cursor.cursor, 2);
+    assert.equal(afterRetry.cursor.gapGeneration, 1);
+    assert.equal(afterRetry.cursor.gap?.cause, "scope_capacity");
+  } finally {
+    socket.close();
+    await server.stop();
+  }
+});
+
 // REMOVED PENDING A SERVER FIX, defect recorded on asg_2107e9db:
 // an unknown-outcome persistence failure during pair.request never produces a
 // response envelope, so the client hangs forever rather than receiving an

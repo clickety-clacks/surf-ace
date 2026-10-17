@@ -826,7 +826,12 @@ export class SurfaceCore {
   async transactionAsync<T>(operation: () => Promise<T>, committed?: {
     retainUncertainEvents: boolean;
     onNotificationError: (error: unknown) => void;
-    rollbackPane?: { paneId: number; surfaceId: string };
+    rollbackPane?: {
+      controllerInstanceId: string;
+      paneId: number;
+      requestId: string;
+      surfaceId: string;
+    };
   }): Promise<T> {
     if (this.activeAsyncTransaction !== null &&
         this.transactionContext.getStore() === this.activeAsyncTransaction) {
@@ -857,14 +862,22 @@ export class SurfaceCore {
   private async transactionAsyncExclusive<T>(operation: () => Promise<T>, committed?: {
     retainUncertainEvents: boolean;
     onNotificationError: (error: unknown) => void;
-    rollbackPane?: { paneId: number; surfaceId: string };
+    rollbackPane?: {
+      controllerInstanceId: string;
+      paneId: number;
+      requestId: string;
+      surfaceId: string;
+    };
   }): Promise<T> {
     const rollback = committed?.rollbackPane &&
       this.surfaces.get(committed.rollbackPane.surfaceId)?.panes.has(committed.rollbackPane.paneId)
-      ? this.captureOrdinaryPaneRollback(committed.rollbackPane.surfaceId, committed.rollbackPane.paneId)
+      ? this.captureOrdinaryPaneRollback(committed.rollbackPane)
       : (() => {
           const before = this.getPersistentState();
-          return () => this.restorePersistentState(before);
+          return {
+            commit: () => {},
+            rollback: () => this.restorePersistentState(before),
+          };
         })();
     this.pendingEvents = [];
     let result: T;
@@ -872,12 +885,15 @@ export class SurfaceCore {
       result = await operation();
     } catch (error) {
       if ((error as { name?: string } | null)?.name !== "PersistentStateOutcomeUnknownError") {
-        rollback();
+        rollback.rollback();
       } else if (committed?.retainUncertainEvents) {
+        rollback.commit();
         this.deferredVerifiedEvents = {
           state: this.capturePersistentStateSnapshot().contents,
           events: this.pendingEvents,
         };
+      } else {
+        rollback.commit();
       }
       this.pendingEvents = null;
       throw error;
@@ -891,8 +907,9 @@ export class SurfaceCore {
     } else {
       // Preserve the legacy notification/rollback policy for other callers.
       try { for (const event of events) this.deliver(event); }
-      catch (error) { rollback(); throw error; }
+      catch (error) { rollback.rollback(); throw error; }
     }
+    rollback.commit();
     return result;
   }
 
@@ -922,7 +939,13 @@ export class SurfaceCore {
   // one existing pane, a few pane flags, and the surface's geometry revisions.
   // Those commands use copy-on-write for history entries, so the checkpoint can
   // retain the old history root instead of cloning its content and annotations.
-  private captureOrdinaryPaneRollback(surfaceId: string, paneId: number): () => void {
+  private captureOrdinaryPaneRollback(input: {
+    controllerInstanceId: string;
+    paneId: number;
+    requestId: string;
+    surfaceId: string;
+  }): { commit(): void; rollback(): void } {
+    const { paneId, surfaceId } = input;
     const surface = this.getSurface(surfaceId);
     const pane = this.expectPane(surfaceId, paneId);
     const paneBefore = {
@@ -944,12 +967,18 @@ export class SurfaceCore {
     };
     const geometryRevision = surface.geometryRevision;
     const topologyRevision = surface.topologyRevision;
-    const authority = this.locklessAuthority.exportState();
-    return () => {
-      Object.assign(pane, paneBefore);
-      surface.geometryRevision = geometryRevision;
-      surface.topologyRevision = topologyRevision;
-      this.locklessAuthority.restorePersistentState(authority);
+    const authority = this.locklessAuthority.captureOrdinaryMutationRollback(
+      input.controllerInstanceId,
+      input.requestId,
+    );
+    return {
+      commit: () => authority.commit(),
+      rollback: () => {
+        Object.assign(pane, paneBefore);
+        surface.geometryRevision = geometryRevision;
+        surface.topologyRevision = topologyRevision;
+        authority.rollback();
+      },
     };
   }
 

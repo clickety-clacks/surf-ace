@@ -1502,7 +1502,9 @@ export class SurfaceWsServer {
                 .includes(request.op) && session.surfaceId &&
                   Number.isSafeInteger((request.payload as { paneId?: number }).paneId)
                 ? { rollbackPane: {
+                    controllerInstanceId: session.controllerInstanceId,
                     paneId: Number((request.payload as { paneId: number }).paneId),
+                    requestId: request.id,
                     surfaceId: session.surfaceId,
                   } }
                 : {}),
