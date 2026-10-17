@@ -4880,6 +4880,184 @@ test("content write refusal restores unread capacity loss, cursor gap, and reque
   }
 });
 
+test("append, patch, and capped clear write refusals preserve history for retry", async () => {
+  const cases: Array<{
+    op: "content.append" | "content.patch" | "content.clear";
+    seed(core: SurfaceCore, surfaceId: string, paneId: number): number;
+    payload(surfaceId: string, paneId: number, expectedRevision: number): Record<string, unknown>;
+    verify(before: any, after: any): void;
+  }> = [
+    {
+      op: "content.append",
+      seed: (core, surfaceId, paneId) => core.locklessContentPush(
+        surfaceId,
+        {
+          content: { lines: ["before"], scrollback: 50 },
+          contentId: "append-rollback",
+          contentType: "terminal",
+          friendlyChatName: "Writer",
+          paneId,
+        },
+        "Tight Beam",
+      ).revision,
+      payload: (surfaceId, paneId, expectedRevision) => ({
+        contentId: "append-rollback",
+        expectedRevision,
+        lines: ["after"],
+        paneId,
+        surfaceId,
+      }),
+      verify: (before, after) => {
+        assert.deepEqual(
+          after.history.map((entry: any) => entry.contentId),
+          before.history.map((entry: any) => entry.contentId),
+        );
+        assert.deepEqual(after.history.at(-1)?.content, {
+          lines: ["before", "after"],
+          scrollback: 50,
+        });
+        assert.equal(after.history.at(-1)?.revision, before.history.at(-1)!.revision + 1);
+      },
+    },
+    {
+      op: "content.patch",
+      seed: (core, surfaceId, paneId) => core.locklessContentPush(
+        surfaceId,
+        {
+          content: { html: '<main id="target">before</main>' },
+          contentId: "patch-rollback",
+          contentType: "html",
+          friendlyChatName: "Writer",
+          paneId,
+        },
+        "Tight Beam",
+      ).revision,
+      payload: (surfaceId, paneId, expectedRevision) => ({
+        contentId: "patch-rollback",
+        expectedRevision,
+        paneId,
+        patch: { action: "replace_inner", html: "after", selector: "#target" },
+        surfaceId,
+      }),
+      verify: (before, after) => {
+        assert.deepEqual(
+          after.history.map((entry: any) => entry.contentId),
+          before.history.map((entry: any) => entry.contentId),
+        );
+        assert.deepEqual(after.history.at(-1)?.content, {
+          html: '<main id="target">after</main>',
+        });
+        assert.equal(after.history.at(-1)?.revision, before.history.at(-1)!.revision + 1);
+      },
+    },
+    {
+      op: "content.clear",
+      seed: (core, surfaceId, paneId) => {
+        let revision = 0;
+        for (let index = 0; index < 24; index += 1) {
+          revision = core.locklessContentPush(
+            surfaceId,
+            {
+              content: { markdown: `history-${index}` },
+              contentId: `clear-rollback-${index}`,
+              contentType: "markdown",
+              friendlyChatName: "Writer",
+              paneId,
+            },
+            "Tight Beam",
+          ).revision;
+        }
+        return revision;
+      },
+      payload: (surfaceId, paneId, expectedRevision) => ({
+        expectedRevision,
+        paneId,
+        surfaceId,
+      }),
+      verify: (before, after) => {
+        assert.equal(before.history.length, 21);
+        assert.equal(after.history.length, 20);
+        assert.deepEqual(
+          after.history.map((entry: any) => entry.contentId),
+          [...before.history.map((entry: any) => entry.contentId), null].slice(-20),
+        );
+        assert.equal(after.history.at(-1)?.content, null);
+        assert.equal(after.history.at(-1)?.contentId, null);
+        assert.equal(after.history.at(-1)?.contentType, null);
+        assert.equal(after.history.at(-1)?.revision, before.history.at(-1)!.revision + 1);
+      },
+    },
+  ];
+
+  for (const scenario of cases) {
+    const core = new SurfaceCore();
+    const surface = core.ensurePrimarySurface("Surf Ace", {
+      height: 800,
+      scale: 2,
+      width: 1200,
+    });
+    initializeRegistryBootstrapPanes(core);
+    const paneId = Number(core.panesList(surface.surfaceId).panes[0]!.paneId);
+    const expectedRevision = scenario.seed(core, surface.surfaceId, paneId);
+    let refuseNextWrite = false;
+    const port = nextPort++;
+    const server = new SurfaceWsServer({
+      capturePaneImage: async () => null,
+      compositorSocketPath: null,
+      core,
+      endpointName: "Surf Ace",
+      hostName: "localhost",
+      persistLocklessState: async () => {
+        if (!refuseNextWrite) return;
+        refuseNextWrite = false;
+        throw new PersistentStateWriteGuardError("injected pre-write refusal");
+      },
+      port,
+      viewport: () => ({ height: 800, scale: 2, width: 1200 }),
+    });
+    await server.start();
+    const socket = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+    const controllerInstanceId = `rollback-${scenario.op}`;
+    const requestId = `rq_${scenario.op.replaceAll(".", "_")}_history_retry`;
+    try {
+      assert.equal((await pair(socket, controllerInstanceId, surface.surfaceId)).ok, true);
+      const before = core.capturePaneTombstonePayload(surface.surfaceId, paneId).pane;
+      if (scenario.op === "content.clear") assert.equal(before.history.length, 21);
+
+      refuseNextWrite = true;
+      const failed = await request(
+        socket,
+        scenario.op,
+        scenario.payload(surface.surfaceId, paneId, expectedRevision),
+        { id: requestId },
+      );
+      assert.equal(failed.ok, false, JSON.stringify(failed));
+      assert.equal(failed.error?.code, "internal_error");
+      assert.deepEqual(
+        core.capturePaneTombstonePayload(surface.surfaceId, paneId).pane,
+        before,
+        `${scenario.op} refusal must restore the pre-mutation history root and entries`,
+      );
+      assert.deepEqual(
+        core.locklessAuthority.resolveOperationReceipts(controllerInstanceId, [requestId]),
+        [{ outcome: "not_committed", requestId }],
+      );
+
+      const retried = await request(
+        socket,
+        scenario.op,
+        scenario.payload(surface.surfaceId, paneId, expectedRevision),
+        { id: requestId },
+      );
+      assert.equal(retried.ok, true, JSON.stringify(retried));
+      scenario.verify(before, core.capturePaneTombstonePayload(surface.surfaceId, paneId).pane);
+    } finally {
+      socket.close();
+      await server.stop();
+    }
+  }
+});
+
 // REMOVED PENDING A SERVER FIX, defect recorded on asg_2107e9db:
 // an unknown-outcome persistence failure during pair.request never produces a
 // response envelope, so the client hangs forever rather than receiving an
