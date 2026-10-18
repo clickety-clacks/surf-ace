@@ -1426,6 +1426,7 @@ test("Tightbeam Linux stage contains only the standalone CLI, callable server cl
     "packages/allocator/sql/001_allocator.sql": "-- schema\n",
     "packages/allocator/sql/002_fleet_panes.sql": "-- migration\n",
     "packages/allocator/sql/003_annotation_journal.sql": "-- annotation migration\n",
+    "packages/allocator/sql/004_pane_label_reuse.sql": "-- pane generation migration\n",
   };
   for (const [relative, contents] of Object.entries(files)) {
     const file = path.join(source, relative);
@@ -1445,11 +1446,15 @@ test("Tightbeam Linux stage contains only the standalone CLI, callable server cl
   await walk(stage);
   assert.deepEqual(actual.sort(), [...TIGHTBEAM_LINUX_SERVER_FILES].sort());
   assert.deepEqual(TIGHTBEAM_LINUX_RUNTIME_FILES, TIGHTBEAM_LINUX_SERVER_FILES);
+  const paneGenerationMigration = path.join(stage, "schemas/allocator/004_pane_label_reuse.sql");
+  const paneGenerationBytes = await fs.readFile(path.join(source, "packages/allocator/sql/004_pane_label_reuse.sql"));
+  assert.deepEqual(await fs.readFile(paneGenerationMigration), paneGenerationBytes);
   const guide = await fs.readFile(path.join(stage, "README.md"), "utf8");
   assert.match(guide, /startCentralServer\(config, name\)/);
   assert.match(guide, /await service\.close\(\)/);
   assert.match(guide, /already-provisioned PostgreSQL (?:16 )?custody/);
   assert.match(guide, /003_annotation_journal\.sql/);
+  assert.match(guide, /004_pane_label_reuse\.sql/);
   assert.match(guide, /foreground launcher/);
   assert.match(guide, /does not install or enable a service/);
   assert.doesNotMatch(actual.join("\n"), /surf-ace-runtime|controller\/dist\/main\.js/);
@@ -1463,6 +1468,11 @@ test("Tightbeam Linux stage contains only the standalone CLI, callable server cl
   assert.match(operations, /pg_dump --format=custom/);
   assert.match(operations, /pg_restore --clean --if-exists --exit-on-error/);
   assert.match(operations, /discard-staging-and-retain-original/);
+
+  await fs.rm(paneGenerationMigration);
+  await assert.rejects(verifyTightbeamLinuxStage(stage), /tightbeam_linux_runtime_closure_mismatch/);
+  await fs.writeFile(paneGenerationMigration, paneGenerationBytes);
+  await verifyTightbeamLinuxStage(stage);
 
   await fs.chmod(path.join(stage, "bin/surf-ace"), 0o644);
   await assert.rejects(verifyTightbeamLinuxStage(stage), /tightbeam_linux_runtime_cli_not_executable/);
