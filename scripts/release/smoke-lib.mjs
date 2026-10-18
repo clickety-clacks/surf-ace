@@ -67,7 +67,7 @@ export async function waitForCommand(command, args, options = {}, deadlineMs = 9
 }
 
 export async function verifyClientAppVersion(diagnosticLogPath, expectedVersion) {
-  if (typeof expectedVersion !== "string" || !/^\d+\.\d+\.\d+$/.test(expectedVersion)) {
+  if (typeof expectedVersion !== "string" || !/^\d+\.\d+\.\d+(?:-rc[1-9]\d*)?$/.test(expectedVersion)) {
     throw new Error("tightbeam_client_expected_version_invalid");
   }
   const diagnostic = await fs.readFile(diagnosticLogPath, "utf8");

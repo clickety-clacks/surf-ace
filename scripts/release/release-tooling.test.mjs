@@ -602,6 +602,23 @@ test("running Electron release identity is read from one app_launch diagnostic a
   await assert.rejects(verifyClientAppVersion(diagnostic, "0.2.1"), /tightbeam_client_app_launch_identity_missing_or_ambiguous/);
 });
 
+test("running Electron release candidate identity must match the exact selected version", async (t) => {
+  const root = await temporary(t);
+  const diagnostic = path.join(root, "client-flight-recorder.ndjson");
+  await recordClientAppLaunch(diagnostic, "0.2.10-rc1");
+  const identity = await verifyClientAppVersion(diagnostic, "0.2.10-rc1");
+  assert.equal(identity.source, "electron.app.getVersion");
+  assert.equal(identity.version, "0.2.10-rc1");
+  assert.equal(identity.evidenceSha256, createHash("sha256").update(await fs.readFile(diagnostic)).digest("hex"));
+  for (const observedVersion of ["0.2.10", "0.2.10-rc2"]) {
+    await recordClientAppLaunch(diagnostic, observedVersion);
+    await assert.rejects(verifyClientAppVersion(diagnostic, "0.2.10-rc1"), /tightbeam_client_app_version_mismatch/);
+  }
+  for (const expectedVersion of [null, "0.2.10-rc0", "0.2.10-rc01", "0.2.10-rc", "0.2.10-beta.1"]) {
+    await assert.rejects(verifyClientAppVersion(diagnostic, expectedVersion), /tightbeam_client_expected_version_invalid/);
+  }
+});
+
 test("Electron smoke rejects a mismatched participant identity before launching a client", async (t) => {
   const root = await temporary(t);
   const plan = macosSmokePlan(root, "candidate.zip");
