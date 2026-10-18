@@ -1185,6 +1185,7 @@ async function packagedV023MigrationSmoke(options: Options) {
   const baselineSchema = path.join(options.productSourceDir, "scripts/release/fixtures/001_allocator_v023.sql");
   const migration = path.join(options.candidateRoot, "schemas/allocator/002_fleet_panes.sql");
   const annotationMigration = path.join(options.candidateRoot, "schemas/allocator/003_annotation_journal.sql");
+  const paneGenerationMigration = path.join(options.candidateRoot, "schemas/allocator/004_pane_label_reuse.sql");
   const cluster = await startCluster(path.join(options.stateRoot, "v023-migration-primary"), baselineSchema, false);
   const backup = path.join(options.stateRoot, "v023-pre-migration.dump");
   let stage: Cluster | undefined;
@@ -1221,9 +1222,19 @@ async function packagedV023MigrationSmoke(options: Options) {
     if (backupBytes.length < 1 || !hasRequiredAllocatorBackupObjects(backupList)) {
       throw new Error("v023_migration_backup_unverified");
     }
+    stage = await startCluster(path.join(options.stateRoot, "v023-backup-restore"), baselineSchema, false);
+    await command(path.join(stage.postgresBin, "pg_restore"), [
+      "--clean", "--if-exists", "--exit-on-error", "--dbname", stage.adminUrl, backup,
+    ]);
+    const restored = await allocatorDiagnostics(stage.adminUrl, cluster.config.fleetId);
+    if (restored.primaryHeadSeq !== before.primaryHeadSeq ||
+        restored.primaryHeadHash !== before.primaryHeadHash) {
+      throw new Error("v023_migration_backup_restore_head_mismatch");
+    }
     await command(path.join(cluster.postgresBin, "psql"), [cluster.adminUrl, "-v", "ON_ERROR_STOP=1", "-f", migration]);
     await command(path.join(cluster.postgresBin, "psql"), [cluster.adminUrl, "-v", "ON_ERROR_STOP=1", "-f", migration]);
     await command(path.join(cluster.postgresBin, "psql"), [cluster.adminUrl, "-v", "ON_ERROR_STOP=1", "-f", annotationMigration]);
+    await command(path.join(cluster.postgresBin, "psql"), [cluster.adminUrl, "-v", "ON_ERROR_STOP=1", "-f", paneGenerationMigration]);
     const annotationRows = await postgresQuery(cluster.adminUrl, `
       SELECT epoch, head_sequence::text AS "headSequence"
       FROM surf_ace_allocator.annotation_journal_head WHERE fleet_id = $1
@@ -1242,21 +1253,21 @@ async function packagedV023MigrationSmoke(options: Options) {
       SELECT next_pane_ordinal_fence::text AS "paneFence",
         has_function_privilege('allocator_writer',
           'surf_ace_allocator.claim_pane(text,bigint,text,text,text,text,text)', 'EXECUTE') AS "writerCanClaim",
+        has_function_privilege('allocator_writer',
+          'surf_ace_allocator.claim_pane_generation(text,bigint,text,text,text,text,text)', 'EXECUTE') AS "writerCanClaimGeneration",
+        pane_label_schema_version AS "paneSchemaVersion",
+        pane_label_reuse_enabled AS "paneReuseEnabled",
         (surf_ace_allocator.read_accepted_state(fleet_id) ? 'paneMappings') AS "stateHasPanes"
       FROM surf_ace_allocator.fleets WHERE fleet_id = $1
-    `, [cluster.config.fleetId]) as Array<{ paneFence: string; writerCanClaim: boolean; stateHasPanes: boolean }>;
+    `, [cluster.config.fleetId]) as Array<{
+      paneFence: string; writerCanClaim: boolean; writerCanClaimGeneration: boolean;
+      paneSchemaVersion: number; paneReuseEnabled: boolean; stateHasPanes: boolean;
+    }>;
     if (contract[0]?.paneFence !== "1" || contract[0]?.writerCanClaim !== true ||
+        contract[0]?.writerCanClaimGeneration !== true || contract[0]?.paneSchemaVersion !== 2 ||
+        contract[0]?.paneReuseEnabled !== false ||
         contract[0]?.stateHasPanes !== true) {
       throw new Error("v023_migration_pane_custody_contract_invalid");
-    }
-    stage = await startCluster(path.join(options.stateRoot, "v023-backup-restore"), baselineSchema, false);
-    await command(path.join(stage.postgresBin, "pg_restore"), [
-      "--clean", "--if-exists", "--exit-on-error", "--dbname", stage.adminUrl, backup,
-    ]);
-    const restored = await allocatorDiagnostics(stage.adminUrl, cluster.config.fleetId);
-    if (restored.primaryHeadSeq !== before.primaryHeadSeq ||
-        restored.primaryHeadHash !== before.primaryHeadHash) {
-      throw new Error("v023_migration_backup_restore_head_mismatch");
     }
     return {
       backupSha256: createHash("sha256").update(backupBytes).digest("hex"),
@@ -1309,6 +1320,8 @@ async function freshInstallMain(options: Options) {
   try {
     await command(path.join(cluster.postgresBin, "psql"), [cluster.adminUrl, "-v", "ON_ERROR_STOP=1", "-f",
       path.join(options.candidateRoot, "schemas/allocator/003_annotation_journal.sql")]);
+    await command(path.join(cluster.postgresBin, "psql"), [cluster.adminUrl, "-v", "ON_ERROR_STOP=1", "-f",
+      path.join(options.candidateRoot, "schemas/allocator/004_pane_label_reuse.sql")]);
     registryProcess = await startPackagedServer(registryLauncher, registryConfig, cluster.root, "fresh-install-registry");
     const registryEndpoint = registryProcess.endpoint;
     const initialRegistryHealth = registryProcess.health;
