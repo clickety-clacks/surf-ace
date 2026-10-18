@@ -1,4 +1,4 @@
-const VERSION = /^\d+\.\d+\.\d+$/;
+const VERSION = /^\d+\.\d+\.\d+(?:-rc[1-9]\d*)?$/;
 const REVISION = /^r[1-9]\d*$/;
 
 export function publicReleaseNames({ version, sourceRevision, toolingRevision, legacy = false }) {
