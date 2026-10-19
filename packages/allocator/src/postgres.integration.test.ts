@@ -698,8 +698,13 @@ test("real PostgreSQL allocator authority", { timeout: 180_000 }, async (t) => {
       let cutClaim = false;
       let backendPid = 0;
       let refuseOnce = false;
-      let blockAcquisition = false;
-      let acquisitionRefused: (() => void) | undefined;
+      let fenceStartup = false;
+      let stopDuringValidation = false;
+      let validationFailed: (() => void) | undefined;
+      const originalWitnessId = cluster.config.witnessServerId;
+      const validationHeads: unknown[] = [];
+      const inspector = new Client({ connectionString: cluster.adminUrl });
+      await inspector.connect();
       let recovered!: () => void;
       const recovery = new Promise<void>((resolve) => { recovered = resolve; });
       const lifecycle: string[] = [];
@@ -708,14 +713,28 @@ test("real PostgreSQL allocator authority", { timeout: 180_000 }, async (t) => {
         recovered: () => { lifecycle.push("recovered"); recovered(); },
       }, {
         beforeMutation(operation) {
-          if (operation === "acquire_writer" && (refuseOnce || blockAcquisition)) {
+          if (operation === "acquire_writer" && refuseOnce) {
             refuseOnce = false;
             lifecycle.push("acquire-refused");
-            acquisitionRefused?.();
             throw new Error("temporary-writer-acquisition-failure");
           }
         },
+        async afterStartupFailure() {
+          const result = await inspector.query(`SELECT lease_generation, custody_revision,
+            (SELECT count(*) FROM surf_ace_allocator.custody_revision_heads WHERE fleet_id = $1) AS history_rows
+            FROM surf_ace_allocator.fleets WHERE fleet_id = $1`, [cluster.config.fleetId]);
+          validationHeads.push(result.rows[0]);
+          validationFailed?.();
+          // Restore the real witness only after two observed validation failures.
+          if (!stopDuringValidation && validationHeads.length === 2) {
+            cluster.config.witnessServerId = originalWitnessId;
+            fenceStartup = false;
+          }
+        },
         async afterCommitBeforeAck(operation) {
+          if (operation === "acquire_writer" && fenceStartup) {
+            cluster.config.witnessServerId = "unavailable-startup-witness";
+          }
           if (operation !== "claim_pane_generation" || !cutClaim) return;
           cutClaim = false;
           refuseOnce = true;
@@ -746,6 +765,7 @@ test("real PostgreSQL allocator authority", { timeout: 180_000 }, async (t) => {
         const before = await registry.server.diagnostics();
         backendPid = before.leaseBackendPid;
         cutClaim = true;
+        fenceStartup = true;
         // A lost socket need not deliver the failed request's response. Recovery
         // is observed from the newly acquired registry, not a response timeout.
         void wire.request("pane.claim", {
@@ -765,7 +785,10 @@ test("real PostgreSQL allocator authority", { timeout: 180_000 }, async (t) => {
         const after = await registry.server.diagnostics();
         const resumed = result.payload as typeof first;
         assert.equal(after.registrationReady, true);
-        assert.ok(after.leaseGeneration > before.leaseGeneration);
+        assert.equal(after.leaseGeneration, before.leaseGeneration + 1);
+        assert.equal(validationHeads.length, 2);
+        assert.deepEqual(validationHeads[1], validationHeads[0],
+          "a persistent startup fence must not allocate more writer generations or custody history");
         assert.notEqual(after.leaseBackendPid, before.leaseBackendPid);
         assert.ok(resumed.endpointLease.leaseGeneration > first.endpointLease.leaseGeneration);
         assert.equal(resumed.surfaces[0]!.windowLabel, first.surfaces[0]!.windowLabel);
@@ -777,22 +800,26 @@ test("real PostgreSQL allocator authority", { timeout: 180_000 }, async (t) => {
           "the committed claim is read back, not allocated again");
         assert.equal(after.assignmentCount, before.assignmentCount);
 
-        blockAcquisition = true;
-        const refused = new Promise<void>((resolve) => { acquisitionRefused = resolve; });
+        fenceStartup = true;
+        stopDuringValidation = true;
+        const refused = new Promise<void>((resolve) => { validationFailed = resolve; });
         await adminQuery(cluster.adminUrl, `SELECT pg_terminate_backend(${after.leaseBackendPid})`);
         await refused;
         await registry.close();
         assert.equal(lifecycle.filter((event) => event === "recovered").length, 1,
           "shutdown during an outage must not start another registry");
-        blockAcquisition = false;
+        cluster.config.witnessServerId = originalWitnessId;
+        fenceStartup = false;
         const replacement = await AllocatorServer.start({
           ...serverConfig(cluster), listenPort: Number(new URL(endpoint).port),
         });
         await replacement.close();
       } finally {
+        cluster.config.witnessServerId = originalWitnessId;
         await wire.close();
         await retried?.close();
         await registry.close();
+        await inspector.end();
       }
     });
 

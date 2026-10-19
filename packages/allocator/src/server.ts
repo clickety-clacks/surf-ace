@@ -294,55 +294,59 @@ export class AllocatorServer {
     private readonly endpointLeases: EndpointLeaseBook,
   ) {}
 
-  static async start(config: AllocatorServerConfig, testHooks: AdapterTestHooks = {}): Promise<AllocatorServer> {
+  static async start(
+    config: AllocatorServerConfig, testHooks: AdapterTestHooks = {}, retrySignal?: AbortSignal,
+  ): Promise<AllocatorServer> {
     validateServerConfig(config);
     const hostLock = HostLock.acquire(config.hostLockPath);
     try {
-      const custody = await PostgresCustodyAdapter.acquireWriter(config.custody, testHooks);
+      const custody = await PostgresCustodyAdapter.acquireWriter(config.custody, testHooks, retrySignal);
       try {
-        const authority = new WindowLabelAuthority(custody);
-        await authority.recoverPreparedTransactions();
-        await custody.validateLease();
-        // Annotation state must be verified and old leases fenced before the
-        // listener can accept a hello. Older schemas remain direct-only.
-        let annotationInstalled = true;
-        try {
-          await custody.annotationInfo();
-        } catch (error) {
-          if ((error as { code?: string }).code !== "42883") throw error;
-          annotationInstalled = false;
-        }
-        let annotationVerified = true;
-        if (annotationInstalled) {
+        return await custody.finishStartup(async () => {
+          const authority = new WindowLabelAuthority(custody);
+          await authority.recoverPreparedTransactions();
+          await custody.validateLease();
+          // Annotation state must be verified and old leases fenced before the
+          // listener can accept a hello. Older schemas remain direct-only.
+          let annotationInstalled = true;
           try {
-            await custody.verifyAnnotationStartup();
+            await custody.annotationInfo();
           } catch (error) {
-            if (asAllocatorError(error).code !== "annotation_journal_unverified") throw error;
-            annotationVerified = false;
+            if ((error as { code?: string }).code !== "42883") throw error;
+            annotationInstalled = false;
           }
-        }
-        const webSocketServer = new WebSocketServer({
-          host: config.listenHost,
-          port: config.listenPort,
-        });
-        await new Promise<void>((resolve, reject) => {
-          webSocketServer.once("listening", resolve);
-          webSocketServer.once("error", reject);
-        });
-        const server = new AllocatorServer(
-          config,
-          hostLock,
-          custody,
-          authority,
-          webSocketServer,
-          annotationVerified,
-          new EndpointLeaseBook(
-            custody.token.leaseGeneration,
-            config.maxEndpointLeaseMs ?? DEFAULT_MAX_ENDPOINT_LEASE_MS,
-          ),
-        );
-        webSocketServer.on("connection", (socket) => server.accept(socket));
-        return server;
+          let annotationVerified = true;
+          if (annotationInstalled) {
+            try {
+              await custody.verifyAnnotationStartup();
+            } catch (error) {
+              if (asAllocatorError(error).code !== "annotation_journal_unverified") throw error;
+              annotationVerified = false;
+            }
+          }
+          const webSocketServer = new WebSocketServer({
+            host: config.listenHost,
+            port: config.listenPort,
+          });
+          await new Promise<void>((resolve, reject) => {
+            webSocketServer.once("listening", resolve);
+            webSocketServer.once("error", reject);
+          });
+          const server = new AllocatorServer(
+            config,
+            hostLock,
+            custody,
+            authority,
+            webSocketServer,
+            annotationVerified,
+            new EndpointLeaseBook(
+              custody.token.leaseGeneration,
+              config.maxEndpointLeaseMs ?? DEFAULT_MAX_ENDPOINT_LEASE_MS,
+            ),
+          );
+          webSocketServer.on("connection", (socket) => server.accept(socket));
+          return server;
+        }, retrySignal);
       } catch (error) {
         await custody.terminate();
         throw error;
@@ -813,7 +817,7 @@ export async function startRecoveringAllocatorServer(
       await closeServer();
       while (!stopped) {
         try {
-          server = await AllocatorServer.start(restartConfig, testHooks);
+          server = await AllocatorServer.start(restartConfig, testHooks, retryCancellation.signal);
           serverClose = undefined;
           break;
         } catch {
