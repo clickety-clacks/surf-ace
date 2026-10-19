@@ -333,15 +333,7 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
             for _ in 0..<100 {
                 if web.title == "FAST-visible", let image = try? await web.takeSnapshot(configuration: nil),
                    let cg = image.cgImage {
-                    var pixel = [UInt8](repeating: 0, count: 4)
-                    let green = pixel.withUnsafeMutableBytes { bytes -> Bool in
-                        guard let context = CGContext(data: bytes.baseAddress, width: 1, height: 1,
-                            bitsPerComponent: 8, bytesPerRow: 4, space: CGColorSpaceCreateDeviceRGB(),
-                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
-                        context.draw(cg, in: CGRect(x: 0, y: 0, width: 1, height: 1))
-                        return true
-                    }
-                    if green && pixel[1] > 180 && pixel[0] < 80 && pixel[2] < 130 {
+                    if self.hasExpectedVisiblePixel(in: cg) {
                         elapsed = (ProcessInfo.processInfo.systemUptime - began) * 1000
                         visibleImage = image; painted.fulfill(); return
                     }
@@ -356,6 +348,48 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         attachment.name = "FAST-content-set-mounted-visible"; attachment.lifetime = .keepAlways; add(attachment)
         XCTAssertEqual(pane.currentEntry.contentId, "fast-visible")
         XCTAssertTrue(webViews(host.view).contains { $0 === web })
+    }
+
+    private func hasExpectedVisiblePixel(in image: CGImage?) -> Bool {
+        guard let image,
+              let context = CGContext(data: nil, width: image.width, height: image.height,
+                bitsPerComponent: 8, bytesPerRow: image.width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue)
+        else { return false }
+        // Preserve image pixels instead of reducing the entire snapshot to one pixel.
+        context.setBlendMode(.copy)
+        context.draw(image, in: CGRect(x: 0, y: 0, width: CGFloat(image.width), height: CGFloat(image.height)))
+        return withExtendedLifetime(context) {
+            guard let data = context.data else { return false }
+            let offset = (image.height / 2) * context.bytesPerRow + (image.width / 2) * 4
+            let pixel = data.assumingMemoryBound(to: UInt8.self).advanced(by: offset)
+            return pixel[3] > 240 && pixel[1] > 180 && pixel[0] < 80 && pixel[2] < 130
+        }
+    }
+
+    func testMountedPixelSamplerRejectsWrongOrAbsentContent() throws {
+        let green: [UInt8] = [20, 220, 80, 255]
+        let red: [UInt8] = [220, 20, 80, 255]
+        func image(background: [UInt8], center: [UInt8]) throws -> CGImage {
+            // Padded source rows ensure the sample is an image coordinate, not a byte-count assumption.
+            var bytes = [UInt8](repeating: 0, count: 3 * 16)
+            for y in 0..<3 {
+                for x in 0..<3 {
+                    let offset = y * 16 + x * 4
+                    bytes.replaceSubrange(offset..<(offset + 4), with: x == 1 && y == 1 ? center : background)
+                }
+            }
+            let provider = try XCTUnwrap(CGDataProvider(data: Data(bytes) as CFData))
+            return try XCTUnwrap(CGImage(width: 3, height: 3, bitsPerComponent: 8, bitsPerPixel: 32,
+                bytesPerRow: 16, space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue
+                    | CGBitmapInfo.byteOrder32Big.rawValue), provider: provider, decode: nil,
+                shouldInterpolate: false, intent: .defaultIntent))
+        }
+        XCTAssertTrue(hasExpectedVisiblePixel(in: try image(background: red, center: green)))
+        XCTAssertFalse(hasExpectedVisiblePixel(in: try image(background: green, center: red)))
+        XCTAssertFalse(hasExpectedVisiblePixel(in: try image(background: green, center: [0, 0, 0, 0])))
+        XCTAssertFalse(hasExpectedVisiblePixel(in: nil))
     }
 
     func testDoneHeldLocalFailureStopsSpinnerWithoutChangingAuthorityOrHistory() async throws {
