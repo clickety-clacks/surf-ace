@@ -212,6 +212,9 @@ jobs:
           guard
           pnpm --dir source --filter @surf-ace/controller test
           pnpm --dir source --filter @surf-ace/protocol test
+          python3 -m venv "${RUNNER_TEMP}/surf-ace-test-python"
+          "${RUNNER_TEMP}/surf-ace-test-python/bin/python3" -m pip install jsonschema==4.25.1
+          export PATH="${RUNNER_TEMP}/surf-ace-test-python/bin:${PATH}"
           pnpm --dir source --filter @surf-ace/electron test
           guard
           xcodebuild test \
