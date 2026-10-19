@@ -26,9 +26,9 @@ scan, or remote transport weakening is used.
 
 Release acceptance environments:
 
-- Plumbus Linux: Electron/client acceptance and configured-controller checks.
-- Eezo macOS: macOS acceptance checks.
-- Eezo iPad simulator: the supported Apple client acceptance target. Use only
+- Linux host: Electron/client acceptance and configured-controller checks.
+- macOS host: macOS acceptance checks.
+- iPad simulator on the macOS host: the supported Apple client acceptance target. Use only
   installed iPad simulator destinations reported by Xcode, or the generic
   simulator destination for a build-only check; do not assume a device name or
   run the excluded visionOS/visionOS-simulator target.
