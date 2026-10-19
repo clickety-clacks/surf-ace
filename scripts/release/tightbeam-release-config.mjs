@@ -7,6 +7,14 @@ export const TIGHTBEAM_TOOLING_TAG = RELEASE_NAMES.toolingTag;
 
 export const TIGHTBEAM_SKILL_ASSET = RELEASE_NAMES.skillAsset;
 
+function requiredProductCommit() {
+  const commit = process.env.PRODUCT_COMMIT;
+  if (!/^[a-f0-9]{40}$/.test(commit ?? "")) {
+    throw new Error("tightbeam_product_commit_missing_or_invalid");
+  }
+  return commit;
+}
+
 export const TOOLCHAINS = Object.freeze({
   linuxContainer: "rust:1.89.0-bookworm@sha256:948f9b08a66e7fe01b03a98ef1c7568292e07ec2e4fe90d88c07bb14563c84ff",
   macosRunner: "xcode-27",
@@ -20,7 +28,9 @@ export const TOOLCHAINS = Object.freeze({
 });
 
 export const TIGHTBEAM = Object.freeze({
-  candidateCommit: "3d00b8ba8ed78bcec05eae065dc3b525db19ae0e",
+  get candidateCommit() {
+    return requiredProductCommit();
+  },
   sourceTag: RELEASE_NAMES.sourceTag,
   version: RELEASE_NAMES.version,
   channel: RELEASE_NAMES.channel,

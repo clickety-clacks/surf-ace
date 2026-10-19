@@ -77,6 +77,9 @@ import { verifySmokeReceipt, writeSmokeReceipt } from "./write-smoke-receipt.mjs
 import tightbeamServerLauncher from "./tightbeam-server-launcher.cjs";
 import { publicReleaseNames } from "./public-release-names.mjs";
 
+const testProductCommit = "a".repeat(40);
+process.env.PRODUCT_COMMIT = testProductCommit;
+
 const screenshotFixturePng = "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAECAIAAAA8r+mnAAAAFUlEQVR4nGO4aWYGRyrZ5+CIgXoSADGsKiGSGiX+AAAAAElFTkSuQmCC";
 const screenshotFixtureImage = createRequire(import.meta.url)("./png-pixel-evidence.cjs").inspectScreenshotPixels;
 const screenshotPixelFixtureHtml = [
@@ -1271,8 +1274,9 @@ test("Linux fresh-install raw CLI evidence binds two isolated roots to their cli
 
 test("Surf Ace v0.2.10-rc1 binds the selected source, six hosted assets, and tooling identity", () => {
   assert.equal(TIGHTBEAM_TOOLING_TAG, "surf-ace-release-tooling-v0.2.10-rc1-r1");
-  assert.deepEqual(TIGHTBEAM, {
-    candidateCommit: "3d00b8ba8ed78bcec05eae065dc3b525db19ae0e",
+  const { candidateCommit, ...releaseIdentity } = TIGHTBEAM;
+  assert.equal(candidateCommit, testProductCommit);
+  assert.deepEqual(releaseIdentity, {
     sourceTag: "surf-ace-v0.2.10-rc1-r1", version: "0.2.10-rc1", channel: "surf-ace", toolingTag: TIGHTBEAM_TOOLING_TAG,
     assets: ["surf-ace-server-linux-x86_64-v0.2.10-rc1.tar.gz","surf-ace-cli-linux-x86_64-v0.2.10-rc1.tar.gz","surf-ace-electron-linux-x86_64-v0.2.10-rc1.zip","surf-ace-cli-macos-arm64-v0.2.10-rc1.tar.gz","surf-ace-electron-macos-arm64-v0.2.10-rc1.zip",TIGHTBEAM_SKILL_ASSET],
     manifest: "surf-ace-v0.2.10-rc1-manifest.json", checksums: "SHA256SUMS",
@@ -1295,7 +1299,7 @@ test("Linux fresh-install fixture binds its identity gate to the release candida
 
   assert.match(fixture, /import \{ TIGHTBEAM \} from "\.\/tightbeam-release-config\.mjs";/);
   assert.match(fixture, /options\.candidateCommit !== TIGHTBEAM\.candidateCommit \|\| options\.expectedVersion !== TIGHTBEAM\.version/);
-  assert.equal(TIGHTBEAM.candidateCommit, "3d00b8ba8ed78bcec05eae065dc3b525db19ae0e");
+  assert.equal(TIGHTBEAM.candidateCommit, testProductCommit);
   assert.match(operations, /applies only to product commit\s+`17480ecc9dd4ad1b696059d000b903fe38e6454a`/);
   for (const source of [fixture, operations]) {
     assert.doesNotMatch(source, /44421f305516ff3b8b305bc2df24c0f4c40b65c0/);
@@ -2896,7 +2900,11 @@ test("stable v0.2.8 documentation stays historical and current release gates bin
   for (const match of workflow.matchAll(/^\s*uses:\s*([^\s]+)$/gm)) assert.match(match[1], /@[0-9a-f]{40}$/);
   assert.match(workflow, /run_smoke:[\s\S]*?default: false/);
   assert.match(workflow, /publish_release:[\s\S]*?default: false/);
-  assert.match(workflow, /PRODUCT_COMMIT: 3d00b8ba8ed78bcec05eae065dc3b525db19ae0e/);
+  assert.match(workflow, /product_commit:[\s\S]*?required: true[\s\S]*?type: string/);
+  assert.doesNotMatch(workflow, /^\s*PRODUCT_COMMIT:\s*[a-f0-9]{40}\s*$/m);
+  assert.match(workflow, /test "\$\{product_remote\}" = "\$\{PRODUCT_COMMIT_INPUT\}"/);
+  assert.match(workflow, /product_commit: \$\{\{ steps\.identity\.outputs\.product_commit \}\}/);
+  assert.match(workflow, /PRODUCT_COMMIT: \$\{\{ needs\.guard\.outputs\.product_commit \}\}/);
   assert.match(workflow, /PRODUCT_TAG: surf-ace-v0\.2\.10-rc1-r1/);
   assert.match(workflow, /PRODUCT_VERSION: 0\.2\.10-rc1/);
   assert.match(workflow, /TOOLING_TAG: surf-ace-release-tooling-v0\.2\.10-rc1-r1/);
@@ -2928,7 +2936,8 @@ test("rc1 release smoke gates bind only matching candidate participants", async 
   for (const input of [workflow, smoke]) assert.doesNotMatch(input, /cf91ef1baab26d6045fac5300487c29d0ddf332d/);
   assert.doesNotMatch(workflow, /build-smoke-baseline|BASELINE_(?:BACKEND|ELECTRON)|baseline-(?:commit|electron|root)/i);
   assert.doesNotMatch(smoke, /SURF_ACE_TIGHTBEAM_BASELINE|function smokeLinux\(|runLinuxStateDriver|validateTightbeamStateSequence/);
-  assert.match(workflow, /--candidate-commit 3d00b8ba8ed78bcec05eae065dc3b525db19ae0e/);
+  assert.match(workflow, /--candidate-commit "\$product_commit"/);
+  assert.match(workflow, /--candidate-commit "\$\{PRODUCT_COMMIT\}"/);
   assert.match(smoke, /tightbeam-\$\{channel\}-v023-candidate-write/);
   assert.match(smoke, /inspectScreenshotPixels\(visible\.capture\.image, expectedScreenshotColors\)/);
   assert.doesNotMatch(`${smoke}\n${fixture}`, /includeImage/);
