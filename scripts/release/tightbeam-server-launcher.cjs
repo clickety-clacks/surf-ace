@@ -255,6 +255,10 @@ async function checkHealth(endpoint, timeoutMs = 5000) {
         finish(publicError("health_fleet_topology_payload_invalid"));
         return;
       }
+      if (response.payload.registrationReady !== true) {
+        finish(publicError("registration_writer_unavailable"));
+        return;
+      }
       finish(null, { endpoint: url.origin, status: "healthy", transport: "fleet.topology" });
     });
     socket.addEventListener("error", (event) => {
