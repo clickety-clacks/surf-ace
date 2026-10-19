@@ -515,7 +515,7 @@ final class SurfAceAnnotationOutboxTests: XCTestCase {
                        state.annotationPublisher?.sourceEpoch)
     }
 
-    func testTombstoneReclamationPreservesUnacceptedSourcePartition() throws {
+    func testRetainedTombstonesPreserveUnacceptedSourcePartition() throws {
         var limits = SurfAceLocklessCapacityLimits.production
         limits.maxRetainedTombstones = 1
         limits.maxAnnotationPublisherStateBytesPerSurface = Int64(SurfAceAnnotationOutbox.maximumBytes)
@@ -537,9 +537,16 @@ final class SurfAceAnnotationOutboxTests: XCTestCase {
             state: &state, surfaceId: second.surface.surfaceId,
             expectedSurfaceSetRevision: state.surfaceSetRevision,
             expectedTopologyRevision: second.surface.topologyRevision)
-        XCTAssertFalse(state.surfaceTombstones.contains { $0.surface.surfaceId == first.surface.surfaceId })
+        XCTAssertEqual(state.surfaceTombstones.map { $0.surface.surfaceId },
+                       [first.surface.surfaceId, second.surface.surfaceId])
+        XCTAssertEqual(state.surfaceTombstones.first?.surface, first.surface)
         XCTAssertEqual(state.annotationPublisher?.surfaces[first.surface.surfaceId]?.fifo.first, pending)
-        try state.validate()
+        XCTAssertTrue((state.pendingTombstoneReclamations ?? []).isEmpty)
+        let restored = try JSONDecoder().decode(SurfAceLocklessAuthorityState.self,
+                                                from: JSONEncoder().encode(state))
+        try restored.validate()
+        XCTAssertEqual(restored, state)
+        XCTAssertEqual(restored.annotationPublisher?.surfaces[first.surface.surfaceId]?.fifo.first, pending)
     }
 
     func testFailedSourceFrameRetainsDirectRecoveryStrokeIds() throws {

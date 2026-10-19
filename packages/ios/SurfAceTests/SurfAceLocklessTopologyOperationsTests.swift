@@ -351,7 +351,7 @@ final class SurfAceLocklessTopologyOperationsTests: XCTestCase {
         XCTAssertEqual(state.liveSurfaces[surfaceId]?.nextPaneLabel, 1)
     }
 
-    func testSharedTombstonePoolReclaimsOldestClosedSequence() throws {
+    func testSharedTombstonePoolRetainsClosedPanesBeyondFormerCountLimit() throws {
         var limits = SurfAceLocklessCapacityLimits.production
         limits.maxRetainedTombstones = 1
         var state = try SurfAceLocklessAuthorityState.empty(limits: limits)
@@ -362,15 +362,35 @@ final class SurfAceLocklessTopologyOperationsTests: XCTestCase {
             state: &state, surfaceId: surfaceId, paneId: 1, count: 3,
             direction: "horizontal", expectedTopologyRevision: 0
         )
+        for paneId in split.newPaneIds {
+            state.liveSurfaces[surfaceId]?.panes[String(paneId)]?.history.visible.content = .string("retained source \(paneId)")
+            state.liveSurfaces[surfaceId]?.panes[String(paneId)]?.history.visible.annotations = .object(["keep": .bool(true)])
+        }
+        let original = try XCTUnwrap(state.liveSurfaces[surfaceId])
+        let originalScopes = state.scopes
         let first = try SurfAceLocklessTopologyOperations.paneClose(
             state: &state, surfaceId: surfaceId, paneId: split.newPaneIds[0], expectedTopologyRevision: 1
         )
         let second = try SurfAceLocklessTopologyOperations.paneClose(
             state: &state, surfaceId: surfaceId, paneId: split.newPaneIds[1], expectedTopologyRevision: 2
         )
-        XCTAssertEqual(second.reclamations.map(\.tombstoneId), [first.tombstoneId])
-        XCTAssertEqual(second.reclamations.map(\.reason), [.countCapacity])
-        XCTAssertEqual(state.liveSurfaces[surfaceId]?.paneTombstones.map(\.tombstoneId), [second.tombstoneId])
+        XCTAssertTrue(first.reclamations.isEmpty)
+        XCTAssertTrue(second.reclamations.isEmpty)
+        XCTAssertEqual(state.liveSurfaces[surfaceId]?.paneTombstones.map(\.tombstoneId),
+                       [first.tombstoneId, second.tombstoneId])
+        XCTAssertLessThan(first.closedSequence, second.closedSequence)
+        for closed in [first, second] {
+            let restored = try SurfAceLocklessTopologyOperations.paneRestore(
+                state: &state, surfaceId: surfaceId, tombstoneId: closed.tombstoneId,
+                anchorPaneId: 1, direction: "horizontal",
+                expectedTopologyRevision: try XCTUnwrap(state.liveSurfaces[surfaceId]?.topologyRevision),
+                assignedPaneLabel: try XCTUnwrap(original.panes[String(closed.paneId)]?.paneLabel)
+            )
+            XCTAssertEqual(state.liveSurfaces[surfaceId]?.panes[String(restored.paneId)],
+                           original.panes[String(restored.paneId)])
+        }
+        XCTAssertEqual(state.scopes, originalScopes)
+        XCTAssertEqual(state.liveSurfaces[surfaceId]?.paneTombstones, [])
     }
 
     func testSurfaceCloseRestorePreservesStableIdsAndAllNestedMaterial() throws {
@@ -745,7 +765,7 @@ extension SurfAceLocklessTopologyOperationsTests {
         XCTAssertTrue(state.liveSurfaces["sf_1"]?.paneTombstones.isEmpty == true)
     }
 
-    func testACCLOSE06GlobalCountAndBytePressureReclaimsAscendingClosedSequence() throws {
+    func testACCLOSE06FormerCountAndBytePressurePreservesClosedSequenceAndState() throws {
         var countLimits = SurfAceLocklessCapacityLimits.production
         countLimits.maxRetainedTombstones = 1
         var countState = try SurfAceLocklessAuthorityState.empty(limits: countLimits)
@@ -763,8 +783,10 @@ extension SurfAceLocklessTopologyOperationsTests {
             state: &countState, surfaceId: secondId,
             expectedSurfaceSetRevision: 3, expectedTopologyRevision: 0
         )
-        XCTAssertEqual(second.reclamations.map(\.tombstoneId), [first.tombstoneId])
-        XCTAssertEqual(second.reclamations.map(\.reason), [.countCapacity])
+        XCTAssertTrue(first.reclamations.isEmpty)
+        XCTAssertTrue(second.reclamations.isEmpty)
+        XCTAssertEqual(countState.surfaceTombstones.map(\.tombstoneId), [first.tombstoneId, second.tombstoneId])
+        XCTAssertEqual(countState.surfaceTombstones.map(\.closedSequence), [first.closedSequence, second.closedSequence])
 
         var byteState = try bytePressureAuthority()
         var closed: [SurfAceLocklessSurfaceCloseResult] = []
@@ -778,15 +800,22 @@ extension SurfAceLocklessTopologyOperationsTests {
                 expectedSurfaceSetRevision: Int64(index * 2 + 1), expectedTopologyRevision: 0
             ))
         }
-        XCTAssertEqual(closed.last?.reclamations.first?.closedSequence, closed.first?.closedSequence)
-        XCTAssertEqual(closed.last?.reclamations.first?.reason, .byteCapacity)
-        XCTAssertLessThanOrEqual(
-            byteState.surfaceTombstones.reduce(Int64(0)) { $0 + $1.bytes },
-            byteState.limits.maxRetainedTombstoneBytes
-        )
+        XCTAssertTrue(closed.allSatisfy { $0.reclamations.isEmpty })
+        XCTAssertEqual(byteState.surfaceTombstones.map(\.tombstoneId), closed.map(\.tombstoneId))
+        XCTAssertEqual(byteState.surfaceTombstones.map(\.closedSequence), closed.map(\.closedSequence))
+        XCTAssertGreaterThan(Int64(try JSONEncoder().encode(byteState.surfaceTombstones).count),
+                             byteState.limits.maxRetainedTombstoneBytes)
+        for retained in byteState.surfaceTombstones {
+            XCTAssertEqual(retained.surface.nativeRestoreMaterial,
+                           .object(["placement": .string(String(repeating: "a", count: 45_000))]))
+        }
+        let restarted = try JSONDecoder().decode(SurfAceLocklessAuthorityState.self,
+                                                 from: JSONEncoder().encode(byteState))
+        try restarted.validate()
+        XCTAssertEqual(restarted, byteState)
     }
 
-    func testACCLOSE08ReadsAndFailedRestoreDoNotRefreshReclamationOrder() throws {
+    func testACCLOSE08ReadsAndFailedRestorePreserveRetainedLifecycleOrder() throws {
         var limits = SurfAceLocklessCapacityLimits.production
         limits.maxRetainedTombstones = 1
         var state = try SurfAceLocklessAuthorityState.empty(limits: limits)
@@ -806,18 +835,25 @@ extension SurfAceLocklessTopologyOperationsTests {
             state: &state, surfaceId: secondSurface,
             expectedSurfaceSetRevision: 3, expectedTopologyRevision: 0
         )
-        XCTAssertFalse(state.surfaceTombstones.contains { $0.tombstoneId == first.tombstoneId })
+        XCTAssertEqual(state.surfaceTombstones.first, observed)
         let before = state
         XCTAssertThrowsError(try SurfAceLocklessTopologyOperations.surfaceWindowRestore(
             state: &state, tombstoneId: first.tombstoneId,
-            expectedSurfaceSetRevision: state.surfaceSetRevision
+            expectedSurfaceSetRevision: state.surfaceSetRevision - 1
         )) { error in
-            XCTAssertEqual(error as? SurfAceLocklessTopologyOperationError, .tombstoneNotFound(first.tombstoneId))
+            XCTAssertEqual(error as? SurfAceLocklessTopologyOperationError,
+                           .staleSurfaceSet(currentRevision: before.surfaceSetRevision))
         }
         XCTAssertEqual(state, before)
+        let restored = try SurfAceLocklessTopologyOperations.surfaceWindowRestore(
+            state: &state, tombstoneId: first.tombstoneId,
+            expectedSurfaceSetRevision: state.surfaceSetRevision)
+        XCTAssertEqual(restored.surface, observed?.surface)
+        XCTAssertEqual(state.surfaceTombstones, Array(before.surfaceTombstones.dropFirst()))
+        XCTAssertEqual(state.sequences.nextClosedSequence, before.sequences.nextClosedSequence)
     }
 
-    func testACCLOSE09ReclamationDiagnosticsContainStableIdentityBoundsAndReason() throws {
+    func testACCLOSE09RetainedIdentitiesDoNotEmitQuotaReclamationDiagnostics() throws {
         var limits = SurfAceLocklessCapacityLimits.production
         limits.maxRetainedTombstones = 1
         var state = try SurfAceLocklessAuthorityState.empty(limits: limits)
@@ -835,19 +871,21 @@ extension SurfAceLocklessTopologyOperationsTests {
             state: &state, surfaceId: secondId,
             expectedSurfaceSetRevision: 3, expectedTopologyRevision: 0
         )
-        let diagnostic = try XCTUnwrap(close.reclamations.first)
-        XCTAssertEqual(diagnostic.tombstoneId, first.tombstoneId)
-        XCTAssertEqual(diagnostic.surfaceId, firstId)
-        XCTAssertEqual(diagnostic.closedSequence, first.closedSequence)
-        XCTAssertGreaterThan(diagnostic.bytes, 0)
-        XCTAssertEqual(diagnostic.reason, .countCapacity)
-        XCTAssertEqual(diagnostic.maxRetainedTombstones, 1)
-        XCTAssertEqual(diagnostic.maxRetainedTombstoneBytes, state.limits.maxRetainedTombstoneBytes)
-        XCTAssertEqual(diagnostic.nestedLivePaneCount, 1)
-        XCTAssertEqual(diagnostic.nestedPaneTombstoneCount, 0)
-        XCTAssertEqual(diagnostic.unreadFrameCount, 0)
-        XCTAssertEqual(diagnostic.recipientControllerInstanceIds, [])
-        XCTAssertEqual(state.pendingTombstoneReclamations, [diagnostic])
+        XCTAssertTrue(close.reclamations.isEmpty)
+        XCTAssertTrue((state.pendingTombstoneReclamations ?? []).isEmpty)
+        let retained = try XCTUnwrap(state.surfaceTombstones.first)
+        XCTAssertEqual(retained.tombstoneId, first.tombstoneId)
+        XCTAssertEqual(retained.surface.surfaceId, firstId)
+        XCTAssertEqual(retained.closedSequence, first.closedSequence)
+        XCTAssertEqual(retained.surface.panes.count, 1)
+        XCTAssertEqual(state.surfaceTombstones.map(\.surface.surfaceId), [firstId, secondId])
+        let beforeRestore = state
+        let restored = try SurfAceLocklessTopologyOperations.surfaceWindowRestore(
+            state: &state, tombstoneId: first.tombstoneId,
+            expectedSurfaceSetRevision: state.surfaceSetRevision)
+        XCTAssertEqual(restored.surface, retained.surface)
+        XCTAssertEqual(state.surfaceTombstones, Array(beforeRestore.surfaceTombstones.dropFirst()))
+        XCTAssertTrue((state.pendingTombstoneReclamations ?? []).isEmpty)
     }
 
     func testACCAP01CreationCapRetainedConservationAndCapacityFreeRestore() throws {

@@ -65,10 +65,10 @@ final class SurfAceControllerReclamationAccountingTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: store.stateURL), bytes)
     }
 
-    func testInvalidInputAccountingIsStillRejectedBeforeStartupWrites() throws {
+    func testInvalidLifecycleSequenceIsRejectedBeforeStartupWrites() throws {
         var before = try fixture()
-        let id = try XCTUnwrap(before.liveSurfaces.keys.first)
-        before.liveSurfaces[id]?.paneTombstones[0].bytes += 1
+        // Invalid lifecycle input must be rejected before dormant-pressure cleanup writes.
+        before.sequences.nextClosedSequence = 0
         let directory = try temporaryDirectory()
         let store = SurfAceLocklessGenerationStore(stateURL: directory.appendingPathComponent("invalid.json"))
         let bytes = try JSONEncoder().encode(before)
@@ -77,7 +77,7 @@ final class SurfAceControllerReclamationAccountingTests: XCTestCase {
             guard case SurfAceLocklessAuthorityError.invalidState(let reason) = error else {
                 return XCTFail("Unexpected error: \(error)")
             }
-            XCTAssertTrue(reason.hasPrefix("pane_tombstone_exact_bytes:"))
+            XCTAssertEqual(reason, "client_sequences")
         }
         XCTAssertEqual(try Data(contentsOf: store.stateURL), bytes)
     }
