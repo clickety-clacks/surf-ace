@@ -1,5 +1,6 @@
 import { closeSync, fsyncSync, openSync, readFileSync, unlinkSync, writeSync } from "node:fs";
 import { createHash, randomBytes } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
 
 import WebSocket, { WebSocketServer, type RawData } from "ws";
 import { parseAnnotationCursor } from "@surf-ace/protocol";
@@ -801,6 +802,7 @@ export async function startRecoveringAllocatorServer(
   let stopped = false;
   let stop!: () => void;
   const stopping = new Promise<void>((resolve) => { stop = resolve; });
+  const retryCancellation = new AbortController();
   let serverClose: Promise<void> | undefined;
   const closeServer = () => serverClose ??= server.close();
   const recovery = (async () => {
@@ -815,12 +817,8 @@ export async function startRecoveringAllocatorServer(
           serverClose = undefined;
           break;
         } catch {
-          let timer!: ReturnType<typeof setTimeout>;
-          await Promise.race([
-            new Promise<void>((resolve) => { timer = setTimeout(resolve, 2_000); }),
-            stopping,
-          ]);
-          clearTimeout(timer);
+          try { await delay(2_000, undefined, { signal: retryCancellation.signal }); }
+          catch (error) { if (!stopped) throw error; }
         }
       }
       if (!stopped) lifecycle.recovered?.();
@@ -834,6 +832,7 @@ export async function startRecoveringAllocatorServer(
     async close(): Promise<void> {
       stopped = true;
       stop();
+      retryCancellation.abort();
       await recovery.finally(closeServer);
     },
   };

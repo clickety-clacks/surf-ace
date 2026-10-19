@@ -697,12 +697,28 @@ test("real PostgreSQL allocator authority", { timeout: 180_000 }, async (t) => {
     await t.test("a lost primary connection recovers committed pane identity and replaces endpoint leases", { timeout: 30_000 }, async () => {
       let cutClaim = false;
       let backendPid = 0;
+      let refuseOnce = false;
+      let blockAcquisition = false;
+      let acquisitionRefused: (() => void) | undefined;
       let recovered!: () => void;
       const recovery = new Promise<void>((resolve) => { recovered = resolve; });
-      const registry = await startRecoveringAllocatorServer(serverConfig(cluster), { recovered }, {
+      const lifecycle: string[] = [];
+      const registry = await startRecoveringAllocatorServer(serverConfig(cluster), {
+        unavailable: () => { lifecycle.push("unavailable"); },
+        recovered: () => { lifecycle.push("recovered"); recovered(); },
+      }, {
+        beforeMutation(operation) {
+          if (operation === "acquire_writer" && (refuseOnce || blockAcquisition)) {
+            refuseOnce = false;
+            lifecycle.push("acquire-refused");
+            acquisitionRefused?.();
+            throw new Error("temporary-writer-acquisition-failure");
+          }
+        },
         async afterCommitBeforeAck(operation) {
           if (operation !== "claim_pane_generation" || !cutClaim) return;
           cutClaim = false;
+          refuseOnce = true;
           const lost = registry.server.connectionLost;
           await adminQuery(cluster.adminUrl, `SELECT pg_terminate_backend(${backendPid})`);
           await lost;
@@ -736,6 +752,7 @@ test("real PostgreSQL allocator authority", { timeout: 180_000 }, async (t) => {
           clientId, surfaceId, paneId: "pane-cut", paneLineageId: "pl_primary-cut",
         }).catch(() => undefined);
         await recovery;
+        assert.deepEqual(lifecycle, ["unavailable", "acquire-refused", "recovered"]);
         assert.equal(registry.server.address.url, endpoint);
         retried = await WireClient.connect(endpoint);
         const result = await retried.request("client.register", {
@@ -759,6 +776,19 @@ test("real PostgreSQL allocator authority", { timeout: 180_000 }, async (t) => {
         assert.equal(after.nextPaneOrdinalFence, before.nextPaneOrdinalFence + 1,
           "the committed claim is read back, not allocated again");
         assert.equal(after.assignmentCount, before.assignmentCount);
+
+        blockAcquisition = true;
+        const refused = new Promise<void>((resolve) => { acquisitionRefused = resolve; });
+        await adminQuery(cluster.adminUrl, `SELECT pg_terminate_backend(${after.leaseBackendPid})`);
+        await refused;
+        await registry.close();
+        assert.equal(lifecycle.filter((event) => event === "recovered").length, 1,
+          "shutdown during an outage must not start another registry");
+        blockAcquisition = false;
+        const replacement = await AllocatorServer.start({
+          ...serverConfig(cluster), listenPort: Number(new URL(endpoint).port),
+        });
+        await replacement.close();
       } finally {
         await wire.close();
         await retried?.close();
