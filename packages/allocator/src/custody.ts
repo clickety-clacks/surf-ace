@@ -227,6 +227,9 @@ function recordCustodyDiagnostic(event: string, fields: Record<string, unknown>)
 
 export class PostgresCustodyAdapter<M extends LeaseMode> {
   private closed = false;
+  private connectionFailed = false;
+  private resolveConnectionLoss!: () => void;
+  readonly connectionLost = new Promise<void>((resolve) => { this.resolveConnectionLoss = resolve; });
   private operationTail: Promise<void> = Promise.resolve();
   private validated = false;
   private uncertain: { operation: string; before: AcceptedState; matches: (state: AcceptedState) => boolean } | null = null;
@@ -236,7 +239,20 @@ export class PostgresCustodyAdapter<M extends LeaseMode> {
     private readonly primary: PgClient,
     readonly token: LeaseToken<M>,
     private readonly hooks: AdapterTestHooks = {},
-  ) {}
+  ) {
+    const lost = () => {
+      if (this.closed || this.connectionFailed) return;
+      this.connectionFailed = true;
+      this.validated = false;
+      this.resolveConnectionLoss();
+    };
+    primary.once("error", lost);
+    primary.once("end", lost);
+  }
+
+  get hasLostConnection(): boolean {
+    return this.connectionFailed;
+  }
 
   static async installSchema(adminUrl: string): Promise<void> {
     const client = new Client({ connectionString: adminUrl });
@@ -383,7 +399,7 @@ export class PostgresCustodyAdapter<M extends LeaseMode> {
   }
 
   get registrationReady(): boolean {
-    return !this.closed && this.validated && this.uncertain === null;
+    return !this.closed && !this.connectionFailed && this.validated && this.uncertain === null;
   }
 
   private async validateLeaseNow(): Promise<void> {

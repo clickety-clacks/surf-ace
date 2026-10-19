@@ -364,6 +364,10 @@ export class AllocatorServer {
     };
   }
 
+  get connectionLost(): Promise<void> {
+    return this.custody.connectionLost;
+  }
+
   async diagnostics(): Promise<AllocatorDiagnostics> {
     const [state, witness] = await Promise.all([
       this.custody.readAcceptedState(),
@@ -401,13 +405,17 @@ export class AllocatorServer {
   }
 
   async close(): Promise<void> {
-    for (const client of this.webSocketServer.clients) client.close(1001, "allocator_shutdown");
+    for (const client of this.webSocketServer.clients) {
+      if (this.custody.hasLostConnection) client.terminate();
+      else client.close(1001, "allocator_shutdown");
+    }
     await new Promise<void>((resolve, reject) => {
       this.webSocketServer.close((error) => error ? reject(error) : resolve());
     });
     await this.registrationTail;
     try {
-      await this.custody.release();
+      if (this.custody.hasLostConnection) await this.custody.terminate();
+      else await this.custody.release();
     } finally {
       this.hostLock.release();
     }
@@ -779,6 +787,56 @@ export class AllocatorServer {
       lease.pumping = false;
     }
   }
+}
+
+// A dead pg Client cannot reconnect. Restart the registry instance through its
+// existing acquisition path so every in-memory lease belongs to the new writer.
+export async function startRecoveringAllocatorServer(
+  config: AllocatorServerConfig,
+  lifecycle: { unavailable?: () => void; recovered?: () => void } = {},
+  testHooks: AdapterTestHooks = {},
+) {
+  let server = await AllocatorServer.start(config, testHooks);
+  const restartConfig = { ...config, listenPort: server.address.port };
+  let stopped = false;
+  let stop!: () => void;
+  const stopping = new Promise<void>((resolve) => { stop = resolve; });
+  let serverClose: Promise<void> | undefined;
+  const closeServer = () => serverClose ??= server.close();
+  const recovery = (async () => {
+    while (!stopped) {
+      await Promise.race([server.connectionLost, stopping]);
+      if (stopped) return;
+      lifecycle.unavailable?.();
+      await closeServer();
+      while (!stopped) {
+        try {
+          server = await AllocatorServer.start(restartConfig, testHooks);
+          serverClose = undefined;
+          break;
+        } catch {
+          let timer!: ReturnType<typeof setTimeout>;
+          await Promise.race([
+            new Promise<void>((resolve) => { timer = setTimeout(resolve, 2_000); }),
+            stopping,
+          ]);
+          clearTimeout(timer);
+        }
+      }
+      if (!stopped) lifecycle.recovered?.();
+    }
+  })();
+  // Keep unexpected shutdown failures observable through close(), without an
+  // unhandled rejection while the foreground service is still running.
+  void recovery.catch(() => lifecycle.unavailable?.());
+  return {
+    get server() { return server; },
+    async close(): Promise<void> {
+      stopped = true;
+      stop();
+      await recovery.finally(closeServer);
+    },
+  };
 }
 
 function paneReleaseIntentId(evidence: PaneRetirementEvidence): string {

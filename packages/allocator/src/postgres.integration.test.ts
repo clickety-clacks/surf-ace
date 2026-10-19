@@ -36,6 +36,7 @@ import {
   PostgresCustodyAdapter,
   WindowLabelAuthority,
   revokeWriter,
+  startRecoveringAllocatorServer,
   type AcceptedState,
   type AllocatorServerConfig,
   type Assignment,
@@ -690,6 +691,78 @@ test("real PostgreSQL allocator authority", { timeout: 180_000 }, async (t) => {
         await wire.close();
         await server.close();
         server = null;
+      }
+    });
+
+    await t.test("a lost primary connection recovers committed pane identity and replaces endpoint leases", { timeout: 30_000 }, async () => {
+      let cutClaim = false;
+      let backendPid = 0;
+      let recovered!: () => void;
+      const recovery = new Promise<void>((resolve) => { recovered = resolve; });
+      const registry = await startRecoveringAllocatorServer(serverConfig(cluster), { recovered }, {
+        async afterCommitBeforeAck(operation) {
+          if (operation !== "claim_pane_generation" || !cutClaim) return;
+          cutClaim = false;
+          const lost = registry.server.connectionLost;
+          await adminQuery(cluster.adminUrl, `SELECT pg_terminate_backend(${backendPid})`);
+          await lost;
+        },
+      });
+      const endpoint = registry.server.address.url;
+      const wire = await WireClient.connect(endpoint);
+      let retried: WireClient | undefined;
+      const clientId = createHash("sha256").update("primary-reconnect-client").digest("hex");
+      const surfaceId = "sf_primary-reconnect";
+      const registration = {
+        clientId, allocationGenerationV1: true, prePairDescribeV1: true,
+        directEndpoint: "ws://127.0.0.1:19002/ws",
+        surfaces: [{ surfaceId, panes: [{
+          paneId: "pane-kept", paneLineageId: "pl_primary-kept", paneLabel: 0,
+        }] }],
+      };
+      try {
+        const initial = await wire.request("client.register", registration);
+        assert.equal(initial.ok, true);
+        const first = initial.payload as {
+          endpointLease: { leaseGeneration: number };
+          surfaces: Array<{ windowLabel: string; panes: Array<{ paneLabel: number; allocationGeneration: number }> }>;
+        };
+        const before = await registry.server.diagnostics();
+        backendPid = before.leaseBackendPid;
+        cutClaim = true;
+        // A lost socket need not deliver the failed request's response. Recovery
+        // is observed from the newly acquired registry, not a response timeout.
+        void wire.request("pane.claim", {
+          clientId, surfaceId, paneId: "pane-cut", paneLineageId: "pl_primary-cut",
+        }).catch(() => undefined);
+        await recovery;
+        assert.equal(registry.server.address.url, endpoint);
+        retried = await WireClient.connect(endpoint);
+        const result = await retried.request("client.register", {
+          ...registration,
+          surfaces: [{ surfaceId, panes: [registration.surfaces[0]!.panes[0]!, {
+            paneId: "pane-cut", paneLineageId: "pl_primary-cut", paneLabel: 0,
+          }] }],
+        });
+        assert.equal(result.ok, true);
+        const after = await registry.server.diagnostics();
+        const resumed = result.payload as typeof first;
+        assert.equal(after.registrationReady, true);
+        assert.ok(after.leaseGeneration > before.leaseGeneration);
+        assert.notEqual(after.leaseBackendPid, before.leaseBackendPid);
+        assert.ok(resumed.endpointLease.leaseGeneration > first.endpointLease.leaseGeneration);
+        assert.equal(resumed.surfaces[0]!.windowLabel, first.surfaces[0]!.windowLabel);
+        assert.equal(resumed.surfaces[0]!.panes[0]!.paneLabel, first.surfaces[0]!.panes[0]!.paneLabel);
+        assert.equal(resumed.surfaces[0]!.panes[0]!.allocationGeneration,
+          first.surfaces[0]!.panes[0]!.allocationGeneration);
+        assert.equal(resumed.surfaces[0]!.panes[1]!.paneLabel, before.nextPaneOrdinalFence);
+        assert.equal(after.nextPaneOrdinalFence, before.nextPaneOrdinalFence + 1,
+          "the committed claim is read back, not allocated again");
+        assert.equal(after.assignmentCount, before.assignmentCount);
+      } finally {
+        await wire.close();
+        await retried?.close();
+        await registry.close();
       }
     });
 
