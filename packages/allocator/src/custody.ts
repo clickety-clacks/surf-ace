@@ -1,5 +1,6 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { setTimeout as delay } from "node:timers/promises";
 
 import pg, { type Client as PgClient, type QueryResultRow } from "pg";
 
@@ -168,6 +169,7 @@ export type RestoreReady = {
 };
 
 export type AdapterTestHooks = {
+  afterStartupFailure?: (error: unknown) => Promise<void> | void;
   afterCommitBeforeAck?: (operation: string) => Promise<void> | void;
   afterCommitBeforeWitness?: (operation: string) => Promise<void> | void;
   afterMutationBeforeCommit?: (operation: string, client: PgClient) => Promise<void> | void;
@@ -227,6 +229,9 @@ function recordCustodyDiagnostic(event: string, fields: Record<string, unknown>)
 
 export class PostgresCustodyAdapter<M extends LeaseMode> {
   private closed = false;
+  private connectionFailed = false;
+  private resolveConnectionLoss!: () => void;
+  readonly connectionLost = new Promise<void>((resolve) => { this.resolveConnectionLoss = resolve; });
   private operationTail: Promise<void> = Promise.resolve();
   private validated = false;
   private uncertain: { operation: string; before: AcceptedState; matches: (state: AcceptedState) => boolean } | null = null;
@@ -236,7 +241,20 @@ export class PostgresCustodyAdapter<M extends LeaseMode> {
     private readonly primary: PgClient,
     readonly token: LeaseToken<M>,
     private readonly hooks: AdapterTestHooks = {},
-  ) {}
+  ) {
+    const lost = () => {
+      if (this.closed || this.connectionFailed) return;
+      this.connectionFailed = true;
+      this.validated = false;
+      this.resolveConnectionLoss();
+    };
+    primary.once("error", lost);
+    primary.once("end", lost);
+  }
+
+  get hasLostConnection(): boolean {
+    return this.connectionFailed;
+  }
 
   static async installSchema(adminUrl: string): Promise<void> {
     const client = new Client({ connectionString: adminUrl });
@@ -287,8 +305,9 @@ export class PostgresCustodyAdapter<M extends LeaseMode> {
   static async acquireWriter(
     config: PostgresCustodyConfig,
     hooks: AdapterTestHooks = {},
+    retrySignal?: AbortSignal,
   ): Promise<PostgresCustodyAdapter<"writer">> {
-    return await PostgresCustodyAdapter.acquire(config, "writer", hooks);
+    return await PostgresCustodyAdapter.acquire(config, "writer", hooks, retrySignal);
   }
 
   static async acquireRecovery(
@@ -302,6 +321,7 @@ export class PostgresCustodyAdapter<M extends LeaseMode> {
     config: PostgresCustodyConfig,
     mode: T,
     hooks: AdapterTestHooks,
+    retrySignal?: AbortSignal,
   ): Promise<PostgresCustodyAdapter<T>> {
     validateCustodyConfig(config);
     const primary = await connect(mode === "recovery" ? config.recoveryUrl : config.primaryUrl);
@@ -324,11 +344,26 @@ export class PostgresCustodyAdapter<M extends LeaseMode> {
         tokenFromRow(result.rows[0], mode),
         hooks,
       );
-      await adapter.validateLease();
+      await adapter.finishStartup(() => adapter.validateLease(), retrySignal);
       return adapter;
     } catch (error) {
       await primary.end().catch(() => undefined);
       throw mapDatabaseError(error);
+    }
+  }
+
+  // Once acquisition commits, keep that writer while startup is fenced. Repeated
+  // validation must not allocate more generations or custody history rows.
+  async finishStartup<T>(operation: () => Promise<T>, retrySignal?: AbortSignal): Promise<T> {
+    while (true) {
+      retrySignal?.throwIfAborted();
+      try {
+        return await operation();
+      } catch (error) {
+        if (!retrySignal || retrySignal.aborted || this.hasLostConnection) throw error;
+        await this.hooks.afterStartupFailure?.(error);
+        await delay(2_000, undefined, { signal: retrySignal });
+      }
     }
   }
 
@@ -383,7 +418,7 @@ export class PostgresCustodyAdapter<M extends LeaseMode> {
   }
 
   get registrationReady(): boolean {
-    return !this.closed && this.validated && this.uncertain === null;
+    return !this.closed && !this.connectionFailed && this.validated && this.uncertain === null;
   }
 
   private async validateLeaseNow(): Promise<void> {

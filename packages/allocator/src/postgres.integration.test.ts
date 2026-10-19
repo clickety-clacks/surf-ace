@@ -36,6 +36,7 @@ import {
   PostgresCustodyAdapter,
   WindowLabelAuthority,
   revokeWriter,
+  startRecoveringAllocatorServer,
   type AcceptedState,
   type AllocatorServerConfig,
   type Assignment,
@@ -693,6 +694,135 @@ test("real PostgreSQL allocator authority", { timeout: 180_000 }, async (t) => {
       }
     });
 
+    await t.test("a lost primary connection recovers committed pane identity and replaces endpoint leases", { timeout: 30_000 }, async () => {
+      let cutClaim = false;
+      let backendPid = 0;
+      let refuseOnce = false;
+      let fenceStartup = false;
+      let stopDuringValidation = false;
+      let validationFailed: (() => void) | undefined;
+      const originalWitnessId = cluster.config.witnessServerId;
+      const validationHeads: unknown[] = [];
+      const inspector = new Client({ connectionString: cluster.adminUrl });
+      await inspector.connect();
+      let recovered!: () => void;
+      const recovery = new Promise<void>((resolve) => { recovered = resolve; });
+      const lifecycle: string[] = [];
+      const registry = await startRecoveringAllocatorServer(serverConfig(cluster), {
+        unavailable: () => { lifecycle.push("unavailable"); },
+        recovered: () => { lifecycle.push("recovered"); recovered(); },
+      }, {
+        beforeMutation(operation) {
+          if (operation === "acquire_writer" && refuseOnce) {
+            refuseOnce = false;
+            lifecycle.push("acquire-refused");
+            throw new Error("temporary-writer-acquisition-failure");
+          }
+        },
+        async afterStartupFailure() {
+          const result = await inspector.query(`SELECT lease_generation, custody_revision,
+            (SELECT count(*) FROM surf_ace_allocator.custody_revision_heads WHERE fleet_id = $1) AS history_rows
+            FROM surf_ace_allocator.fleets WHERE fleet_id = $1`, [cluster.config.fleetId]);
+          validationHeads.push(result.rows[0]);
+          validationFailed?.();
+          // Restore the real witness only after two observed validation failures.
+          if (!stopDuringValidation && validationHeads.length === 2) {
+            cluster.config.witnessServerId = originalWitnessId;
+            fenceStartup = false;
+          }
+        },
+        async afterCommitBeforeAck(operation) {
+          if (operation === "acquire_writer" && fenceStartup) {
+            cluster.config.witnessServerId = "unavailable-startup-witness";
+          }
+          if (operation !== "claim_pane_generation" || !cutClaim) return;
+          cutClaim = false;
+          refuseOnce = true;
+          const lost = registry.server.connectionLost;
+          await adminQuery(cluster.adminUrl, `SELECT pg_terminate_backend(${backendPid})`);
+          await lost;
+        },
+      });
+      const endpoint = registry.server.address.url;
+      const wire = await WireClient.connect(endpoint);
+      let retried: WireClient | undefined;
+      const clientId = createHash("sha256").update("primary-reconnect-client").digest("hex");
+      const surfaceId = "sf_primary-reconnect";
+      const registration = {
+        clientId, allocationGenerationV1: true, prePairDescribeV1: true,
+        directEndpoint: "ws://127.0.0.1:19002/ws",
+        surfaces: [{ surfaceId, panes: [{
+          paneId: "pane-kept", paneLineageId: "pl_primary-kept", paneLabel: 0,
+        }] }],
+      };
+      try {
+        const initial = await wire.request("client.register", registration);
+        assert.equal(initial.ok, true);
+        const first = initial.payload as {
+          endpointLease: { leaseGeneration: number };
+          surfaces: Array<{ windowLabel: string; panes: Array<{ paneLabel: number; allocationGeneration: number }> }>;
+        };
+        const before = await registry.server.diagnostics();
+        backendPid = before.leaseBackendPid;
+        cutClaim = true;
+        fenceStartup = true;
+        // A lost socket need not deliver the failed request's response. Recovery
+        // is observed from the newly acquired registry, not a response timeout.
+        void wire.request("pane.claim", {
+          clientId, surfaceId, paneId: "pane-cut", paneLineageId: "pl_primary-cut",
+        }).catch(() => undefined);
+        await recovery;
+        assert.deepEqual(lifecycle, ["unavailable", "acquire-refused", "recovered"]);
+        assert.equal(registry.server.address.url, endpoint);
+        retried = await WireClient.connect(endpoint);
+        const result = await retried.request("client.register", {
+          ...registration,
+          surfaces: [{ surfaceId, panes: [registration.surfaces[0]!.panes[0]!, {
+            paneId: "pane-cut", paneLineageId: "pl_primary-cut", paneLabel: 0,
+          }] }],
+        });
+        assert.equal(result.ok, true);
+        const after = await registry.server.diagnostics();
+        const resumed = result.payload as typeof first;
+        assert.equal(after.registrationReady, true);
+        assert.equal(after.leaseGeneration, before.leaseGeneration + 1);
+        assert.equal(validationHeads.length, 2);
+        assert.deepEqual(validationHeads[1], validationHeads[0],
+          "a persistent startup fence must not allocate more writer generations or custody history");
+        assert.notEqual(after.leaseBackendPid, before.leaseBackendPid);
+        assert.ok(resumed.endpointLease.leaseGeneration > first.endpointLease.leaseGeneration);
+        assert.equal(resumed.surfaces[0]!.windowLabel, first.surfaces[0]!.windowLabel);
+        assert.equal(resumed.surfaces[0]!.panes[0]!.paneLabel, first.surfaces[0]!.panes[0]!.paneLabel);
+        assert.equal(resumed.surfaces[0]!.panes[0]!.allocationGeneration,
+          first.surfaces[0]!.panes[0]!.allocationGeneration);
+        assert.equal(resumed.surfaces[0]!.panes[1]!.paneLabel, before.nextPaneOrdinalFence);
+        assert.equal(after.nextPaneOrdinalFence, before.nextPaneOrdinalFence + 1,
+          "the committed claim is read back, not allocated again");
+        assert.equal(after.assignmentCount, before.assignmentCount);
+
+        fenceStartup = true;
+        stopDuringValidation = true;
+        const refused = new Promise<void>((resolve) => { validationFailed = resolve; });
+        await adminQuery(cluster.adminUrl, `SELECT pg_terminate_backend(${after.leaseBackendPid})`);
+        await refused;
+        await registry.close();
+        assert.equal(lifecycle.filter((event) => event === "recovered").length, 1,
+          "shutdown during an outage must not start another registry");
+        cluster.config.witnessServerId = originalWitnessId;
+        fenceStartup = false;
+        const replacement = await AllocatorServer.start({
+          ...serverConfig(cluster), listenPort: Number(new URL(endpoint).port),
+        });
+        await replacement.close();
+      } finally {
+        cluster.config.witnessServerId = originalWitnessId;
+        await wire.close();
+        await retried?.close();
+        await registry.close();
+        await inspector.end();
+      }
+    });
+
     await t.test("unknown mapping commit resolves to the one durable assignment", async () => {
       let injected = false;
       const writer = await PostgresCustodyAdapter.acquireWriter(cluster.config, {
@@ -912,6 +1042,71 @@ test("real PostgreSQL allocator authority", { timeout: 180_000 }, async (t) => {
     });
   } finally {
     if (server) await server.close().catch(() => undefined);
+    await cluster.stop();
+  }
+});
+
+test("recovery waits for a busy port without repeating annotation consumer lease reset", { timeout: 90_000 }, async () => {
+  const cluster = await startCluster();
+  const inspector = new Client({ connectionString: cluster.adminUrl });
+  const occupied = createServer();
+  let registry: Awaited<ReturnType<typeof startRecoveringAllocatorServer>> | undefined;
+  let port = 0;
+  let occupyOnAcquisition = false;
+  let recovered!: () => void;
+  const recovery = new Promise<void>((resolve) => { recovered = resolve; });
+  const consumerGenerations: string[] = [];
+  const readConsumerGeneration = async () => (await inspector.query<{ lease_generation: string }>(
+    "SELECT lease_generation FROM surf_ace_allocator.annotation_consumers WHERE fleet_id=$1 AND consumer_id=$2",
+    [cluster.config.fleetId, "port-recovery-consumer"],
+  )).rows[0]!.lease_generation;
+  try {
+    await inspector.connect();
+    const initial = await PostgresCustodyAdapter.initializeAbsentFleet(cluster.config, "alloc_port-recovery");
+    await initial.release();
+    await adminQuery(cluster.adminUrl,
+      await readFile(new URL("../sql/003_annotation_journal.sql", import.meta.url), "utf8"));
+    const seed = await PostgresCustodyAdapter.acquireWriter(cluster.config);
+    try { await seed.openAnnotationConsumer("port-recovery-consumer", "watch"); }
+    finally { await seed.release(); }
+    registry = await startRecoveringAllocatorServer(serverConfig(cluster), { recovered }, {
+      async afterCommitBeforeAck(operation) {
+        if (operation !== "acquire_writer" || !occupyOnAcquisition) return;
+        occupyOnAcquisition = false;
+        await new Promise<void>((resolve, reject) => {
+          occupied.once("error", reject);
+          occupied.listen(port, "127.0.0.1", resolve);
+        });
+      },
+      async afterStartupFailure(error) {
+        assert.equal((error as NodeJS.ErrnoException).code, "EADDRINUSE");
+        consumerGenerations.push(await readConsumerGeneration());
+        // Release the real port only after two observed failed bind attempts.
+        if (consumerGenerations.length === 2) {
+          await new Promise<void>((resolve, reject) => occupied.close((error) => error ? reject(error) : resolve()));
+        }
+      },
+    });
+    port = registry.server.address.port;
+    const before = await registry.server.diagnostics();
+    const beforeConsumer = BigInt(await readConsumerGeneration());
+    occupyOnAcquisition = true;
+    await adminQuery(cluster.adminUrl, `SELECT pg_terminate_backend(${before.leaseBackendPid})`);
+    await recovery;
+    assert.equal(consumerGenerations.length, 2);
+    assert.equal(BigInt(consumerGenerations[0]!), beforeConsumer + 1n,
+      "the replacement writer fences the old annotation consumer once");
+    assert.equal(consumerGenerations[1], consumerGenerations[0],
+      "a failed bind must not reset the annotation consumer again");
+    assert.equal(await readConsumerGeneration(), consumerGenerations[0]);
+    const after = await registry.server.diagnostics();
+    assert.equal(after.leaseGeneration, before.leaseGeneration + 1);
+    assert.equal(after.registrationReady, true);
+    assert.equal(registry.server.address.port, port);
+  } finally {
+    if (occupied.listening) await new Promise<void>((resolve) => occupied.close(() => resolve()));
+    await registry?.close();
+    await inspector.end();
     await cluster.stop();
   }
 });

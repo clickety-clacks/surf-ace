@@ -1,5 +1,6 @@
 import { closeSync, fsyncSync, openSync, readFileSync, unlinkSync, writeSync } from "node:fs";
 import { createHash, randomBytes } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
 
 import WebSocket, { WebSocketServer, type RawData } from "ws";
 import { parseAnnotationCursor } from "@surf-ace/protocol";
@@ -293,41 +294,50 @@ export class AllocatorServer {
     private readonly endpointLeases: EndpointLeaseBook,
   ) {}
 
-  static async start(config: AllocatorServerConfig, testHooks: AdapterTestHooks = {}): Promise<AllocatorServer> {
+  static async start(
+    config: AllocatorServerConfig, testHooks: AdapterTestHooks = {}, retrySignal?: AbortSignal,
+  ): Promise<AllocatorServer> {
     validateServerConfig(config);
     const hostLock = HostLock.acquire(config.hostLockPath);
     try {
-      const custody = await PostgresCustodyAdapter.acquireWriter(config.custody, testHooks);
+      const custody = await PostgresCustodyAdapter.acquireWriter(config.custody, testHooks, retrySignal);
       try {
         const authority = new WindowLabelAuthority(custody);
-        await authority.recoverPreparedTransactions();
-        await custody.validateLease();
-        // Annotation state must be verified and old leases fenced before the
-        // listener can accept a hello. Older schemas remain direct-only.
-        let annotationInstalled = true;
-        try {
-          await custody.annotationInfo();
-        } catch (error) {
-          if ((error as { code?: string }).code !== "42883") throw error;
-          annotationInstalled = false;
-        }
-        let annotationVerified = true;
-        if (annotationInstalled) {
+        // Retry only the unfinished stage: a busy port must not repeat completed
+        // journal verification or invalidate annotation consumer leases again.
+        await custody.finishStartup(() => authority.recoverPreparedTransactions(), retrySignal);
+        await custody.finishStartup(() => custody.validateLease(), retrySignal);
+        const annotationInstalled = await custody.finishStartup(async () => {
+          try {
+            await custody.annotationInfo();
+            return true;
+          } catch (error) {
+            if ((error as { code?: string }).code !== "42883") throw error;
+            return false;
+          }
+        }, retrySignal);
+        const annotationVerified = !annotationInstalled || await custody.finishStartup(async () => {
           try {
             await custody.verifyAnnotationStartup();
+            return true;
           } catch (error) {
             if (asAllocatorError(error).code !== "annotation_journal_unverified") throw error;
-            annotationVerified = false;
+            return false;
           }
-        }
-        const webSocketServer = new WebSocketServer({
-          host: config.listenHost,
-          port: config.listenPort,
-        });
-        await new Promise<void>((resolve, reject) => {
-          webSocketServer.once("listening", resolve);
-          webSocketServer.once("error", reject);
-        });
+        }, retrySignal);
+        const webSocketServer = await custody.finishStartup(async () => {
+          const listener = new WebSocketServer({ host: config.listenHost, port: config.listenPort });
+          try {
+            await new Promise<void>((resolve, reject) => {
+              listener.once("listening", resolve);
+              listener.once("error", reject);
+            });
+            return listener;
+          } catch (error) {
+            await new Promise<void>((resolve) => listener.close(() => resolve()));
+            throw error;
+          }
+        }, retrySignal);
         const server = new AllocatorServer(
           config,
           hostLock,
@@ -362,6 +372,10 @@ export class AllocatorServer {
       port: address.port,
       url: `ws://${this.config.listenHost}:${address.port}`,
     };
+  }
+
+  get connectionLost(): Promise<void> {
+    return this.custody.connectionLost;
   }
 
   async diagnostics(): Promise<AllocatorDiagnostics> {
@@ -401,13 +415,17 @@ export class AllocatorServer {
   }
 
   async close(): Promise<void> {
-    for (const client of this.webSocketServer.clients) client.close(1001, "allocator_shutdown");
+    for (const client of this.webSocketServer.clients) {
+      if (this.custody.hasLostConnection) client.terminate();
+      else client.close(1001, "allocator_shutdown");
+    }
     await new Promise<void>((resolve, reject) => {
       this.webSocketServer.close((error) => error ? reject(error) : resolve());
     });
     await this.registrationTail;
     try {
-      await this.custody.release();
+      if (this.custody.hasLostConnection) await this.custody.terminate();
+      else await this.custody.release();
     } finally {
       this.hostLock.release();
     }
@@ -779,6 +797,54 @@ export class AllocatorServer {
       lease.pumping = false;
     }
   }
+}
+
+// A dead pg Client cannot reconnect. Restart the registry instance through its
+// existing acquisition path so every in-memory lease belongs to the new writer.
+export async function startRecoveringAllocatorServer(
+  config: AllocatorServerConfig,
+  lifecycle: { unavailable?: () => void; recovered?: () => void } = {},
+  testHooks: AdapterTestHooks = {},
+) {
+  let server = await AllocatorServer.start(config, testHooks);
+  const restartConfig = { ...config, listenPort: server.address.port };
+  let stopped = false;
+  let stop!: () => void;
+  const stopping = new Promise<void>((resolve) => { stop = resolve; });
+  const retryCancellation = new AbortController();
+  let serverClose: Promise<void> | undefined;
+  const closeServer = () => serverClose ??= server.close();
+  const recovery = (async () => {
+    while (!stopped) {
+      await Promise.race([server.connectionLost, stopping]);
+      if (stopped) return;
+      lifecycle.unavailable?.();
+      await closeServer();
+      while (!stopped) {
+        try {
+          server = await AllocatorServer.start(restartConfig, testHooks, retryCancellation.signal);
+          serverClose = undefined;
+          break;
+        } catch {
+          try { await delay(2_000, undefined, { signal: retryCancellation.signal }); }
+          catch (error) { if (!stopped) throw error; }
+        }
+      }
+      if (!stopped) lifecycle.recovered?.();
+    }
+  })();
+  // Keep unexpected shutdown failures observable through close(), without an
+  // unhandled rejection while the foreground service is still running.
+  void recovery.catch(() => lifecycle.unavailable?.());
+  return {
+    get server() { return server; },
+    async close(): Promise<void> {
+      stopped = true;
+      stop();
+      retryCancellation.abort();
+      await recovery.finally(closeServer);
+    },
+  };
 }
 
 function paneReleaseIntentId(evidence: PaneRetirementEvidence): string {
