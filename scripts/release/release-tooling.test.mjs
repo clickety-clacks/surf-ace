@@ -1539,6 +1539,7 @@ test("Tightbeam foreground launcher validates exact PG16 config and WebSocket he
 
   const healthServer = new WebSocketServer({ host: "127.0.0.1", path: "/ws", port: 0 });
   let acceptTopology = true;
+  let registrationReady = true;
   await new Promise((resolve, reject) => {
     healthServer.once("error", reject);
     healthServer.once("listening", resolve);
@@ -1553,7 +1554,7 @@ test("Tightbeam foreground launcher validates exact PG16 config and WebSocket he
         v: 1,
         ok: acceptTopology,
         ...(acceptTopology
-          ? { payload: { clients: [] } }
+          ? { payload: { clients: [], registrationReady } }
           : { error: { code: "registry_unavailable", message: "registry unavailable" } }),
       }));
     });
@@ -1566,6 +1567,12 @@ test("Tightbeam foreground launcher validates exact PG16 config and WebSocket he
       status: "healthy",
       transport: "fleet.topology",
     });
+    for (const readiness of [false, undefined]) {
+      registrationReady = readiness;
+      await assert.rejects(tightbeamServerLauncher.checkHealth(endpoint), /registration_writer_unavailable/);
+    }
+    registrationReady = true;
+    assert.equal((await tightbeamServerLauncher.checkHealth(endpoint)).status, "healthy");
     acceptTopology = false;
     await assert.rejects(tightbeamServerLauncher.checkHealth(endpoint), /health_fleet_topology_rejected:registry_unavailable/);
     await assert.rejects(
