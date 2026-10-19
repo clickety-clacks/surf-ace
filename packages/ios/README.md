@@ -30,8 +30,14 @@ Release acceptance environments:
 - Eezo macOS: macOS acceptance checks.
 - Eezo iPad simulator: the supported Apple client acceptance target. Use only
   installed iPad simulator destinations reported by Xcode, or the generic
-  simulator destination for a build-only check; do not assume a device name or
-  run the excluded visionOS/visionOS-simulator target.
+  simulator destination for a build-only check; do not assume a device name.
+- Spatial release attempt: use the shared `SurfAceSpatial` scheme's Release
+  Archive action to attempt a visionOS archive, then attempt registration on
+  the intended device if archiving succeeds. If archiving or registration fails,
+  retain the source commit, Xcode and SDK versions, scheme and destination,
+  exact command, complete build output or result bundle, and any device
+  registration error. Record the attempt and use this evidence for the release
+  decision; an attempt alone does not establish Spatial acceptance.
 
 For an installed Xcode toolchain, enumerate the available destinations first,
 then select an installed iPad simulator ID for the focused test:
