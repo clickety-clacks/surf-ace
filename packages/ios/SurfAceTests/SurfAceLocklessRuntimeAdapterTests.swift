@@ -659,14 +659,14 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
         XCTAssertEqual(try fixture.store.load()?.pendingControllerRetentionReclamations, [])
     }
 
-    func testACCLOSE09TombstoneReclamationOutboxPersistsOrderedCommitRecipientsUntilDelivery() async throws {
+    func testACCLOSE09RetainedTombstonesCommitInFIFOOrderWithoutReclamation() async throws {
         let fixture = try makeFixture { state in
             state.limits.maxRetainedTombstones = 1
         }
         _ = try await admit(fixture.adapter, id: "controller-a", token: "connection-a")
         _ = try await admit(fixture.adapter, id: "controller-b", token: "connection-b")
 
-        _ = try await fixture.adapter.commitMutation(
+        let firstClose = try await fixture.adapter.commitMutation(
             connectionToken: "connection-a", requestId: "close-first", operation: "surface.window.close"
         ) { state, _ in
             let result = try SurfAceLocklessTopologyOperations.surfaceWindowClose(
@@ -686,7 +686,7 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
         guard case .string(let secondSurfaceId) = opened.responsePayload else {
             return XCTFail("missing second surface identity")
         }
-        _ = try await fixture.adapter.commitMutation(
+        let secondClose = try await fixture.adapter.commitMutation(
             connectionToken: "connection-b", requestId: "close-second", operation: "surface.window.close"
         ) { state, _ in
             let result = try SurfAceLocklessTopologyOperations.surfaceWindowClose(
@@ -697,32 +697,23 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
         }
 
         let persisted = try XCTUnwrap(fixture.store.load())
-        let occurrence = try XCTUnwrap(persisted.pendingTombstoneReclamations?.first)
-        XCTAssertEqual(occurrence.commitSequence, 3)
-        XCTAssertEqual(occurrence.surfaceId, "sf_1")
-        XCTAssertEqual(occurrence.recipientControllerInstanceIds, ["controller-a", "controller-b"])
-        XCTAssertEqual(occurrence.deliveredControllerInstanceIds, [])
-        XCTAssertEqual(occurrence.reason, .countCapacity)
-        XCTAssertEqual(occurrence.maxRetainedTombstones, 1)
-        XCTAssertGreaterThan(occurrence.maxRetainedTombstoneBytes, occurrence.bytes)
-
+        XCTAssertEqual([firstClose.commitSequence, opened.commitSequence, secondClose.commitSequence], [1, 2, 3])
+        XCTAssertEqual(persisted.sequences.nextCommitSequence, 4)
+        XCTAssertEqual(persisted.surfaceSetRevision, 4)
+        XCTAssertEqual(persisted.surfaceTombstones.map(\.surface.surfaceId), ["sf_1", secondSurfaceId])
+        XCTAssertEqual(persisted.surfaceTombstones.map(\.closedSequence), [1, 2])
+        XCTAssertTrue((persisted.pendingTombstoneReclamations ?? []).isEmpty)
         let pendingDeliveries = await fixture.adapter.pendingTombstoneReclamations()
-        let delivery = try XCTUnwrap(pendingDeliveries.first)
-        XCTAssertEqual(delivery.record, occurrence)
-        XCTAssertEqual(delivery.connectionTokensByControllerInstanceId, [
-            "controller-a": "connection-a", "controller-b": "connection-b",
-        ])
-        try await fixture.adapter.acknowledgeTombstoneReclamation(
-            eventId: occurrence.eventId, deliveredControllerInstanceIds: ["controller-a"]
-        )
-        XCTAssertEqual(
-            try fixture.store.load()?.pendingTombstoneReclamations?.first?.deliveredControllerInstanceIds,
-            ["controller-a"]
-        )
-        try await fixture.adapter.acknowledgeTombstoneReclamation(
-            eventId: occurrence.eventId, deliveredControllerInstanceIds: ["controller-b"]
-        )
-        XCTAssertEqual(try fixture.store.load()?.pendingTombstoneReclamations, [])
+        XCTAssertTrue(pendingDeliveries.isEmpty)
+        XCTAssertEqual(persisted.controllers["controller-a"]?.pendingOperationReceipts["close-first"]?.commitSequence, 1)
+        XCTAssertEqual(persisted.controllers["controller-b"]?.pendingOperationReceipts["close-second"]?.commitSequence, 3)
+
+        let restarted = try SurfAceLocklessRuntimeAdapter(store: fixture.store)
+        let restored = await restarted.snapshot()
+        XCTAssertEqual(restored.surfaceTombstones, persisted.surfaceTombstones)
+        XCTAssertEqual(restored.generation, persisted.generation + 1)
+        XCTAssertEqual(restored.sequences.nextCommitSequence, persisted.sequences.nextCommitSequence)
+        XCTAssertTrue((restored.pendingTombstoneReclamations ?? []).isEmpty)
     }
 
     func testDeferredReclamationPressureDoesNotBlockLaterRetentionOrMutation() async throws {

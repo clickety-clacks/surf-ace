@@ -364,60 +364,50 @@ final class SurfAceLocklessAuthorityTests: XCTestCase {
 }
 
 extension SurfAceLocklessAuthorityTests {
-    func testACCLOSE07ValidCloseAtExactBoundAndFourStandaloneTransitionsAreAtomic() throws {
+    func testACCLOSE07CloseAndStandaloneTransitionsPreserveStateBeyondFormerBounds() throws {
         for reversed in [false, true] {
-            var closeState = try closeAtExactTombstoneBound(reversedIdentities: reversed)
+            var closeState = try closeWithSmallLegacyLimits(reversedIdentities: reversed)
             let beforeClose = closeState
             let surface = try XCTUnwrap(closeState.liveSurfaces.values.first)
+            XCTAssertGreaterThan(try JSONEncoder().encode(surface).count, 1)
+            XCTAssertThrowsError(try SurfAceLocklessTopologyOperations.surfaceWindowClose(
+                state: &closeState, surfaceId: surface.surfaceId,
+                expectedSurfaceSetRevision: closeState.surfaceSetRevision - 1,
+                expectedTopologyRevision: surface.topologyRevision
+            ))
+            XCTAssertEqual(closeState, beforeClose)
             let close = try SurfAceLocklessTopologyOperations.surfaceWindowClose(
-                state: &closeState,
-                surfaceId: surface.surfaceId,
+                state: &closeState, surfaceId: surface.surfaceId,
                 expectedSurfaceSetRevision: closeState.surfaceSetRevision,
                 expectedTopologyRevision: surface.topologyRevision
             )
             let retained = try XCTUnwrap(
                 closeState.surfaceTombstones.first(where: { $0.tombstoneId == close.tombstoneId })
             )
-            XCTAssertEqual(retained.bytes, beforeClose.limits.maxRecoverableSurfaceBytes)
-            XCTAssertEqual(retained.bytes, beforeClose.limits.maxRetainedTombstoneBytes)
             XCTAssertEqual(retained.surface, beforeClose.liveSurfaces[surface.surfaceId])
+            XCTAssertEqual(retained.scopes, beforeClose.scopes)
+            XCTAssertEqual(closeState.surfaceSetRevision, beforeClose.surfaceSetRevision + 1)
+            XCTAssertEqual(closeState.sequences.nextClosedSequence, beforeClose.sequences.nextClosedSequence + 1)
+            XCTAssertTrue(close.reclamations.isEmpty)
 
-            let equality = try retainedAggregateTransitionState(reversedIdentities: reversed)
-            let exactAggregate = equality.surfaceTombstones.reduce(Int64(0)) { $0 + $1.bytes }
-            XCTAssertEqual(exactAggregate, equality.limits.maxRetainedTombstoneBytes)
-            let equalitySource = equality
+            let retainedState = try retainedAggregateTransitionState(reversedIdentities: reversed)
+            XCTAssertGreaterThan(retainedState.surfaceTombstones.count, Int(retainedState.limits.maxRetainedTombstones))
+            let priorGeneration = retainedState
             for transition in [
-                SurfAceLocklessRecoverableTransition.locklessAdmission,
-                .restart, .configuration,
+                SurfAceLocklessRecoverableTransition.locklessAdmission, .restart, .configuration,
             ] {
-                XCTAssertEqual(try equality.validated(for: transition), equality)
-                XCTAssertEqual(equality, equalitySource)
-            }
-
-            var overLimits = equality.limits
-            overLimits.maxRetainedTombstoneBytes = exactAggregate - 1
-            XCTAssertGreaterThanOrEqual(
-                overLimits.maxRetainedTombstoneBytes,
-                overLimits.maxRecoverableSurfaceBytes
-            )
-            let priorGeneration = equality
-            for transition in [
-                SurfAceLocklessRecoverableTransition.locklessAdmission,
-                .restart, .configuration,
-            ] {
-                XCTAssertThrowsError(try equality.validated(for: transition, limits: overLimits)) { error in
-                    XCTAssertEqual(
-                        error as? SurfAceLocklessTopologyOperationError,
-                        .tombstoneCapacity(bytes: exactAggregate, maximum: exactAggregate - 1)
-                    )
+                XCTAssertEqual(try retainedState.validated(for: transition), priorGeneration)
+                XCTAssertEqual(retainedState, priorGeneration)
+                // A genuinely invalid lifecycle sequence still refuses without mutation.
+                var invalid = retainedState
+                invalid.sequences.nextClosedSequence = 0
+                let beforeInvalid = invalid
+                XCTAssertThrowsError(try invalid.validated(for: transition)) { error in
+                    XCTAssertEqual(error as? SurfAceLocklessAuthorityError, .invalidState("client_sequences"))
                 }
-                XCTAssertEqual(equality, priorGeneration)
+                XCTAssertEqual(invalid, beforeInvalid)
             }
         }
-
-        let normal = try retainedAggregateTransitionState(reversedIdentities: false)
-        let reversed = try retainedAggregateTransitionState(reversedIdentities: true)
-        XCTAssertEqual(normal.surfaceTombstones.map(\.bytes), reversed.surfaceTombstones.map(\.bytes))
     }
 
     private func retainedAggregateTransitionState(
@@ -442,19 +432,11 @@ extension SurfAceLocklessAuthorityTests {
                 expectedTopologyRevision: 1
             )
         }
-        var limits = try exactSmallLimits(for: state)
-        let aggregate = state.surfaceTombstones.reduce(Int64(0)) { $0 + $1.bytes }
-        limits.maxRetainedTombstoneBytes = aggregate
-        limits.maxRecoverableSurfaceBytes = max(
-            limits.recoverableSurfaceMinimumBytes,
-            state.surfaceTombstones.map(\.bytes).max() ?? 1
-        )
-        XCTAssertLessThanOrEqual(limits.maxRecoverableSurfaceBytes, aggregate)
-        state.limits = limits
+        state.limits = smallLegacyLimits()
         return try state.validated(for: .configuration)
     }
 
-    private func closeAtExactTombstoneBound(
+    private func closeWithSmallLegacyLimits(
         reversedIdentities: Bool
     ) throws -> SurfAceLocklessAuthorityState {
         var state = try SurfAceLocklessAuthorityState.empty()
@@ -480,50 +462,20 @@ extension SurfAceLocklessAuthorityTests {
         try applyEqualWidthIdentity(
             to: &state, surfaceId: opened.surface.surfaceId, reversed: reversedIdentities
         )
-        let surface = try XCTUnwrap(state.liveSurfaces[opened.surface.surfaceId])
-        let sequence = state.sequences.nextClosedSequence
-        let tombstoneId = String(format: "st_%016llx", sequence)
-        let scopes = Dictionary(uniqueKeysWithValues: state.scopes.filter {
-            $0.key.hasPrefix("surface:") || $0.key.hasPrefix("pane:")
-        })
-        let exact = try SurfAceLocklessTopologyOperations.restoredSurfaceTombstoneBytes(
-            closedSequence: sequence, scopes: scopes, surface: surface, tombstoneId: tombstoneId
-        )
-        var limits = try exactSmallLimits(for: state)
-        limits.maxRetainedTombstoneBytes = exact
-        limits.maxRecoverableSurfaceBytes = exact
-        XCTAssertLessThanOrEqual(limits.recoverableSurfaceMinimumBytes, exact)
-        state.limits = limits
+        state.limits = smallLegacyLimits()
         return try state.validated(for: .configuration)
     }
 
-    private func exactSmallLimits(
-        for state: SurfAceLocklessAuthorityState
-    ) throws -> SurfAceLocklessCapacityLimits {
-        let surfaces = Array(state.liveSurfaces.values) + state.surfaceTombstones.map(\.surface)
-        let panes = surfaces.flatMap { Array($0.panes.values) + $0.paneTombstones.map(\.pane) }
+    private func smallLegacyLimits() -> SurfAceLocklessCapacityLimits {
         var limits = SurfAceLocklessCapacityLimits.production
+        // Positive wire-compatibility fields, deliberately smaller than retained material.
         limits.maxPanesPerSurface = 3
-        limits.maxRetainedTombstones = 2
-        limits.maxPaneRecoverableStateBytes = try panes.map {
-            try SurfAceLocklessContentOperations.exactPaneRecoverableBytes($0)
-        }.max() ?? 1
-        limits.maxPaneAnnotationRestoreBytes = try panes.map {
-            try SurfAceLocklessContentOperations.exactAnnotationRestoreBytes($0)
-        }.max() ?? 1
-        limits.maxSurfaceRecoverableBaseBytes = try surfaces.map {
-            try SurfAceLocklessTopologyOperations.surfaceBaseBytes($0)
-        }.max() ?? 1
-        limits.maxPaneConsumableRecords = 1
-        limits.maxPaneConsumableBytes = 1
-        limits.maxSurfaceConsumableRecords = 1
-        limits.maxSurfaceConsumableBytes = 1
-        limits.maxConsumableRecordBytes = 1
-        limits.maxConsumableCursorStateBytesPerScope = 1
-        limits.maxAdmittedControllerEntries = 1
-        limits.maxDormantControllerEntries = 1
-        limits.maxRecoverableSurfaceBytes = limits.recoverableSurfaceMinimumBytes
-        limits.maxRetainedTombstoneBytes = limits.maxRecoverableSurfaceBytes
+        limits.maxRetainedTombstones = 1
+        limits.maxPaneRecoverableStateBytes = 1
+        limits.maxPaneAnnotationRestoreBytes = 1
+        limits.maxSurfaceRecoverableBaseBytes = 1
+        limits.maxRecoverableSurfaceBytes = 1
+        limits.maxRetainedTombstoneBytes = 1
         return limits
     }
 
