@@ -1046,6 +1046,71 @@ test("real PostgreSQL allocator authority", { timeout: 180_000 }, async (t) => {
   }
 });
 
+test("recovery waits for a busy port without repeating annotation consumer lease reset", { timeout: 90_000 }, async () => {
+  const cluster = await startCluster();
+  const inspector = new Client({ connectionString: cluster.adminUrl });
+  const occupied = createServer();
+  let registry: Awaited<ReturnType<typeof startRecoveringAllocatorServer>> | undefined;
+  let port = 0;
+  let occupyOnAcquisition = false;
+  let recovered!: () => void;
+  const recovery = new Promise<void>((resolve) => { recovered = resolve; });
+  const consumerGenerations: string[] = [];
+  const readConsumerGeneration = async () => (await inspector.query<{ lease_generation: string }>(
+    "SELECT lease_generation FROM surf_ace_allocator.annotation_consumers WHERE fleet_id=$1 AND consumer_id=$2",
+    [cluster.config.fleetId, "port-recovery-consumer"],
+  )).rows[0]!.lease_generation;
+  try {
+    await inspector.connect();
+    const initial = await PostgresCustodyAdapter.initializeAbsentFleet(cluster.config, "alloc_port-recovery");
+    await initial.release();
+    await adminQuery(cluster.adminUrl,
+      await readFile(new URL("../sql/003_annotation_journal.sql", import.meta.url), "utf8"));
+    const seed = await PostgresCustodyAdapter.acquireWriter(cluster.config);
+    try { await seed.openAnnotationConsumer("port-recovery-consumer", "watch"); }
+    finally { await seed.release(); }
+    registry = await startRecoveringAllocatorServer(serverConfig(cluster), { recovered }, {
+      async afterCommitBeforeAck(operation) {
+        if (operation !== "acquire_writer" || !occupyOnAcquisition) return;
+        occupyOnAcquisition = false;
+        await new Promise<void>((resolve, reject) => {
+          occupied.once("error", reject);
+          occupied.listen(port, "127.0.0.1", resolve);
+        });
+      },
+      async afterStartupFailure(error) {
+        assert.equal((error as NodeJS.ErrnoException).code, "EADDRINUSE");
+        consumerGenerations.push(await readConsumerGeneration());
+        // Release the real port only after two observed failed bind attempts.
+        if (consumerGenerations.length === 2) {
+          await new Promise<void>((resolve, reject) => occupied.close((error) => error ? reject(error) : resolve()));
+        }
+      },
+    });
+    port = registry.server.address.port;
+    const before = await registry.server.diagnostics();
+    const beforeConsumer = BigInt(await readConsumerGeneration());
+    occupyOnAcquisition = true;
+    await adminQuery(cluster.adminUrl, `SELECT pg_terminate_backend(${before.leaseBackendPid})`);
+    await recovery;
+    assert.equal(consumerGenerations.length, 2);
+    assert.equal(BigInt(consumerGenerations[0]!), beforeConsumer + 1n,
+      "the replacement writer fences the old annotation consumer once");
+    assert.equal(consumerGenerations[1], consumerGenerations[0],
+      "a failed bind must not reset the annotation consumer again");
+    assert.equal(await readConsumerGeneration(), consumerGenerations[0]);
+    const after = await registry.server.diagnostics();
+    assert.equal(after.leaseGeneration, before.leaseGeneration + 1);
+    assert.equal(after.registrationReady, true);
+    assert.equal(registry.server.address.port, port);
+  } finally {
+    if (occupied.listening) await new Promise<void>((resolve) => occupied.close(() => resolve()));
+    await registry?.close();
+    await inspector.end();
+    await cluster.stop();
+  }
+});
+
 test("configured server registers two stable clients and deduplicates reconnect", { timeout: 90_000 }, async () => {
   const cluster = await startCluster();
   let allocator: AllocatorServer | null = null;

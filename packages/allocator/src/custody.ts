@@ -169,7 +169,7 @@ export type RestoreReady = {
 };
 
 export type AdapterTestHooks = {
-  afterStartupFailure?: () => Promise<void> | void;
+  afterStartupFailure?: (error: unknown) => Promise<void> | void;
   afterCommitBeforeAck?: (operation: string) => Promise<void> | void;
   afterCommitBeforeWitness?: (operation: string) => Promise<void> | void;
   afterMutationBeforeCommit?: (operation: string, client: PgClient) => Promise<void> | void;
@@ -361,7 +361,7 @@ export class PostgresCustodyAdapter<M extends LeaseMode> {
         return await operation();
       } catch (error) {
         if (!retrySignal || retrySignal.aborted || this.hasLostConnection) throw error;
-        await this.hooks.afterStartupFailure?.();
+        await this.hooks.afterStartupFailure?.(error);
         await delay(2_000, undefined, { signal: retrySignal });
       }
     }

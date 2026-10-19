@@ -302,51 +302,56 @@ export class AllocatorServer {
     try {
       const custody = await PostgresCustodyAdapter.acquireWriter(config.custody, testHooks, retrySignal);
       try {
-        return await custody.finishStartup(async () => {
-          const authority = new WindowLabelAuthority(custody);
-          await authority.recoverPreparedTransactions();
-          await custody.validateLease();
-          // Annotation state must be verified and old leases fenced before the
-          // listener can accept a hello. Older schemas remain direct-only.
-          let annotationInstalled = true;
+        const authority = new WindowLabelAuthority(custody);
+        // Retry only the unfinished stage: a busy port must not repeat completed
+        // journal verification or invalidate annotation consumer leases again.
+        await custody.finishStartup(() => authority.recoverPreparedTransactions(), retrySignal);
+        await custody.finishStartup(() => custody.validateLease(), retrySignal);
+        const annotationInstalled = await custody.finishStartup(async () => {
           try {
             await custody.annotationInfo();
+            return true;
           } catch (error) {
             if ((error as { code?: string }).code !== "42883") throw error;
-            annotationInstalled = false;
+            return false;
           }
-          let annotationVerified = true;
-          if (annotationInstalled) {
-            try {
-              await custody.verifyAnnotationStartup();
-            } catch (error) {
-              if (asAllocatorError(error).code !== "annotation_journal_unverified") throw error;
-              annotationVerified = false;
-            }
-          }
-          const webSocketServer = new WebSocketServer({
-            host: config.listenHost,
-            port: config.listenPort,
-          });
-          await new Promise<void>((resolve, reject) => {
-            webSocketServer.once("listening", resolve);
-            webSocketServer.once("error", reject);
-          });
-          const server = new AllocatorServer(
-            config,
-            hostLock,
-            custody,
-            authority,
-            webSocketServer,
-            annotationVerified,
-            new EndpointLeaseBook(
-              custody.token.leaseGeneration,
-              config.maxEndpointLeaseMs ?? DEFAULT_MAX_ENDPOINT_LEASE_MS,
-            ),
-          );
-          webSocketServer.on("connection", (socket) => server.accept(socket));
-          return server;
         }, retrySignal);
+        const annotationVerified = !annotationInstalled || await custody.finishStartup(async () => {
+          try {
+            await custody.verifyAnnotationStartup();
+            return true;
+          } catch (error) {
+            if (asAllocatorError(error).code !== "annotation_journal_unverified") throw error;
+            return false;
+          }
+        }, retrySignal);
+        const webSocketServer = await custody.finishStartup(async () => {
+          const listener = new WebSocketServer({ host: config.listenHost, port: config.listenPort });
+          try {
+            await new Promise<void>((resolve, reject) => {
+              listener.once("listening", resolve);
+              listener.once("error", reject);
+            });
+            return listener;
+          } catch (error) {
+            await new Promise<void>((resolve) => listener.close(() => resolve()));
+            throw error;
+          }
+        }, retrySignal);
+        const server = new AllocatorServer(
+          config,
+          hostLock,
+          custody,
+          authority,
+          webSocketServer,
+          annotationVerified,
+          new EndpointLeaseBook(
+            custody.token.leaseGeneration,
+            config.maxEndpointLeaseMs ?? DEFAULT_MAX_ENDPOINT_LEASE_MS,
+          ),
+        );
+        webSocketServer.on("connection", (socket) => server.accept(socket));
+        return server;
       } catch (error) {
         await custody.terminate();
         throw error;
