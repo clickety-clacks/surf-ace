@@ -3,6 +3,10 @@ name: Build standalone Surf Ace release
 on:
   workflow_dispatch:
     inputs:
+      product_commit:
+        description: Full commit SHA selected for the product tag; it must resolve to this exact commit.
+        required: true
+        type: string
       run_smoke:
         description: Run isolated Linux and macOS client/state acceptance after reproducible build comparison.
         required: true
@@ -25,7 +29,6 @@ env:
   NODE_VERSION: 24.3.0
   PNPM_VERSION: 10.15.1
   POSTGRES_VERSION: "16"
-  PRODUCT_COMMIT: 3d00b8ba8ed78bcec05eae065dc3b525db19ae0e
   PRODUCT_TAG: surf-ace-v0.2.10-rc1-r1
   PRODUCT_VERSION: 0.2.10-rc1
   RUST_VERSION: 1.89.0
@@ -36,12 +39,17 @@ env:
 jobs:
   guard:
     runs-on: macos-15
+    outputs:
+      product_commit: ${{ steps.identity.outputs.product_commit }}
     steps:
       - name: Require exact manual tooling and immutable product tags
+        id: identity
         env:
           GH_TOKEN: ${{ github.token }}
+          PRODUCT_COMMIT_INPUT: ${{ inputs.product_commit }}
         run: |
           set -euo pipefail
+          [[ "${PRODUCT_COMMIT_INPUT}" =~ ^[a-f0-9]{40}$ ]]
           peel_tag() {
             read -r object_type object_sha <<EOF
           $(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/$1" --jq '.object.type + " " + .object.sha')
@@ -60,10 +68,13 @@ jobs:
           tooling_remote="$(peel_tag "${TOOLING_TAG}")"
           product_remote="$(peel_tag "${PRODUCT_TAG}")"
           test "${tooling_remote}" = "${GITHUB_SHA}"
-          test "${product_remote}" = "${PRODUCT_COMMIT}"
+          test "${product_remote}" = "${PRODUCT_COMMIT_INPUT}"
+          printf 'product_commit=%s\n' "${product_remote}" >> "${GITHUB_OUTPUT}"
 
   build-linux:
     needs: guard
+    env:
+      PRODUCT_COMMIT: ${{ needs.guard.outputs.product_commit }}
     strategy:
       fail-fast: false
       matrix:
@@ -151,6 +162,8 @@ jobs:
 
   build-macos:
     needs: guard
+    env:
+      PRODUCT_COMMIT: ${{ needs.guard.outputs.product_commit }}
     strategy:
       fail-fast: false
       matrix:
@@ -301,7 +314,9 @@ jobs:
           if-no-files-found: error
 
   assemble:
-    needs: compare
+    needs: [compare, guard]
+    env:
+      PRODUCT_COMMIT: ${{ needs.guard.outputs.product_commit }}
     runs-on: macos-15
     steps:
       - name: Check out immutable tooling
@@ -355,7 +370,9 @@ jobs:
 
   smoke-linux:
     if: ${{ inputs.run_smoke }}
-    needs: assemble
+    needs: [assemble, guard]
+    env:
+      PRODUCT_COMMIT: ${{ needs.guard.outputs.product_commit }}
     runs-on: ubuntu-24.04
     steps:
       - name: Check out immutable tooling
@@ -442,13 +459,14 @@ jobs:
             test -z "$(ip route show default)"
             exec runuser -u "$smoke_user" -- env \
               PATH="$smoke_path" TMPDIR="$smoke_tmp" \
+              PRODUCT_COMMIT="$product_commit" \
               SURF_ACE_SMOKE_COMPONENT=linux \
               SURF_ACE_TIGHTBEAM_STATE_DRIVER="$state_driver" \
               xvfb-run -a "$smoke_node" tooling/scripts/release/smoke-tightbeam-release.mjs \
                 --source-dir source \
                 --source-commit "$product_commit" \
                 --tooling-commit "$tooling_commit" \
-                --candidate-commit 3d00b8ba8ed78bcec05eae065dc3b525db19ae0e \
+                --candidate-commit "$product_commit" \
                 --manifest build/release/tightbeam/surf-ace-v0.2.10-rc1-manifest.json
           ' bash "$smoke_user" "$smoke_tmp" "$smoke_node" "$PATH" \
             "$SURF_ACE_TIGHTBEAM_STATE_DRIVER" "$PRODUCT_COMMIT" "$GITHUB_SHA" \
@@ -491,7 +509,9 @@ jobs:
 
   smoke-macos:
     if: ${{ inputs.run_smoke }}
-    needs: assemble
+    needs: [assemble, guard]
+    env:
+      PRODUCT_COMMIT: ${{ needs.guard.outputs.product_commit }}
     runs-on: xcode-27
     steps:
       - name: Check out immutable tooling
@@ -540,7 +560,7 @@ jobs:
             --source-dir source \
             --source-commit "${PRODUCT_COMMIT}" \
             --tooling-commit "${GITHUB_SHA}" \
-            --candidate-commit 3d00b8ba8ed78bcec05eae065dc3b525db19ae0e \
+            --candidate-commit "${PRODUCT_COMMIT}" \
             --manifest build/release/tightbeam/surf-ace-v0.2.10-rc1-manifest.json \
             > macos-smoke.json
           node tooling/scripts/release/write-smoke-receipt.mjs \
