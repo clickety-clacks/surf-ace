@@ -593,7 +593,7 @@ test("real PostgreSQL allocator authority", { timeout: 180_000 }, async (t) => {
       const claim = { clientId, surfaceId, paneId: "pane-1", paneLineageId: "pl_registration-recovery" };
       const emptyRegistration = { clientId, surfaces: [{ surfaceId, panes: [] }] };
       const fullRegistration = { clientId, surfaces: [{ surfaceId, panes: [{
-        paneId: claim.paneId, paneLineageId: claim.paneLineageId,
+        paneId: claim.paneId, paneLabel: 0, paneLineageId: claim.paneLineageId,
       }] }] };
       const originalWitnessId = cluster.config.witnessServerId;
       try {
@@ -606,13 +606,16 @@ test("real PostgreSQL allocator authority", { timeout: 180_000 }, async (t) => {
           (error) => error instanceof AllocatorError && error.code === "writer_fence_unavailable");
 
         cluster.config.witnessServerId = "divergent-witness";
-        assert.equal((await wire.request("client.register", fullRegistration)).ok, false,
+        const fenced = await wire.request("client.register", fullRegistration);
+        assert.equal(fenced.ok, false,
           "an unvalidated writer cannot admit a registration through a divergent witness");
+        assert.equal(fenced.error?.code, "registration_failed");
+        assert.notEqual(fenced.error?.message, "invalid_pane", "the valid pending pane reaches the writer fence");
 
         cluster.config.witnessServerId = originalWitnessId;
         const startedAt = Date.now();
         const recovered = await wire.request("client.register", fullRegistration);
-        assert.equal(recovered.ok, true);
+        assert.equal(recovered.ok, true, JSON.stringify(recovered));
         assert.ok(Date.now() - startedAt < 30_000, "registration recovers within the bounded window");
         const originalSurfaces = (first.payload as { surfaces: Array<{ windowLabel: number }> }).surfaces;
         const recoveredSurfaces = (recovered.payload as {
@@ -1141,6 +1144,8 @@ test("configured server registers two stable clients and deduplicates reconnect"
       allocatorId: "alloc_registration-test",
       fleetId: cluster.config.fleetId,
     });
+    const currentRegistration = await reader.request("fleet.topology");
+    assert.equal(currentRegistration.ok, true);
     const existing = fixtures[0];
     const reconfirmed = await reader.request("client.register", {
       clientId: existing.clientId,
@@ -1167,7 +1172,11 @@ test("configured server registers two stable clients and deduplicates reconnect"
       assert.equal(response.ok, true);
       return response.payload as { clients: Array<{ clientId: string; surfaces: Array<{ windowLabel: string; panes: Array<{ paneAddress: string }> }> }> };
     };
+    // Restore current capabilities after the intentional legacy registration before comparing reconnects.
+    await clients[0].synchronize();
     const first = await topology();
+    assert.deepEqual(first.clients, currentRegistration.payload?.clients,
+      "legacy-to-current negotiation preserves the original identities, labels and allocation generations");
     assert.equal(first.clients.length, 2);
     const firstPaneNumbers = first.clients.flatMap((client) => client.surfaces.flatMap((surface) =>
       surface.panes.map((pane) => Number(pane.paneAddress.slice(surface.windowLabel.length)))));
