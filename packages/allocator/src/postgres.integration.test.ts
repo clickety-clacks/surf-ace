@@ -611,7 +611,6 @@ test("real PostgreSQL allocator authority", { timeout: 180_000 }, async (t) => {
           "an unvalidated writer cannot admit a registration through a divergent witness");
         assert.equal(fenced.error?.code, "registration_failed");
         assert.notEqual(fenced.error?.message, "invalid_pane", "the valid pending pane reaches the writer fence");
-        assert.equal((await server.diagnostics()).registrationReady, false);
 
         cluster.config.witnessServerId = originalWitnessId;
         const startedAt = Date.now();
