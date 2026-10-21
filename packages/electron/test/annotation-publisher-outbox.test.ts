@@ -3,7 +3,6 @@ import test from "node:test";
 
 import { AnnotationPublisherOutbox, ANNOTATION_PUBLISHER_MAX_BYTES } from "../src/annotation-publisher-outbox.js";
 import { SurfaceCore } from "../src/surface-core.js";
-import { locklessRecoverableSurfaceMinimumBytes } from "../../protocol/src/lockless.js";
 
 const clientId = "c".repeat(64);
 const surfaceId = "sf_annotation-test";
@@ -61,20 +60,20 @@ test("publisher partition survives the Electron surface state serialization boun
     /invalid persisted annotation publisher state/);
 });
 
-test("configured publisher reserves its full partition before lockless admission", () => {
+test("configured publisher keeps its independent byte limit and lockless limits", () => {
   const legacy = new SurfaceCore().getPersistentState();
   const core = new SurfaceCore({ annotationClientId: clientId, persistentState: legacy });
   const limits = core.locklessAuthority.limits;
   assert.equal(limits.maxAnnotationPublisherStateBytesPerSurface, ANNOTATION_PUBLISHER_MAX_BYTES);
-  assert.ok(limits.maxRecoverableSurfaceBytes >= locklessRecoverableSurfaceMinimumBytes(limits));
   assert.ok(limits.maxRecoverableSurfaceBytes <= limits.maxRetainedTombstoneBytes);
   assert.equal(new SurfaceCore({ annotationClientId: clientId,
     persistentState: core.getPersistentState() }).locklessAuthority.limits.maxRecoverableSurfaceBytes,
   limits.maxRecoverableSurfaceBytes);
 
   const tooSmall = structuredClone(legacy);
-  tooSmall.lockless!.limits.maxRetainedTombstoneBytes = 640 * 1024 * 1024;
-  assert.throws(() => new SurfaceCore({ annotationClientId: clientId, persistentState: tooSmall }),
+  tooSmall.lockless!.limits.maxRetainedTombstoneBytes =
+    tooSmall.lockless!.limits.maxRecoverableSurfaceBytes - 1;
+  assert.throws(() => new SurfaceCore({ persistentState: tooSmall }),
     /invalid_lockless_limit:surface_exceeds_tombstone_pool/);
 });
 

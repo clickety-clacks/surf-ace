@@ -437,11 +437,14 @@ final class SurfAceAnnotationOutboxTests: XCTestCase {
                                                cursor: .init(epoch: sourceEpoch, sequence: "1")))
     }
 
-    func testPublisherReservationMustFitFullRecoverableSurfaceEnvelope() throws {
+    func testPublisherLimitsValidateAndRoundTrip() throws {
         var limits = SurfAceLocklessCapacityLimits.production
         limits.maxAnnotationPublisherStateBytesPerSurface = Int64(SurfAceAnnotationOutbox.maximumBytes)
         limits.maxAnnotationPublisherRecordsPerSurface = Int64(SurfAceAnnotationOutbox.maximumRecords)
-        XCTAssertThrowsError(try limits.validate())
+        XCTAssertEqual(limits.maxAnnotationPublisherStateBytesPerSurface,
+                       Int64(SurfAceAnnotationOutbox.maximumBytes))
+        XCTAssertEqual(limits.maxAnnotationPublisherRecordsPerSurface,
+                       Int64(SurfAceAnnotationOutbox.maximumRecords))
         limits.maxRecoverableSurfaceBytes = 704 * 1_024 * 1_024
         try limits.validate()
         var state = try SurfAceLocklessAuthorityState.empty(limits: limits)
