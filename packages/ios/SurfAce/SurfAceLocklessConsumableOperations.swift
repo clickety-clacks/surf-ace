@@ -338,9 +338,7 @@ enum SurfAceLocklessConsumableOperations {
             // Nested pane accounting must be current before encoding its container.
             tombstone.bytes = try SurfAceLocklessTopologyOperations.restoredSurfaceTombstoneBytes(
                 closedSequence: tombstone.closedSequence, scopes: tombstone.scopes,
-                surface: tombstone.surface, tombstoneId: tombstone.tombstoneId,
-                annotationPartitionBytes: state.annotationPublisher?.partitionBytes(
-                    surfaceId: tombstone.surface.surfaceId) ?? 0
+                surface: tombstone.surface, tombstoneId: tombstone.tombstoneId
             )
             state.surfaceTombstones[surfaceIndex] = tombstone
         }

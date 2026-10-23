@@ -445,7 +445,11 @@ final class SurfAceAnnotationOutboxTests: XCTestCase {
                        Int64(SurfAceAnnotationOutbox.maximumBytes))
         XCTAssertEqual(limits.maxAnnotationPublisherRecordsPerSurface,
                        Int64(SurfAceAnnotationOutbox.maximumRecords))
-        limits.maxRecoverableSurfaceBytes = 704 * 1_024 * 1_024
+        XCTAssertEqual(limits.maxRecoverableSurfaceBytes,
+                       SurfAceLocklessCapacityLimits.production.maxRecoverableSurfaceBytes)
+        XCTAssertLessThanOrEqual(limits.recoverableSurfaceMinimumBytes,
+                                 limits.maxRecoverableSurfaceBytes,
+                                 "publisher capacity is independent of surface recovery limits")
         try limits.validate()
         var state = try SurfAceLocklessAuthorityState.empty(limits: limits)
         state.annotationPublisher = try SurfAceAnnotationOutbox(clientId: "client-1", sourceEpoch: sourceEpoch)
@@ -455,11 +459,10 @@ final class SurfAceAnnotationOutboxTests: XCTestCase {
         XCTAssertEqual(restored.annotationPublisher, state.annotationPublisher)
     }
 
-    func testSurfaceCloseChargesPublisherPartitionAndRetainsItsSourceHistory() async throws {
+    func testSurfaceCloseRetainsPublisherPartitionAndItsSourceHistory() async throws {
         var limits = SurfAceLocklessCapacityLimits.production
         limits.maxAnnotationPublisherStateBytesPerSurface = Int64(SurfAceAnnotationOutbox.maximumBytes)
         limits.maxAnnotationPublisherRecordsPerSurface = Int64(SurfAceAnnotationOutbox.maximumRecords)
-        limits.maxRecoverableSurfaceBytes = 704 * 1_024 * 1_024
         var state = try SurfAceLocklessAuthorityState.empty(limits: limits)
         state.annotationPublisher = try SurfAceAnnotationOutbox(clientId: "client-1", sourceEpoch: sourceEpoch)
         let opened = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
@@ -468,6 +471,12 @@ final class SurfAceAnnotationOutboxTests: XCTestCase {
         _ = try state.annotationPublisher?.append(surfaceId: surfaceId, record: record())
         let pending = try XCTUnwrap(state.annotationPublisher?.head(surfaceId: surfaceId))
         let publisherBytes = try XCTUnwrap(state.annotationPublisher?.partitionBytes(surfaceId: surfaceId))
+        let publisherByteLimit = try XCTUnwrap(limits.maxAnnotationPublisherStateBytesPerSurface)
+        let publisherRecordLimit = try XCTUnwrap(limits.maxAnnotationPublisherRecordsPerSurface)
+        XCTAssertGreaterThan(publisherBytes, 0)
+        XCTAssertLessThanOrEqual(publisherBytes, publisherByteLimit)
+        XCTAssertLessThanOrEqual(Int64(state.annotationPublisher?.surfaces[surfaceId]?.fifo.count ?? 0),
+                                 publisherRecordLimit)
         let topologyRevision = try XCTUnwrap(state.liveSurfaces[surfaceId]?.topologyRevision)
         _ = try SurfAceLocklessTopologyOperations.surfaceWindowClose(
             state: &state, surfaceId: surfaceId,
@@ -477,7 +486,8 @@ final class SurfAceAnnotationOutboxTests: XCTestCase {
         let base = try SurfAceLocklessTopologyOperations.restoredSurfaceTombstoneBytes(
             closedSequence: tombstone.closedSequence, scopes: tombstone.scopes,
             surface: tombstone.surface, tombstoneId: tombstone.tombstoneId)
-        XCTAssertEqual(tombstone.bytes, base + publisherBytes)
+        XCTAssertEqual(tombstone.bytes, base)
+        XCTAssertEqual(try XCTUnwrap(state.annotationPublisher?.partitionBytes(surfaceId: surfaceId)), publisherBytes)
         XCTAssertEqual(state.annotationPublisher?.surfaces[surfaceId]?.fifo.first, pending)
         try state.validate()
 
@@ -495,8 +505,15 @@ final class SurfAceAnnotationOutboxTests: XCTestCase {
         let accepted = await adapter.snapshot()
         let updatedTombstone = try XCTUnwrap(accepted.surfaceTombstones.first)
         let remainingBytes = try XCTUnwrap(accepted.annotationPublisher?.partitionBytes(surfaceId: surfaceId))
-        XCTAssertEqual(updatedTombstone.bytes, base + remainingBytes)
-        XCTAssertLessThan(updatedTombstone.bytes, tombstone.bytes)
+        let acceptedSurface = try XCTUnwrap(accepted.annotationPublisher?.surfaces[surfaceId])
+        XCTAssertEqual(updatedTombstone.bytes, base)
+        XCTAssertLessThan(remainingBytes, publisherBytes)
+        XCTAssertTrue(acceptedSurface.fifo.isEmpty)
+        XCTAssertEqual(acceptedSurface.acceptedCursor?.sequence, "1")
+        XCTAssertEqual(acceptedSurface.nextSequence, 2)
+        XCTAssertEqual(accepted.annotationPublisher?.sourceEpoch, sourceEpoch)
+        XCTAssertEqual(accepted.annotationPublisher?.clientId, "client-1")
+        XCTAssertLessThanOrEqual(remainingBytes, publisherByteLimit)
         try accepted.validate()
     }
 
@@ -511,7 +528,8 @@ final class SurfAceAnnotationOutboxTests: XCTestCase {
         XCTAssertEqual(state.annotationPublisher?.clientId, "client-1")
         XCTAssertEqual(state.limits.maxAnnotationPublisherStateBytesPerSurface,
                        Int64(SurfAceAnnotationOutbox.maximumBytes))
-        XCTAssertEqual(state.limits.maxRecoverableSurfaceBytes, 704 * 1_024 * 1_024)
+        XCTAssertEqual(state.limits.maxRecoverableSurfaceBytes,
+                       SurfAceLocklessCapacityLimits.production.maxRecoverableSurfaceBytes)
         let restarted = try SurfAceLocklessRuntimeAdapter(store: store, annotationClientId: "client-1")
         let afterRestart = await restarted.snapshot()
         XCTAssertEqual(afterRestart.annotationPublisher?.sourceEpoch,
@@ -523,7 +541,6 @@ final class SurfAceAnnotationOutboxTests: XCTestCase {
         limits.maxRetainedTombstones = 1
         limits.maxAnnotationPublisherStateBytesPerSurface = Int64(SurfAceAnnotationOutbox.maximumBytes)
         limits.maxAnnotationPublisherRecordsPerSurface = Int64(SurfAceAnnotationOutbox.maximumRecords)
-        limits.maxRecoverableSurfaceBytes = 704 * 1_024 * 1_024
         var state = try SurfAceLocklessAuthorityState.empty(limits: limits)
         state.annotationPublisher = try SurfAceAnnotationOutbox(clientId: "client-1", sourceEpoch: sourceEpoch)
         let first = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
@@ -918,7 +935,6 @@ extension SurfAceAnnotationOutboxTests {
         var limits = SurfAceLocklessCapacityLimits.production
         limits.maxAnnotationPublisherStateBytesPerSurface = Int64(SurfAceAnnotationOutbox.maximumBytes)
         limits.maxAnnotationPublisherRecordsPerSurface = Int64(SurfAceAnnotationOutbox.maximumRecords)
-        limits.maxRecoverableSurfaceBytes = 704 * 1_024 * 1_024
         var state = try SurfAceLocklessAuthorityState.empty(limits: limits)
         state.annotationPublisher = try SurfAceAnnotationOutbox(clientId: "client-1", sourceEpoch: sourceEpoch)
         let opened = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
@@ -1012,7 +1028,6 @@ extension SurfAceAnnotationOutboxTests {
         var limits = SurfAceLocklessCapacityLimits.production
         limits.maxAnnotationPublisherStateBytesPerSurface = Int64(SurfAceAnnotationOutbox.maximumBytes)
         limits.maxAnnotationPublisherRecordsPerSurface = Int64(SurfAceAnnotationOutbox.maximumRecords)
-        limits.maxRecoverableSurfaceBytes = 704 * 1_024 * 1_024
         var state = try SurfAceLocklessAuthorityState.empty(limits: limits)
         state.annotationPublisher = try SurfAceAnnotationOutbox(clientId: "client-1", sourceEpoch: sourceEpoch)
         let opened = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
@@ -1058,7 +1073,6 @@ extension SurfAceAnnotationOutboxTests {
         var limits = SurfAceLocklessCapacityLimits.production
         limits.maxAnnotationPublisherStateBytesPerSurface = Int64(SurfAceAnnotationOutbox.maximumBytes)
         limits.maxAnnotationPublisherRecordsPerSurface = Int64(SurfAceAnnotationOutbox.maximumRecords)
-        limits.maxRecoverableSurfaceBytes = 704 * 1_024 * 1_024
         var state = try SurfAceLocklessAuthorityState.empty(limits: limits)
         state.annotationPublisher = try SurfAceAnnotationOutbox(clientId: "client-1", sourceEpoch: sourceEpoch)
         let first = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
@@ -1098,7 +1112,6 @@ extension SurfAceAnnotationOutboxTests {
         var limits = SurfAceLocklessCapacityLimits.production
         limits.maxAnnotationPublisherStateBytesPerSurface = Int64(SurfAceAnnotationOutbox.maximumBytes)
         limits.maxAnnotationPublisherRecordsPerSurface = Int64(SurfAceAnnotationOutbox.maximumRecords)
-        limits.maxRecoverableSurfaceBytes = 704 * 1_024 * 1_024
         var state = try SurfAceLocklessAuthorityState.empty(limits: limits)
         state.annotationPublisher = try SurfAceAnnotationOutbox(clientId: "client-1", sourceEpoch: sourceEpoch)
         let first = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
@@ -1136,7 +1149,6 @@ extension SurfAceAnnotationOutboxTests {
         var limits = SurfAceLocklessCapacityLimits.production
         limits.maxAnnotationPublisherStateBytesPerSurface = Int64(SurfAceAnnotationOutbox.maximumBytes)
         limits.maxAnnotationPublisherRecordsPerSurface = Int64(SurfAceAnnotationOutbox.maximumRecords)
-        limits.maxRecoverableSurfaceBytes = 704 * 1_024 * 1_024
         var state = try SurfAceLocklessAuthorityState.empty(limits: limits)
         state.annotationPublisher = try SurfAceAnnotationOutbox(clientId: "client-1", sourceEpoch: sourceEpoch)
         let opened = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
@@ -1182,7 +1194,6 @@ extension SurfAceAnnotationOutboxTests {
         var limits = SurfAceLocklessCapacityLimits.production
         limits.maxAnnotationPublisherStateBytesPerSurface = Int64(SurfAceAnnotationOutbox.maximumBytes)
         limits.maxAnnotationPublisherRecordsPerSurface = Int64(SurfAceAnnotationOutbox.maximumRecords)
-        limits.maxRecoverableSurfaceBytes = 704 * 1_024 * 1_024
         var state = try SurfAceLocklessAuthorityState.empty(limits: limits)
         state.annotationPublisher = try SurfAceAnnotationOutbox(clientId: "client-1", sourceEpoch: sourceEpoch)
         let opened = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
@@ -1237,7 +1248,6 @@ extension SurfAceAnnotationOutboxTests {
         var limits = SurfAceLocklessCapacityLimits.production
         limits.maxAnnotationPublisherStateBytesPerSurface = Int64(SurfAceAnnotationOutbox.maximumBytes)
         limits.maxAnnotationPublisherRecordsPerSurface = Int64(SurfAceAnnotationOutbox.maximumRecords)
-        limits.maxRecoverableSurfaceBytes = 704 * 1_024 * 1_024
         var state = try SurfAceLocklessAuthorityState.empty(limits: limits)
         state.annotationPublisher = try SurfAceAnnotationOutbox(clientId: "client-1", sourceEpoch: sourceEpoch)
         let opened = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
@@ -1310,7 +1320,6 @@ extension SurfAceAnnotationOutboxTests {
         var limits = SurfAceLocklessCapacityLimits.production
         limits.maxAnnotationPublisherStateBytesPerSurface = Int64(SurfAceAnnotationOutbox.maximumBytes)
         limits.maxAnnotationPublisherRecordsPerSurface = Int64(SurfAceAnnotationOutbox.maximumRecords)
-        limits.maxRecoverableSurfaceBytes = 704 * 1_024 * 1_024
         var state = try SurfAceLocklessAuthorityState.empty(limits: limits)
         state.annotationPublisher = try SurfAceAnnotationOutbox(clientId: "client-1", sourceEpoch: sourceEpoch)
         let opened = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
@@ -1386,7 +1395,6 @@ extension SurfAceAnnotationOutboxTests {
         var limits = SurfAceLocklessCapacityLimits.production
         limits.maxAnnotationPublisherStateBytesPerSurface = Int64(SurfAceAnnotationOutbox.maximumBytes)
         limits.maxAnnotationPublisherRecordsPerSurface = Int64(SurfAceAnnotationOutbox.maximumRecords)
-        limits.maxRecoverableSurfaceBytes = 704 * 1_024 * 1_024
         var state = try SurfAceLocklessAuthorityState.empty(limits: limits)
         state.annotationPublisher = try SurfAceAnnotationOutbox(clientId: "client-1", sourceEpoch: sourceEpoch)
         let opened = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
