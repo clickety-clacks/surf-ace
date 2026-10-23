@@ -1,5 +1,8 @@
 import XCTest
+import CryptoKit
 @testable import SurfAce
+
+private let allocationTestClientId = String(repeating: "a", count: 64)
 
 // Unit fixtures inject registry results when a scenario needs assigned labels.
 // Production operations may commit panes unnumbered until registry authority returns.
@@ -82,7 +85,7 @@ enum TestRegistryTopology {
 final class SurfAceLocklessTopologyOperationsTests: XCTestCase {
     func testPaneFinalCloseRemovesRestoreMaterialAndRetainsUnreadScopeWithFencedRelease() throws {
         var state = try SurfAceLocklessAuthorityState.empty()
-        state.registryBinding = .init(allocatorId: "alloc_test", clientId: "client-test", fleetId: "fleet-test")
+        state.registryBinding = .init(allocatorId: "alloc_test", clientId: allocationTestClientId, fleetId: "fleet-test")
         let surfaceId = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
             state: &state, expectedSurfaceSetRevision: 0
         ).surface.surfaceId
@@ -128,14 +131,18 @@ final class SurfAceLocklessTopologyOperationsTests: XCTestCase {
         let release = try XCTUnwrap(state.allocationReleaseIntents?.first)
         XCTAssertEqual(release.allocationGeneration, 42)
         XCTAssertEqual(release.allocatorId, "alloc_test")
-        XCTAssertEqual(release.clientId, "client-test")
+        XCTAssertEqual(release.clientId, allocationTestClientId)
         XCTAssertEqual(release.fleetId, "fleet-test")
         XCTAssertEqual(release.paneId, Int64(closedPaneId))
         XCTAssertEqual(release.paneLineageId, closedPane.paneLineageId)
         XCTAssertEqual(release.paneLabel, closedPane.paneLabel)
         XCTAssertEqual(release.sourceTombstoneId, close.tombstoneId)
         XCTAssertEqual(release.terminalRetirementRevision, close.topologyRevision)
-        XCTAssertEqual(release.idempotencyKey, "release:\(close.tombstoneId)")
+        XCTAssertEqual(release.idempotencyKey, release.releaseId)
+        let paneReleaseEvidence = "{\"allocationGeneration\":42,\"clientId\":\"\(allocationTestClientId)\",\"closeRevision\":\(close.topologyRevision),\"lineageId\":\"\(closedPane.paneLineageId)\",\"paneId\":\"\(closedPaneId)\",\"paneLabel\":\(closedPane.paneLabel),\"surfaceId\":\"\(surfaceId)\",\"terminalRetirementRevision\":\(close.topologyRevision),\"tombstoneId\":\"\(close.tombstoneId)\",\"tombstoneKind\":\"pane\"}"
+        let expectedReleaseId = SHA256.hash(data: Data(paneReleaseEvidence.utf8))
+            .map { String(format: "%02x", $0) }.joined()
+        XCTAssertEqual(release.releaseId, expectedReleaseId)
 
         let closedState = state
         XCTAssertThrowsError(try SurfAceLocklessTopologyOperations.paneRestore(
@@ -149,7 +156,7 @@ final class SurfAceLocklessTopologyOperationsTests: XCTestCase {
 
     func testWindowFinalCloseRetiresNestedAllocationsAndKeepsEveryUnreadScope() throws {
         var state = try SurfAceLocklessAuthorityState.empty()
-        state.registryBinding = .init(allocatorId: "alloc_test", clientId: "client-test", fleetId: "fleet-test")
+        state.registryBinding = .init(allocatorId: "alloc_test", clientId: allocationTestClientId, fleetId: "fleet-test")
         let surfaceId = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
             state: &state, expectedSurfaceSetRevision: 0
         ).surface.surfaceId
@@ -213,11 +220,268 @@ final class SurfAceLocklessTopologyOperationsTests: XCTestCase {
         )
         XCTAssertTrue(state.allocationReleaseIntents?.allSatisfy { $0.status == .pending } == true)
         XCTAssertTrue(state.allocationReleaseIntents?.contains {
-            $0.allocationKind == .pane && $0.sourceTombstoneId == nestedClose.tombstoneId
+            $0.allocationKind == .pane && $0.sourceTombstoneId == close.tombstoneId
+                && $0.sourceTombstoneKind == .surface
         } == true)
         XCTAssertEqual(state.terminalCloseRecords?.count, 3)
         XCTAssertEqual(close.tombstoneId, state.terminalCloseRecords?.first(where: { $0.allocationKind == .surface })?.recordId)
         try state.validate()
+    }
+
+    func testStartupFinalizesProvenLegacyPaneCloseButKeepsAnAmbiguousWindowAndItsOtherClaims() async throws {
+        var limits = SurfAceLocklessCapacityLimits.production
+        limits.maxAnnotationPublisherStateBytesPerSurface = Int64(SurfAceAnnotationOutbox.maximumBytes)
+        limits.maxAnnotationPublisherRecordsPerSurface = Int64(SurfAceAnnotationOutbox.maximumRecords)
+        limits.maxRecoverableSurfaceBytes = 704 * 1_024 * 1_024
+        var state = try SurfAceLocklessAuthorityState.empty(limits: limits)
+        state.registryBinding = .init(allocatorId: "alloc_test", clientId: allocationTestClientId, fleetId: "fleet-test")
+        state.annotationPublisher = try SurfAceAnnotationOutbox(
+            clientId: allocationTestClientId, sourceEpoch: "0123456789abcdef0123456789abcdef"
+        )
+        let surfaceId = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
+            state: &state, expectedSurfaceSetRevision: 0
+        ).surface.surfaceId
+        try SurfAceLocklessTopologyOperations.applyWindowLabels(
+            state: &state, assignments: [(surfaceId: surfaceId, windowLabel: "b")]
+        )
+        var surface = try XCTUnwrap(state.liveSurfaces[surfaceId])
+        surface.allocationGeneration = 30
+        var firstPane = try XCTUnwrap(surface.panes["1"])
+        firstPane.paneLabel = 1
+        firstPane.allocationGeneration = 41
+        surface.panes["1"] = firstPane
+        state.liveSurfaces[surfaceId] = surface
+        let split = try TestRegistryTopology.paneSplit(
+            state: &state, surfaceId: surfaceId, paneId: 1, count: 2,
+            direction: "horizontal", expectedTopologyRevision: 0
+        )
+        let closedPaneId = try XCTUnwrap(split.newPaneIds.first)
+        surface = try XCTUnwrap(state.liveSurfaces[surfaceId])
+        var closedPane = try XCTUnwrap(surface.panes[String(closedPaneId)])
+        closedPane.allocationGeneration = 42
+        surface.panes[String(closedPaneId)] = closedPane
+        state.liveSurfaces[surfaceId] = surface
+
+        var publisher = try XCTUnwrap(state.annotationPublisher)
+        let queuedRecord: [String: Any] = [
+            "paneId": closedPaneId, "frameId": "fr_0123456789abcdef0123456789abcdef",
+            "kind": "live_delta", "contentId": "content-1", "revision": 1,
+            "contentType": "html", "sourceTimestamp": "2026-10-06T23:00:00.000Z",
+            "viewport": ["scrollOffset": ["x": 0, "y": 0],
+                         "visibleRect": ["x": 0, "y": 0, "width": 100, "height": 100],
+                         "contentSize": ["width": 100, "height": 100], "zoomLevel": 1],
+            "payload": ["strokes": []],
+        ]
+        _ = try publisher.append(surfaceId: surfaceId, record: queuedRecord)
+        let queuedAnnotation = try XCTUnwrap(publisher.head(surfaceId: surfaceId))
+        _ = try publisher.beginFrame(
+            surfaceId: surfaceId, paneId: Int(closedPaneId), contextKey: "content-1",
+            contentId: "content-1", contentType: "html", revision: 1, url: nil,
+            scrollOffset: .init(x: 0, y: 0),
+            viewport: .init(width: 100, height: 100, scale: 1), openedAt: 1, image: "aW1hZ2U="
+        )
+        try publisher.recordStroke(
+            surfaceId: surfaceId, paneId: Int(closedPaneId),
+            stroke: .init(strokeId: "stroke-upgrade", points: [.init(x: 1, y: 1, pressure: nil)],
+                          bbox: .init(x: 1, y: 1, width: 1, height: 1), startedAt: 1, endedAt: 2)
+        )
+        publisher.setFrameCommitRequested(surfaceId: surfaceId, paneId: Int(closedPaneId), requested: true)
+        state.annotationPublisher = publisher
+
+        let encodedSurfaceId = try XCTUnwrap(surfaceId.addingPercentEncoding(withAllowedCharacters: .alphanumerics))
+        let paneScopeId = "pane:\(encodedSurfaceId):\(closedPaneId)"
+        _ = try SurfAceLocklessConsumableOperations.appendCommittedRecord(
+            in: &state, scopeId: paneScopeId, scopeKind: "pane", recordId: "record:legacy-pane-unread",
+            recordClass: .annotationFrame, payload: .object(["frameId": .string("legacy-unread-frame")])
+        )
+        let unreadPaneScope = try XCTUnwrap(state.scopes[paneScopeId])
+        let paneClose = try SurfAceLocklessTopologyOperations.paneClose(
+            state: &state, surfaceId: surfaceId, paneId: Int64(closedPaneId),
+            expectedTopologyRevision: split.topologyRevision
+        )
+        state.liveSurfaces[surfaceId]?.paneTombstones[0].origin = nil
+        let surfaceScopeId = "surface:\(encodedSurfaceId)"
+        _ = try SurfAceLocklessConsumableOperations.appendCommittedRecord(
+            in: &state, scopeId: surfaceScopeId, scopeKind: "surface",
+            recordId: "record:legacy-pane-close", recordClass: .topology,
+            payload: .object([
+                "closedSequence": .integer(paneClose.closedSequence),
+                "operation": .string("pane.close"),
+                "paneId": .integer(Int64(closedPaneId)),
+                "recoverable": .bool(true),
+                "tombstoneId": .string(paneClose.tombstoneId),
+                "topologyRevision": .integer(paneClose.topologyRevision),
+            ])
+        )
+        let windowClose = try SurfAceLocklessTopologyOperations.surfaceWindowClose(
+            state: &state, surfaceId: surfaceId, expectedSurfaceSetRevision: state.surfaceSetRevision,
+            expectedTopologyRevision: paneClose.topologyRevision
+        )
+        state.surfaceTombstones[0].origin = nil
+        XCTAssertEqual(state.surfaceTombstones[0].tombstoneId, windowClose.tombstoneId)
+
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SurfAceUpgradeTombstoneMigration-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = SurfAceLocklessGenerationStore(stateURL: directory.appendingPathComponent("authority-v1.json"))
+        try store.save(state)
+        let adapter = try SurfAceLocklessRuntimeAdapter(store: store)
+        let migrated = await adapter.snapshot()
+
+        XCTAssertTrue(migrated.liveSurfaces.isEmpty)
+        XCTAssertEqual(migrated.surfaceTombstones.count, 1)
+        let retainedWindow = try XCTUnwrap(migrated.surfaceTombstones.first)
+        XCTAssertEqual(retainedWindow.origin, .ambiguous)
+        XCTAssertEqual(retainedWindow.surface.allocationGeneration, 30)
+        XCTAssertEqual(retainedWindow.surface.paneTombstones.count, 0)
+        XCTAssertNil(retainedWindow.scopes[paneScopeId])
+        XCTAssertEqual(migrated.scopes[paneScopeId], unreadPaneScope)
+        XCTAssertEqual(migrated.scopes[paneScopeId]?.records.map(\.recordId), ["record:legacy-pane-unread"])
+        XCTAssertEqual(migrated.allocationReleaseIntents?.count, 1)
+        let paneRelease = try XCTUnwrap(migrated.allocationReleaseIntents?.first)
+        XCTAssertEqual(paneRelease.allocationKind, .pane)
+        XCTAssertEqual(paneRelease.allocationGeneration, 42)
+        XCTAssertEqual(paneRelease.sourceTombstoneId, paneClose.tombstoneId)
+        XCTAssertEqual(paneRelease.status, .pending)
+        var migratedPublisher = migrated.annotationPublisher
+        XCTAssertEqual(try migratedPublisher?.head(surfaceId: surfaceId), queuedAnnotation)
+        XCTAssertNil(migratedPublisher?.openFrame(surfaceId: surfaceId, paneId: Int(closedPaneId)))
+        XCTAssertFalse(migratedPublisher?.surfaces[surfaceId]?.fifo.contains(where: { entry in
+            guard let data = entry.canonical.data(using: .utf8),
+                  let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+            return value["kind"] as? String == "frame_commit"
+        }) ?? true)
+
+        var restored = migrated
+        let restore = try SurfAceLocklessTopologyOperations.surfaceWindowRestore(
+            state: &restored, tombstoneId: windowClose.tombstoneId,
+            expectedSurfaceSetRevision: migrated.surfaceSetRevision
+        )
+        XCTAssertEqual(restore.surface.surfaceId, surfaceId)
+        XCTAssertEqual(restore.surface.allocationGeneration, 30)
+        XCTAssertNil(restore.surface.panes[String(closedPaneId)])
+        XCTAssertEqual(restore.surface.panes["1"]?.allocationGeneration, 41)
+        try restored.validate()
+
+        let restarted = try SurfAceLocklessRuntimeAdapter(store: store)
+        let afterRestart = await restarted.snapshot()
+        XCTAssertEqual(afterRestart, migrated)
+    }
+
+    func testStartupKeepsLegacyPaneTombstoneRestorableWhenCloseEvidenceIsMissing() async throws {
+        var state = try SurfAceLocklessAuthorityState.empty()
+        state.registryBinding = .init(allocatorId: "alloc_test", clientId: allocationTestClientId, fleetId: "fleet-test")
+        let surfaceId = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
+            state: &state, expectedSurfaceSetRevision: 0
+        ).surface.surfaceId
+        try SurfAceLocklessTopologyOperations.applyWindowLabels(
+            state: &state, assignments: [(surfaceId: surfaceId, windowLabel: "c")]
+        )
+        var surface = try XCTUnwrap(state.liveSurfaces[surfaceId])
+        surface.allocationGeneration = 30
+        var originalPane = try XCTUnwrap(surface.panes["1"])
+        originalPane.paneLabel = 1
+        originalPane.allocationGeneration = 41
+        surface.panes["1"] = originalPane
+        state.liveSurfaces[surfaceId] = surface
+        let split = try TestRegistryTopology.paneSplit(
+            state: &state, surfaceId: surfaceId, paneId: 1, count: 2,
+            direction: "horizontal", expectedTopologyRevision: 0
+        )
+        let closedPaneId = try XCTUnwrap(split.newPaneIds.first)
+        surface = try XCTUnwrap(state.liveSurfaces[surfaceId])
+        var closedPane = try XCTUnwrap(surface.panes[String(closedPaneId)])
+        closedPane.allocationGeneration = 42
+        surface.panes[String(closedPaneId)] = closedPane
+        state.liveSurfaces[surfaceId] = surface
+        let close = try SurfAceLocklessTopologyOperations.paneClose(
+            state: &state, surfaceId: surfaceId, paneId: Int64(closedPaneId),
+            expectedTopologyRevision: split.topologyRevision
+        )
+        state.liveSurfaces[surfaceId]?.paneTombstones[0].origin = nil
+
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SurfAceAmbiguousPaneMigration-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = SurfAceLocklessGenerationStore(stateURL: directory.appendingPathComponent("authority-v1.json"))
+        try store.save(state)
+        let adapter = try SurfAceLocklessRuntimeAdapter(store: store)
+        let migrated = await adapter.snapshot()
+
+        let retainedSurface = try XCTUnwrap(migrated.liveSurfaces[surfaceId])
+        let retainedPane = try XCTUnwrap(retainedSurface.paneTombstones.first)
+        XCTAssertEqual(retainedPane.tombstoneId, close.tombstoneId)
+        XCTAssertEqual(retainedPane.origin, .ambiguous)
+        XCTAssertEqual(retainedPane.pane.paneId, Int64(closedPaneId))
+        XCTAssertEqual(retainedPane.pane.paneLabel, 2)
+        XCTAssertEqual(retainedPane.pane.allocationGeneration, 42)
+        XCTAssertTrue(migrated.allocationReleaseIntents?.isEmpty == true)
+
+        var restored = migrated
+        let restore = try SurfAceLocklessTopologyOperations.paneRestore(
+            state: &restored, surfaceId: surfaceId, tombstoneId: close.tombstoneId,
+            anchorPaneId: 1, direction: "horizontal",
+            expectedTopologyRevision: retainedSurface.topologyRevision,
+            assignedPaneLabel: retainedPane.pane.paneLabel
+        )
+        XCTAssertEqual(restore.paneId, Int64(closedPaneId))
+        XCTAssertEqual(restored.liveSurfaces[surfaceId]?.panes[String(closedPaneId)]?.paneLineageId,
+                       retainedPane.pane.paneLineageId)
+        XCTAssertEqual(restored.liveSurfaces[surfaceId]?.panes[String(closedPaneId)]?.allocationGeneration, 42)
+        try restored.validate()
+    }
+
+    func testStartupFinalizesAProvenLegacyWindowCloseWithChildReleasesBeforeWindowRelease() async throws {
+        var state = try SurfAceLocklessAuthorityState.empty()
+        state.registryBinding = .init(allocatorId: "alloc_test", clientId: allocationTestClientId, fleetId: "fleet-test")
+        let surfaceId = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
+            state: &state, expectedSurfaceSetRevision: 0
+        ).surface.surfaceId
+        try SurfAceLocklessTopologyOperations.applyWindowLabels(
+            state: &state, assignments: [(surfaceId: surfaceId, windowLabel: "a")]
+        )
+        var surface = try XCTUnwrap(state.liveSurfaces[surfaceId])
+        surface.allocationGeneration = 30
+        var pane = try XCTUnwrap(surface.panes["1"])
+        pane.paneLabel = 1
+        pane.allocationGeneration = 41
+        surface.panes["1"] = pane
+        state.liveSurfaces[surfaceId] = surface
+        surface = try XCTUnwrap(state.liveSurfaces[surfaceId])
+        let closeTopologyRevision = surface.topologyRevision
+        let encodedSurfaceId = try XCTUnwrap(surfaceId.addingPercentEncoding(withAllowedCharacters: .alphanumerics))
+        let surfaceScopeId = "surface:\(encodedSurfaceId)"
+        _ = try SurfAceLocklessConsumableOperations.appendCommittedRecord(
+            in: &state, scopeId: surfaceScopeId, scopeKind: "surface",
+            recordId: "record:legacy-window-close", recordClass: .topology,
+            payload: .object([
+                "operation": .string("surface.window.close"),
+                "surfaceId": .string(surfaceId),
+            ])
+        )
+        let close = try SurfAceLocklessTopologyOperations.surfaceWindowClose(
+            state: &state, surfaceId: surfaceId, expectedSurfaceSetRevision: state.surfaceSetRevision,
+            expectedTopologyRevision: surface.topologyRevision
+        )
+        state.surfaceTombstones[0].origin = nil
+
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SurfAceUpgradeWindowMigration-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = SurfAceLocklessGenerationStore(stateURL: directory.appendingPathComponent("authority-v1.json"))
+        try store.save(state)
+        let adapter = try SurfAceLocklessRuntimeAdapter(store: store)
+        let migrated = await adapter.snapshot()
+
+        XCTAssertTrue(migrated.liveSurfaces.isEmpty)
+        XCTAssertTrue(migrated.surfaceTombstones.isEmpty)
+        XCTAssertEqual(migrated.terminalCloseRecords?.count, 2)
+        XCTAssertEqual(migrated.allocationReleaseIntents?.map(\.allocationKind), [.pane, .surface])
+        XCTAssertEqual(migrated.allocationReleaseIntents?.map(\.allocationGeneration), [41, 30])
+        XCTAssertTrue(migrated.allocationReleaseIntents?.allSatisfy { $0.status == .pending } == true)
+        XCTAssertEqual(migrated.terminalCloseRecords?.first?.closeTopologyRevision, closeTopologyRevision)
+        XCTAssertEqual(migrated.terminalCloseRecords?.last?.sourceTombstoneId, close.tombstoneId)
+        try migrated.validate()
     }
 
     func testGlobalLabelsValidateWholeSetAndPreservePaneHistory() throws {

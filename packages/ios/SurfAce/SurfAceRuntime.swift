@@ -638,6 +638,22 @@ final class SurfAceRuntime {
                     verifiedUnconfirmed: verifiedUnconfirmed
                 )
             },
+            inputSnapshot: { [weak self] in
+                guard let self else { throw SurfAceRegistrationError.stopped }
+                let adapter = try self.ensureLocklessAdapter()
+                return try SurfAceRegistrationInput(state: await adapter.snapshot())
+            },
+            applyReply: { [weak self] reply, input in
+                guard let self else { throw SurfAceRegistrationError.stopped }
+                let adapter = try self.ensureLocklessAdapter()
+                let state = try await adapter.applyRegistration(reply, expectedInput: input)
+                self.confirmedPaneLabels = Dictionary(uniqueKeysWithValues: reply.assignments.flatMap { assignment in
+                    assignment.panes.map { pane in
+                        ("\(assignment.surfaceId):\(pane.paneLineageId)", pane.paneLabel)
+                    }
+                })
+                try self.projectLocklessAuthorityState(state)
+            },
             onError: { error in
                 let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
                 surfAceServerRuntimeLog(
@@ -1082,7 +1098,8 @@ final class SurfAceRuntime {
                 anchorPaneId: Int64(anchorPaneId),
                 direction: direction,
                 expectedTopologyRevision: surface.topologyRevision,
-                assignedPaneLabel: paneClaim.label ?? 0
+                assignedPaneLabel: paneClaim.label ?? 0,
+                assignedPaneGeneration: paneClaim.generation
             )
             return .object([
                 "commitSequence": .integer(sequence),
@@ -3299,62 +3316,72 @@ final class SurfAceRuntime {
         expectedTopologyRevision: Int64,
         newPaneCount: Int64,
         adapter: SurfAceLocklessRuntimeAdapter
-    ) async throws -> (labels: [Int64: Int64], lineages: [Int64: String]) {
+    ) async throws -> (labels: [Int64: Int64], lineages: [Int64: String], generations: [Int64: Int64]) {
         let snapshot = await adapter.snapshot()
         guard newPaneCount >= 0, newPaneCount <= snapshot.limits.maxPanesPerSurface,
               let surface = snapshot.liveSurfaces[surfaceId],
               surface.topologyRevision == expectedTopologyRevision else {
             throw SurfAceLocklessRuntimeAdapterError.invalidAdmission
         }
-        if newPaneCount == 0 { return ([:], [:]) }
+        if newPaneCount == 0 { return ([:], [:], [:]) }
         let occupied = Set(surface.panes.values.map(\.paneId))
             .union(surface.paneTombstones.map(\.pane.paneId))
         var proposedId = surface.nextPaneId
         var labels: [Int64: Int64] = [:]
         var lineages: [Int64: String] = [:]
+        var generations: [Int64: Int64] = [:]
         for _ in 0..<newPaneCount {
             while occupied.contains(proposedId) || lineages[proposedId] != nil { proposedId += 1 }
             let lineageId = "pl_\(UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased())"
             lineages[proposedId] = lineageId
             proposedId += 1
         }
-        guard let registration = centralRegistration else { return (labels, lineages) }
+        guard let registration = centralRegistration else { return (labels, lineages, generations) }
         for paneId in lineages.keys.sorted() {
             guard let lineageId = lineages[paneId] else {
                 throw SurfAceLocklessRuntimeAdapterError.invalidAdmission
             }
             do {
-                labels[paneId] = try await registration.claimPaneLabel(
+                let allocation = try await registration.claimPaneLabel(
                     surfaceId: surfaceId, paneId: paneId, paneLineageId: lineageId
                 )
+                labels[paneId] = allocation.paneLabel
+                if let generation = allocation.allocationGeneration {
+                    generations[paneId] = generation
+                }
             } catch {
                 if isPaneAllocatorUnavailable(error) { break }
                 throw error
             }
         }
-        return (labels, lineages)
+        return (labels, lineages, generations)
     }
 
     private func claimRestoredPaneLabel(
         surfaceId: String, tombstoneId: String,
         adapter: SurfAceLocklessRuntimeAdapter
-    ) async throws -> (paneId: Int64, lineageId: String, label: Int64?) {
+    ) async throws -> (paneId: Int64, lineageId: String, label: Int64?, generation: Int64?) {
         let snapshot = await adapter.snapshot()
         guard let pane = snapshot.liveSurfaces[surfaceId]?.paneTombstones
             .first(where: { $0.tombstoneId == tombstoneId })?.pane else {
             throw SurfAceLocklessRuntimeAdapterError.invalidAdmission
         }
         guard let registration = centralRegistration else {
-            return (pane.paneId, pane.paneLineageId, nil)
+            return (pane.paneId, pane.paneLineageId, nil, pane.allocationGeneration)
         }
         do {
-            let label = try await registration.claimPaneLabel(
+            let allocation = try await registration.claimPaneLabel(
                 surfaceId: surfaceId, paneId: pane.paneId, paneLineageId: pane.paneLineageId
             )
-            return (pane.paneId, pane.paneLineageId, label)
+            guard (pane.paneLabel == 0 || pane.paneLabel == allocation.paneLabel),
+                  (pane.allocationGeneration == nil
+                      || pane.allocationGeneration == allocation.allocationGeneration) else {
+                throw SurfAceLocklessRuntimeAdapterError.invalidAdmission
+            }
+            return (pane.paneId, pane.paneLineageId, allocation.paneLabel, allocation.allocationGeneration)
         } catch {
             if isPaneAllocatorUnavailable(error) {
-                return (pane.paneId, pane.paneLineageId, nil)
+                return (pane.paneId, pane.paneLineageId, nil, pane.allocationGeneration)
             }
             throw error
         }
@@ -3404,7 +3431,8 @@ final class SurfAceRuntime {
                         state: &state, surfaceId: surfaceId, paneId: paneId, count: count,
                         direction: direction, expectedTopologyRevision: expected,
                         assignedPaneLabels: paneClaims.labels,
-                        assignedPaneLineages: paneClaims.lineages
+                        assignedPaneLineages: paneClaims.lineages,
+                        assignedPaneGenerations: paneClaims.generations
                     )
                     return .object([
                         "newPaneIds": .array(result.newPaneIds.map(SurfAceLocklessJSON.integer)),
@@ -3497,7 +3525,8 @@ final class SurfAceRuntime {
                         state: &state, surfaceId: surfaceId, tombstoneId: tombstoneId,
                         anchorPaneId: anchorPaneId, direction: direction,
                         expectedTopologyRevision: expected,
-                        assignedPaneLabel: paneClaim.label ?? 0
+                        assignedPaneLabel: paneClaim.label ?? 0,
+                        assignedPaneGeneration: paneClaim.generation
                     )
                     return .object([
                         "operationReceipt": Self.locklessReceiptJSON(requestId: id, sequence: sequence),
@@ -3542,7 +3571,8 @@ final class SurfAceRuntime {
                         desired: desired, allowDestroyPaneIds: allowDestroyPaneIds,
                         expectedTopologyRevision: expected,
                         assignedPaneLabels: paneClaims.labels,
-                        assignedPaneLineages: paneClaims.lineages
+                        assignedPaneLineages: paneClaims.lineages,
+                        assignedPaneGenerations: paneClaims.generations
                     )
                     return .object([
                         "createdPaneIds": .array(result.createdPaneIds.map(SurfAceLocklessJSON.integer)),
