@@ -1528,6 +1528,76 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         XCTAssertTrue(restored.surfaceTombstones.isEmpty)
     }
 
+    func testProcessRestartRestoresLiveWindowHistoryAndDeliveredRecords() async throws {
+        let stateURL = try locklessStateURL()
+        let firstRuntime = SurfAceRuntime(
+            userDefaults: isolatedUserDefaults(), locklessStateURL: stateURL,
+            enableFleetDiscovery: false, isolatedTestLoopback: true
+        )
+        addTeardownBlock { await firstRuntime.stop() }
+        await firstRuntime.start()
+        let registered = await firstRuntime.registerSurfaceForScene(sceneKey: "scene-process-restart")
+        let original = try XCTUnwrap(registered)
+        let surfaceId = original.surfaceId
+        let adapter = try firstRuntime.locklessAuthorityForLocalMutation()
+
+        _ = try await adapter.commitLocalMutation(operation: "test.persist_surface_history") { state, _ in
+            _ = try SurfAceLocklessContentOperations.set(
+                state: &state,
+                intent: .init(
+                    content: .object(["html": .string("<p>first</p>")]),
+                    contentId: "content-first", contentType: "html",
+                    controllerProductName: nil, friendlyChatName: nil,
+                    paneId: 1, surfaceId: surfaceId
+                )
+            )
+            _ = try SurfAceLocklessContentOperations.set(
+                state: &state,
+                intent: .init(
+                    content: .object(["html": .string("<p>second</p>")]),
+                    contentId: "content-second", contentType: "html",
+                    controllerProductName: nil, friendlyChatName: nil,
+                    paneId: 1, surfaceId: surfaceId
+                )
+            )
+            _ = try SurfAceLocklessConsumableOperations.appendCommittedRecord(
+                in: &state,
+                scopeId: "surface:\(surfaceId)",
+                scopeKind: "surface",
+                recordId: "record:process-restart-history",
+                recordClass: .content,
+                payload: .object(["contentId": .string("content-second")])
+            )
+            return .object(["surfaceId": .string(surfaceId)])
+        }
+        let beforeRestart = await adapter.snapshot()
+        let originalMaterial = try XCTUnwrap(beforeRestart.liveSurfaces[surfaceId])
+        let originalScope = try XCTUnwrap(beforeRestart.scopes["surface:\(surfaceId)"])
+        XCTAssertTrue(originalScope.records.contains {
+            $0.recordId == "record:process-restart-history" && $0.recordClass == .content
+        })
+        await firstRuntime.stop()
+
+        let restartedRuntime = SurfAceRuntime(
+            userDefaults: isolatedUserDefaults(), locklessStateURL: stateURL,
+            enableFleetDiscovery: false, isolatedTestLoopback: true
+        )
+        addTeardownBlock { await restartedRuntime.stop() }
+        await restartedRuntime.start()
+        let afterRestart = try await restartedRuntime.locklessReadinessSnapshot().state
+        XCTAssertEqual(afterRestart.liveSurfaces[surfaceId], originalMaterial)
+        XCTAssertEqual(afterRestart.scopes["surface:\(surfaceId)"], originalScope)
+        let pane = try XCTUnwrap(afterRestart.liveSurfaces[surfaceId]?.panes["1"])
+        XCTAssertEqual(pane.history.visible.contentId, "content-second")
+        XCTAssertEqual(pane.history.back.compactMap(\.contentId), ["content-first"])
+
+        let registeredAgain = await restartedRuntime.registerSurfaceForScene(sceneKey: "scene-process-restart")
+        let restored = try XCTUnwrap(registeredAgain)
+        XCTAssertEqual(restored.surfaceId, original.surfaceId)
+        XCTAssertEqual(restored.windowLabel, original.windowLabel)
+        XCTAssertEqual(restored.panes.map(\.paneId), original.panes.map(\.paneId))
+    }
+
     func testLocklessProcessRestartLoadsGenerationBeforeRestoringTombstonedScene() async throws {
         let stateURL = try locklessStateURL()
         let firstRuntime = SurfAceRuntime(userDefaults: isolatedUserDefaults(), locklessStateURL: stateURL)
