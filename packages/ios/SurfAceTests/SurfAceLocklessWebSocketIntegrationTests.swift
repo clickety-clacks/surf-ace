@@ -2166,10 +2166,11 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         )
         let zeroLivePayload = payload(zeroLiveDiscovery)
         XCTAssertEqual((zeroLivePayload["surfaces"] as? [[String: Any]])?.count, 0)
-        XCTAssertTrue(
+        XCTAssertFalse(
             (zeroLivePayload["surfaceTombstones"] as? [[String: Any]])?.contains(where: {
                 (($0["surface"] as? [String: Any])?["surfaceId"] as? String) == surface.surfaceId
-            }) ?? false
+            }) ?? false,
+            "an explicitly closed surface has no restore path"
         )
         XCTAssertEqual(
             ((zeroLivePayload["capabilities"] as? [String: Any])?["protocolFeatures"] as? [String]),

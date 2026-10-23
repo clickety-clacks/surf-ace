@@ -1475,7 +1475,7 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         }
     }
 
-    func testLocklessZeroLiveSurfaceRestoresExactSurfaceAndPaneIdentity() async throws {
+    func testFinalWindowCloseDoesNotRestoreTheClosedSurfaceIdentity() async throws {
         let runtime = SurfAceRuntime(
             userDefaults: isolatedUserDefaults(),
             locklessStateURL: try locklessStateURL()
@@ -1488,13 +1488,16 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         await runtime.unregisterSurfaceForScene(sceneKey: "scene-zero-live")
         let closed = try await runtime.locklessReadinessSnapshot()
         XCTAssertTrue(closed.state.liveSurfaces.isEmpty)
-        XCTAssertEqual(closed.state.surfaceTombstones.map(\.surface.surfaceId), [original.surfaceId])
-        XCTAssertEqual(closed.state.sceneSurfaceIds["scene-zero-live"], original.surfaceId)
+        XCTAssertTrue(closed.state.surfaceTombstones.isEmpty)
+        XCTAssertNil(closed.state.sceneSurfaceIds["scene-zero-live"])
+        XCTAssertTrue(closed.state.terminalCloseRecords?.contains {
+            $0.allocationKind == .surface && $0.surfaceId == original.surfaceId
+        } == true)
 
         let registeredRestored = await runtime.registerSurfaceForScene(sceneKey: "scene-zero-live")
-        let restored = try XCTUnwrap(registeredRestored)
-        XCTAssertEqual(restored.surfaceId, original.surfaceId)
-        XCTAssertEqual(restored.panes.map(\.paneId), originalPaneIds)
+        let opened = try XCTUnwrap(registeredRestored)
+        XCTAssertNotEqual(opened.surfaceId, original.surfaceId)
+        XCTAssertEqual(opened.panes.map(\.paneId), originalPaneIds)
         let restoredState = try await runtime.locklessReadinessSnapshot()
         XCTAssertTrue(restoredState.state.surfaceTombstones.isEmpty)
     }
@@ -1643,14 +1646,29 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         XCTAssertEqual(restored.panes.map(\.paneId), original.panes.map(\.paneId))
     }
 
-    func testLocklessProcessRestartLoadsGenerationBeforeRestoringTombstonedScene() async throws {
+    func testLocklessProcessRestartRestoresLiveSceneIdentityAndAllocationGenerations() async throws {
         let stateURL = try locklessStateURL()
         let firstRuntime = SurfAceRuntime(userDefaults: isolatedUserDefaults(), locklessStateURL: stateURL)
         await firstRuntime.restoreLocklessAuthority(reason: "test_process_start")
         let registeredOriginal = await firstRuntime.registerSurfaceForScene(sceneKey: "scene-restart")
         let original = try XCTUnwrap(registeredOriginal)
         let originalPaneIds = original.panes.map(\.paneId)
-        await firstRuntime.unregisterSurfaceForScene(sceneKey: "scene-restart")
+        let firstAdapter = try firstRuntime.locklessAuthorityForLocalMutation()
+        _ = try await firstAdapter.commitLocalMutation(operation: "test.record-allocation-generations") { state, _ in
+            guard var surface = state.liveSurfaces[original.surfaceId] else {
+                throw SurfAceLocklessRuntimeAdapterError.invalidAdmission
+            }
+            surface.allocationGeneration = 73
+            for paneId in Array(surface.panes.keys) {
+                surface.panes[paneId]?.allocationGeneration = 90 + (Int64(paneId) ?? 0)
+            }
+            state.liveSurfaces[original.surfaceId] = surface
+            return .object(["surfaceId": .string(original.surfaceId)])
+        }
+        let beforeTermination = await firstAdapter.snapshot()
+        let materialBeforeTermination = try XCTUnwrap(beforeTermination.liveSurfaces[original.surfaceId])
+        firstRuntime.detachSurfaceForScene(sceneKey: "scene-restart")
+        await firstRuntime.stop()
 
         let restartedRuntime = SurfAceRuntime(userDefaults: isolatedUserDefaults(),
                                               locklessStateURL: stateURL,
@@ -1663,7 +1681,9 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         let readiness = try await restartedRuntime.locklessReadinessSnapshot()
         XCTAssertTrue(readiness.fullGenerationLoaded)
         XCTAssertTrue(readiness.readyForAdmission)
-        XCTAssertTrue(readiness.state.liveSurfaces.isEmpty)
+        XCTAssertEqual(readiness.state.liveSurfaces[original.surfaceId], materialBeforeTermination)
+        XCTAssertTrue(readiness.state.surfaceTombstones.isEmpty)
+        XCTAssertEqual(readiness.state.sceneSurfaceIds["scene-restart"], original.surfaceId)
 
         let registeredRestored = await restartedRuntime.registerSurfaceForScene(sceneKey: "scene-restart")
         let restored = try XCTUnwrap(registeredRestored)
@@ -1734,7 +1754,7 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         XCTAssertTrue(terminal.state.targetApplyWorkItems.isEmpty)
     }
 
-    func testLocalPaneCloseRestoreUsesSharedRecoverableTopologyAuthority() async throws {
+    func testLocalPaneFinalCloseCannotRestoreItsRemovedIdentity() async throws {
         let runtime = SurfAceRuntime(
             userDefaults: isolatedUserDefaults(),
             locklessStateURL: try locklessStateURL()
@@ -1766,19 +1786,23 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         let closedState = try await runtime.locklessReadinessSnapshot()
         let closed = closedState.state.liveSurfaces[surfaceId]
         XCTAssertNil(closed?.panes[String(createdPaneId)])
-        XCTAssertEqual(closed?.paneTombstones.map(\.tombstoneId), [tombstoneId])
+        XCTAssertTrue(closed?.paneTombstones.isEmpty == true)
+        XCTAssertTrue(closedState.state.terminalCloseRecords?.contains {
+            $0.allocationKind == .pane && $0.paneId == Int64(createdPaneId)
+                && $0.sourceTombstoneId == tombstoneId
+        } == true)
 
-        let restoredPaneId = try await runtime.restorePaneLocally(
-            surfaceId: surfaceId,
-            tombstoneId: tombstoneId,
-            anchorPaneId: 1,
-            direction: "vertical"
-        )
-        XCTAssertEqual(restoredPaneId, Int(createdPaneId))
-        let restoredState = try await runtime.locklessReadinessSnapshot()
-        let restored = restoredState.state.liveSurfaces[surfaceId]
-        XCTAssertNotNil(restored?.panes[String(createdPaneId)])
-        XCTAssertTrue(restored?.paneTombstones.isEmpty == true)
+        do {
+            _ = try await runtime.restorePaneLocally(
+                surfaceId: surfaceId,
+                tombstoneId: tombstoneId,
+                anchorPaneId: 1,
+                direction: "vertical"
+            )
+            XCTFail("a final-closed pane must not restore")
+        } catch { }
+        let afterRejectedRestore = try await runtime.locklessReadinessSnapshot()
+        XCTAssertEqual(afterRejectedRestore.state, closedState.state)
     }
 
     private func isolatedUserDefaults() -> UserDefaults {
