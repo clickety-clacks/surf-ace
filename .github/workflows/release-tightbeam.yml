@@ -12,6 +12,11 @@ on:
         required: true
         type: boolean
         default: false
+      run_linux_smoke_only:
+        description: Run only the network-isolated Linux smoke; leave run_smoke and publish_release false.
+        required: true
+        type: boolean
+        default: false
       publish_release:
         description: Publish only after both smoke receipts and protected environment approval.
         required: true
@@ -372,7 +377,7 @@ jobs:
           retention-days: 30
 
   smoke-linux:
-    if: ${{ inputs.run_smoke }}
+    if: ${{ inputs.run_smoke || inputs.run_linux_smoke_only }}
     needs: [assemble, guard]
     env:
       PRODUCT_COMMIT: ${{ needs.guard.outputs.product_commit }}
