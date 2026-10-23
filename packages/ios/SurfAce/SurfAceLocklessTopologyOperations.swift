@@ -613,6 +613,9 @@ enum SurfAceLocklessTopologyOperations {
             }
             let tombstone = candidate.surfaceTombstones[index]
             if let closeRevision = provenSurfaceCloseRevision(tombstone) {
+                // A proven window close covers every captured pane, including pane tombstones
+                // whose own close origin is ambiguous. Bind all of them to this one post-close
+                // surface revision; their earlier pane revisions remain in the retained history.
                 try finalizeSurfaceTombstone(
                     state: &candidate, index: index, closeTopologyRevision: closeRevision
                 )

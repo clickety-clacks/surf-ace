@@ -350,6 +350,15 @@ final class SurfAceLocklessTopologyOperationsTests: XCTestCase {
         XCTAssertEqual(paneRelease.allocationGeneration, 42)
         XCTAssertEqual(paneRelease.sourceTombstoneId, paneClose.tombstoneId)
         XCTAssertEqual(paneRelease.status, .pending)
+        XCTAssertEqual(paneRelease.closeTopologyRevision, paneClose.topologyRevision)
+        let historicalPaneClose = try XCTUnwrap(
+            migrated.scopes[surfaceScopeId]?.records.first(where: { $0.recordId == "record:legacy-pane-close" })
+        )
+        if case .object(let payload) = historicalPaneClose.payload {
+            XCTAssertEqual(payload["topologyRevision"], .integer(paneClose.topologyRevision))
+        } else {
+            XCTFail("Expected the interim pane-close record to remain historical metadata")
+        }
         var migratedPublisher = migrated.annotationPublisher
         XCTAssertEqual(try migratedPublisher?.head(surfaceId: surfaceId), queuedAnnotation)
         XCTAssertNil(migratedPublisher?.openFrame(surfaceId: surfaceId, paneId: Int(closedPaneId)))
@@ -454,10 +463,52 @@ final class SurfAceLocklessTopologyOperationsTests: XCTestCase {
         pane.allocationGeneration = 41
         surface.panes["1"] = pane
         state.liveSurfaces[surfaceId] = surface
+        let split = try TestRegistryTopology.paneSplit(
+            state: &state, surfaceId: surfaceId, paneId: 1, count: 3,
+            direction: "horizontal", expectedTopologyRevision: 0
+        )
+        let nestedClosedPaneId = try XCTUnwrap(split.newPaneIds.first)
+        let remainingSplitPaneId = try XCTUnwrap(split.newPaneIds.dropFirst().first)
         surface = try XCTUnwrap(state.liveSurfaces[surfaceId])
-        let preCloseTopologyRevision = surface.topologyRevision
+        for (paneId, label, generation) in [
+            (Int64(1), Int64(1), Int64(41)),
+            (nestedClosedPaneId, Int64(2), Int64(42)),
+            (remainingSplitPaneId, Int64(3), Int64(43)),
+        ] {
+            var allocatedPane = try XCTUnwrap(surface.panes[String(paneId)])
+            allocatedPane.paneLabel = label
+            allocatedPane.allocationGeneration = generation
+            surface.panes[String(paneId)] = allocatedPane
+        }
+        state.liveSurfaces[surfaceId] = surface
+        let paneClose = try SurfAceLocklessTopologyOperations.paneClose(
+            state: &state, surfaceId: surfaceId, paneId: nestedClosedPaneId,
+            expectedTopologyRevision: split.topologyRevision
+        )
+        let historicalPaneCloseRevision = paneClose.topologyRevision
         let encodedSurfaceId = try XCTUnwrap(surfaceId.addingPercentEncoding(withAllowedCharacters: .alphanumerics))
         let surfaceScopeId = "surface:\(encodedSurfaceId)"
+        _ = try SurfAceLocklessConsumableOperations.appendCommittedRecord(
+            in: &state, scopeId: surfaceScopeId, scopeKind: "surface",
+            recordId: "record:legacy-pane-close", recordClass: .topology,
+            payload: .object([
+                "closedSequence": .integer(paneClose.closedSequence),
+                "operation": .string("pane.close"),
+                "paneId": .integer(nestedClosedPaneId),
+                "recoverable": .bool(true),
+                "surfaceId": .string(surfaceId),
+                "tombstoneId": .string(paneClose.tombstoneId),
+                "topologyRevision": .integer(historicalPaneCloseRevision),
+            ])
+        )
+        state.liveSurfaces[surfaceId]?.paneTombstones[0].origin = .ambiguous
+        let rename = try SurfAceLocklessTopologyOperations.paneRename(
+            state: &state, surfaceId: surfaceId, paneId: remainingSplitPaneId,
+            name: "after-pane-close", expectedTopologyRevision: historicalPaneCloseRevision
+        )
+        surface = try XCTUnwrap(state.liveSurfaces[surfaceId])
+        let preCloseTopologyRevision = surface.topologyRevision
+        XCTAssertEqual(rename.topologyRevision, historicalPaneCloseRevision + 1)
         _ = try SurfAceLocklessConsumableOperations.appendCommittedRecord(
             in: &state, scopeId: surfaceScopeId, scopeKind: "surface",
             recordId: "record:legacy-window-close", recordClass: .topology,
@@ -471,6 +522,7 @@ final class SurfAceLocklessTopologyOperationsTests: XCTestCase {
             expectedTopologyRevision: surface.topologyRevision
         )
         state.surfaceTombstones[0].origin = nil
+        XCTAssertEqual(state.surfaceTombstones[0].surface.paneTombstones.first?.origin, .ambiguous)
 
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("SurfAceUpgradeWindowMigration-\(UUID().uuidString)", isDirectory: true)
@@ -482,16 +534,31 @@ final class SurfAceLocklessTopologyOperationsTests: XCTestCase {
 
         XCTAssertTrue(migrated.liveSurfaces.isEmpty)
         XCTAssertTrue(migrated.surfaceTombstones.isEmpty)
-        XCTAssertEqual(migrated.terminalCloseRecords?.count, 2)
-        XCTAssertEqual(migrated.allocationReleaseIntents?.map(\.allocationKind), [.pane, .surface])
-        XCTAssertEqual(migrated.allocationReleaseIntents?.map(\.allocationGeneration), [41, 30])
+        XCTAssertEqual(migrated.terminalCloseRecords?.count, 4)
+        XCTAssertEqual(migrated.allocationReleaseIntents?.map(\.allocationKind), [.pane, .pane, .pane, .surface])
+        XCTAssertEqual(migrated.allocationReleaseIntents?.map(\.allocationGeneration), [41, 42, 43, 30])
         XCTAssertTrue(migrated.allocationReleaseIntents?.allSatisfy { $0.status == .pending } == true)
+        let committedCloseTopologyRevision = preCloseTopologyRevision + 1
+        XCTAssertEqual(preCloseTopologyRevision, 3)
+        XCTAssertEqual(historicalPaneCloseRevision, 2)
         XCTAssertTrue(migrated.allocationReleaseIntents?.allSatisfy {
-            $0.closeTopologyRevision == preCloseTopologyRevision + 1
+            $0.closeTopologyRevision == committedCloseTopologyRevision
+                && $0.sourceTombstoneKind == .surface
+                && $0.sourceTombstoneId == close.tombstoneId
         } == true)
         XCTAssertTrue(migrated.terminalCloseRecords?.allSatisfy {
-            $0.closeTopologyRevision == preCloseTopologyRevision + 1
+            $0.closeTopologyRevision == committedCloseTopologyRevision
+                && $0.sourceTombstoneKind == .surface
+                && $0.sourceTombstoneId == close.tombstoneId
         } == true)
+        let historicalPaneClose = try XCTUnwrap(
+            migrated.scopes[surfaceScopeId]?.records.first(where: { $0.recordId == "record:legacy-pane-close" })
+        )
+        if case .object(let payload) = historicalPaneClose.payload {
+            XCTAssertEqual(payload["topologyRevision"], .integer(historicalPaneCloseRevision))
+        } else {
+            XCTFail("Expected the old pane revision to remain in historical metadata")
+        }
         XCTAssertEqual(migrated.terminalCloseRecords?.last?.sourceTombstoneId, close.tombstoneId)
         try migrated.validate()
     }
