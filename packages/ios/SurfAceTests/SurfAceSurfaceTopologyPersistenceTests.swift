@@ -2012,12 +2012,12 @@ final class SurfAceHostZoomViewportTests: XCTestCase {
     }
     func testBrowserResizeRetainsMountedViewSelectionAndSnapshotCoordinates() async throws {
         let trace = SurfAceBrowserResizeDiagnosticTrace()
-        func traceRect(_ rect: CGRect) -> String {
-            let minX = String(describing: rect.minX)
-            let minY = String(describing: rect.minY)
+        func traceRect(_ rect: SurfAceRect) -> String {
+            let x = String(describing: rect.x)
+            let y = String(describing: rect.y)
             let width = String(describing: rect.width)
             let height = String(describing: rect.height)
-            return "x=\(minX),y=\(minY),width=\(width),height=\(height)"
+            return "x=\(x),y=\(y),width=\(width),height=\(height)"
         }
         defer {
             let attachment = XCTAttachment(data: Data(trace.text().utf8), uniformTypeIdentifier: "public.plain-text")
@@ -2248,13 +2248,17 @@ final class SurfAceHostZoomViewportTests: XCTestCase {
             XCTAssertEqual(try XCTUnwrap(dom["width"]) * 1.275, Double(size.width), accuracy: 1.3)
             XCTAssertEqual(try XCTUnwrap(dom["height"]) * 1.275, Double(size.height), accuracy: 1.3)
             let captured = await host.fetchSnapshot()
+            let snapshotPresent = String(captured != nil)
+            let snapshotSelectionText = captured?.selection?.text ?? "nil"
+            let snapshotSelectionRect = captured?.selection?.boundingRect.map { traceRect($0) } ?? "nil"
+            let snapshotScrollX = String(describing: captured?.viewport.scrollOffset.x)
+            let snapshotScrollY = String(describing: captured?.viewport.scrollOffset.y)
+            let snapshotImageBase64Present = String(captured?.imageBase64 != nil)
             trace.record("snapshot.fetch.result", fields: [
-                "resizeIndex": String(resizeIndex), "present": String(captured != nil),
-                "selectionText": captured?.selection?.text ?? "nil",
-                "selectionRect": captured?.selection?.boundingRect.map { traceRect($0) } ?? "nil",
-                "scrollX": String(describing: captured?.viewport.scrollOffset.x),
-                "scrollY": String(describing: captured?.viewport.scrollOffset.y),
-                "imageBase64Present": String(captured?.imageBase64 != nil)
+                "resizeIndex": String(resizeIndex), "present": snapshotPresent,
+                "selectionText": snapshotSelectionText, "selectionRect": snapshotSelectionRect,
+                "scrollX": snapshotScrollX, "scrollY": snapshotScrollY,
+                "imageBase64Present": snapshotImageBase64Present
             ])
             let snapshot = try XCTUnwrap(captured)
             let selected = try XCTUnwrap(snapshot.selection?.boundingRect)
