@@ -1528,6 +1528,51 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         XCTAssertTrue(restored.surfaceTombstones.isEmpty)
     }
 
+    func testDiscardingOneOfSeveralWindowSessionsFinalClosesOnlyThatWindow() async throws {
+        let runtime = SurfAceRuntime(
+            userDefaults: isolatedUserDefaults(), locklessStateURL: try locklessStateURL(),
+            enableFleetDiscovery: false, isolatedTestLoopback: true
+        )
+        addTeardownBlock { await runtime.stop() }
+        await runtime.start()
+        let firstRegistered = await runtime.registerSurfaceForScene(sceneKey: "scene-explicit-one")
+        let secondRegistered = await runtime.registerSurfaceForScene(sceneKey: "scene-remains-live")
+        let first = try XCTUnwrap(firstRegistered)
+        let second = try XCTUnwrap(secondRegistered)
+
+        await runtime.finalizeDiscardedSceneSessions(["scene-explicit-one"])
+
+        let state = try await runtime.locklessReadinessSnapshot().state
+        XCTAssertNil(state.liveSurfaces[first.surfaceId])
+        XCTAssertNotNil(state.liveSurfaces[second.surfaceId])
+        XCTAssertTrue(state.surfaceTombstones.isEmpty)
+        XCTAssertNil(state.sceneSurfaceIds["scene-explicit-one"])
+        XCTAssertEqual(state.sceneSurfaceIds["scene-remains-live"], second.surfaceId)
+    }
+
+    func testDiscardingEveryKnownWindowSessionIsAmbiguousAndRestoresAll() async throws {
+        let runtime = SurfAceRuntime(
+            userDefaults: isolatedUserDefaults(), locklessStateURL: try locklessStateURL(),
+            enableFleetDiscovery: false, isolatedTestLoopback: true
+        )
+        addTeardownBlock { await runtime.stop() }
+        await runtime.start()
+        let firstRegistered = await runtime.registerSurfaceForScene(sceneKey: "scene-exit-a")
+        let secondRegistered = await runtime.registerSurfaceForScene(sceneKey: "scene-exit-b")
+        let first = try XCTUnwrap(firstRegistered)
+        let second = try XCTUnwrap(secondRegistered)
+        let before = try await runtime.locklessReadinessSnapshot().state
+
+        await runtime.finalizeDiscardedSceneSessions(["scene-exit-a", "scene-exit-b"])
+
+        let after = try await runtime.locklessReadinessSnapshot().state
+        XCTAssertEqual(after.liveSurfaces[first.surfaceId], before.liveSurfaces[first.surfaceId])
+        XCTAssertEqual(after.liveSurfaces[second.surfaceId], before.liveSurfaces[second.surfaceId])
+        XCTAssertEqual(after.sceneSurfaceIds, before.sceneSurfaceIds)
+        XCTAssertTrue(after.surfaceTombstones.isEmpty)
+        XCTAssertTrue(after.terminalCloseRecords?.isEmpty == true)
+    }
+
     func testProcessRestartRestoresLiveWindowHistoryAndDeliveredRecords() async throws {
         let stateURL = try locklessStateURL()
         let firstRuntime = SurfAceRuntime(
