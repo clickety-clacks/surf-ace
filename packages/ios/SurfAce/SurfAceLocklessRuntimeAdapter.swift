@@ -200,9 +200,6 @@ actor SurfAceLocklessRuntimeAdapter {
                 var proposed = state.limits
                 if proposed.maxAnnotationPublisherStateBytesPerSurface == nil,
                    proposed.maxAnnotationPublisherRecordsPerSurface == nil {
-                    if proposed == .production {
-                        proposed.maxRecoverableSurfaceBytes = 704 * 1_024 * 1_024
-                    }
                     proposed.maxAnnotationPublisherStateBytesPerSurface = Int64(SurfAceAnnotationOutbox.maximumBytes)
                     proposed.maxAnnotationPublisherRecordsPerSurface = Int64(SurfAceAnnotationOutbox.maximumRecords)
                 }
@@ -1382,8 +1379,7 @@ actor SurfAceLocklessRuntimeAdapter {
                 let tombstone = state.surfaceTombstones[index]
                 state.surfaceTombstones[index].bytes = try SurfAceLocklessTopologyOperations.restoredSurfaceTombstoneBytes(
                     closedSequence: tombstone.closedSequence, scopes: tombstone.scopes,
-                    surface: tombstone.surface, tombstoneId: tombstone.tombstoneId,
-                    annotationPartitionBytes: publisher.partitionBytes(surfaceId: surfaceId)
+                    surface: tombstone.surface, tombstoneId: tombstone.tombstoneId
                 )
             }
             return result

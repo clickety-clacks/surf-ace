@@ -487,15 +487,13 @@ enum SurfAceLocklessTopologyOperations {
         closedSequence: Int64,
         scopes: [String: SurfAceLocklessConsumableScope],
         surface: SurfAceLocklessSurfaceMaterial,
-        tombstoneId: String,
-        annotationPartitionBytes: Int64 = 0
+        tombstoneId: String
     ) throws -> Int64 {
         try surfaceTombstoneBytes(
             closedSequence: closedSequence,
             scopes: scopes,
             surface: surface,
-            tombstoneId: tombstoneId,
-            annotationPartitionBytes: annotationPartitionBytes
+            tombstoneId: tombstoneId
         )
     }
 
@@ -603,8 +601,7 @@ private extension SurfAceLocklessTopologyOperations {
     static func paneTombstoneBytes(closedSequence: Int64, pane: SurfAceLocklessPaneMaterial, scope: SurfAceLocklessConsumableScope, tombstoneId: String) throws -> Int64 {
         0
     }
-    static func surfaceTombstoneBytes(closedSequence: Int64, scopes: [String: SurfAceLocklessConsumableScope], surface: SurfAceLocklessSurfaceMaterial, tombstoneId: String,
-                                      annotationPartitionBytes: Int64 = 0) throws -> Int64 {
+    static func surfaceTombstoneBytes(closedSequence: Int64, scopes: [String: SurfAceLocklessConsumableScope], surface: SurfAceLocklessSurfaceMaterial, tombstoneId: String) throws -> Int64 {
         0
     }
 

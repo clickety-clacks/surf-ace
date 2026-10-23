@@ -98,7 +98,6 @@ struct SurfAceLocklessCapacityLimits: Codable, Equatable, Sendable {
         return maxSurfaceRecoverableBaseBytes
             + maxSurfaceConsumableBytes
             + maxAdmittedControllerEntries * maxConsumableCursorStateBytesPerScope
-            + (maxAnnotationPublisherStateBytesPerSurface ?? 0)
             + (maxPanesPerSurface + maxRetainedTombstones) * paneEnvelope
     }
 
