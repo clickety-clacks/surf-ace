@@ -2094,8 +2094,8 @@ final class SurfAceHostZoomViewportTests: XCTestCase {
                 "url": observedWeb.url?.absoluteString ?? "nil"
             ])
             guard change.newValue == false, observedWeb.url == pageURL else { return }
-            trace.record("fixture.pageLoad.expectation.fulfill", fields: ["url": pageURL.absoluteString])
             pageLoad.fulfill()
+            trace.record("fixture.pageLoad.expectation.fulfilled", fields: ["url": pageURL.absoluteString])
         }
         trace.record("observer.registration.complete", fields: ["keyPath": "WKWebView.isLoading"])
         defer { pageLoadObservation.invalidate() }
@@ -2140,7 +2140,7 @@ final class SurfAceHostZoomViewportTests: XCTestCase {
         trace.record("observer.invalidated", fields: ["keyPath": "WKWebView.url"])
         _ = await navigationResult.value
         trace.record("renderBrowserURL.awaitReturned")
-        trace.record("fixture.pageLoad.gatePassed", fields: ["url": web.url?.absoluteString ?? "nil", "isLoading": String(web.isLoading)])
+        trace.record("fixture.pageLoad.postWait.continuation", fields: ["url": web.url?.absoluteString ?? "nil", "isLoading": String(web.isLoading)])
         XCTAssertEqual(web.url, pageURL)
         let loadedDocument = try await web.evaluateJavaScript("document.getElementById('selected')?.textContent")
         trace.record("fixture.document.selectedText", fields: ["value": String(describing: loadedDocument)])
