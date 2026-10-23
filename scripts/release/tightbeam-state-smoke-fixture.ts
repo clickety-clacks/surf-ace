@@ -1293,7 +1293,7 @@ async function freshInstallMain(options: Options) {
   await fs.mkdir(options.stateRoot, { recursive: true, mode: 0o700 });
   const migrationEvidence = await packagedV023MigrationSmoke(options);
   const clusterRoot = path.join(options.stateRoot, "postgres");
-  const cluster = await startCluster(clusterRoot, path.join(options.candidateRoot, "schemas/allocator/001_allocator.sql"));
+  const cluster = await startCluster(clusterRoot, path.join(options.candidateRoot, "schemas/allocator/001_allocator.sql"), false);
   const cliStateRoot = path.join(options.stateRoot, "cli");
   const clientHome = path.join(options.stateRoot, "client-home");
   const registryLauncher = path.join(options.candidateRoot, "bin/surf-ace-server");
@@ -1322,6 +1322,8 @@ async function freshInstallMain(options: Options) {
       path.join(options.candidateRoot, "schemas/allocator/003_annotation_journal.sql")]);
     await command(path.join(cluster.postgresBin, "psql"), [cluster.adminUrl, "-v", "ON_ERROR_STOP=1", "-f",
       path.join(options.candidateRoot, "schemas/allocator/004_pane_label_reuse.sql")]);
+    const initialization = await PostgresCustodyAdapter.initializeAbsentFleet(cluster.config, "alloc_release-smoke");
+    await initialization.release();
     registryProcess = await startPackagedServer(registryLauncher, registryConfig, cluster.root, "fresh-install-registry");
     const registryEndpoint = registryProcess.endpoint;
     const initialRegistryHealth = registryProcess.health;
