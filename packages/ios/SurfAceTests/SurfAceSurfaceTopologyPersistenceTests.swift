@@ -2012,6 +2012,13 @@ final class SurfAceHostZoomViewportTests: XCTestCase {
     }
     func testBrowserResizeRetainsMountedViewSelectionAndSnapshotCoordinates() async throws {
         let trace = SurfAceBrowserResizeDiagnosticTrace()
+        func traceRect(_ rect: CGRect) -> String {
+            let minX = String(describing: rect.minX)
+            let minY = String(describing: rect.minY)
+            let width = String(describing: rect.width)
+            let height = String(describing: rect.height)
+            return "x=\(minX),y=\(minY),width=\(width),height=\(height)"
+        }
         defer {
             let attachment = XCTAttachment(data: Data(trace.text().utf8), uniformTypeIdentifier: "public.plain-text")
             attachment.name = "browser-resize-event-trace"
@@ -2150,7 +2157,7 @@ final class SurfAceHostZoomViewportTests: XCTestCase {
             CGSize(width: 1024, height: 820), CGSize(width: 820, height: 1024), CGSize(width: 600, height: 400)
         ].enumerated() {
             trace.record("resize.begin", fields: [
-                "index": String(resizeIndex), "width": String(size.width), "height": String(size.height),
+                "index": String(resizeIndex), "width": String(describing: size.width), "height": String(describing: size.height),
                 "firstResize": String(resizeIndex == 0)
             ])
             window.frame.size = size
@@ -2244,7 +2251,7 @@ final class SurfAceHostZoomViewportTests: XCTestCase {
             trace.record("snapshot.fetch.result", fields: [
                 "resizeIndex": String(resizeIndex), "present": String(captured != nil),
                 "selectionText": captured?.selection?.text ?? "nil",
-                "selectionRect": captured?.selection?.boundingRect.map { "x=\($0.minX),y=\($0.minY),width=\($0.width),height=\($0.height)" } ?? "nil",
+                "selectionRect": captured?.selection?.boundingRect.map { traceRect($0) } ?? "nil",
                 "scrollX": String(describing: captured?.viewport.scrollOffset.x),
                 "scrollY": String(describing: captured?.viewport.scrollOffset.y),
                 "imageBase64Present": String(captured?.imageBase64 != nil)
@@ -2253,7 +2260,7 @@ final class SurfAceHostZoomViewportTests: XCTestCase {
             let selected = try XCTUnwrap(snapshot.selection?.boundingRect)
             trace.record("snapshot.assertionInputs", fields: [
                 "resizeIndex": String(resizeIndex), "selectionText": snapshot.selection?.text ?? "nil",
-                "selectionRect": "x=\(selected.minX),y=\(selected.minY),width=\(selected.width),height=\(selected.height)",
+                "selectionRect": traceRect(selected),
                 "scrollX": String(snapshot.viewport.scrollOffset.x), "scrollY": String(snapshot.viewport.scrollOffset.y)
             ])
             XCTAssertEqual(snapshot.selection?.text, "Selected text")
@@ -2265,7 +2272,7 @@ final class SurfAceHostZoomViewportTests: XCTestCase {
                 "scrollX": String(describing: scrollCapture?.viewport.scrollOffset.x),
                 "scrollY": String(describing: scrollCapture?.viewport.scrollOffset.y),
                 "selectionText": scrollCapture?.selection?.text ?? "nil",
-                "selectionRect": scrollCapture?.selection?.boundingRect.map { "x=\($0.minX),y=\($0.minY),width=\($0.width),height=\($0.height)" } ?? "nil"
+                "selectionRect": scrollCapture?.selection?.boundingRect.map { traceRect($0) } ?? "nil"
             ])
             let scroll = try XCTUnwrap(scrollCapture)
             XCTAssertEqual(scroll.viewport.scrollOffset, snapshot.viewport.scrollOffset)
@@ -2292,10 +2299,13 @@ final class SurfAceHostZoomViewportTests: XCTestCase {
             let imageData = try XCTUnwrap(Data(base64Encoded: try XCTUnwrap(snapshot.imageBase64)))
             let image = try XCTUnwrap(UIImage(data: imageData))
             let bitmap = try XCTUnwrap(image.cgImage)
+            let screenScale = String(describing: window.screen.scale)
+            let expectedWidthPoints = String(describing: size.width)
+            let expectedHeightPoints = String(describing: size.height)
             trace.record("snapshot.image.assertionInputs", fields: [
                 "resizeIndex": String(resizeIndex), "widthPixels": String(bitmap.width),
-                "heightPixels": String(bitmap.height), "screenScale": String(window.screen.scale),
-                "expectedWidthPoints": String(size.width), "expectedHeightPoints": String(size.height)
+                "heightPixels": String(bitmap.height), "screenScale": screenScale,
+                "expectedWidthPoints": expectedWidthPoints, "expectedHeightPoints": expectedHeightPoints
             ])
             XCTAssertEqual(Double(bitmap.width), Double(size.width * window.screen.scale), accuracy: 1)
             XCTAssertEqual(Double(bitmap.height), Double(size.height * window.screen.scale), accuracy: 1)
