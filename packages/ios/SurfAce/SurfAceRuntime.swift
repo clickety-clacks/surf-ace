@@ -782,6 +782,13 @@ final class SurfAceRuntime {
         removeSurfaceModel(sceneKey: sceneKey, persistProjection: true)
     }
 
+    /// Drops the in-memory projection for a scene that UIKit disconnected.
+    /// A disconnect can be memory reclamation or process lifecycle cleanup, so
+    /// it must leave the durable live surface and its scene mapping untouched.
+    func detachSurfaceForScene(sceneKey: String) {
+        removeSurfaceModel(sceneKey: sceneKey, persistProjection: true, broadcastRemoval: false)
+    }
+
     func registerSurfaceForScene(sceneKey: String, scene: UIScene? = nil) async -> SurfAceSurfaceModel? {
         guard let adapter = locklessAdapter else {
             return registerSurface(sceneKey: sceneKey, scene: scene)
@@ -1015,7 +1022,11 @@ final class SurfAceRuntime {
         return Int(paneId)
     }
 
-    private func removeSurfaceModel(sceneKey: String, persistProjection: Bool) {
+    private func removeSurfaceModel(
+        sceneKey: String,
+        persistProjection: Bool,
+        broadcastRemoval: Bool = true
+    ) {
         sceneDisconnectObserversBySceneKey.removeValue(forKey: sceneKey)?.invalidate()
         guard let surfaceId = surfaceIdBySceneKey.removeValue(forKey: sceneKey),
               let surface = surfaceById.removeValue(forKey: surfaceId) else {
@@ -1035,10 +1046,12 @@ final class SurfAceRuntime {
         }
         surfaces.removeAll { $0.surfaceId == surfaceId }
 
-        broadcastLifecycleEvent(
-            op: "event.surface_removed",
-            payload: ["surfaceId": surfaceId]
-        )
+        if broadcastRemoval {
+            broadcastLifecycleEvent(
+                op: "event.surface_removed",
+                payload: ["surfaceId": surfaceId]
+            )
+        }
 
         refreshBonjourTXT()
     }
@@ -1214,9 +1227,7 @@ final class SurfAceRuntime {
         }
 
         let observer = SurfAceSceneDisconnectObserver { [weak self] in
-            Task { @MainActor in
-                await self?.unregisterSurfaceForScene(sceneKey: sceneKey)
-            }
+            self?.detachSurfaceForScene(sceneKey: sceneKey)
         }
         observer.observe(sceneObject: scene)
         sceneDisconnectObserversBySceneKey[sceneKey] = observer

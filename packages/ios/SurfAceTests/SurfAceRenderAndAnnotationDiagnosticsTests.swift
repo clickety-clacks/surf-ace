@@ -1499,6 +1499,35 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         XCTAssertTrue(restoredState.state.surfaceTombstones.isEmpty)
     }
 
+    func testLocklessSceneDisconnectDetachesProjectionAndKeepsLiveAuthorityForReconnect() async throws {
+        let runtime = SurfAceRuntime(
+            userDefaults: isolatedUserDefaults(),
+            locklessStateURL: try locklessStateURL()
+        )
+        await runtime.restoreLocklessAuthority(reason: "test_process_start")
+        let registered = await runtime.registerSurfaceForScene(sceneKey: "scene-involuntary-loss")
+        let original = try XCTUnwrap(registered)
+        let before = try await runtime.locklessReadinessSnapshot().state
+        let originalMaterial = try XCTUnwrap(before.liveSurfaces[original.surfaceId])
+
+        runtime.detachSurfaceForScene(sceneKey: "scene-involuntary-loss")
+
+        XCTAssertTrue(runtime.surfaces.isEmpty)
+        let detached = try await runtime.locklessReadinessSnapshot().state
+        XCTAssertEqual(detached.liveSurfaces[original.surfaceId], originalMaterial)
+        XCTAssertEqual(detached.sceneSurfaceIds["scene-involuntary-loss"], original.surfaceId)
+        XCTAssertTrue(detached.surfaceTombstones.isEmpty)
+
+        let registeredAgain = await runtime.registerSurfaceForScene(sceneKey: "scene-involuntary-loss")
+        let reconnected = try XCTUnwrap(registeredAgain)
+        XCTAssertEqual(reconnected.surfaceId, original.surfaceId)
+        XCTAssertEqual(reconnected.windowLabel, original.windowLabel)
+        XCTAssertEqual(reconnected.panes.map(\.paneId), original.panes.map(\.paneId))
+        let restored = try await runtime.locklessReadinessSnapshot().state
+        XCTAssertEqual(restored.liveSurfaces[original.surfaceId], originalMaterial)
+        XCTAssertTrue(restored.surfaceTombstones.isEmpty)
+    }
+
     func testLocklessProcessRestartLoadsGenerationBeforeRestoringTombstonedScene() async throws {
         let stateURL = try locklessStateURL()
         let firstRuntime = SurfAceRuntime(userDefaults: isolatedUserDefaults(), locklessStateURL: stateURL)
