@@ -529,6 +529,10 @@ enum SurfAceLocklessTopologyOperations {
             try assertSurfaceSet(expectedSurfaceSetRevision, candidate)
             let surface = try liveSurface(candidate, surfaceId)
             try assertTopology(expectedTopologyRevision, surface)
+            guard surface.topologyRevision < 9_007_199_254_740_991 else {
+                throw Error.invalidAuthorityState("topology_revision_exhausted")
+            }
+            let closeTopologyRevision = surface.topologyRevision + 1
             guard candidate.sequences.nextClosedSequence < Int64.max else {
                 throw Error.invalidAuthorityState("close_sequence_exhausted")
             }
@@ -559,7 +563,7 @@ enum SurfAceLocklessTopologyOperations {
                     recordId: paneRecordId,
                     sourceTombstoneId: recordId,
                     sourceTombstoneKind: .surface,
-                    closeTopologyRevision: surface.topologyRevision,
+                    closeTopologyRevision: closeTopologyRevision,
                     terminalRetirementRevision: terminalRevision
                 )
             }
@@ -573,7 +577,7 @@ enum SurfAceLocklessTopologyOperations {
                 recordId: recordId,
                 sourceTombstoneId: recordId,
                 sourceTombstoneKind: .surface,
-                closeTopologyRevision: surface.topologyRevision,
+                closeTopologyRevision: closeTopologyRevision,
                 terminalRetirementRevision: terminalRevision
             )
             if var publisher = candidate.annotationPublisher {
@@ -884,7 +888,9 @@ enum SurfAceLocklessTopologyOperations {
     private static func provenSurfaceCloseRevision(
         _ tombstone: SurfAceLocklessSurfaceTombstone
     ) -> Int64? {
-        if tombstone.origin == .explicitWindowClose { return tombstone.surface.topologyRevision }
+        guard tombstone.surface.topologyRevision < 9_007_199_254_740_991 else { return nil }
+        let closeTopologyRevision = tombstone.surface.topologyRevision + 1
+        if tombstone.origin == .explicitWindowClose { return closeTopologyRevision }
         guard tombstone.origin == nil,
               let scope = tombstone.scopes[surfaceScopeId(tombstone.surface.surfaceId)],
               scope.scopeId == surfaceScopeId(tombstone.surface.surfaceId),
@@ -898,7 +904,7 @@ enum SurfAceLocklessTopologyOperations {
               operation == "surface.window.close",
               case .string(let surfaceId) = payload["surfaceId"],
               surfaceId == tombstone.surface.surfaceId else { return nil }
-        return tombstone.surface.topologyRevision
+        return closeTopologyRevision
     }
 
     private static func finalizePaneTombstone(

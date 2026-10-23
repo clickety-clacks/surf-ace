@@ -206,6 +206,7 @@ final class SurfAceLocklessTopologyOperationsTests: XCTestCase {
             state: &state, surfaceId: surfaceId, expectedSurfaceSetRevision: 1,
             expectedTopologyRevision: nestedClose.topologyRevision
         )
+        let committedCloseTopologyRevision = nestedClose.topologyRevision + 1
 
         XCTAssertTrue(state.liveSurfaces.isEmpty)
         XCTAssertTrue(state.surfaceTombstones.isEmpty)
@@ -223,7 +224,13 @@ final class SurfAceLocklessTopologyOperationsTests: XCTestCase {
             $0.allocationKind == .pane && $0.sourceTombstoneId == close.tombstoneId
                 && $0.sourceTombstoneKind == .surface
         } == true)
+        XCTAssertTrue(state.allocationReleaseIntents?.allSatisfy {
+            $0.closeTopologyRevision == committedCloseTopologyRevision
+        } == true)
         XCTAssertEqual(state.terminalCloseRecords?.count, 3)
+        XCTAssertTrue(state.terminalCloseRecords?.allSatisfy {
+            $0.closeTopologyRevision == committedCloseTopologyRevision
+        } == true)
         XCTAssertEqual(close.tombstoneId, state.terminalCloseRecords?.first(where: { $0.allocationKind == .surface })?.recordId)
         try state.validate()
     }
@@ -448,7 +455,7 @@ final class SurfAceLocklessTopologyOperationsTests: XCTestCase {
         surface.panes["1"] = pane
         state.liveSurfaces[surfaceId] = surface
         surface = try XCTUnwrap(state.liveSurfaces[surfaceId])
-        let closeTopologyRevision = surface.topologyRevision
+        let preCloseTopologyRevision = surface.topologyRevision
         let encodedSurfaceId = try XCTUnwrap(surfaceId.addingPercentEncoding(withAllowedCharacters: .alphanumerics))
         let surfaceScopeId = "surface:\(encodedSurfaceId)"
         _ = try SurfAceLocklessConsumableOperations.appendCommittedRecord(
@@ -479,7 +486,12 @@ final class SurfAceLocklessTopologyOperationsTests: XCTestCase {
         XCTAssertEqual(migrated.allocationReleaseIntents?.map(\.allocationKind), [.pane, .surface])
         XCTAssertEqual(migrated.allocationReleaseIntents?.map(\.allocationGeneration), [41, 30])
         XCTAssertTrue(migrated.allocationReleaseIntents?.allSatisfy { $0.status == .pending } == true)
-        XCTAssertEqual(migrated.terminalCloseRecords?.first?.closeTopologyRevision, closeTopologyRevision)
+        XCTAssertTrue(migrated.allocationReleaseIntents?.allSatisfy {
+            $0.closeTopologyRevision == preCloseTopologyRevision + 1
+        } == true)
+        XCTAssertTrue(migrated.terminalCloseRecords?.allSatisfy {
+            $0.closeTopologyRevision == preCloseTopologyRevision + 1
+        } == true)
         XCTAssertEqual(migrated.terminalCloseRecords?.last?.sourceTombstoneId, close.tombstoneId)
         try migrated.validate()
     }

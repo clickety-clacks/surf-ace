@@ -1251,18 +1251,20 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         XCTAssertEqual(input.pendingWindowReleases.count, 1)
         let paneRelease = try XCTUnwrap(input.pendingPaneReleases.first)
         let windowRelease = try XCTUnwrap(input.pendingWindowReleases.first)
-        XCTAssertEqual(paneRelease.closeRevision, 0)
+        let committedCloseTopologyRevision = surface.topologyRevision + 1
+        XCTAssertEqual(committedCloseTopologyRevision, 1)
+        XCTAssertEqual(paneRelease.closeRevision, committedCloseTopologyRevision)
         XCTAssertEqual(paneRelease.tombstoneKind, "surface")
         XCTAssertEqual(paneRelease.tombstoneId, close.tombstoneId)
-        XCTAssertEqual(windowRelease.closeRevision, 0)
+        XCTAssertEqual(windowRelease.closeRevision, committedCloseTopologyRevision)
         XCTAssertEqual(windowRelease.tombstoneKind, "surface")
         XCTAssertEqual(windowRelease.tombstoneId, close.tombstoneId)
 
-        let paneEvidence = "{\"allocationGeneration\":41,\"clientId\":\"\(clientId)\",\"closeRevision\":0,\"lineageId\":\"\(pane.paneLineageId)\",\"paneId\":\"1\",\"paneLabel\":1,\"surfaceId\":\"\(surfaceId)\",\"terminalRetirementRevision\":\(close.surfaceSetRevision),\"tombstoneId\":\"\(close.tombstoneId)\",\"tombstoneKind\":\"surface\"}"
+        let paneEvidence = "{\"allocationGeneration\":41,\"clientId\":\"\(clientId)\",\"closeRevision\":\(committedCloseTopologyRevision),\"lineageId\":\"\(pane.paneLineageId)\",\"paneId\":\"1\",\"paneLabel\":1,\"surfaceId\":\"\(surfaceId)\",\"terminalRetirementRevision\":\(close.surfaceSetRevision),\"tombstoneId\":\"\(close.tombstoneId)\",\"tombstoneKind\":\"surface\"}"
         let expectedPaneReleaseId = SHA256.hash(data: Data(paneEvidence.utf8))
             .map { String(format: "%02x", $0) }.joined()
         XCTAssertEqual(paneRelease.releaseId, expectedPaneReleaseId)
-        let windowEvidence = "{\"allocationGeneration\":30,\"clientId\":\"\(clientId)\",\"closeRevision\":0,\"surfaceId\":\"\(surfaceId)\",\"terminalRetirementRevision\":\(close.surfaceSetRevision),\"tombstoneId\":\"\(close.tombstoneId)\",\"tombstoneKind\":\"surface\",\"windowLabel\":\"b\"}"
+        let windowEvidence = "{\"allocationGeneration\":30,\"clientId\":\"\(clientId)\",\"closeRevision\":\(committedCloseTopologyRevision),\"surfaceId\":\"\(surfaceId)\",\"terminalRetirementRevision\":\(close.surfaceSetRevision),\"tombstoneId\":\"\(close.tombstoneId)\",\"tombstoneKind\":\"surface\",\"windowLabel\":\"b\"}"
         let expectedWindowReleaseId = SHA256.hash(data: Data(windowEvidence.utf8))
             .map { String(format: "%02x", $0) }.joined()
         XCTAssertEqual(windowRelease.releaseId, expectedWindowReleaseId)

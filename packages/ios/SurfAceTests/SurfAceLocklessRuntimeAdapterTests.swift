@@ -175,8 +175,9 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
         let windowIds = input.pendingWindowReleases.map(\.releaseId)
         XCTAssertEqual(paneIds.count, 1)
         XCTAssertEqual(windowIds.count, 1)
-        XCTAssertTrue(input.pendingPaneReleases.allSatisfy { $0.closeRevision == 0 })
-        XCTAssertTrue(input.pendingWindowReleases.allSatisfy { $0.closeRevision == 0 })
+        XCTAssertTrue(input.pendingPaneReleases.allSatisfy { $0.closeRevision == 1 })
+        XCTAssertTrue(input.pendingWindowReleases.allSatisfy { $0.closeRevision == 1 })
+        XCTAssertTrue(before.terminalCloseRecords?.allSatisfy { $0.closeTopologyRevision == 1 } == true)
 
         let unacknowledged = SurfAceRegistrationReply(
             assignments: [],
