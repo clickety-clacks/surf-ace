@@ -1,0 +1,316 @@
+name: Browser resize diagnostic
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  SOURCE_COMMIT: d42c2671747f327319eede0fe7821a438fb839c3
+  SOURCE_TREE: 2c61c357940cb1266b18c9551f185e18c4155b02
+  SOURCE_FILE: packages/ios/SurfAceTests/SurfAceSurfaceTopologyPersistenceTests.swift
+  SOURCE_FILE_SHA256: a05a0391bf9990e60124bb84f5981c5a9eefd20d760eb67ee41014e3b3de0958
+  TEST_SELECTOR: SurfAceTests/SurfAceHostZoomViewportTests/testBrowserResizeRetainsMountedViewSelectionAndSnapshotCoordinates
+  EVIDENCE_DIR: ${{ github.workspace }}/evidence/browser-resize-${{ github.run_id }}-${{ github.run_attempt }}
+  EVIDENCE_READBACK_DIR: ${{ github.workspace }}/evidence-readback/browser-resize-${{ github.run_id }}-${{ github.run_attempt }}
+  RESULT_BUNDLE: ${{ github.workspace }}/evidence/browser-resize-${{ github.run_id }}-${{ github.run_attempt }}/result.xcresult
+  ARTIFACT_NAME: browser-resize-diagnostic-build-b-${{ github.run_id }}-${{ github.run_attempt }}
+
+jobs:
+  build-b:
+    name: macOS build-b diagnostic
+    runs-on: xcode-27
+    steps:
+      - name: Prepare evidence directory and record runner identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf "$EVIDENCE_DIR" "$EVIDENCE_READBACK_DIR"
+          mkdir -p "$EVIDENCE_DIR"
+          {
+            printf 'workflow_run_id=%s\n' "$GITHUB_RUN_ID"
+            printf 'workflow_run_attempt=%s\n' "$GITHUB_RUN_ATTEMPT"
+            printf 'workflow_ref=%s\n' "$GITHUB_REF"
+            printf 'workflow_sha=%s\n' "$GITHUB_SHA"
+            printf 'runner_name=%s\n' "${RUNNER_NAME:-unknown}"
+            printf 'runner_os=%s\n' "${RUNNER_OS:-unknown}"
+            printf 'runner_arch=%s\n' "${RUNNER_ARCH:-unknown}"
+            printf 'runner_image_os=%s\n' "${ImageOS:-unknown}"
+            printf 'runner_image_version=%s\n' "${ImageVersion:-unknown}"
+            printf 'workflow_started_at_utc=%s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          } > "$EVIDENCE_DIR/runner-identity.txt"
+
+      - name: Check out the reviewed test source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: source
+          persist-credentials: false
+          ref: ${{ env.SOURCE_COMMIT }}
+
+      - name: Select and verify Xcode 27.0 and the iOS 27.0 simulator
+        id: toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo xcode-select --switch /Applications/Xcode_27.0.0.app
+          xcode-select -p > "$EVIDENCE_DIR/developer-directory.txt"
+          xcodebuild -version > "$EVIDENCE_DIR/xcode-version.txt"
+          xcodebuild -showsdks > "$EVIDENCE_DIR/xcode-sdks.txt"
+          swift --version > "$EVIDENCE_DIR/swift-version.txt"
+          xcrun --sdk iphonesimulator --show-sdk-version > "$EVIDENCE_DIR/ios-simulator-sdk-version.txt"
+          xcrun simctl list runtimes > "$EVIDENCE_DIR/simulator-runtimes.txt"
+          xcrun simctl list devices available > "$EVIDENCE_DIR/simulator-devices.txt"
+          {
+            printf 'developer_directory=%s\n' "$(cat "$EVIDENCE_DIR/developer-directory.txt")"
+            printf '\n--- macOS ---\n'
+            sw_vers
+            uname -a
+            printf '\n--- Xcode ---\n'
+            cat "$EVIDENCE_DIR/xcode-version.txt"
+            printf '\n--- SDKs ---\n'
+            cat "$EVIDENCE_DIR/xcode-sdks.txt"
+            printf '\n--- Swift ---\n'
+            cat "$EVIDENCE_DIR/swift-version.txt"
+            printf '\n--- iOS Simulator SDK ---\n'
+            cat "$EVIDENCE_DIR/ios-simulator-sdk-version.txt"
+            printf '\n--- Simulator runtimes ---\n'
+            cat "$EVIDENCE_DIR/simulator-runtimes.txt"
+            printf '\n--- Available simulators ---\n'
+            cat "$EVIDENCE_DIR/simulator-devices.txt"
+          } 2>&1 | tee "$EVIDENCE_DIR/toolchain.txt"
+          test "$(sed -n '1p' "$EVIDENCE_DIR/xcode-version.txt")" = 'Xcode 27.0'
+          test "$(cat "$EVIDENCE_DIR/ios-simulator-sdk-version.txt")" = '27.0'
+          grep -Fq 'iOS 27.0' "$EVIDENCE_DIR/simulator-runtimes.txt"
+          grep -Fq 'iPad Pro 13-inch (M5)' "$EVIDENCE_DIR/simulator-devices.txt"
+          printf 'toolchain_verified_at_utc=%s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$EVIDENCE_DIR/runner-identity.txt"
+          printf 'PASS\n' > "$EVIDENCE_DIR/toolchain-verification-status.txt"
+
+      - name: Verify the exact reviewed source revision
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual_commit="$(git -C source rev-parse HEAD)"
+          actual_tree="$(git -C source rev-parse 'HEAD^{tree}')"
+          actual_source_sha256="$(shasum -a 256 "source/${SOURCE_FILE}" | awk '{print $1}')"
+          {
+            printf 'source_commit=%s\n' "$actual_commit"
+            printf 'source_tree=%s\n' "$actual_tree"
+            printf 'source_file=%s\n' "$SOURCE_FILE"
+            printf 'source_file_sha256=%s\n' "$actual_source_sha256"
+            printf '\n--- checkout status ---\n'
+            git -C source status --short --branch
+          } | tee "$EVIDENCE_DIR/source-identity.txt"
+          test "$actual_commit" = "$SOURCE_COMMIT"
+          test "$actual_tree" = "$SOURCE_TREE"
+          test "$actual_source_sha256" = "$SOURCE_FILE_SHA256"
+          git -C source diff --exit-code HEAD -- .
+          git -C source diff --cached --exit-code HEAD -- .
+          test -z "$(git -C source status --porcelain)"
+          printf 'PASS\n' > "$EVIDENCE_DIR/source-verification-status.txt"
+
+      - name: Run only the browser-resize selector
+        id: diagnostic
+        shell: bash
+        run: |
+          set -euo pipefail
+          test ! -e "$RESULT_BUNDLE"
+          command=(
+            xcodebuild test
+            -project source/packages/ios/SurfAce.xcodeproj
+            -scheme SurfAce
+            -configuration Release
+            ENABLE_TESTABILITY=YES
+            -parallel-testing-enabled NO
+            -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M5),OS=27.0'
+            "-only-testing:${TEST_SELECTOR}"
+            -resultBundlePath "$RESULT_BUNDLE"
+          )
+          printf '%q ' "${command[@]}" > "$EVIDENCE_DIR/xcodebuild-command.txt"
+          printf '\n' >> "$EVIDENCE_DIR/xcodebuild-command.txt"
+          printf 'started_at_utc=%s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "$EVIDENCE_DIR/test-timing.txt"
+          set +e
+          "${command[@]}" 2>&1 | tee "$EVIDENCE_DIR/xcodebuild.log"
+          pipeline_status=( "${PIPESTATUS[@]}" )
+          set -e
+          test_exit_code="${pipeline_status[0]}"
+          tee_exit_code="${pipeline_status[1]}"
+          printf '%s\n' "$test_exit_code" > "$EVIDENCE_DIR/xcodebuild-exit-code.txt"
+          printf '%s\n' "$tee_exit_code" > "$EVIDENCE_DIR/xcodebuild-tee-exit-code.txt"
+          {
+            printf 'finished_at_utc=%s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+            printf 'xcodebuild_exit_code=%s\n' "$test_exit_code"
+            printf 'tee_exit_code=%s\n' "$tee_exit_code"
+          } >> "$EVIDENCE_DIR/test-timing.txt"
+
+      - name: Verify the source checkout stayed unchanged
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -e source/.git ]]; then
+            git -C source status --short > "$EVIDENCE_DIR/source-post-test-status.txt"
+            if git -C source diff --quiet HEAD -- . && \
+               git -C source diff --cached --quiet HEAD -- . && \
+               test -z "$(git -C source status --porcelain)"; then
+              printf 'PASS\n' > "$EVIDENCE_DIR/source-post-test-verification-status.txt"
+            else
+              printf 'FAIL\n' > "$EVIDENCE_DIR/source-post-test-verification-status.txt"
+              cat "$EVIDENCE_DIR/source-post-test-status.txt"
+            fi
+          else
+            printf 'The source checkout is unavailable.\n' > "$EVIDENCE_DIR/source-post-test-status.txt"
+            printf 'FAIL\n' > "$EVIDENCE_DIR/source-post-test-verification-status.txt"
+          fi
+
+      - name: Export the result summary and attached event trace
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -d "$RESULT_BUNDLE" ]]; then
+            set +e
+            xcrun xcresulttool get test-results summary --path "$RESULT_BUNDLE" \
+              > "$EVIDENCE_DIR/xcresult-summary.json" 2> "$EVIDENCE_DIR/xcresult-summary.stderr"
+            summary_exit_code=$?
+            xcrun xcresulttool export attachments --path "$RESULT_BUNDLE" \
+              --output-path "$EVIDENCE_DIR/attachments" \
+              > "$EVIDENCE_DIR/attachment-export.log" 2>&1
+            attachment_export_exit_code=$?
+            set -e
+            printf 'summary_exit_code=%s\n' "$summary_exit_code" > "$EVIDENCE_DIR/xcresult-capture-status.txt"
+            printf 'attachment_export_exit_code=%s\n' "$attachment_export_exit_code" >> "$EVIDENCE_DIR/xcresult-capture-status.txt"
+          else
+            printf 'No .xcresult bundle was created.\n' > "$EVIDENCE_DIR/xcresult-capture-unavailable.txt"
+            printf 'summary_exit_code=not-run\nattachment_export_exit_code=not-run\n' > "$EVIDENCE_DIR/xcresult-capture-status.txt"
+          fi
+
+      - name: Hash and verify staged evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$EVIDENCE_DIR"
+          find . -type f \
+            ! -name capture-manifest.sha256 \
+            ! -name capture-readback.txt \
+            ! -name capture-index.sha256 \
+            -print0 | xargs -0 shasum -a 256 > capture-manifest.sha256
+          if shasum -a 256 -c capture-manifest.sha256 > capture-readback.txt 2>&1; then
+            status=PASS
+          else
+            status=FAIL
+          fi
+          manifest_sha256="$(shasum -a 256 capture-manifest.sha256 | awk '{print $1}')"
+          {
+            printf 'status=%s\n' "$status"
+            printf 'capture_manifest_sha256=%s\n' "$manifest_sha256"
+          } >> capture-readback.txt
+          shasum -a 256 capture-manifest.sha256 capture-readback.txt > capture-index.sha256
+          shasum -a 256 -c capture-index.sha256 > /dev/null
+          printf '%s\n' "$status" > capture-staging-status.txt
+          test "$status" = PASS
+
+      - name: Retain diagnostic evidence, including failures
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ${{ env.EVIDENCE_DIR }}/
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 30
+
+      - name: Download retained evidence for readback
+        if: always()
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ${{ env.EVIDENCE_READBACK_DIR }}
+
+      - name: Verify uploaded evidence readback
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -d "$EVIDENCE_READBACK_DIR" ]] && (
+            cd "$EVIDENCE_READBACK_DIR" &&
+            shasum -a 256 -c capture-index.sha256 > "$EVIDENCE_DIR/evidence-index-readback.txt" &&
+            shasum -a 256 -c capture-manifest.sha256 > "$EVIDENCE_DIR/evidence-payload-readback.txt" &&
+            grep -Fxq 'status=PASS' capture-readback.txt &&
+            manifest_sha256="$(shasum -a 256 capture-manifest.sha256 | awk '{print $1}')" &&
+            grep -Fxq "capture_manifest_sha256=${manifest_sha256}" capture-readback.txt
+          ); then
+            printf 'PASS\n' > "$EVIDENCE_DIR/evidence-readback-status.txt"
+            verified_files="$(grep -c ': OK$' "$EVIDENCE_DIR/evidence-payload-readback.txt" || true)"
+            manifest_sha256="$(shasum -a 256 "$EVIDENCE_READBACK_DIR/capture-manifest.sha256" | awk '{print $1}')"
+            {
+              printf '## Diagnostic evidence readback\n\n'
+              printf 'Verified %s captured files after artifact download.\n\n' "$verified_files"
+              printf 'Capture manifest SHA-256: `%s`\n' "$manifest_sha256"
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            printf 'FAIL\n' > "$EVIDENCE_DIR/evidence-readback-status.txt"
+            {
+              printf '## Diagnostic evidence readback\n\n'
+              printf 'The uploaded evidence could not be verified after download. See this job log for details.\n'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Report the diagnostic and evidence outcome
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          failure=0
+          if [[ ! -f "$EVIDENCE_DIR/xcodebuild-exit-code.txt" ]]; then
+            echo 'The selector did not produce an xcodebuild exit code.'
+            failure=1
+          else
+            read -r test_exit_code < "$EVIDENCE_DIR/xcodebuild-exit-code.txt"
+            if [[ "$test_exit_code" != '0' ]]; then
+              printf 'The selected test command exited %s.\n' "$test_exit_code"
+              failure=1
+            fi
+          fi
+          if [[ ! -d "$RESULT_BUNDLE" ]]; then
+            echo 'The raw .xcresult bundle is missing.'
+            failure=1
+          fi
+          if [[ "$(cat "$EVIDENCE_DIR/toolchain-verification-status.txt" 2>/dev/null || true)" != 'PASS' ]]; then
+            echo 'Xcode 27.0 lane verification did not pass.'
+            failure=1
+          fi
+          if [[ "$(cat "$EVIDENCE_DIR/source-verification-status.txt" 2>/dev/null || true)" != 'PASS' ]]; then
+            echo 'The exact diagnostic source verification did not pass.'
+            failure=1
+          fi
+          if [[ "$(cat "$EVIDENCE_DIR/source-post-test-verification-status.txt" 2>/dev/null || true)" != 'PASS' ]]; then
+            echo 'The source checkout changed during the diagnostic or could not be checked.'
+            failure=1
+          fi
+          if [[ "$(cat "$EVIDENCE_DIR/capture-staging-status.txt" 2>/dev/null || true)" != 'PASS' ]]; then
+            echo 'Staged evidence hash/readback did not pass.'
+            failure=1
+          fi
+          if [[ "$(cat "$EVIDENCE_DIR/evidence-readback-status.txt" 2>/dev/null || true)" != 'PASS' ]]; then
+            echo 'Uploaded evidence hash/readback did not pass.'
+            failure=1
+          fi
+          if [[ -f "$EVIDENCE_DIR/xcodebuild-tee-exit-code.txt" ]] && \
+             [[ "$(cat "$EVIDENCE_DIR/xcodebuild-tee-exit-code.txt")" != '0' ]]; then
+            echo 'The complete xcodebuild log could not be retained by tee.'
+            failure=1
+          fi
+          if [[ -f "$EVIDENCE_DIR/xcresult-capture-status.txt" ]]; then
+            summary_exit_code="$(sed -n '1s/^[^=]*=//p' "$EVIDENCE_DIR/xcresult-capture-status.txt")"
+            attachment_exit_code="$(sed -n '2s/^[^=]*=//p' "$EVIDENCE_DIR/xcresult-capture-status.txt")"
+            if [[ -d "$RESULT_BUNDLE" ]] && \
+               { [[ "$summary_exit_code" != '0' ]] || [[ "$attachment_exit_code" != '0' ]]; }; then
+              echo 'The xcresult summary or attachment export failed.'
+              failure=1
+            fi
+          fi
+          exit "$failure"
