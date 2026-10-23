@@ -106,7 +106,8 @@ final class SurfAceLocklessTopologyOperationsTests: XCTestCase {
         closedPane.allocationGeneration = 42
         surface.panes[String(closedPaneId)] = closedPane
         state.liveSurfaces[surfaceId] = surface
-        let paneScopeId = SurfAceLocklessTopologyOperations.paneScopeId(surfaceId, Int64(closedPaneId))
+        let encodedSurfaceId = try XCTUnwrap(surfaceId.addingPercentEncoding(withAllowedCharacters: .alphanumerics))
+        let paneScopeId = "pane:\(encodedSurfaceId):\(closedPaneId)"
         _ = try SurfAceLocklessConsumableOperations.appendCommittedRecord(
             in: &state, scopeId: paneScopeId, scopeKind: "pane", recordId: "record:unread-final-close",
             recordClass: .annotationFrame, payload: .object(["frameId": .string("frame-unread")])
@@ -174,7 +175,8 @@ final class SurfAceLocklessTopologyOperationsTests: XCTestCase {
         nestedPane.allocationGeneration = 42
         surface.panes[String(nestedPaneId)] = nestedPane
         state.liveSurfaces[surfaceId] = surface
-        let nestedScopeId = SurfAceLocklessTopologyOperations.paneScopeId(surfaceId, Int64(nestedPaneId))
+        let encodedSurfaceId = try XCTUnwrap(surfaceId.addingPercentEncoding(withAllowedCharacters: .alphanumerics))
+        let nestedScopeId = "pane:\(encodedSurfaceId):\(nestedPaneId)"
         _ = try SurfAceLocklessConsumableOperations.appendCommittedRecord(
             in: &state, scopeId: nestedScopeId, scopeKind: "pane", recordId: "record:nested-unread",
             recordClass: .annotationFrame, payload: .object(["frameId": .string("nested-frame")])
@@ -184,13 +186,14 @@ final class SurfAceLocklessTopologyOperationsTests: XCTestCase {
             expectedTopologyRevision: split.topologyRevision, origin: .ambiguous
         )
         let nestedUnreadScope = try XCTUnwrap(state.liveSurfaces[surfaceId]?.paneTombstones.first?.scope)
+        let surfaceScopeId = "surface:\(encodedSurfaceId)"
         _ = try SurfAceLocklessConsumableOperations.appendCommittedRecord(
-            in: &state, scopeId: SurfAceLocklessTopologyOperations.surfaceScopeId(surfaceId),
+            in: &state, scopeId: surfaceScopeId,
             scopeKind: "surface", recordId: "record:surface-unread", recordClass: .content,
             payload: .object(["contentId": .string("kept")])
         )
         let surfaceUnreadScope = try XCTUnwrap(
-            state.scopes[SurfAceLocklessTopologyOperations.surfaceScopeId(surfaceId)]
+            state.scopes[surfaceScopeId]
         )
         let close = try SurfAceLocklessTopologyOperations.surfaceWindowFinalClose(
             state: &state, surfaceId: surfaceId, expectedSurfaceSetRevision: 1,
@@ -200,7 +203,7 @@ final class SurfAceLocklessTopologyOperationsTests: XCTestCase {
         XCTAssertTrue(state.liveSurfaces.isEmpty)
         XCTAssertTrue(state.surfaceTombstones.isEmpty)
         XCTAssertNil(state.sceneSurfaceIds["scene-window-b"])
-        XCTAssertEqual(state.scopes[SurfAceLocklessTopologyOperations.surfaceScopeId(surfaceId)], surfaceUnreadScope)
+        XCTAssertEqual(state.scopes[surfaceScopeId], surfaceUnreadScope)
         XCTAssertEqual(state.scopes[nestedScopeId], nestedUnreadScope)
         XCTAssertEqual(state.scopes[nestedScopeId]?.records.map(\.recordId), ["record:nested-unread"])
         XCTAssertEqual(state.allocationReleaseIntents?.count, 3)
