@@ -2,7 +2,99 @@ import XCTest
 import SwiftUI
 import WebKit
 import CryptoKit
+import Dispatch
+import Foundation
 @testable import SurfAce
+
+// Mutable trace state stays on the serial queue; callbacks only enqueue values.
+private final class SurfAceBrowserResizeDiagnosticTrace: @unchecked Sendable {
+    private struct Event {
+        let elapsedNanoseconds: UInt64
+        let sequence: Int
+        let name: String
+        let fields: [String: String]
+    }
+
+    private let start = DispatchTime.now().uptimeNanoseconds
+    private let queue = DispatchQueue(label: "SurfAceBrowserResizeDiagnosticTrace")
+    private var events: [Event] = []
+    private var nextSequence = 0
+
+    func record(_ name: String, fields: [String: String] = [:]) {
+        let elapsedNanoseconds = DispatchTime.now().uptimeNanoseconds &- start
+        queue.async { [self] in
+            nextSequence += 1
+            events.append(Event(elapsedNanoseconds: elapsedNanoseconds, sequence: nextSequence,
+                                name: name, fields: fields))
+        }
+    }
+
+    func text() -> String {
+        queue.sync {
+            events.sorted {
+                $0.elapsedNanoseconds == $1.elapsedNanoseconds
+                    ? $0.sequence < $1.sequence
+                    : $0.elapsedNanoseconds < $1.elapsedNanoseconds
+            }.map { event in
+                let fields = event.fields.keys.sorted().map { "\($0)=\(event.fields[$0]!)" }.joined(separator: " ")
+                return "elapsed_ns=\(event.elapsedNanoseconds) seq=\(event.sequence) event=\(event.name) \(fields)"
+            }.joined(separator: "\n")
+        }
+    }
+}
+
+@MainActor
+private final class SurfAceBrowserResizeNavigationTraceDelegate: NSObject, WKNavigationDelegate {
+    private let downstream: WKNavigationDelegate?
+    private let trace: SurfAceBrowserResizeDiagnosticTrace
+
+    init(downstream: WKNavigationDelegate?, trace: SurfAceBrowserResizeDiagnosticTrace) {
+        self.downstream = downstream
+        self.trace = trace
+    }
+
+    private func fields(for webView: WKWebView, navigation: WKNavigation?) -> [String: String] {
+        [
+            "navigation": navigation.map { String(describing: ObjectIdentifier($0)) } ?? "nil",
+            "url": webView.url?.absoluteString ?? "nil"
+        ]
+    }
+
+    func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        trace.record("navigation.didStartProvisional", fields: fields(for: webView, navigation: navigation))
+        downstream?.webView?(webView, didStartProvisionalNavigation: navigation)
+    }
+
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        trace.record("navigation.didCommit", fields: fields(for: webView, navigation: navigation))
+        downstream?.webView?(webView, didCommit: navigation)
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        trace.record("navigation.didFinish", fields: fields(for: webView, navigation: navigation))
+        downstream?.webView?(webView, didFinish: navigation)
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        var eventFields = fields(for: webView, navigation: navigation)
+        let nsError = error as NSError
+        eventFields["errorDomain"] = nsError.domain
+        eventFields["errorCode"] = String(nsError.code)
+        eventFields["error"] = error.localizedDescription
+        trace.record("navigation.didFail", fields: eventFields)
+        downstream?.webView?(webView, didFail: navigation, withError: error)
+    }
+
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        var eventFields = fields(for: webView, navigation: navigation)
+        let nsError = error as NSError
+        eventFields["errorDomain"] = nsError.domain
+        eventFields["errorCode"] = String(nsError.code)
+        eventFields["error"] = error.localizedDescription
+        trace.record("navigation.didFailProvisional", fields: eventFields)
+        downstream?.webView?(webView, didFailProvisionalNavigation: navigation, withError: error)
+    }
+}
 
 final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
     @MainActor
@@ -1919,6 +2011,14 @@ final class SurfAceHostZoomViewportTests: XCTestCase {
         }
     }
     func testBrowserResizeRetainsMountedViewSelectionAndSnapshotCoordinates() async throws {
+        let trace = SurfAceBrowserResizeDiagnosticTrace()
+        defer {
+            let attachment = XCTAttachment(data: Data(trace.text().utf8), uniformTypeIdentifier: "public.plain-text")
+            attachment.name = "browser-resize-event-trace"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+        }
+        trace.record("test.begin", fields: ["selectedElementID": "selected", "selectedText": "Selected text"])
         let html = """
         <html><head><meta name='viewport' content='width=device-width,initial-scale=1'></head>
         <body style='margin:0;width:3000px;height:3000px;background:rgb(0,200,0)'>
@@ -1926,18 +2026,28 @@ final class SurfAceHostZoomViewportTests: XCTestCase {
         </body></html>
         """
         let identity = UUID().uuidString
+        trace.record("fixture.identity.created", fields: ["identity": identity, "targetID": "owned-browser", "targetEpoch": "1"])
         let server = SurfAceHTTPServer()
         let port = try await server.startIsolatedLoopbackForTesting(httpHandler: { request in
-            if request.path == "/identity" { return HTTPServerResponse(statusCode: 200, body: Data(identity.utf8)) }
+            trace.record("fixture.http.request", fields: ["path": request.path])
+            if request.path == "/identity" {
+                trace.record("fixture.http.response", fields: ["path": request.path, "status": "200"])
+                return HTTPServerResponse(statusCode: 200, body: Data(identity.utf8))
+            }
             if request.path == "/page" {
+                trace.record("fixture.http.response", fields: ["path": request.path, "status": "200", "contentType": "text/html"])
                 return HTTPServerResponse(statusCode: 200, headers: ["Content-Type": "text/html"], body: Data(html.utf8))
             }
+            trace.record("fixture.http.response", fields: ["path": request.path, "status": "404"])
             return HTTPServerResponse(statusCode: 404)
         }, webSocketHandler: { socket in await socket.close() })
         defer { Task { await server.stop() } }
+        trace.record("fixture.server.started", fields: ["port": String(port)])
         XCTAssertNotEqual(port, SurfAceHTTPServer.fixedPort)
         let origin = try XCTUnwrap(URL(string: "http://127.0.0.1:\(port)/"))
+        trace.record("fixture.identity.request", fields: ["url": origin.appendingPathComponent("identity").absoluteString])
         let (ownedIdentity, _) = try await URLSession.shared.data(from: origin.appendingPathComponent("identity"))
+        trace.record("fixture.identity.response", fields: ["matches": String(String(decoding: ownedIdentity, as: UTF8.self) == identity)])
         XCTAssertEqual(String(decoding: ownedIdentity, as: UTF8.self), identity)
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
         let previous = scene.windows.first(where: \.isKeyWindow)
@@ -1956,41 +2066,129 @@ final class SurfAceHostZoomViewportTests: XCTestCase {
             forIdentifier: "browser-zoom-\(identity)", encodedContentRuleList: rules)
         web.configuration.userContentController.add(try XCTUnwrap(ruleList))
         defer { web.configuration.userContentController.removeAllContentRuleLists() }
+        trace.record("fixture.webView.ready", fields: ["webViewIdentity": String(describing: ObjectIdentifier(web))])
+        let originalNavigationDelegate = web.navigationDelegate
+        trace.record("navigation.delegate.original", fields: [
+            "delegateType": originalNavigationDelegate.map { String(reflecting: type(of: $0)) } ?? "nil"
+        ])
+        let navigationTraceDelegate = SurfAceBrowserResizeNavigationTraceDelegate(
+            downstream: originalNavigationDelegate, trace: trace)
+        web.navigationDelegate = navigationTraceDelegate
+        trace.record("navigation.delegate.traceProxyInstalled")
+        defer {
+            trace.record("navigation.delegate.restore")
+            web.navigationDelegate = originalNavigationDelegate
+        }
         host.setContentScale(1.5)
         let pageURL = origin.appendingPathComponent("page")
+        trace.record("fixture.pageURL.created", fields: ["url": pageURL.absoluteString])
         let entry = SurfAcePaneEntry.browserURL(targetId: "owned-browser", targetEpoch: 1,
                                                url: pageURL.absoluteString, title: "Owned browser")
         let pageLoad = expectation(description: "browser fixture page finishes loading")
-        let pageLoadObservation = web.observe(\.isLoading, options: [.new]) { observedWeb, change in
+        trace.record("observer.registration.begin", fields: ["keyPath": "WKWebView.isLoading", "options": "old,new"])
+        let pageLoadObservation = web.observe(\.isLoading, options: [.old, .new]) { observedWeb, change in
+            trace.record("observer.delivery", fields: [
+                "keyPath": "WKWebView.isLoading",
+                "old": change.oldValue.map { $0 ? "true" : "false" } ?? "unavailable",
+                "new": change.newValue.map { $0 ? "true" : "false" } ?? "unavailable",
+                "url": observedWeb.url?.absoluteString ?? "nil"
+            ])
             guard change.newValue == false, observedWeb.url == pageURL else { return }
+            trace.record("fixture.pageLoad.expectation.fulfill", fields: ["url": pageURL.absoluteString])
             pageLoad.fulfill()
         }
+        trace.record("observer.registration.complete", fields: ["keyPath": "WKWebView.isLoading"])
         defer { pageLoadObservation.invalidate() }
-        let navigationResult = Task { await host.renderBrowserURL(entry: entry) }
+        trace.record("observer.registration.begin", fields: ["keyPath": "WKWebView.url", "options": "old,new"])
+        let pageURLObservation = web.observe(\.url, options: [.old, .new]) { observedWeb, change in
+            trace.record("observer.delivery", fields: [
+                "keyPath": "WKWebView.url",
+                "old": String(describing: change.oldValue),
+                "new": String(describing: change.newValue),
+                "isLoading": String(observedWeb.isLoading)
+            ])
+        }
+        trace.record("observer.registration.complete", fields: ["keyPath": "WKWebView.url"])
+        defer { pageURLObservation.invalidate() }
+        trace.record("renderBrowserURL.taskScheduled", fields: ["fixtureURL": pageURL.absoluteString])
+        let navigationResult = Task {
+            let invocationStart = DispatchTime.now().uptimeNanoseconds
+            trace.record("renderBrowserURL.invoke", fields: [
+                "fixtureURL": pageURL.absoluteString,
+                "productBudgetMs": "8000",
+                "elapsedOrigin": "test-side call entry"
+            ])
+            let result = await host.renderBrowserURL(entry: entry)
+            let elapsedNanoseconds = DispatchTime.now().uptimeNanoseconds &- invocationStart
+            trace.record("renderBrowserURL.result", fields: [
+                "status": result.status,
+                "error": result.errorMessage ?? "nil",
+                "url": result.url,
+                "elapsedFromInvocationNs": String(elapsedNanoseconds),
+                "productBudgetNs": "8000000000",
+                "remainingFromInvocationNs": String(8_000_000_000 - Int64(elapsedNanoseconds))
+            ])
+            return result
+        }
         // Gate resize setup on the fixture load, independently of the product result budget.
+        trace.record("fixture.pageLoad.wait.begin", fields: ["timeoutSeconds": "60"])
         await fulfillment(of: [pageLoad], timeout: 60)
+        trace.record("fixture.pageLoad.wait.return", fields: ["url": web.url?.absoluteString ?? "nil", "isLoading": String(web.isLoading)])
         pageLoadObservation.invalidate()
+        pageURLObservation.invalidate()
+        trace.record("observer.invalidated", fields: ["keyPath": "WKWebView.isLoading"])
+        trace.record("observer.invalidated", fields: ["keyPath": "WKWebView.url"])
         _ = await navigationResult.value
+        trace.record("renderBrowserURL.awaitReturned")
+        trace.record("fixture.pageLoad.gatePassed", fields: ["url": web.url?.absoluteString ?? "nil", "isLoading": String(web.isLoading)])
         XCTAssertEqual(web.url, pageURL)
         let loadedDocument = try await web.evaluateJavaScript("document.getElementById('selected')?.textContent")
+        trace.record("fixture.document.selectedText", fields: ["value": String(describing: loadedDocument)])
         XCTAssertEqual(loadedDocument as? String, "Selected text")
         let ownedWeb = ObjectIdentifier(web)
-        for size in [CGSize(width: 1024, height: 820), CGSize(width: 820, height: 1024), CGSize(width: 600, height: 400)] {
+        for (resizeIndex, size) in [
+            CGSize(width: 1024, height: 820), CGSize(width: 820, height: 1024), CGSize(width: 600, height: 400)
+        ].enumerated() {
+            trace.record("resize.begin", fields: [
+                "index": String(resizeIndex), "width": String(size.width), "height": String(size.height),
+                "firstResize": String(resizeIndex == 0)
+            ])
             window.frame.size = size
             host.frame = CGRect(origin: .zero, size: size)
             host.setNeedsLayout(); host.layoutIfNeeded()
             let selectionEvent = expectation(description: "scrolled selection callback")
             var callbackRect: CGRect?
+            var selectionCallbackCount = 0
+            trace.record("selection.callback.install.begin", fields: ["resizeIndex": String(resizeIndex)])
             host.onSelectionChanged = { text, rect in
+                selectionCallbackCount += 1
+                trace.record("selection.callback.invoke", fields: [
+                    "resizeIndex": String(resizeIndex), "count": String(selectionCallbackCount),
+                    "text": text, "callbackRect": rect.map { "x=\($0.minX),y=\($0.minY),width=\($0.width),height=\($0.height)" } ?? "nil"
+                ])
                 guard callbackRect == nil, text == "Selected text", let rect else { return }
-                callbackRect = rect; selectionEvent.fulfill()
+                callbackRect = rect
+                trace.record("selection.callback.accepted", fields: [
+                    "resizeIndex": String(resizeIndex),
+                    "callbackRect": "x=\(rect.minX),y=\(rect.minY),width=\(rect.width),height=\(rect.height)"
+                ])
+                selectionEvent.fulfill()
             }
+            trace.record("selection.callback.install.complete", fields: ["resizeIndex": String(resizeIndex)])
             let tapEvent = expectation(description: "scrolled DOM tap bridge (not native touch)")
             var tapPoint: SurfAcePoint?
-            host.onTapEvent = { _, point, _ in
+            var tapCallbackCount = 0
+            host.onTapEvent = { kind, point, nearestContent in
+                tapCallbackCount += 1
+                trace.record("tap.callback.invoke", fields: [
+                    "resizeIndex": String(resizeIndex), "count": String(tapCallbackCount),
+                    "kind": kind, "nearestContent": nearestContent,
+                    "point": "x=\(point.x),y=\(point.y)"
+                ])
                 guard tapPoint == nil else { return }
                 tapPoint = point; tapEvent.fulfill()
             }
+            trace.record("resize.domSelectionAndTap.evaluate.begin", fields: ["resizeIndex": String(resizeIndex), "elementID": "selected"])
             let dimensions = try await web.callAsyncJavaScript("""
             scrollTo(60,200);
             await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
@@ -2009,7 +2207,18 @@ final class SurfAceHostZoomViewportTests: XCTestCase {
                     visualX:visualViewport.offsetLeft,visualY:visualViewport.offsetTop};
             """, arguments: [:], in: nil, contentWorld: .page)
             let dom = try XCTUnwrap(dimensions as? [String: Double])
+            trace.record("resize.domSelectionAndTap.evaluate.return", fields: [
+                "resizeIndex": String(resizeIndex),
+                "values": dom.keys.sorted().map { "\($0)=\(dom[$0]!)" }.joined(separator: ",")
+            ])
             await fulfillment(of: [selectionEvent, tapEvent], timeout: 5)
+            trace.record("selection.callback.wait.return", fields: [
+                "resizeIndex": String(resizeIndex), "callbackCount": String(selectionCallbackCount),
+                "callbackRect": callbackRect.map { "x=\($0.minX),y=\($0.minY),width=\($0.width),height=\($0.height)" } ?? "nil",
+                "tapCallbackCount": String(tapCallbackCount),
+                "tapPoint": tapPoint.map { "x=\($0.x),y=\($0.y)" } ?? "nil",
+                "domValues": dom.keys.sorted().map { "\($0)=\(dom[$0]!)" }.joined(separator: ",")
+            ])
             XCTAssertEqual(dom["scrollX"], 60); XCTAssertEqual(dom["scrollY"], 200)
             XCTAssertEqual(dom["visualScale"], 1)
             let clientX = try XCTUnwrap(dom["x"]), clientY = try XCTUnwrap(dom["y"])
@@ -2032,12 +2241,32 @@ final class SurfAceHostZoomViewportTests: XCTestCase {
             XCTAssertEqual(try XCTUnwrap(dom["width"]) * 1.275, Double(size.width), accuracy: 1.3)
             XCTAssertEqual(try XCTUnwrap(dom["height"]) * 1.275, Double(size.height), accuracy: 1.3)
             let captured = await host.fetchSnapshot()
+            trace.record("snapshot.fetch.result", fields: [
+                "resizeIndex": String(resizeIndex), "present": String(captured != nil),
+                "selectionText": captured?.selection?.text ?? "nil",
+                "selectionRect": captured?.selection?.boundingRect.map { "x=\($0.minX),y=\($0.minY),width=\($0.width),height=\($0.height)" } ?? "nil",
+                "scrollX": String(describing: captured?.viewport.scrollOffset.x),
+                "scrollY": String(describing: captured?.viewport.scrollOffset.y),
+                "imageBase64Present": String(captured?.imageBase64 != nil)
+            ])
             let snapshot = try XCTUnwrap(captured)
             let selected = try XCTUnwrap(snapshot.selection?.boundingRect)
+            trace.record("snapshot.assertionInputs", fields: [
+                "resizeIndex": String(resizeIndex), "selectionText": snapshot.selection?.text ?? "nil",
+                "selectionRect": "x=\(selected.minX),y=\(selected.minY),width=\(selected.width),height=\(selected.height)",
+                "scrollX": String(snapshot.viewport.scrollOffset.x), "scrollY": String(snapshot.viewport.scrollOffset.y)
+            ])
             XCTAssertEqual(snapshot.selection?.text, "Selected text")
             XCTAssertEqual(snapshot.viewport.scrollOffset.x, 60)
             XCTAssertEqual(snapshot.viewport.scrollOffset.y, 200)
             let scrollCapture = await host.fetchScrollMetadataForTesting()
+            trace.record("scrollMetadata.assertionInputs", fields: [
+                "resizeIndex": String(resizeIndex), "present": String(scrollCapture != nil),
+                "scrollX": String(describing: scrollCapture?.viewport.scrollOffset.x),
+                "scrollY": String(describing: scrollCapture?.viewport.scrollOffset.y),
+                "selectionText": scrollCapture?.selection?.text ?? "nil",
+                "selectionRect": scrollCapture?.selection?.boundingRect.map { "x=\($0.minX),y=\($0.minY),width=\($0.width),height=\($0.height)" } ?? "nil"
+            ])
             let scroll = try XCTUnwrap(scrollCapture)
             XCTAssertEqual(scroll.viewport.scrollOffset, snapshot.viewport.scrollOffset)
             XCTAssertEqual(scroll.selection?.boundingRect, snapshot.selection?.boundingRect)
@@ -2050,6 +2279,10 @@ final class SurfAceHostZoomViewportTests: XCTestCase {
                     scrollX:payload.viewport.scrollOffset.x,scrollY:payload.viewport.scrollOffset.y};
             """, arguments: [:], in: nil, contentWorld: .page)
             let document = try XCTUnwrap(legacy as? [String: Double])
+            trace.record("snapshot.documentBridge.assertionInputs", fields: [
+                "resizeIndex": String(resizeIndex),
+                "values": document.keys.sorted().map { "\($0)=\(document[$0]!)" }.joined(separator: ",")
+            ])
             XCTAssertEqual(document["x"], clientX + 60)
             XCTAssertEqual(document["y"], clientY + 200)
             XCTAssertEqual(document["scrollX"], 60); XCTAssertEqual(document["scrollY"], 200)
@@ -2059,6 +2292,11 @@ final class SurfAceHostZoomViewportTests: XCTestCase {
             let imageData = try XCTUnwrap(Data(base64Encoded: try XCTUnwrap(snapshot.imageBase64)))
             let image = try XCTUnwrap(UIImage(data: imageData))
             let bitmap = try XCTUnwrap(image.cgImage)
+            trace.record("snapshot.image.assertionInputs", fields: [
+                "resizeIndex": String(resizeIndex), "widthPixels": String(bitmap.width),
+                "heightPixels": String(bitmap.height), "screenScale": String(window.screen.scale),
+                "expectedWidthPoints": String(size.width), "expectedHeightPoints": String(size.height)
+            ])
             XCTAssertEqual(Double(bitmap.width), Double(size.width * window.screen.scale), accuracy: 1)
             XCTAssertEqual(Double(bitmap.height), Double(size.height * window.screen.scale), accuracy: 1)
             let attachment = XCTAttachment(image: image); attachment.name = "browser-resize-composite-\(size)"
