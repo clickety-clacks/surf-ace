@@ -162,6 +162,7 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
                 state.liveSurfaces[surfaceId] = surface
                 let surfaceSetRevision = state.surfaceSetRevision
                 let topologyRevision = surface.topologyRevision
+                XCTAssertEqual(topologyRevision, 0)
                 _ = try SurfAceLocklessTopologyOperations.surfaceWindowFinalClose(
                     state: &state, surfaceId: surfaceId,
                     expectedSurfaceSetRevision: surfaceSetRevision,
@@ -177,7 +178,11 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
         XCTAssertEqual(windowIds.count, 1)
         XCTAssertTrue(input.pendingPaneReleases.allSatisfy { $0.closeRevision == 1 })
         XCTAssertTrue(input.pendingWindowReleases.allSatisfy { $0.closeRevision == 1 })
-        XCTAssertTrue(before.terminalCloseRecords?.allSatisfy { $0.closeTopologyRevision == 1 } == true)
+        let committedCloseRecords = try XCTUnwrap(before.terminalCloseRecords)
+        XCTAssertEqual(committedCloseRecords.count, 2)
+        XCTAssertTrue(committedCloseRecords.allSatisfy { $0.closeTopologyRevision == 1 })
+        XCTAssertEqual(before.allocationReleaseIntents?.count, 2)
+        XCTAssertTrue(before.allocationReleaseIntents?.allSatisfy { $0.closeTopologyRevision == 1 } == true)
 
         let unacknowledged = SurfAceRegistrationReply(
             assignments: [],
