@@ -8,6 +8,7 @@ permissions:
 
 env:
   SOURCE_COMMIT: d42c2671747f327319eede0fe7821a438fb839c3
+  SOURCE_REF: refs/tags/surf-ace-browser-resize-diagnostic-d42
   SOURCE_TREE: 2c61c357940cb1266b18c9551f185e18c4155b02
   SOURCE_FILE: packages/ios/SurfAceTests/SurfAceSurfaceTopologyPersistenceTests.swift
   SOURCE_FILE_SHA256: a05a0391bf9990e60124bb84f5981c5a9eefd20d760eb67ee41014e3b3de0958
@@ -46,7 +47,7 @@ jobs:
         with:
           path: source
           persist-credentials: false
-          ref: ${{ env.SOURCE_COMMIT }}
+          ref: ${{ env.SOURCE_REF }}
 
       - name: Select and verify Xcode 27.0 and the iOS 27.0 simulator
         id: toolchain
@@ -95,6 +96,7 @@ jobs:
           actual_tree="$(git -C source rev-parse 'HEAD^{tree}')"
           actual_source_sha256="$(shasum -a 256 "source/${SOURCE_FILE}" | awk '{print $1}')"
           {
+            printf 'source_ref=%s\n' "$SOURCE_REF"
             printf 'source_commit=%s\n' "$actual_commit"
             printf 'source_tree=%s\n' "$actual_tree"
             printf 'source_file=%s\n' "$SOURCE_FILE"
