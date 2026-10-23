@@ -1957,10 +1957,23 @@ final class SurfAceHostZoomViewportTests: XCTestCase {
         web.configuration.userContentController.add(try XCTUnwrap(ruleList))
         defer { web.configuration.userContentController.removeAllContentRuleLists() }
         host.setContentScale(1.5)
+        let pageURL = origin.appendingPathComponent("page")
         let entry = SurfAcePaneEntry.browserURL(targetId: "owned-browser", targetEpoch: 1,
-                                               url: origin.appendingPathComponent("page").absoluteString, title: "Owned browser")
-        let result = await host.renderBrowserURL(entry: entry)
-        XCTAssertEqual(result.status, "applied", result.errorMessage ?? "")
+                                               url: pageURL.absoluteString, title: "Owned browser")
+        let pageLoad = expectation(description: "browser fixture page finishes loading")
+        let pageLoadObservation = web.observe(\.isLoading, options: [.new]) { observedWeb, change in
+            guard change.newValue == false, observedWeb.url == pageURL else { return }
+            pageLoad.fulfill()
+        }
+        defer { pageLoadObservation.invalidate() }
+        let navigationResult = Task { await host.renderBrowserURL(entry: entry) }
+        // Gate resize setup on the fixture load, independently of the product result budget.
+        await fulfillment(of: [pageLoad], timeout: 60)
+        pageLoadObservation.invalidate()
+        _ = await navigationResult.value
+        XCTAssertEqual(web.url, pageURL)
+        let loadedDocument = try await web.evaluateJavaScript("document.getElementById('selected')?.textContent")
+        XCTAssertEqual(loadedDocument as? String, "Selected text")
         let ownedWeb = ObjectIdentifier(web)
         for size in [CGSize(width: 1024, height: 820), CGSize(width: 820, height: 1024), CGSize(width: 600, height: 400)] {
             window.frame.size = size
