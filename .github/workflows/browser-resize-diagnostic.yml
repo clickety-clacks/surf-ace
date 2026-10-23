@@ -12,7 +12,6 @@ env:
   SOURCE_TREE: 2c61c357940cb1266b18c9551f185e18c4155b02
   SOURCE_FILE: packages/ios/SurfAceTests/SurfAceSurfaceTopologyPersistenceTests.swift
   SOURCE_FILE_SHA256: a05a0391bf9990e60124bb84f5981c5a9eefd20d760eb67ee41014e3b3de0958
-  TEST_SELECTOR: SurfAceTests/SurfAceHostZoomViewportTests/testBrowserResizeRetainsMountedViewSelectionAndSnapshotCoordinates
   EVIDENCE_DIR: ${{ github.workspace }}/evidence/browser-resize-${{ github.run_id }}-${{ github.run_attempt }}
   EVIDENCE_READBACK_DIR: ${{ github.workspace }}/evidence-readback/browser-resize-${{ github.run_id }}-${{ github.run_attempt }}
   RESULT_BUNDLE: ${{ github.workspace }}/evidence/browser-resize-${{ github.run_id }}-${{ github.run_attempt }}/result.xcresult
@@ -112,7 +111,7 @@ jobs:
           test -z "$(git -C source status --porcelain)"
           printf 'PASS\n' > "$EVIDENCE_DIR/source-verification-status.txt"
 
-      - name: Run only the browser-resize selector
+      - name: Run the full native test suite
         id: diagnostic
         shell: bash
         run: |
@@ -126,7 +125,6 @@ jobs:
             ENABLE_TESTABILITY=YES
             -parallel-testing-enabled NO
             -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M5),OS=27.0'
-            "-only-testing:${TEST_SELECTOR}"
             -resultBundlePath "$RESULT_BUNDLE"
           )
           printf '%q ' "${command[@]}" > "$EVIDENCE_DIR/xcodebuild-command.txt"
@@ -268,12 +266,12 @@ jobs:
           set -euo pipefail
           failure=0
           if [[ ! -f "$EVIDENCE_DIR/xcodebuild-exit-code.txt" ]]; then
-            echo 'The selector did not produce an xcodebuild exit code.'
+            echo 'The full native test suite did not produce an xcodebuild exit code.'
             failure=1
           else
             read -r test_exit_code < "$EVIDENCE_DIR/xcodebuild-exit-code.txt"
             if [[ "$test_exit_code" != '0' ]]; then
-              printf 'The selected test command exited %s.\n' "$test_exit_code"
+              printf 'The native test suite xcodebuild command exited %s.\n' "$test_exit_code"
               failure=1
             fi
           fi
