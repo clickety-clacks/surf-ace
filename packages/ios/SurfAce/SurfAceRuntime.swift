@@ -789,6 +789,34 @@ final class SurfAceRuntime {
         removeSurfaceModel(sceneKey: sceneKey, persistProjection: true, broadcastRemoval: false)
     }
 
+    /// A discarded session is final only when UIKit removed a strict subset of
+    /// the currently mapped live windows. If the callback cannot distinguish
+    /// one window from whole-app removal, preserve every surface as live state.
+    func finalizeDiscardedSceneSessions(_ discardedSceneKeys: Set<String>) async {
+        guard !discardedSceneKeys.isEmpty, isSceneAuthorityReady,
+              let adapter = locklessAdapter else { return }
+        let state = await adapter.snapshot()
+        let liveSceneKeys = Set(state.sceneSurfaceIds.compactMap { entry -> String? in
+            let (sceneKey, surfaceId) = entry
+            guard state.liveSurfaces[surfaceId]?.sceneKeys.contains(sceneKey) == true else { return nil }
+            return sceneKey
+        })
+        guard discardedSceneKeys.isSubset(of: liveSceneKeys),
+              liveSceneKeys.count > discardedSceneKeys.count else {
+            return
+        }
+        let surfacesToClose = state.liveSurfaces.values
+            .filter { surface in
+                let sceneKeys = Set(surface.sceneKeys)
+                return !sceneKeys.isEmpty && sceneKeys.isSubset(of: discardedSceneKeys)
+            }
+            .sorted { $0.surfaceId < $1.surfaceId }
+        for surface in surfacesToClose {
+            guard let sceneKey = surface.sceneKeys.sorted().first else { continue }
+            await unregisterSurfaceForScene(sceneKey: sceneKey)
+        }
+    }
+
     func registerSurfaceForScene(sceneKey: String, scene: UIScene? = nil) async -> SurfAceSurfaceModel? {
         guard let adapter = locklessAdapter else {
             return registerSurface(sceneKey: sceneKey, scene: scene)
@@ -891,40 +919,74 @@ final class SurfAceRuntime {
     }
 
     func unregisterSurfaceForScene(sceneKey: String) async {
-        guard let adapter = locklessAdapter,
-              let surfaceId = surfaceIdBySceneKey[sceneKey] else {
+        guard let adapter = locklessAdapter else {
             unregisterSurface(sceneKey: sceneKey)
             return
         }
+        let before = await adapter.snapshot()
+        guard let surfaceId = before.sceneSurfaceIds[sceneKey] ?? surfaceIdBySceneKey[sceneKey],
+              let surfaceBefore = before.liveSurfaces[surfaceId] else { return }
         do {
-            _ = try await commitLocalMutation(adapter: adapter, operation: "local.surface.close") { state, sequence in
+            let commit = try await commitLocalMutation(adapter: adapter, operation: "local.surface.close") { state, sequence in
                 guard let surface = state.liveSurfaces[surfaceId] else {
-                    return .object(["commitSequence": .integer(sequence), "surfaceId": .string(surfaceId)])
+                    throw SurfAceLocklessTopologyOperationError.surfaceNotFound(surfaceId)
                 }
-                let result = try SurfAceLocklessTopologyOperations.surfaceWindowClose(
+                #if os(iOS)
+                let result = try SurfAceLocklessTopologyOperations.surfaceWindowFinalClose(
                     state: &state,
                     surfaceId: surfaceId,
                     expectedSurfaceSetRevision: state.surfaceSetRevision,
                     expectedTopologyRevision: surface.topologyRevision
                 )
+                #else
+                let result = try SurfAceLocklessTopologyOperations.surfaceWindowClose(
+                    state: &state,
+                    surfaceId: surfaceId,
+                    expectedSurfaceSetRevision: state.surfaceSetRevision,
+                    expectedTopologyRevision: surface.topologyRevision,
+                    origin: .explicitWindowClose
+                )
                 state.sceneSurfaceIds[sceneKey] = surfaceId
+                #endif
                 return .object([
                     "commitSequence": .integer(sequence),
+                    "closedSequence": .integer(result.closedSequence),
                     "surfaceId": .string(surfaceId),
+                    "surfaceSetRevision": .integer(result.surfaceSetRevision),
                     "tombstoneId": .string(result.tombstoneId),
                 ])
             }
-            removeSurfaceModel(sceneKey: sceneKey, persistProjection: false)
+            guard case .object(let closeResult) = commit.result,
+                  case .integer(let closedSequence) = closeResult["closedSequence"],
+                  case .string(let tombstoneId) = closeResult["tombstoneId"] else {
+                throw SurfAceLocklessAuthorityError.invalidState("local_surface_final_close_result")
+            }
+            for key in surfaceBefore.sceneKeys { removeSurfaceModel(sceneKey: key, persistProjection: false) }
+            try projectLocklessAuthorityState(await adapter.snapshot())
+            #if os(iOS)
             await fanoutLocklessCommittedEvent(
                 op: "event.surface_removed",
-                payload: .object(["surfaceId": .string(surfaceId)])
+                payload: .object([
+                    "closedSequence": .integer(closedSequence),
+                    "recoverable": .bool(false),
+                    "surfaceId": .string(surfaceId),
+                    "tombstoneId": .string(tombstoneId),
+                ])
             )
+            #else
+            await fanoutLocklessCommittedEvent(
+                op: "event.surface_removed",
+                payload: .object(["recoverable": .bool(true), "surfaceId": .string(surfaceId)])
+            )
+            #endif
+            await fanoutLocklessConsumable(scopeId: Self.locklessSurfaceScopeId(surfaceId), adapter: adapter)
+            annotationPublisher?.notify()
             await drainControllerRetentionReclamations(adapter: adapter)
             surfAceLifecycleLog(
-                "event=lockless_scene_close_commit \(surfAceDiagnosticFields([("scene_key", sceneKey), ("surface_id", surfaceId)]))"
+                "event=lockless_scene_final_close_commit \(surfAceDiagnosticFields([("scene_key", sceneKey), ("surface_id", surfaceId)]))"
             )
         } catch {
-            endpointError = "Lockless scene close failed: \(error.localizedDescription)"
+            endpointError = "Lockless scene final close failed: \(error.localizedDescription)"
         }
     }
 
@@ -936,14 +998,25 @@ final class SurfAceRuntime {
             guard let surface = state.liveSurfaces[surfaceId] else {
                 throw SurfAceLocklessTopologyOperationError.surfaceNotFound(surfaceId)
             }
-            let result = try SurfAceLocklessTopologyOperations.paneClose(
+            #if os(iOS)
+            let result = try SurfAceLocklessTopologyOperations.paneFinalClose(
                 state: &state,
                 surfaceId: surfaceId,
                 paneId: Int64(paneId),
                 expectedTopologyRevision: surface.topologyRevision
             )
+            #else
+            let result = try SurfAceLocklessTopologyOperations.paneClose(
+                state: &state,
+                surfaceId: surfaceId,
+                paneId: Int64(paneId),
+                expectedTopologyRevision: surface.topologyRevision,
+                origin: .explicitPaneClose
+            )
+            #endif
             return .object([
                 "commitSequence": .integer(sequence),
+                "closedSequence": .integer(result.closedSequence),
                 "paneId": .integer(result.paneId),
                 "surfaceId": .string(surfaceId),
                 "tombstoneId": .string(result.tombstoneId),
@@ -957,14 +1030,32 @@ final class SurfAceRuntime {
         try projectLocklessAuthorityState(await adapter.snapshot())
         removedPane?.pendingFlushTask?.cancel()
         removedPane?.pendingFlushTask = nil
+        #if os(iOS)
         await fanoutLocklessCommittedEvent(
             op: "event.pane_removed",
             payload: .object([
+                "closedSequence": result["closedSequence"] ?? .null,
                 "paneId": .integer(Int64(paneId)),
+                "recoverable": .bool(false),
                 "surfaceId": .string(surfaceId),
                 "tombstoneId": .string(tombstoneId),
             ])
         )
+        await fanoutLocklessConsumable(
+            scopeId: Self.locklessPaneScopeId(surfaceId: surfaceId, paneId: Int64(paneId)), adapter: adapter
+        )
+        annotationPublisher?.notify()
+        #else
+        await fanoutLocklessCommittedEvent(
+            op: "event.pane_removed",
+            payload: .object([
+                "paneId": .integer(Int64(paneId)),
+                "recoverable": .bool(true),
+                "surfaceId": .string(surfaceId),
+                "tombstoneId": .string(tombstoneId),
+            ])
+        )
+        #endif
         await drainControllerRetentionReclamations(adapter: adapter)
         return tombstoneId
     }
@@ -3279,6 +3370,17 @@ final class SurfAceRuntime {
         do {
             let committed: SurfAceLocklessCommittedMutation
             var confirmedAfterCommit: [String: Int64] = [:]
+            #if os(iOS)
+            let closeSceneKey = (payload["surfaceId"] as? String).flatMap { surfaceById[$0]?.sceneKey }
+            #else
+            let closeSceneKey: String? = nil
+            #endif
+            let paneModelBeforeClose: SurfAcePaneModel? = {
+                guard op == "pane.close",
+                      let surfaceId = payload["surfaceId"] as? String,
+                      let paneId = Self.int64(payload["paneId"]) else { return nil }
+                return surfaceById[surfaceId]?.panesById[Int(paneId)]
+            }()
             switch op {
             case "pane.split":
                 guard let surfaceId = payload["surfaceId"] as? String,
@@ -3352,14 +3454,24 @@ final class SurfAceRuntime {
                     consumableScopeId: Self.locklessSurfaceScopeId(surfaceId),
                     consumableScopeKind: "surface", consumableRecordClass: .topology
                 ) { state, sequence in
-                    let result = try SurfAceLocklessTopologyOperations.paneClose(
+                    #if os(iOS)
+                    let result = try SurfAceLocklessTopologyOperations.paneFinalClose(
                         state: &state, surfaceId: surfaceId, paneId: paneId,
                         expectedTopologyRevision: expected
                     )
+                    let recoverable = false
+                    #else
+                    let result = try SurfAceLocklessTopologyOperations.paneClose(
+                        state: &state, surfaceId: surfaceId, paneId: paneId,
+                        expectedTopologyRevision: expected, origin: .explicitPaneClose
+                    )
+                    let recoverable = true
+                    #endif
                     return .object([
                         "closedSequence": .integer(result.closedSequence),
                         "operationReceipt": Self.locklessReceiptJSON(requestId: id, sequence: sequence),
                         "paneId": .integer(result.paneId),
+                        "recoverable": .bool(recoverable),
                         "tombstoneId": .string(result.tombstoneId),
                         "topology": result.topology,
                         "topologyRevision": .integer(result.topologyRevision),
@@ -3518,13 +3630,24 @@ final class SurfAceRuntime {
                             "surfaceId": .string(surfaceId),
                         ])
                     )
-                    let result = try SurfAceLocklessTopologyOperations.surfaceWindowClose(
+                    #if os(iOS)
+                    let result = try SurfAceLocklessTopologyOperations.surfaceWindowFinalClose(
                         state: &state, surfaceId: surfaceId,
                         expectedSurfaceSetRevision: surfaceSet, expectedTopologyRevision: topology
                     )
+                    let recoverable = false
+                    #else
+                    let result = try SurfAceLocklessTopologyOperations.surfaceWindowClose(
+                        state: &state, surfaceId: surfaceId,
+                        expectedSurfaceSetRevision: surfaceSet, expectedTopologyRevision: topology,
+                        origin: .explicitWindowClose
+                    )
+                    let recoverable = true
+                    #endif
                     return .object([
                         "closedSequence": .integer(result.closedSequence),
                         "operationReceipt": Self.locklessReceiptJSON(requestId: id, sequence: sequence),
+                        "recoverable": .bool(recoverable),
                         "surfaceId": .string(result.surfaceId),
                         "surfaceSetRevision": .integer(result.surfaceSetRevision),
                         "tombstoneId": .string(result.tombstoneId),
@@ -3583,13 +3706,47 @@ final class SurfAceRuntime {
                 postSendAction = {
                     SurfAceSceneActivation.requestNewWindow(source: "lockless:\(op)")
                 }
+            } else if op == "pane.close",
+                      let surfaceId = payload["surfaceId"] as? String,
+                      case .object(let response) = committed.responsePayload,
+                      case .integer(let paneId) = response["paneId"],
+                      case .integer(let closedSequence) = response["closedSequence"],
+                      case .string(let tombstoneId) = response["tombstoneId"] {
+                postSendAction = { [weak self] in
+                    paneModelBeforeClose?.pendingFlushTask?.cancel()
+                    paneModelBeforeClose?.pendingFlushTask = nil
+                    self?.annotationPublisher?.notify()
+                    await self?.fanoutLocklessCommittedEvent(
+                        op: "event.pane_removed",
+                        payload: .object([
+                            "closedSequence": .integer(closedSequence),
+                            "paneId": .integer(paneId),
+                            "recoverable": .bool(false),
+                            "surfaceId": .string(surfaceId),
+                            "tombstoneId": .string(tombstoneId),
+                        ])
+                    )
+                }
             } else if op == "surface.window.close",
                       let surfaceId = payload["surfaceId"] as? String,
-                      let sceneKey = surfaceById[surfaceId]?.sceneKey {
-                postSendAction = {
-                    guard let scene = UIApplication.shared.connectedScenes.first(where: {
-                        $0.session.persistentIdentifier == sceneKey
-                    }) else { return }
+                      case .object(let response) = committed.responsePayload,
+                      case .integer(let closedSequence) = response["closedSequence"],
+                      case .string(let tombstoneId) = response["tombstoneId"] {
+                postSendAction = { [weak self] in
+                    self?.annotationPublisher?.notify()
+                    await self?.fanoutLocklessCommittedEvent(
+                        op: "event.surface_removed",
+                        payload: .object([
+                            "closedSequence": .integer(closedSequence),
+                            "recoverable": .bool(false),
+                            "surfaceId": .string(surfaceId),
+                            "tombstoneId": .string(tombstoneId),
+                        ])
+                    )
+                    guard let sceneKey = closeSceneKey,
+                          let scene = UIApplication.shared.connectedScenes.first(where: {
+                              $0.session.persistentIdentifier == sceneKey
+                          }) else { return }
                     SurfAceSceneActivation.log(
                         event: "scene_destruction_request",
                         fields: [("source", "lockless"), ("surface_id", surfaceId)]

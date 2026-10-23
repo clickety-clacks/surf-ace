@@ -122,6 +122,8 @@ struct SurfAceAnnotationSurfaceOutbox: Codable, Equatable, Sendable {
     var latestSubmissionByPane: [String: SurfAceAnnotationPaneSubmission]? = nil
     var acceptedCursor: SurfAceAnnotationServerCursor?
     var diagnostic: SurfAceAnnotationDiagnostic?
+    var finalClosed: Bool? = nil
+    var finalizedPaneIds: [String]? = nil
     var unhealthy: SurfAceAnnotationDiagnostic? = nil
     var fifo: [SurfAceAnnotationOutboxEntry]
     var nextSequence: Int64
@@ -153,6 +155,7 @@ struct SurfAceAnnotationOutbox: Codable, Equatable, Sendable {
 
     var version = 1
     var clientId: String
+    var finalizedSurfaceIds: [String]? = nil
     var sourceEpoch: String
     var surfaces: [String: SurfAceAnnotationSurfaceOutbox] = [:]
 
@@ -178,6 +181,9 @@ struct SurfAceAnnotationOutbox: Codable, Equatable, Sendable {
                   surface.fifo.allSatisfy({ $0.canonical.utf8.count <= Self.maximumRecordBytes }),
                   (surface.acceptedFramesByPane?.count ?? 0) <= 256,
                   (surface.latestSubmissionByPane?.count ?? 0) <= 256,
+                  (surface.finalizedPaneIds ?? []).allSatisfy({ Int($0).map({ $0 > 0 }) == true }),
+                  Set(surface.finalizedPaneIds ?? []).count == (surface.finalizedPaneIds ?? []).count,
+                  (surface.finalizedPaneIds ?? []).sorted() == (surface.finalizedPaneIds ?? []),
                   (surface.latestSubmissionByPane ?? [:]).allSatisfy({ key, submission in
                       Int(key).map({ $0 > 0 }) == true
                           && Int64(submission.sourceSequence).map({ $0 > 0 && $0 < surface.nextSequence }) == true
@@ -207,6 +213,12 @@ struct SurfAceAnnotationOutbox: Codable, Equatable, Sendable {
                 throw SurfAceAnnotationOutboxError.invalidState
             }
         }
+        let finalized = finalizedSurfaceIds ?? []
+        guard Set(finalized).count == finalized.count,
+              finalized.allSatisfy({ !$0.isEmpty && $0.utf8.count <= 128 }),
+              finalized.allSatisfy({ surfaces[$0] == nil || surfaces[$0]?.finalClosed == true }) else {
+            throw SurfAceAnnotationOutboxError.invalidState
+        }
     }
 
     func partitionBytes(surfaceId: String) throws -> Int64 {
@@ -235,6 +247,7 @@ struct SurfAceAnnotationOutbox: Codable, Equatable, Sendable {
     }
 
     mutating func markUnhealthy(surfaceId: String, code: String) throws {
+        guard !isFinalized(surfaceId) else { throw SurfAceAnnotationOutboxError.invalidState }
         try ensureSurface(surfaceId, maxBytes: Self.maximumBytes, maxRecords: Self.maximumRecords)
         guard let surface = surfaces[surfaceId] else { throw SurfAceAnnotationOutboxError.invalidState }
         let sequence = surface.fifo.first?.sourceSequence ?? surface.trailingGap?.from ?? String(surface.nextSequence)
@@ -252,12 +265,52 @@ struct SurfAceAnnotationOutbox: Codable, Equatable, Sendable {
         surfaces[surfaceId]?.openFrames?[String(paneId)]
     }
 
+    mutating func finalizeSurface(surfaceId: String) {
+        guard !surfaceId.isEmpty, surfaceId.utf8.count <= 128 else { return }
+        var finalized = finalizedSurfaceIds ?? []
+        if !finalized.contains(surfaceId) {
+            finalized.append(surfaceId)
+            finalized.sort()
+        }
+        finalizedSurfaceIds = finalized
+        guard var surface = surfaces[surfaceId] else { return }
+        // An open frame has no durable registry acceptance and must not be
+        // converted into a final record by a close operation.
+        surface.openFrames = [:]
+        surface.acceptedFramesByPane = nil
+        surface.latestSubmissionByPane = nil
+        surface.finalClosed = true
+        if surface.fifo.isEmpty && surface.trailingGap == nil {
+            surfaces.removeValue(forKey: surfaceId)
+        } else {
+            surfaces[surfaceId] = surface
+        }
+    }
+
+    mutating func finalizePane(surfaceId: String, paneId: Int) throws {
+        guard paneId > 0, !isFinalized(surfaceId) else { throw SurfAceAnnotationOutboxError.invalidState }
+        try ensureSurface(surfaceId, maxBytes: Self.maximumBytes, maxRecords: Self.maximumRecords)
+        guard var surface = surfaces[surfaceId] else { throw SurfAceAnnotationOutboxError.invalidState }
+        var finalized = surface.finalizedPaneIds ?? []
+        let key = String(paneId)
+        if !finalized.contains(key) {
+            finalized.append(key)
+            finalized.sort()
+        }
+        surface.finalizedPaneIds = finalized
+        surface.openFrames?.removeValue(forKey: String(paneId))
+        surface.acceptedFramesByPane?.removeValue(forKey: String(paneId))
+        surface.latestSubmissionByPane?.removeValue(forKey: String(paneId))
+        surfaces[surfaceId] = surface
+    }
+
     mutating func beginFrame(surfaceId: String, paneId: Int, contextKey: String, contentId: String,
                              contentType: String? = nil, revision: Int? = nil,
                              url: String?, scrollOffset: SurfAceAnnotationOpenFrame.Offset,
                              viewport: SurfAceAnnotationOpenFrame.Viewport, openedAt: Int64,
                              image: String, maxBytes: Int = maximumBytes) throws -> SurfAceAnnotationOpenFrame {
         try ensureSurface(surfaceId, maxBytes: maxBytes, maxRecords: Self.maximumRecords)
+        guard !isFinalizedPane(surfaceId, paneId: paneId) else { throw SurfAceAnnotationOutboxError.invalidState }
         if let existing = openFrame(surfaceId: surfaceId, paneId: paneId) {
             // Once direct clients have seen the explicit commit, a later stroke
             // must never join this frame while source finalization retries.
@@ -449,6 +502,7 @@ struct SurfAceAnnotationOutbox: Codable, Equatable, Sendable {
     }
 
     mutating func lose(surfaceId: String, code: String) throws {
+        guard !isFinalized(surfaceId) else { throw SurfAceAnnotationOutboxError.invalidState }
         try ensureSurface(surfaceId, maxBytes: Self.maximumBytes, maxRecords: Self.maximumRecords)
         guard var surface = surfaces[surfaceId], surface.nextSequence < Int64.max else {
             throw SurfAceAnnotationOutboxError.sequenceExhausted
@@ -462,8 +516,13 @@ struct SurfAceAnnotationOutbox: Codable, Equatable, Sendable {
 
     mutating func append(surfaceId: String, record: [String: Any],
                          maxBytes: Int = maximumBytes, maxRecords: Int = maximumRecords) throws -> String {
+        guard !isFinalized(surfaceId) else { throw SurfAceAnnotationOutboxError.invalidState }
         try ensureSurface(surfaceId, maxBytes: maxBytes, maxRecords: maxRecords)
         guard var surface = surfaces[surfaceId] else { throw SurfAceAnnotationOutboxError.invalidState }
+        if let paneId = record["paneId"] as? Int,
+           (surface.finalizedPaneIds ?? []).contains(String(paneId)) {
+            throw SurfAceAnnotationOutboxError.invalidState
+        }
         guard surface.nextSequence < Int64.max else { throw SurfAceAnnotationOutboxError.sequenceExhausted }
         let sequence = String(surface.nextSequence)
         surface.nextSequence += 1
@@ -574,7 +633,7 @@ struct SurfAceAnnotationOutbox: Codable, Equatable, Sendable {
         surfaces[surfaceId] = surface
         // Retain only the latest final-frame proof per pane. The serialized
         // partition accounts for receipts; lack of space loses UI proof, not FIFO.
-        if head.kind == "payload", let data = head.canonical.data(using: .utf8),
+        if surface.finalClosed != true, head.kind == "payload", let data = head.canonical.data(using: .utf8),
            let record = try JSONSerialization.jsonObject(with: data) as? [String: Any],
            record["kind"] as? String == "frame_commit",
            let paneId = record["paneId"] as? Int,
@@ -596,6 +655,9 @@ struct SurfAceAnnotationOutbox: Codable, Equatable, Sendable {
                     surfaces[surfaceId] = surface
                 }
             }
+        }
+        if surface.finalClosed == true && surface.fifo.isEmpty && surface.trailingGap == nil {
+            surfaces.removeValue(forKey: surfaceId)
         }
     }
 
@@ -663,12 +725,21 @@ struct SurfAceAnnotationOutbox: Codable, Equatable, Sendable {
         guard !surfaceId.isEmpty, surfaceId.utf8.count <= 128 else {
             throw SurfAceAnnotationOutboxError.invalidState
         }
+        guard !isFinalized(surfaceId) else { throw SurfAceAnnotationOutboxError.invalidState }
         if surfaces[surfaceId] != nil { return }
         surfaces[surfaceId] = .empty
         guard try fits(surfaceId: surfaceId, maxBytes: maxBytes, maxRecords: maxRecords) else {
             surfaces.removeValue(forKey: surfaceId)
             throw SurfAceAnnotationOutboxError.invalidLimit
         }
+    }
+
+    private func isFinalized(_ surfaceId: String) -> Bool {
+        (finalizedSurfaceIds ?? []).contains(surfaceId) || surfaces[surfaceId]?.finalClosed == true
+    }
+
+    private func isFinalizedPane(_ surfaceId: String, paneId: Int) -> Bool {
+        (surfaces[surfaceId]?.finalizedPaneIds ?? []).contains(String(paneId))
     }
 
     private func fits(surfaceId: String, maxBytes: Int, maxRecords: Int) throws -> Bool {

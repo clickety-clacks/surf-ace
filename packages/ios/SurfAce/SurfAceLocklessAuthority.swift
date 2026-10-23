@@ -166,6 +166,7 @@ struct SurfAceLocklessHistory: Codable, Equatable, Sendable {
 
 struct SurfAceLocklessPaneMaterial: Codable, Equatable, Sendable {
     var annotationMode: Bool
+    var allocationGeneration: Int64? = nil
     var history: SurfAceLocklessHistory
     var name: String?
     var paneId: Int64
@@ -174,15 +175,23 @@ struct SurfAceLocklessPaneMaterial: Codable, Equatable, Sendable {
     var target: SurfAceLocklessJSON?
 }
 
+enum SurfAceLocklessTombstoneOrigin: String, Codable, Equatable, Sendable {
+    case explicitPaneClose = "explicit_pane_close"
+    case explicitWindowClose = "explicit_window_close"
+    case ambiguous
+}
+
 struct SurfAceLocklessPaneTombstone: Codable, Equatable, Sendable {
     var bytes: Int64
     var closedSequence: Int64
+    var origin: SurfAceLocklessTombstoneOrigin? = nil
     var pane: SurfAceLocklessPaneMaterial
     var scope: SurfAceLocklessConsumableScope
     var tombstoneId: String
 }
 
 struct SurfAceLocklessSurfaceMaterial: Codable, Equatable, Sendable {
+    var allocationGeneration: Int64? = nil
     var name: String
     var nativeRestoreMaterial: SurfAceLocklessJSON
     var nextPaneId: Int64
@@ -202,9 +211,53 @@ struct SurfAceLocklessSurfaceMaterial: Codable, Equatable, Sendable {
 struct SurfAceLocklessSurfaceTombstone: Codable, Equatable, Sendable {
     var bytes: Int64
     var closedSequence: Int64
+    var origin: SurfAceLocklessTombstoneOrigin? = nil
     var scopes: [String: SurfAceLocklessConsumableScope]
     var surface: SurfAceLocklessSurfaceMaterial
     var tombstoneId: String
+}
+
+struct SurfAceLocklessFinalCloseRecord: Codable, Equatable, Sendable {
+    enum AllocationKind: String, Codable, Equatable, Sendable { case pane, surface }
+
+    var allocationGeneration: Int64?
+    var allocationKind: AllocationKind
+    var allocatorId: String?
+    var clientId: String?
+    var closedSequence: Int64
+    var closeTopologyRevision: Int64
+    var fleetId: String?
+    var paneId: Int64?
+    var paneLabel: Int64?
+    var paneLineageId: String?
+    var recordId: String
+    var sourceTombstoneId: String
+    var sourceTombstoneKind: SurfAceLocklessTombstoneReclamation.Kind
+    var surfaceId: String
+    var terminalRetirementRevision: Int64
+    var windowLabel: String?
+}
+
+struct SurfAceLocklessAllocationReleaseIntent: Codable, Equatable, Sendable {
+    var allocationGeneration: Int64?
+    var allocationKind: SurfAceLocklessFinalCloseRecord.AllocationKind
+    var allocatorId: String?
+    var clientId: String?
+    var closeTopologyRevision: Int64
+    var fleetId: String?
+    var idempotencyKey: String
+    var paneId: Int64?
+    var paneLabel: Int64?
+    var paneLineageId: String?
+    var recordId: String
+    var sourceTombstoneId: String
+    var sourceTombstoneKind: SurfAceLocklessTombstoneReclamation.Kind
+    var status: Status
+    var surfaceId: String
+    var terminalRetirementRevision: Int64
+    var windowLabel: String?
+
+    enum Status: String, Codable, Equatable, Sendable { case pending, accepted }
 }
 
 enum SurfAceLocklessControllerStatus: String, Codable, Equatable, Sendable {
@@ -388,6 +441,7 @@ struct SurfAceLocklessClientSequences: Codable, Equatable, Sendable {
 }
 
 struct SurfAceLocklessAuthorityState: Codable, Equatable, Sendable {
+    var allocationReleaseIntents: [SurfAceLocklessAllocationReleaseIntent]? = nil
     var annotationPublisher: SurfAceAnnotationOutbox?
     var capability: String
     var controllers: [String: SurfAceLocklessControllerBundle]
@@ -405,11 +459,13 @@ struct SurfAceLocklessAuthorityState: Codable, Equatable, Sendable {
     var surfaceTombstones: [SurfAceLocklessSurfaceTombstone]
     var targetApplyResults: [String: SurfAceLocklessTargetResult]
     var targetApplyWorkItems: [String: SurfAceLocklessTargetWorkItem]
+    var terminalCloseRecords: [SurfAceLocklessFinalCloseRecord]? = nil
     var version: Int
 
     static func empty(limits: SurfAceLocklessCapacityLimits = .production) throws -> Self {
         try limits.validate()
         return SurfAceLocklessAuthorityState(
+            allocationReleaseIntents: [],
             annotationPublisher: nil,
             capability: surfAceLocklessCapability,
             controllers: [:],
@@ -433,6 +489,7 @@ struct SurfAceLocklessAuthorityState: Codable, Equatable, Sendable {
             surfaceTombstones: [],
             targetApplyResults: [:],
             targetApplyWorkItems: [:],
+            terminalCloseRecords: [],
             version: 1
         )
     }
@@ -512,6 +569,31 @@ struct SurfAceLocklessAuthorityState: Codable, Equatable, Sendable {
                   Set(delivered).isSubset(of: Set(recipients)) else {
                 throw SurfAceLocklessAuthorityError.invalidState("tombstone_reclamation_delivery")
             }
+        }
+        let finalCloseRecords = terminalCloseRecords ?? []
+        guard Set(finalCloseRecords.map(\.recordId)).count == finalCloseRecords.count,
+              finalCloseRecords.allSatisfy({
+                  !$0.recordId.isEmpty && !$0.surfaceId.isEmpty && !$0.sourceTombstoneId.isEmpty
+                      && $0.closedSequence > 0 && $0.closeTopologyRevision >= 0
+                      && $0.terminalRetirementRevision > 0
+                      && ($0.allocationGeneration.map { $0 > 0 } ?? true)
+                      && ($0.allocationKind == .pane
+                          ? $0.paneId != nil && $0.paneLineageId?.isEmpty == false && $0.windowLabel == nil
+                          : $0.paneId == nil && $0.paneLineageId == nil && $0.paneLabel == nil)
+              }) else {
+            throw SurfAceLocklessAuthorityError.invalidState("terminal_close_records")
+        }
+        let releaseIntents = allocationReleaseIntents ?? []
+        guard Set(releaseIntents.map(\.recordId)).count == releaseIntents.count,
+              releaseIntents.allSatisfy({ intent in
+                  !intent.idempotencyKey.isEmpty && !intent.recordId.isEmpty && !intent.surfaceId.isEmpty
+                      && !intent.sourceTombstoneId.isEmpty && intent.closeTopologyRevision >= 0
+                      && intent.terminalRetirementRevision > 0
+                      && (intent.allocationGeneration.map { $0 > 0 } ?? true)
+                      && (finalCloseRecords.contains(where: { $0.recordId == intent.recordId })
+                          || intent.status == .accepted)
+              }) else {
+            throw SurfAceLocklessAuthorityError.invalidState("allocation_release_intents")
         }
         for (controllerId, controller) in controllers {
             guard controllerId == controller.controllerInstanceId else {

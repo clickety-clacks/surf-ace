@@ -212,7 +212,8 @@ enum SurfAceLocklessTopologyOperations {
         state: inout SurfAceLocklessAuthorityState,
         surfaceId: String,
         paneId: Int64,
-        expectedTopologyRevision: Int64
+        expectedTopologyRevision: Int64,
+        origin: SurfAceLocklessTombstoneOrigin = .ambiguous
     ) throws -> SurfAceLocklessPaneCloseResult {
         try atomically(&state) { candidate in
             var surface = try liveSurface(candidate, surfaceId)
@@ -231,7 +232,8 @@ enum SurfAceLocklessTopologyOperations {
             surface.panes.removeValue(forKey: String(paneId))
             candidate.scopes.removeValue(forKey: scopeId)
             surface.paneTombstones.append(.init(
-                bytes: bytes, closedSequence: sequence, pane: pane, scope: scope, tombstoneId: tombstoneId
+                bytes: bytes, closedSequence: sequence, origin: origin,
+                pane: pane, scope: scope, tombstoneId: tombstoneId
             ))
             surface.paneTombstones.sort(by: tombstoneOrder)
             surface.topology = try SurfAceLocklessTopologyCodec.canonical(topology)
@@ -242,6 +244,63 @@ enum SurfAceLocklessTopologyOperations {
             return SurfAceLocklessPaneCloseResult(
                 closedSequence: sequence, paneId: paneId, reclamations: reclamations,
                 tombstoneId: tombstoneId, topology: surface.topology, topologyRevision: surface.topologyRevision
+            )
+        }
+    }
+
+    static func paneFinalClose(
+        state: inout SurfAceLocklessAuthorityState,
+        surfaceId: String,
+        paneId: Int64,
+        expectedTopologyRevision: Int64
+    ) throws -> SurfAceLocklessPaneCloseResult {
+        try atomically(&state) { candidate in
+            var surface = try liveSurface(candidate, surfaceId)
+            try assertTopology(expectedTopologyRevision, surface)
+            guard surface.panes.count > 1 else { throw Error.lastLivePane }
+            guard let pane = surface.panes[String(paneId)] else { throw Error.paneNotFound(paneId) }
+            guard let topology = removingPane(from: surface.topology, paneId: paneId) else {
+                throw Error.invalidTopology("pane_not_in_topology")
+            }
+            guard candidate.sequences.nextClosedSequence < Int64.max else {
+                throw Error.invalidAuthorityState("close_sequence_exhausted")
+            }
+
+            let closedSequence = candidate.sequences.nextClosedSequence
+            let recordId = tombstoneId(prefix: "pf", sequence: closedSequence)
+            let topologyRevision = surface.topologyRevision + 1
+            surface.panes.removeValue(forKey: String(paneId))
+            surface.paneTombstones.removeAll { $0.pane.paneId == paneId }
+            surface.topology = try SurfAceLocklessTopologyCodec.canonical(topology)
+            surface.topologyRevision = topologyRevision
+            surface.surfaceRevision += 1
+            candidate.sequences.nextClosedSequence += 1
+            preservePaneScope(pane, surfaceId: surfaceId, state: &candidate)
+            appendFinalCloseAllocation(
+                state: &candidate,
+                allocationKind: .pane,
+                surfaceId: surfaceId,
+                pane: pane,
+                surface: surface,
+                closedSequence: closedSequence,
+                recordId: recordId,
+                sourceTombstoneId: recordId,
+                sourceTombstoneKind: .pane,
+                closeTopologyRevision: topologyRevision,
+                terminalRetirementRevision: topologyRevision
+            )
+            if var publisher = candidate.annotationPublisher {
+                try publisher.finalizePane(surfaceId: surfaceId, paneId: Int(paneId))
+                candidate.annotationPublisher = publisher
+            }
+            candidate.liveSurfaces[surfaceId] = surface
+            return SurfAceLocklessPaneCloseResult(
+                closedSequence: closedSequence,
+                paneId: paneId,
+                reclamations: [],
+                tombstoneId: recordId,
+                topology: surface.topology,
+                topologyRevision: topologyRevision
             )
         }
     }
@@ -414,7 +473,8 @@ enum SurfAceLocklessTopologyOperations {
         state: inout SurfAceLocklessAuthorityState,
         surfaceId: String,
         expectedSurfaceSetRevision: Int64,
-        expectedTopologyRevision: Int64
+        expectedTopologyRevision: Int64,
+        origin: SurfAceLocklessTombstoneOrigin = .ambiguous
     ) throws -> SurfAceLocklessSurfaceCloseResult {
         try atomically(&state) { candidate in
             try assertSurfaceSet(expectedSurfaceSetRevision, candidate)
@@ -432,7 +492,8 @@ enum SurfAceLocklessTopologyOperations {
             let bytes: Int64 = 0
             candidate.liveSurfaces.removeValue(forKey: surfaceId)
             candidate.surfaceTombstones.append(.init(
-                bytes: bytes, closedSequence: sequence, scopes: scopes, surface: surface, tombstoneId: id
+                bytes: bytes, closedSequence: sequence, origin: origin,
+                scopes: scopes, surface: surface, tombstoneId: id
             ))
             candidate.surfaceTombstones.sort(by: surfaceTombstoneOrder)
             candidate.surfaceSetRevision += 1
@@ -442,6 +503,181 @@ enum SurfAceLocklessTopologyOperations {
                 surfaceSetRevision: candidate.surfaceSetRevision, tombstoneId: id
             )
         }
+    }
+
+    static func surfaceWindowFinalClose(
+        state: inout SurfAceLocklessAuthorityState,
+        surfaceId: String,
+        expectedSurfaceSetRevision: Int64,
+        expectedTopologyRevision: Int64
+    ) throws -> SurfAceLocklessSurfaceCloseResult {
+        try atomically(&state) { candidate in
+            try assertSurfaceSet(expectedSurfaceSetRevision, candidate)
+            let surface = try liveSurface(candidate, surfaceId)
+            try assertTopology(expectedTopologyRevision, surface)
+            guard candidate.sequences.nextClosedSequence < Int64.max else {
+                throw Error.invalidAuthorityState("close_sequence_exhausted")
+            }
+
+            let closedSequence = candidate.sequences.nextClosedSequence
+            let recordId = tombstoneId(prefix: "sf", sequence: closedSequence)
+            let terminalRevision = candidate.surfaceSetRevision + 1
+            let allPaneTombstones = Dictionary(
+                surface.paneTombstones.map { ($0.pane.paneId, $0) },
+                uniquingKeysWith: { first, _ in first }
+            )
+            var paneIds = Set(surface.panes.values.map(\.paneId))
+            paneIds.formUnion(allPaneTombstones.keys)
+
+            preserveSurfaceScopes(surface, state: &candidate)
+            for paneId in paneIds.sorted() {
+                let pane = surface.panes[String(paneId)] ?? allPaneTombstones[paneId]?.pane
+                guard let pane else { continue }
+                let paneRecordId = tombstoneId(prefix: "pf", sequence: closedSequence)
+                    + "_\(paneId)"
+                appendFinalCloseAllocation(
+                    state: &candidate,
+                    allocationKind: .pane,
+                    surfaceId: surfaceId,
+                    pane: pane,
+                    surface: surface,
+                    closedSequence: closedSequence,
+                    recordId: paneRecordId,
+                    sourceTombstoneId: allPaneTombstones[paneId]?.tombstoneId ?? paneRecordId,
+                    sourceTombstoneKind: .pane,
+                    closeTopologyRevision: surface.topologyRevision,
+                    terminalRetirementRevision: terminalRevision
+                )
+            }
+            appendFinalCloseAllocation(
+                state: &candidate,
+                allocationKind: .surface,
+                surfaceId: surfaceId,
+                pane: nil,
+                surface: surface,
+                closedSequence: closedSequence,
+                recordId: recordId,
+                sourceTombstoneId: recordId,
+                sourceTombstoneKind: .surface,
+                closeTopologyRevision: surface.topologyRevision,
+                terminalRetirementRevision: terminalRevision
+            )
+            if var publisher = candidate.annotationPublisher {
+                publisher.finalizeSurface(surfaceId: surfaceId)
+                candidate.annotationPublisher = publisher
+            }
+            candidate.sequences.nextClosedSequence += 1
+            candidate.sceneSurfaceIds = candidate.sceneSurfaceIds.filter { $0.value != surfaceId }
+            candidate.liveSurfaces.removeValue(forKey: surfaceId)
+            candidate.surfaceSetRevision = terminalRevision
+            return SurfAceLocklessSurfaceCloseResult(
+                closedSequence: closedSequence,
+                reclamations: [],
+                surfaceId: surfaceId,
+                surfaceSetRevision: terminalRevision,
+                tombstoneId: recordId
+            )
+        }
+    }
+
+    private static func preservePaneScope(
+        _ pane: SurfAceLocklessPaneMaterial,
+        surfaceId: String,
+        state: inout SurfAceLocklessAuthorityState
+    ) {
+        let scopeId = paneScopeId(surfaceId, pane.paneId)
+        if state.scopes[scopeId] == nil {
+            state.scopes[scopeId] = emptyScope(
+                id: scopeId, kind: "pane", controllers: state.controllers
+            )
+        }
+    }
+
+    private static func preserveSurfaceScopes(
+        _ surface: SurfAceLocklessSurfaceMaterial,
+        state: inout SurfAceLocklessAuthorityState
+    ) {
+        let surfaceId = surface.surfaceId
+        let surfaceScope = surfaceScopeId(surfaceId)
+        if state.scopes[surfaceScope] == nil {
+            state.scopes[surfaceScope] = emptyScope(
+                id: surfaceScope, kind: "surface", controllers: state.controllers
+            )
+        }
+        for pane in surface.panes.values {
+            preservePaneScope(pane, surfaceId: surfaceId, state: &state)
+        }
+        for tombstone in surface.paneTombstones {
+            let scopeId = paneScopeId(surfaceId, tombstone.pane.paneId)
+            if state.scopes[scopeId] == nil { state.scopes[scopeId] = tombstone.scope }
+        }
+    }
+
+    private static func appendFinalCloseAllocation(
+        state: inout SurfAceLocklessAuthorityState,
+        allocationKind: SurfAceLocklessFinalCloseRecord.AllocationKind,
+        surfaceId: String,
+        pane: SurfAceLocklessPaneMaterial?,
+        surface: SurfAceLocklessSurfaceMaterial,
+        closedSequence: Int64,
+        recordId: String,
+        sourceTombstoneId: String,
+        sourceTombstoneKind: SurfAceLocklessTombstoneReclamation.Kind,
+        closeTopologyRevision: Int64,
+        terminalRetirementRevision: Int64
+    ) {
+        let binding = state.registryBinding
+        let confirmedWindowLabel = surface.windowLabel.isEmpty || surface.windowLabelConfirmed == false
+            ? nil : surface.windowLabel
+        let confirmedPaneLabel = pane.flatMap { $0.paneLabel > 0 ? $0.paneLabel : nil }
+        let allocationGeneration = allocationKind == .pane
+            ? pane?.allocationGeneration : surface.allocationGeneration
+        let record = SurfAceLocklessFinalCloseRecord(
+            allocationGeneration: allocationGeneration,
+            allocationKind: allocationKind,
+            allocatorId: binding?.allocatorId,
+            clientId: binding?.clientId,
+            closedSequence: closedSequence,
+            closeTopologyRevision: closeTopologyRevision,
+            fleetId: binding?.fleetId,
+            paneId: allocationKind == .pane ? pane?.paneId : nil,
+            paneLabel: allocationKind == .pane ? confirmedPaneLabel : nil,
+            paneLineageId: allocationKind == .pane ? pane?.paneLineageId : nil,
+            recordId: recordId,
+            sourceTombstoneId: sourceTombstoneId,
+            sourceTombstoneKind: sourceTombstoneKind,
+            surfaceId: surfaceId,
+            terminalRetirementRevision: terminalRetirementRevision,
+            windowLabel: allocationKind == .surface ? confirmedWindowLabel : nil
+        )
+        var records = state.terminalCloseRecords ?? []
+        records.append(record)
+        state.terminalCloseRecords = records
+
+        let hasAllocation = allocationKind == .pane ? confirmedPaneLabel != nil : confirmedWindowLabel != nil
+        guard hasAllocation else { return }
+        let intent = SurfAceLocklessAllocationReleaseIntent(
+            allocationGeneration: allocationGeneration,
+            allocationKind: allocationKind,
+            allocatorId: binding?.allocatorId,
+            clientId: binding?.clientId,
+            closeTopologyRevision: closeTopologyRevision,
+            fleetId: binding?.fleetId,
+            idempotencyKey: "release:\(recordId)",
+            paneId: allocationKind == .pane ? pane?.paneId : nil,
+            paneLabel: allocationKind == .pane ? confirmedPaneLabel : nil,
+            paneLineageId: allocationKind == .pane ? pane?.paneLineageId : nil,
+            recordId: recordId,
+            sourceTombstoneId: sourceTombstoneId,
+            sourceTombstoneKind: sourceTombstoneKind,
+            status: .pending,
+            surfaceId: surfaceId,
+            terminalRetirementRevision: terminalRetirementRevision,
+            windowLabel: allocationKind == .surface ? confirmedWindowLabel : nil
+        )
+        var intents = state.allocationReleaseIntents ?? []
+        intents.append(intent)
+        state.allocationReleaseIntents = intents
     }
 
     static func surfaceWindowRestore(
