@@ -1652,18 +1652,19 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         await firstRuntime.restoreLocklessAuthority(reason: "test_process_start")
         let registeredOriginal = await firstRuntime.registerSurfaceForScene(sceneKey: "scene-restart")
         let original = try XCTUnwrap(registeredOriginal)
+        let originalSurfaceId = original.surfaceId
         let originalPaneIds = original.panes.map(\.paneId)
         let firstAdapter = try firstRuntime.locklessAuthorityForLocalMutation()
         _ = try await firstAdapter.commitLocalMutation(operation: "test.record-allocation-generations") { state, _ in
-            guard var surface = state.liveSurfaces[original.surfaceId] else {
+            guard var surface = state.liveSurfaces[originalSurfaceId] else {
                 throw SurfAceLocklessRuntimeAdapterError.invalidAdmission
             }
             surface.allocationGeneration = 73
             for paneId in Array(surface.panes.keys) {
                 surface.panes[paneId]?.allocationGeneration = 90 + (Int64(paneId) ?? 0)
             }
-            state.liveSurfaces[original.surfaceId] = surface
-            return .object(["surfaceId": .string(original.surfaceId)])
+            state.liveSurfaces[originalSurfaceId] = surface
+            return .object(["surfaceId": .string(originalSurfaceId)])
         }
         let beforeTermination = await firstAdapter.snapshot()
         let materialBeforeTermination = try XCTUnwrap(beforeTermination.liveSurfaces[original.surfaceId])
