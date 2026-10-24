@@ -352,7 +352,7 @@ final class SurfAceLocklessTopologyOperationsTests: XCTestCase {
         XCTAssertEqual(paneRelease.status, .pending)
         XCTAssertEqual(paneRelease.closeTopologyRevision, paneClose.topologyRevision)
         let historicalPaneClose = try XCTUnwrap(
-            migrated.scopes[surfaceScopeId]?.records.first(where: { $0.recordId == "record:legacy-pane-close" })
+            retainedWindow.scopes[surfaceScopeId]?.records.first(where: { $0.recordId == "record:legacy-pane-close" })
         )
         if case .object(let payload) = historicalPaneClose.payload {
             XCTAssertEqual(payload["topologyRevision"], .integer(paneClose.topologyRevision))
