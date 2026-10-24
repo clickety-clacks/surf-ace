@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 let surfAceLocklessCapability = "surf-ace.lockless-multi-controller.v1"
@@ -166,6 +167,7 @@ struct SurfAceLocklessHistory: Codable, Equatable, Sendable {
 
 struct SurfAceLocklessPaneMaterial: Codable, Equatable, Sendable {
     var annotationMode: Bool
+    var allocationGeneration: Int64? = nil
     var history: SurfAceLocklessHistory
     var name: String?
     var paneId: Int64
@@ -174,15 +176,23 @@ struct SurfAceLocklessPaneMaterial: Codable, Equatable, Sendable {
     var target: SurfAceLocklessJSON?
 }
 
+enum SurfAceLocklessTombstoneOrigin: String, Codable, Equatable, Sendable {
+    case explicitPaneClose = "explicit_pane_close"
+    case explicitWindowClose = "explicit_window_close"
+    case ambiguous
+}
+
 struct SurfAceLocklessPaneTombstone: Codable, Equatable, Sendable {
     var bytes: Int64
     var closedSequence: Int64
+    var origin: SurfAceLocklessTombstoneOrigin? = nil
     var pane: SurfAceLocklessPaneMaterial
     var scope: SurfAceLocklessConsumableScope
     var tombstoneId: String
 }
 
 struct SurfAceLocklessSurfaceMaterial: Codable, Equatable, Sendable {
+    var allocationGeneration: Int64? = nil
     var name: String
     var nativeRestoreMaterial: SurfAceLocklessJSON
     var nextPaneId: Int64
@@ -202,9 +212,163 @@ struct SurfAceLocklessSurfaceMaterial: Codable, Equatable, Sendable {
 struct SurfAceLocklessSurfaceTombstone: Codable, Equatable, Sendable {
     var bytes: Int64
     var closedSequence: Int64
+    var origin: SurfAceLocklessTombstoneOrigin? = nil
     var scopes: [String: SurfAceLocklessConsumableScope]
     var surface: SurfAceLocklessSurfaceMaterial
     var tombstoneId: String
+}
+
+struct SurfAceLocklessFinalCloseRecord: Codable, Equatable, Sendable {
+    enum AllocationKind: String, Codable, Equatable, Sendable { case pane, surface }
+
+    var allocationGeneration: Int64?
+    var allocationKind: AllocationKind
+    var allocatorId: String?
+    var clientId: String?
+    var closedSequence: Int64
+    var closeTopologyRevision: Int64
+    var fleetId: String?
+    var paneId: Int64?
+    var paneLabel: Int64?
+    var paneLineageId: String?
+    var recordId: String
+    var sourceTombstoneId: String
+    var sourceTombstoneKind: SurfAceLocklessTombstoneReclamation.Kind
+    var surfaceId: String
+    var terminalRetirementRevision: Int64
+    var windowLabel: String?
+}
+
+struct SurfAceLocklessAllocationReleaseIntent: Codable, Equatable, Sendable {
+    var allocationGeneration: Int64?
+    var allocationKind: SurfAceLocklessFinalCloseRecord.AllocationKind
+    var allocatorId: String?
+    var clientId: String?
+    var closeTopologyRevision: Int64
+    var fleetId: String?
+    var idempotencyKey: String
+    var paneId: Int64?
+    var paneLabel: Int64?
+    var paneLineageId: String?
+    var releaseId: String
+    var recordId: String
+    var sourceTombstoneId: String
+    var sourceTombstoneKind: SurfAceLocklessTombstoneReclamation.Kind
+    var status: Status
+    var surfaceId: String
+    var terminalRetirementRevision: Int64
+    var windowLabel: String?
+
+    enum Status: String, Codable, Equatable, Sendable { case pending, accepted }
+}
+
+enum SurfAceLocklessAllocationReleaseIdentity {
+    static func matches(_ intent: SurfAceLocklessAllocationReleaseIntent) -> Bool {
+        guard let allocationGeneration = intent.allocationGeneration,
+              let clientId = intent.clientId else { return false }
+        switch intent.allocationKind {
+        case .pane:
+            guard let lineageId = intent.paneLineageId,
+                  let paneId = intent.paneId,
+                  let paneLabel = intent.paneLabel else { return false }
+            return pane(
+                allocationGeneration: allocationGeneration,
+                clientId: clientId,
+                closeRevision: intent.closeTopologyRevision,
+                lineageId: lineageId,
+                paneId: String(paneId),
+                paneLabel: paneLabel,
+                surfaceId: intent.surfaceId,
+                terminalRetirementRevision: intent.terminalRetirementRevision,
+                tombstoneId: intent.sourceTombstoneId,
+                tombstoneKind: intent.sourceTombstoneKind
+            ) == intent.releaseId
+        case .surface:
+            guard let windowLabel = intent.windowLabel else { return false }
+            return window(
+                allocationGeneration: allocationGeneration,
+                clientId: clientId,
+                closeRevision: intent.closeTopologyRevision,
+                surfaceId: intent.surfaceId,
+                terminalRetirementRevision: intent.terminalRetirementRevision,
+                tombstoneId: intent.sourceTombstoneId,
+                tombstoneKind: intent.sourceTombstoneKind,
+                windowLabel: windowLabel
+            ) == intent.releaseId
+        }
+    }
+
+    static func pane(
+        allocationGeneration: Int64,
+        clientId: String,
+        closeRevision: Int64,
+        lineageId: String,
+        paneId: String,
+        paneLabel: Int64,
+        surfaceId: String,
+        terminalRetirementRevision: Int64,
+        tombstoneId: String,
+        tombstoneKind: SurfAceLocklessTombstoneReclamation.Kind
+    ) -> String? {
+        guard allocationGeneration > 0,
+              safeInteger(closeRevision),
+              paneLabel > 0,
+              terminalRetirementRevision > 0,
+              validClientId(clientId),
+              validSurfaceId(surfaceId),
+              validLineageId(lineageId),
+              paneId.range(of: #"^[1-9][0-9]{0,15}$"#, options: .regularExpression) != nil,
+              validTombstoneId(tombstoneId),
+              tombstoneKind == .pane || tombstoneKind == .surface else { return nil }
+        let json = "{\"allocationGeneration\":\(allocationGeneration),\"clientId\":\"\(clientId)\",\"closeRevision\":\(closeRevision),\"lineageId\":\"\(lineageId)\",\"paneId\":\"\(paneId)\",\"paneLabel\":\(paneLabel),\"surfaceId\":\"\(surfaceId)\",\"terminalRetirementRevision\":\(terminalRetirementRevision),\"tombstoneId\":\"\(tombstoneId)\",\"tombstoneKind\":\"\(tombstoneKind.rawValue)\"}"
+        return digest(json)
+    }
+
+    static func window(
+        allocationGeneration: Int64,
+        clientId: String,
+        closeRevision: Int64,
+        surfaceId: String,
+        terminalRetirementRevision: Int64,
+        tombstoneId: String,
+        tombstoneKind: SurfAceLocklessTombstoneReclamation.Kind,
+        windowLabel: String
+    ) -> String? {
+        guard allocationGeneration > 0,
+              safeInteger(closeRevision),
+              terminalRetirementRevision > 0,
+              validClientId(clientId),
+              validSurfaceId(surfaceId),
+              validTombstoneId(tombstoneId),
+              tombstoneKind == .surface,
+              windowLabel.range(of: #"^[a-z]{1,32}$"#, options: .regularExpression) != nil else { return nil }
+        let json = "{\"allocationGeneration\":\(allocationGeneration),\"clientId\":\"\(clientId)\",\"closeRevision\":\(closeRevision),\"surfaceId\":\"\(surfaceId)\",\"terminalRetirementRevision\":\(terminalRetirementRevision),\"tombstoneId\":\"\(tombstoneId)\",\"tombstoneKind\":\"surface\",\"windowLabel\":\"\(windowLabel)\"}"
+        return digest(json)
+    }
+
+    private static func digest(_ value: String) -> String {
+        SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func safeInteger(_ value: Int64) -> Bool {
+        value >= 0 && value <= 9_007_199_254_740_991
+    }
+
+    private static func validClientId(_ value: String) -> Bool {
+        value.range(of: #"^[a-f0-9]{64}$"#, options: .regularExpression) != nil
+    }
+
+    private static func validSurfaceId(_ value: String) -> Bool {
+        value.range(of: #"^sf_[A-Za-z0-9._:-]{3,64}$"#, options: .regularExpression) != nil
+    }
+
+    private static func validLineageId(_ value: String) -> Bool {
+        value.range(of: #"^pl_[A-Za-z0-9._:-]{3,128}$"#, options: .regularExpression) != nil
+    }
+
+    private static func validTombstoneId(_ value: String) -> Bool {
+        value.range(of: #"^[A-Za-z0-9._:-]{1,128}$"#, options: .regularExpression) != nil
+    }
 }
 
 enum SurfAceLocklessControllerStatus: String, Codable, Equatable, Sendable {
@@ -388,6 +552,7 @@ struct SurfAceLocklessClientSequences: Codable, Equatable, Sendable {
 }
 
 struct SurfAceLocklessAuthorityState: Codable, Equatable, Sendable {
+    var allocationReleaseIntents: [SurfAceLocklessAllocationReleaseIntent]? = nil
     var annotationPublisher: SurfAceAnnotationOutbox?
     var capability: String
     var controllers: [String: SurfAceLocklessControllerBundle]
@@ -405,11 +570,13 @@ struct SurfAceLocklessAuthorityState: Codable, Equatable, Sendable {
     var surfaceTombstones: [SurfAceLocklessSurfaceTombstone]
     var targetApplyResults: [String: SurfAceLocklessTargetResult]
     var targetApplyWorkItems: [String: SurfAceLocklessTargetWorkItem]
+    var terminalCloseRecords: [SurfAceLocklessFinalCloseRecord]? = nil
     var version: Int
 
     static func empty(limits: SurfAceLocklessCapacityLimits = .production) throws -> Self {
         try limits.validate()
         return SurfAceLocklessAuthorityState(
+            allocationReleaseIntents: [],
             annotationPublisher: nil,
             capability: surfAceLocklessCapability,
             controllers: [:],
@@ -433,6 +600,7 @@ struct SurfAceLocklessAuthorityState: Codable, Equatable, Sendable {
             surfaceTombstones: [],
             targetApplyResults: [:],
             targetApplyWorkItems: [:],
+            terminalCloseRecords: [],
             version: 1
         )
     }
@@ -512,6 +680,33 @@ struct SurfAceLocklessAuthorityState: Codable, Equatable, Sendable {
                   Set(delivered).isSubset(of: Set(recipients)) else {
                 throw SurfAceLocklessAuthorityError.invalidState("tombstone_reclamation_delivery")
             }
+        }
+        let finalCloseRecords = terminalCloseRecords ?? []
+        guard Set(finalCloseRecords.map(\.recordId)).count == finalCloseRecords.count,
+              finalCloseRecords.allSatisfy({
+                  !$0.recordId.isEmpty && !$0.surfaceId.isEmpty && !$0.sourceTombstoneId.isEmpty
+                      && $0.closedSequence > 0 && $0.closeTopologyRevision >= 0
+                      && $0.terminalRetirementRevision > 0
+                      && ($0.allocationGeneration.map { $0 > 0 } ?? true)
+                      && ($0.allocationKind == .pane
+                          ? $0.paneId != nil && $0.paneLineageId?.isEmpty == false && $0.windowLabel == nil
+                          : $0.paneId == nil && $0.paneLineageId == nil && $0.paneLabel == nil)
+              }) else {
+            throw SurfAceLocklessAuthorityError.invalidState("terminal_close_records")
+        }
+        let releaseIntents = allocationReleaseIntents ?? []
+        guard Set(releaseIntents.map(\.recordId)).count == releaseIntents.count,
+              Set(releaseIntents.map(\.releaseId)).count == releaseIntents.count,
+              releaseIntents.allSatisfy({ intent in
+                  SurfAceLocklessAllocationReleaseIdentity.matches(intent)
+                      && intent.idempotencyKey == intent.releaseId
+                      && !intent.recordId.isEmpty
+                      && !intent.surfaceId.isEmpty
+                      && !intent.sourceTombstoneId.isEmpty
+                      && (finalCloseRecords.contains(where: { $0.recordId == intent.recordId })
+                          || intent.status == .accepted)
+              }) else {
+            throw SurfAceLocklessAuthorityError.invalidState("allocation_release_intents")
         }
         for (controllerId, controller) in controllers {
             guard controllerId == controller.controllerInstanceId else {

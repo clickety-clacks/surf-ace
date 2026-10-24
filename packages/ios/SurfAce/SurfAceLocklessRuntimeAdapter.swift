@@ -211,6 +211,11 @@ actor SurfAceLocklessRuntimeAdapter {
             }
         }
         try Self.normalizeTopologies(in: &state)
+        var upgradeTombstoneMigrationChanged = false
+        #if os(iOS)
+        upgradeTombstoneMigrationChanged = try SurfAceLocklessTopologyOperations
+            .finalizeProvenUpgradeTombstones(state: &state)
+        #endif
         var restoredLiveController = false
         for controllerId in state.controllers.keys.sorted() {
             guard state.controllers[controllerId]?.status == .live else { continue }
@@ -221,7 +226,8 @@ actor SurfAceLocklessRuntimeAdapter {
         }
         let reclaimedRestoredController = try !SurfAceLocklessDormantRetention
             .enforceBounds(in: &state, trigger: "restored_state_enforcement").isEmpty
-        if restoredLiveController || reclaimedRestoredController || annotationMigrationChanged || loadedState == nil {
+        if restoredLiveController || reclaimedRestoredController || annotationMigrationChanged
+            || upgradeTombstoneMigrationChanged || loadedState == nil {
             state.generation += 1
             try store.save(state)
         }
@@ -589,6 +595,108 @@ actor SurfAceLocklessRuntimeAdapter {
                 surface.nextPaneLabel = max(surface.nextPaneLabel,
                     (assignment.panes.map(\.paneLabel).max() ?? 0) + 1)
                 state.liveSurfaces[assignment.surfaceId] = surface
+            }
+            return state
+        }
+    }
+
+    func applyRegistration(
+        _ reply: SurfAceRegistrationReply,
+        expectedInput: SurfAceRegistrationInput
+    ) async throws -> SurfAceLocklessAuthorityState {
+        try await coordinator.transact(trigger: "central_registration", skipUnchanged: true) { state in
+            guard try SurfAceRegistrationInput(state: state) == expectedInput else {
+                throw SurfAceRegistrationError.topologyChanged
+            }
+            guard reply.assignments.count == expectedInput.surfaces.count,
+                  Set(reply.assignments.map(\.surfaceId)) == Set(expectedInput.surfaces.map(\.surfaceId)),
+                  reply.projection.completedPaneReleaseIds == expectedInput.pendingPaneReleases.map(\.releaseId),
+                  reply.projection.completedWindowReleaseIds == expectedInput.pendingWindowReleases.map(\.releaseId) else {
+                throw SurfAceRegistrationError.invalidResponse
+            }
+
+            try SurfAceLocklessTopologyOperations.applyWindowLabels(
+                state: &state, assignments: reply.assignments.map { ($0.surfaceId, $0.windowLabel) }
+            )
+            var usedPaneLabels = Set<Int64>()
+            for assignment in reply.assignments {
+                guard var surface = state.liveSurfaces[assignment.surfaceId],
+                      let expected = expectedInput.surfaces.first(where: { $0.surfaceId == assignment.surfaceId }),
+                      assignment.panes.count == surface.panes.count,
+                      expected.panes.count == surface.panes.count else {
+                    throw SurfAceRegistrationError.invalidResponse
+                }
+                if reply.projection.allocationGenerationV1 {
+                    guard let generation = assignment.windowAllocationGeneration,
+                          generation > 0, generation <= 9_007_199_254_740_991 else {
+                        throw SurfAceRegistrationError.invalidResponse
+                    }
+                    if let current = surface.allocationGeneration, current != generation {
+                        throw SurfAceRegistrationError.invalidResponse
+                    }
+                    if surface.allocationGeneration != nil,
+                       surface.windowLabelConfirmed == true,
+                       surface.windowLabel != assignment.windowLabel {
+                        throw SurfAceRegistrationError.invalidResponse
+                    }
+                    surface.allocationGeneration = generation
+                }
+
+                var expectedPanes: [String: SurfAceRegistrationSurface.Pane] = [:]
+                for pane in expected.panes {
+                    guard expectedPanes.updateValue(pane, forKey: pane.paneId) == nil else {
+                        throw SurfAceRegistrationError.invalidResponse
+                    }
+                }
+                var seenPaneIds = Set<String>()
+                for paneAssignment in assignment.panes {
+                    guard let paneId = Int64(paneAssignment.paneId),
+                          seenPaneIds.insert(paneAssignment.paneId).inserted,
+                          paneAssignment.paneLabel > 0,
+                          !usedPaneLabels.contains(paneAssignment.paneLabel),
+                          var pane = surface.panes[paneAssignment.paneId],
+                          pane.paneId == paneId,
+                          pane.paneLineageId == paneAssignment.paneLineageId,
+                          let expectedPane = expectedPanes[paneAssignment.paneId],
+                          expectedPane.paneLineageId == paneAssignment.paneLineageId else {
+                        throw SurfAceRegistrationError.invalidResponse
+                    }
+                    if reply.projection.allocationGenerationV1,
+                       let currentGeneration = pane.allocationGeneration,
+                       currentGeneration != paneAssignment.allocationGeneration {
+                        throw SurfAceRegistrationError.invalidResponse
+                    }
+                    if expectedPane.paneLabel > 0,
+                       expectedPane.paneLabel != paneAssignment.paneLabel {
+                        throw SurfAceRegistrationError.invalidResponse
+                    }
+                    if reply.projection.allocationGenerationV1 {
+                        guard let generation = paneAssignment.allocationGeneration,
+                              generation > 0, generation <= 9_007_199_254_740_991 else {
+                            throw SurfAceRegistrationError.invalidResponse
+                        }
+                        pane.allocationGeneration = generation
+                    }
+                    usedPaneLabels.insert(paneAssignment.paneLabel)
+                    pane.paneLabel = paneAssignment.paneLabel
+                    surface.panes[paneAssignment.paneId] = pane
+                }
+                surface.nextPaneLabel = max(surface.nextPaneLabel,
+                    (assignment.panes.map(\.paneLabel).max() ?? 0) + 1)
+                state.liveSurfaces[assignment.surfaceId] = surface
+            }
+
+            let completed = Set(reply.projection.completedPaneReleaseIds + reply.projection.completedWindowReleaseIds)
+            if !completed.isEmpty {
+                var intents = state.allocationReleaseIntents ?? []
+                let pending = Set(intents.filter { $0.status == .pending }.map(\.releaseId))
+                guard completed.isSubset(of: pending) else {
+                    throw SurfAceRegistrationError.invalidResponse
+                }
+                for index in intents.indices where completed.contains(intents[index].releaseId) {
+                    intents[index].status = .accepted
+                }
+                state.allocationReleaseIntents = intents
             }
             return state
         }

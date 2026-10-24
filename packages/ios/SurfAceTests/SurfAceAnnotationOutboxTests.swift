@@ -17,6 +17,79 @@ final class SurfAceAnnotationOutboxTests: XCTestCase {
         ]
     }
 
+    func testFinalSurfaceCloseDropsOpenFrameAndDrainsAcceptedRecordsBeforeRemovingPartition() throws {
+        var outbox = try SurfAceAnnotationOutbox(clientId: "client-1", sourceEpoch: sourceEpoch)
+        _ = try outbox.append(surfaceId: surfaceId, record: record())
+        _ = try outbox.beginFrame(
+            surfaceId: surfaceId, paneId: 1, contextKey: "context", contentId: "content-1",
+            contentType: "html", revision: 1, url: nil,
+            scrollOffset: .init(x: 0, y: 0),
+            viewport: .init(width: 100, height: 100, scale: 1), openedAt: 1, image: "image"
+        )
+        try outbox.recordStroke(
+            surfaceId: surfaceId, paneId: 1,
+            stroke: .init(
+                strokeId: "stroke-1", points: [.init(x: 1, y: 1, pressure: nil)],
+                bbox: .init(x: 1, y: 1, width: 1, height: 1), startedAt: 1, endedAt: 2
+            )
+        )
+        outbox.setFrameCommitRequested(surfaceId: surfaceId, paneId: 1, requested: true)
+        let nextSequenceBeforeClose = try XCTUnwrap(outbox.surfaces[surfaceId]?.nextSequence)
+
+        outbox.finalizeSurface(surfaceId: surfaceId)
+
+        XCTAssertNil(outbox.openFrame(surfaceId: surfaceId, paneId: 1))
+        XCTAssertFalse(outbox.surfaces[surfaceId]?.fifo.contains(where: { entry in
+            guard let data = entry.canonical.data(using: .utf8),
+                  let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+            return value["kind"] as? String == "frame_commit"
+        }) ?? false)
+        XCTAssertEqual(outbox.surfaces[surfaceId]?.fifo.count, 1)
+        XCTAssertEqual(outbox.surfaces[surfaceId]?.nextSequence, nextSequenceBeforeClose)
+        XCTAssertTrue(outbox.finalizedSurfaceIds?.contains(surfaceId) == true)
+        XCTAssertThrowsError(try outbox.append(surfaceId: surfaceId, record: record()))
+
+        let accepted = try XCTUnwrap(outbox.head(surfaceId: surfaceId))
+        XCTAssertEqual(accepted.kind, "payload")
+        try outbox.accept(
+            surfaceId: surfaceId, head: accepted,
+            cursor: .init(epoch: sourceEpoch, sequence: "1")
+        )
+        XCTAssertNil(outbox.surfaces[surfaceId], "the partition is removed only after durable acceptance")
+        XCTAssertTrue(outbox.finalizedSurfaceIds?.contains(surfaceId) == true)
+        XCTAssertThrowsError(try outbox.append(surfaceId: surfaceId, record: record()))
+        try outbox.validate()
+    }
+
+    func testPaneFinalizationDropsOnlyItsOpenFrameAndRejectsLateSource() throws {
+        var outbox = try SurfAceAnnotationOutbox(clientId: "client-1", sourceEpoch: sourceEpoch)
+        _ = try outbox.append(surfaceId: surfaceId, record: record())
+        _ = try outbox.beginFrame(
+            surfaceId: surfaceId, paneId: 2, contextKey: "context", contentId: "content-1",
+            contentType: "html", revision: 1, url: nil,
+            scrollOffset: .init(x: 0, y: 0),
+            viewport: .init(width: 100, height: 100, scale: 1), openedAt: 1, image: "image"
+        )
+        try outbox.recordStroke(
+            surfaceId: surfaceId, paneId: 2,
+            stroke: .init(
+                strokeId: "stroke-2", points: [.init(x: 1, y: 1, pressure: nil)],
+                bbox: .init(x: 1, y: 1, width: 1, height: 1), startedAt: 1, endedAt: 2
+            )
+        )
+        outbox.setFrameCommitRequested(surfaceId: surfaceId, paneId: 2, requested: true)
+        try outbox.finalizePane(surfaceId: surfaceId, paneId: 2)
+
+        XCTAssertNil(outbox.openFrame(surfaceId: surfaceId, paneId: 2))
+        XCTAssertEqual(outbox.surfaces[surfaceId]?.fifo.count, 1)
+        var lateClosedPaneRecord = record()
+        lateClosedPaneRecord["paneId"] = 2
+        XCTAssertThrowsError(try outbox.append(surfaceId: surfaceId, record: lateClosedPaneRecord))
+        XCTAssertEqual(outbox.surfaces[surfaceId]?.nextSequence, 2)
+        XCTAssertEqual(try outbox.append(surfaceId: surfaceId, record: record()), "2")
+        try outbox.validate()
+    }
+
     func testOptionalSubmissionFrontierCannotTurnFittingPayloadIntoGap() throws {
         var final = record(padding: 2_000)
         final["kind"] = "frame_commit"

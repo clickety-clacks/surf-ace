@@ -16,6 +16,39 @@ enum SurfAceSceneID {
     static let mainWindow = "surf-ace-main-window"
 }
 
+#if os(iOS)
+@MainActor
+final class SurfAceApplicationDelegate: NSObject, UIApplicationDelegate {
+    weak var runtime: SurfAceRuntime?
+    private var pendingDiscardedSceneSessions: [Set<String>] = []
+
+    func attach(runtime: SurfAceRuntime) {
+        self.runtime = runtime
+    }
+
+    func application(
+        _ application: UIApplication,
+        didDiscardSceneSessions sceneSessions: Set<UISceneSession>
+    ) {
+        let sceneKeys = Set(sceneSessions.map(\.persistentIdentifier))
+        guard !sceneKeys.isEmpty else { return }
+        pendingDiscardedSceneSessions.append(sceneKeys)
+        Task { @MainActor [weak self] in
+            await self?.deliverPendingDiscardedSceneSessions()
+        }
+    }
+
+    func deliverPendingDiscardedSceneSessions() async {
+        guard let runtime, runtime.isSceneAuthorityReady else { return }
+        let pending = pendingDiscardedSceneSessions
+        pendingDiscardedSceneSessions.removeAll()
+        for sceneKeys in pending {
+            await runtime.finalizeDiscardedSceneSessions(sceneKeys)
+        }
+    }
+}
+#endif
+
 @MainActor
 enum SurfAceSceneActivation {
     private static let formatter = ISO8601DateFormatter()
@@ -120,6 +153,9 @@ private struct SurfAceWindowCommands: Commands {
 @main
 struct SurfAceApp: App {
     @State private var runtime = SurfAceRuntime()
+    #if os(iOS)
+    @UIApplicationDelegateAdaptor(SurfAceApplicationDelegate.self) private var appDelegate
+    #endif
 
     var body: some Scene {
         WindowGroup(id: SurfAceSceneID.mainWindow) {
@@ -155,6 +191,9 @@ struct SurfAceApp: App {
             .surfAceSpatialWindowTransparency()
             .surfAceSpatialWindowOrnament()
             .task {
+                #if os(iOS)
+                appDelegate.attach(runtime: runtime)
+                #endif
                 let environment = ProcessInfo.processInfo.environment
                 let schemeFlag = environment["SURF_ACE_XCTEST_HOST_NO_AUTOSTART"] == "1"
                 let xctestHost = environment["XCTestConfigurationFilePath"] != nil
@@ -165,6 +204,9 @@ struct SurfAceApp: App {
                     return
                 }
                 await runtime.start()
+                #if os(iOS)
+                await appDelegate.deliverPendingDiscardedSceneSessions()
+                #endif
             }
     }
 }

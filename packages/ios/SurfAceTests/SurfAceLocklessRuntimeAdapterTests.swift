@@ -145,6 +145,76 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
         XCTAssertEqual(recovered.liveSurfaces["sf_1"]?.panes["2"]?.paneLineageId, lineage)
     }
 
+    func testRegistrationKeepsFinalCloseReleasesPendingUntilExactAcknowledgementsCommit() async throws {
+        let clientId = String(repeating: "a", count: 64)
+        let surfaceId = "sf_123"
+        let fixture = try makeFixture(configure: { state in
+                state.registryBinding = .init(allocatorId: "alloc_home", clientId: clientId, fleetId: "fleet-home")
+                try SurfAceLocklessTopologyOperations.applyWindowLabels(
+                    state: &state, assignments: [(surfaceId: surfaceId, windowLabel: "b")]
+                )
+                var surface = try XCTUnwrap(state.liveSurfaces[surfaceId])
+                surface.allocationGeneration = 30
+                var pane = try XCTUnwrap(surface.panes["1"])
+                pane.paneLabel = 1
+                pane.allocationGeneration = 41
+                surface.panes["1"] = pane
+                state.liveSurfaces[surfaceId] = surface
+                let surfaceSetRevision = state.surfaceSetRevision
+                let topologyRevision = surface.topologyRevision
+                XCTAssertEqual(topologyRevision, 0)
+                _ = try SurfAceLocklessTopologyOperations.surfaceWindowFinalClose(
+                    state: &state, surfaceId: surfaceId,
+                    expectedSurfaceSetRevision: surfaceSetRevision,
+                    expectedTopologyRevision: topologyRevision
+                )
+            }, surfaceId: surfaceId)
+        let before = try XCTUnwrap(fixture.store.load())
+        let beforeBytes = try Data(contentsOf: fixture.store.stateURL)
+        let input = try SurfAceRegistrationInput(state: before)
+        let paneIds = input.pendingPaneReleases.map(\.releaseId)
+        let windowIds = input.pendingWindowReleases.map(\.releaseId)
+        XCTAssertEqual(paneIds.count, 1)
+        XCTAssertEqual(windowIds.count, 1)
+        XCTAssertTrue(input.pendingPaneReleases.allSatisfy { $0.closeRevision == 1 })
+        XCTAssertTrue(input.pendingWindowReleases.allSatisfy { $0.closeRevision == 1 })
+        let committedCloseRecords = try XCTUnwrap(before.terminalCloseRecords)
+        XCTAssertEqual(committedCloseRecords.count, 2)
+        XCTAssertTrue(committedCloseRecords.allSatisfy { $0.closeTopologyRevision == 1 })
+        XCTAssertEqual(before.allocationReleaseIntents?.count, 2)
+        XCTAssertTrue(before.allocationReleaseIntents?.allSatisfy { $0.closeTopologyRevision == 1 } == true)
+
+        let unacknowledged = SurfAceRegistrationReply(
+            assignments: [],
+            projection: SurfAceRegistrationProjection(
+                directEndpoint: nil, prePairDescribeV1: false, allocationGenerationV1: true,
+                endpointLease: nil, completedPaneReleaseIds: [], completedWindowReleaseIds: []
+            )
+        )
+        await XCTAssertThrowsErrorAsync {
+            _ = try await fixture.adapter.applyRegistration(unacknowledged, expectedInput: input)
+        } verify: { error in
+            guard let error = error as? SurfAceRegistrationError, case .invalidResponse = error else {
+                return XCTFail("Expected malformed release acknowledgement to be rejected")
+            }
+        }
+        XCTAssertEqual(try fixture.store.load(), before)
+        XCTAssertEqual(try Data(contentsOf: fixture.store.stateURL), beforeBytes)
+
+        let acknowledged = SurfAceRegistrationReply(
+            assignments: [],
+            projection: SurfAceRegistrationProjection(
+                directEndpoint: nil, prePairDescribeV1: false, allocationGenerationV1: true,
+                endpointLease: nil, completedPaneReleaseIds: paneIds, completedWindowReleaseIds: windowIds
+            )
+        )
+        let after = try await fixture.adapter.applyRegistration(acknowledged, expectedInput: input)
+        XCTAssertNotEqual(try Data(contentsOf: fixture.store.stateURL), beforeBytes)
+        XCTAssertEqual(after.allocationReleaseIntents?.map(\.status), [.accepted, .accepted])
+        XCTAssertTrue(after.liveSurfaces.isEmpty)
+        try after.validate()
+    }
+
     func testRepeatedIdenticalRegistrationDoesNotWriteAnotherGeneration() async throws {
         let fixture = try makeFixture()
         let expected = SurfAceRegistrationSurface.snapshot(await fixture.adapter.snapshot())
@@ -1170,6 +1240,7 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
 
     private func makeFixture(
         configure: (inout SurfAceLocklessAuthorityState) throws -> Void = { _ in },
+        surfaceId: String = "sf_1",
         targetIntentAdmissionPreparation: (@Sendable (String) async -> Void)? = nil
     ) throws -> (
         adapter: SurfAceLocklessRuntimeAdapter,
@@ -1187,18 +1258,19 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
         )
         let originalId = opened.surface.surfaceId
         var surface = opened.surface
-        surface.surfaceId = "sf_1"
+        surface.surfaceId = surfaceId
         state.liveSurfaces.removeValue(forKey: originalId)
-        state.liveSurfaces["sf_1"] = surface
+        state.liveSurfaces[surfaceId] = surface
         let encodedOriginalId = originalId.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? originalId
+        let encodedSurfaceId = surfaceId.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? surfaceId
         let originalSurfaceScope = "surface:\(encodedOriginalId)"
         if var scope = state.scopes.removeValue(forKey: originalSurfaceScope) {
-            scope.scopeId = "surface:sf%5F1"
+            scope.scopeId = "surface:\(encodedSurfaceId)"
             state.scopes[scope.scopeId] = scope
         }
         let originalPaneScope = "pane:\(encodedOriginalId):1"
         if var scope = state.scopes.removeValue(forKey: originalPaneScope) {
-            scope.scopeId = "pane:sf%5F1:1"
+            scope.scopeId = "pane:\(encodedSurfaceId):1"
             state.scopes[scope.scopeId] = scope
         }
         try configure(&state)
