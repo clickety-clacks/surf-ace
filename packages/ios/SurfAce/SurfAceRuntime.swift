@@ -805,9 +805,9 @@ final class SurfAceRuntime {
         removeSurfaceModel(sceneKey: sceneKey, persistProjection: true, broadcastRemoval: false)
     }
 
-    /// A discarded session is final only when UIKit removed a strict subset of
-    /// the currently mapped live windows. If the callback cannot distinguish
-    /// one window from whole-app removal, preserve every surface as live state.
+    /// UIKit's permanent-discard callback is distinct from a scene disconnect,
+    /// which can represent memory reclamation. Finalize every mapped scene in
+    /// that callback's set, including when it contains all currently live scenes.
     func finalizeDiscardedSceneSessions(_ discardedSceneKeys: Set<String>) async {
         guard !discardedSceneKeys.isEmpty, isSceneAuthorityReady,
               let adapter = locklessAdapter else { return }
@@ -817,8 +817,7 @@ final class SurfAceRuntime {
             guard state.liveSurfaces[surfaceId]?.sceneKeys.contains(sceneKey) == true else { return nil }
             return sceneKey
         })
-        guard discardedSceneKeys.isSubset(of: liveSceneKeys),
-              liveSceneKeys.count > discardedSceneKeys.count else {
+        guard discardedSceneKeys.isSubset(of: liveSceneKeys) else {
             return
         }
         let surfacesToClose = state.liveSurfaces.values
