@@ -37,11 +37,11 @@ test("stable public release names identify Surf Ace", () => {
 });
 
 test("the selected rc1 names bind the exact candidate version and source", () => {
-  const names = publicReleaseNames({ version: "0.2.10-rc1", sourceRevision: "r1", toolingRevision: "r1" });
+  const names = publicReleaseNames({ version: "0.2.10-rc1", sourceRevision: "r1", toolingRevision: "r3" });
   assert.equal(names.title, "Surf Ace v0.2.10-rc1");
   assert.equal(names.channel, "surf-ace");
   assert.equal(names.sourceTag, "surf-ace-v0.2.10-rc1-r1");
-  assert.equal(names.toolingTag, "surf-ace-release-tooling-v0.2.10-rc1-r1");
+  assert.equal(names.toolingTag, "surf-ace-release-tooling-v0.2.10-rc1-r3");
   assert.equal(names.assets[0], "surf-ace-server-linux-x86_64-v0.2.10-rc1.tar.gz");
   assert.equal(names.assets[5], "surf-ace-skill-v0.2.10-rc1.md");
   assert.equal(names.manifest, "surf-ace-v0.2.10-rc1-manifest.json");
