@@ -169,12 +169,43 @@ jobs:
     needs: guard
     env:
       PRODUCT_COMMIT: ${{ needs.guard.outputs.product_commit }}
+      EVIDENCE_DIR: ${{ github.workspace }}/release-evidence/${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.lane }}
+      EVIDENCE_READBACK_DIR: ${{ github.workspace }}/release-evidence-readback/${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.lane }}
+      RESULT_BUNDLE: ${{ github.workspace }}/release-evidence/${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.lane }}/native-tests.xcresult
+      EVIDENCE_ARTIFACT: surf-ace-macos-evidence-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.lane }}
     strategy:
       fail-fast: false
       matrix:
         lane: [build-a, build-b]
     runs-on: xcode-27
     steps:
+      - name: Prepare run-isolated macOS evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf "$EVIDENCE_DIR"
+          mkdir -p "$EVIDENCE_DIR"
+          {
+            printf 'run_id=%s\n' "$GITHUB_RUN_ID"
+            printf 'run_attempt=%s\n' "$GITHUB_RUN_ATTEMPT"
+            printf 'workflow_ref=%s\n' "$GITHUB_REF"
+            printf 'workflow_commit=%s\n' "$GITHUB_SHA"
+            printf 'lane=%s\n' '${{ matrix.lane }}'
+            printf 'runner_name=%s\n' "${RUNNER_NAME:-unknown}"
+            printf 'runner_os=%s\n' "${RUNNER_OS:-unknown}"
+            printf 'runner_arch=%s\n' "${RUNNER_ARCH:-unknown}"
+            printf 'runner_image_os=%s\n' "${ImageOS:-unknown}"
+            printf 'runner_image_version=%s\n' "${ImageVersion:-unknown}"
+            printf 'product_tag=%s\n' "$PRODUCT_TAG"
+            printf 'product_commit=%s\n' "$PRODUCT_COMMIT"
+            printf 'tooling_tag=%s\n' "$TOOLING_TAG"
+            printf 'tooling_commit=%s\n' "$GITHUB_SHA"
+            printf 'started_at_utc=%s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+            printf '\n--- macOS ---\n'
+            sw_vers
+            uname -a
+          } > "$EVIDENCE_DIR/run-identity.txt"
+
       - name: Check out immutable tooling
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -192,6 +223,7 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
       - name: Install frozen dependencies and run macOS/iPadOS tests
+        id: macos-tests
         run: |
           set -euo pipefail
           sudo xcode-select --switch /Applications/Xcode_27.0.0.app
@@ -222,14 +254,217 @@ jobs:
           export PATH="${RUNNER_TEMP}/surf-ace-test-python/bin:${PATH}"
           pnpm --dir source --filter @surf-ace/electron test
           guard
-          xcodebuild test \
+          command=(
+            xcodebuild test \
             -project source/packages/ios/SurfAce.xcodeproj \
             -scheme SurfAce \
             -configuration Release \
             ENABLE_TESTABILITY=YES \
             -parallel-testing-enabled NO \
-            -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M5),OS=27.0'
+            -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M5),OS=27.0' \
+            -resultBundlePath "$RESULT_BUNDLE"
+          )
+          printf '%q ' "${command[@]}" > "$EVIDENCE_DIR/xcodebuild-command.txt"
+          printf '\n' >> "$EVIDENCE_DIR/xcodebuild-command.txt"
+          set +e
+          "${command[@]}" 2>&1 | tee "$EVIDENCE_DIR/xcodebuild.log"
+          pipeline_status=( "${PIPESTATUS[@]}" )
+          set -e
+          xcodebuild_exit_code="${pipeline_status[0]}"
+          tee_exit_code="${pipeline_status[1]}"
+          printf '%s\n' "$xcodebuild_exit_code" > "$EVIDENCE_DIR/xcodebuild-exit-code.txt"
+          printf '%s\n' "$tee_exit_code" > "$EVIDENCE_DIR/xcodebuild-tee-exit-code.txt"
+          if [[ "$xcodebuild_exit_code" != 0 ]]; then
+            exit "$xcodebuild_exit_code"
+          fi
+          if [[ "$tee_exit_code" != 0 ]]; then
+            exit "$tee_exit_code"
+          fi
           guard
+
+      - name: Capture macOS native test evidence
+        if: always()
+        shell: bash
+        env:
+          MACOS_TEST_STEP_OUTCOME: ${{ steps.macos-tests.outcome }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$EVIDENCE_DIR"
+          printf 'macos_test_step_outcome=%s\n' "${MACOS_TEST_STEP_OUTCOME:-not-run}" \
+            > "$EVIDENCE_DIR/test-step-outcome.txt"
+
+          capture_tool() {
+            local output="$1"
+            shift
+            if "$@" > "$EVIDENCE_DIR/$output" 2>&1; then
+              printf 'exit_code=0\n' > "$EVIDENCE_DIR/$output.status"
+            else
+              local exit_code=$?
+              printf 'exit_code=%s\n' "$exit_code" > "$EVIDENCE_DIR/$output.status"
+            fi
+          }
+
+          capture_tool developer-directory.txt xcode-select -p
+          capture_tool xcode-version.txt xcodebuild -version
+          capture_tool xcode-sdks.txt xcodebuild -showsdks
+          capture_tool swift-version.txt swift --version
+          capture_tool ios-simulator-sdk-version.txt xcrun --sdk iphonesimulator --show-sdk-version
+          capture_tool simulator-runtimes.txt xcrun simctl list runtimes
+          capture_tool simulator-devices.txt xcrun simctl list devices available
+
+          if [[ -d source/.git ]]; then
+            {
+              printf 'expected_product_commit=%s\n' "$PRODUCT_COMMIT"
+              printf 'source_commit='
+              git -C source rev-parse HEAD || printf 'unavailable\n'
+              printf 'source_tree='
+              git -C source rev-parse 'HEAD^{tree}' || printf 'unavailable\n'
+              printf 'source_status:\n'
+              git -C source status --short --branch || true
+            } > "$EVIDENCE_DIR/source-identity.txt" 2>&1
+          else
+            printf 'source_checkout=unavailable\nexpected_product_commit=%s\n' "$PRODUCT_COMMIT" \
+              > "$EVIDENCE_DIR/source-identity.txt"
+          fi
+
+          if [[ -d tooling/.git ]]; then
+            {
+              printf 'expected_tooling_commit=%s\n' "$GITHUB_SHA"
+              printf 'tooling_commit='
+              git -C tooling rev-parse HEAD || printf 'unavailable\n'
+              printf 'tooling_tree='
+              git -C tooling rev-parse 'HEAD^{tree}' || printf 'unavailable\n'
+              printf 'tooling_status:\n'
+              git -C tooling status --short --branch || true
+            } > "$EVIDENCE_DIR/tooling-identity.txt" 2>&1
+          else
+            printf 'tooling_checkout=unavailable\nexpected_tooling_commit=%s\n' "$GITHUB_SHA" \
+              > "$EVIDENCE_DIR/tooling-identity.txt"
+          fi
+
+          if [[ -d "$RESULT_BUNDLE" ]]; then
+            capture_tool xcresult-summary.json xcrun xcresulttool get test-results summary --path "$RESULT_BUNDLE"
+            capture_tool attachment-export.log xcrun xcresulttool export attachments \
+              --path "$RESULT_BUNDLE" --output-path "$EVIDENCE_DIR/attachments"
+          else
+            printf 'No .xcresult bundle was created.\n' > "$EVIDENCE_DIR/xcresult-unavailable.txt"
+          fi
+
+          printf 'finished_at_utc=%s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
+            > "$EVIDENCE_DIR/evidence-captured-at.txt"
+          python3 - "$EVIDENCE_DIR" <<'PY'
+          import hashlib
+          import json
+          import sys
+          from pathlib import Path
+
+          root = Path(sys.argv[1])
+          excluded = {"capture-manifest.json", "capture-readback.json"}
+
+          def file_digest(path):
+              digest = hashlib.sha256()
+              size = 0
+              with path.open("rb") as stream:
+                  for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                      size += len(chunk)
+                      digest.update(chunk)
+              return size, digest.hexdigest()
+
+          entries = []
+          for path in sorted(root.rglob("*")):
+              if path.is_file() and path.name not in excluded:
+                  size, digest = file_digest(path)
+                  entries.append({"path": path.relative_to(root).as_posix(), "size_bytes": size, "sha256": digest})
+          manifest_path = root / "capture-manifest.json"
+          manifest_path.write_text(json.dumps({"files": entries}, indent=2) + "\n", encoding="utf-8")
+          errors = []
+          total_bytes = 0
+          for entry in entries:
+              path = root / entry["path"]
+              if not path.is_file():
+                  errors.append(f"missing:{entry['path']}")
+                  continue
+              size, digest = file_digest(path)
+              total_bytes += size
+              if size != entry["size_bytes"] or digest != entry["sha256"]:
+                  errors.append(f"mismatch:{entry['path']}")
+          readback = {"status": "PASS" if not errors else "FAIL", "file_count": len(entries),
+                      "verified_size_bytes": total_bytes,
+                      "capture_manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+                      "errors": errors}
+          (root / "capture-readback.json").write_text(json.dumps(readback, indent=2) + "\n", encoding="utf-8")
+          if errors:
+              raise SystemExit("macOS release evidence manifest verification failed")
+          PY
+
+      - name: Retain macOS release evidence
+        if: always()
+        id: upload-macos-evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ${{ env.EVIDENCE_ARTIFACT }}
+          path: ${{ env.EVIDENCE_DIR }}/
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 30
+      - name: Download retained macOS evidence for readback
+        if: always()
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: ${{ env.EVIDENCE_ARTIFACT }}
+          path: ${{ env.EVIDENCE_READBACK_DIR }}
+      - name: Verify retained macOS evidence readback
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if python3 - "$EVIDENCE_READBACK_DIR" <<'PY'
+          import hashlib
+          import json
+          import sys
+          from pathlib import Path
+
+          root = Path(sys.argv[1])
+          manifest_path = root / "capture-manifest.json"
+          manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+          errors = []
+          for entry in manifest.get("files", []):
+              path = root / entry["path"]
+              if not path.is_file():
+                  errors.append(f"missing:{entry['path']}")
+                  continue
+              digest = hashlib.sha256()
+              size = 0
+              with path.open("rb") as stream:
+                  for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                      size += len(chunk)
+                      digest.update(chunk)
+              if size != entry["size_bytes"] or digest.hexdigest() != entry["sha256"]:
+                  errors.append(f"mismatch:{entry['path']}")
+          readback = json.loads((root / "capture-readback.json").read_text(encoding="utf-8"))
+          if readback.get("status") != "PASS":
+              errors.append("staging-readback-failed")
+          if readback.get("capture_manifest_sha256") != hashlib.sha256(manifest_path.read_bytes()).hexdigest():
+              errors.append("manifest-digest-mismatch")
+          if errors:
+              raise SystemExit(";".join(errors))
+          print(len(manifest.get("files", [])))
+          PY
+          then
+            printf 'PASS\n' > "$EVIDENCE_DIR/evidence-readback-status.txt"
+            manifest_sha256="$(shasum -a 256 "$EVIDENCE_READBACK_DIR/capture-manifest.json" | awk '{print $1}')"
+            {
+              printf 'Verified the uploaded evidence after artifact download.\n'
+              printf 'Capture manifest SHA-256: %s\n' "$manifest_sha256"
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            printf 'FAIL\n' > "$EVIDENCE_DIR/evidence-readback-status.txt"
+            printf 'The uploaded macOS evidence could not be verified after download.\n' \
+              >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
       - name: Build standalone macOS CLI and Electron assets
         env:
           SURF_ACE_RELEASE_COMPONENT: macos
@@ -253,6 +488,144 @@ jobs:
       - name: Remove job-owned checkout and build paths
         if: always()
         run: rm -rf "${GITHUB_WORKSPACE}/source" "${GITHUB_WORKSPACE}/tooling" "${GITHUB_WORKSPACE}/build"
+
+  retain-macos-job-logs:
+    if: always()
+    needs: [build-macos]
+    continue-on-error: true
+    permissions:
+      actions: read
+      contents: read
+    runs-on: ubuntu-24.04
+    env:
+      JOB_EVIDENCE_DIR: ${{ github.workspace }}/macos-job-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+      JOB_LOG_ARTIFACT: surf-ace-macos-job-logs-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Prepare run-isolated job log evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf "$JOB_EVIDENCE_DIR"
+          mkdir -p "$JOB_EVIDENCE_DIR/job-logs"
+          {
+            printf 'run_id=%s\n' "$GITHUB_RUN_ID"
+            printf 'run_attempt=%s\n' "$GITHUB_RUN_ATTEMPT"
+            printf 'workflow_ref=%s\n' "$GITHUB_REF"
+            printf 'workflow_commit=%s\n' "$GITHUB_SHA"
+            printf 'started_at_utc=%s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          } > "$JOB_EVIDENCE_DIR/run-identity.txt"
+      - name: Download completed macOS job logs
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          jobs_url="${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs?filter=latest&per_page=100"
+          if curl --fail --silent --show-error --location \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "$jobs_url" --output "$JOB_EVIDENCE_DIR/jobs.json"; then
+            python3 - "$JOB_EVIDENCE_DIR/jobs.json" "$JOB_EVIDENCE_DIR/macos-jobs.tsv" <<'PY'
+          import json
+          import sys
+          with open(sys.argv[1], encoding="utf-8") as stream:
+              payload = json.load(stream)
+          with open(sys.argv[2], "w", encoding="utf-8") as output:
+              for job in payload.get("jobs", []):
+                  name = job.get("name", "")
+                  if name.startswith("build-macos"):
+                      fields = [job.get("id", ""), name, job.get("conclusion") or "", job.get("runner_name") or ""]
+                      output.write("\t".join(str(field).replace("\t", " ").replace("\n", " ") for field in fields) + "\n")
+          PY
+          else
+            printf '{"jobs":[]}\n' > "$JOB_EVIDENCE_DIR/jobs.json"
+            : > "$JOB_EVIDENCE_DIR/macos-jobs.tsv"
+          fi
+
+          downloaded=0
+          failed=0
+          while IFS=$'\t' read -r job_id job_name conclusion runner_name; do
+            [[ -n "$job_id" ]] || continue
+            safe_name="$(printf '%s' "$job_name" | tr -cs 'A-Za-z0-9._-' '-')"
+            log_path="$JOB_EVIDENCE_DIR/job-logs/${job_id}-${safe_name}.txt"
+            log_url="${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/jobs/${job_id}/logs"
+            if curl --fail --silent --show-error --location --retry 2 \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header 'X-GitHub-Api-Version: 2026-03-10' \
+              "$log_url" --output "$log_path"; then
+              downloaded=$((downloaded + 1))
+            else
+              failed=$((failed + 1))
+              rm -f "$log_path"
+            fi
+          done < "$JOB_EVIDENCE_DIR/macos-jobs.tsv"
+          if [[ ! -s "$JOB_EVIDENCE_DIR/macos-jobs.tsv" ]]; then
+            printf 'No completed macOS build job logs were available.\n' \
+              > "$JOB_EVIDENCE_DIR/job-logs-unavailable.txt"
+          fi
+          {
+            printf 'macos_job_logs_downloaded=%s\n' "$downloaded"
+            printf 'macos_job_logs_failed=%s\n' "$failed"
+          } > "$JOB_EVIDENCE_DIR/job-log-capture-status.txt"
+      - name: Hash and verify macOS job logs
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - "$JOB_EVIDENCE_DIR" <<'PY'
+          import hashlib
+          import json
+          import sys
+          from pathlib import Path
+
+          root = Path(sys.argv[1])
+          excluded = {"job-log-manifest.json", "job-log-readback.json"}
+
+          def file_digest(path):
+              digest = hashlib.sha256()
+              size = 0
+              with path.open("rb") as stream:
+                  for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                      size += len(chunk)
+                      digest.update(chunk)
+              return size, digest.hexdigest()
+
+          entries = []
+          for path in sorted(root.rglob("*")):
+              if path.is_file() and path.name not in excluded:
+                  size, digest = file_digest(path)
+                  entries.append({"path": path.relative_to(root).as_posix(), "size_bytes": size, "sha256": digest})
+          manifest_path = root / "job-log-manifest.json"
+          manifest_path.write_text(json.dumps({"files": entries}, indent=2) + "\n", encoding="utf-8")
+          errors = []
+          total_bytes = 0
+          for entry in entries:
+              path = root / entry["path"]
+              if not path.is_file():
+                  errors.append(f"missing:{entry['path']}")
+                  continue
+              size, digest = file_digest(path)
+              total_bytes += size
+              if size != entry["size_bytes"] or digest != entry["sha256"]:
+                  errors.append(f"mismatch:{entry['path']}")
+          readback = {"status": "PASS" if not errors else "FAIL", "file_count": len(entries),
+                      "verified_size_bytes": total_bytes,
+                      "manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(), "errors": errors}
+          readback_path = root / "job-log-readback.json"
+          readback_path.write_text(json.dumps(readback, indent=2) + "\n", encoding="utf-8")
+          if errors:
+              raise SystemExit("macOS job log manifest verification failed")
+          PY
+      - name: Retain macOS job logs and size/SHA manifest
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ${{ env.JOB_LOG_ARTIFACT }}
+          path: ${{ env.JOB_EVIDENCE_DIR }}/
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 30
 
   compare:
     needs: [build-linux, build-macos]
