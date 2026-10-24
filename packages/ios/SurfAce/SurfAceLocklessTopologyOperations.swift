@@ -625,15 +625,11 @@ enum SurfAceLocklessTopologyOperations {
 
             if tombstone.origin != .ambiguous {
                 candidate.surfaceTombstones[index].origin = .ambiguous
-                let publisherBytes = try candidate.annotationPublisher?.partitionBytes(
-                    surfaceId: tombstone.surface.surfaceId
-                ) ?? 0
                 candidate.surfaceTombstones[index].bytes = try restoredSurfaceTombstoneBytes(
                     closedSequence: tombstone.closedSequence,
                     scopes: tombstone.scopes,
                     surface: candidate.surfaceTombstones[index].surface,
-                    tombstoneId: tombstone.tombstoneId,
-                    annotationPartitionBytes: publisherBytes
+                    tombstoneId: tombstone.tombstoneId
                 )
                 changed = true
             }
@@ -666,15 +662,11 @@ enum SurfAceLocklessTopologyOperations {
                     candidate.surfaceTombstones[surfaceIndex]
                         .surface.paneTombstones[paneIndex].origin = .ambiguous
                     let updated = candidate.surfaceTombstones[surfaceIndex]
-                    let publisherBytes = try candidate.annotationPublisher?.partitionBytes(
-                        surfaceId: updated.surface.surfaceId
-                    ) ?? 0
                     candidate.surfaceTombstones[surfaceIndex].bytes = try restoredSurfaceTombstoneBytes(
                         closedSequence: updated.closedSequence,
                         scopes: updated.scopes,
                         surface: updated.surface,
-                        tombstoneId: updated.tombstoneId,
-                        annotationPartitionBytes: publisherBytes
+                        tombstoneId: updated.tombstoneId
                     )
                     changed = true
                 }
@@ -996,13 +988,11 @@ enum SurfAceLocklessTopologyOperations {
                 $0.surface.surfaceId == surfaceId
             }) {
                 var surfaceTombstone = candidate.surfaceTombstones[surfaceIndex]
-                let publisherBytes = try candidate.annotationPublisher?.partitionBytes(surfaceId: surfaceId) ?? 0
                 surfaceTombstone.bytes = try restoredSurfaceTombstoneBytes(
                     closedSequence: surfaceTombstone.closedSequence,
                     scopes: surfaceTombstone.scopes,
                     surface: surfaceTombstone.surface,
-                    tombstoneId: surfaceTombstone.tombstoneId,
-                    annotationPartitionBytes: publisherBytes
+                    tombstoneId: surfaceTombstone.tombstoneId
                 )
                 candidate.surfaceTombstones[surfaceIndex] = surfaceTombstone
             }
