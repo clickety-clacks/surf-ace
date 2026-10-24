@@ -1273,7 +1273,7 @@ test("Linux fresh-install raw CLI evidence binds two isolated roots to their cli
 });
 
 test("Surf Ace v0.2.10-rc1 binds the selected source, six hosted assets, and tooling identity", () => {
-  assert.equal(TIGHTBEAM_TOOLING_TAG, "surf-ace-release-tooling-v0.2.10-rc1-r1");
+  assert.equal(TIGHTBEAM_TOOLING_TAG, "surf-ace-release-tooling-v0.2.10-rc1-r3");
   const { candidateCommit, ...releaseIdentity } = TIGHTBEAM;
   assert.equal(candidateCommit, testProductCommit);
   assert.deepEqual(releaseIdentity, {
@@ -2914,7 +2914,7 @@ test("stable v0.2.8 documentation stays historical and current release gates bin
   assert.match(workflow, /PRODUCT_COMMIT: \$\{\{ needs\.guard\.outputs\.product_commit \}\}/);
   assert.match(workflow, /PRODUCT_TAG: surf-ace-v0\.2\.10-rc1-r1/);
   assert.match(workflow, /PRODUCT_VERSION: 0\.2\.10-rc1/);
-  assert.match(workflow, /TOOLING_TAG: surf-ace-release-tooling-v0\.2\.10-rc1-r1/);
+  assert.match(workflow, /TOOLING_TAG: surf-ace-release-tooling-v0\.2\.10-rc1-r3/);
   assert.match(workflow, /GITHUB_EVENT_NAME/);
   assert.match(workflow, /GITHUB_REF_TYPE/);
   assert.doesNotMatch(workflow, /build-ios|tightbeam-ios-ipa|xcodebuild archive|-exportArchive|\.ipa\b|IOS_CERTIFICATE|IOS_PROVISIONING_PROFILE|tightbeam-ios-signing/);
