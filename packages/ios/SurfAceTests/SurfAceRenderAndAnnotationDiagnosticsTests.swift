@@ -1562,6 +1562,7 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
         await runtime.start()
         let registered = await runtime.registerSurfaceForScene(sceneKey: "scene-exit-only")
         let onlyWindow = try XCTUnwrap(registered)
+        let surfaceId = onlyWindow.surfaceId
         let adapter = try runtime.locklessAuthorityForLocalMutation()
         let clientId = String(repeating: "a", count: 64)
         _ = try await adapter.commitLocalMutation(operation: "test.seed_discarded_scene_allocations") { state, _ in
@@ -1570,9 +1571,9 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
             )
             try SurfAceLocklessTopologyOperations.applyWindowLabels(
                 state: &state,
-                assignments: [(surfaceId: onlyWindow.surfaceId, windowLabel: "a")]
+                assignments: [(surfaceId: surfaceId, windowLabel: "a")]
             )
-            guard var surface = state.liveSurfaces[onlyWindow.surfaceId],
+            guard var surface = state.liveSurfaces[surfaceId],
                   var pane = surface.panes["1"] else {
                 throw SurfAceLocklessAuthorityError.invalidState("test_discarded_scene_allocation")
             }
@@ -1580,30 +1581,33 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
             pane.paneLabel = 1
             pane.allocationGeneration = 41
             surface.panes["1"] = pane
-            state.liveSurfaces[onlyWindow.surfaceId] = surface
+            state.liveSurfaces[surfaceId] = surface
             return .object([:])
         }
         let before = try await adapter.snapshot()
-        XCTAssertEqual(before.liveSurfaces[onlyWindow.surfaceId]?.topologyRevision, 0)
+        XCTAssertEqual(before.liveSurfaces[surfaceId]?.topologyRevision, 0)
 
         await runtime.finalizeDiscardedSceneSessions(["scene-exit-only"])
 
         let after = try await adapter.snapshot()
-        XCTAssertNil(after.liveSurfaces[onlyWindow.surfaceId])
+        XCTAssertNil(after.liveSurfaces[surfaceId])
         XCTAssertNil(after.sceneSurfaceIds["scene-exit-only"])
         XCTAssertTrue(after.surfaceTombstones.isEmpty)
         let closeRecords = try XCTUnwrap(after.terminalCloseRecords)
         XCTAssertEqual(closeRecords.count, 2)
         XCTAssertEqual(closeRecords.filter { $0.allocationKind == .surface }.count, 1)
         XCTAssertEqual(closeRecords.filter { $0.allocationKind == .pane }.count, 1)
-        XCTAssertEqual(Set(closeRecords.map(\.surfaceId)), [onlyWindow.surfaceId])
+        XCTAssertEqual(Set(closeRecords.map(\.surfaceId)), Set([surfaceId]))
         XCTAssertTrue(closeRecords.allSatisfy { $0.closeTopologyRevision == 1 })
         XCTAssertTrue(closeRecords.allSatisfy { $0.sourceTombstoneKind == .surface })
 
         let releaseIntents = try XCTUnwrap(after.allocationReleaseIntents)
         XCTAssertEqual(releaseIntents.count, 2)
         XCTAssertEqual(releaseIntents.filter { $0.allocationKind == .surface }.compactMap(\.windowLabel), ["a"])
-        XCTAssertEqual(Set(releaseIntents.filter { $0.allocationKind == .pane }.map(\.surfaceId)), [onlyWindow.surfaceId])
+        XCTAssertEqual(
+            Set(releaseIntents.filter { $0.allocationKind == .pane }.map(\.surfaceId)),
+            Set([surfaceId])
+        )
         XCTAssertTrue(releaseIntents.allSatisfy { $0.closeTopologyRevision == 1 })
         XCTAssertTrue(releaseIntents.allSatisfy { $0.sourceTombstoneKind == .surface })
         XCTAssertTrue(releaseIntents.allSatisfy { $0.status == .pending })
