@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
 import {
@@ -800,7 +801,7 @@ test("final close preserves scope data and persists exact pane and window releas
   ]);
   const windowRelease = target.listPendingWindowReleases()[0]!;
   assert.deepEqual({
-    allocationGeneration: windowRelease.allocationGeneration,
+    windowGeneration: windowRelease.windowGeneration,
     closeRevision: windowRelease.closeRevision,
     clientId: windowRelease.clientId,
     surfaceId: windowRelease.surfaceId,
@@ -808,7 +809,7 @@ test("final close preserves scope data and persists exact pane and window releas
     tombstoneKind: windowRelease.tombstoneKind,
     windowLabel: windowRelease.windowLabel,
   }, {
-    allocationGeneration: 8,
+    windowGeneration: 8,
     closeRevision: 5,
     clientId,
     surfaceId,
@@ -816,6 +817,20 @@ test("final close preserves scope data and persists exact pane and window releas
     tombstoneKind: "surface",
     windowLabel: "b",
   });
+  const expectedWindowReleaseEvidence = {
+    clientId,
+    closeRevision: 5,
+    surfaceId,
+    terminalRetirementRevision: windowRelease.terminalRetirementRevision,
+    tombstoneId: closed.tombstoneId,
+    tombstoneKind: "surface",
+    windowGeneration: 8,
+    windowLabel: "b",
+  };
+  assert.deepEqual(Object.keys(windowRelease), [...Object.keys(expectedWindowReleaseEvidence), "releaseId"]);
+  assert.equal(windowRelease.releaseId, createHash("sha256")
+    .update(JSON.stringify(expectedWindowReleaseEvidence)).digest("hex"),
+  "window release ID uses the allocator's canonical generation-evidence hash");
 
   const restarted = new LocklessClientAuthority(target.exportState(), () => 101, clientId);
   assert.deepEqual(restarted.listPendingWindowReleases(), [windowRelease]);

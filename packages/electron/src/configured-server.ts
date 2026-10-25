@@ -100,10 +100,11 @@ export class ConfiguredServerRegistration {
             directEndpoint: this.directEndpoint,
             allocationGenerationV1: true,
             prePairDescribeV1: true,
+            windowGenerationV1: true,
             pendingPaneReleases: this.core.locklessAuthority.listPendingPaneReleases(),
             pendingWindowReleases: this.core.locklessAuthority.listPendingWindowReleases(),
             surfaces: this.core.listSurfaces().map((surface) => ({
-              windowAllocationGeneration: surface.windowAllocationGeneration,
+              windowGeneration: surface.windowAllocationGeneration,
               surfaceId: surface.surfaceId,
               panes: [...surface.panes.values()].map((pane) => ({
                 allocationGeneration: pane.allocationGeneration,
@@ -130,6 +131,7 @@ export class ConfiguredServerRegistration {
         directEndpoint?: unknown;
         endpointLease?: unknown;
         prePairDescribeV1?: unknown;
+        windowGenerationV1?: unknown;
         completedPaneReleaseIds?: unknown;
         completedWindowReleaseIds?: unknown;
         surfaces?: unknown;
@@ -151,14 +153,22 @@ export class ConfiguredServerRegistration {
         throw new Error("foreign_registry_identity");
       }
       const payload = response.payload as { clientId: string; surfaces: Array<{
-        surfaceId: string; windowLabel: string; windowAllocationGeneration?: number | null;
+        surfaceId: string; windowLabel: string; windowGeneration?: number | null;
         panes: Array<{ allocationGeneration: number; paneId: string; paneLineageId: string; paneLabel: number }>;
-      }>; completedPaneReleaseIds?: string[]; completedWindowReleaseIds?: unknown };
+      }>; windowGenerationV1?: unknown; completedPaneReleaseIds?: string[]; completedWindowReleaseIds?: unknown };
       const expectedSurfaceIds = new Set(this.core.listSurfaces().map((surface) => surface.surfaceId));
       if (payload.clientId !== this.clientId || !Array.isArray(payload.surfaces) ||
           payload.surfaces.length !== expectedSurfaceIds.size ||
           payload.surfaces.some((surface) => !expectedSurfaceIds.delete(surface.surfaceId)) ||
-          expectedSurfaceIds.size !== 0) throw new Error("invalid_registration_response");
+          expectedSurfaceIds.size !== 0 ||
+          (payload.windowGenerationV1 !== undefined && typeof payload.windowGenerationV1 !== "boolean")) {
+        throw new Error("invalid_registration_response");
+      }
+      const windowGenerationV1 = payload.windowGenerationV1 === true;
+      if (windowGenerationV1 && payload.surfaces.some((surface) =>
+        !Number.isSafeInteger(surface.windowGeneration) || Number(surface.windowGeneration) < 1)) {
+        throw new Error("invalid_registration_response");
+      }
       const pendingReleaseIds = new Set(registrationPayload.pendingPaneReleases.map((release) => release.releaseId));
       if (!Array.isArray(payload.completedPaneReleaseIds) ||
           new Set(payload.completedPaneReleaseIds).size !== payload.completedPaneReleaseIds.length ||
@@ -168,18 +178,25 @@ export class ConfiguredServerRegistration {
       }
       const pendingWindowReleaseIds = new Set(registrationPayload.pendingWindowReleases.map((release) => release.releaseId));
       let completedWindowReleaseIds: string[] = [];
-      if (payload.completedWindowReleaseIds !== undefined) {
+      if (windowGenerationV1) {
         if (!Array.isArray(payload.completedWindowReleaseIds) ||
             new Set(payload.completedWindowReleaseIds).size !== payload.completedWindowReleaseIds.length ||
+            payload.completedWindowReleaseIds.length !== pendingWindowReleaseIds.size ||
             payload.completedWindowReleaseIds.some((releaseId) =>
               typeof releaseId !== "string" || !pendingWindowReleaseIds.has(releaseId))) {
           throw new Error("invalid_registration_response");
         }
         completedWindowReleaseIds = payload.completedWindowReleaseIds as string[];
+      } else if (payload.completedWindowReleaseIds !== undefined &&
+          (!Array.isArray(payload.completedWindowReleaseIds) || payload.completedWindowReleaseIds.length !== 0)) {
+        throw new Error("invalid_registration_response");
       }
       await this.core.locklessAuthority.transactionAsync(() =>
         this.core.transactionAsync(async () => {
-          this.core.applyWindowLabels(payload.surfaces);
+          this.core.applyWindowLabels(payload.surfaces.map((surface) => ({
+            ...surface,
+            windowGeneration: windowGenerationV1 ? surface.windowGeneration : null,
+          })));
           this.core.applyRegistryPaneLabels(payload.surfaces);
           this.core.locklessAuthority.acknowledgePaneReleases(payload.completedPaneReleaseIds ?? []);
           this.core.locklessAuthority.acknowledgeWindowReleases(completedWindowReleaseIds);

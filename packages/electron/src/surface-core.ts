@@ -2646,7 +2646,7 @@ export class SurfaceCore {
     this.applyWindowLabels([{ surfaceId, windowLabel }]);
   }
 
-  applyWindowLabels(assignments: Array<{ surfaceId: string; windowAllocationGeneration?: number | null; windowLabel: string }>): void {
+  applyWindowLabels(assignments: Array<{ surfaceId: string; windowGeneration?: number | null; windowLabel: string }>): void {
     const labels = new Map<string, string>();
     for (const { surfaceId, windowLabel } of assignments) {
       assertValidWindowLabel(windowLabel);
@@ -2670,9 +2670,9 @@ export class SurfaceCore {
         const confirmationChanged = surface.windowLabelConfirmed !== true;
         surface.windowLabelConfirmed = true;
         const assignment = assignments.find((candidate) => candidate.surfaceId === surfaceId)!;
-        const generation = Number.isSafeInteger(assignment.windowAllocationGeneration) &&
-          Number(assignment.windowAllocationGeneration) > 0
-          ? Number(assignment.windowAllocationGeneration)
+        const generation = Number.isSafeInteger(assignment.windowGeneration) &&
+          Number(assignment.windowGeneration) > 0
+          ? Number(assignment.windowGeneration)
           : surface.windowLabel === windowLabel ? surface.windowAllocationGeneration : null;
         const generationChanged = surface.windowAllocationGeneration !== generation;
         const labelChanged = surface.windowLabel !== windowLabel;

@@ -136,7 +136,7 @@ export type PersistentPaneRetirement = {
 };
 
 export type PersistentWindowRetirement = {
-  allocationGeneration: number;
+  windowGeneration: number;
   clientId: string;
   closeRevision: number;
   releaseId: string;
@@ -1777,7 +1777,7 @@ export class LocklessClientAuthority {
     };
     this.state.finalCloseRecords.push(record);
     this.recordWindowRetirementIntent({
-      allocationGeneration: windowAllocationGeneration,
+      windowGeneration: windowAllocationGeneration,
       clientId: this.clientIdentity,
       closeRevision: options.closeRevision,
       surfaceId,
@@ -1971,7 +1971,7 @@ export class LocklessClientAuthority {
   }
 
   private recordWindowRetirementIntent(input: {
-    allocationGeneration: number | null;
+    windowGeneration: number | null;
     clientId: string | null;
     closeRevision: number;
     surfaceId: string;
@@ -1979,25 +1979,25 @@ export class LocklessClientAuthority {
     tombstoneId: string;
     windowLabel: string | null;
   }): void {
-    if (input.allocationGeneration === null || input.clientId === null || input.windowLabel === null ||
+    if (input.windowGeneration === null || input.clientId === null || input.windowLabel === null ||
         !/^[a-f0-9]{64}$/.test(input.clientId) || !/^sf_[A-Za-z0-9._:-]{3,64}$/.test(input.surfaceId) ||
-        !Number.isSafeInteger(input.allocationGeneration) || input.allocationGeneration < 1 ||
+        !Number.isSafeInteger(input.windowGeneration) || input.windowGeneration < 1 ||
         !Number.isSafeInteger(input.closeRevision) || input.closeRevision < 1 ||
         !Number.isSafeInteger(input.terminalRetirementRevision) || input.terminalRetirementRevision < 1 ||
         !/^[A-Za-z0-9._:-]{1,128}$/.test(input.tombstoneId) || !/^[a-z]+$/.test(input.windowLabel)) return;
     const base = {
-      allocationGeneration: input.allocationGeneration,
       clientId: input.clientId,
       closeRevision: input.closeRevision,
       surfaceId: input.surfaceId,
       terminalRetirementRevision: input.terminalRetirementRevision,
       tombstoneId: input.tombstoneId,
       tombstoneKind: "surface" as const,
+      windowGeneration: input.windowGeneration,
       windowLabel: input.windowLabel,
     };
     const release: PersistentWindowRetirement = { ...base, releaseId: windowReleaseId(base) };
     const existing = this.state.windowRetirementAudits.find((entry) =>
-      entry.surfaceId === release.surfaceId && entry.allocationGeneration === release.allocationGeneration,
+      entry.surfaceId === release.surfaceId && entry.windowGeneration === release.windowGeneration,
     );
     if (existing && existing.releaseId !== release.releaseId) {
       throw new LocklessAuthorityError("internal_error", "Window retirement identity already has conflicting evidence");
@@ -2475,7 +2475,7 @@ export class LocklessClientAuthority {
       if (!/^[a-f0-9]{64}$/.test(releaseId) || releaseId !== windowReleaseId(evidence) ||
           !/^[a-f0-9]{64}$/.test(retirement.clientId) ||
           !/^sf_[A-Za-z0-9._:-]{3,64}$/.test(retirement.surfaceId) ||
-          !Number.isSafeInteger(retirement.allocationGeneration) || retirement.allocationGeneration < 1 ||
+          !Number.isSafeInteger(retirement.windowGeneration) || retirement.windowGeneration < 1 ||
           !Number.isSafeInteger(retirement.closeRevision) || retirement.closeRevision < 1 ||
           !Number.isSafeInteger(retirement.terminalRetirementRevision) || retirement.terminalRetirementRevision < 1 ||
           !/^[A-Za-z0-9._:-]{1,128}$/.test(retirement.tombstoneId) ||
