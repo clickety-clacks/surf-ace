@@ -434,9 +434,9 @@ enum SurfAceRegistrationWire {
     }
     struct Payload: Codable {
         let clientId: String
-        let allocationGenerationV1: Bool
-        let pendingPaneReleases: [SurfAcePaneReleaseRequest]
-        let pendingWindowReleases: [SurfAceWindowReleaseRequest]
+        let allocationGenerationV1: Bool?
+        let pendingPaneReleases: [SurfAcePaneReleaseRequest]?
+        let pendingWindowReleases: [SurfAceWindowReleaseRequest]?
         let surfaces: [SurfAceRegistrationSurface]
     }
 
@@ -470,8 +470,8 @@ enum SurfAceRegistrationWire {
 
     static func requestData(clientId: String, surfaces: [SurfAceRegistrationSurface], id: String) throws -> Data {
         try JSONEncoder().encode(Request(id: id, payload: Payload(
-            clientId: clientId, allocationGenerationV1: false,
-            pendingPaneReleases: [], pendingWindowReleases: [], surfaces: surfaces
+            clientId: clientId, allocationGenerationV1: nil,
+            pendingPaneReleases: nil, pendingWindowReleases: nil, surfaces: surfaces
         )))
     }
 
