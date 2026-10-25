@@ -1,3 +1,4 @@
+import "./test-release-env.mjs";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -2894,7 +2895,7 @@ test("Tightbeam Linux smoke fixture binds adapter dependencies to the exact prod
   assert.doesNotMatch(fixture, /^import\s+(?:pg|WebSocket)\s+from\s+["'](?:pg|ws)["']/m);
 });
 
-test("stable v0.2.8 documentation stays historical and current release gates bind rc2", async () => {
+test("stable v0.2.8 documentation stays historical and release gates bind the selected version", async () => {
   const specification = await fs.readFile(path.join(repository, "docs/release/surf-ace-standalone-v0.2.8.md"), "utf8");
   const readme = await fs.readFile(path.join(repository, "README.md"), "utf8");
   const skill = await fs.readFile(path.join(repository, "integrations/tightbeam/skills/surf-ace/SKILL.md"), "utf8");
@@ -2922,13 +2923,17 @@ test("stable v0.2.8 documentation stays historical and current release gates bin
   assert.match(workflow, /run_smoke:[\s\S]*?default: false/);
   assert.match(workflow, /publish_release:[\s\S]*?default: false/);
   assert.match(workflow, /product_commit:[\s\S]*?required: true[\s\S]*?type: string/);
+  assert.match(workflow, /product_tag:[\s\S]*?required: true[\s\S]*?type: string/);
+  assert.match(workflow, /tooling_tag:[\s\S]*?required: true[\s\S]*?type: string/);
   assert.doesNotMatch(workflow, /^\s*PRODUCT_COMMIT:\s*[a-f0-9]{40}\s*$/m);
   assert.match(workflow, /test "\$\{product_remote\}" = "\$\{PRODUCT_COMMIT_INPUT\}"/);
   assert.match(workflow, /product_commit: \$\{\{ steps\.identity\.outputs\.product_commit \}\}/);
+  assert.match(workflow, /product_version: \$\{\{ steps\.identity\.outputs\.product_version \}\}/);
   assert.match(workflow, /PRODUCT_COMMIT: \$\{\{ needs\.guard\.outputs\.product_commit \}\}/);
-  assert.match(workflow, /PRODUCT_TAG: surf-ace-v0\.2\.10-rc2-r1/);
-  assert.match(workflow, /PRODUCT_VERSION: 0\.2\.10-rc2/);
-  assert.match(workflow, /TOOLING_TAG: surf-ace-release-tooling-v0\.2\.10-rc2-r1/);
+  assert.match(workflow, /PRODUCT_TAG: \$\{\{ inputs\.product_tag \}\}/);
+  assert.match(workflow, /TOOLING_TAG: \$\{\{ inputs\.tooling_tag \}\}/);
+  assert.doesNotMatch(workflow, /surf-ace-v\d+\.\d+\.\d+(?:-rc\d+)?-r\d+/);
+  assert.doesNotMatch(workflow, /surf-ace-release-tooling-v\d+\.\d+\.\d+(?:-rc\d+)?-r\d+/);
   assert.match(workflow, /GITHUB_EVENT_NAME/);
   assert.match(workflow, /GITHUB_REF_TYPE/);
   assert.doesNotMatch(workflow, /build-ios|tightbeam-ios-ipa|xcodebuild archive|-exportArchive|\.ipa\b|IOS_CERTIFICATE|IOS_PROVISIONING_PROFILE|tightbeam-ios-signing/);
@@ -2942,8 +2947,10 @@ test("stable v0.2.8 documentation stays historical and current release gates bin
   const compareStart = workflow.indexOf("  compare:\n");
   const assembleStart = workflow.indexOf("  assemble:\n", compareStart);
   const compareJob = workflow.slice(compareStart, assembleStart);
-  for (const name of TIGHTBEAM.assets) assert.ok(compareJob.includes(name));
-  assert.match(workflow, /needs: \[assemble, smoke-linux, smoke-macos\]/);
+  for (const name of TIGHTBEAM.assets) {
+    assert.ok(compareJob.includes(name.replace(TIGHTBEAM.version, "${PRODUCT_VERSION}")));
+  }
+  assert.match(workflow, /needs: \[assemble, smoke-linux, smoke-macos, guard\]/);
   assert.doesNotMatch(TIGHTBEAM_BUILD_COMMANDS.join("\n"), /xcodebuild archive|-exportArchive|\.ipa\b/);
 });
 

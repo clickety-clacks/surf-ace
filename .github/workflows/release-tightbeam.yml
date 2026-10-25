@@ -3,6 +3,14 @@ name: Build standalone Surf Ace release
 on:
   workflow_dispatch:
     inputs:
+      product_tag:
+        description: Unique immutable product source tag; its version must match the tooling tag.
+        required: true
+        type: string
+      tooling_tag:
+        description: Unique immutable tooling tag for this workflow commit.
+        required: true
+        type: string
       product_commit:
         description: Full commit SHA selected for the product tag; it must resolve to this exact commit.
         required: true
@@ -27,34 +35,49 @@ permissions:
   contents: read
 
 concurrency:
-  group: surf-ace-v0.2.10-rc2
+  group: surf-ace-${{ inputs.product_tag }}
   cancel-in-progress: false
 
 env:
   NODE_VERSION: 24.3.0
   PNPM_VERSION: 10.15.1
   POSTGRES_VERSION: "16"
-  PRODUCT_TAG: surf-ace-v0.2.10-rc2-r1
-  PRODUCT_VERSION: 0.2.10-rc2
+  PRODUCT_TAG: ${{ inputs.product_tag }}
   RUST_VERSION: 1.89.0
   LINUX_RUST_TARGET: x86_64-unknown-linux-gnu
   MACOS_RUST_TARGET: aarch64-apple-darwin
-  TOOLING_TAG: surf-ace-release-tooling-v0.2.10-rc2-r1
+  TOOLING_TAG: ${{ inputs.tooling_tag }}
 
 jobs:
   guard:
     runs-on: macos-15
     outputs:
       product_commit: ${{ steps.identity.outputs.product_commit }}
+      product_version: ${{ steps.identity.outputs.product_version }}
     steps:
-      - name: Require exact manual tooling and immutable product tags
+      - name: Require exact manual tooling and immutable release tags
         id: identity
         env:
           GH_TOKEN: ${{ github.token }}
           PRODUCT_COMMIT_INPUT: ${{ inputs.product_commit }}
+          PRODUCT_TAG_INPUT: ${{ inputs.product_tag }}
+          TOOLING_TAG_INPUT: ${{ inputs.tooling_tag }}
         run: |
           set -euo pipefail
           [[ "${PRODUCT_COMMIT_INPUT}" =~ ^[a-f0-9]{40}$ ]]
+          if [[ "${PRODUCT_TAG_INPUT}" =~ ^surf-ace-v([0-9]+\.[0-9]+\.[0-9]+(-rc[1-9][0-9]*)?)-(r[1-9][0-9]*)$ ]]; then
+            product_version="${BASH_REMATCH[1]}"
+          else
+            echo "product_tag_invalid" >&2
+            exit 1
+          fi
+          if [[ "${TOOLING_TAG_INPUT}" =~ ^surf-ace-release-tooling-v([0-9]+\.[0-9]+\.[0-9]+(-rc[1-9][0-9]*)?)-(r[1-9][0-9]*)$ ]]; then
+            tooling_version="${BASH_REMATCH[1]}"
+          else
+            echo "tooling_tag_invalid" >&2
+            exit 1
+          fi
+          test "${tooling_version}" = "${product_version}"
           peel_tag() {
             read -r object_type object_sha <<EOF
           $(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/$1" --jq '.object.type + " " + .object.sha')
@@ -75,11 +98,13 @@ jobs:
           test "${tooling_remote}" = "${GITHUB_SHA}"
           test "${product_remote}" = "${PRODUCT_COMMIT_INPUT}"
           printf 'product_commit=%s\n' "${product_remote}" >> "${GITHUB_OUTPUT}"
+          printf 'product_version=%s\n' "${product_version}" >> "${GITHUB_OUTPUT}"
 
   build-linux:
     needs: guard
     env:
       PRODUCT_COMMIT: ${{ needs.guard.outputs.product_commit }}
+      PRODUCT_VERSION: ${{ needs.guard.outputs.product_version }}
     strategy:
       fail-fast: false
       matrix:
@@ -155,10 +180,10 @@ jobs:
         with:
           name: tightbeam-linux-${{ matrix.lane }}
           path: |
-            build/release/tightbeam/surf-ace-server-linux-x86_64-v0.2.10-rc2.tar.gz
-            build/release/tightbeam/surf-ace-cli-linux-x86_64-v0.2.10-rc2.tar.gz
-            build/release/tightbeam/surf-ace-electron-linux-x86_64-v0.2.10-rc2.zip
-            build/release/tightbeam/surf-ace-skill-v0.2.10-rc2.md
+            build/release/tightbeam/surf-ace-server-linux-x86_64-v${{ env.PRODUCT_VERSION }}.tar.gz
+            build/release/tightbeam/surf-ace-cli-linux-x86_64-v${{ env.PRODUCT_VERSION }}.tar.gz
+            build/release/tightbeam/surf-ace-electron-linux-x86_64-v${{ env.PRODUCT_VERSION }}.zip
+            build/release/tightbeam/surf-ace-skill-v${{ env.PRODUCT_VERSION }}.md
           if-no-files-found: error
           retention-days: 30
       - name: Remove job-owned checkout and build paths
@@ -169,6 +194,7 @@ jobs:
     needs: guard
     env:
       PRODUCT_COMMIT: ${{ needs.guard.outputs.product_commit }}
+      PRODUCT_VERSION: ${{ needs.guard.outputs.product_version }}
       EVIDENCE_DIR: ${{ github.workspace }}/release-evidence/${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.lane }}
       EVIDENCE_READBACK_DIR: ${{ github.workspace }}/release-evidence-readback/${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.lane }}
       RESULT_BUNDLE: ${{ github.workspace }}/release-evidence/${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.lane }}/native-tests.xcresult
@@ -481,8 +507,8 @@ jobs:
         with:
           name: tightbeam-macos-${{ matrix.lane }}
           path: |
-            build/release/tightbeam/surf-ace-cli-macos-arm64-v0.2.10-rc2.tar.gz
-            build/release/tightbeam/surf-ace-electron-macos-arm64-v0.2.10-rc2.zip
+            build/release/tightbeam/surf-ace-cli-macos-arm64-v${{ env.PRODUCT_VERSION }}.tar.gz
+            build/release/tightbeam/surf-ace-electron-macos-arm64-v${{ env.PRODUCT_VERSION }}.zip
           if-no-files-found: error
           retention-days: 30
       - name: Remove job-owned checkout and build paths
@@ -628,7 +654,9 @@ jobs:
           retention-days: 30
 
   compare:
-    needs: [build-linux, build-macos]
+    needs: [build-linux, build-macos, guard]
+    env:
+      PRODUCT_VERSION: ${{ needs.guard.outputs.product_version }}
     runs-on: macos-15
     steps:
       - name: Check out immutable tooling
@@ -661,12 +689,12 @@ jobs:
           set -euo pipefail
           mkdir -p build-a build-b
           for file in \
-            surf-ace-server-linux-x86_64-v0.2.10-rc2.tar.gz \
-            surf-ace-cli-linux-x86_64-v0.2.10-rc2.tar.gz \
-            surf-ace-electron-linux-x86_64-v0.2.10-rc2.zip \
-            surf-ace-cli-macos-arm64-v0.2.10-rc2.tar.gz \
-            surf-ace-electron-macos-arm64-v0.2.10-rc2.zip \
-            surf-ace-skill-v0.2.10-rc2.md; do
+            surf-ace-server-linux-x86_64-v${PRODUCT_VERSION}.tar.gz \
+            surf-ace-cli-linux-x86_64-v${PRODUCT_VERSION}.tar.gz \
+            surf-ace-electron-linux-x86_64-v${PRODUCT_VERSION}.zip \
+            surf-ace-cli-macos-arm64-v${PRODUCT_VERSION}.tar.gz \
+            surf-ace-electron-macos-arm64-v${PRODUCT_VERSION}.zip \
+            surf-ace-skill-v${PRODUCT_VERSION}.md; do
             test -s "build/downloads/build-a/${file}"
             test -s "build/downloads/build-b/${file}"
             cp "build/downloads/build-a/${file}" build-a/
@@ -674,19 +702,19 @@ jobs:
           done
           mkdir -p build-a/.receipts build-b/.receipts
           for file in \
-            surf-ace-cli-linux-x86_64-v0.2.10-rc2.tar.gz \
-            surf-ace-cli-macos-arm64-v0.2.10-rc2.tar.gz \
-            surf-ace-electron-linux-x86_64-v0.2.10-rc2.zip \
-            surf-ace-electron-macos-arm64-v0.2.10-rc2.zip \
-            surf-ace-server-linux-x86_64-v0.2.10-rc2.tar.gz \
-            surf-ace-skill-v0.2.10-rc2.md; do
+            surf-ace-cli-linux-x86_64-v${PRODUCT_VERSION}.tar.gz \
+            surf-ace-cli-macos-arm64-v${PRODUCT_VERSION}.tar.gz \
+            surf-ace-electron-linux-x86_64-v${PRODUCT_VERSION}.zip \
+            surf-ace-electron-macos-arm64-v${PRODUCT_VERSION}.zip \
+            surf-ace-server-linux-x86_64-v${PRODUCT_VERSION}.tar.gz \
+            surf-ace-skill-v${PRODUCT_VERSION}.md; do
             (cd build-a && shasum -a 256 "${file}") >> build-a/.receipts/SHA256SUMS
             (cd build-b && shasum -a 256 "${file}") >> build-b/.receipts/SHA256SUMS
           done
           node tooling/scripts/release/compare-release-builds.mjs \
             --build-a build-a \
             --build-b build-b \
-            --files surf-ace-server-linux-x86_64-v0.2.10-rc2.tar.gz,surf-ace-cli-linux-x86_64-v0.2.10-rc2.tar.gz,surf-ace-electron-linux-x86_64-v0.2.10-rc2.zip,surf-ace-cli-macos-arm64-v0.2.10-rc2.tar.gz,surf-ace-electron-macos-arm64-v0.2.10-rc2.zip,surf-ace-skill-v0.2.10-rc2.md
+            --files surf-ace-server-linux-x86_64-v${PRODUCT_VERSION}.tar.gz,surf-ace-cli-linux-x86_64-v${PRODUCT_VERSION}.tar.gz,surf-ace-electron-linux-x86_64-v${PRODUCT_VERSION}.zip,surf-ace-cli-macos-arm64-v${PRODUCT_VERSION}.tar.gz,surf-ace-electron-macos-arm64-v${PRODUCT_VERSION}.zip,surf-ace-skill-v${PRODUCT_VERSION}.md
       - name: Retain byte-comparison receipt
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -698,6 +726,7 @@ jobs:
     needs: [compare, guard]
     env:
       PRODUCT_COMMIT: ${{ needs.guard.outputs.product_commit }}
+      PRODUCT_VERSION: ${{ needs.guard.outputs.product_version }}
     runs-on: macos-15
     steps:
       - name: Check out immutable tooling
@@ -754,6 +783,7 @@ jobs:
     needs: [assemble, guard]
     env:
       PRODUCT_COMMIT: ${{ needs.guard.outputs.product_commit }}
+      PRODUCT_VERSION: ${{ needs.guard.outputs.product_version }}
     runs-on: ubuntu-24.04
     steps:
       - name: Check out immutable tooling
@@ -848,7 +878,7 @@ jobs:
                 --source-commit "$product_commit" \
                 --tooling-commit "$tooling_commit" \
                 --candidate-commit "$product_commit" \
-                --manifest build/release/tightbeam/surf-ace-v0.2.10-rc2-manifest.json
+                --manifest "build/release/tightbeam/surf-ace-v${PRODUCT_VERSION}-manifest.json"
           ' bash "$smoke_user" "$smoke_tmp" "$smoke_node" "$PATH" \
             "$SURF_ACE_TIGHTBEAM_STATE_DRIVER" "$PRODUCT_COMMIT" "$GITHUB_SHA" \
             > linux-smoke.json 2> linux-smoke-stderr.log || {
@@ -873,8 +903,8 @@ jobs:
             }
           node tooling/scripts/release/write-smoke-receipt.mjs \
             --channel tightbeam-linux \
-            --manifest build/release/tightbeam/surf-ace-v0.2.10-rc2-manifest.json \
-            --files build/release/tightbeam/surf-ace-server-linux-x86_64-v0.2.10-rc2.tar.gz,build/release/tightbeam/surf-ace-cli-linux-x86_64-v0.2.10-rc2.tar.gz,build/release/tightbeam/surf-ace-electron-linux-x86_64-v0.2.10-rc2.zip,build/release/tightbeam/surf-ace-cli-macos-arm64-v0.2.10-rc2.tar.gz,build/release/tightbeam/surf-ace-electron-macos-arm64-v0.2.10-rc2.zip,build/release/tightbeam/surf-ace-skill-v0.2.10-rc2.md \
+            --manifest "build/release/tightbeam/surf-ace-v${PRODUCT_VERSION}-manifest.json" \
+            --files "build/release/tightbeam/surf-ace-server-linux-x86_64-v${PRODUCT_VERSION}.tar.gz,build/release/tightbeam/surf-ace-cli-linux-x86_64-v${PRODUCT_VERSION}.tar.gz,build/release/tightbeam/surf-ace-electron-linux-x86_64-v${PRODUCT_VERSION}.zip,build/release/tightbeam/surf-ace-cli-macos-arm64-v${PRODUCT_VERSION}.tar.gz,build/release/tightbeam/surf-ace-electron-macos-arm64-v${PRODUCT_VERSION}.zip,build/release/tightbeam/surf-ace-skill-v${PRODUCT_VERSION}.md" \
             --output linux-smoke-receipt.json
       - name: Retain Linux smoke result and receipt
         if: always()
@@ -893,6 +923,7 @@ jobs:
     needs: [assemble, guard]
     env:
       PRODUCT_COMMIT: ${{ needs.guard.outputs.product_commit }}
+      PRODUCT_VERSION: ${{ needs.guard.outputs.product_version }}
     runs-on: xcode-27
     steps:
       - name: Check out immutable tooling
@@ -942,12 +973,12 @@ jobs:
             --source-commit "${PRODUCT_COMMIT}" \
             --tooling-commit "${GITHUB_SHA}" \
             --candidate-commit "${PRODUCT_COMMIT}" \
-            --manifest build/release/tightbeam/surf-ace-v0.2.10-rc2-manifest.json \
+            --manifest "build/release/tightbeam/surf-ace-v${PRODUCT_VERSION}-manifest.json" \
             > macos-smoke.json
           node tooling/scripts/release/write-smoke-receipt.mjs \
             --channel tightbeam-macos \
-            --manifest build/release/tightbeam/surf-ace-v0.2.10-rc2-manifest.json \
-            --files build/release/tightbeam/surf-ace-server-linux-x86_64-v0.2.10-rc2.tar.gz,build/release/tightbeam/surf-ace-cli-linux-x86_64-v0.2.10-rc2.tar.gz,build/release/tightbeam/surf-ace-electron-linux-x86_64-v0.2.10-rc2.zip,build/release/tightbeam/surf-ace-cli-macos-arm64-v0.2.10-rc2.tar.gz,build/release/tightbeam/surf-ace-electron-macos-arm64-v0.2.10-rc2.zip,build/release/tightbeam/surf-ace-skill-v0.2.10-rc2.md \
+            --manifest "build/release/tightbeam/surf-ace-v${PRODUCT_VERSION}-manifest.json" \
+            --files "build/release/tightbeam/surf-ace-server-linux-x86_64-v${PRODUCT_VERSION}.tar.gz,build/release/tightbeam/surf-ace-cli-linux-x86_64-v${PRODUCT_VERSION}.tar.gz,build/release/tightbeam/surf-ace-electron-linux-x86_64-v${PRODUCT_VERSION}.zip,build/release/tightbeam/surf-ace-cli-macos-arm64-v${PRODUCT_VERSION}.tar.gz,build/release/tightbeam/surf-ace-electron-macos-arm64-v${PRODUCT_VERSION}.zip,build/release/tightbeam/surf-ace-skill-v${PRODUCT_VERSION}.md" \
             --output macos-smoke-receipt.json
       - name: Retain macOS smoke result and receipt
         if: always()
@@ -962,7 +993,9 @@ jobs:
 
   publish:
     if: ${{ inputs.publish_release && inputs.run_smoke }}
-    needs: [assemble, smoke-linux, smoke-macos]
+    needs: [assemble, smoke-linux, smoke-macos, guard]
+    env:
+      PRODUCT_VERSION: ${{ needs.guard.outputs.product_version }}
     environment: tightbeam-release
     runs-on: macos-15
     permissions:
@@ -994,15 +1027,15 @@ jobs:
       - name: Verify receipts bind the same exact six assets and manifest
         run: |
           set -euo pipefail
-          FILES="release/surf-ace-server-linux-x86_64-v0.2.10-rc2.tar.gz,release/surf-ace-cli-linux-x86_64-v0.2.10-rc2.tar.gz,release/surf-ace-electron-linux-x86_64-v0.2.10-rc2.zip,release/surf-ace-cli-macos-arm64-v0.2.10-rc2.tar.gz,release/surf-ace-electron-macos-arm64-v0.2.10-rc2.zip,release/surf-ace-skill-v0.2.10-rc2.md"
+          FILES="release/surf-ace-server-linux-x86_64-v${PRODUCT_VERSION}.tar.gz,release/surf-ace-cli-linux-x86_64-v${PRODUCT_VERSION}.tar.gz,release/surf-ace-electron-linux-x86_64-v${PRODUCT_VERSION}.zip,release/surf-ace-cli-macos-arm64-v${PRODUCT_VERSION}.tar.gz,release/surf-ace-electron-macos-arm64-v${PRODUCT_VERSION}.zip,release/surf-ace-skill-v${PRODUCT_VERSION}.md"
           node tooling/scripts/release/write-smoke-receipt.mjs \
             --channel tightbeam-linux \
-            --manifest release/surf-ace-v0.2.10-rc2-manifest.json \
+            --manifest "release/surf-ace-v${PRODUCT_VERSION}-manifest.json" \
             --files "${FILES}" \
             --receipt release/.receipts/linux-smoke-receipt.json
           node tooling/scripts/release/write-smoke-receipt.mjs \
             --channel tightbeam-macos \
-            --manifest release/surf-ace-v0.2.10-rc2-manifest.json \
+            --manifest "release/surf-ace-v${PRODUCT_VERSION}-manifest.json" \
             --files "${FILES}" \
             --receipt release/.receipts/macos-smoke-receipt.json
       - name: Attest Linux smoke receipt
@@ -1025,13 +1058,13 @@ jobs:
           test -n "${LINUX_ATTESTATION_URL}"
           test -n "${MACOS_ATTESTATION_URL}"
           gh release create "${PRODUCT_TAG}" \
-            release/surf-ace-server-linux-x86_64-v0.2.10-rc2.tar.gz \
-            release/surf-ace-cli-linux-x86_64-v0.2.10-rc2.tar.gz \
-            release/surf-ace-electron-linux-x86_64-v0.2.10-rc2.zip \
-            release/surf-ace-cli-macos-arm64-v0.2.10-rc2.tar.gz \
-            release/surf-ace-electron-macos-arm64-v0.2.10-rc2.zip \
-            release/surf-ace-skill-v0.2.10-rc2.md \
-            release/surf-ace-v0.2.10-rc2-manifest.json \
+            "release/surf-ace-server-linux-x86_64-v${PRODUCT_VERSION}.tar.gz" \
+            "release/surf-ace-cli-linux-x86_64-v${PRODUCT_VERSION}.tar.gz" \
+            "release/surf-ace-electron-linux-x86_64-v${PRODUCT_VERSION}.zip" \
+            "release/surf-ace-cli-macos-arm64-v${PRODUCT_VERSION}.tar.gz" \
+            "release/surf-ace-electron-macos-arm64-v${PRODUCT_VERSION}.zip" \
+            "release/surf-ace-skill-v${PRODUCT_VERSION}.md" \
+            "release/surf-ace-v${PRODUCT_VERSION}-manifest.json" \
             release/SHA256SUMS \
             --repo "${GITHUB_REPOSITORY}" \
             --verify-tag \
