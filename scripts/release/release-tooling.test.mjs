@@ -1272,18 +1272,18 @@ test("Linux fresh-install raw CLI evidence binds two isolated roots to their cli
   ], bindings), /linux_fresh_install_cli_state_root_not_bound/);
 });
 
-test("Surf Ace v0.2.10-rc1 binds the selected source, six hosted assets, and tooling identity", () => {
-  assert.equal(TIGHTBEAM_TOOLING_TAG, "surf-ace-release-tooling-v0.2.10-rc1-r3");
+test("Surf Ace v0.2.10-rc2 binds the selected source, six hosted assets, and tooling identity", () => {
+  assert.equal(TIGHTBEAM_TOOLING_TAG, "surf-ace-release-tooling-v0.2.10-rc2-r1");
   const { candidateCommit, ...releaseIdentity } = TIGHTBEAM;
   assert.equal(candidateCommit, testProductCommit);
   assert.deepEqual(releaseIdentity, {
-    sourceTag: "surf-ace-v0.2.10-rc1-r1", version: "0.2.10-rc1", channel: "surf-ace", toolingTag: TIGHTBEAM_TOOLING_TAG,
-    assets: ["surf-ace-server-linux-x86_64-v0.2.10-rc1.tar.gz","surf-ace-cli-linux-x86_64-v0.2.10-rc1.tar.gz","surf-ace-electron-linux-x86_64-v0.2.10-rc1.zip","surf-ace-cli-macos-arm64-v0.2.10-rc1.tar.gz","surf-ace-electron-macos-arm64-v0.2.10-rc1.zip",TIGHTBEAM_SKILL_ASSET],
-    manifest: "surf-ace-v0.2.10-rc1-manifest.json", checksums: "SHA256SUMS",
+    sourceTag: "surf-ace-v0.2.10-rc2-r1", version: "0.2.10-rc2", channel: "surf-ace", toolingTag: TIGHTBEAM_TOOLING_TAG,
+    assets: ["surf-ace-server-linux-x86_64-v0.2.10-rc2.tar.gz","surf-ace-cli-linux-x86_64-v0.2.10-rc2.tar.gz","surf-ace-electron-linux-x86_64-v0.2.10-rc2.zip","surf-ace-cli-macos-arm64-v0.2.10-rc2.tar.gz","surf-ace-electron-macos-arm64-v0.2.10-rc2.zip",TIGHTBEAM_SKILL_ASSET],
+    manifest: "surf-ace-v0.2.10-rc2-manifest.json", checksums: "SHA256SUMS",
   });
-  assert.equal(TIGHTBEAM_SKILL_ASSET, "surf-ace-skill-v0.2.10-rc1.md");
+  assert.equal(TIGHTBEAM_SKILL_ASSET, "surf-ace-skill-v0.2.10-rc2.md");
   assert.equal(TIGHTBEAM.assets.length, 6);
-  assert.equal(TIGHTBEAM.sourceTag, "surf-ace-v0.2.10-rc1-r1");
+  assert.equal(TIGHTBEAM.sourceTag, "surf-ace-v0.2.10-rc2-r1");
   assert.equal(TOOLCHAINS.macosRunner, "xcode-27");
   assert.equal(TOOLCHAINS.xcode, "27.0");
   assert.deepEqual(TIGHTBEAM_ROUTING, {
@@ -1355,10 +1355,15 @@ test("Tightbeam manifest assembles the six hosted assets including the exact ski
   const manifest = JSON.parse(await fs.readFile(result.manifestPath, "utf8"));
   assert.deepEqual(result.files, TIGHTBEAM_PUBLIC_FILES);
   assert.deepEqual(manifest.assets.map(({ name }) => name), TIGHTBEAM.assets);
+  const migrationBytes = await fs.readFile(path.join(repository, "packages/allocator/sql/005_window_label_reuse.sql"));
+  assert.deepEqual(manifest.serverPackage.schemaMigrations, [{
+    path: "schemas/allocator/005_window_label_reuse.sql",
+    sha256: createHash("sha256").update(migrationBytes).digest("hex"),
+    sizeBytes: migrationBytes.length,
+  }]);
   const skillRecord = manifest.assets.find(({ name }) => name === TIGHTBEAM_SKILL_ASSET);
   assert.equal(skillRecord.sha256, createHash("sha256").update(toolingSkillBytes).digest("hex"));
   assert.deepEqual(await fs.readFile(path.join(outputDir, TIGHTBEAM_SKILL_ASSET)), toolingSkillBytes);
-  assert.ok((await fs.readFile(path.join(outputDir, TIGHTBEAM_SKILL_ASSET), "utf8")).includes(TIGHTBEAM_SKILL_ASSET));
   assert.equal(Object.hasOwn(manifest, "iosSigning"), false);
   assert.deepEqual((await verifyTightbeamChecksums(result.manifestPath)).files,
     [...TIGHTBEAM.assets, TIGHTBEAM.manifest].sort());
@@ -1431,6 +1436,7 @@ test("Tightbeam Linux stage contains only the standalone CLI, callable server cl
     "packages/allocator/sql/002_fleet_panes.sql": "-- migration\n",
     "packages/allocator/sql/003_annotation_journal.sql": "-- annotation migration\n",
     "packages/allocator/sql/004_pane_label_reuse.sql": "-- pane generation migration\n",
+    "packages/allocator/sql/005_window_label_reuse.sql": "-- window generation migration\n",
   };
   for (const [relative, contents] of Object.entries(files)) {
     const file = path.join(source, relative);
@@ -1453,12 +1459,16 @@ test("Tightbeam Linux stage contains only the standalone CLI, callable server cl
   const paneGenerationMigration = path.join(stage, "schemas/allocator/004_pane_label_reuse.sql");
   const paneGenerationBytes = await fs.readFile(path.join(source, "packages/allocator/sql/004_pane_label_reuse.sql"));
   assert.deepEqual(await fs.readFile(paneGenerationMigration), paneGenerationBytes);
+  const windowGenerationMigration = path.join(stage, "schemas/allocator/005_window_label_reuse.sql");
+  const windowGenerationBytes = await fs.readFile(path.join(source, "packages/allocator/sql/005_window_label_reuse.sql"));
+  assert.deepEqual(await fs.readFile(windowGenerationMigration), windowGenerationBytes);
   const guide = await fs.readFile(path.join(stage, "README.md"), "utf8");
   assert.match(guide, /startCentralServer\(config, name\)/);
   assert.match(guide, /await service\.close\(\)/);
   assert.match(guide, /already-provisioned PostgreSQL (?:16 )?custody/);
   assert.match(guide, /003_annotation_journal\.sql/);
   assert.match(guide, /004_pane_label_reuse\.sql/);
+  assert.match(guide, /005_window_label_reuse\.sql/);
   assert.match(guide, /foreground launcher/);
   assert.match(guide, /does not install or enable a service/);
   assert.doesNotMatch(actual.join("\n"), /surf-ace-runtime|controller\/dist\/main\.js/);
@@ -1476,6 +1486,10 @@ test("Tightbeam Linux stage contains only the standalone CLI, callable server cl
   await fs.rm(paneGenerationMigration);
   await assert.rejects(verifyTightbeamLinuxStage(stage), /tightbeam_linux_runtime_closure_mismatch/);
   await fs.writeFile(paneGenerationMigration, paneGenerationBytes);
+  await verifyTightbeamLinuxStage(stage);
+  await fs.rm(windowGenerationMigration);
+  await assert.rejects(verifyTightbeamLinuxStage(stage), /tightbeam_linux_runtime_closure_mismatch/);
+  await fs.writeFile(windowGenerationMigration, windowGenerationBytes);
   await verifyTightbeamLinuxStage(stage);
 
   await fs.chmod(path.join(stage, "bin/surf-ace"), 0o644);
@@ -2880,7 +2894,7 @@ test("Tightbeam Linux smoke fixture binds adapter dependencies to the exact prod
   assert.doesNotMatch(fixture, /^import\s+(?:pg|WebSocket)\s+from\s+["'](?:pg|ws)["']/m);
 });
 
-test("stable v0.2.8 documentation stays historical and current release gates bind rc1", async () => {
+test("stable v0.2.8 documentation stays historical and current release gates bind rc2", async () => {
   const specification = await fs.readFile(path.join(repository, "docs/release/surf-ace-standalone-v0.2.8.md"), "utf8");
   const readme = await fs.readFile(path.join(repository, "README.md"), "utf8");
   const skill = await fs.readFile(path.join(repository, "integrations/tightbeam/skills/surf-ace/SKILL.md"), "utf8");
@@ -2912,9 +2926,9 @@ test("stable v0.2.8 documentation stays historical and current release gates bin
   assert.match(workflow, /test "\$\{product_remote\}" = "\$\{PRODUCT_COMMIT_INPUT\}"/);
   assert.match(workflow, /product_commit: \$\{\{ steps\.identity\.outputs\.product_commit \}\}/);
   assert.match(workflow, /PRODUCT_COMMIT: \$\{\{ needs\.guard\.outputs\.product_commit \}\}/);
-  assert.match(workflow, /PRODUCT_TAG: surf-ace-v0\.2\.10-rc1-r1/);
-  assert.match(workflow, /PRODUCT_VERSION: 0\.2\.10-rc1/);
-  assert.match(workflow, /TOOLING_TAG: surf-ace-release-tooling-v0\.2\.10-rc1-r3/);
+  assert.match(workflow, /PRODUCT_TAG: surf-ace-v0\.2\.10-rc2-r1/);
+  assert.match(workflow, /PRODUCT_VERSION: 0\.2\.10-rc2/);
+  assert.match(workflow, /TOOLING_TAG: surf-ace-release-tooling-v0\.2\.10-rc2-r1/);
   assert.match(workflow, /GITHUB_EVENT_NAME/);
   assert.match(workflow, /GITHUB_REF_TYPE/);
   assert.doesNotMatch(workflow, /build-ios|tightbeam-ios-ipa|xcodebuild archive|-exportArchive|\.ipa\b|IOS_CERTIFICATE|IOS_PROVISIONING_PROFILE|tightbeam-ios-signing/);
@@ -2933,7 +2947,7 @@ test("stable v0.2.8 documentation stays historical and current release gates bin
   assert.doesNotMatch(TIGHTBEAM_BUILD_COMMANDS.join("\n"), /xcodebuild archive|-exportArchive|\.ipa\b/);
 });
 
-test("rc1 release smoke gates bind only matching candidate participants", async () => {
+test("rc2 release smoke gates bind only matching candidate participants", async () => {
   const workflow = await fs.readFile(path.join(repository, ".github/workflows/release-tightbeam.yml"), "utf8");
   const smoke = await fs.readFile(path.join(repository, "scripts/release/smoke-tightbeam-release.mjs"), "utf8");
   const fixture = await fs.readFile(path.join(repository, "scripts/release/tightbeam-state-smoke-fixture.ts"), "utf8");

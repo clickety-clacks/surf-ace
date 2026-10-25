@@ -1,4 +1,4 @@
-import { closeSync, fsyncSync, openSync, readFileSync, unlinkSync, writeSync } from "node:fs";
+import { closeSync, fsyncSync, lstatSync, openSync, readFileSync, unlinkSync, writeSync } from "node:fs";
 import { createHash, randomBytes } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 
@@ -356,9 +356,8 @@ export class AllocatorServer {
     config: AllocatorServerConfig, testHooks: AdapterTestHooks = {}, retrySignal?: AbortSignal,
   ): Promise<AllocatorServer> {
     validateServerConfig(config);
-    const hostLock = HostLock.acquire(config.hostLockPath);
+    const { hostLock, custody } = await acquireStartupOwnership(config, testHooks, retrySignal);
     try {
-      const custody = await PostgresCustodyAdapter.acquireWriter(config.custody, testHooks, retrySignal);
       try {
         const authority = new WindowLabelAuthority(custody);
         // Retry only the unfinished stage: a busy port must not repeat completed
@@ -958,6 +957,10 @@ class HostLock {
     try {
       descriptor = openSync(path, "wx", 0o600);
     } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+        const snapshot = deadHostLockSnapshot(path);
+        if (snapshot) throw new StaleHostLockError(snapshot);
+      }
       throw new AllocatorError("writer_fence_unavailable", `canonical host lock is unavailable: ${path}`, undefined, error);
     }
     try {
@@ -970,12 +973,101 @@ class HostLock {
     }
   }
 
+  static reclaimStale(path: string, expected: HostLockSnapshot): HostLock {
+    const current = deadHostLockSnapshot(path);
+    if (!current || !sameHostLockSnapshot(current, expected)) {
+      throw new AllocatorError("writer_fence_unavailable", `canonical host lock changed before stale-owner recovery: ${path}`);
+    }
+    try {
+      unlinkSync(path);
+    } catch (error) {
+      throw new AllocatorError("writer_fence_unavailable", `canonical host lock could not be reclaimed: ${path}`, undefined, error);
+    }
+    try {
+      return HostLock.acquire(path);
+    } catch (error) {
+      if (error instanceof StaleHostLockError) {
+        throw new AllocatorError("writer_fence_unavailable", `canonical host lock changed during stale-owner recovery: ${path}`, undefined, error);
+      }
+      throw error;
+    }
+  }
+
   release(): void {
     if (this.released) return;
     this.released = true;
     closeSync(this.descriptor);
     const contents = readFileSync(this.path, "utf8");
     if (contents === `${process.pid}:${this.nonce}\n`) unlinkSync(this.path);
+  }
+}
+
+type HostLockSnapshot = { contents: string; device: number; inode: number; pid: number };
+
+class StaleHostLockError extends Error {
+  constructor(readonly snapshot: HostLockSnapshot) {
+    super("canonical host lock is owned by a process that is no longer present");
+  }
+}
+
+function deadHostLockSnapshot(path: string): HostLockSnapshot | null {
+  let before: ReturnType<typeof lstatSync>;
+  let contents: string;
+  try {
+    before = lstatSync(path);
+    if (!before.isFile()) return null;
+    contents = readFileSync(path, "utf8");
+  } catch {
+    return null;
+  }
+  const match = /^([1-9][0-9]*):([A-Za-z0-9_-]{32})\n$/.exec(contents);
+  const pid = Number(match?.[1]);
+  if (!match || !Number.isSafeInteger(pid)) return null;
+  try {
+    process.kill(pid, 0);
+    return null;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ESRCH") return null;
+  }
+  try {
+    const after = lstatSync(path);
+    if (!after.isFile() || before.dev !== after.dev || before.ino !== after.ino || readFileSync(path, "utf8") !== contents) {
+      return null;
+    }
+  } catch {
+    return null;
+  }
+  return { contents, device: before.dev, inode: before.ino, pid };
+}
+
+function sameHostLockSnapshot(left: HostLockSnapshot, right: HostLockSnapshot): boolean {
+  return left.contents === right.contents && left.device === right.device && left.inode === right.inode && left.pid === right.pid;
+}
+
+async function acquireStartupOwnership(
+  config: AllocatorServerConfig,
+  testHooks: AdapterTestHooks,
+  retrySignal?: AbortSignal,
+): Promise<{ custody: PostgresCustodyAdapter<"writer">; hostLock: HostLock }> {
+  try {
+    const hostLock = HostLock.acquire(config.hostLockPath);
+    try {
+      const custody = await PostgresCustodyAdapter.acquireWriter(config.custody, testHooks, retrySignal);
+      return { custody, hostLock };
+    } catch (error) {
+      hostLock.release();
+      throw error;
+    }
+  } catch (error) {
+    if (!(error instanceof StaleHostLockError)) throw error;
+    const custody = await PostgresCustodyAdapter.acquireWriter(config.custody, testHooks, retrySignal);
+    try {
+      const hostLock = HostLock.reclaimStale(config.hostLockPath, error.snapshot);
+      return { custody, hostLock };
+    } catch (reclaimError) {
+      await custody.terminate();
+      throw reclaimError;
+    }
   }
 }
 

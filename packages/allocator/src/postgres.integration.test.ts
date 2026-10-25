@@ -1,7 +1,7 @@
 import { ServerConnection } from "../../electron/src/server-connection.js";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { appendFile, mkdtemp, readFile, rm } from "node:fs/promises";
+import { appendFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer, createConnection, type Socket } from "node:net";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -1113,6 +1113,67 @@ test("recovery waits for a busy port without repeating annotation consumer lease
     await cluster.stop();
   }
 });
+
+test("allocator startup reclaims an exact dead-owner lock only after writer custody", { timeout: 90_000 }, async () => {
+  const cluster = await startCluster();
+  let allocator: AllocatorServer | null = null;
+  try {
+    const initial = await PostgresCustodyAdapter.initializeAbsentFleet(cluster.config, "alloc_host_lock_recovery");
+    await initial.release();
+    const deadOwnerPid = await exitedProcessPid();
+    const staleContents = `${deadOwnerPid}:${Buffer.alloc(24).toString("base64url")}\n`;
+    const config = serverConfig(cluster);
+    await writeFile(config.hostLockPath, staleContents, { mode: 0o600 });
+
+    allocator = await AllocatorServer.start(config);
+    const activeContents = await readFile(config.hostLockPath, "utf8");
+    assert.match(activeContents, /^([1-9][0-9]*):[A-Za-z0-9_-]{32}\n$/);
+    assert.equal(Number(activeContents.slice(0, activeContents.indexOf(":"))), process.pid);
+    assert.notEqual(activeContents, staleContents, "startup replaces only the proven-dead owner record");
+
+    await assert.rejects(
+      AllocatorServer.start(config),
+      (error) => error instanceof AllocatorError && error.code === "writer_fence_unavailable",
+      "a live recorded owner remains reserved",
+    );
+    assert.equal(await readFile(config.hostLockPath, "utf8"), activeContents,
+      "a second start does not remove or replace a live owner's lock");
+
+    const competingStalePath = join(cluster.root, "competing-stale.lock");
+    await writeFile(competingStalePath, staleContents, { mode: 0o600 });
+    await assert.rejects(
+      AllocatorServer.start({ ...config, hostLockPath: competingStalePath }),
+      (error) => error instanceof AllocatorError && error.code === "writer_fence_unavailable",
+      "stale-lock recovery waits for the database writer fence",
+    );
+    assert.equal(await readFile(competingStalePath, "utf8"), staleContents,
+      "an occupied writer fence leaves the stale path unchanged");
+
+    await allocator.close();
+    allocator = null;
+    await assert.rejects(readFile(config.hostLockPath), (error) => (error as NodeJS.ErrnoException).code === "ENOENT");
+  } finally {
+    await allocator?.close();
+    await cluster.stop();
+  }
+});
+
+async function exitedProcessPid(): Promise<number> {
+  const child = spawn(process.execPath, ["-e", "process.exit(0)"], { stdio: "ignore" });
+  const pid = child.pid;
+  await new Promise<void>((resolve, reject) => {
+    child.once("error", reject);
+    child.once("exit", () => resolve());
+  });
+  if (!pid) throw new Error("test_child_pid_unavailable");
+  try {
+    process.kill(pid, 0);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ESRCH") return pid;
+    throw error;
+  }
+  throw new Error("test_child_pid_was_reused");
+}
 
 test("configured server registers two stable clients and deduplicates reconnect", { timeout: 90_000 }, async () => {
   const cluster = await startCluster();
