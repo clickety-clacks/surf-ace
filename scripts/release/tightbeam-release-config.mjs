@@ -1,7 +1,10 @@
-import { publicReleaseNames } from "./public-release-names.mjs";
+import { publicReleaseNamesFromTags } from "./public-release-names.mjs";
 
 // v0.2.5's published identities remain immutable. New releases use Surf Ace names.
-const RELEASE_NAMES = publicReleaseNames({ version: "0.2.10-rc2", sourceRevision: "r1", toolingRevision: "r1" });
+const RELEASE_NAMES = publicReleaseNamesFromTags({
+  productTag: process.env.PRODUCT_TAG,
+  toolingTag: process.env.TOOLING_TAG,
+});
 
 export const TIGHTBEAM_TOOLING_TAG = RELEASE_NAMES.toolingTag;
 

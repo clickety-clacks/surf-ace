@@ -1,5 +1,7 @@
 const VERSION = /^\d+\.\d+\.\d+(?:-rc[1-9]\d*)?$/;
 const REVISION = /^r[1-9]\d*$/;
+const PRODUCT_TAG = /^surf-ace-v(\d+\.\d+\.\d+(?:-rc[1-9]\d*))-(r[1-9]\d*)$/;
+const TOOLING_TAG = /^surf-ace-release-tooling-v(\d+\.\d+\.\d+(?:-rc[1-9]\d*))-(r[1-9]\d*)$/;
 
 export function publicReleaseNames({ version, sourceRevision, toolingRevision, legacy = false }) {
   if (!VERSION.test(version ?? "")) throw new Error("release_version_invalid");
@@ -32,4 +34,21 @@ export function publicReleaseNames({ version, sourceRevision, toolingRevision, l
     manifest: `${stem}-v${version}-manifest.json`,
     checksums: "SHA256SUMS",
   });
+}
+
+export function publicReleaseNamesFromTags({ productTag, toolingTag }) {
+  const productMatch = PRODUCT_TAG.exec(productTag ?? "");
+  const toolingMatch = TOOLING_TAG.exec(toolingTag ?? "");
+  if (!productMatch || !toolingMatch) throw new Error("release_tag_invalid");
+  if (productMatch[1] !== toolingMatch[1]) throw new Error("release_tag_version_mismatch");
+
+  const names = publicReleaseNames({
+    version: productMatch[1],
+    sourceRevision: productMatch[2],
+    toolingRevision: toolingMatch[2],
+  });
+  if (names.sourceTag !== productTag || names.toolingTag !== toolingTag) {
+    throw new Error("release_tag_name_mismatch");
+  }
+  return names;
 }
