@@ -1727,7 +1727,7 @@ test("AC-TOPO-04: split rename resize close restore and realization share stable
       paneId: createdPaneId,
       surfaceId: surface.surfaceId,
     });
-    assert.equal(closed.payload.recoverable, true);
+    assert.equal(closed.payload.recoverable, false);
     const restored = await request(second, "pane.restore", {
       anchorPaneId: paneId,
       direction: "vertical",
@@ -1735,8 +1735,11 @@ test("AC-TOPO-04: split rename resize close restore and realization share stable
       surfaceId: surface.surfaceId,
       tombstoneId: closed.payload.tombstoneId,
     });
-    assert.equal(restored.ok, true);
-    assert.equal(restored.payload.paneId, createdPaneId);
+    assert.equal(restored.ok, false);
+    assert.equal(restored.error.code, "tombstone_not_found");
+    const panesAfterClose = await request(second, "panes.list", { surfaceId: surface.surfaceId });
+    assert.equal(panesAfterClose.payload.topology.topologyRevision, closed.payload.topologyRevision);
+    assert.equal(panesAfterClose.payload.panes.some((pane: { paneId: number }) => pane.paneId === createdPaneId), false);
 
     const createdLifecycleEvent = nextEvent(
       second,
@@ -1747,35 +1750,31 @@ test("AC-TOPO-04: split rename resize close restore and realization share stable
       desired: {
         children: [
           { paneId, type: "pane" },
-          { paneId: createdPaneId, type: "pane" },
           { name: "Allocated by Surf Ace", type: "pane" },
         ],
         direction: "horizontal",
         type: "split",
       },
-      expectedTopologyRevision: restored.payload.topologyRevision,
+      expectedTopologyRevision: closed.payload.topologyRevision,
       surfaceId: surface.surfaceId,
       target: { root: true },
     });
     assert.equal(realized.ok, true, JSON.stringify(realized));
     assert.equal(realized.payload.topologyRevision, 4);
-    assert.equal(realized.payload.panes.length, 3);
+    assert.equal(realized.payload.panes.length, 2);
     const allocatedPaneId = realized.payload.panes.find(
-      (candidate: { paneId: number }) =>
-        candidate.paneId !== paneId &&
-        candidate.paneId !== createdPaneId,
+      (candidate: { paneId: number }) => candidate.paneId !== paneId,
     ).paneId;
     assert.deepEqual(realized.payload.createdPaneIds, [allocatedPaneId]);
     assert.deepEqual(realized.payload.destroyedPaneIds, []);
     assert.deepEqual(realized.payload.destroyedPaneTombstones, []);
     assert.deepEqual(
       [...realized.payload.preservedPaneIds].sort((a, b) => a - b),
-      [paneId, createdPaneId].sort((a, b) => a - b),
+      [paneId],
     );
     assert.deepEqual(realized.payload.topology, {
       children: [
         { paneId, type: "pane" },
-        { paneId: createdPaneId, type: "pane" },
         { paneId: allocatedPaneId, type: "pane" },
       ],
       direction: "horizontal",
@@ -2051,10 +2050,15 @@ test("new panes stay unnumbered when the registry rejects a pane claim and recov
     width: 1200,
   });
   initializeRegistryBootstrapPanes(core);
+  const claimOrder: string[] = [];
   const port = nextPort++;
   const server = new SurfaceWsServer({
     capturePaneImage: async () => null,
-    claimPaneLabel: async () => { throw new Error("surface_not_registered"); },
+    claimPaneLabel: async () => {
+      claimOrder.push("pane-claim");
+      throw new Error("surface_not_registered");
+    },
+    preparePaneLabelClaim: async () => { claimOrder.push("release-preflight"); },
     compositorSocketPath: null,
     core,
     endpointName: "Surf Ace",
@@ -2086,11 +2090,13 @@ test("new panes stay unnumbered when the registry rejects a pane claim and recov
       surfaceId: surface.surfaceId,
     });
     assert.equal(split.ok, true, JSON.stringify(split));
+    assert.deepEqual(claimOrder, ["release-preflight", "pane-claim"]);
     let panes = (await request(controller, "panes.list", { surfaceId: surface.surfaceId })).payload.panes;
     const splitPane = panes.find((pane: any) => pane.paneId !== base.panes[0].paneId);
     assert.ok(splitPane?.paneLineageId);
     assert.equal(splitPane.paneLabel, null);
 
+    const beforeTopologyClaim = claimOrder.length;
     const topology = await request(controller, "topology.apply", {
       allowDestroyPaneIds: [],
       desired: {
@@ -2107,6 +2113,7 @@ test("new panes stay unnumbered when the registry rejects a pane claim and recov
       target: { root: true },
     });
     assert.equal(topology.ok, true, JSON.stringify(topology));
+    assert.deepEqual(claimOrder.slice(beforeTopologyClaim), ["release-preflight", "pane-claim"]);
     panes = (await request(controller, "panes.list", { surfaceId: surface.surfaceId })).payload.panes;
     const topologyPane = panes.find((pane: any) => ![base.panes[0].paneId, splitPane.paneId].includes(pane.paneId));
     assert.ok(topologyPane?.paneLineageId);
@@ -2118,6 +2125,7 @@ test("new panes stay unnumbered when the registry rejects a pane claim and recov
       surfaceId: surface.surfaceId,
     });
     assert.equal(closed.ok, true, JSON.stringify(closed));
+    assert.equal(closed.payload.recoverable, false);
     const restored = await request(controller, "pane.restore", {
       anchorPaneId: Number(base.panes[0].paneId),
       direction: "vertical",
@@ -2125,17 +2133,16 @@ test("new panes stay unnumbered when the registry rejects a pane claim and recov
       surfaceId: surface.surfaceId,
       tombstoneId: closed.payload.tombstoneId,
     });
-    assert.equal(restored.ok, true, JSON.stringify(restored));
+    assert.equal(restored.ok, false);
+    assert.equal(restored.error.code, "tombstone_not_found");
     panes = (await request(controller, "panes.list", { surfaceId: surface.surfaceId })).payload.panes;
-    const restoredPane = panes.find((pane: any) => pane.paneId === topologyPane.paneId);
-    assert.equal(restoredPane.paneLineageId, topologyPane.paneLineageId);
-    assert.equal(restoredPane.paneLabel, null);
+    assert.equal(panes.some((pane: any) => pane.paneId === topologyPane.paneId), false);
 
     const unnumberedLineages = new Set(
       panes.filter((pane: any) => pane.paneLabel === null).map((pane: any) => pane.paneLineageId),
     );
     assert.ok(unnumberedLineages.has(splitPane.paneLineageId));
-    assert.ok(unnumberedLineages.has(restoredPane.paneLineageId));
+    assert.equal(unnumberedLineages.has(topologyPane.paneLineageId), false);
     const registrationRequestPromise = new Promise<{ socket: WebSocket; message: any }>((resolve) => {
       registry.once("connection", (socket) => {
         socket.on("message", (raw) => {
@@ -2203,7 +2210,7 @@ test("new panes stay unnumbered when the registry rejects a pane claim and recov
   }
 });
 
-test("pane restore refuses an unavailable current allocation and keeps its tombstone retryable", async () => {
+test("pane final close records its exact allocation and refuses restore", async () => {
   const core = new SurfaceCore();
   const surface = core.ensurePrimarySurface("Surf Ace", {
     height: 800,
@@ -2211,14 +2218,11 @@ test("pane restore refuses an unavailable current allocation and keeps its tombs
     width: 1200,
   });
   initializeRegistryBootstrapPanes(core);
-  let refusedLineage: string | null = null;
   const port = nextPort++;
   const server = new SurfaceWsServer({
     capturePaneImage: async () => null,
-    claimPaneLabel: async (surfaceId, paneId, paneLineageId) => {
-      if (paneLineageId === refusedLineage) throw new Error("pane_generation_retired");
-      return claimTestRegistryPaneLabel(surfaceId, paneId, paneLineageId);
-    },
+    claimPaneLabel: async (surfaceId, paneId, paneLineageId) =>
+      claimTestRegistryPaneLabel(surfaceId, paneId, paneLineageId),
     compositorSocketPath: null,
     core,
     endpointName: "Surf Ace",
@@ -2251,8 +2255,18 @@ test("pane restore refuses an unavailable current allocation and keeps its tombs
       surfaceId: surface.surfaceId,
     });
     assert.equal(closed.ok, true, JSON.stringify(closed));
+    assert.equal(closed.payload.recoverable, false);
+    assert.equal(closed.payload.topologyRevision, split.payload.topologyRevision + 1);
+    const release = core.locklessAuthority.listPendingPaneReleases()[0]!;
+    assert.equal(release.closeRevision, closed.payload.topologyRevision);
+    assert.equal(release.tombstoneId, closed.payload.tombstoneId);
+    assert.equal(release.tombstoneKind, "pane");
+    assert.equal(release.paneId, String(created.paneId));
+    assert.equal(release.lineageId, created.paneLineageId);
+    assert.equal(release.paneLabel, created.paneLabel);
+    assert.equal(release.allocationGeneration, allocated?.allocationGeneration);
+    assert.equal(core.locklessAuthority.listTombstones("pane").some((entry) => entry.tombstoneId === closed.payload.tombstoneId), false);
 
-    refusedLineage = created.paneLineageId;
     const refused = await request(controller, "pane.restore", {
       anchorPaneId: Number(base.panes[0].paneId),
       direction: "vertical",
@@ -2261,25 +2275,13 @@ test("pane restore refuses an unavailable current allocation and keeps its tombs
       tombstoneId: closed.payload.tombstoneId,
     });
     assert.equal(refused.ok, false);
+    assert.equal(refused.error.code, "tombstone_not_found");
     let panes = (await request(controller, "panes.list", { surfaceId: surface.surfaceId })).payload.panes;
     assert.equal(panes.some((pane: any) => pane.paneId === created.paneId), false,
-      "a stale or unavailable allocator claim cannot reinsert the pane");
-
-    refusedLineage = null;
-    const restored = await request(controller, "pane.restore", {
-      anchorPaneId: Number(base.panes[0].paneId),
-      direction: "vertical",
-      expectedTopologyRevision: closed.payload.topologyRevision,
-      surfaceId: surface.surfaceId,
-      tombstoneId: closed.payload.tombstoneId,
-    });
-    assert.equal(restored.ok, true, JSON.stringify(restored));
-    panes = (await request(controller, "panes.list", { surfaceId: surface.surfaceId })).payload.panes;
-    const restoredPane = panes.find((pane: any) => pane.paneId === created.paneId);
-    assert.equal(restoredPane.paneLabel, created.paneLabel);
-    const restoredAllocation = core.confirmedRegistryClaims().find((entry) => entry.surfaceId === surface.surfaceId)
-      ?.panes.find((pane) => pane.paneLineageId === created.paneLineageId);
-    assert.equal(restoredAllocation?.allocationGeneration, allocated?.allocationGeneration);
+      "a final close cannot reinsert the pane");
+    const restarted = new SurfaceCore({ persistentState: core.getPersistentState() });
+    assert.deepEqual(restarted.locklessAuthority.listPendingPaneReleases(), [release]);
+    assert.equal(restarted.locklessAuthority.listTombstones("pane").length, 0);
   } finally {
     controller.close();
     await server.stop();
@@ -3344,12 +3346,13 @@ test("one stable controller may hold lifecycle and surface sessions but not dupl
       surfaceId: surface.surfaceId,
     });
     assert.equal(closed.ok, true, JSON.stringify(closed));
+    assert.equal(closed.payload.recoverable, false);
     assert.equal((await removal).payload.surfaceId, surface.surfaceId);
+    assert.equal((await removal).payload.recoverable, false);
     surfaceSession.close();
     await new Promise<void>((resolve) =>
       surfaceSession.once("close", () => resolve()),
     );
-    const appeared = nextEvent(lifecycle, "event.surface_appeared");
     const restored = await request(
       lifecycle,
       "surface.window.restore",
@@ -3358,9 +3361,12 @@ test("one stable controller may hold lifecycle and surface sessions but not dupl
         tombstoneId: closed.payload.tombstoneId,
       },
     );
-    assert.equal(restored.ok, true, JSON.stringify(restored));
-    assert.equal(restored.payload.surfaceId, surface.surfaceId);
-    assert.equal((await appeared).payload.surfaceId, surface.surfaceId);
+    assert.equal(restored.ok, false);
+    assert.equal(restored.error.code, "tombstone_not_found");
+    const afterClose = await request(lifecycle, "surfaces.list", {});
+    assert.equal(afterClose.payload.surfaceSetRevision, closed.payload.surfaceSetRevision);
+    assert.equal(afterClose.payload.surfaces.some((entry: any) => entry.surfaceId === surface.surfaceId), false);
+    assert.equal(core.locklessAuthority.listTombstones("surface").some((entry) => entry.tombstoneId === closed.payload.tombstoneId), false);
   } finally {
     lifecycle.close();
     surfaceSession.close();
@@ -3746,7 +3752,7 @@ test("pair admission requires the lockless protocol capability", async () => {
   }
 });
 
-test("AC-SURF-02: complete surface close persists a tombstone before zero-live socket teardown and restores exact identity after restart", async () => {
+test("AC-SURF-02: final surface close preserves unread consumables and has no restore right after restart", async () => {
   const core = new SurfaceCore();
   const surface = core.ensurePrimarySurface("Surf Ace", {
     height: 800,
@@ -3817,12 +3823,20 @@ test("AC-SURF-02: complete surface close persists a tombstone before zero-live s
     surfaceId: surface.surfaceId,
   });
   assert.equal(nestedClosed.ok, true, JSON.stringify(nestedClosed));
+  assert.equal(nestedClosed.payload.recoverable, false);
+  assert.equal(core.locklessAuthority.listTombstones("pane").length, 0);
+  const closedPaneScopeId = locklessPaneScopeId(surface.surfaceId, nestedPaneId);
+  assert.ok(core.locklessAuthority.scopeSnapshot("tight-beam", closedPaneScopeId).records.some(
+    (record) => (record.payload as { value?: string }).value === "nested-unread",
+  ));
   const closed = await request(surfaceSession, "surface.window.close", {
     expectedSurfaceSetRevision: listed.payload.surfaceSetRevision,
     expectedTopologyRevision: nestedClosed.payload.topologyRevision,
     surfaceId: surface.surfaceId,
   });
   assert.equal(closed.ok, true, JSON.stringify(closed));
+  assert.equal(closed.payload.recoverable, false);
+  assert.equal(core.locklessAuthority.listTombstones("surface").length, 0);
   lifecycle.close();
   surfaceSession.close();
   await firstServer.stop();
@@ -3839,31 +3853,9 @@ test("AC-SURF-02: complete surface close persists a tombstone before zero-live s
     [],
   );
   assert.equal(restarted.listSurfaces().length, 0);
-  const retainedSurface = restarted.locklessAuthority
-    .listTombstones("surface")[0]!;
-  const retainedPayload = retainedSurface.payload as {
-    paneTombstones: Array<{
-      payload: { pane: { history: Array<{ contentId: string }> } };
-      scopes: Record<string, { records: Array<{ payload: unknown }> }>;
-      tombstoneId: string;
-    }>;
-  };
-  assert.equal(
-    retainedPayload.paneTombstones[0]?.tombstoneId,
-    nestedClosed.payload.tombstoneId,
-  );
-  assert.equal(
-    retainedPayload.paneTombstones[0]?.payload.pane.history.some(
-      (entry) => entry.contentId === "nested-retained-content",
-    ),
-    true,
-  );
-  assert.equal(
-    retainedPayload.paneTombstones[0]?.scopes[
-      locklessPaneScopeId(surface.surfaceId, nestedPaneId)
-    ]?.records.length,
-    2,
-  );
+  assert.equal(restarted.locklessAuthority.listTombstones().length, 0);
+  assert.equal(restarted.locklessAuthority.exportState().finalCloseRecords.length, 2);
+  assert.equal(JSON.stringify(restarted.locklessAuthority.exportState().finalCloseRecords).includes("nested-retained-content"), false);
   const secondPort = nextPort++;
   const secondServer = new SurfaceWsServer({
     capturePaneImage: async () => null,
@@ -3888,8 +3880,13 @@ test("AC-SURF-02: complete surface close persists a tombstone before zero-live s
     assert.equal(admitted.payload.resumed, true);
     const secondController = await pair(secondControllerSession, "openclaw");
     assert.equal(secondController.ok, true, JSON.stringify(secondController));
-    // A new controller adds cursors to retained nested pane scopes. The
-    // resulting persisted generation must remain restart-valid before restore.
+    const closedPaneScope = restarted.locklessAuthority.scopeSnapshot("tight-beam", closedPaneScopeId);
+    assert.ok(closedPaneScope.records.some(
+      (record) => (record.payload as { value?: string }).value === "nested-unread",
+    ));
+    assert.ok(restarted.locklessAuthority.scopeSnapshot("openclaw", closedPaneScopeId).records.some(
+      (record) => (record.payload as { value?: string }).value === "nested-unread",
+    ));
     assert.doesNotThrow(
       () => new SurfaceCore({ persistentState: restarted.getPersistentState() }),
     );
@@ -3899,12 +3896,9 @@ test("AC-SURF-02: complete surface close persists a tombstone before zero-live s
       expectedSurfaceSetRevision: closed.payload.surfaceSetRevision,
       tombstoneId: closed.payload.tombstoneId,
     });
-    assert.equal(restored.ok, true, JSON.stringify(restored));
-    assert.equal(restored.payload.surfaceId, surface.surfaceId);
-    assert.equal(
-      restarted.locklessAuthority.listTombstones("pane")[0]?.tombstoneId,
-      nestedClosed.payload.tombstoneId,
-    );
+    assert.equal(restored.ok, false);
+    assert.equal(restored.error.code, "tombstone_not_found");
+    assert.equal(restarted.listSurfaces().length, 0);
   } finally {
     resumed.close();
     secondControllerSession.close();
@@ -3912,7 +3906,7 @@ test("AC-SURF-02: complete surface close persists a tombstone before zero-live s
   }
 });
 
-test("AC-SURF-01: controller and local-user surface lifecycle share the persisted client authority seam", async () => {
+test("AC-SURF-01: local-user final close commits before removal and preserves publisher data", async () => {
   const core = new SurfaceCore({ annotationClientId: "c".repeat(64) });
   core.ensurePrimarySurface("Surf Ace", {
     height: 800,
@@ -3921,6 +3915,10 @@ test("AC-SURF-01: controller and local-user surface lifecycle share the persiste
   });
   const port = nextPort++;
   let persistedRevision = -1;
+  let persistedRevisionAtRemoval = -1;
+  core.subscribe((event) => {
+    if (event.type === "surface-removed") persistedRevisionAtRemoval = persistedRevision;
+  });
   const server = new SurfaceWsServer({
     capturePaneImage: async () => null,
     compositorSocketPath: null,
@@ -3953,30 +3951,25 @@ test("AC-SURF-01: controller and local-user surface lifecycle share the persiste
     const localClosed = await server.closeSurfaceFromLocalUser(localOpened.surfaceId);
     assert.equal(localClosed.surfaceSetRevision, localOpened.surfaceSetRevision + 1);
     assert.equal(persistedRevision, localClosed.surfaceSetRevision);
-    const tombstone = core.locklessAuthority.listTombstones("surface")
-      .find((entry) => entry.tombstoneId === localClosed.tombstoneId)!;
-    assert.equal(tombstone.annotationPublisherPartitionBytes, publisherBytes);
-    const { bytes, ...material } = tombstone;
-    assert.equal(bytes, Buffer.byteLength(JSON.stringify({ version: 1, ...material }), "utf8") + publisherBytes);
+    assert.equal(persistedRevisionAtRemoval, localClosed.surfaceSetRevision);
+    assert.equal(core.locklessAuthority.listTombstones("surface").length, 0);
+    assert.equal(core.locklessAuthority.exportState().finalCloseRecords[0]?.tombstoneId, localClosed.tombstoneId);
+    assert.equal(core.locklessAuthority.listPendingWindowReleases().length, 0,
+      "an unconfirmed window allocation remains reserved without a guessed release");
+    assert.equal(core.annotationPublisher!.partitionBytes(localOpened.surfaceId), publisherBytes);
     const sealed = core.annotationPublisher!.head(localOpened.surfaceId)!;
     const sealedBytes = core.annotationPublisher!.partitionBytes(localOpened.surfaceId);
     core.getPersistentState();
-    assert.equal(core.locklessAuthority.listTombstones("surface")
-      .find((entry) => entry.tombstoneId === localClosed.tombstoneId)?.annotationPublisherPartitionBytes,
-    sealedBytes);
+    assert.equal(core.annotationPublisher!.partitionBytes(localOpened.surfaceId), sealedBytes);
     core.annotationPublisher!.accepted(localOpened.surfaceId, sealed,
       { epoch: "a".repeat(32), sequence: "1" });
     const acceptedBytes = core.annotationPublisher!.partitionBytes(localOpened.surfaceId);
     core.getPersistentState();
-    assert.equal(core.locklessAuthority.listTombstones("surface")
-      .find((entry) => entry.tombstoneId === localClosed.tombstoneId)?.annotationPublisherPartitionBytes,
-    acceptedBytes);
+    assert.equal(core.annotationPublisher!.partitionBytes(localOpened.surfaceId), acceptedBytes);
     const restarted = new SurfaceCore({ annotationClientId: "c".repeat(64),
       persistentState: core.getPersistentState() });
     assert.equal(restarted.annotationPublisher!.partitionBytes(localOpened.surfaceId), acceptedBytes);
-    assert.equal(restarted.locklessAuthority.listTombstones("surface")
-      .find((entry) => entry.tombstoneId === localClosed.tombstoneId)?.annotationPublisherPartitionBytes,
-    acceptedBytes);
+    assert.equal(restarted.locklessAuthority.listTombstones("surface").length, 0);
   } finally {
     lifecycle.close();
     await server.stop();

@@ -743,6 +743,146 @@ test("a reclaimed legacy tombstone without a committed topology revision cannot 
   assert.deepEqual(staleBackup.listPendingPaneReleases(), []);
 });
 
+test("final close preserves scope data and persists exact pane and window releases", () => {
+  const clientId = "d".repeat(64);
+  const target = new LocklessClientAuthority(createEmptyLocklessClientState(limits), () => 100, clientId);
+  const surfaceId = "sf_final_close_surface";
+  const livePane = {
+    allocationGeneration: 6,
+    paneId: 2,
+    paneLabel: 12,
+    paneLineageId: "pl_final_close_live",
+  };
+  const nestedPane = {
+    allocationGeneration: 7,
+    paneId: 3,
+    paneLabel: 13,
+    paneLineageId: "pl_final_close_nested",
+  };
+  admit(target, "controller-a");
+  const nestedScopeId = `pane:${surfaceId}:3`;
+  target.ensureScope(nestedScopeId, "pane");
+  target.appendConsumable({
+    payload: { value: "delivered-before-close" },
+    recordClass: "tap",
+    scopeId: nestedScopeId,
+    scopeKind: "pane",
+    triggerOperation: "tap",
+  });
+  target.createTombstone({
+    kind: "pane",
+    payload: { closeTopologyRevision: 2, pane: nestedPane },
+    surfaceId,
+  });
+
+  const closed = target.recordSurfaceFinalClose({
+    panes: [livePane],
+    surfaceId,
+    topologyRevision: 4,
+    windowAllocationGeneration: 8,
+    windowLabel: "b",
+  }, [], { closeRevision: 5 });
+
+  assert.equal(closed.closeRevision, 5);
+  assert.equal(target.listTombstones().length, 0);
+  assert.ok(target.scopeSnapshot("controller-a", nestedScopeId).records.some(
+    (record) => (record.payload as { value?: string }).value === "delivered-before-close",
+  ));
+  assert.deepEqual(target.listPendingPaneReleases().map((release) => ({
+    allocationGeneration: release.allocationGeneration,
+    closeRevision: release.closeRevision,
+    paneId: release.paneId,
+    paneLabel: release.paneLabel,
+    tombstoneKind: release.tombstoneKind,
+  })), [
+    { allocationGeneration: 6, closeRevision: 5, paneId: "2", paneLabel: 12, tombstoneKind: "surface" },
+    { allocationGeneration: 7, closeRevision: 5, paneId: "3", paneLabel: 13, tombstoneKind: "surface" },
+  ]);
+  const windowRelease = target.listPendingWindowReleases()[0]!;
+  assert.deepEqual({
+    allocationGeneration: windowRelease.allocationGeneration,
+    closeRevision: windowRelease.closeRevision,
+    clientId: windowRelease.clientId,
+    surfaceId: windowRelease.surfaceId,
+    tombstoneId: windowRelease.tombstoneId,
+    tombstoneKind: windowRelease.tombstoneKind,
+    windowLabel: windowRelease.windowLabel,
+  }, {
+    allocationGeneration: 8,
+    closeRevision: 5,
+    clientId,
+    surfaceId,
+    tombstoneId: closed.tombstoneId,
+    tombstoneKind: "surface",
+    windowLabel: "b",
+  });
+
+  const restarted = new LocklessClientAuthority(target.exportState(), () => 101, clientId);
+  assert.deepEqual(restarted.listPendingWindowReleases(), [windowRelease]);
+  assert.deepEqual(restarted.listPendingPaneReleases(), target.listPendingPaneReleases());
+  restarted.acknowledgeWindowReleases([windowRelease.releaseId]);
+  assert.deepEqual(restarted.listPendingWindowReleases(), []);
+});
+
+test("upgrade finalizes a proven close and keeps an unproven pane tombstone restorable", () => {
+  const clientId = "e".repeat(64);
+  const legacy = authority();
+  admit(legacy, "controller-a");
+  const paneTombstone = legacy.createTombstone({
+    kind: "pane",
+    payload: {
+      closeTopologyRevision: 7,
+      pane: {
+        allocationGeneration: 4,
+        paneId: 8,
+        paneLabel: 18,
+        paneLineageId: "pl_proven_legacy_close",
+      },
+    },
+    surfaceId: "sf_proven_legacy_close",
+  });
+  legacy.beginOperationReceipt("controller-a", "close-8", "pane.close");
+  legacy.completeOperationReceipt(
+    "controller-a",
+    "close-8",
+    "pane.close",
+    "resolved_success",
+    { id: "close-8", ok: true, payload: { tombstoneId: paneTombstone.tombstoneId } },
+    { commitSequence: 9, requestId: "close-8" },
+  );
+  const unproven = legacy.createTombstone({
+    kind: "pane",
+    payload: {
+      closeTopologyRevision: 10,
+      pane: {
+        allocationGeneration: 5,
+        paneId: 9,
+        paneLabel: 19,
+        paneLineageId: "pl_unproven_legacy_close",
+      },
+    },
+    surfaceId: "sf_unproven_legacy_close",
+  });
+  legacy.beginOperationReceipt("controller-a", "topology-apply", "topology.apply");
+  legacy.completeOperationReceipt(
+    "controller-a",
+    "topology-apply",
+    "topology.apply",
+    "resolved_success",
+    { id: "topology-apply", ok: true, payload: { tombstoneId: unproven.tombstoneId } },
+    { commitSequence: 11, requestId: "topology-apply" },
+  );
+
+  const upgraded = new LocklessClientAuthority(legacy.exportState(), () => 100, clientId);
+  assert.equal(upgraded.listTombstones().some((entry) => entry.tombstoneId === paneTombstone.tombstoneId), false);
+  assert.ok(upgraded.listTombstones().some((entry) => entry.tombstoneId === unproven.tombstoneId));
+  assert.equal(upgraded.listPendingPaneReleases().length, 1);
+  assert.equal(upgraded.listPendingPaneReleases()[0]?.closeRevision, 7);
+  assert.equal(upgraded.listPendingPaneReleases()[0]?.tombstoneId, paneTombstone.tombstoneId);
+  assert.equal(upgraded.listPendingPaneReleases()[0]?.allocationGeneration, 4);
+  assert.equal(upgraded.restoreTombstone(unproven.tombstoneId, "pane").tombstoneId, unproven.tombstoneId);
+});
+
 function retainedAggregateFixture(identityOrder: "forward" | "reverse"): {
   aggregateBytes: number;
   state: PersistentLocklessClientState;

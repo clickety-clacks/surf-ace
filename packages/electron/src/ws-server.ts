@@ -139,6 +139,7 @@ export type SurfaceWsServerOptions = {
   bindAddress?: string;
   capturePaneImage: (surfaceId: string, paneId: number) => Promise<string | null>;
   claimPaneLabel?: (surfaceId: string, paneId: number, paneLineageId: string) => Promise<number | PaneLabelAllocation>;
+  preparePaneLabelClaim?: () => Promise<void>;
   core: SurfaceCore;
   endpointName: string;
   hostName: string;
@@ -249,6 +250,7 @@ export class SurfaceWsServer {
   private readonly compositorSocketPath: string | null;
   private readonly core: SurfaceCore;
   private readonly claimPaneLabel: (surfaceId: string, paneId: number, paneLineageId: string) => Promise<number | PaneLabelAllocation>;
+  private readonly preparePaneLabelClaim?: () => Promise<void>;
   private readonly endpointName: string;
   private readonly hostName: string;
   private readonly getOverlayDiagnostics?: (surfaceId: string) => Record<string, unknown> | null;
@@ -300,6 +302,7 @@ export class SurfaceWsServer {
       : options.compositorSocketPath;
     this.core = options.core;
     this.claimPaneLabel = options.claimPaneLabel ?? (async () => { throw new Error("allocator_unavailable"); });
+    this.preparePaneLabelClaim = options.preparePaneLabelClaim;
     this.endpointName = options.endpointName;
     this.getOverlayDiagnostics = options.getOverlayDiagnostics;
     this.getRuntimeAppBinding = options.getRuntimeAppBinding;
@@ -816,11 +819,11 @@ export class SurfaceWsServer {
     });
   }
 
-  async broadcastSurfaceRemoved(surfaceId: string): Promise<void> {
+  async broadcastSurfaceRemoved(surfaceId: string, recoverable = false): Promise<void> {
     await this.broadcastLifecycleEvent({
       eventId: makeEventId(),
       op: "event.surface_removed",
-      payload: { surfaceId },
+      payload: { recoverable, surfaceId },
       sentAt: Date.now(),
       type: "event",
       v: 1,
@@ -833,31 +836,20 @@ export class SurfaceWsServer {
     tombstoneId: string;
   }> {
     if (this.persistenceOutcomeUnknown) throw this.persistenceOutcomeUnknown;
-    const result = await this.core.locklessAuthority.transactionAsync(async () => {
-      const committed = await this.runLifecycleTransaction(() => {
-        const record = this.core.captureSurfaceTombstonePayload(surfaceId);
-        const paneTombstones =
-          this.core.locklessAuthority.takePaneTombstonesForSurface(
-            surfaceId,
-          );
-        const tombstone = this.core.locklessAuthority.createTombstone({
-          annotationPublisherPartitionBytes: this.core.annotationPublisher?.partitionBytes(surfaceId),
-          kind: "surface",
-          payload: { paneTombstones, surface: record },
-          surfaceId,
-        });
-        this.core.removeSurface(surfaceId);
-        return {
-          surfaceId,
-          surfaceSetRevision:
-            this.core.locklessAuthority.advanceSurfaceSetRevision(),
-          tombstoneId: tombstone.tombstoneId,
-        };
-      }, surfaceId);
+    const result = await this.runLifecycleTransactionAsync(async () => {
+      const surface = this.core.captureSurfaceTombstonePayload(surfaceId);
+      const closeRevision = this.core.advanceFinalCloseTopologyRevision(surfaceId);
+      const finalClose = this.core.locklessAuthority.recordSurfaceFinalClose(surface, [], { closeRevision });
+      this.core.removeSurface(surfaceId, false);
+      const committed = {
+        surfaceId,
+        surfaceSetRevision: this.core.locklessAuthority.advanceSurfaceSetRevision(),
+        tombstoneId: finalClose.tombstoneId,
+      };
+      this.core.markLocklessAuthorityChanged();
       await this.persistLocklessState();
       return committed;
-    });
-    this.core.markLocklessAuthorityChanged();
+    }, surfaceId);
     return result;
   }
 
@@ -951,8 +943,11 @@ export class SurfaceWsServer {
           eventId: makeEventId(),
           op: "event.pane_removed",
           payload: {
+            ...(event.closedSequence !== undefined ? { closedSequence: event.closedSequence } : {}),
             paneId: event.paneId,
+            ...(event.recoverable !== undefined ? { recoverable: event.recoverable } : {}),
             surfaceId: event.surfaceId,
+            ...(event.tombstoneId ? { tombstoneId: event.tombstoneId } : {}),
           },
           sentAt: Date.now(),
           type: "event",
@@ -1003,7 +998,7 @@ export class SurfaceWsServer {
         return;
       case "surface-removed":
         this.stopNativePaneStatusPollingForSurface(event.surfaceId);
-        await this.broadcastSurfaceRemoved(event.surfaceId);
+        await this.broadcastSurfaceRemoved(event.surfaceId, event.recoverable ?? false);
         return;
       case "surface-changed":
         this.syncNativePaneStatusPolling(event.surfaceId);
@@ -1179,6 +1174,17 @@ export class SurfaceWsServer {
     request: LocklessRequest,
   ): Promise<void> {
     const session = this.locklessSessions.get(socket);
+    if (session && this.preparePaneLabelClaim &&
+        (request.op === "pane.split" || request.op === "pane.restore" || request.op === "topology.apply")) {
+      try {
+        await this.preparePaneLabelClaim();
+      } catch (error) {
+        persistentServerDiagnostic("warn", "allocator_release_preflight_failed", {
+          op: request.op,
+          ...errorDiagnosticFields(error),
+        });
+      }
+    }
     // surface.describe bypasses the authority queue, so fence the full mutation
     // dispatch through its durable receipt write and response.
     const changesApplicationState = request.op === "pair.request" ||
@@ -2500,26 +2506,17 @@ export class SurfaceWsServer {
               Number(record.topologyRevision),
               this.core.topologyState(targetSurfaceId),
             );
-            const paneTombstones =
-              this.core.locklessAuthority.takePaneTombstonesForSurface(
-                targetSurfaceId,
-              );
-            const tombstone =
-              this.core.locklessAuthority.createTombstone({
-                annotationPublisherPartitionBytes: this.core.annotationPublisher?.partitionBytes(targetSurfaceId),
-                kind: "surface",
-                payload: { paneTombstones, surface: record },
-                surfaceId: targetSurfaceId,
-              });
-            this.core.removeSurface(targetSurfaceId);
+            const closeRevision = this.core.advanceFinalCloseTopologyRevision(targetSurfaceId);
+            const finalClose = this.core.locklessAuthority.recordSurfaceFinalClose(record, [], { closeRevision });
+            this.core.removeSurface(targetSurfaceId, false);
             const surfaceSetRevision =
               this.core.locklessAuthority.advanceSurfaceSetRevision();
             return {
-              closedSequence: tombstone.closedSequence,
-              recoverable: true,
+              closedSequence: finalClose.closedSequence,
+              recoverable: false,
               surfaceId: targetSurfaceId,
               surfaceSetRevision,
-              tombstoneId: tombstone.tombstoneId,
+              tombstoneId: finalClose.tombstoneId,
             };
         },
         targetSurfaceId,
@@ -2836,20 +2833,22 @@ export class SurfaceWsServer {
               surfaceId,
               request.payload.paneId,
             );
-            const tombstone = this.core.locklessAuthority.createTombstone({
-              kind: "pane",
-              payload: tombstonePayload,
+            const closeRevision = Math.max(1, Number(topology.topologyRevision) + 1);
+            const finalClose = this.core.locklessAuthority.recordPaneFinalClose(tombstonePayload, {
+              closeRevision,
               surfaceId,
             });
-          this.core.paneClose(surfaceId, request.payload.paneId);
+            this.core.paneClose(surfaceId, request.payload.paneId, {
+              closedSequence: finalClose.closedSequence,
+              recoverable: false,
+              tombstoneId: finalClose.tombstoneId,
+            });
             return {
-              closedSequence: tombstone.closedSequence,
+              closedSequence: finalClose.closedSequence,
               paneId: request.payload.paneId,
-              recoverable: true,
-              tombstoneId: tombstone.tombstoneId,
-              topologyRevision: Number(
-                this.core.topologyState(surfaceId).topologyRevision,
-              ),
+              recoverable: false,
+              tombstoneId: finalClose.tombstoneId,
+              topologyRevision: closeRevision,
             };
         } catch (error) {
           rollbackSurface();

@@ -120,7 +120,8 @@ async function centralFixture(registryIdentity: { allocatorId: string; fleetId: 
   return {
     server, requests, identityRequests, port, address: `ws://127.0.0.1:${port}/`,
     reply(index: number, ok = true, assignPaneLabels = true, paneLabelBase = 700, windowLabel?: string,
-      responseIdentity: { allocatorId: string; fleetId: string } | null = registryIdentity) {
+      responseIdentity: { allocatorId: string; fleetId: string } | null = registryIdentity,
+      completeWindowReleases = false) {
       const { socket, message } = requests[index]!;
       assert.equal(message.op, "client.register");
       socket.send(JSON.stringify({
@@ -128,6 +129,9 @@ async function centralFixture(registryIdentity: { allocatorId: string; fleetId: 
         payload: { clientId: message.payload.clientId,
           ...(responseIdentity ? { registryIdentity: responseIdentity } : {}),
           completedPaneReleaseIds: (message.payload.pendingPaneReleases ?? []).map((release: any) => release.releaseId),
+          ...(completeWindowReleases ? {
+            completedWindowReleaseIds: (message.payload.pendingWindowReleases ?? []).map((release: any) => release.releaseId),
+          } : {}),
           surfaces: message.payload.surfaces.map((surface: any, i: number) => ({
             surfaceId: surface.surfaceId,
             windowLabel: windowLabel ?? String.fromCharCode(97 + i),
@@ -148,6 +152,60 @@ async function centralFixture(registryIdentity: { allocatorId: string; fleetId: 
     },
   };
 }
+
+test("pending window releases block pane claims until the registry acknowledges them", async () => {
+  const central = await centralFixture();
+  const clientId = "b".repeat(64);
+  const core = new SurfaceCore({ clientIdentity: clientId });
+  const surface = core.ensurePrimarySurface("Pending release", { width: 800, height: 600, scale: 1 });
+  core.admitSurfaceToLockless(surface.surfaceId);
+  core.bindRegistryIdentity({ clientId, allocatorId: "alloc_fixture", fleetId: "fixture-fleet" });
+  core.applyWindowLabels([{ surfaceId: surface.surfaceId, windowAllocationGeneration: 8, windowLabel: "a" }]);
+  core.locklessAuthority.recordSurfaceFinalClose({
+    panes: [],
+    surfaceId: surface.surfaceId,
+    topologyRevision: 1,
+    windowAllocationGeneration: 8,
+    windowLabel: "a",
+  }, [], { closeRevision: 2 });
+  const connection = new ServerConnection({
+    clientId,
+    core,
+    persist: async () => {},
+    configuredAddress: central.address,
+    discovery: emptyDiscovery(),
+  });
+
+  try {
+    const firstSync = connection.synchronize();
+    await until(() => central.requests.length === 1);
+    assert.equal(central.requests[0]!.message.payload.pendingWindowReleases.length, 1);
+    central.reply(0);
+    await firstSync;
+    assert.equal(core.locklessAuthority.listPendingWindowReleases().length, 1,
+      "an allocator without window-release acknowledgement leaves the release pending");
+    await assert.rejects(connection.claimPaneLabel(surface.surfaceId, 20, "pl_claim_after_close"),
+      /allocator_release_pending/);
+    assert.equal(central.requests.length, 1, "no pane claim reaches the allocator while a release is pending");
+
+    const releaseRetry = connection.preparePaneLabelClaim();
+    await until(() => central.requests.length === 2);
+    central.reply(1, true, true, 700, undefined, undefined, true);
+    await releaseRetry;
+    assert.equal(core.locklessAuthority.listPendingWindowReleases().length, 0);
+    const claim = connection.claimPaneLabel(surface.surfaceId, 20, "pl_claim_after_close");
+    await until(() => central.requests.length === 3);
+    assert.equal(central.requests[2]!.message.op, "pane.claim");
+    central.requests[2]!.socket.send(JSON.stringify({
+      type: "response", v: 1, id: central.requests[2]!.message.id, op: "pane.claim", ok: true,
+      payload: { allocationGeneration: 9, paneLabel: 2 },
+    }));
+    assert.deepEqual(await claim, { allocationGeneration: 9, paneLabel: 2 });
+  } finally {
+    await connection.stop();
+    await central.close();
+  }
+});
 
 test("registration cannot export a release from a lifecycle transaction that later rolls back", async () => {
   const central = await centralFixture();

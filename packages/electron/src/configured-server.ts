@@ -41,6 +41,7 @@ export class ConfiguredServerRegistration {
   private timer: ReturnType<typeof setTimeout> | undefined;
   private stopped = false;
   private pending: Promise<void> = Promise.resolve();
+  private reportedPendingWindowReleaseIds = new Set<string>();
 
   constructor(
     address: string,
@@ -66,6 +67,10 @@ export class ConfiguredServerRegistration {
 
   async claimPaneLabel(surfaceId: string, paneId: number, paneLineageId: string): Promise<PaneLabelAllocation> {
     if (this.stopped || !this.wire.isOpen()) throw new Error("allocator_unavailable");
+    if (this.core.locklessAuthority.listPendingPaneReleases().length > 0 ||
+        this.core.locklessAuthority.listPendingWindowReleases().length > 0) {
+      throw new Error("allocator_release_pending");
+    }
     await this.confirmRegistryIdentity();
     const response = await this.wire.request("pane.claim", {
       clientId: this.clientId, surfaceId, paneId: String(paneId), paneLineageId,
@@ -96,7 +101,9 @@ export class ConfiguredServerRegistration {
             allocationGenerationV1: true,
             prePairDescribeV1: true,
             pendingPaneReleases: this.core.locklessAuthority.listPendingPaneReleases(),
+            pendingWindowReleases: this.core.locklessAuthority.listPendingWindowReleases(),
             surfaces: this.core.listSurfaces().map((surface) => ({
+              windowAllocationGeneration: surface.windowAllocationGeneration,
               surfaceId: surface.surfaceId,
               panes: [...surface.panes.values()].map((pane) => ({
                 allocationGeneration: pane.allocationGeneration,
@@ -108,7 +115,7 @@ export class ConfiguredServerRegistration {
           // Snapshot, client persistence, and release evidence share the same
           // lifecycle/authority turn. A concurrent rollback cannot export an
           // uncommitted retirement to the allocator.
-          if (payload.pendingPaneReleases.length > 0) await this.persist();
+          if (payload.pendingPaneReleases.length > 0 || payload.pendingWindowReleases.length > 0) await this.persist();
           return payload;
         }),
       );
@@ -124,6 +131,7 @@ export class ConfiguredServerRegistration {
         endpointLease?: unknown;
         prePairDescribeV1?: unknown;
         completedPaneReleaseIds?: unknown;
+        completedWindowReleaseIds?: unknown;
         surfaces?: unknown;
       };
       const endpointLease = registrationEndpointLease(response.payload);
@@ -143,9 +151,9 @@ export class ConfiguredServerRegistration {
         throw new Error("foreign_registry_identity");
       }
       const payload = response.payload as { clientId: string; surfaces: Array<{
-        surfaceId: string; windowLabel: string;
+        surfaceId: string; windowLabel: string; windowAllocationGeneration?: number | null;
         panes: Array<{ allocationGeneration: number; paneId: string; paneLineageId: string; paneLabel: number }>;
-      }>; completedPaneReleaseIds?: string[] };
+      }>; completedPaneReleaseIds?: string[]; completedWindowReleaseIds?: unknown };
       const expectedSurfaceIds = new Set(this.core.listSurfaces().map((surface) => surface.surfaceId));
       if (payload.clientId !== this.clientId || !Array.isArray(payload.surfaces) ||
           payload.surfaces.length !== expectedSurfaceIds.size ||
@@ -158,15 +166,36 @@ export class ConfiguredServerRegistration {
           payload.completedPaneReleaseIds.some((releaseId) => typeof releaseId !== "string" || !pendingReleaseIds.has(releaseId))) {
         throw new Error("invalid_registration_response");
       }
+      const pendingWindowReleaseIds = new Set(registrationPayload.pendingWindowReleases.map((release) => release.releaseId));
+      let completedWindowReleaseIds: string[] = [];
+      if (payload.completedWindowReleaseIds !== undefined) {
+        if (!Array.isArray(payload.completedWindowReleaseIds) ||
+            new Set(payload.completedWindowReleaseIds).size !== payload.completedWindowReleaseIds.length ||
+            payload.completedWindowReleaseIds.some((releaseId) =>
+              typeof releaseId !== "string" || !pendingWindowReleaseIds.has(releaseId))) {
+          throw new Error("invalid_registration_response");
+        }
+        completedWindowReleaseIds = payload.completedWindowReleaseIds as string[];
+      }
       await this.core.locklessAuthority.transactionAsync(() =>
         this.core.transactionAsync(async () => {
           this.core.applyWindowLabels(payload.surfaces);
           this.core.applyRegistryPaneLabels(payload.surfaces);
           this.core.locklessAuthority.acknowledgePaneReleases(payload.completedPaneReleaseIds ?? []);
+          this.core.locklessAuthority.acknowledgeWindowReleases(completedWindowReleaseIds);
           this.core.setRegistryEndpointLease(endpointLease);
           await this.persist();
         }),
       );
+      const pendingWindowReleaseIdsAfterSync = new Set(
+        this.core.locklessAuthority.listPendingWindowReleases().map((release) => release.releaseId),
+      );
+      for (const releaseId of pendingWindowReleaseIdsAfterSync) {
+        if (!this.reportedPendingWindowReleaseIds.has(releaseId)) {
+          this.onError(new Error("allocator_release_pending"));
+        }
+      }
+      this.reportedPendingWindowReleaseIds = pendingWindowReleaseIdsAfterSync;
       this.core.confirmRegistryPaneLabels(payload.surfaces);
       if (!this.wire.isOpen()) throw new Error("controller_wire_closed");
     });

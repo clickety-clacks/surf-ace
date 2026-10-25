@@ -217,6 +217,7 @@ const paintNativeOwners = new NativePanePaintOwners<BrowserWindow, WebContents, 
 });
 
 const programmaticSurfaceCloses = new Set<string>();
+const pendingLocalSurfaceCloses = new Set<string>();
 const pendingWindowStates = new Map<string, RendererWindowState>();
 const browserUrlWebContentsPanes = new Map<number, { paneId: number; surfaceId: string }>();
 const readyWindows = new Set<string>();
@@ -273,6 +274,10 @@ function createServer(coreValue: SurfaceCore): SurfaceWsServer {
       claimPaneLabel: async (surfaceId, paneId, paneLineageId) => {
         if (!configuredRegistration) throw new Error("allocator_unavailable");
         return await configuredRegistration.claimPaneLabel(surfaceId, paneId, paneLineageId);
+      },
+      preparePaneLabelClaim: async () => {
+        if (!configuredRegistration) throw new Error("allocator_unavailable");
+        await configuredRegistration.preparePaneLabelClaim();
       },
       core: coreValue,
       endpointName: endpointName(),
@@ -1565,8 +1570,20 @@ async function createWindowForSurface(surfaceId: string): Promise<BrowserWindow>
     reconcilePresentationWindowOwnership();
     pendingWindowStates.delete(surfaceId);
     readyWindows.delete(surfaceId);
-    if (!isQuitting) {
-      void (async () => {
+    server.disconnectLocklessSurfaceSessions(surfaceId, "surface_closed");
+  });
+
+  window.on("close", (event) => {
+    if (isQuitting || programmaticSurfaceCloses.has(surfaceId)) return;
+    event.preventDefault();
+    if (persistentStateOutcomeUnknown) {
+      clientWarn("window_close_paused_uncertain_persistence", { surface_id: surfaceId });
+      return;
+    }
+    if (pendingLocalSurfaceCloses.has(surfaceId)) return;
+    pendingLocalSurfaceCloses.add(surfaceId);
+    void (async () => {
+      try {
         try {
           await releaseNativePaneInstancesForSurface(surfaceId, "window close");
         } catch (error) {
@@ -1575,18 +1592,16 @@ async function createWindowForSurface(surfaceId: string): Promise<BrowserWindow>
             console.warn(`[surf-ace] compositor overlay region clear failed: ${overlayError}`);
           });
         }
-        server.disconnectLocklessSurfaceSessions(surfaceId, "surface_closed");
-        await server.closeSurfaceFromLocalUser(surfaceId);
-        void persistState().catch(() => {});
-      })();
-    }
-  });
-
-  window.on("close", (event) => {
-    if (persistentStateOutcomeUnknown && !isQuitting && !programmaticSurfaceCloses.has(surfaceId)) {
-      event.preventDefault();
-      clientWarn("window_close_paused_uncertain_persistence", { surface_id: surfaceId });
-    }
+        if (!isQuitting) await server.closeSurfaceFromLocalUser(surfaceId);
+      } catch (error) {
+        clientWarn("window_close_commit_failed", {
+          surface_id: surfaceId,
+          ...errorDiagnosticFields(error),
+        });
+      } finally {
+        pendingLocalSurfaceCloses.delete(surfaceId);
+      }
+    })();
   });
 
   await window.loadFile(path.join(distDir, "renderer", "index.html"), {

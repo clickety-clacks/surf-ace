@@ -19,7 +19,6 @@ import type {
   HistoryNavigatedEvent,
   MutationAckResponse,
   NativePaneWindowGroupDiagnostic,
-  PaneCloseResponse,
   PaneCreatedEvent,
   PaneId,
   PaneRemovedEvent,
@@ -181,6 +180,7 @@ type SurfaceState = {
   topologyRevision: number;
   viewport: SurfaceViewport;
   windowPlacement: WindowPlacement | null;
+  windowAllocationGeneration: number | null;
   windowLabel: string;
   windowLabelConfirmed: boolean | null;
 };
@@ -233,6 +233,7 @@ export type PersistentRegistryEndpointLease = {
 export type ConfirmedRegistryClaim = {
   panes: Array<{ allocationGeneration: number | null; paneId: string; paneLabel: number; paneLineageId: string }>;
   surfaceId: string;
+  windowAllocationGeneration: number | null;
   windowLabel: string;
 };
 
@@ -249,6 +250,7 @@ type PersistentSurfaceRecord = {
   topologyRevision: number;
   viewport: SurfaceViewport;
   windowPlacement?: WindowPlacement | null;
+  windowAllocationGeneration?: number | null;
   windowLabel: string;
   windowLabelConfirmed?: boolean | null;
 };
@@ -348,10 +350,10 @@ export type CoreEvent =
   | { surfaceId: string; type: "keyboard-focus-changed" }
   | { surfaceId: string; type: "surface-changed" }
   | { surfaceId: string; type: "surface-created" }
-  | { surfaceId: string; type: "surface-removed" }
+  | { recoverable?: boolean; surfaceId: string; type: "surface-removed" }
   | { paneIds: number[]; surfaceId: string; type: "pane-geometry-changed" }
   | { fromSplit: boolean; paneId: number; paneLabel: number; parentPaneId: number | null; surfaceId: string; type: "pane-created" }
-  | { paneId: number; surfaceId: string; type: "pane-removed" }
+  | { closedSequence?: number; paneId: number; recoverable?: boolean; surfaceId: string; tombstoneId?: string; type: "pane-removed" }
   | { name: string | null; paneId: number; surfaceId: string; type: "pane-renamed" }
   | { paneId: number; surfaceId: string; type: "annotation-committed" }
   | { contentId: string | null; direction: "back" | "forward"; paneId: number; revision: number; surfaceId: string; type: "history-navigated" }
@@ -362,6 +364,8 @@ export type PaneLabelAllocation = {
   allocationGeneration: number | null;
   paneLabel: number;
 };
+
+type CorePaneCloseResult = { closedFramesDiscarded: number; paneId: number };
 
 export class SurfaceCoreError extends Error {
   constructor(
@@ -970,12 +974,18 @@ export class SurfaceCore {
     const add = (
       surfaceId: string,
       windowLabel: string,
+      windowAllocationGeneration: number | null | undefined,
       windowLabelConfirmed: boolean | null | undefined,
       panes: Array<{ allocationGeneration?: number | null; paneId: number; paneLabel: number; paneLineageId: string }>,
     ) => {
       const confirmed = panes.filter((pane) => pane.paneLabel > 0);
       if ((!isValidWindowLabel(windowLabel) || windowLabelConfirmed === false) && confirmed.length === 0) return;
-      const claim = claims.get(surfaceId) ?? { panes: [], surfaceId, windowLabel };
+      const claim = claims.get(surfaceId) ?? {
+        panes: [], surfaceId, windowAllocationGeneration: null, windowLabel,
+      };
+      if (Number.isSafeInteger(windowAllocationGeneration) && Number(windowAllocationGeneration) > 0) {
+        claim.windowAllocationGeneration = Number(windowAllocationGeneration);
+      }
       if (isValidWindowLabel(windowLabel)) claim.windowLabel = windowLabel;
       for (const pane of confirmed) {
         if (!claim.panes.some((existing) => existing.paneId === String(pane.paneId))) {
@@ -988,12 +998,14 @@ export class SurfaceCore {
       claims.set(surfaceId, claim);
     };
     for (const surface of this.listSurfaces()) {
-      add(surface.surfaceId, surface.windowLabel, surface.windowLabelConfirmed, [...surface.panes.values()]);
+      add(surface.surfaceId, surface.windowLabel, surface.windowAllocationGeneration,
+        surface.windowLabelConfirmed, [...surface.panes.values()]);
     }
     for (const tombstone of this.locklessAuthority.listTombstones()) {
       if (tombstone.kind === "pane") {
         const pane = (tombstone.payload as { pane?: PersistentPaneRecord })?.pane;
-        if (pane) add(tombstone.surfaceId, claims.get(tombstone.surfaceId)?.windowLabel ?? "", null, [pane]);
+        if (pane) add(tombstone.surfaceId, claims.get(tombstone.surfaceId)?.windowLabel ?? "",
+          claims.get(tombstone.surfaceId)?.windowAllocationGeneration, null, [pane]);
         continue;
       }
       const payload = tombstone.payload as {
@@ -1001,11 +1013,11 @@ export class SurfaceCore {
         surface?: PersistentSurfaceRecord;
       };
       if (!payload?.surface) continue;
-      add(payload.surface.surfaceId, payload.surface.windowLabel,
+      add(payload.surface.surfaceId, payload.surface.windowLabel, payload.surface.windowAllocationGeneration,
         payload.surface.windowLabelConfirmed, payload.surface.panes);
       for (const nested of payload.paneTombstones ?? []) {
         if (nested.payload?.pane) {
-          add(payload.surface.surfaceId, payload.surface.windowLabel,
+          add(payload.surface.surfaceId, payload.surface.windowLabel, payload.surface.windowAllocationGeneration,
             payload.surface.windowLabelConfirmed, [nested.payload.pane]);
         }
       }
@@ -1683,6 +1695,7 @@ export class SurfaceCore {
       }
       prospective.windowLabel = candidate;
       prospective.windowLabelConfirmed = false;
+      prospective.windowAllocationGeneration = null;
     }
     const surface = deserializeSurface(prospective, this.now());
     if (!surface) {
@@ -1728,13 +1741,19 @@ export class SurfaceCore {
     return restored;
   }
 
-  removeSurface(surfaceId: string): void {
+  advanceFinalCloseTopologyRevision(surfaceId: string): number {
+    const surface = this.getSurface(surfaceId);
+    surface.topologyRevision = Math.max(1, surface.topologyRevision + 1);
+    return surface.topologyRevision;
+  }
+
+  removeSurface(surfaceId: string, recoverable = false): void {
     if (!this.surfaces.has(surfaceId)) {
       return;
     }
     this.surfaces.delete(surfaceId);
     this.panePresentations.delete(surfaceId);
-    this.emit({ surfaceId, type: "surface-removed" });
+    this.emit({ recoverable, surfaceId, type: "surface-removed" });
   }
 
   listSurfaces(): SurfaceState[] {
@@ -2629,7 +2648,7 @@ export class SurfaceCore {
     this.applyWindowLabels([{ surfaceId, windowLabel }]);
   }
 
-  applyWindowLabels(assignments: Array<{ surfaceId: string; windowLabel: string }>): void {
+  applyWindowLabels(assignments: Array<{ surfaceId: string; windowAllocationGeneration?: number | null; windowLabel: string }>): void {
     const labels = new Map<string, string>();
     for (const { surfaceId, windowLabel } of assignments) {
       assertValidWindowLabel(windowLabel);
@@ -2650,11 +2669,23 @@ export class SurfaceCore {
     this.transaction(() => {
       for (const { surfaceId, windowLabel } of assignments) {
         const surface = this.getSurface(surfaceId);
+        const confirmationChanged = surface.windowLabelConfirmed !== true;
         surface.windowLabelConfirmed = true;
-        if (surface.windowLabel === windowLabel) continue;
-        if ([...surface.panes.values()].some((pane) => pane.externalNative)) bumpGeometryRevision(surface);
-        surface.windowLabel = windowLabel;
-        this.emit({ surfaceId, type: "surface-changed" });
+        const assignment = assignments.find((candidate) => candidate.surfaceId === surfaceId)!;
+        const generation = Number.isSafeInteger(assignment.windowAllocationGeneration) &&
+          Number(assignment.windowAllocationGeneration) > 0
+          ? Number(assignment.windowAllocationGeneration)
+          : surface.windowLabel === windowLabel ? surface.windowAllocationGeneration : null;
+        const generationChanged = surface.windowAllocationGeneration !== generation;
+        const labelChanged = surface.windowLabel !== windowLabel;
+        surface.windowAllocationGeneration = generation;
+        if (labelChanged) {
+          if ([...surface.panes.values()].some((pane) => pane.externalNative)) bumpGeometryRevision(surface);
+          surface.windowLabel = windowLabel;
+        }
+        if (confirmationChanged || labelChanged || generationChanged) {
+          this.emit({ surfaceId, type: "surface-changed" });
+        }
       }
     });
   }
@@ -2762,6 +2793,7 @@ export class SurfaceCore {
 
     if (surface.windowLabel !== payload.windowLabel) {
       surface.windowLabel = payload.windowLabel;
+      surface.windowAllocationGeneration = null;
       didChange = true;
     }
 
@@ -2793,6 +2825,7 @@ export class SurfaceCore {
       currentPane !== null &&
       isPristineProviderBootstrapPane(currentPane);
     surface.windowLabel = payload.windowLabel;
+    surface.windowAllocationGeneration = null;
     if (canBootstrapReplace) {
       if (this.ensureInitialPane(surface, payload.initialPaneId, payload.initialPaneLabel)) {
         bumpGeometryRevision(surface);
@@ -2848,7 +2881,10 @@ export class SurfaceCore {
     }
 
     surface.layout = layout;
-    surface.windowLabel = payload.windowLabel;
+    if (surface.windowLabel !== payload.windowLabel) {
+      surface.windowLabel = payload.windowLabel;
+      surface.windowAllocationGeneration = null;
+    }
     surface.paneOrder = orderedPanes;
     surface.panes = nextPanes;
     surface.topologyRevision = Number(payload.topologyRevision);
@@ -3294,7 +3330,11 @@ export class SurfaceCore {
     this.emit({ surfaceId, type: "topology-changed", topology, ...(admittedOccurrence ? { admittedOccurrence } : {}) });
   }
 
-  paneClose(surfaceId: string, paneId: number): PaneCloseResponse["payload"] {
+  paneClose(
+    surfaceId: string,
+    paneId: number,
+    lifecycle?: { closedSequence: number; recoverable: false; tombstoneId: string },
+  ): CorePaneCloseResult {
     const surface = this.getSurface(surfaceId);
     if (surface.panes.size <= 1) {
       throw new SurfaceCoreError("invalid_operation", "Cannot close the last pane");
@@ -3312,7 +3352,7 @@ export class SurfaceCore {
     bumpGeometryRevision(surface);
     this.ensureActiveKeyboardPane(surface);
     this.emit({ surfaceId, type: "surface-changed" });
-    this.emit({ paneId, surfaceId, type: "pane-removed" });
+    this.emit({ ...lifecycle, paneId, surfaceId, type: "pane-removed" });
     return {
       closedFramesDiscarded,
       paneId: paneId as PaneId,
@@ -4157,6 +4197,7 @@ export class SurfaceCore {
       topologyRevision: 0,
       viewport: cloneViewport(viewport),
       windowPlacement: null,
+      windowAllocationGeneration: null,
       windowLabel: "",
       windowLabelConfirmed: false,
     };
@@ -4373,6 +4414,7 @@ function serializeSurface(surface: SurfaceState): PersistentSurfaceRecord {
     topologyRevision: surface.topologyRevision,
     viewport: cloneViewport(surface.viewport),
     windowPlacement: cloneWindowPlacement(surface.windowPlacement),
+    windowAllocationGeneration: surface.windowAllocationGeneration,
     windowLabel: surface.windowLabel,
     windowLabelConfirmed: surface.windowLabelConfirmed,
   };
@@ -4495,6 +4537,8 @@ function deserializeSurface(record: PersistentSurfaceRecord, now: number): Surfa
       width: DEFAULT_VISIBLE_RECT.width,
     },
     windowPlacement: cloneWindowPlacement(record.windowPlacement),
+    windowAllocationGeneration: Number.isSafeInteger(record.windowAllocationGeneration) &&
+      Number(record.windowAllocationGeneration) > 0 ? Number(record.windowAllocationGeneration) : null,
     windowLabel: isValidWindowLabel(record.windowLabel) ? record.windowLabel : "",
     windowLabelConfirmed: typeof record.windowLabelConfirmed === "boolean"
       ? record.windowLabelConfirmed : null,
