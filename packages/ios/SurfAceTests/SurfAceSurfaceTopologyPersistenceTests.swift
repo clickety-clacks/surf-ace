@@ -337,7 +337,7 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
             ($0, chromeMountPath(surface.paneLayout, paneId: Int($0)))
         })
         var expectedRevision = original.topologyRevision
-        var tombstoneIds = Set<String>()
+        var finalCloseIds = Set<String>()
         // Nested collapse must retain its OUTER 0.5 slot, not the child's 0.2.
         // The next close leaves weights summing to 0.5; the last collapses the root.
         let transitions: [(closed: Int64, survivors: [Int64], fractions: [CGFloat])] = [
@@ -346,8 +346,8 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
             (ids[0], [ids[1]], [1]),
         ]
         for (step, transition) in transitions.enumerated() {
-            let tombstoneId = try await runtime.closePaneLocally(surfaceId: surfaceId, paneId: Int(transition.closed))
-            XCTAssertTrue(tombstoneIds.insert(tombstoneId).inserted)
+            let finalCloseId = try await runtime.closePaneLocally(surfaceId: surfaceId, paneId: Int(transition.closed))
+            XCTAssertTrue(finalCloseIds.insert(finalCloseId).inserted)
             let state = await adapter.snapshot()
             let persisted = try SurfAceLocklessGenerationStore(stateURL: stateURL).load()
             XCTAssertEqual(persisted, state, "Command must be durable before projecting its result")
@@ -355,8 +355,11 @@ final class SurfAceSurfaceTopologyPersistenceTests: XCTestCase {
             expectedRevision += 1
             XCTAssertEqual(material.topologyRevision, expectedRevision)
             XCTAssertEqual(Set(material.panes.keys), Set(transition.survivors.map(String.init)))
-            let tombstone = try XCTUnwrap(material.paneTombstones.first { $0.tombstoneId == tombstoneId })
-            XCTAssertEqual(tombstone.pane, original.panes[String(transition.closed)])
+            XCTAssertFalse(material.paneTombstones.contains { $0.pane.paneId == transition.closed })
+            XCTAssertTrue(state.terminalCloseRecords?.contains {
+                $0.allocationKind == .pane && $0.paneId == transition.closed
+                    && $0.recordId == finalCloseId
+            } == true)
             let retainedViews = try transition.survivors.map { try XCTUnwrap(views[$0]) }
             await waitForMountedWebViews(retainedViews, in: host.view)
             var x = available.minX
