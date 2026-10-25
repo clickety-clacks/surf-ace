@@ -9,6 +9,7 @@ ALTER TABLE surf_ace_allocator.fleets
 
 ALTER TABLE surf_ace_allocator.allocation_transactions
   DROP CONSTRAINT IF EXISTS allocation_transactions_fleet_id_allocator_id_generation_id_ordinal_key,
+  DROP CONSTRAINT IF EXISTS allocation_transactions_fleet_id_allocator_id_generation_id_key,
   DROP CONSTRAINT IF EXISTS allocation_transactions_status_check;
 ALTER TABLE surf_ace_allocator.allocation_transactions
   ADD CONSTRAINT allocation_transactions_status_check
