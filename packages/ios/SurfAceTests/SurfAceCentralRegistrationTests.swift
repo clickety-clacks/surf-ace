@@ -1326,6 +1326,11 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         XCTAssertEqual(Set(requestPayload.keys), Set([
             "clientId", "allocationGenerationV1", "pendingPaneReleases", "pendingWindowReleases", "surfaces",
         ]))
+        XCTAssertEqual(requestPayload["allocationGenerationV1"] as? Bool, false)
+        let pendingPaneReleases = try XCTUnwrap(requestPayload["pendingPaneReleases"] as? [[String: Any]])
+        let pendingWindowReleases = try XCTUnwrap(requestPayload["pendingWindowReleases"] as? [[String: Any]])
+        XCTAssertTrue(pendingPaneReleases.isEmpty)
+        XCTAssertTrue(pendingWindowReleases.isEmpty)
 
         let legacyServer = Data(#"{"id":"register-1","op":"client.register","ok":true,"payload":{"clientId":"stable-client","registryIdentity":{"allocatorId":"alloc_home","fleetId":"fleet-home"},"surfaces":[]}}"#.utf8)
         let legacyReply = try SurfAceRegistrationWire.registration(
