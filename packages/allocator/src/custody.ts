@@ -5,6 +5,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import pg, { type Client as PgClient, type QueryResultRow } from "pg";
 
 import {
+  allocatorSurfaceId,
   AllocatorError,
   ordinalToWindowLabel,
   STATE_VERSION,
@@ -96,12 +97,15 @@ export type AcceptedState = {
     ownerAnchorId: string;
     recoveredAtCustodyRevision: number | null;
     surfaceId: string;
+    windowGeneration: number;
     windowLabel: string;
   }>;
   nextOrdinalFence: number;
   nextPaneOrdinalFence: number;
   nextPaneAllocationGenerationFence: number;
   paneLabelReuseEnabled: boolean;
+  windowLabelReuseEnabled: boolean;
+  windowReleases: WindowReleaseRecord[];
   paneMappings: Array<{
     allocationGeneration: number | null;
     clientId: string;
@@ -115,7 +119,7 @@ export type AcceptedState = {
     authorityId: string;
     ordinal: number;
     ownerAnchorId: string;
-    status: "burned" | "committed" | "reserved";
+    status: "burned" | "committed" | "released" | "reserved";
     surfaceId: string;
     transactionId: string;
   }>;
@@ -127,7 +131,7 @@ export type TransactionRecord = {
   fleetId: string;
   ordinal: number;
   ownerAnchorId: string;
-  status: "burned" | "committed" | "reserved";
+  status: "burned" | "committed" | "released" | "reserved";
   surfaceId: string;
   transactionId: string;
   windowLabel: string | null;
@@ -135,13 +139,13 @@ export type TransactionRecord = {
 
 export type ReserveResult = {
   ordinal: number;
-  status: "burned" | "committed" | "reserved";
+  status: "burned" | "committed" | "released" | "reserved";
   windowLabel: string | null;
 };
 
 export type RestoreSnapshot = Pick<
   AcceptedState,
-  "allocatorId" | "authorityOwners" | "custodyRevision" | "fleetId" | "headHash" | "headSeq" | "mappings" | "nextOrdinalFence" | "nextPaneOrdinalFence" | "nextPaneAllocationGenerationFence" | "paneLabelReuseEnabled" | "paneMappings" | "stateVersion" | "transactions"
+  "allocatorId" | "authorityOwners" | "custodyRevision" | "fleetId" | "headHash" | "headSeq" | "mappings" | "nextOrdinalFence" | "nextPaneOrdinalFence" | "nextPaneAllocationGenerationFence" | "paneLabelReuseEnabled" | "paneMappings" | "stateVersion" | "transactions" | "windowLabelReuseEnabled"
 >;
 
 export type PaneAllocation = {
@@ -160,6 +164,28 @@ export type PaneRetirementEvidence = {
   terminalRetirementRevision: number;
   tombstoneId: string;
   tombstoneKind: "pane" | "surface";
+};
+
+export type WindowRetirementEvidence = {
+  clientId: string;
+  closeRevision: number;
+  surfaceId: string;
+  terminalRetirementRevision: number;
+  tombstoneId: string;
+  tombstoneKind: "surface";
+  windowGeneration: number;
+  windowLabel: string;
+};
+
+export type WindowReleaseRecord = WindowRetirementEvidence & {
+  allocatorId: string;
+  allocatorSurfaceId: string;
+  authorityId: string;
+  fleetId: string;
+  idempotencyKey: string;
+  ordinal: number;
+  ownerAnchorId: string;
+  transactionId: string;
 };
 
 export type RestoreReady = {
@@ -704,10 +730,11 @@ export class PostgresCustodyAdapter<M extends LeaseMode> {
     authorityId: string,
     ownerAnchorId: string,
     surfaceId: string,
+    windowGenerationV1 = false,
   ): Promise<ReserveResult> {
     this.assertMode("writer");
     const result = await this.mutate("reserve_ordinal", async () => await this.primary.query<ReserveRow>(
-      "SELECT * FROM surf_ace_allocator.reserve_ordinal($1, $2, $3, $4, $5, $6, $7)",
+      "SELECT * FROM surf_ace_allocator.reserve_ordinal($1, $2, $3, $4, $5, $6, $7, $8)",
       [
         this.config.fleetId,
         this.token.leaseGeneration,
@@ -716,9 +743,11 @@ export class PostgresCustodyAdapter<M extends LeaseMode> {
         authorityId,
         ownerAnchorId,
         surfaceId,
+        windowGenerationV1,
       ],
     ), (state) => state.transactions.some((tx) => tx.transactionId === transactionId
-      && tx.authorityId === authorityId && tx.ownerAnchorId === ownerAnchorId && tx.surfaceId === surfaceId));
+      && tx.authorityId === authorityId && tx.ownerAnchorId === ownerAnchorId && tx.surfaceId === surfaceId) ||
+      state.mappings.some((mapping) => mapping.authorityId === authorityId && mapping.surfaceId === surfaceId));
     return reserveFromRow(requiredRow(result.rows[0], "reserve_ordinal"));
   }
 
@@ -739,6 +768,7 @@ export class PostgresCustodyAdapter<M extends LeaseMode> {
       ordinal: integer(row.ordinal),
       ownerAnchorId: row.owner_anchor_id,
       surfaceId: row.surface_id,
+      windowGeneration: integer(row.window_generation),
       windowLabel: row.window_label,
     };
   }
@@ -829,6 +859,33 @@ export class PostgresCustodyAdapter<M extends LeaseMode> {
       if (prior && (prior.paneLabel !== evidence.paneLabel ||
           prior.allocationGeneration !== evidence.allocationGeneration)) {
         throw new AllocatorError("assignment_conflict", "pane release does not match the active allocation");
+      }
+    });
+  }
+
+  async releaseWindowGeneration(
+    this: PostgresCustodyAdapter<"writer">,
+    evidence: WindowRetirementEvidence,
+  ): Promise<void> {
+    this.assertMode("writer");
+    const storedSurfaceId = allocatorSurfaceId(evidence.clientId, evidence.surfaceId);
+    const matches = (state: AcceptedState) => state.windowReleases.some((release) =>
+      release.clientId === evidence.clientId && release.surfaceId === evidence.surfaceId &&
+      release.allocatorSurfaceId === storedSurfaceId && release.windowLabel === evidence.windowLabel &&
+      release.windowGeneration === evidence.windowGeneration && release.tombstoneId === evidence.tombstoneId &&
+      release.tombstoneKind === evidence.tombstoneKind && release.closeRevision === evidence.closeRevision &&
+      release.terminalRetirementRevision === evidence.terminalRetirementRevision);
+    await this.mutate("release_window_generation", async () => await this.primary.query(
+      "SELECT surf_ace_allocator.release_window_generation($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+      [this.config.fleetId, this.token.leaseGeneration, this.token.leaseId,
+        evidence.clientId, evidence.surfaceId, storedSurfaceId, evidence.windowLabel,
+        evidence.windowGeneration, evidence.tombstoneId, evidence.closeRevision,
+        evidence.terminalRetirementRevision],
+    ), matches, (state) => {
+      const active = state.mappings.find((mapping) => mapping.surfaceId === storedSurfaceId);
+      if (active && (active.windowLabel !== evidence.windowLabel ||
+          active.windowGeneration !== evidence.windowGeneration)) {
+        throw new AllocatorError("assignment_conflict", "window release does not match the active allocation");
       }
     });
   }
@@ -1218,6 +1275,7 @@ function validateAcceptedState(state: AcceptedState, config: PostgresCustodyConf
   if (!Number.isSafeInteger(state.nextPaneOrdinalFence) || state.nextPaneOrdinalFence < 1 ||
       !Number.isSafeInteger(state.nextPaneAllocationGenerationFence) ||
       state.nextPaneAllocationGenerationFence < 0 || typeof state.paneLabelReuseEnabled !== "boolean" ||
+      typeof state.windowLabelReuseEnabled !== "boolean" || !Array.isArray(state.windowReleases) ||
       !Array.isArray(state.paneMappings)) {
     throw new AllocatorError("allocator_state_corrupt", "pane allocator fence or mappings are invalid");
   }
@@ -1251,6 +1309,8 @@ function validateAcceptedState(state: AcceptedState, config: PostgresCustodyConf
       || ordinals.has(mapping.ordinal)
       || labels.has(mapping.windowLabel)
       || mapping.ordinal >= state.nextOrdinalFence
+      || !Number.isSafeInteger(mapping.windowGeneration) || mapping.windowGeneration < 1 ||
+      mapping.windowGeneration > state.headSeq
       || ordinalToWindowLabel(mapping.ordinal) !== mapping.windowLabel
       || ownerByAuthority.get(mapping.authorityId) !== mapping.ownerAnchorId
     ) {
@@ -1260,16 +1320,62 @@ function validateAcceptedState(state: AcceptedState, config: PostgresCustodyConf
     ordinals.add(mapping.ordinal);
     labels.add(mapping.windowLabel);
   }
+  const releasedWindows = new Map<string, WindowReleaseRecord>();
+  for (const release of state.windowReleases) {
+    const releaseKey = `${release.allocatorSurfaceId}\0${release.windowGeneration}`;
+    const transaction = state.transactions.find((tx) => tx.transactionId === release.transactionId);
+    if (release.allocatorId !== state.allocatorId || release.fleetId !== state.fleetId ||
+        !/^[a-f0-9]{64}$/.test(release.clientId) ||
+        !/^sf_[A-Za-z0-9._:-]{3,64}$/.test(release.surfaceId) ||
+        !/^sf_[A-Za-z0-9._:-]{3,64}$/.test(release.allocatorSurfaceId) ||
+        !Number.isSafeInteger(release.windowGeneration) || release.windowGeneration < 1 ||
+        !Number.isSafeInteger(release.ordinal) || release.ordinal < 0 ||
+        release.windowGeneration > state.headSeq || release.ordinal >= state.nextOrdinalFence ||
+        ordinalToWindowLabel(release.ordinal) !== release.windowLabel ||
+        release.tombstoneKind !== "surface" || !/^[A-Za-z0-9._:-]{1,128}$/.test(release.tombstoneId) ||
+        !Number.isSafeInteger(release.closeRevision) || release.closeRevision < 1 ||
+        !Number.isSafeInteger(release.terminalRetirementRevision) || release.terminalRetirementRevision < 1 ||
+        !/^[a-f0-9]{64}$/.test(release.idempotencyKey) ||
+        ownerByAuthority.get(release.authorityId) !== release.ownerAnchorId ||
+        !transaction || transaction.status !== "released" || transaction.authorityId !== release.authorityId ||
+        transaction.ownerAnchorId !== release.ownerAnchorId || transaction.surfaceId !== release.allocatorSurfaceId ||
+        transaction.ordinal !== release.ordinal || releasedWindows.has(releaseKey)) {
+      throw new AllocatorError("allocator_state_corrupt", "window release journal violates identity or generation invariants");
+    }
+    releasedWindows.set(releaseKey, release);
+  }
+  const activeTransactionOrdinals = new Set<number>();
   for (const tx of state.transactions) {
-    if (tx.ordinal >= state.nextOrdinalFence || ownerByAuthority.get(tx.authorityId) !== tx.ownerAnchorId) {
+    if (tx.ordinal >= state.nextOrdinalFence || ownerByAuthority.get(tx.authorityId) !== tx.ownerAnchorId ||
+        !["burned", "committed", "released", "reserved"].includes(tx.status)) {
       throw new AllocatorError("allocator_state_corrupt", "transaction ledger violates binding or fence invariants");
+    }
+    if (tx.status !== "released") {
+      if (activeTransactionOrdinals.has(tx.ordinal)) {
+        throw new AllocatorError("allocator_state_corrupt", "active transaction ordinals are not unique");
+      }
+      activeTransactionOrdinals.add(tx.ordinal);
     }
     const mapping = mappings.get(`${tx.authorityId}\0${tx.surfaceId}`);
     if (tx.status === "committed" && (!mapping || mapping.ordinal !== tx.ordinal)) {
       throw new AllocatorError("allocator_state_corrupt", "committed transaction lacks its exact immutable mapping");
     }
+    if (tx.status === "released") {
+      const release = [...releasedWindows.values()].find((item) => item.transactionId === tx.transactionId);
+      if (!release || release.authorityId !== tx.authorityId || release.ownerAnchorId !== tx.ownerAnchorId ||
+          release.allocatorSurfaceId !== tx.surfaceId || release.ordinal !== tx.ordinal ||
+          mapping?.ordinal === tx.ordinal) {
+        throw new AllocatorError("allocator_state_corrupt", "released transaction lacks its exact retirement proof");
+      }
+    }
     if (tx.status !== "committed" && mapping?.ordinal === tx.ordinal) {
       throw new AllocatorError("allocator_state_corrupt", "uncommitted transaction owns a mapping");
+    }
+  }
+  for (const mapping of state.mappings) {
+    if (!state.transactions.some((tx) => tx.status === "committed" && tx.authorityId === mapping.authorityId &&
+        tx.surfaceId === mapping.surfaceId && tx.ordinal === mapping.ordinal)) {
+      throw new AllocatorError("allocator_state_corrupt", "active window mapping lacks a committed transaction");
     }
   }
 }
@@ -1339,7 +1445,7 @@ function tokenFromRow<M extends LeaseMode>(row: TokenRow | undefined, mode: M): 
 }
 
 function reserveFromRow(row: ReserveRow): ReserveResult {
-  if (row.status !== "reserved" && row.status !== "burned" && row.status !== "committed") {
+  if (row.status !== "reserved" && row.status !== "burned" && row.status !== "committed" && row.status !== "released") {
     throw new AllocatorError("allocator_state_corrupt", "custody returned an invalid transaction status");
   }
   return { ordinal: integer(row.ordinal), status: row.status, windowLabel: row.window_label };
@@ -1381,6 +1487,7 @@ type MappingRow = {
   owner_anchor_id: string;
   recovered_at_custody_revision: number | string | null;
   surface_id: string;
+  window_generation: number | string;
   window_label: string;
 } & QueryResultRow;
 type TransactionRow = ReserveRow & {

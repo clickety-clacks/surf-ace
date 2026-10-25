@@ -2,6 +2,10 @@ import { createHash } from "node:crypto";
 
 export const STATE_VERSION = 1 as const;
 
+export function allocatorSurfaceId(clientId: string, surfaceId: string): string {
+  return "sf_" + createHash("sha256").update(JSON.stringify([clientId, surfaceId])).digest("hex");
+}
+
 export const ALLOCATOR_OPERATIONS = [
   "authority.bind",
   "label.claim",
@@ -68,6 +72,7 @@ export type Assignment = {
   ownerAnchorId: string;
   stateVersion: number;
   surfaceId: string;
+  windowGeneration: number;
   windowLabel: string;
 };
 
@@ -86,6 +91,7 @@ export type LabelClaimPayload = AuthorityBindPayload & {
 export type ExpectedAssignment = {
   committed: true;
   ordinal: number;
+  windowGeneration?: number;
   windowLabel: string;
 };
 

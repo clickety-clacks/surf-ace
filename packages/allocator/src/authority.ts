@@ -87,12 +87,12 @@ export class WindowLabelAuthority {
     this.failClosedReason = null;
   }
 
-  async claim(payload: LabelClaimPayload): Promise<Assignment> {
+  async claim(payload: LabelClaimPayload, windowGenerationV1 = false): Promise<Assignment> {
     const key = `${payload.authorityId}\0${payload.surfaceId}`;
     const previous = this.claimTails.get(key) ?? Promise.resolve();
     const result = previous.then(
-      async () => await this.claimNow(payload),
-      async () => await this.claimNow(payload),
+      async () => await this.claimNow(payload, windowGenerationV1),
+      async () => await this.claimNow(payload, windowGenerationV1),
     );
     const tail = result.then(() => undefined, () => undefined);
     this.claimTails.set(key, tail);
@@ -103,12 +103,10 @@ export class WindowLabelAuthority {
     }
   }
 
-  private async claimNow(payload: LabelClaimPayload): Promise<Assignment> {
+  private async claimNow(payload: LabelClaimPayload, windowGenerationV1: boolean): Promise<Assignment> {
     const state = await this.accepted(payload.fleetId, payload.expectedAllocatorId);
     this.assertServing(state);
     assertBound(state, payload.authorityId, payload.ownerAnchorId);
-    const existing = findMapping(state, payload.authorityId, payload.surfaceId);
-    if (existing) return assignmentFrom(state, existing);
 
     const transactionId = `tx_${randomUUID().replaceAll("-", "")}`;
     let reserved;
@@ -118,6 +116,7 @@ export class WindowLabelAuthority {
         payload.authorityId,
         payload.ownerAnchorId,
         payload.surfaceId,
+        windowGenerationV1,
       );
     } catch (error) {
       this.observeFailure(error);
@@ -128,6 +127,9 @@ export class WindowLabelAuthority {
     }
     if (reserved.status === "burned") {
       throw new AllocatorError("persistence_failed", "the allocation transaction is durably burned", state.allocatorId);
+    }
+    if (reserved.status === "released") {
+      throw new AllocatorError("assignment_conflict", "the allocation transaction was terminally retired", state.allocatorId);
     }
     if (reserved.status === "committed") {
       const refreshed = await this.custody.readAcceptedState();
@@ -181,9 +183,9 @@ export class WindowLabelAuthority {
         this.observeFailure(unknown);
         throw unknown;
       }
-      if (!transaction || transaction.status === "burned") {
+      if (!transaction || transaction.status === "burned" || transaction.status === "released") {
         this.failClosedReason = null;
-        throw new AllocatorError("persistence_failed", "allocation transaction did not commit");
+        throw new AllocatorError("persistence_failed", "allocation transaction did not remain active");
       }
       if (transaction.status === "reserved") {
         try {
@@ -228,6 +230,8 @@ export class WindowLabelAuthority {
       !mapping
       || mapping.ordinal !== payload.expectedAssignment.ordinal
       || mapping.windowLabel !== payload.expectedAssignment.windowLabel
+      || (payload.expectedAssignment.windowGeneration !== undefined &&
+        mapping.windowGeneration !== payload.expectedAssignment.windowGeneration)
       || payload.expectedAssignment.committed !== true
     ) {
       this.failClosedReason = "client assignment contradicts accepted custody";
@@ -310,6 +314,7 @@ function assignmentFrom(
     ownerAnchorId: mapping.ownerAnchorId,
     stateVersion: state.stateVersion,
     surfaceId: mapping.surfaceId,
+    windowGeneration: mapping.windowGeneration,
     windowLabel: mapping.windowLabel,
   };
 }
