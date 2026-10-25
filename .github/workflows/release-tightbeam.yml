@@ -849,7 +849,7 @@ jobs:
           trap 'rm -rf "$smoke_tmp"' EXIT
           smoke_user="$(id -un)"
           smoke_node="$(command -v node)"
-          timeout --signal=TERM --kill-after=10s 20m sudo -n unshare --net -- bash -c '
+          timeout --signal=TERM --kill-after=10s 20m sudo -n env PRODUCT_VERSION="${PRODUCT_VERSION}" unshare --net -- bash -c '
             set -euo pipefail
             smoke_user=$1
             smoke_tmp=$2

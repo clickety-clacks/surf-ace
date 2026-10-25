@@ -2943,7 +2943,7 @@ test("stable v0.2.8 documentation stays historical and release gates bind the se
   assert.match(workflow, /GITHUB_REF_TYPE/);
   assert.doesNotMatch(workflow, /build-ios|tightbeam-ios-ipa|xcodebuild archive|-exportArchive|\.ipa\b|IOS_CERTIFICATE|IOS_PROVISIONING_PROFILE|tightbeam-ios-signing/);
   assert.match(workflow, /trap 'rm -rf "\$smoke_tmp"' EXIT/);
-  assert.match(workflow, /timeout --signal=TERM --kill-after=10s 20m sudo -n unshare --net -- bash -c/);
+  assert.match(workflow, /timeout --signal=TERM --kill-after=10s 20m sudo -n env PRODUCT_VERSION="\$\{PRODUCT_VERSION\}" unshare --net -- bash -c/);
   assert.match(workflow, /ip route add 224\.0\.0\.0\/4 dev veth0/);
   assert.match(workflow, /test -z "\$\(ip route show default\)"/);
   assert.match(workflow, /exec runuser -u "\$smoke_user" -- env/);
