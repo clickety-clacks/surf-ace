@@ -98,14 +98,17 @@ export function parseReconfirmPayload(input: unknown): LabelReconfirmPayload {
   ]);
   identityFields(value);
   const expected = object(value.expectedAssignment, "expectedAssignment");
-  exactKeys(expected, ["ordinal", "windowLabel", "committed"]);
+  exactKeys(expected, ["ordinal", "windowLabel", "committed", "windowGeneration"], ["windowGeneration"]);
   const ordinal = integer(expected.ordinal, "expectedAssignment.ordinal");
+  const windowGeneration = expected.windowGeneration === undefined
+    ? undefined
+    : integer(expected.windowGeneration, "expectedAssignment.windowGeneration");
   const windowLabel = patterned(
     expected.windowLabel,
     /^[a-z]+$/,
     "expectedAssignment.windowLabel",
   );
-  if (ordinal < 0 || expected.committed !== true) {
+  if (ordinal < 0 || (windowGeneration !== undefined && windowGeneration < 1) || expected.committed !== true) {
     invalid("expectedAssignment is invalid");
   }
   if (windowLabelToOrdinal(windowLabel) !== ordinal) {
@@ -115,6 +118,7 @@ export function parseReconfirmPayload(input: unknown): LabelReconfirmPayload {
     committed: true,
     ordinal,
     windowLabel,
+    ...(windowGeneration === undefined ? {} : { windowGeneration }),
   };
   return {
     authorityId: string(value.authorityId, "authorityId"),

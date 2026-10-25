@@ -1735,6 +1735,8 @@ test("v0.2.3 custody migrates without changing its witnessed head", { timeout: 1
     `);
     await adminQuery(cluster.adminUrl,
       await readFile(new URL("../sql/004_pane_label_reuse.sql", import.meta.url), "utf8"));
+    await adminQuery(cluster.adminUrl,
+      await readFile(new URL("../sql/005_window_label_reuse.sql", import.meta.url), "utf8"));
     const migratedLabel = await scalar(cluster.adminUrl,
       "SELECT surf_ace_allocator.read_accepted_state('fleet-test')->'paneMappings'->0->>'paneLabel'");
     const migratedGeneration = await scalar(cluster.adminUrl,
@@ -2503,6 +2505,216 @@ test("pane allocation generations release exact tombstoned identities and gate s
   }
 });
 
+test("window allocation generations keep reconnects reserved and reuse only exact released labels", { timeout: 240_000 }, async () => {
+  const cluster = await startCluster();
+  let allocator: AllocatorServer | null = null;
+  let wire: WireClient | null = null;
+  let recovery: Awaited<ReturnType<typeof PostgresCustodyAdapter.acquireRecovery>> | null = null;
+  try {
+    const initializer = await PostgresCustodyAdapter.initializeAbsentFleet(cluster.config, "alloc_window-reuse");
+    await initializer.release();
+    allocator = await AllocatorServer.start(serverConfig(cluster));
+    wire = await WireClient.connect(allocator.address.url);
+
+    const clientId = createHash("sha256").update("window-generation-reuse-client").digest("hex");
+    const register = async (surfaces: Array<Record<string, unknown>>, pendingWindowReleases: unknown[] = []) =>
+      await wire!.request("client.register", {
+        clientId,
+        windowGenerationV1: true,
+        pendingWindowReleases,
+        surfaces,
+      });
+    const readSurfaces = (response: { payload?: unknown }) =>
+      (response.payload as { surfaces: Array<{
+        surfaceId: string;
+        windowLabel: string;
+        windowGeneration: number;
+      }> }).surfaces;
+    const makeRelease = (
+      surfaceId: string, windowLabel: string, windowGeneration: number, tombstoneId: string,
+      closeRevision: number,
+    ) => {
+      const evidence = {
+        clientId,
+        closeRevision,
+        surfaceId,
+        terminalRetirementRevision: closeRevision + 1,
+        tombstoneId,
+        tombstoneKind: "surface" as const,
+        windowGeneration,
+        windowLabel,
+      };
+      const releaseId = createHash("sha256").update(JSON.stringify(evidence)).digest("hex");
+      return { ...evidence, releaseId };
+    };
+
+    const firstResponse = await register([{ surfaceId: "sf_window_a", panes: [] }]);
+    assert.equal(firstResponse.ok, true, JSON.stringify(firstResponse));
+    const first = readSurfaces(firstResponse)[0]!;
+    assert.equal(first.windowLabel, "a");
+    assert.ok(first.windowGeneration > 0, "a new allocation receives a positive generation");
+
+    const zeroClose = makeRelease("sf_window_a", first.windowLabel, first.windowGeneration, "st_window_a_zero", 0);
+    const rejectedZero = await register([], [zeroClose]);
+    assert.equal(rejectedZero.ok, false);
+    assert.match(String((rejectedZero.error as { message?: unknown } | undefined)?.message), /invalid_window_release/,
+      "the first 0-to-1 close must carry its post-close revision 1");
+
+    const wrongGeneration = makeRelease(
+      "sf_window_a", first.windowLabel, first.windowGeneration + 1, "st_window_a_wrong_generation", 1,
+    );
+    const rejectedGeneration = await register([], [wrongGeneration]);
+    assert.equal(rejectedGeneration.ok, false, "a release for another generation is refused");
+    const stillReserved = await register([
+      { surfaceId: "sf_window_a", windowGeneration: first.windowGeneration, panes: [] },
+      { surfaceId: "sf_window_b", panes: [] },
+      { surfaceId: "sf_window_c", panes: [] },
+    ]);
+    assert.equal(stillReserved.ok, true, JSON.stringify(stillReserved));
+    const reservedLabels = readSurfaces(stillReserved);
+    assert.deepEqual(reservedLabels.map(({ windowLabel }) => windowLabel), ["a", "b", "c"],
+      "invalid release evidence leaves the allocation reserved");
+    const second = reservedLabels[1]!;
+    const third = reservedLabels[2]!;
+
+    await wire.close();
+    wire = null;
+    await allocator.close();
+    allocator = await AllocatorServer.start(serverConfig(cluster));
+    wire = await WireClient.connect(allocator.address.url);
+    const reconnected = await register([
+      { surfaceId: "sf_window_a", windowGeneration: first.windowGeneration, panes: [] },
+      { surfaceId: "sf_window_b", windowGeneration: second.windowGeneration, panes: [] },
+      { surfaceId: "sf_window_c", windowGeneration: third.windowGeneration, panes: [] },
+    ]);
+    assert.equal(reconnected.ok, true, JSON.stringify(reconnected));
+    assert.deepEqual(readSurfaces(reconnected).map(({ windowLabel, windowGeneration }) => ({ windowLabel, windowGeneration })), [
+      { windowLabel: "a", windowGeneration: first.windowGeneration },
+      { windowLabel: "b", windowGeneration: second.windowGeneration },
+      { windowLabel: "c", windowGeneration: third.windowGeneration },
+    ], "restart and reconnect preserve exact generations and keep unreleased labels reserved");
+
+    await adminQuery(cluster.adminUrl, `BEGIN;
+      SET ROLE surf_ace_allocator_owner;
+      SELECT surf_ace_allocator.window_label_reuse_ready('fleet-test',
+        '{"allocator":true,"clients":true,"backupReaders":true,"referenceResolvers":true,"rollbackReaders":true}'::jsonb);
+      RESET ROLE;
+      COMMIT;`);
+    await wire.close();
+    wire = null;
+    await allocator.close();
+    allocator = null;
+    recovery = await PostgresCustodyAdapter.acquireRecovery(cluster.config);
+    const beforeRelease = restoreSnapshot(await recovery.readAcceptedState());
+    await recovery.release();
+    recovery = null;
+    allocator = await AllocatorServer.start(serverConfig(cluster));
+    wire = await WireClient.connect(allocator.address.url);
+
+    const releaseA = makeRelease("sf_window_a", first.windowLabel, first.windowGeneration, "st_window_a_close", 1);
+    const releaseB = makeRelease("sf_window_b", second.windowLabel, second.windowGeneration, "st_window_b_close", 1);
+    const reused = await register([
+      { surfaceId: "sf_window_c", windowGeneration: third.windowGeneration, panes: [] },
+      { surfaceId: "sf_window_d", panes: [] },
+      { surfaceId: "sf_window_e", panes: [] },
+    ], [releaseA, releaseB]);
+    assert.equal(reused.ok, true, JSON.stringify(reused));
+    const reusedPayload = reused.payload as {
+      completedWindowReleaseIds: string[];
+      surfaces: Array<{ surfaceId: string; windowLabel: string; windowGeneration: number }>;
+    };
+    assert.deepEqual(reusedPayload.completedWindowReleaseIds, [releaseA.releaseId, releaseB.releaseId]);
+    assert.deepEqual(reusedPayload.surfaces.map(({ surfaceId, windowLabel }) => ({ surfaceId, windowLabel })), [
+      { surfaceId: "sf_window_c", windowLabel: "c" },
+      { surfaceId: "sf_window_d", windowLabel: "a" },
+      { surfaceId: "sf_window_e", windowLabel: "b" },
+    ], "proven releases run before claims, and the allocator reuses the lowest available letters");
+    const fourth = reusedPayload.surfaces[1]!;
+    const fifth = reusedPayload.surfaces[2]!;
+    assert.ok(fourth.windowGeneration > first.windowGeneration);
+    assert.ok(fifth.windowGeneration > second.windowGeneration);
+
+    const changedRetry = makeRelease("sf_window_a", first.windowLabel, first.windowGeneration, "st_window_a_other_close", 1);
+    const rejectedChangedRetry = await register([
+      { surfaceId: "sf_window_d", windowGeneration: fourth.windowGeneration, panes: [] },
+    ], [changedRetry]);
+    assert.equal(rejectedChangedRetry.ok, false, "changed evidence cannot release an already retired generation");
+    const stableReplacement = await register([
+      { surfaceId: "sf_window_d", windowGeneration: fourth.windowGeneration, panes: [] },
+    ]);
+    assert.equal(stableReplacement.ok, true, JSON.stringify(stableReplacement));
+    assert.deepEqual(readSurfaces(stableReplacement).map(({ windowLabel, windowGeneration }) => ({ windowLabel, windowGeneration })), [
+      { windowLabel: "a", windowGeneration: fourth.windowGeneration },
+    ], "a stale release cannot affect the new occupant of a reused letter");
+
+    await wire.close();
+    wire = null;
+    await allocator.close();
+    allocator = null;
+    recovery = await PostgresCustodyAdapter.acquireRecovery(cluster.config);
+    const restoredId = `restore_window_reuse_${Date.now()}`;
+    const witness = await recovery.readWitness();
+    await recovery.stageRestore(restoredId, `${restoredId}_idem`, beforeRelease, witness);
+    const ready = await recovery.markRestoreReady(restoredId);
+    await recovery.activateRestore(restoredId, ready);
+    const restored = await recovery.readAcceptedState();
+    assert.deepEqual(restored.mappings.map(({ windowLabel, windowGeneration }) => ({ windowLabel, windowGeneration })), [
+      { windowLabel: "a", windowGeneration: fourth.windowGeneration },
+      { windowLabel: "b", windowGeneration: fifth.windowGeneration },
+      { windowLabel: "c", windowGeneration: third.windowGeneration },
+    ], "restore replays releases and later generations instead of reviving retired labels");
+    assert.equal(restored.windowReleases.length, 2);
+    assert.equal(restored.windowLabelReuseEnabled, true);
+    await recovery.release();
+    recovery = null;
+
+    allocator = await AllocatorServer.start(serverConfig(cluster));
+    wire = await WireClient.connect(allocator.address.url);
+    const duplicateRelease = await register([
+      { surfaceId: "sf_window_d", windowGeneration: fourth.windowGeneration, panes: [] },
+      { surfaceId: "sf_window_e", windowGeneration: fifth.windowGeneration, panes: [] },
+    ], [releaseA, releaseB]);
+    assert.equal(duplicateRelease.ok, true, JSON.stringify(duplicateRelease));
+    assert.deepEqual((duplicateRelease.payload as { completedWindowReleaseIds: string[] }).completedWindowReleaseIds,
+      [releaseA.releaseId, releaseB.releaseId], "identical release evidence remains idempotent after restore");
+    assert.deepEqual(readSurfaces(duplicateRelease).map(({ windowLabel, windowGeneration }) => ({ windowLabel, windowGeneration })), [
+      { windowLabel: "a", windowGeneration: fourth.windowGeneration },
+      { windowLabel: "b", windowGeneration: fifth.windowGeneration },
+    ]);
+
+    const legacyClientId = createHash("sha256").update("legacy-window-client").digest("hex");
+    const legacyClaim = await wire.request("client.register", {
+      clientId: legacyClientId,
+      surfaces: [{ surfaceId: "sf_window_legacy", panes: [] }],
+    });
+    assert.equal(legacyClaim.ok, true, JSON.stringify(legacyClaim));
+    assert.equal(readSurfaces(legacyClaim)[0]?.windowLabel, "d",
+      "a legacy claim disables reuse and continues at the monotonic high-water mark");
+
+    await wire.close();
+    wire = null;
+    await allocator.close();
+    allocator = null;
+    recovery = await PostgresCustodyAdapter.acquireRecovery(cluster.config);
+    assert.equal((await recovery.readAcceptedState()).windowLabelReuseEnabled, false,
+      "a legacy claim durably closes the reuse gate");
+    await recovery.release();
+    recovery = null;
+
+    allocator = await AllocatorServer.start(serverConfig(cluster));
+    wire = await WireClient.connect(allocator.address.url);
+    const retiredIdentity = await register([
+      { surfaceId: "sf_window_a", windowGeneration: first.windowGeneration, panes: [] },
+    ]);
+    assert.equal(retiredIdentity.ok, false, "a retired surface identity cannot be reclaimed after restore");
+  } finally {
+    await wire?.close();
+    await allocator?.close();
+    await recovery?.release();
+    await cluster.stop();
+  }
+});
+
 async function startCluster(schemaVersion: "current" | "v0.2.3" = "current"): Promise<TestCluster> {
   const root = await mkdtemp(join(process.cwd(), ".allocator-pg-"));
   const primaryData = join(root, "primary");
@@ -2532,6 +2744,7 @@ fsync = on
     } else {
       await PostgresCustodyAdapter.installSchema(adminUrl);
       await adminQuery(adminUrl, await readFile(new URL("../sql/004_pane_label_reuse.sql", import.meta.url), "utf8"));
+      await adminQuery(adminUrl, await readFile(new URL("../sql/005_window_label_reuse.sql", import.meta.url), "utf8"));
     }
     await adminQuery(adminUrl, `
       CREATE ROLE allocator_writer LOGIN IN ROLE surf_ace_allocator_writer;
@@ -2728,6 +2941,7 @@ function restoreSnapshot(state: AcceptedState): RestoreSnapshot {
     nextPaneOrdinalFence: state.nextPaneOrdinalFence,
     nextPaneAllocationGenerationFence: state.nextPaneAllocationGenerationFence,
     paneLabelReuseEnabled: state.paneLabelReuseEnabled,
+    windowLabelReuseEnabled: state.windowLabelReuseEnabled,
     paneMappings: state.paneMappings.map((mapping) => ({ ...mapping })),
     stateVersion: state.stateVersion,
     transactions: state.transactions.map((transaction) => ({ ...transaction })),

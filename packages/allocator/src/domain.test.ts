@@ -99,3 +99,30 @@ test("reconfirm rejects an assignment whose label does not encode its ordinal", 
     (error) => error instanceof AllocatorError && error.code === "invalid_payload",
   );
 });
+
+test("reconfirm accepts and preserves a positive window allocation generation", () => {
+  const request = {
+    id: "rq_3",
+    op: "label.reconfirm",
+    payload: {
+      authorityId: `auth_${"a".repeat(22)}`,
+      expectedAllocatorId: "alloc_one",
+      expectedAssignment: { committed: true, ordinal: 0, windowGeneration: 12, windowLabel: "a" },
+      fleetId: "fleet-1",
+      ownerAnchorId: `owner_${"b".repeat(22)}`,
+      protocolVersion: 1,
+      surfaceId: "sf_001",
+    },
+    sentAt: 1,
+    type: "request",
+    v: 1,
+  };
+  assert.deepEqual(parseAllocatorRequest(request), request);
+  assert.throws(
+    () => parseAllocatorRequest({
+      ...request,
+      payload: { ...request.payload, expectedAssignment: { ...request.payload.expectedAssignment, windowGeneration: 0 } },
+    }),
+    (error) => error instanceof AllocatorError && error.code === "invalid_payload",
+  );
+});
