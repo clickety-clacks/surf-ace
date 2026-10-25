@@ -347,15 +347,21 @@ BEGIN
     END IF;
     RETURN true;
   END IF;
-  SELECT a, t INTO assigned, tx FROM surf_ace_allocator.assignments a
-    JOIN surf_ace_allocator.allocation_transactions t
-      ON t.generation_id = a.generation_id AND t.transaction_id = a.transaction_id
+  SELECT a.* INTO assigned FROM surf_ace_allocator.assignments a
     WHERE a.fleet_id = p_fleet_id AND a.allocator_id = fleet.allocator_id
       AND a.generation_id = fleet.accepted_generation_id
       AND a.surface_id = p_allocator_surface_id AND a.window_label = p_window_label
-    FOR UPDATE OF a, t;
+    FOR UPDATE OF a;
   IF NOT FOUND THEN
     RAISE EXCEPTION 'window allocation is not active' USING ERRCODE = '23503';
+  END IF;
+  SELECT t.* INTO tx FROM surf_ace_allocator.allocation_transactions t
+    WHERE t.fleet_id = p_fleet_id AND t.allocator_id = fleet.allocator_id
+      AND t.generation_id = fleet.accepted_generation_id
+      AND t.transaction_id = assigned.transaction_id
+    FOR UPDATE OF t;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'window allocation transaction is missing' USING ERRCODE = '55000';
   END IF;
   SELECT j.head_seq INTO claim_generation FROM surf_ace_allocator.custody_journal j
     WHERE j.fleet_id = p_fleet_id AND j.event->>'type' = 'committed'
