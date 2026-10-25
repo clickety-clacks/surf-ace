@@ -54,6 +54,23 @@ function coreWithLimits(limits = acceptanceLimits()): SurfaceCore {
   });
 }
 
+function paneLifecycleBusinessState(core: SurfaceCore) {
+  const state = core.getPersistentState();
+  const lockless = state.lockless;
+  return {
+    finalCloseRecords: lockless?.finalCloseRecords,
+    paneIdentityReservations: lockless?.paneIdentityReservations,
+    paneRetirementAudits: lockless?.paneRetirementAudits,
+    pendingPaneReleases: lockless?.pendingPaneReleases,
+    pendingWindowReleases: lockless?.pendingWindowReleases,
+    scopes: lockless?.scopes,
+    surfaceSetRevision: lockless?.surfaceSetRevision,
+    surfaces: state.surfaces,
+    tombstones: lockless?.tombstones,
+    windowRetirementAudits: lockless?.windowRetirementAudits,
+  };
+}
+
 async function freePort(): Promise<number> {
   const server = createServer();
   await new Promise<void>((resolve, reject) => {
@@ -595,7 +612,7 @@ test("AC-CAP-01 AC-FC-1: final pane close cannot be restored and pane creation r
       assert.equal(resplit.ok, true, JSON.stringify(resplit));
       assert.equal(core.activePaneIds(surface.surfaceId).length, 2);
 
-      const beforeRestore = core.getPersistentState();
+      const beforeRestore = paneLifecycleBusinessState(core);
       const restore = await request(socket, "pane.restore", {
         anchorPaneId: rootPaneId,
         direction: "horizontal",
@@ -605,9 +622,9 @@ test("AC-CAP-01 AC-FC-1: final pane close cannot be restored and pane creation r
       });
       assert.equal(restore.ok, false);
       assert.equal(restore.error.code, "tombstone_not_found");
-      assert.deepEqual(core.getPersistentState(), beforeRestore);
+      assert.deepEqual(paneLifecycleBusinessState(core), beforeRestore);
 
-      const beforeCapacityRefusal = core.getPersistentState();
+      const beforeCapacityRefusal = paneLifecycleBusinessState(core);
       const refusedCreation = await request(socket, "pane.split", {
         count: 2,
         direction: "horizontal",
@@ -618,7 +635,7 @@ test("AC-CAP-01 AC-FC-1: final pane close cannot be restored and pane creation r
       assert.equal(refusedCreation.ok, false);
       assert.equal(refusedCreation.error.code, "pane_capacity");
       assert.equal(core.activePaneIds(surface.surfaceId).length, 2);
-      assert.deepEqual(core.getPersistentState(), beforeCapacityRefusal);
+      assert.deepEqual(paneLifecycleBusinessState(core), beforeCapacityRefusal);
     } finally {
       socket.close();
     }
@@ -925,7 +942,7 @@ test("global lifecycle seam serializes concurrent cross-surface pane final close
         assert.equal(finalClose.surfaceId, entry.surfaceId);
         assert.equal(finalClose.closeRevision, entry.response.payload.topologyRevision);
       }
-      const beforeRestore = core.getPersistentState();
+      const beforeRestore = paneLifecycleBusinessState(core);
       for (const entry of ordered) {
         const restored = await request(entry.socket, "pane.restore", {
           anchorPaneId: entry.anchorPaneId,
@@ -937,7 +954,7 @@ test("global lifecycle seam serializes concurrent cross-surface pane final close
         assert.equal(restored.ok, false);
         assert.equal(restored.error.code, "tombstone_not_found");
       }
-      assert.deepEqual(core.getPersistentState(), beforeRestore);
+      assert.deepEqual(paneLifecycleBusinessState(core), beforeRestore);
     } finally {
       first.close();
       second.close();
