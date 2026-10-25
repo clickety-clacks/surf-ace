@@ -76,7 +76,7 @@ import { verifyClientAppVersion } from "./smoke-lib.mjs";
 import { waitForScreenshotPixels } from "./wait-for-screenshot-pixels.mjs";
 import { verifySmokeReceipt, writeSmokeReceipt } from "./write-smoke-receipt.mjs";
 import tightbeamServerLauncher from "./tightbeam-server-launcher.cjs";
-import { publicReleaseNames } from "./public-release-names.mjs";
+import { publicReleaseNames, publicReleaseNamesFromTags } from "./public-release-names.mjs";
 
 const testProductCommit = "a".repeat(40);
 process.env.PRODUCT_COMMIT = testProductCommit;
@@ -1274,17 +1274,22 @@ test("Linux fresh-install raw CLI evidence binds two isolated roots to their cli
 });
 
 test("Surf Ace v0.2.10-rc2 binds the selected source, six hosted assets, and tooling identity", () => {
-  assert.equal(TIGHTBEAM_TOOLING_TAG, "surf-ace-release-tooling-v0.2.10-rc2-r1");
+  const selectedNames = publicReleaseNamesFromTags({
+    productTag: process.env.PRODUCT_TAG,
+    toolingTag: process.env.TOOLING_TAG,
+  });
+  assert.equal(selectedNames.version, "0.2.10-rc2");
+  assert.equal(TIGHTBEAM_TOOLING_TAG, selectedNames.toolingTag);
   const { candidateCommit, ...releaseIdentity } = TIGHTBEAM;
   assert.equal(candidateCommit, testProductCommit);
   assert.deepEqual(releaseIdentity, {
-    sourceTag: "surf-ace-v0.2.10-rc2-r1", version: "0.2.10-rc2", channel: "surf-ace", toolingTag: TIGHTBEAM_TOOLING_TAG,
-    assets: ["surf-ace-server-linux-x86_64-v0.2.10-rc2.tar.gz","surf-ace-cli-linux-x86_64-v0.2.10-rc2.tar.gz","surf-ace-electron-linux-x86_64-v0.2.10-rc2.zip","surf-ace-cli-macos-arm64-v0.2.10-rc2.tar.gz","surf-ace-electron-macos-arm64-v0.2.10-rc2.zip",TIGHTBEAM_SKILL_ASSET],
-    manifest: "surf-ace-v0.2.10-rc2-manifest.json", checksums: "SHA256SUMS",
+    sourceTag: selectedNames.sourceTag, version: selectedNames.version, channel: "surf-ace", toolingTag: selectedNames.toolingTag,
+    assets: [...selectedNames.assets],
+    manifest: selectedNames.manifest, checksums: "SHA256SUMS",
   });
   assert.equal(TIGHTBEAM_SKILL_ASSET, "surf-ace-skill-v0.2.10-rc2.md");
   assert.equal(TIGHTBEAM.assets.length, 6);
-  assert.equal(TIGHTBEAM.sourceTag, "surf-ace-v0.2.10-rc2-r1");
+  assert.equal(TIGHTBEAM.sourceTag, selectedNames.sourceTag);
   assert.equal(TOOLCHAINS.macosRunner, "xcode-27");
   assert.equal(TOOLCHAINS.xcode, "27.0");
   assert.deepEqual(TIGHTBEAM_ROUTING, {

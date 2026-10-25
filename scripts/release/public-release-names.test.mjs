@@ -76,7 +76,7 @@ test("release names derive from distinct matching product and tooling tags", () 
   }), /release_tag_version_mismatch/);
   assert.throws(() => publicReleaseNamesFromTags({
     productTag: "surf-ace-v0.2.10-rc2",
-    toolingTag: "surf-ace-release-tooling-v0.2.10-rc2-r1",
+    toolingTag: "surf-ace-release-tooling-v0.2.10-rc2-r9",
   }), /release_tag_invalid/);
 });
 
