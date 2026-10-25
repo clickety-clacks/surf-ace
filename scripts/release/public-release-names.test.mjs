@@ -6,10 +6,12 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
 import { publicReleaseNames, publicReleaseNamesFromTags } from "./public-release-names.mjs";
 import { TIGHTBEAM, TIGHTBEAM_SKILL_ASSET, TIGHTBEAM_TOOLING_TAG } from "./tightbeam-release-config.mjs";
 
 const execFileAsync = promisify(execFile);
+const repositoryRoot = fileURLToPath(new URL("../..", import.meta.url));
 
 test("published v0.2.5 download identities remain exact legacy names", () => {
   const names = publicReleaseNames({ version: "0.2.5", sourceRevision: "r4", toolingRevision: "r11", legacy: true });
@@ -107,8 +109,11 @@ test("the release guard accepts a72e77c with distinct immutable RC2 tag inputs",
 
   const productTag = "surf-ace-v0.2.10-rc2-r2";
   const toolingTag = "surf-ace-release-tooling-v0.2.10-rc2-r3";
-  const candidate = "a72e77c503f4bbc057d08819bb77066a62ca8092";
+  const productCommit = "a72e77c503f4bbc057d08819bb77066a62ca8092";
+  const workflowCommit = (await execFileAsync("git", ["-C", repositoryRoot, "rev-parse", "HEAD"])).stdout.trim();
   assert.notEqual(productTag, toolingTag);
+  assert.match(workflowCommit, /^[a-f0-9]{40}$/);
+  assert.notEqual(productCommit, workflowCommit);
 
   const temporaryDirectory = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-release-guard-"));
   t.after(() => fs.rm(temporaryDirectory, { recursive: true, force: true }));
@@ -132,15 +137,15 @@ esac
       GITHUB_EVENT_NAME: "workflow_dispatch",
       GITHUB_REF_TYPE: "tag",
       GITHUB_REF: `refs/tags/${toolingTag}`,
-      GITHUB_SHA: candidate,
+      GITHUB_SHA: workflowCommit,
       GITHUB_REPOSITORY: "clickety-clacks/surf-ace",
       GITHUB_OUTPUT: outputPath,
       GH_API_CALLS: callsPath,
       EXPECTED_TOOLING_TAG: toolingTag,
       EXPECTED_PRODUCT_TAG: productTag,
-      EXPECTED_WORKFLOW_SHA: candidate,
-      EXPECTED_PRODUCT_SHA: candidate,
-      PRODUCT_COMMIT_INPUT: candidate,
+      EXPECTED_WORKFLOW_SHA: workflowCommit,
+      EXPECTED_PRODUCT_SHA: productCommit,
+      PRODUCT_COMMIT_INPUT: productCommit,
       PRODUCT_TAG_INPUT: productTag,
       TOOLING_TAG_INPUT: toolingTag,
       PRODUCT_TAG: productTag,
@@ -148,7 +153,7 @@ esac
     },
   });
 
-  assert.equal(await fs.readFile(outputPath, "utf8"), `product_commit=${candidate}\nproduct_version=0.2.10-rc2\n`);
+  assert.equal(await fs.readFile(outputPath, "utf8"), `product_commit=${productCommit}\nproduct_version=0.2.10-rc2\n`);
   const calls = await fs.readFile(callsPath, "utf8");
   assert.ok(calls.includes(`git/ref/tags/${toolingTag}`));
   assert.ok(calls.includes(`git/ref/tags/${productTag}`));
