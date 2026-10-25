@@ -873,8 +873,11 @@ export type SurfaceWindowOpenResponse = ResponseBase<"surface.window.open"> & {
 
 export type SurfaceWindowCloseResponse = ResponseBase<"surface.window.close"> & {
   payload: {
-    closed: boolean;
+    closedSequence: number;
+    recoverable: boolean;
     surfaceId: SurfaceId;
+    surfaceSetRevision: number;
+    tombstoneId: string;
   };
 };
 
@@ -896,8 +899,11 @@ export type PaneRenameResponse = ResponseBase<"pane.rename"> & {
 
 export type PaneCloseResponse = ResponseBase<"pane.close"> & {
   payload: {
+    closedSequence: number;
     paneId: PaneId;
-    closedFramesDiscarded: number;
+    recoverable: boolean;
+    tombstoneId: string;
+    topologyRevision: TopologyRevision;
   };
 };
 
@@ -1051,6 +1057,7 @@ export type SurfaceAppearedEvent = EventBase<"event.surface_appeared"> & {
 
 export type SurfaceRemovedEvent = EventBase<"event.surface_removed"> & {
   payload: {
+    recoverable: boolean;
     surfaceId: SurfaceId;
   };
 };
@@ -1088,8 +1095,11 @@ export type PaneCreatedEvent = EventBase<"event.pane_created"> & {
 
 export type PaneRemovedEvent = EventBase<"event.pane_removed"> & {
   payload: {
+    closedSequence?: number;
     surfaceId: SurfaceId;
     paneId: PaneId;
+    recoverable?: boolean;
+    tombstoneId?: string;
   };
 };
 

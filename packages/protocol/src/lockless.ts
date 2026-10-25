@@ -290,6 +290,24 @@ export type LocklessSurfaceCloseIntent = LocklessSurfaceSetExpectation &
     surfaceId: string;
   };
 
+export type LocklessPaneCloseResult = {
+  closedSequence: number;
+  operationReceipt?: LocklessOperationReceipt;
+  paneId: number;
+  recoverable: false;
+  tombstoneId: TombstoneId;
+  topologyRevision: number;
+};
+
+export type LocklessSurfaceCloseResult = {
+  closedSequence: number;
+  operationReceipt?: LocklessOperationReceipt;
+  recoverable: false;
+  surfaceId: string;
+  surfaceSetRevision: number;
+  tombstoneId: TombstoneId;
+};
+
 export type LocklessSurfaceRestoreIntent = LocklessSurfaceSetExpectation & {
   placement?: Record<string, unknown>;
   tombstoneId: TombstoneId;
@@ -520,7 +538,18 @@ export type LocklessEvent =
   | LocklessWireEvent<
       "event.target_apply_result",
       LocklessTargetApplyResultEvent
-    >;
+    >
+  | LocklessWireEvent<"event.pane_removed", {
+      closedSequence?: number;
+      paneId: number;
+      recoverable?: boolean;
+      surfaceId: string;
+      tombstoneId?: TombstoneId;
+    }>
+  | LocklessWireEvent<"event.surface_removed", {
+      recoverable: boolean;
+      surfaceId: string;
+    }>;
 
 export type LocklessResponse = {
   id: string;
@@ -804,6 +833,8 @@ const LOCKLESS_EVENT_OPS = new Set<LocklessEvent["op"]>([
   "event.controller_retention_reclaimed",
   "event.tombstone_reclaimed",
   "event.target_apply_result",
+  "event.pane_removed",
+  "event.surface_removed",
 ]);
 
 const LOCKLESS_ERROR_CODES = new Set<LocklessErrorCode>([
@@ -1257,7 +1288,24 @@ function validateLocklessEventPayload(
         validTargetApplyResult(result)
       );
     }
+    case "event.pane_removed":
+      return hasExactKeys(payload, ["paneId", "surfaceId"], ["closedSequence", "recoverable", "tombstoneId"]) &&
+        positiveInteger(payload.paneId) && nonemptyString(payload.surfaceId) &&
+        (payload.closedSequence === undefined || positiveInteger(payload.closedSequence)) &&
+        (payload.recoverable === undefined || typeof payload.recoverable === "boolean") &&
+        (payload.tombstoneId === undefined || nonemptyString(payload.tombstoneId)) &&
+        (payload.recoverable !== false ||
+          (positiveInteger(payload.closedSequence) && nonemptyString(payload.tombstoneId)));
+    case "event.surface_removed":
+      return hasExactKeys(payload, ["recoverable", "surfaceId"]) &&
+        typeof payload.recoverable === "boolean" && nonemptyString(payload.surfaceId);
   }
+}
+
+function validOperationReceipt(value: unknown, envelopeRequestId: unknown): boolean {
+  return plainRecord(value) &&
+    hasExactKeys(value, ["commitSequence", "requestId"]) &&
+    positiveInteger(value.commitSequence) && value.requestId === envelopeRequestId;
 }
 
 function validReceiptResolution(value: unknown): boolean {
@@ -1774,6 +1822,27 @@ export function validateLocklessEnvelope(
       !validTargetApplyAccepted(envelope.payload, envelope.id)
     ) {
       return { ok: false, reason: "invalid_target_apply_response" };
+    }
+    if (envelope.op === "pane.close") {
+      const payload = envelope.payload;
+      if (!plainRecord(payload) ||
+          !hasExactKeys(payload, ["closedSequence", "paneId", "recoverable", "tombstoneId", "topologyRevision"], ["operationReceipt"]) ||
+          !positiveInteger(payload.closedSequence) || !positiveInteger(payload.paneId) || payload.recoverable !== false ||
+          !nonemptyString(payload.tombstoneId) || !positiveInteger(payload.topologyRevision) ||
+          (payload.operationReceipt !== undefined && !validOperationReceipt(payload.operationReceipt, envelope.id))) {
+        return { ok: false, reason: "invalid_pane_close_response" };
+      }
+    }
+    if (envelope.op === "surface.window.close") {
+      const payload = envelope.payload;
+      if (!plainRecord(payload) ||
+          !hasExactKeys(payload, ["closedSequence", "recoverable", "surfaceId", "surfaceSetRevision", "tombstoneId"], ["operationReceipt"]) ||
+          !positiveInteger(payload.closedSequence) || payload.recoverable !== false ||
+          !nonemptyString(payload.surfaceId) || !positiveInteger(payload.surfaceSetRevision) ||
+          !nonemptyString(payload.tombstoneId) ||
+          (payload.operationReceipt !== undefined && !validOperationReceipt(payload.operationReceipt, envelope.id))) {
+        return { ok: false, reason: "invalid_surface_close_response" };
+      }
     }
     if (envelope.op === "operation.receipt.sync") {
       if (

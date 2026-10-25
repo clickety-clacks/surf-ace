@@ -85,7 +85,21 @@ export class ServerConnection {
 
   async claimPaneLabel(surfaceId: string, paneId: number, paneLineageId: string): Promise<PaneLabelAllocation> {
     if (this.status !== "connected" || !this.selected) throw new Error("allocator_unavailable");
+    if (this.options.core.locklessAuthority.listPendingPaneReleases().length > 0 ||
+        this.options.core.locklessAuthority.listPendingWindowReleases().length > 0) {
+      throw new Error("allocator_release_pending");
+    }
     return await this.selected.registration.claimPaneLabel(surfaceId, paneId, paneLineageId);
+  }
+
+  async preparePaneLabelClaim(): Promise<void> {
+    if (this.options.core.locklessAuthority.listPendingPaneReleases().length === 0 &&
+        this.options.core.locklessAuthority.listPendingWindowReleases().length === 0) return;
+    await this.synchronize();
+    if (this.options.core.locklessAuthority.listPendingPaneReleases().length > 0 ||
+        this.options.core.locklessAuthority.listPendingWindowReleases().length > 0) {
+      throw new Error("allocator_release_pending");
+    }
   }
 
   synchronize(): Promise<void> {
@@ -143,7 +157,7 @@ export class ServerConnection {
         }
       }
 
-      if (this.options.configuredAddress && await tryAddress(this.options.configuredAddress)) {
+      if (this.options.configuredAddress && await tryAddress(this.options.configuredAddress, true)) {
         if (this.browsing) {
           await this.discovery.stop();
           this.browsing = false;

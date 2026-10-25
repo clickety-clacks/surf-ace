@@ -120,17 +120,28 @@ async function centralFixture(registryIdentity: { allocatorId: string; fleetId: 
   return {
     server, requests, identityRequests, port, address: `ws://127.0.0.1:${port}/`,
     reply(index: number, ok = true, assignPaneLabels = true, paneLabelBase = 700, windowLabel?: string,
-      responseIdentity: { allocatorId: string; fleetId: string } | null = registryIdentity) {
+      responseIdentity: { allocatorId: string; fleetId: string } | null = registryIdentity,
+      responseOptions: { windowGenerationV1?: boolean; completedWindowReleaseIds?: string[] } = { windowGenerationV1: true }) {
       const { socket, message } = requests[index]!;
       assert.equal(message.op, "client.register");
       socket.send(JSON.stringify({
         type: "response", v: 1, id: message.id, op: message.op, ok,
         payload: { clientId: message.payload.clientId,
           ...(responseIdentity ? { registryIdentity: responseIdentity } : {}),
+          ...(responseOptions.windowGenerationV1 === undefined
+            ? {} : { windowGenerationV1: responseOptions.windowGenerationV1 }),
           completedPaneReleaseIds: (message.payload.pendingPaneReleases ?? []).map((release: any) => release.releaseId),
+          ...(responseOptions.windowGenerationV1 === true ? {
+            completedWindowReleaseIds: responseOptions.completedWindowReleaseIds ??
+              (message.payload.pendingWindowReleases ?? []).map((release: any) => release.releaseId),
+          } : {}),
           surfaces: message.payload.surfaces.map((surface: any, i: number) => ({
             surfaceId: surface.surfaceId,
             windowLabel: windowLabel ?? String.fromCharCode(97 + i),
+            ...(responseOptions.windowGenerationV1 === true ? {
+              windowGeneration: Number.isSafeInteger(surface.windowGeneration) && surface.windowGeneration > 0
+                ? surface.windowGeneration : i + 1,
+            } : {}),
             ...(assignPaneLabels ? {
               panes: (surface.panes ?? []).map((pane: any, paneIndex: number) => ({
                 ...pane,
@@ -148,6 +159,115 @@ async function centralFixture(registryIdentity: { allocatorId: string; fleetId: 
     },
   };
 }
+
+test("pending window releases block pane claims until the registry acknowledges them", async () => {
+  const central = await centralFixture();
+  const clientId = "b".repeat(64);
+  const core = new SurfaceCore({ clientIdentity: clientId });
+  const surface = core.ensurePrimarySurface("Pending release", { width: 800, height: 600, scale: 1 });
+  core.admitSurfaceToLockless(surface.surfaceId);
+  core.bindRegistryIdentity({ clientId, allocatorId: "alloc_fixture", fleetId: "fixture-fleet" });
+  core.applyWindowLabels([{ surfaceId: surface.surfaceId, windowGeneration: 8, windowLabel: "a" }]);
+  core.locklessAuthority.recordSurfaceFinalClose({
+    panes: [],
+    surfaceId: surface.surfaceId,
+    topologyRevision: 1,
+    windowAllocationGeneration: 8,
+    windowLabel: "a",
+  }, [], { closeRevision: 2 });
+  core.removeSurface(surface.surfaceId, false);
+  const claimSurface = core.ensurePrimarySurface("Replacement surface", { width: 800, height: 600, scale: 1 });
+  core.admitSurfaceToLockless(claimSurface.surfaceId);
+  const connection = new ServerConnection({
+    clientId,
+    core,
+    persist: async () => {},
+    configuredAddress: central.address,
+    discovery: emptyDiscovery(),
+  });
+
+  try {
+    const firstSync = connection.synchronize();
+    await until(() => central.requests.length === 1);
+    const registration = central.requests[0]!.message.payload;
+    assert.equal(registration.windowGenerationV1, true);
+    assert.equal(registration.surfaces[0]!.windowGeneration, null);
+    assert.equal(registration.pendingWindowReleases.length, 1);
+    assert.equal(registration.pendingWindowReleases[0]!.windowGeneration, 8);
+    assert.equal("allocationGeneration" in registration.pendingWindowReleases[0]!, false);
+    central.reply(0, true, true, 700, undefined, undefined, {});
+    await firstSync;
+    assert.equal(core.locklessAuthority.listPendingWindowReleases().length, 1,
+      "a legacy allocator response cannot acknowledge a generation-fenced release");
+    assert.equal(core.listSurfaces()[0]!.windowAllocationGeneration, null,
+      "a legacy allocator's null-generation response keeps the label but no generation");
+    await assert.rejects(connection.claimPaneLabel(surface.surfaceId, 20, "pl_claim_after_close"),
+      /allocator_release_pending/);
+    assert.equal(central.requests.length, 1, "no pane claim reaches the allocator while a release is pending");
+
+    const releaseRetry = connection.preparePaneLabelClaim();
+    await until(() => central.requests.length === 2);
+    central.reply(1);
+    await releaseRetry;
+    assert.equal(core.locklessAuthority.listPendingWindowReleases().length, 0);
+    assert.ok(Number(core.listSurfaces()[0]!.windowAllocationGeneration) > 0,
+      "the generation-aware response confirms the replacement window generation");
+    const claim = connection.claimPaneLabel(claimSurface.surfaceId, 20, "pl_claim_after_close");
+    await until(() => central.requests.length === 3);
+    assert.equal(central.requests[2]!.message.op, "pane.claim");
+    central.requests[2]!.socket.send(JSON.stringify({
+      type: "response", v: 1, id: central.requests[2]!.message.id, op: "pane.claim", ok: true,
+      payload: { allocationGeneration: 9, paneLabel: 2 },
+    }));
+    assert.deepEqual(await claim, { allocationGeneration: 9, paneLabel: 2 });
+  } finally {
+    await connection.stop();
+    await central.close();
+  }
+});
+
+test("generation-aware registration does not commit a partial window release acknowledgement", async () => {
+  const central = await centralFixture();
+  const clientId = "c".repeat(64);
+  const core = new SurfaceCore({ clientIdentity: clientId });
+  const surface = core.ensurePrimarySurface("Final close", { width: 800, height: 600, scale: 1 });
+  core.admitSurfaceToLockless(surface.surfaceId);
+  core.bindRegistryIdentity({ clientId, allocatorId: "alloc_fixture", fleetId: "fixture-fleet" });
+  core.applyWindowLabels([{ surfaceId: surface.surfaceId, windowGeneration: 4, windowLabel: "a" }]);
+  core.locklessAuthority.recordSurfaceFinalClose({
+    panes: [],
+    surfaceId: surface.surfaceId,
+    topologyRevision: 1,
+    windowAllocationGeneration: 4,
+    windowLabel: "a",
+  }, [], { closeRevision: 2 });
+  core.removeSurface(surface.surfaceId, false);
+  core.ensurePrimarySurface("Replacement surface", { width: 800, height: 600, scale: 1 });
+  const connection = new ServerConnection({
+    clientId,
+    core,
+    persist: async () => {},
+    configuredAddress: central.address,
+    discovery: emptyDiscovery(),
+  });
+
+  try {
+    const sync = connection.synchronize();
+    await until(() => central.requests.length === 1);
+    central.reply(0, true, true, 700, undefined, undefined, {
+      windowGenerationV1: true,
+      completedWindowReleaseIds: [],
+    });
+    await assert.rejects(sync, /invalid_registration_response/);
+    assert.equal(core.locklessAuthority.listPendingWindowReleases().length, 1,
+      "a partial acknowledgement leaves the full durable release intent pending");
+    assert.equal(core.listSurfaces()[0]!.windowAllocationGeneration, null,
+      "a rejected registration does not apply replacement labels or generations");
+  } finally {
+    await connection.stop();
+    await central.close();
+  }
+});
 
 test("registration cannot export a release from a lifecycle transaction that later rolls back", async () => {
   const central = await centralFixture();
