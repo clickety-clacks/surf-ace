@@ -1320,10 +1320,18 @@ function validateAcceptedState(state: AcceptedState, config: PostgresCustodyConf
     ordinals.add(mapping.ordinal);
     labels.add(mapping.windowLabel);
   }
-  const releasedWindows = new Map<string, WindowReleaseRecord>();
+  const transactionsById = new Map<string, AcceptedState["transactions"][number]>();
+  for (const transaction of state.transactions) {
+    if (transactionsById.has(transaction.transactionId)) {
+      throw new AllocatorError("allocator_state_corrupt", "transaction ledger contains duplicate transaction ids");
+    }
+    transactionsById.set(transaction.transactionId, transaction);
+  }
+  const releasedWindowKeys = new Set<string>();
+  const releasedTransactions = new Map<string, WindowReleaseRecord>();
   for (const release of state.windowReleases) {
     const releaseKey = `${release.allocatorSurfaceId}\0${release.windowGeneration}`;
-    const transaction = state.transactions.find((tx) => tx.transactionId === release.transactionId);
+    const transaction = transactionsById.get(release.transactionId);
     if (release.allocatorId !== state.allocatorId || release.fleetId !== state.fleetId ||
         !/^[a-f0-9]{64}$/.test(release.clientId) ||
         !/^sf_[A-Za-z0-9._:-]{3,64}$/.test(release.surfaceId) ||
@@ -1339,12 +1347,15 @@ function validateAcceptedState(state: AcceptedState, config: PostgresCustodyConf
         ownerByAuthority.get(release.authorityId) !== release.ownerAnchorId ||
         !transaction || transaction.status !== "released" || transaction.authorityId !== release.authorityId ||
         transaction.ownerAnchorId !== release.ownerAnchorId || transaction.surfaceId !== release.allocatorSurfaceId ||
-        transaction.ordinal !== release.ordinal || releasedWindows.has(releaseKey)) {
+        transaction.ordinal !== release.ordinal || releasedWindowKeys.has(releaseKey) ||
+        releasedTransactions.has(release.transactionId)) {
       throw new AllocatorError("allocator_state_corrupt", "window release journal violates identity or generation invariants");
     }
-    releasedWindows.set(releaseKey, release);
+    releasedWindowKeys.add(releaseKey);
+    releasedTransactions.set(release.transactionId, release);
   }
   const activeTransactionOrdinals = new Set<number>();
+  const committedMappingKeys = new Set<string>();
   for (const tx of state.transactions) {
     if (tx.ordinal >= state.nextOrdinalFence || ownerByAuthority.get(tx.authorityId) !== tx.ownerAnchorId ||
         !["burned", "committed", "released", "reserved"].includes(tx.status)) {
@@ -1357,11 +1368,14 @@ function validateAcceptedState(state: AcceptedState, config: PostgresCustodyConf
       activeTransactionOrdinals.add(tx.ordinal);
     }
     const mapping = mappings.get(`${tx.authorityId}\0${tx.surfaceId}`);
-    if (tx.status === "committed" && (!mapping || mapping.ordinal !== tx.ordinal)) {
-      throw new AllocatorError("allocator_state_corrupt", "committed transaction lacks its exact immutable mapping");
+    if (tx.status === "committed") {
+      if (!mapping || mapping.ordinal !== tx.ordinal) {
+        throw new AllocatorError("allocator_state_corrupt", "committed transaction lacks its exact immutable mapping");
+      }
+      committedMappingKeys.add(`${tx.authorityId}\0${tx.surfaceId}`);
     }
     if (tx.status === "released") {
-      const release = [...releasedWindows.values()].find((item) => item.transactionId === tx.transactionId);
+      const release = releasedTransactions.get(tx.transactionId);
       if (!release || release.authorityId !== tx.authorityId || release.ownerAnchorId !== tx.ownerAnchorId ||
           release.allocatorSurfaceId !== tx.surfaceId || release.ordinal !== tx.ordinal ||
           mapping?.ordinal === tx.ordinal) {
@@ -1373,8 +1387,7 @@ function validateAcceptedState(state: AcceptedState, config: PostgresCustodyConf
     }
   }
   for (const mapping of state.mappings) {
-    if (!state.transactions.some((tx) => tx.status === "committed" && tx.authorityId === mapping.authorityId &&
-        tx.surfaceId === mapping.surfaceId && tx.ordinal === mapping.ordinal)) {
+    if (!committedMappingKeys.has(`${mapping.authorityId}\0${mapping.surfaceId}`)) {
       throw new AllocatorError("allocator_state_corrupt", "active window mapping lacks a committed transaction");
     }
   }
