@@ -41,6 +41,7 @@ export const TIGHTBEAM_LINUX_SERVER_FILES = Object.freeze([
   "schemas/allocator/002_fleet_panes.sql",
   "schemas/allocator/003_annotation_journal.sql",
   "schemas/allocator/004_pane_label_reuse.sql",
+  "schemas/allocator/005_window_label_reuse.sql",
   "schemas/protocol/schema.json",
   "server/central-server.cjs",
   "service/surf-ace-server@.service",
@@ -162,6 +163,8 @@ const linuxServerReadme = [
   "client registration, including for a new fleet. It requires a stopped fleet,",
   "a verified backup and staged restore validation; allocator leases must be released",
   "and in-progress restores settled. Pane-label reuse remains disabled by default.",
+  "Apply `schemas/allocator/005_window_label_reuse.sql` after 004 and before",
+  "generation-aware window close registration.",
   "The packaged server configuration",
   "uses the existing AllocatorServerConfig fields and a single owned host lock.",
   "The callable module remains available for embedding by one process owner:",
@@ -241,6 +244,7 @@ export async function assembleTightbeamLinuxStage({ sourceDir, stageDir, target 
     "schemas/allocator/002_fleet_panes.sql": path.join(source, "packages/allocator/sql/002_fleet_panes.sql"),
     "schemas/allocator/003_annotation_journal.sql": path.join(source, "packages/allocator/sql/003_annotation_journal.sql"),
     "schemas/allocator/004_pane_label_reuse.sql": path.join(source, "packages/allocator/sql/004_pane_label_reuse.sql"),
+    "schemas/allocator/005_window_label_reuse.sql": path.join(source, "packages/allocator/sql/005_window_label_reuse.sql"),
     "schemas/protocol/schema.json": path.join(source, "packages/electron/dist/schema.json"),
     "server/central-server.cjs": path.join(source, "packages/electron/dist/central-server.cjs"),
     "service/surf-ace-server@.service": path.join(toolingRoot, "scripts/release/templates/surf-ace-server@.service"),
@@ -411,6 +415,8 @@ export async function writeTightbeamManifest({ sourceDir, outputDir, toolingComm
   }
   const nodeDependencies = await workspaceProductionInventory(path.join(source, "pnpm-lock.yaml"), "packages/electron");
   const cargoDependencies = await cargoLockedPackages(path.join(source, "packages/cli/Cargo.lock"));
+  const windowLabelMigrationPath = "schemas/allocator/005_window_label_reuse.sql";
+  const windowLabelMigration = path.join(source, "packages/allocator/sql/005_window_label_reuse.sql");
   const manifestPath = path.join(output, TIGHTBEAM.manifest);
   await writeCanonicalJson(manifestPath, {
     acceptance: {
@@ -433,6 +439,13 @@ export async function writeTightbeamManifest({ sourceDir, outputDir, toolingComm
       pnpmSha256: await sha256(path.join(source, "pnpm-lock.yaml")),
     },
     source: { commit: TIGHTBEAM.candidateCommit, tag: TIGHTBEAM.sourceTag },
+    serverPackage: {
+      schemaMigrations: [{
+        path: windowLabelMigrationPath,
+        sha256: await sha256(windowLabelMigration),
+        sizeBytes: (await fs.stat(windowLabelMigration)).size,
+      }],
+    },
     toolchains: TOOLCHAINS,
     tooling: { commit: toolingCommit, tag: TIGHTBEAM_TOOLING_TAG },
     version: TIGHTBEAM.version,
