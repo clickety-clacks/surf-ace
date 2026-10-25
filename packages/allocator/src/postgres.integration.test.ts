@@ -2670,10 +2670,6 @@ test("window allocation generations keep reconnects reserved and reuse only exac
 
     allocator = await AllocatorServer.start(serverConfig(cluster));
     wire = await WireClient.connect(allocator.address.url);
-    const retiredIdentity = await register([
-      { surfaceId: "sf_window_a", windowGeneration: first.windowGeneration, panes: [] },
-    ]);
-    assert.equal(retiredIdentity.ok, false, "a retired surface identity cannot be reclaimed after restore");
     const duplicateRelease = await register([
       { surfaceId: "sf_window_d", windowGeneration: fourth.windowGeneration, panes: [] },
       { surfaceId: "sf_window_e", windowGeneration: fifth.windowGeneration, panes: [] },
@@ -2702,6 +2698,15 @@ test("window allocation generations keep reconnects reserved and reuse only exac
     recovery = await PostgresCustodyAdapter.acquireRecovery(cluster.config);
     assert.equal((await recovery.readAcceptedState()).windowLabelReuseEnabled, false,
       "a legacy claim durably closes the reuse gate");
+    await recovery.release();
+    recovery = null;
+
+    allocator = await AllocatorServer.start(serverConfig(cluster));
+    wire = await WireClient.connect(allocator.address.url);
+    const retiredIdentity = await register([
+      { surfaceId: "sf_window_a", windowGeneration: first.windowGeneration, panes: [] },
+    ]);
+    assert.equal(retiredIdentity.ok, false, "a retired surface identity cannot be reclaimed after restore");
   } finally {
     await wire?.close();
     await allocator?.close();
