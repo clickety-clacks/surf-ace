@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { cp, mkdtemp, rm } from "node:fs/promises";
 import { createServer, type AddressInfo } from "node:net";
@@ -3360,6 +3361,190 @@ test("one stable controller may hold lifecycle and surface sessions but not dupl
     lifecycle.close();
     surfaceSession.close();
     duplicateSurface.close();
+    await server.stop();
+  }
+});
+
+test("explicit window close sends an allocator-compatible windowGeneration release", async () => {
+  const clientId = "d".repeat(64);
+  const allocatorId = "alloc_explicit_window_release_fixture";
+  const fleetId = "fixture-fleet";
+  const core = new SurfaceCore({ clientIdentity: clientId });
+  const surface = core.ensurePrimarySurface("Surf Ace", {
+    height: 800,
+    scale: 2,
+    width: 1200,
+  });
+  core.bindRegistryIdentity({ clientId, allocatorId, fleetId });
+  initializeRegistryBootstrapPanes(core);
+
+  const port = nextPort++;
+  const server = new SurfaceWsServer({
+    capturePaneImage: async () => null,
+    compositorSocketPath: null,
+    core,
+    endpointName: "Surf Ace",
+    hostName: "localhost",
+    port,
+    viewport: () => ({ height: 800, scale: 2, width: 1200 }),
+  });
+  await server.start();
+  const lifecycle = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+  const surfaceController = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+  const registry = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  await new Promise<void>((resolve) => registry.once("listening", resolve));
+  const registryAddress = `ws://127.0.0.1:${(registry.address() as AddressInfo).port}/`;
+  const registration = new ConfiguredServerRegistration(
+    registryAddress,
+    clientId,
+    core,
+    async () => {},
+    () => {},
+    500,
+  );
+  const registrationRequests: Array<{ socket: WebSocket; message: any }> = [];
+  const registrationWaiters: Array<(request: { socket: WebSocket; message: any }) => void> = [];
+  const waitForRegistration = () => {
+    const queued = registrationRequests.shift();
+    if (queued) return Promise.resolve(queued);
+    return new Promise<{ socket: WebSocket; message: any }>((resolve) => {
+      registrationWaiters.push(resolve);
+    });
+  };
+  const releaseIdFor = (release: any) => createHash("sha256").update(JSON.stringify({
+    clientId: release.clientId,
+    closeRevision: release.closeRevision,
+    surfaceId: release.surfaceId,
+    terminalRetirementRevision: release.terminalRetirementRevision,
+    tombstoneId: release.tombstoneId,
+    tombstoneKind: release.tombstoneKind,
+    windowGeneration: release.windowGeneration,
+    windowLabel: release.windowLabel,
+  })).digest("hex");
+  registry.on("connection", (socket) => {
+    socket.on("message", (raw) => {
+      const message = JSON.parse(String(raw));
+      if (message.op === "fleet.topology") {
+        socket.send(JSON.stringify({
+          id: message.id,
+          ok: true,
+          op: message.op,
+          payload: { registryIdentity: { allocatorId, fleetId } },
+          type: "response",
+          v: 1,
+        }));
+      } else if (message.op === "client.register") {
+        const captured = { socket, message };
+        const waiter = registrationWaiters.shift();
+        if (waiter) waiter(captured);
+        else registrationRequests.push(captured);
+      }
+    });
+  });
+  const respondAsAllocator = (
+    socket: WebSocket,
+    message: any,
+    windowGeneration: number,
+  ) => {
+    assert.equal(message.payload.windowGenerationV1, true);
+    const completedWindowReleaseIds = (message.payload.pendingWindowReleases ?? []).map((release: any) => {
+      assert.equal(release.clientId, clientId);
+      assert.match(release.surfaceId, /^sf_[A-Za-z0-9._:-]{3,64}$/);
+      assert.match(release.windowLabel, /^[a-z]+$/);
+      assert.ok(Number.isSafeInteger(release.windowGeneration) && release.windowGeneration > 0);
+      assert.equal(release.tombstoneKind, "surface");
+      assert.match(release.tombstoneId, /^[A-Za-z0-9._:-]{1,128}$/);
+      assert.ok(Number.isSafeInteger(release.closeRevision) && release.closeRevision > 0);
+      assert.ok(Number.isSafeInteger(release.terminalRetirementRevision) && release.terminalRetirementRevision > 0);
+      assert.match(release.releaseId, /^[a-f0-9]{64}$/);
+      assert.equal(release.releaseId, releaseIdFor(release));
+      return release.releaseId;
+    });
+    socket.send(JSON.stringify({
+      id: message.id,
+      ok: true,
+      op: "client.register",
+      payload: {
+        clientId,
+        completedPaneReleaseIds: (message.payload.pendingPaneReleases ?? [])
+          .map((release: { releaseId: string }) => release.releaseId),
+        completedWindowReleaseIds,
+        registryIdentity: { allocatorId, fleetId },
+        surfaces: message.payload.surfaces.map((entry: any) => ({
+          surfaceId: entry.surfaceId,
+          windowGeneration,
+          windowLabel: "a",
+          panes: entry.panes.map((pane: any, index: number) => ({
+            ...pane,
+            allocationGeneration: pane.allocationGeneration ?? index + 1,
+            paneLabel: pane.paneLabel > 0 ? pane.paneLabel : index + 1,
+          })),
+        })),
+        windowGenerationV1: true,
+      },
+      type: "response",
+      v: 1,
+    }));
+  };
+
+  try {
+    assert.equal((await pair(lifecycle, "explicit-window-close-controller")).ok, true);
+    assert.equal(
+      (await pair(surfaceController, "explicit-window-close-controller", surface.surfaceId)).ok,
+      true,
+    );
+
+    const firstRequestPromise = waitForRegistration();
+    const firstSync = registration.synchronize();
+    const { socket: registrySocket, message: firstRequest } = await firstRequestPromise;
+    assert.equal(firstRequest.payload.windowGenerationV1, true);
+    assert.equal(firstRequest.payload.surfaces[0].windowGeneration, null);
+    assert.deepEqual(firstRequest.payload.pendingWindowReleases, []);
+    respondAsAllocator(registrySocket, firstRequest, 17);
+    await firstSync;
+    assert.equal(core.listSurfaces()[0]!.windowAllocationGeneration, 17);
+
+    const listed = await request(lifecycle, "surfaces.list", {});
+    const closed = await request(surfaceController, "surface.window.close", {
+      expectedSurfaceSetRevision: listed.payload.surfaceSetRevision,
+      expectedTopologyRevision: listed.payload.surfaces[0].topology.topologyRevision,
+      surfaceId: surface.surfaceId,
+    });
+    assert.equal(closed.ok, true, JSON.stringify(closed));
+    assert.equal(closed.payload.recoverable, false);
+
+    const pending = core.locklessAuthority.listPendingWindowReleases();
+    assert.equal(pending.length, 1);
+    const release = pending[0]!;
+    assert.equal(release.clientId, clientId);
+    assert.equal(release.surfaceId, surface.surfaceId);
+    assert.equal(release.windowGeneration, 17);
+    assert.equal(release.windowLabel, "a");
+    assert.equal(release.tombstoneKind, "surface");
+    assert.equal("allocationGeneration" in release, false);
+    const expectedReleaseId = releaseIdFor(release);
+    assert.equal(release.releaseId, expectedReleaseId);
+
+    const releaseRequestPromise = waitForRegistration();
+    const releaseSync = registration.synchronize();
+    const { socket: releaseSocket, message: releaseRequest } = await releaseRequestPromise;
+    assert.equal(releaseRequest.payload.windowGenerationV1, true);
+    assert.deepEqual(releaseRequest.payload.surfaces, []);
+    assert.deepEqual(releaseRequest.payload.pendingWindowReleases, [release]);
+    assert.equal(releaseRequest.payload.pendingWindowReleases[0].windowGeneration, 17);
+    assert.deepEqual(
+      releaseRequest.payload.pendingWindowReleases.map((entry: { releaseId: string }) => entry.releaseId),
+      [expectedReleaseId],
+    );
+    respondAsAllocator(releaseSocket, releaseRequest, 17);
+    await releaseSync;
+    assert.deepEqual(core.locklessAuthority.listPendingWindowReleases(), []);
+  } finally {
+    await registration.stop();
+    lifecycle.close();
+    surfaceController.close();
+    for (const socket of registry.clients) socket.terminate();
+    await new Promise<void>((resolve) => registry.close(() => resolve()));
     await server.stop();
   }
 });
