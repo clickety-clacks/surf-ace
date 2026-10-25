@@ -151,7 +151,7 @@ BEGIN
     ), candidates AS (
       SELECT 0::bigint AS ordinal
       UNION
-      SELECT ordinal + 1 FROM occupied
+      SELECT o.ordinal + 1 FROM occupied o
     )
     SELECT min(c.ordinal) INTO chosen_ordinal FROM candidates c
       WHERE NOT EXISTS (SELECT 1 FROM occupied o WHERE o.ordinal = c.ordinal);
