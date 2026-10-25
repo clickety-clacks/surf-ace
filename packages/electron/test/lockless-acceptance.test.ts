@@ -547,10 +547,9 @@ test("AC-TOPO-01 AC-TOPO-02 AC-TOPO-03 AC-TOPO-05 AC-TOPO-06 AC-OPS-02: stale to
   });
 });
 
-test("AC-CAP-01 AC-CLOSE-01..08: P/T conservation permits exact restore over P and stale/invalid failures preserve tombstones atomically", async () => {
+test("AC-CAP-01 AC-FC-1: final pane close cannot be restored and pane creation remains bounded", async () => {
   const core = coreWithLimits(acceptanceLimits({
     maxPanesPerSurface: 2,
-    maxRetainedTombstones: 3,
   }));
   const surface = core.ensurePrimarySurface("Surf Ace", viewport);
   await withRegistryServer(core, async ({ url }) => {
@@ -578,7 +577,13 @@ test("AC-CAP-01 AC-CLOSE-01..08: P/T conservation permits exact restore over P a
         surfaceId: surface.surfaceId,
       });
       assert.equal(closed.ok, true, JSON.stringify(closed));
-      assert.equal(core.locklessAuthority.listTombstones("pane").length, 1);
+      assert.equal(closed.payload.recoverable, false);
+      assert.equal(core.locklessAuthority.listTombstones("pane").length, 0);
+      const finalClose = core.getPersistentState().lockless?.finalCloseRecords.find(
+        (record) => record.tombstoneId === closed.payload.tombstoneId,
+      );
+      assert.ok(finalClose, "the committed close keeps its terminal identity audit");
+      assert.equal(finalClose.closeRevision, closed.payload.topologyRevision);
 
       const resplit = await request(socket, "pane.split", {
         count: 2,
@@ -590,69 +595,30 @@ test("AC-CAP-01 AC-CLOSE-01..08: P/T conservation permits exact restore over P a
       assert.equal(resplit.ok, true, JSON.stringify(resplit));
       assert.equal(core.activePaneIds(surface.surfaceId).length, 2);
 
-      const beforeStale = core.getPersistentState();
-      const stale = await request(socket, "pane.restore", {
-        anchorPaneId: rootPaneId,
-        direction: "horizontal",
-        expectedTopologyRevision: closed.payload.topologyRevision,
-        surfaceId: surface.surfaceId,
-        tombstoneId: closed.payload.tombstoneId,
-      });
-      assert.equal(stale.ok, false);
-      assert.equal(stale.error.code, "stale_topology");
-      const afterStale = core.getPersistentState();
-      assert.deepEqual(afterStale.surfaces, beforeStale.surfaces);
-      assert.deepEqual(
-        afterStale.lockless?.tombstones,
-        beforeStale.lockless?.tombstones,
-      );
-      assert.deepEqual(
-        afterStale.lockless?.scopes,
-        beforeStale.lockless?.scopes,
-      );
-
-      const beforeInvalid = core.getPersistentState();
-      const invalid = await request(socket, "pane.restore", {
-        anchorPaneId: 999_999,
-        direction: "horizontal",
-        expectedTopologyRevision: resplit.payload.topologyRevision,
-        surfaceId: surface.surfaceId,
-        tombstoneId: closed.payload.tombstoneId,
-      });
-      assert.equal(invalid.ok, false);
-      const afterInvalid = core.getPersistentState();
-      assert.deepEqual(afterInvalid.surfaces, beforeInvalid.surfaces);
-      assert.deepEqual(
-        afterInvalid.lockless?.tombstones,
-        beforeInvalid.lockless?.tombstones,
-      );
-      assert.deepEqual(
-        afterInvalid.lockless?.scopes,
-        beforeInvalid.lockless?.scopes,
-      );
-
-      const restored = await request(socket, "pane.restore", {
+      const beforeRestore = core.getPersistentState();
+      const restore = await request(socket, "pane.restore", {
         anchorPaneId: rootPaneId,
         direction: "horizontal",
         expectedTopologyRevision: resplit.payload.topologyRevision,
         surfaceId: surface.surfaceId,
         tombstoneId: closed.payload.tombstoneId,
       });
-      assert.equal(restored.ok, true, JSON.stringify(restored));
-      assert.equal(restored.payload.paneId, secondPaneId);
-      assert.equal(core.activePaneIds(surface.surfaceId).length, 3);
-      assert.equal(core.locklessAuthority.listTombstones("pane").length, 0);
+      assert.equal(restore.ok, false);
+      assert.equal(restore.error.code, "tombstone_not_found");
+      assert.deepEqual(core.getPersistentState(), beforeRestore);
 
+      const beforeCapacityRefusal = core.getPersistentState();
       const refusedCreation = await request(socket, "pane.split", {
         count: 2,
         direction: "horizontal",
-        expectedTopologyRevision: restored.payload.topologyRevision,
+        expectedTopologyRevision: resplit.payload.topologyRevision,
         paneId: rootPaneId,
         surfaceId: surface.surfaceId,
       });
       assert.equal(refusedCreation.ok, false);
       assert.equal(refusedCreation.error.code, "pane_capacity");
-      assert.equal(core.activePaneIds(surface.surfaceId).length, 3);
+      assert.equal(core.activePaneIds(surface.surfaceId).length, 2);
+      assert.deepEqual(core.getPersistentState(), beforeCapacityRefusal);
     } finally {
       socket.close();
     }
@@ -872,7 +838,7 @@ test("CAP-3 websocket mutations reject exact surface and pane byte classes atomi
   });
 });
 
-test("global tombstone lifecycle seam serializes concurrent cross-surface pane closes", async () => {
+test("global lifecycle seam serializes concurrent cross-surface pane final closes", async () => {
   const core = coreWithLimits(acceptanceLimits({
     maxPanesPerSurface: 2,
     maxRetainedTombstones: 1,
@@ -928,6 +894,7 @@ test("global tombstone lifecycle seam serializes concurrent cross-surface pane c
         }),
       ]);
       assert.equal(closed.every((response) => response.ok), true);
+      assert.equal(closed.every((response) => response.payload.recoverable === false), true);
       const ordered = closed
         .map((response, index) => ({
           anchorPaneId: index === 0
@@ -948,33 +915,29 @@ test("global tombstone lifecycle seam serializes concurrent cross-surface pane c
         ordered[1]!.response.payload.closedSequence,
         ordered[0]!.response.payload.closedSequence + 1,
       );
-      const reclaimed = await request(
-        ordered[0]!.socket,
-        "pane.restore",
-        {
-          anchorPaneId: ordered[0]!.anchorPaneId,
+      assert.equal(core.locklessAuthority.listTombstones("pane").length, 0);
+      const finalCloseRecords = core.getPersistentState().lockless?.finalCloseRecords ?? [];
+      for (const entry of ordered) {
+        const finalClose = finalCloseRecords.find(
+          (record) => record.tombstoneId === entry.response.payload.tombstoneId,
+        );
+        assert.ok(finalClose, "each concurrent close has its own terminal identity audit");
+        assert.equal(finalClose.surfaceId, entry.surfaceId);
+        assert.equal(finalClose.closeRevision, entry.response.payload.topologyRevision);
+      }
+      const beforeRestore = core.getPersistentState();
+      for (const entry of ordered) {
+        const restored = await request(entry.socket, "pane.restore", {
+          anchorPaneId: entry.anchorPaneId,
           direction: "horizontal",
-          expectedTopologyRevision:
-            ordered[0]!.response.payload.topologyRevision,
-          surfaceId: ordered[0]!.surfaceId,
-          tombstoneId: ordered[0]!.response.payload.tombstoneId,
-        },
-      );
-      assert.equal(reclaimed.ok, false);
-      assert.equal(reclaimed.error.code, "tombstone_not_found");
-      const retained = await request(
-        ordered[1]!.socket,
-        "pane.restore",
-        {
-          anchorPaneId: ordered[1]!.anchorPaneId,
-          direction: "horizontal",
-          expectedTopologyRevision:
-            ordered[1]!.response.payload.topologyRevision,
-          surfaceId: ordered[1]!.surfaceId,
-          tombstoneId: ordered[1]!.response.payload.tombstoneId,
-        },
-      );
-      assert.equal(retained.ok, true, JSON.stringify(retained));
+          expectedTopologyRevision: entry.response.payload.topologyRevision,
+          surfaceId: entry.surfaceId,
+          tombstoneId: entry.response.payload.tombstoneId,
+        });
+        assert.equal(restored.ok, false);
+        assert.equal(restored.error.code, "tombstone_not_found");
+      }
+      assert.deepEqual(core.getPersistentState(), beforeRestore);
     } finally {
       first.close();
       second.close();

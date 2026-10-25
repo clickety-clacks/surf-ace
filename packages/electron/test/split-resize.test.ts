@@ -351,7 +351,7 @@ test("uncertain atomic topology occurrence survives proven candidate reload and 
   } finally { await stopUnstartedServer(server); await fs.rm(dir, { recursive: true, force: true }); }
 });
 
-test("actual local close queued behind held-core resize settles and preserves a valid tombstone", async () => {
+test("actual local window close queued behind held-core resize commits final-close state", async () => {
   const { core, surfaceId, server, expected, geometry } = fixture();
   let release!: () => void, entered!: () => void;
   const barrier = new Promise<void>((resolve) => { release = resolve; });
@@ -376,7 +376,14 @@ test("actual local close queued behind held-core resize settles and preserves a 
     assert.equal(results[1], true);
     assert.equal(results[2].surfaceId, surfaceId);
     assert.equal(core.listSurfaces().some((surface) => surface.surfaceId === surfaceId), false);
-    assert.ok(core.locklessAuthority.listTombstones("surface").some((entry) => entry.tombstoneId === results[2].tombstoneId));
+    assert.equal(core.locklessAuthority.listTombstones("surface").length, 0);
+    const finalClose = core.getPersistentState().lockless?.finalCloseRecords.find(
+      (record) => record.tombstoneId === results[2].tombstoneId,
+    );
+    assert.ok(finalClose, "the committed local window close keeps its terminal identity audit");
+    assert.equal(finalClose.kind, "surface");
+    assert.equal(finalClose.surfaceId, surfaceId);
+    assert.equal(finalClose.paneIdentities.length, 2);
   } finally { clearTimeout(timeout); release(); core.transactionAsync = original; await stopUnstartedServer(server); }
 });
 
