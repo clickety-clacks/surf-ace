@@ -233,7 +233,7 @@ export type PersistentRegistryEndpointLease = {
 export type ConfirmedRegistryClaim = {
   panes: Array<{ allocationGeneration: number | null; paneId: string; paneLabel: number; paneLineageId: string }>;
   surfaceId: string;
-  windowAllocationGeneration: number | null;
+  windowAllocationGeneration?: number;
   windowLabel: string;
 };
 
@@ -980,9 +980,7 @@ export class SurfaceCore {
     ) => {
       const confirmed = panes.filter((pane) => pane.paneLabel > 0);
       if ((!isValidWindowLabel(windowLabel) || windowLabelConfirmed === false) && confirmed.length === 0) return;
-      const claim = claims.get(surfaceId) ?? {
-        panes: [], surfaceId, windowAllocationGeneration: null, windowLabel,
-      };
+      const claim = claims.get(surfaceId) ?? { panes: [], surfaceId, windowLabel };
       if (Number.isSafeInteger(windowAllocationGeneration) && Number(windowAllocationGeneration) > 0) {
         claim.windowAllocationGeneration = Number(windowAllocationGeneration);
       }

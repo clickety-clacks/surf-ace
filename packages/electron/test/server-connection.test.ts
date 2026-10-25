@@ -168,6 +168,9 @@ test("pending window releases block pane claims until the registry acknowledges 
     windowAllocationGeneration: 8,
     windowLabel: "a",
   }, [], { closeRevision: 2 });
+  core.removeSurface(surface.surfaceId, false);
+  const claimSurface = core.ensurePrimarySurface("Replacement surface", { width: 800, height: 600, scale: 1 });
+  core.admitSurfaceToLockless(claimSurface.surfaceId);
   const connection = new ServerConnection({
     clientId,
     core,
@@ -193,7 +196,7 @@ test("pending window releases block pane claims until the registry acknowledges 
     central.reply(1, true, true, 700, undefined, undefined, true);
     await releaseRetry;
     assert.equal(core.locklessAuthority.listPendingWindowReleases().length, 0);
-    const claim = connection.claimPaneLabel(surface.surfaceId, 20, "pl_claim_after_close");
+    const claim = connection.claimPaneLabel(claimSurface.surfaceId, 20, "pl_claim_after_close");
     await until(() => central.requests.length === 3);
     assert.equal(central.requests[2]!.message.op, "pane.claim");
     central.requests[2]!.socket.send(JSON.stringify({

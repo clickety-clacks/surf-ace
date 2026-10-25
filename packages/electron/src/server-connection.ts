@@ -157,7 +157,7 @@ export class ServerConnection {
         }
       }
 
-      if (this.options.configuredAddress && await tryAddress(this.options.configuredAddress)) {
+      if (this.options.configuredAddress && await tryAddress(this.options.configuredAddress, true)) {
         if (this.browsing) {
           await this.discovery.stop();
           this.browsing = false;
