@@ -68,6 +68,7 @@ export class ServerConnection {
     persist: () => Promise<void>;
     onError?: (error: unknown) => void;
     discovery?: SurfAceDiscoveryService;
+    registryRebindWaitMs?: number;
     requestTimeoutMs?: number;
   }) {
     this.discovery = options.discovery ?? createBonjourSurfAceDiscoveryService({ timeoutMs: 1500 });
@@ -270,22 +271,60 @@ export class ServerConnection {
             registration = null;
             continue;
           }
-          if (this.options.core.isPriorRegistryBinding(this.options.clientId, identity.allocatorId, identity.fleetId)) {
-            this.reportFailure(
-              `${route.context} ${route.address} rejected: registry identity was previously abandoned`,
-              true,
-              failures,
-            );
-            await registration.stop();
-            registration = null;
-            continue;
-          }
           if (!firstForeign) firstForeign = { ...route, registration, identity };
           else await registration.stop();
           registration = null;
         } catch (error) {
           await registration?.stop();
           this.reportFailure(`${route.context} ${route.address} identity probe failed: ${describeError(error)}`, true, failures);
+        }
+      }
+
+      if (!matchingRegistrySeen && firstForeign && boundForClient) {
+        const waitMs = Math.max(0, Math.min(2_000, this.options.registryRebindWaitMs ?? 250));
+        const deadline = Date.now() + waitMs;
+        while (!this.stopped && Date.now() < deadline && !matchingRegistrySeen) {
+          await new Promise<void>((resolve) => setTimeout(resolve, Math.min(25, Math.max(1, deadline - Date.now()))));
+          try { await this.discovery.refreshNow(); } catch { /* Continue through the bounded rebind wait. */ }
+          const returningAddresses: Array<{ address: string; configured: boolean; context: string }> = [];
+          if (this.options.configuredAddress) {
+            returningAddresses.push({ address: this.options.configuredAddress, configured: true, context: "configured registry" });
+          }
+          for (const endpoint of this.discovery.getSnapshot()) {
+            if (endpoint.role !== "server" || !isServerContract(endpoint) || isUnspecifiedAddress(endpoint.host)) continue;
+            for (const address of endpointAddresses(endpoint)) {
+              returningAddresses.push({ address, configured: false, context: `discovered registry ${endpoint.instanceName}` });
+            }
+          }
+          const checked = new Set<string>();
+          for (const route of returningAddresses) {
+            if (checked.has(route.address) || route.address === firstForeign.address) continue;
+            checked.add(route.address);
+            let registration: ConfiguredServerRegistration | null = null;
+            try {
+              registration = new ConfiguredServerRegistration(
+                route.address,
+                this.options.clientId,
+                this.options.core,
+                this.options.persist,
+                this.options.onError,
+                this.options.requestTimeoutMs ?? 2000,
+                this.options.directEndpoint ?? null,
+              );
+              const identity = await registration.readRegistryIdentity();
+              if (identity.allocatorId === boundForClient.allocatorId && identity.fleetId === boundForClient.fleetId) {
+                matchingRegistrySeen = true;
+                const returning = { ...route, registration, identity };
+                registration = null;
+                if (await adopt(returning, false)) return;
+                break;
+              }
+            } catch {
+              // A failed probe during the bounded wait does not make a foreign identity eligible.
+            } finally {
+              await registration?.stop();
+            }
+          }
         }
       }
 

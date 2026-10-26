@@ -142,6 +142,7 @@ export class ConfiguredServerRegistration {
       this.registryIdentity = identity;
 
       const registrationPayload = await this.buildRegistrationPayload();
+      await this.deliverPendingReleases(registrationPayload, identity);
       const registered = await this.registerLiveClaims(registrationPayload);
       const parsed = this.parseRegistrationResponse(registered.response, registered.payload, identity);
       await this.core.locklessAuthority.transactionAsync(() =>
@@ -157,7 +158,6 @@ export class ConfiguredServerRegistration {
         }),
       );
       this.core.confirmRegistryPaneLabels(parsed.surfaces);
-      await this.deliverPendingReleases(registered.payload, identity);
 
       const pendingWindowReleaseIdsAfterSync = new Set(
         this.core.locklessAuthority.listPendingWindowReleases().map((release) => release.releaseId),
@@ -199,6 +199,13 @@ export class ConfiguredServerRegistration {
         if (this.core.normalizeRefusedRegistryClaims()) await this.persist();
         const surfaces = this.core.listSurfaces();
         for (const surface of surfaces) this.core.admitSurfaceToLockless(surface.surfaceId);
+        const hasPendingReleases = this.core.locklessAuthority.listPendingPaneReleases().length > 0 ||
+          this.core.locklessAuthority.listPendingWindowReleases().length > 0;
+        if (hasPendingReleases) {
+          // Persist the live snapshot and terminal close evidence together before
+          // the allocator can observe either the release or replacement claims.
+          await this.persist();
+        }
         return {
           clientId: this.clientId,
           directEndpoint: this.directEndpoint,
@@ -381,39 +388,90 @@ export class ConfiguredServerRegistration {
   ): Promise<void> {
     const paneReleases = this.core.locklessAuthority.listPendingPaneReleases();
     const windowReleases = this.core.locklessAuthority.listPendingWindowReleases();
-    for (const release of paneReleases) {
-      await this.persist();
-      const response = await this.tryRelease(livePayload, identity, "pane", release);
+    if (paneReleases.length === 0 && windowReleases.length === 0) return;
+    const registrationWithReleases: RegistrationPayload = {
+      ...livePayload,
+      pendingPaneReleases: paneReleases,
+      pendingWindowReleases: windowReleases,
+    };
+    try {
+      const response = await this.sendRegistration(registrationWithReleases);
+      if (response.ok && this.completedReleasesMatch(response, paneReleases, windowReleases)) {
+        await this.acknowledgeReleases(paneReleases, windowReleases);
+        return;
+      }
+      if (!response.ok) {
+        // A mixed batch may have committed earlier releases before a later one
+        // was refused. Isolate each exact item below; identical release evidence
+        // is idempotent, and the registry processes releases before claims.
+      }
+    } catch {
+      // The request may have reached the allocator. Resolve each release using
+      // its idempotent evidence before any later label claims are sent.
+    }
+
+    const baseline: RegistrationPayload = {
+      ...livePayload,
+      pendingPaneReleases: [],
+      pendingWindowReleases: [],
+    };
+    let baselineAccepted = false;
+    try {
+      baselineAccepted = (await this.sendRegistration(baseline)).ok;
+    } catch {
+      // Keep unresolved release evidence pending when the no-release baseline
+      // cannot establish that the registry is accepting registrations.
+    }
+    if (!baselineAccepted) return;
+
+    for (const [kind, release] of [
+      ...paneReleases.map((release) => ["pane", release] as const),
+      ...windowReleases.map((release) => ["window", release] as const),
+    ]) {
+      const response = await this.tryRelease(baseline, identity, kind, release);
       if (response === "unknown") break;
       if (response === "accepted") {
-        await this.core.locklessAuthority.transactionAsync(() => this.core.transactionAsync(async () => {
-          this.core.locklessAuthority.acknowledgePaneReleases([release.releaseId]);
-          await this.persist();
-        }));
+        await this.acknowledgeReleases(kind === "pane" ? [release as PersistentPaneRetirement] : [],
+          kind === "window" ? [release as PersistentWindowRetirement] : []);
       } else {
-        await this.core.locklessAuthority.transactionAsync(() => this.core.transactionAsync(async () => {
-          this.core.locklessAuthority.discardRejectedPaneRelease(release.releaseId);
-          await this.persist();
-        }));
+        await this.discardRejectedRelease(kind, release.releaseId);
       }
     }
-    for (const release of windowReleases) {
-      if (!this.core.locklessAuthority.listPendingWindowReleases().some((item) => item.releaseId === release.releaseId)) continue;
+  }
+
+  private completedReleasesMatch(
+    response: ControllerWireEnvelope,
+    paneReleases: PersistentPaneRetirement[],
+    windowReleases: PersistentWindowRetirement[],
+  ): boolean {
+    const body = response.payload as { completedPaneReleaseIds?: unknown; completedWindowReleaseIds?: unknown };
+    const paneIds = paneReleases.map((release) => release.releaseId);
+    const windowIds = windowReleases.map((release) => release.releaseId);
+    return Array.isArray(body?.completedPaneReleaseIds) &&
+      body.completedPaneReleaseIds.length === paneIds.length &&
+      body.completedPaneReleaseIds.every((releaseId, index) => releaseId === paneIds[index]) &&
+      Array.isArray(body?.completedWindowReleaseIds) &&
+      body.completedWindowReleaseIds.length === windowIds.length &&
+      body.completedWindowReleaseIds.every((releaseId, index) => releaseId === windowIds[index]);
+  }
+
+  private async acknowledgeReleases(
+    paneReleases: PersistentPaneRetirement[],
+    windowReleases: PersistentWindowRetirement[],
+  ): Promise<void> {
+    await this.core.locklessAuthority.transactionAsync(() => this.core.transactionAsync(async () => {
+      this.core.locklessAuthority.acknowledgePaneReleases(paneReleases.map((release) => release.releaseId));
+      this.core.locklessAuthority.acknowledgeWindowReleases(windowReleases.map((release) => release.releaseId));
       await this.persist();
-      const response = await this.tryRelease(livePayload, identity, "window", release);
-      if (response === "unknown") break;
-      if (response === "accepted") {
-        await this.core.locklessAuthority.transactionAsync(() => this.core.transactionAsync(async () => {
-          this.core.locklessAuthority.acknowledgeWindowReleases([release.releaseId]);
-          await this.persist();
-        }));
-      } else {
-        await this.core.locklessAuthority.transactionAsync(() => this.core.transactionAsync(async () => {
-          this.core.locklessAuthority.discardRejectedWindowRelease(release.releaseId);
-          await this.persist();
-        }));
-      }
-    }
+    }));
+  }
+
+  private async discardRejectedRelease(kind: "pane" | "window", releaseId: string): Promise<void> {
+    await this.core.locklessAuthority.transactionAsync(() => this.core.transactionAsync(async () => {
+      if (kind === "pane") this.core.locklessAuthority.discardRejectedPaneRelease(releaseId);
+      else this.core.locklessAuthority.discardRejectedWindowRelease(releaseId);
+      await this.persist();
+    }));
   }
 
   private async tryRelease(

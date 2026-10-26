@@ -2190,6 +2190,10 @@ export class LocklessClientAuthority {
     return held;
   }
 
+  clearTombstoneAllocationClaims(): void {
+    this.clearTombstoneAllocationClaimsInState();
+  }
+
   discardRejectedPaneRelease(releaseId: string): void {
     this.discardRejectedRelease(this.state.pendingPaneReleases, "pane", releaseId);
   }
@@ -2213,7 +2217,7 @@ export class LocklessClientAuthority {
     }
   }
 
-  private clearTombstoneAllocationClaims(): void {
+  private clearTombstoneAllocationClaimsInState(): void {
     const clearPane = (pane: unknown): void => {
       if (!pane || typeof pane !== "object" || Array.isArray(pane)) return;
       const value = pane as Record<string, unknown>;

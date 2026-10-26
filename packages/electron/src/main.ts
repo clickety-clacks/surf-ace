@@ -496,7 +496,7 @@ async function loadPersistentState(): Promise<PersistentSurfaceState | undefined
 
 async function persistState(): Promise<void> {
   if (persistentStateOutcomeUnknown) throw new Error("Local persistence is paused pending reconciliation");
-  if (persistentStateWriteGuard) {
+  if (persistentStateWriteGuard && persistentStateWriteGuard !== "corrupt-primary") {
     clientWarn("state_persist_skipped_corrupt_restore", {
       path: path.join(stateDir, STATE_FILE_NAME),
       write_guard: persistentStateWriteGuard,
@@ -513,6 +513,7 @@ async function persistState(): Promise<void> {
         if (persistentStateOutcomeUnknown) throw new Error("Local persistence is paused pending reconciliation");
         try {
           await writePersistentStateFile(stateDir, STATE_FILE_NAME, candidate);
+          persistentStateWriteGuard = false;
           confirmedAnnotationLocalSaves.confirm(candidate);
         } catch (error) {
           if (error instanceof PersistentStateOutcomeUnknownError) {
@@ -537,7 +538,9 @@ async function persistState(): Promise<void> {
 }
 
 async function persistRegistryState(): Promise<void> {
-  if (persistentStateWriteGuard) throw new Error("registry_binding_persistence_pending");
+  if (persistentStateWriteGuard && persistentStateWriteGuard !== "corrupt-primary") {
+    throw new Error("registry_binding_persistence_pending");
+  }
   await persistState();
 }
 
