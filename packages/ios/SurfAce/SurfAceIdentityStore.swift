@@ -26,9 +26,19 @@ struct SurfAceIdentityStore {
     private let account = "ed25519-private-key"
 
     func loadOrCreateIdentity() throws -> SurfAceIdentity {
-        if let stored = try loadKeyData() {
-            let privateKey = try Curve25519.Signing.PrivateKey(rawRepresentation: stored)
-            return makeIdentity(from: privateKey)
+        var stored: Data?
+        do {
+            stored = try loadKeyData()
+        } catch SurfAceIdentityStoreError.invalidStoredKey {
+            try deleteKeyData()
+        }
+        if let stored {
+            do {
+                let privateKey = try Curve25519.Signing.PrivateKey(rawRepresentation: stored)
+                return makeIdentity(from: privateKey)
+            } catch {
+                try deleteKeyData()
+            }
         }
 
         let privateKey = Curve25519.Signing.PrivateKey()
@@ -76,6 +86,18 @@ struct SurfAceIdentityStore {
         // Never overwrite an identity created by another concurrent startup.
         let status = SecItemAdd(query as CFDictionary, nil)
         guard status == errSecSuccess || status == errSecDuplicateItem else {
+            throw SurfAceIdentityStoreError.keychain(status)
+        }
+    }
+
+    private func deleteKeyData() throws {
+        let query: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: service,
+            kSecAttrAccount: account
+        ]
+        let status = SecItemDelete(query as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
             throw SurfAceIdentityStoreError.keychain(status)
         }
     }
