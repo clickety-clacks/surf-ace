@@ -18,6 +18,7 @@ const CONTROL_PROJECTION_V1: &str = "control_projection_v1";
 const DISCOVERY_TIMEOUT: Duration = Duration::from_millis(2_000);
 const DISCOVERY_REGISTRY_MAX_BYTES: usize = 1_048_576;
 const DISCOVERY_DESCRIBE_MAX_BYTES: usize = 65_536;
+const MAX_READINESS_REASON_CHARS: usize = 512;
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -670,13 +671,28 @@ fn probe_surface(candidate: &EndpointCandidate, observed_at_ms: u64) -> Result<V
         } else {
             "unknown"
         };
-        return Err(with_probe_evidence(
+        let error = with_probe_evidence(
             discovery_error(mapped, format!("{message}: {code}")),
             candidate,
             observed_at_ms,
             "reachable",
             readiness,
-        ));
+        );
+        let readiness_reason = (mapped == "client_not_ready")
+            .then(|| {
+                response
+                    .response
+                    .error
+                    .as_ref()
+                    .and_then(|error| error.get("message"))
+                    .and_then(Value::as_str)
+            })
+            .flatten()
+            .and_then(bounded_readiness_reason);
+        return Err(match readiness_reason {
+            Some(reason) => with_probe_readiness_reason(error, reason),
+            None => error,
+        });
     }
     let payload = match response.response.payload {
         Some(payload) => payload,
@@ -703,6 +719,42 @@ fn probe_surface(candidate: &EndpointCandidate, observed_at_ms: u64) -> Result<V
         ));
     }
     Ok(payload)
+}
+
+fn bounded_readiness_reason(message: &str) -> Option<String> {
+    if message.trim().is_empty() {
+        return None;
+    }
+    let mut chars = message.chars();
+    let mut reason: String = chars.by_ref().take(MAX_READINESS_REASON_CHARS).collect();
+    if chars.next().is_some() {
+        reason.pop();
+        reason.push('…');
+    }
+    Some(reason)
+}
+
+fn with_probe_readiness_reason(error: CliError, reason: String) -> CliError {
+    match error {
+        CliError::Discovery {
+            code,
+            message,
+            mut details,
+        } => {
+            if let Some(readiness) = details
+                .get_mut("applicationReadiness")
+                .and_then(Value::as_object_mut)
+            {
+                readiness.insert("readinessReason".into(), Value::String(reason));
+            }
+            CliError::Discovery {
+                code,
+                message,
+                details,
+            }
+        }
+        other => other,
+    }
 }
 
 fn with_probe_evidence(

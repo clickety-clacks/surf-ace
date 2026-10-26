@@ -61,7 +61,9 @@ was absent, invalid, expired, or changed during observation.
 connects but does not return a valid describe response, `application_unresponsive`
 reports the reachable transport separately from unknown application readiness.
 `client_not_ready` and `revision_churn` are explicit evidence, not permission to
-fall back to a different route. Other bounded errors distinguish
+fall back to a different route. For `client_not_ready`, the command includes the
+direct client's existing message as `applicationReadiness.readinessReason`,
+limited to 512 characters. Other bounded errors distinguish
 invalid/unsupported responses and oversized responses. A later stateful read or mutation still
 needs the explicitly selected client endpoint, and every mutation retains its
 own expected-revision and correlated-receipt guards.

@@ -154,6 +154,7 @@ pub fn document(target: Option<&str>) -> Result<Value, String> {
             "discoveryLimits": [
                 "fleet-list reads registry inventory and configured endpoint leases; it does not prove endpoint reachability.",
                 "window-describe reads fleet.topology, sends one nonce-correlated surface.describe to the leased direct endpoint before pairing, then rechecks fleet.topology; identity matching is consistency only and does not authenticate either peer.",
+                "For client_not_ready, window-describe includes the direct client's existing message as applicationReadiness.readinessReason, limited to 512 characters.",
                 "list and capture-pane pair a controller before their direct request; they are not no-pair discovery probes.",
                 "window-describe does not pair, create controller state, or authorize later mutations; writes still need their own explicit endpoint and revision guards."
             ],

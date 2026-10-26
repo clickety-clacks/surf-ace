@@ -550,9 +550,7 @@ fn spawn_registry_sequence_with_outcomes(
     (format!("ws://{address}"), task)
 }
 
-fn spawn_rejected_surface_describe_server(
-    code: &'static str,
-) -> (String, thread::JoinHandle<Value>) {
+fn spawn_rejected_surface_describe_server(error: Value) -> (String, thread::JoinHandle<Value>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let task = thread::spawn(move || {
@@ -569,7 +567,7 @@ fn spawn_rejected_surface_describe_server(
         socket
             .send(Message::Text(
                 json!({
-                    "id": request["id"], "op": "surface.describe", "error": { "code": code },
+                    "id": request["id"], "op": "surface.describe", "error": error,
                     "sentAt": epoch_ms(), "type": "response", "v": 1, "ok": false
                 })
                 .to_string()
@@ -1583,7 +1581,7 @@ fn window_describe_serialized_discovery_errors_match_advertised_error_schema() {
     let client_id = "8".repeat(64);
     let surface_id = "sf_rejected_schema";
     let (endpoint, endpoint_server) =
-        spawn_rejected_surface_describe_server("unexpected_client_failure");
+        spawn_rejected_surface_describe_server(json!({ "code": "unexpected_client_failure" }));
     let topology = discovery_topology(
         vec![discovery_client(
             &client_id,
@@ -1607,6 +1605,69 @@ fn window_describe_serialized_discovery_errors_match_advertised_error_schema() {
     common::schema::validate(&error_schema, &error_schema, &rejected_json).unwrap();
     assert_eq!(registry_server.join().unwrap().len(), 2);
     assert_eq!(endpoint_server.join().unwrap()["op"], "surface.describe");
+}
+
+#[test]
+fn window_describe_exposes_a_bounded_server_not_ready_message() {
+    let long_reason = format!("{}tail", "λ".repeat(700));
+    let cases = [
+        (
+            "The client is restoring its authoritative snapshot".to_owned(),
+            "The client is restoring its authoritative snapshot".to_owned(),
+        ),
+        (
+            long_reason,
+            format!("{}…", "λ".repeat(511)),
+        ),
+    ];
+
+    for (server_reason, expected_reason) in cases {
+        let now = epoch_ms();
+        let client_id = "8".repeat(64);
+        let surface_id = "sf_not_ready_reason";
+        let (endpoint, endpoint_server) = spawn_rejected_surface_describe_server(json!({
+            "code": "not_ready",
+            "message": server_reason,
+        }));
+        let topology = discovery_topology(
+            vec![discovery_client(
+                &client_id,
+                Some(&endpoint),
+                vec![discovery_surface(surface_id, "a")],
+                5,
+                now - 10,
+                now + 10_000,
+                true,
+            )],
+            now,
+        );
+        let (registry, registry_server) =
+            spawn_registry_sequence(vec![topology.clone(), topology]);
+        let output = run_window_describe(&registry, "a");
+        assert!(!output.status.success());
+        let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            result["error"]["code"],
+            "client_not_ready",
+            "result={result}"
+        );
+        assert_eq!(
+            result["error"]["details"]["applicationReadiness"]["status"],
+            "not_ready"
+        );
+        assert_eq!(
+            result["error"]["details"]["applicationReadiness"]["limitationCodes"],
+            json!(["not_ready"])
+        );
+        let readiness_reason = result["error"]["details"]["applicationReadiness"]
+            ["readinessReason"]
+            .as_str()
+            .unwrap();
+        assert_eq!(readiness_reason, expected_reason);
+        assert!(readiness_reason.chars().count() <= 512);
+        assert_eq!(registry_server.join().unwrap().len(), 2);
+        assert_eq!(endpoint_server.join().unwrap()["op"], "surface.describe");
+    }
 }
 
 #[test]
