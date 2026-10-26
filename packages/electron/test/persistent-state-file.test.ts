@@ -330,7 +330,7 @@ test("persistent state recovers last-good backup when primary JSON is truncated"
   assert.deepEqual(JSON.parse(await fs.readFile(path.join(stateDir, STATE_FILE_NAME), "utf8")), state);
 });
 
-test("transient primary read failure does not restore an older backup as current state", async () => {
+test("an unreadable primary recovers from its readable backup", async () => {
   const stateDir = await temporaryStateDir();
   const primaryPath = path.join(stateDir, STATE_FILE_NAME);
   const backupPath = path.join(stateDir, backupStateFileName(STATE_FILE_NAME));
@@ -340,8 +340,12 @@ test("transient primary read failure does not restore an older backup as current
   await fs.writeFile(backupPath, JSON.stringify(olderState));
 
   const originalReadFile = fs.readFile;
+  let attempts = 0;
   fs.readFile = (async (...args: Parameters<typeof fs.readFile>) => {
-    if (args[0] === primaryPath) throw Object.assign(new Error("temporary read failure"), { code: "EIO" });
+    if (args[0] === primaryPath) {
+      attempts += 1;
+      throw Object.assign(new Error("temporary read failure"), { code: "EIO" });
+    }
     return await originalReadFile(...args);
   }) as typeof fs.readFile;
   let result: Awaited<ReturnType<typeof loadPersistentStateFile>>;
@@ -351,12 +355,14 @@ test("transient primary read failure does not restore an older backup as current
     fs.readFile = originalReadFile;
   }
 
-  assert.equal(result.writeGuard, "ambiguous-persistence");
-  assert.equal(result.state, undefined);
-  assert.equal(await fs.readFile(primaryPath, "utf8"), JSON.stringify(currentState));
+  assert.equal(attempts, 1);
+  assert.equal(result.writeGuard, false);
+  assert.equal(result.recoveredFromBackup, true);
+  assert.deepEqual(result.state, olderState);
+  assert.deepEqual(JSON.parse(await fs.readFile(primaryPath, "utf8")), olderState);
 });
 
-test("persistent state retries a transient primary read before considering backup recovery", async () => {
+test("an unreadable primary with no readable backup starts with fresh state without retrying", async () => {
   const stateDir = await temporaryStateDir();
   const primaryPath = path.join(stateDir, STATE_FILE_NAME);
   const currentState = { ...multiWindowState(), primarySurfaceId: "sf_secondary" as never };
@@ -377,8 +383,8 @@ test("persistent state retries a transient primary read before considering backu
     fs.readFile = originalReadFile;
   }
 
-  assert.equal(attempts, 2);
-  assert.deepEqual(result.state, currentState);
+  assert.equal(attempts, 1);
+  assert.equal(result.state, undefined);
   assert.equal(result.writeGuard, false);
 });
 

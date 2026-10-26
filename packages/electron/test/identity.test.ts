@@ -20,7 +20,7 @@ test("identity fingerprint prefix is derived from the persisted public key", asy
   }
 });
 
-test("identity retries a transient read failure without replacing the saved client identity", async () => {
+test("an unreadable identity starts fresh without retrying the failed read", async () => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-electron-identity-"));
   const identityPath = path.join(stateDir, "surface-identity.json");
   try {
@@ -40,8 +40,9 @@ test("identity retries a transient read failure without replacing the saved clie
       fs.readFile = originalReadFile;
     }
 
-    assert.equal(attempts, 2);
-    assert.deepEqual(restored, original);
+    assert.equal(attempts, 1);
+    assert.notEqual(restored.publicKeyPem, original.publicKeyPem);
+    assert.deepEqual(await loadOrCreateIdentity(stateDir), restored);
   } finally {
     await fs.rm(stateDir, { force: true, recursive: true });
   }

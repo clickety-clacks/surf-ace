@@ -407,6 +407,13 @@ test("pending window releases reach the registry before replacement claims", asy
   const closedSurface = core.ensurePrimarySurface("Pending release", { width: 800, height: 600, scale: 1 });
   const oldClaim = closeSurfaceWithAllocatedLabels(core, closedSurface.surfaceId, "a", 8, 7, 9);
   const claimSurface = core.ensurePrimarySurface("Replacement surface", { width: 800, height: 600, scale: 1 });
+  assert.notEqual(claimSurface.surfaceId, oldClaim.surfaceId);
+  const claimPane = [...claimSurface.panes.values()][0]!;
+  core.contentSet(claimSurface.surfaceId, {
+    content: { markdown: "Replacement content" }, contentId: "ct_replacement_surface" as never,
+    contentType: "markdown", historyOwnerToken: "hot_replacement_surface",
+    paneId: claimPane.paneId as never, revision: 1 as never,
+  });
   const oldPane = core.getPersistentState().lockless!.paneRetirementAudits[0]!;
   const registry = await automaticRegistryFixture({ seed: [{
     surfaceId: oldClaim.surfaceId,
@@ -435,6 +442,8 @@ test("pending window releases reach the registry before replacement claims", asy
     assert.equal(core.locklessAuthority.listPendingPaneReleases().length, 0);
     assert.equal(core.getRendererWindowState(claimSurface.surfaceId).windowLabel, "a");
     assert.equal(core.getRendererWindowState(claimSurface.surfaceId).panes[0]?.label, "7");
+    assert.equal(core.getRendererWindowState(claimSurface.surfaceId).panes[0]?.content.contentId, "ct_replacement_surface");
+    assert.equal(core.getRendererWindowState(claimSurface.surfaceId).panes[0]?.content.content.markdown, "Replacement content");
     assert.ok(Number(core.listSurfaces()[0]!.windowAllocationGeneration) > 8);
   } finally {
     await registration.stop();

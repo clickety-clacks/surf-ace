@@ -14,9 +14,9 @@ export async function loadOrCreateIdentity(stateDir: string): Promise<SurfaceIde
   const filePath = path.join(stateDir, IDENTITY_FILE_NAME);
   let contents: string | undefined;
   try {
-    contents = await readIdentityWithRetry(filePath);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    contents = await fs.readFile(filePath, "utf8");
+  } catch {
+    // Unreadable identity bytes are replaced; a failed replacement write still propagates.
   }
 
   let parsed: SurfaceIdentity | undefined;
@@ -59,17 +59,6 @@ export async function loadOrCreateIdentity(stateDir: string): Promise<SurfaceIde
   };
   await fs.writeFile(filePath, JSON.stringify(identity, null, 2));
   return identity;
-}
-
-async function readIdentityWithRetry(filePath: string): Promise<string> {
-  for (let attempt = 0; ; attempt += 1) {
-    try {
-      return await fs.readFile(filePath, "utf8");
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT" || attempt >= 2) throw error;
-      await new Promise<void>((resolve) => setTimeout(resolve, 25 * 2 ** attempt));
-    }
-  }
 }
 
 function publicKeyFingerprintPrefix(publicKeyPem: string): string {

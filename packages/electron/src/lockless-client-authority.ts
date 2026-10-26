@@ -2168,6 +2168,12 @@ export class LocklessClientAuthority {
     );
   }
 
+  isSurfaceFinallyClosed(surfaceId: string): boolean {
+    return this.state.finalCloseRecords.some((entry) =>
+      entry.kind === "surface" && entry.surfaceId === surfaceId,
+    );
+  }
+
   listPendingPaneReleases(): PersistentPaneRetirement[] {
     return clone(this.state.pendingPaneReleases);
   }

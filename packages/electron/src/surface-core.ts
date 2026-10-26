@@ -1767,7 +1767,9 @@ export class SurfaceCore {
 
   ensurePrimarySurface(name: string, viewport: SurfaceViewport): SurfaceState {
     const existingId = this.persistentState.primarySurfaceId;
-    if (existingId && this.surfaces.has(existingId)) {
+    const existingIdIsFinallyClosed = existingId !== null &&
+      this.locklessAuthority.isSurfaceFinallyClosed(existingId);
+    if (existingId && !existingIdIsFinallyClosed && this.surfaces.has(existingId)) {
       const existing = this.surfaces.get(existingId)!;
       existing.name = name;
       existing.viewport = cloneViewport(viewport);
@@ -1776,6 +1778,9 @@ export class SurfaceCore {
       this.emit({ surfaceId: existing.surfaceId, type: "surface-changed" });
       return existing;
     }
+    if (existingIdIsFinallyClosed && existingId && this.surfaces.has(existingId)) {
+      this.removeSurface(existingId);
+    }
 
     const retainedSurfaceIds = new Set(
       this.locklessAuthority
@@ -1783,7 +1788,7 @@ export class SurfaceCore {
         .map((entry) => entry.surfaceId),
     );
     const surfaceId =
-      existingId && !retainedSurfaceIds.has(existingId)
+      existingId && !existingIdIsFinallyClosed && !retainedSurfaceIds.has(existingId)
         ? existingId
         : `sf_${randomUUID().replaceAll("-", "").slice(0, 12)}`;
     const surface = this.createSurface(surfaceId, name, viewport);
