@@ -186,7 +186,7 @@ function buildDescribeRequest(
 function layoutPaneIds(node: any): number[] | null {
   if (!node || typeof node !== "object") return null;
   if (node.type === "pane") {
-    return Number.isSafeInteger(node.paneId) && node.paneId > 0 ? [node.paneId] : null;
+    return Number.isSafeInteger(node.paneId) && node.paneId >= 0 ? [node.paneId] : null;
   }
   if (node.type !== "split" || !["horizontal", "vertical"].includes(node.direction)
       || !Array.isArray(node.children) || node.children.length < 2) {
@@ -340,7 +340,7 @@ function discover(input: {
   const paneIdsValid = payload.panes.every((item: any) =>
     hasExactKeys(item, ["paneId", "paneLabel", "contentObservation"])
       && hasExactKeys(item.contentObservation, ["revision", "source", "observedAtMs"])
-      && Number.isSafeInteger(item.paneId) && item.paneId > 0
+      && Number.isSafeInteger(item.paneId) && item.paneId >= 0
       && (item.paneLabel === null || (Number.isSafeInteger(item.paneLabel) && item.paneLabel > 0))
       && item.contentObservation
       && (item.contentObservation.revision === null
@@ -419,6 +419,22 @@ test("current unique lease plus nonce-bound pre-pair describe returns separate e
   assert.deepEqual(output.operations, ["fleet.topology", "surface.describe", "fleet.topology"]);
   assert.deepEqual(output.writes, []);
   assert.deepEqual(input, before);
+});
+
+test("a restored pane ID zero remains in the successful describe topology", () => {
+  const base = describeResponse();
+  const layout = {
+    type: "split",
+    direction: "vertical",
+    children: [{ type: "pane", paneId: 3 }, { type: "pane", paneId: 0 }],
+  };
+  const panes = [pane(0, null, null), pane(3, null, null)];
+  const response = describeResponse({ payload: { ...base.payload, layout, panes } });
+  const output = discover(validInput({ response }) as any);
+
+  assert.equal(output.status, "current");
+  assert.deepEqual(output.layout, layout);
+  assert.deepEqual(output.panes?.map((item: any) => item.paneId), [0, 3]);
 });
 
 test("request shape has no pair, controller admission, or registry mutation fields", () => {

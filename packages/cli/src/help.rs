@@ -892,7 +892,7 @@ fn result_schema(command: Command, description: &str) -> Value {
                         "observedAtMs": nonnegative_integer_schema(), "applicationReadiness": { "type": "object" },
                         "surfaceSetRevision": nonnegative_integer_schema(), "topologyRevision": nonnegative_integer_schema(),
                         "layout": { "type": "object" },
-                        "panes": { "type": "array", "minItems": 1, "items": { "type": "object", "required": ["paneId", "paneLabel", "contentObservation"], "properties": { "paneId": positive_integer_schema(), "paneLabel": { "type": ["integer", "null"], "minimum": 1, "maximum": SAFE_INTEGER_MAX }, "contentObservation": { "type": "object", "required": ["revision", "source", "observedAtMs"], "properties": { "revision": { "type": ["integer", "null"], "minimum": 0, "maximum": SAFE_INTEGER_MAX }, "source": { "const": "client-authority" }, "observedAtMs": nonnegative_integer_schema() }, "additionalProperties": false } }, "additionalProperties": false } }
+                        "panes": { "type": "array", "minItems": 1, "items": { "type": "object", "required": ["paneId", "paneLabel", "contentObservation"], "properties": { "paneId": nonnegative_integer_schema(), "paneLabel": { "type": ["integer", "null"], "minimum": 1, "maximum": SAFE_INTEGER_MAX }, "contentObservation": { "type": "object", "required": ["revision", "source", "observedAtMs"], "properties": { "revision": { "type": ["integer", "null"], "minimum": 0, "maximum": SAFE_INTEGER_MAX }, "source": { "const": "client-authority" }, "observedAtMs": nonnegative_integer_schema() }, "additionalProperties": false } }, "additionalProperties": false } }
                     },
                     "additionalProperties": false
                 }

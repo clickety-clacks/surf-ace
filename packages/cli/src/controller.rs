@@ -958,7 +958,7 @@ fn validate_surface_observation(
             .map_err(|message| discovery_error("describe_response_invalid", message))?;
         let pane_id = pane
             .get("paneId")
-            .and_then(safe_positive_u64)
+            .and_then(safe_nonnegative_u64)
             .ok_or_else(|| discovery_error("describe_response_invalid", "Pane id is invalid"))?;
         if !pane_ids.insert(pane_id) {
             return Err(discovery_error(
@@ -1124,7 +1124,7 @@ fn validate_layout_node(
             require_exact_keys_with_optional(object, &["type", "paneId"], &["weight"])?;
             let pane_id = object
                 .get("paneId")
-                .and_then(safe_positive_u64)
+                .and_then(safe_nonnegative_u64)
                 .ok_or_else(|| "layout pane id is invalid".to_owned())?;
             validate_layout_weight(object.get("weight"))?;
             pane_ids.push(pane_id);

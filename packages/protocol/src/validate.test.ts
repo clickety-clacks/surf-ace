@@ -88,9 +88,9 @@ test("surface.describe schema is a read-only pre-pair request and permits unknow
       applicationReadiness: { status: "ready", limitationCodes: [] },
       surfaceSetRevision: 2,
       topologyRevision: 3,
-      layout: { paneId: 1, type: "pane" },
+      layout: { paneId: 0, type: "pane" },
       panes: [{
-        paneId: 1,
+        paneId: 0,
         paneLabel: null,
         contentObservation: { revision: null, source: "client-authority", observedAtMs: Date.now() },
       }],
@@ -100,6 +100,22 @@ test("surface.describe schema is a read-only pre-pair request and permits unknow
     v: 1,
   });
   assert.deepEqual(response, { ok: true });
+
+  const positiveOnlyTopology = validateEnvelopeType("event.topology_changed", {
+    eventId: "ev_topology_zero_pane",
+    op: "event.topology_changed",
+    payload: {
+      surfaceId: "sf_fixture",
+      topologyRevision: 3,
+      layout: { paneId: 0, type: "pane" },
+      panes: [{ paneId: 0, paneLabel: 1, name: null }],
+    },
+    sentAt: Date.now(),
+    type: "event",
+    v: 1,
+  });
+  assert.equal(positiveOnlyTopology.ok, false,
+    "pane ID zero is valid in describe observations only");
 
   const unavailableSavedRegistryState = validateEnvelopeType("surface.describe", {
     id: "rq_surface_describe_fixture",

@@ -390,6 +390,20 @@ export type SurfaceDescribeRequest = RequestBase<"surface.describe"> & {
   };
 };
 
+export type SurfaceDescribePaneId = Brand<number, "SurfaceDescribePaneId">;
+export type SurfaceDescribeLayoutNode =
+  | {
+      type: "pane";
+      paneId: SurfaceDescribePaneId;
+      weight?: number;
+    }
+  | {
+      type: "split";
+      direction: "horizontal" | "vertical";
+      weight?: number;
+      children: SurfaceDescribeLayoutNode[];
+    };
+
 export type SurfaceDescribeResponse = ResponseBase<"surface.describe"> & {
   payload: {
     nonce: string;
@@ -401,9 +415,9 @@ export type SurfaceDescribeResponse = ResponseBase<"surface.describe"> & {
     applicationReadiness: { status: "ready" | "degraded"; limitationCodes: string[] };
     surfaceSetRevision: number;
     topologyRevision: TopologyRevision;
-    layout: TopologyLayoutNode;
+    layout: SurfaceDescribeLayoutNode;
     panes: Array<{
-      paneId: PaneId;
+      paneId: SurfaceDescribePaneId;
       paneLabel: number | null;
       contentObservation: {
         revision: Revision | null;

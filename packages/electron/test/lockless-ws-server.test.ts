@@ -409,6 +409,56 @@ test("surface.describe returns revision-bound topology before pairing without ad
   }
 });
 
+test("surface.describe preserves restored pane ID zero in its layout and pane list", async () => {
+  const fixture = describeFixture();
+  const persistentState = fixture.core.getPersistentState();
+  const persistedSurface = persistentState.surfaces?.find(
+    (surface) => surface.surfaceId === fixture.surface.surfaceId,
+  );
+  assert.ok(persistedSurface);
+  const firstPane = structuredClone(persistedSurface.panes[0]!);
+  const secondPane = structuredClone(firstPane);
+  firstPane.paneId = 0;
+  firstPane.paneLabel = 0;
+  firstPane.paneLineageId = "pl_describe_zero";
+  secondPane.paneId = 3;
+  secondPane.paneLabel = 0;
+  secondPane.paneLineageId = "pl_describe_three";
+  persistedSurface.panes = [firstPane, secondPane];
+  persistedSurface.paneOrder = [0, 3];
+  persistedSurface.activeKeyboardPaneId = 0;
+  persistedSurface.layout = {
+    children: [{ paneId: 3, type: "pane" }, { paneId: 0, type: "pane" }],
+    direction: "vertical",
+    type: "split",
+  };
+
+  const core = new SurfaceCore({ persistentState });
+  core.restorePersistedSurfaces("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  const persistedBeforeDescribe = core.getPersistentState();
+  const server = describeServer(core);
+  let socket: WebSocket | null = null;
+  try {
+    await server.start();
+    socket = await connect(`ws://127.0.0.1:${server.port}/ws`);
+    const response = await request(socket, "surface.describe", describePayload(fixture));
+
+    assert.equal(response.ok, true, JSON.stringify(response));
+    assert.deepEqual(response.payload.layout, {
+      children: [{ paneId: 3, type: "pane" }, { paneId: 0, type: "pane" }],
+      direction: "vertical",
+      type: "split",
+    });
+    assert.deepEqual(response.payload.panes.map((pane: { paneId: number }) => pane.paneId), [0, 3]);
+    assert.deepEqual(response.payload.panes.map((pane: { paneLabel: number | null }) => pane.paneLabel), [null, null]);
+    assert.deepEqual(core.getPersistentState(), persistedBeforeDescribe,
+      "describe must leave saved topology and identity unchanged");
+  } finally {
+    socket?.close();
+    await server.stop();
+  }
+});
+
 test("surface.describe refuses a different client identity but reports a different saved registry binding", async () => {
   const fixture = describeFixture();
   let checkApplicationReadiness = () => true;
@@ -581,7 +631,8 @@ test("surface.describe keeps saved windows observable and readable during uncert
         "persistence_outcome_unknown",
         "application_state_unverified",
       ]);
-      assert.equal(observation.payload.panes[0].paneLabel, 11 + index);
+      assert.equal(observation.payload.panes[0].paneLabel, null,
+        "bootstrap labels remain hidden until the registry confirms them");
 
       const panes = await request(pairedSockets[index]!, "panes.list", { surfaceId: surface.surfaceId });
       assert.equal(panes.ok, true, JSON.stringify(panes));
@@ -4666,7 +4717,6 @@ test("surface.describe returns topology when saved registry binding or lease is 
 
   for (const item of cases) {
     const fixture = describeFixture();
-    const expectedPaneLabel = fixture.core.pairState(fixture.surface.surfaceId).panes[0]!.paneLabel;
     const initialServer = describeServer(fixture.core);
     let initialSocket: WebSocket | null = null;
     try {
@@ -4716,7 +4766,8 @@ test("surface.describe returns topology when saved registry binding or lease is 
           fleetId: "fleet_old_fixture",
         });
       }
-      assert.equal(response.payload.panes[0].paneLabel, expectedPaneLabel);
+      assert.equal(response.payload.panes[0].paneLabel, null,
+        "restored labels remain hidden until the registry confirms them again");
 
       const admitted = await pair(socket, `saved-window-reader-${item.name}-restored`, fixture.surface.surfaceId);
       assert.equal(admitted.ok, true, `${item.name}: ${JSON.stringify(admitted)}`);

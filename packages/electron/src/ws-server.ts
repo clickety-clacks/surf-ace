@@ -3456,7 +3456,7 @@ export class SurfaceWsServer {
     };
     const paneIds = panes.map((pane) => pane.paneId);
     if (!visit(snapshot.layout) || panes.length === 0 ||
-        panes.some((pane) => !Number.isSafeInteger(pane.paneId) || pane.paneId < 1 ||
+        panes.some((pane) => !Number.isSafeInteger(pane.paneId) || pane.paneId < 0 ||
           (pane.paneLabel !== null && (!Number.isSafeInteger(pane.paneLabel) || pane.paneLabel < 1)) ||
           (pane.contentObservation.revision !== null &&
             (!Number.isSafeInteger(pane.contentObservation.revision) || pane.contentObservation.revision < 0))) ||
