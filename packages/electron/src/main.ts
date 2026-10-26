@@ -1590,7 +1590,7 @@ async function createWindowForSurface(surfaceId: string): Promise<BrowserWindow>
 
   window.on("close", (event) => {
     const origin = surfaceWindowCloseOrigin({
-      compositorStartupRejected,
+      compositorStartupRejected: compositorRejectedStartup,
       rendererReady: readyWindows.has(surfaceId),
     });
     void handleSurfaceWindowClose(event, origin, {
