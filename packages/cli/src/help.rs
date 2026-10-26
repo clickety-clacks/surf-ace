@@ -154,6 +154,7 @@ pub fn document(target: Option<&str>) -> Result<Value, String> {
             "discoveryLimits": [
                 "fleet-list reads registry inventory and configured endpoint leases; it does not prove endpoint reachability.",
                 "window-describe reads fleet.topology, sends one nonce-correlated surface.describe to the leased direct endpoint before pairing, then rechecks fleet.topology; identity matching is consistency only and does not authenticate either peer.",
+                "When application readiness or saved registry metadata is uncertain, window-describe keeps a readable topology available and reports binding and lease consistency separately.",
                 "For client_not_ready, window-describe includes the direct client's existing message as applicationReadiness.readinessReason, limited to 512 characters.",
                 "list and capture-pane pair a controller before their direct request; they are not no-pair discovery probes.",
                 "window-describe does not pair, create controller state, or authorize later mutations; writes still need their own explicit endpoint and revision guards."
@@ -849,7 +850,7 @@ fn result_schema(command: Command, description: &str) -> Value {
         json!({
             "description": description,
             "type": "object",
-            "required": ["windowLabel", "identitySemantics", "transportReachability", "registryBefore", "registryAfter", "applicationReadiness", "surfaceObservation"],
+            "required": ["windowLabel", "identitySemantics", "transportReachability", "registryBefore", "registryAfter", "applicationReadiness", "registryConsistency", "surfaceObservation"],
             "properties": {
                 "windowLabel": { "type": "string", "pattern": "^[a-z]+$" },
                 "identitySemantics": { "const": "consistency_only_not_authentication" },
@@ -865,13 +866,27 @@ fn result_schema(command: Command, description: &str) -> Value {
                     "properties": { "status": { "enum": ["ready", "degraded"] }, "limitationCodes": { "type": "array", "items": { "type": "string", "pattern": "^[a-z_]{1,64}$" } } },
                     "additionalProperties": false
                 },
+                "registryConsistency": {
+                    "type": "object", "required": ["binding", "endpointLease"],
+                    "properties": {
+                        "binding": { "enum": ["matched", "mismatched", "unavailable", "unverified"] },
+                        "endpointLease": { "enum": ["matched", "mismatched", "stale", "unavailable", "unverified"] }
+                    },
+                    "additionalProperties": false
+                },
                 "surfaceObservation": {
-                    "type": "object", "required": ["nonce", "clientId", "registryIdentity", "surfaceId", "endpointLeaseGeneration", "observedAtMs", "applicationReadiness", "surfaceSetRevision", "topologyRevision", "layout", "panes"],
+                    "type": "object", "required": ["nonce", "clientId", "registryIdentity", "surfaceId", "endpointLease", "observedAtMs", "applicationReadiness", "surfaceSetRevision", "topologyRevision", "layout", "panes"],
                     "properties": {
                         "nonce": { "type": "string", "pattern": "^[a-f0-9]{32,128}$" },
-                        "clientId": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
-                        "registryIdentity": { "type": "object", "required": ["allocatorId", "fleetId"], "properties": { "allocatorId": string_schema(), "fleetId": string_schema() }, "additionalProperties": false },
-                        "surfaceId": string_schema(), "endpointLeaseGeneration": positive_integer_schema(),
+                        "clientId": { "type": ["string", "null"], "pattern": "^[A-Za-z0-9._:-]{1,128}$" },
+                        "registryIdentity": { "type": ["object", "null"], "required": ["allocatorId", "fleetId"], "properties": { "allocatorId": string_schema(), "fleetId": string_schema() }, "additionalProperties": false },
+                        "surfaceId": string_schema(),
+                        "endpointLease": {
+                            "oneOf": [
+                                { "type": "object", "required": ["leaseGeneration", "registrationObservedAtMs", "leaseExpiresAtMs"], "properties": { "leaseGeneration": positive_integer_schema(), "registrationObservedAtMs": nonnegative_integer_schema(), "leaseExpiresAtMs": nonnegative_integer_schema() }, "additionalProperties": false },
+                                { "type": "null" }
+                            ]
+                        },
                         "observedAtMs": nonnegative_integer_schema(), "applicationReadiness": { "type": "object" },
                         "surfaceSetRevision": nonnegative_integer_schema(), "topologyRevision": nonnegative_integer_schema(),
                         "layout": { "type": "object" },

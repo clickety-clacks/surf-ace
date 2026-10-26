@@ -685,14 +685,24 @@ fn discovery_topology(clients: Vec<Value>, server_time_ms: u64) -> Value {
     })
 }
 
-fn describe_observation(client_id: &str, surface_id: &str, generation: u64) -> Value {
+fn describe_observation(
+    client_id: &str,
+    surface_id: &str,
+    generation: u64,
+    registration_observed_at_ms: u64,
+    lease_expires_at_ms: u64,
+) -> Value {
     let now = epoch_ms();
     json!({
         "nonce": "ignored-by-fixture",
         "clientId": client_id,
         "registryIdentity": { "allocatorId": "alloc_fixture", "fleetId": "fleet_fixture" },
         "surfaceId": surface_id,
-        "endpointLeaseGeneration": generation,
+        "endpointLease": {
+            "leaseGeneration": generation,
+            "registrationObservedAtMs": registration_observed_at_ms,
+            "leaseExpiresAtMs": lease_expires_at_ms
+        },
         "observedAtMs": now,
         "applicationReadiness": { "status": "ready", "limitationCodes": [] },
         "surfaceSetRevision": 4,
@@ -800,6 +810,7 @@ fn help_and_schema_are_json_and_do_not_require_operational_arguments() {
     )
     .expect("window-describe example validates against its published input schema");
     let window_result_schema = &window_command["resultSchema"]["properties"]["result"];
+    assert_eq!(window_result_schema["properties"]["registryConsistency"]["required"], json!(["binding", "endpointLease"]));
     assert!(
         window_result_schema["properties"]["surfaceObservation"]["properties"]["panes"]["items"]
             ["properties"]["contentObservation"]["properties"]["revision"]["type"]
@@ -1084,8 +1095,13 @@ fn window_describe_reads_a_leased_endpoint_before_pairing_and_rechecks_the_regis
     let now = epoch_ms();
     let client_id = "a".repeat(64);
     let surface_id = "sf_window_fixture";
-    let (endpoint, endpoint_server) =
-        spawn_surface_describe_server(describe_observation(&client_id, surface_id, 9));
+    let (endpoint, endpoint_server) = spawn_surface_describe_server(describe_observation(
+        &client_id,
+        surface_id,
+        9,
+        now - 100,
+        now + 10_000,
+    ));
     let first = discovery_topology(
         vec![discovery_client(
             &client_id,
@@ -1146,6 +1162,8 @@ fn window_describe_reads_a_leased_endpoint_before_pairing_and_rechecks_the_regis
         endpoint
     );
     assert_eq!(result["result"]["applicationReadiness"]["status"], "ready");
+    assert_eq!(result["result"]["registryConsistency"]["binding"], "matched");
+    assert_eq!(result["result"]["registryConsistency"]["endpointLease"], "matched");
     assert_eq!(
         result["result"]["registryBefore"]["endpointLease"]["leaseGeneration"],
         9
@@ -1345,8 +1363,13 @@ fn window_describe_requires_selected_row_identity_to_match_registry_identity() {
 
     let now = epoch_ms();
     let surface_id = "sf_row_identity_recheck";
-    let (direct_endpoint, direct_server) =
-        spawn_surface_describe_server(describe_observation(&client_id, surface_id, 4));
+    let (direct_endpoint, direct_server) = spawn_surface_describe_server(describe_observation(
+        &client_id,
+        surface_id,
+        4,
+        now - 10,
+        now + 10_000,
+    ));
     let before = discovery_topology(
         vec![discovery_client(
             &client_id,
@@ -1421,8 +1444,13 @@ fn window_describe_rejects_unreachable_endpoints_and_stale_rechecks() {
     assert_eq!(server.join().unwrap().len(), 2);
 
     let surface_id = "sf_stale_after_probe";
-    let (endpoint, endpoint_server) =
-        spawn_surface_describe_server(describe_observation(&client_id, surface_id, 5));
+    let (endpoint, endpoint_server) = spawn_surface_describe_server(describe_observation(
+        &client_id,
+        surface_id,
+        5,
+        now - 10,
+        now + 10_000,
+    ));
     let first = discovery_topology(
         vec![discovery_client(
             &client_id,
@@ -1478,7 +1506,13 @@ fn window_describe_preserves_transport_and_unknown_readiness_when_recheck_fails(
     let client_id = "7".repeat(64);
     let surface_id = "sf_invalid_then_stale";
     for recheck_kind in ["stale", "ambiguous", "unavailable"] {
-        let mut invalid_observation = describe_observation(&client_id, surface_id, 5);
+        let mut invalid_observation = describe_observation(
+            &client_id,
+            surface_id,
+            5,
+            now - 10,
+            now + 10_000,
+        );
         invalid_observation
             .as_object_mut()
             .unwrap()
@@ -1671,13 +1705,18 @@ fn window_describe_exposes_a_bounded_server_not_ready_message() {
 }
 
 #[test]
-fn window_describe_rejects_direct_identity_mismatch() {
+fn window_describe_reports_direct_identity_mismatch_without_suppressing_topology() {
     let now = epoch_ms();
     let client_id = "d".repeat(64);
     let wrong_client_id = "e".repeat(64);
     let surface_id = "sf_identity_mismatch";
-    let (endpoint, endpoint_server) =
-        spawn_surface_describe_server(describe_observation(&wrong_client_id, surface_id, 7));
+    let (endpoint, endpoint_server) = spawn_surface_describe_server(describe_observation(
+        &wrong_client_id,
+        surface_id,
+        7,
+        now - 10,
+        now + 10_000,
+    ));
     let topology = discovery_topology(
         vec![discovery_client(
             &client_id,
@@ -1692,19 +1731,106 @@ fn window_describe_rejects_direct_identity_mismatch() {
     );
     let (registry, server) = spawn_registry_sequence(vec![topology.clone(), topology]);
     let output = run_window_describe(&registry, "a");
-    assert!(!output.status.success());
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
     let result: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(result["error"]["code"], "identity_mismatch");
-    assert_eq!(
-        result["error"]["details"]["transportReachability"]["status"],
-        "reachable"
-    );
-    assert_eq!(
-        result["error"]["details"]["applicationReadiness"]["status"],
-        "unknown"
-    );
+    assert_eq!(result["result"]["registryConsistency"]["binding"], "mismatched");
+    assert_eq!(result["result"]["registryConsistency"]["endpointLease"], "matched");
+    assert_eq!(result["result"]["surfaceObservation"]["clientId"], wrong_client_id);
+    assert_eq!(result["result"]["surfaceObservation"]["topologyRevision"], 8);
     assert_eq!(server.join().unwrap().len(), 2);
     assert_eq!(endpoint_server.join().unwrap()["op"], "surface.describe");
+}
+
+#[test]
+fn window_describe_keeps_topology_when_saved_registry_state_is_unavailable_stale_or_unverified() {
+    for state in [
+        "unavailable",
+        "binding-unavailable",
+        "lease-unavailable",
+        "stale",
+        "unverified",
+    ] {
+        let now = epoch_ms();
+        let client_id = "c".repeat(64);
+        let surface_id = "sf_registry_state_status";
+        let mut observation = describe_observation(
+            &client_id,
+            surface_id,
+            8,
+            now - 10,
+            now + 10_000,
+        );
+        match state {
+            "unavailable" => {
+                observation["clientId"] = Value::Null;
+                observation["registryIdentity"] = Value::Null;
+                observation["endpointLease"] = Value::Null;
+            }
+            "binding-unavailable" => {
+                observation["clientId"] = Value::Null;
+                observation["registryIdentity"] = Value::Null;
+            }
+            "lease-unavailable" => {
+                observation["endpointLease"] = Value::Null;
+            }
+            "stale" => {
+                observation["endpointLease"]["leaseGeneration"] = json!(7);
+                observation["endpointLease"]["leaseExpiresAtMs"] = json!(now - 1);
+            }
+            _ => {
+                observation["applicationReadiness"] = json!({
+                    "status": "degraded", "limitationCodes": ["not_ready"]
+                });
+                observation["clientId"] = json!("d".repeat(64));
+                observation["endpointLease"]["leaseGeneration"] = json!(7);
+            }
+        }
+        let (endpoint, endpoint_server) = spawn_surface_describe_server(observation);
+        let topology = discovery_topology(
+            vec![discovery_client(
+                &client_id,
+                Some(&endpoint),
+                vec![discovery_surface(surface_id, "a")],
+                8,
+                now - 10,
+                now + 10_000,
+                true,
+            )],
+            now,
+        );
+        let (registry, registry_server) = spawn_registry_sequence(vec![topology.clone(), topology]);
+        let output = run_window_describe(&registry, "a");
+        assert!(output.status.success(), "state={state}, output={}", String::from_utf8_lossy(&output.stdout));
+        let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let consistency = &result["result"]["registryConsistency"];
+        match state {
+            "unavailable" => {
+                assert_eq!(consistency["binding"], "unavailable");
+                assert_eq!(consistency["endpointLease"], "unavailable");
+                assert_eq!(result["result"]["surfaceObservation"]["clientId"], Value::Null);
+            }
+            "binding-unavailable" => {
+                assert_eq!(consistency["binding"], "unavailable");
+                assert_eq!(consistency["endpointLease"], "matched");
+            }
+            "lease-unavailable" => {
+                assert_eq!(consistency["binding"], "matched");
+                assert_eq!(consistency["endpointLease"], "unavailable");
+            }
+            "stale" => {
+                assert_eq!(consistency["binding"], "matched");
+                assert_eq!(consistency["endpointLease"], "stale");
+            }
+            _ => {
+                assert_eq!(consistency["binding"], "unverified");
+                assert_eq!(consistency["endpointLease"], "unverified");
+                assert_eq!(result["result"]["applicationReadiness"]["status"], "degraded");
+            }
+        }
+        assert_eq!(result["result"]["surfaceObservation"]["topologyRevision"], 8);
+        assert_eq!(registry_server.join().unwrap().len(), 2);
+        assert_eq!(endpoint_server.join().unwrap()["op"], "surface.describe");
+    }
 }
 
 #[test]

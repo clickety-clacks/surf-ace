@@ -1133,21 +1133,45 @@
         "payload": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["nonce", "clientId", "registryIdentity", "surfaceId", "endpointLeaseGeneration", "observedAtMs", "applicationReadiness", "surfaceSetRevision", "topologyRevision", "layout", "panes"],
+          "required": ["nonce", "clientId", "registryIdentity", "surfaceId", "endpointLease", "observedAtMs", "applicationReadiness", "surfaceSetRevision", "topologyRevision", "layout", "panes"],
           "properties": {
             "nonce": { "type": "string", "pattern": "^[a-f0-9]{32,128}$" },
-            "clientId": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+            "clientId": {
+              "oneOf": [
+                { "type": "string", "pattern": "^[A-Za-z0-9._:-]{1,128}$" },
+                { "type": "null" }
+              ]
+            },
             "registryIdentity": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["allocatorId", "fleetId"],
-              "properties": {
-                "allocatorId": { "type": "string", "pattern": "^alloc_[A-Za-z0-9._:-]{3,64}$" },
-                "fleetId": { "type": "string", "pattern": "^[A-Za-z0-9._:-]{1,128}$" }
-              }
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["allocatorId", "fleetId"],
+                  "properties": {
+                    "allocatorId": { "type": "string", "pattern": "^alloc_[A-Za-z0-9._:-]{3,64}$" },
+                    "fleetId": { "type": "string", "pattern": "^[A-Za-z0-9._:-]{1,128}$" }
+                  }
+                },
+                { "type": "null" }
+              ]
             },
             "surfaceId": { "$ref": "#/$defs/SurfaceId" },
-            "endpointLeaseGeneration": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+            "endpointLease": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["leaseGeneration", "registrationObservedAtMs", "leaseExpiresAtMs"],
+                  "properties": {
+                    "leaseGeneration": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+                    "registrationObservedAtMs": { "$ref": "#/$defs/EpochMs" },
+                    "leaseExpiresAtMs": { "$ref": "#/$defs/EpochMs" }
+                  }
+                },
+                { "type": "null" }
+              ]
+            },
             "observedAtMs": { "$ref": "#/$defs/EpochMs" },
             "applicationReadiness": {
               "type": "object",

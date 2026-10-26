@@ -3360,31 +3360,17 @@ export class SurfaceWsServer {
       ? false
       : this.isApplicationStateReady();
     const readinessUncertain = persistenceOutcomeUnknown || !applicationStateReady;
-    if (readinessUncertain) {
-      persistentServerDiagnostic("warn", "prepair_surface_observation_degraded", {
-        persistence_outcome_unknown: persistenceOutcomeUnknown,
-        surface_id: request.payload.surfaceId,
-      });
-    }
-    let binding: ReturnType<SurfaceCore["registryBinding"]>;
-    let lease: ReturnType<SurfaceCore["registryEndpointLease"]>;
+    let binding: ReturnType<SurfaceCore["registryBinding"]> = null;
+    let lease: ReturnType<SurfaceCore["registryEndpointLease"]> = null;
     try {
       binding = this.core.registryBinding();
+    } catch {
+      // An unavailable saved binding limits consistency reporting, not the topology read.
+    }
+    try {
       lease = this.core.registryEndpointLease();
     } catch {
-      return errorResponse("surface.describe", request.id, "not_ready",
-        "Persisted registry authority is invalid or unavailable");
-    }
-    if (!binding || !lease) {
-      return errorResponse("surface.describe", request.id, "not_ready",
-        "A persisted registry identity and endpoint lease are required");
-    }
-    if (request.payload.clientId !== binding.clientId ||
-        request.payload.registryIdentity.allocatorId !== binding.allocatorId ||
-        request.payload.registryIdentity.fleetId !== binding.fleetId ||
-        request.payload.endpointLeaseGeneration !== lease.leaseGeneration) {
-      return errorResponse("surface.describe", request.id, "identity_mismatch",
-        "Requested registry identity or endpoint lease does not match the persisted client binding");
+      // An unavailable saved lease limits consistency reporting, not the topology read.
     }
     if (!this.core.listSurfaces().some((surface) => surface.surfaceId === request.payload.surfaceId)) {
       return errorResponse("surface.describe", request.id, "surface_not_found",
@@ -3416,6 +3402,34 @@ export class SurfaceWsServer {
         !Number.isSafeInteger(snapshot.topologyRevision) || snapshot.topologyRevision < 0) {
       return errorResponse("surface.describe", request.id, "not_ready",
         "Client revision or observation clock is unavailable");
+    }
+    const bindingMatches = binding !== null &&
+      request.payload.clientId === binding.clientId &&
+      request.payload.registryIdentity.allocatorId === binding.allocatorId &&
+      request.payload.registryIdentity.fleetId === binding.fleetId;
+    const bindingConsistency = !binding
+      ? "unavailable" as const
+      : readinessUncertain
+        ? "unverified" as const
+        : bindingMatches ? "matched" as const : "mismatched" as const;
+    const endpointLeaseConsistency = !lease
+      ? "unavailable" as const
+      : readinessUncertain
+        ? "unverified" as const
+        : lease.leaseExpiresAtMs <= observedAtMs
+          ? "stale" as const
+          : lease.leaseGeneration === request.payload.endpointLeaseGeneration
+            ? "matched" as const
+            : "stale" as const;
+    if (readinessUncertain || bindingConsistency !== "matched" ||
+        endpointLeaseConsistency !== "matched") {
+      persistentServerDiagnostic("warn", "prepair_surface_observation_degraded", {
+        application_readiness: readinessUncertain ? "degraded" : "ready",
+        binding_consistency: bindingConsistency,
+        endpoint_lease_consistency: endpointLeaseConsistency,
+        persistence_outcome_unknown: persistenceOutcomeUnknown,
+        surface_id: request.payload.surfaceId,
+      });
     }
     const panes = snapshot.panes.map((pane) => ({
       paneId: Number(pane.paneId),
@@ -3454,10 +3468,12 @@ export class SurfaceWsServer {
       op: "surface.describe",
       payload: {
         nonce: request.payload.nonce,
-        clientId: binding.clientId,
-        registryIdentity: { allocatorId: binding.allocatorId, fleetId: binding.fleetId },
+        clientId: binding?.clientId ?? null,
+        registryIdentity: binding
+          ? { allocatorId: binding.allocatorId, fleetId: binding.fleetId }
+          : null,
         surfaceId: request.payload.surfaceId,
-        endpointLeaseGeneration: lease.leaseGeneration,
+        endpointLease: lease,
         observedAtMs,
         applicationReadiness: readinessUncertain
           ? { status: "degraded", limitationCodes: ["not_ready"] }

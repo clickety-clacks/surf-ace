@@ -12,7 +12,9 @@ on:
       - ".github/workflows/t368-client-cpu.yml"
       - "packages/controller/**"
       - "packages/electron/**"
+      - "packages/cli/**"
       - "packages/protocol/**"
+      - "rust-toolchain.toml"
 
 permissions:
   contents: read
@@ -34,6 +36,10 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @surf-ace/protocol test
       - run: pnpm --filter @surf-ace/protocol build
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.89.0
+      - run: cargo test --locked --manifest-path packages/cli/Cargo.toml
       - run: pnpm --filter @surf-ace/controller build
       - run: pnpm --filter @surf-ace/electron build
       - run: pnpm --filter @surf-ace/electron test

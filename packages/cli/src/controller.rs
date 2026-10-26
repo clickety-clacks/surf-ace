@@ -268,6 +268,7 @@ fn execute_window_describe(invocation: &Invocation) -> Result<CliOutput, CliErro
         ));
     }
     let surface_observation = probe?;
+    let registry_consistency = registry_consistency(&surface_observation, &rechecked, &after);
     Ok(CliOutput {
         ok: true,
         command: crate::command::Command::WindowDescribe.name().into(),
@@ -284,6 +285,7 @@ fn execute_window_describe(invocation: &Invocation) -> Result<CliOutput, CliErro
             "registryBefore": selected.evidence(&before),
             "registryAfter": rechecked.evidence(&after),
             "applicationReadiness": surface_observation["applicationReadiness"].clone(),
+            "registryConsistency": registry_consistency,
             "surfaceObservation": surface_observation,
         }),
     })
@@ -873,7 +875,7 @@ fn validate_surface_observation(
             "clientId",
             "registryIdentity",
             "surfaceId",
-            "endpointLeaseGeneration",
+            "endpointLease",
             "observedAtMs",
             "applicationReadiness",
             "surfaceSetRevision",
@@ -884,25 +886,60 @@ fn validate_surface_observation(
     )
     .map_err(|message| discovery_error("describe_response_invalid", message))?;
     if object.get("nonce").and_then(Value::as_str) != Some(nonce)
-        || object.get("clientId").and_then(Value::as_str) != Some(candidate.client_id.as_str())
-        || object.get("surfaceId").and_then(Value::as_str) != Some(candidate.surface_id.as_str())
-        || object
-            .get("endpointLeaseGeneration")
-            .and_then(safe_positive_u64)
-            != Some(candidate.lease_generation)
-    {
+        || object.get("surfaceId").and_then(Value::as_str) != Some(candidate.surface_id.as_str()) {
         return Err(discovery_error(
-            "identity_mismatch",
-            "Client observation does not match the selected registry row",
+            "describe_response_invalid",
+            "Client observation nonce or surface id is invalid",
         ));
     }
-    let identity = parse_registry_identity(object.get("registryIdentity"))
-        .map_err(|message| discovery_error("describe_response_invalid", message))?;
-    if identity != candidate.identity {
-        return Err(discovery_error(
-            "identity_mismatch",
-            "Client observation reports a different registry identity",
-        ));
+    match object.get("clientId") {
+        Some(value) if value.is_null() => {}
+        Some(value) if value.as_str().is_some_and(valid_saved_client_id) => {}
+        _ => return Err(discovery_error(
+            "describe_response_invalid",
+            "Client observation has an invalid saved client id",
+        )),
+    }
+    match object.get("registryIdentity") {
+        Some(value) if value.is_null() => {}
+        Some(_) => {
+            parse_registry_identity(object.get("registryIdentity"))
+                .map_err(|message| discovery_error("describe_response_invalid", message))?;
+        }
+        None => return Err(discovery_error(
+            "describe_response_invalid",
+            "Client observation is missing its saved registry identity",
+        )),
+    }
+    match object.get("endpointLease") {
+        Some(value) if value.is_null() => {}
+        Some(value) => {
+            let lease = value.as_object().ok_or_else(|| {
+                discovery_error("describe_response_invalid", "Saved endpoint lease is invalid")
+            })?;
+            require_exact_keys(
+                lease,
+                &["leaseGeneration", "registrationObservedAtMs", "leaseExpiresAtMs"],
+            )
+            .map_err(|message| discovery_error("describe_response_invalid", message))?;
+            let registered_at = lease
+                .get("registrationObservedAtMs")
+                .and_then(safe_nonnegative_u64);
+            let expires_at = lease.get("leaseExpiresAtMs").and_then(safe_nonnegative_u64);
+            if lease.get("leaseGeneration").and_then(safe_positive_u64).is_none()
+                || registered_at.is_none()
+                || expires_at.is_none_or(|expires| Some(expires) <= registered_at)
+            {
+                return Err(discovery_error(
+                    "describe_response_invalid",
+                    "Saved endpoint lease is invalid",
+                ));
+            }
+        }
+        None => return Err(discovery_error(
+            "describe_response_invalid",
+            "Client observation is missing its saved endpoint lease",
+        )),
     }
     for key in ["observedAtMs", "surfaceSetRevision", "topologyRevision"] {
         if object.get(key).and_then(safe_nonnegative_u64).is_none() {
@@ -994,6 +1031,73 @@ fn validate_surface_observation(
         ));
     }
     Ok(())
+}
+
+fn registry_consistency(
+    payload: &Value,
+    candidate: &EndpointCandidate,
+    snapshot: &RegistrySnapshot,
+) -> Value {
+    let readiness_uncertain = payload
+        .get("applicationReadiness")
+        .and_then(|readiness| readiness.get("status"))
+        .and_then(Value::as_str)
+        != Some("ready");
+    let saved_client_id = payload.get("clientId").and_then(Value::as_str);
+    let saved_identity = payload
+        .get("registryIdentity")
+        .and_then(Value::as_object);
+    let binding = if saved_client_id.is_none() || saved_identity.is_none() {
+        "unavailable"
+    } else if readiness_uncertain {
+        "unverified"
+    } else if saved_client_id == Some(candidate.client_id.as_str())
+        && saved_identity
+            .and_then(|identity| identity.get("allocatorId"))
+            .and_then(Value::as_str)
+            == Some(candidate.identity.allocator_id.as_str())
+        && saved_identity
+            .and_then(|identity| identity.get("fleetId"))
+            .and_then(Value::as_str)
+            == Some(candidate.identity.fleet_id.as_str())
+    {
+        "matched"
+    } else {
+        "mismatched"
+    };
+
+    let endpoint_lease = match payload.get("endpointLease").filter(|lease| !lease.is_null()) {
+        None => "unavailable",
+        Some(lease) if readiness_uncertain => "unverified",
+        Some(lease) => {
+            let generation = lease.get("leaseGeneration").and_then(safe_positive_u64);
+            let registered_at = lease
+                .get("registrationObservedAtMs")
+                .and_then(safe_nonnegative_u64);
+            let expires_at = lease.get("leaseExpiresAtMs").and_then(safe_nonnegative_u64);
+            if generation != Some(candidate.lease_generation)
+                || expires_at.is_none_or(|expires| expires <= snapshot.server_time_ms)
+            {
+                "stale"
+            } else if registered_at != Some(candidate.registration_observed_at_ms)
+                || expires_at != Some(candidate.lease_expires_at_ms)
+            {
+                "mismatched"
+            } else {
+                "matched"
+            }
+        }
+    };
+
+    json!({ "binding": binding, "endpointLease": endpoint_lease })
+}
+
+fn valid_saved_client_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte))
 }
 
 fn validate_application_readiness(value: Option<&Value>) -> Result<(), String> {

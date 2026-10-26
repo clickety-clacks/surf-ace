@@ -80,7 +80,11 @@ function describeResponse(overrides: Record<string, unknown> = {}) {
       clientId,
       registryIdentity: { ...identity },
       surfaceId: selectedSurface.surfaceId,
-      endpointLeaseGeneration: 4,
+      endpointLease: {
+        leaseGeneration: 4,
+        registrationObservedAtMs: 9_000,
+        leaseExpiresAtMs: 19_000,
+      },
       observedAtMs: 9_990,
       applicationReadiness: { status: "ready", limitationCodes: [] },
       surfaceSetRevision: 3,
@@ -279,17 +283,15 @@ function discover(input: {
   }
 
   const payload = response.payload;
-  if (!payload || typeof payload !== "object" || payload.nonce !== nonce) {
+  if (!payload || typeof payload !== "object" || payload.nonce !== nonce
+      || !hasExactKeys(payload, ["nonce", "clientId", "registryIdentity", "surfaceId", "endpointLease",
+        "observedAtMs", "applicationReadiness", "surfaceSetRevision", "topologyRevision", "layout", "panes"])) {
     return fail("stale_response", operations, "reachable");
   }
   const selectedRow = initial.row;
   const selectedIdentity = initial.registryIdentity;
   const selectedSurface = selectedRow.surfaces[0]!;
-  if (payload.clientId !== selectedRow.clientId
-      || payload.registryIdentity?.fleetId !== selectedIdentity.fleetId
-      || payload.registryIdentity?.allocatorId !== selectedIdentity.allocatorId
-      || payload.surfaceId !== selectedSurface.surfaceId
-      || payload.endpointLeaseGeneration !== selectedRow.endpointLease?.leaseGeneration) {
+  if (payload.surfaceId !== selectedSurface.surfaceId) {
     return fail("identity_mismatch", operations, "reachable", "unknown", "mismatch");
   }
 
@@ -300,6 +302,33 @@ function discover(input: {
       || (readiness.status === "degraded" && readiness.limitationCodes.length === 0)) {
     return fail("unsupported_protocol", operations, "reachable");
   }
+  const bindingAvailable = payload.clientId !== null
+    && payload.registryIdentity !== null
+    && typeof payload.clientId === "string"
+    && typeof payload.registryIdentity === "object";
+  const identityConsistency = !bindingAvailable
+    ? "unavailable"
+    : readiness.status === "degraded"
+      ? "unverified"
+      : payload.clientId === selectedRow.clientId
+          && payload.registryIdentity.fleetId === selectedIdentity.fleetId
+          && payload.registryIdentity.allocatorId === selectedIdentity.allocatorId
+        ? "matched"
+        : "mismatch";
+  const endpointLease = payload.endpointLease;
+  const currentRegistryTimeMs = input.after?.registryServerTimeMs
+    ?? input.before!.registryServerTimeMs;
+  const endpointLeaseConsistency = endpointLease === null
+    ? "unavailable"
+    : readiness.status === "degraded"
+      ? "unverified"
+      : endpointLease.leaseGeneration !== selectedRow.endpointLease?.leaseGeneration
+          || endpointLease.leaseExpiresAtMs <= currentRegistryTimeMs
+        ? "stale"
+        : endpointLease.registrationObservedAtMs !== selectedRow.endpointLease?.registrationObservedAtMs
+            || endpointLease.leaseExpiresAtMs !== selectedRow.endpointLease?.leaseExpiresAtMs
+          ? "mismatch"
+          : "matched";
   if (hasForbiddenContent(payload)) {
     return fail("unsupported_protocol", operations, "reachable", "unknown", "matched");
   }
@@ -352,7 +381,8 @@ function discover(input: {
     writes: [],
     transportReachability: "reachable",
     applicationReadiness: readiness.status,
-    identityConsistency: "matched",
+    identityConsistency,
+    endpointLeaseConsistency,
     authenticated: false,
     registryServerTimeMs: input.after!.registryServerTimeMs,
     registrationAgeMs: input.after!.registryServerTimeMs
@@ -384,6 +414,7 @@ test("current unique lease plus nonce-bound pre-pair describe returns separate e
   assert.equal(output.transportReachability, "reachable");
   assert.equal(output.applicationReadiness, "ready");
   assert.equal(output.identityConsistency, "matched");
+  assert.equal(output.endpointLeaseConsistency, "matched");
   assert.equal(output.authenticated, false);
   assert.equal(output.registrationAgeMs, 1_000);
   assert.deepEqual(output.operations, ["fleet.topology", "surface.describe", "fleet.topology"]);
@@ -519,23 +550,54 @@ test("unreachable transport and unresponsive application are distinct", () => {
   assert.equal(unresponsive.applicationReadiness, "unknown");
 });
 
-test("client, registry, surface, and lease mismatches are not authenticated or selected", () => {
+test("saved binding and lease mismatches remain readable and are reported separately", () => {
+  const base = describeResponse().payload;
   const cases = [
-    { clientId: "b".repeat(64) },
-    { registryIdentity: { fleetId: "foreign", allocatorId: identity.allocatorId } },
-    { registryIdentity: { fleetId: identity.fleetId, allocatorId: "foreign" } },
-    { surfaceId: "sf_other" },
-    { endpointLeaseGeneration: 5 },
+    { fields: { clientId: "b".repeat(64) }, binding: "mismatch", lease: "matched" },
+    { fields: { registryIdentity: { fleetId: "foreign", allocatorId: identity.allocatorId } }, binding: "mismatch", lease: "matched" },
+    { fields: { registryIdentity: { fleetId: identity.fleetId, allocatorId: "alloc_foreign" } }, binding: "mismatch", lease: "matched" },
+    { fields: { endpointLease: { ...base.endpointLease, leaseGeneration: 5 } }, binding: "matched", lease: "stale" },
+    { fields: { endpointLease: { ...base.endpointLease, leaseExpiresAtMs: 9_500 } }, binding: "matched", lease: "stale" },
   ];
-  for (const fields of cases) {
+  for (const item of cases) {
     const response = describeResponse({
-      payload: { ...describeResponse().payload, ...fields },
+      payload: { ...base, ...item.fields },
     });
     const output = discover(validInput({ response }) as any);
-    assert.equal(output.status, "identity_mismatch");
-    assert.equal(output.identityConsistency, "mismatch");
-    assert.equal(output.authenticated, undefined);
+    assert.equal(output.status, "current");
+    assert.equal(output.identityConsistency, item.binding);
+    assert.equal(output.endpointLeaseConsistency, item.lease);
+    assert.equal(output.authenticated, false);
   }
+
+  const wrongSurface = describeResponse({ payload: { ...base, surfaceId: "sf_other" } });
+  assert.equal(discover(validInput({ response: wrongSurface }) as any).status, "identity_mismatch");
+});
+
+test("unavailable saved registry data and uncertain verification do not suppress topology", () => {
+  const base = describeResponse().payload;
+  const unavailable = describeResponse({
+    payload: { ...base, clientId: null, registryIdentity: null, endpointLease: null },
+  });
+  const unavailableOutput = discover(validInput({ response: unavailable }) as any);
+  assert.equal(unavailableOutput.status, "current");
+  assert.equal(unavailableOutput.identityConsistency, "unavailable");
+  assert.equal(unavailableOutput.endpointLeaseConsistency, "unavailable");
+  assert.equal(unavailableOutput.topologyRevision, 8);
+
+  const degraded = describeResponse({
+    payload: {
+      ...base,
+      applicationReadiness: { status: "degraded", limitationCodes: ["not_ready"] },
+      clientId: "b".repeat(64),
+      endpointLease: { ...base.endpointLease, leaseGeneration: 5 },
+    },
+  });
+  const degradedOutput = discover(validInput({ response: degraded }) as any);
+  assert.equal(degradedOutput.status, "degraded");
+  assert.equal(degradedOutput.identityConsistency, "unverified");
+  assert.equal(degradedOutput.endpointLeaseConsistency, "unverified");
+  assert.equal(degradedOutput.topologyRevision, 8);
 });
 
 test("request id and nonce bind one response and reject cached or cross-request replies", () => {

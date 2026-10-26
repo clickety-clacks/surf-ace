@@ -83,7 +83,11 @@ test("surface.describe schema is a read-only pre-pair request and permits unknow
       clientId: "a".repeat(64),
       registryIdentity: { allocatorId: "alloc_fixture", fleetId: "fleet_fixture" },
       surfaceId: "sf_fixture",
-      endpointLeaseGeneration: 17,
+      endpointLease: {
+        leaseGeneration: 17,
+        registrationObservedAtMs: Date.now() - 1000,
+        leaseExpiresAtMs: Date.now() + 10_000,
+      },
       observedAtMs: Date.now(),
       applicationReadiness: { status: "ready", limitationCodes: [] },
       surfaceSetRevision: 2,
@@ -100,6 +104,33 @@ test("surface.describe schema is a read-only pre-pair request and permits unknow
     v: 1,
   });
   assert.deepEqual(response, { ok: true });
+
+  const unavailableSavedRegistryState = validateEnvelopeType("surface.describe", {
+    id: "rq_surface_describe_fixture",
+    op: "surface.describe",
+    ok: true,
+    payload: {
+      nonce: "b".repeat(32),
+      clientId: null,
+      registryIdentity: null,
+      surfaceId: "sf_fixture",
+      endpointLease: null,
+      observedAtMs: Date.now(),
+      applicationReadiness: { status: "degraded", limitationCodes: ["not_ready"] },
+      surfaceSetRevision: 2,
+      topologyRevision: 3,
+      layout: { paneId: 1, type: "pane" },
+      panes: [{
+        paneId: 1,
+        paneLabel: null,
+        contentObservation: { revision: null, source: "client-authority", observedAtMs: Date.now() },
+      }],
+    },
+    sentAt: Date.now(),
+    type: "response",
+    v: 1,
+  });
+  assert.deepEqual(unavailableSavedRegistryState, { ok: true });
 
   const describePaneProperties = (protocolSchemaDefs.SurfaceDescribeResponse as any)
     .properties.payload.properties.panes.items.properties;
