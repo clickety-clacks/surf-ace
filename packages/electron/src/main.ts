@@ -405,6 +405,7 @@ function endpointName(): string {
 async function acknowledgeCompositorMainAppBinding(): Promise<void> {
   await refreshRuntimeAppBindingDiagnostics();
   compositorRejectedStartupSurfaces.clear();
+  // Generic transport and acknowledgement failures are degraded, not rejection evidence.
   if (runtimeAppBindingDiagnostics?.bindingAuthority === "blocked") {
     for (const surface of core.listSurfaces()) {
       compositorRejectedStartupSurfaces.add(surface.surfaceId);
@@ -2257,6 +2258,7 @@ async function boot(): Promise<void> {
       return;
     }
     if (coreEvent.type === "surface-removed") {
+      compositorRejectedStartupSurfaces.delete(coreEvent.surfaceId);
       const window = windows.get(coreEvent.surfaceId);
       if (window && !window.isDestroyed()) {
         programmaticSurfaceCloses.add(coreEvent.surfaceId);

@@ -97,11 +97,14 @@ test("a rejected startup close persists readable content without final close", a
   assert.equal(restoredContent?.contentType, "markdown");
 });
 
-test("a renderer-ready window close remains final after a rejected startup", () => {
-  assert.equal(
+test("a renderer-ready window close remains final after a rejected startup", async () => {
+  const deps = lifecycle();
+  await handleSurfaceWindowClose(
+    { preventDefault: () => {} },
     surfaceWindowCloseOrigin({ compositorStartupRejected: true, rendererReady: true }),
-    "user",
+    deps,
   );
+  assert.deepEqual(deps.calls, ["begin", "release-panes", "final-close", "finish"]);
 });
 
 test("a rejected startup window stays open if preserving its state fails", async () => {
