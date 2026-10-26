@@ -13,7 +13,6 @@ import {
   loadPersistentStateFile,
   PersistentStateOutcomeUnknownError,
   persistentStateSelectorFileName,
-  shouldGuardUnrestorablePersistentState,
   writePersistentStateFile,
 } from "../src/persistent-state-file.js";
 
@@ -310,6 +309,58 @@ test("persistent state recovers last-good backup when primary JSON is truncated"
   assert.equal(result.recoveredFromBackup, true);
   assert.deepEqual(result.state, state);
   assert.deepEqual(JSON.parse(await fs.readFile(path.join(stateDir, STATE_FILE_NAME), "utf8")), state);
+});
+
+test("transient primary read failure does not restore an older backup as current state", async () => {
+  const stateDir = await temporaryStateDir();
+  const primaryPath = path.join(stateDir, STATE_FILE_NAME);
+  const backupPath = path.join(stateDir, backupStateFileName(STATE_FILE_NAME));
+  const olderState = multiWindowState();
+  const currentState = { ...multiWindowState(), primarySurfaceId: "sf_secondary" as never };
+  await fs.writeFile(primaryPath, JSON.stringify(currentState));
+  await fs.writeFile(backupPath, JSON.stringify(olderState));
+
+  const originalReadFile = fs.readFile;
+  fs.readFile = (async (...args: Parameters<typeof fs.readFile>) => {
+    if (args[0] === primaryPath) throw Object.assign(new Error("temporary read failure"), { code: "EIO" });
+    return await originalReadFile(...args);
+  }) as typeof fs.readFile;
+  let result: Awaited<ReturnType<typeof loadPersistentStateFile>>;
+  try {
+    result = await loadPersistentStateFile(stateDir, STATE_FILE_NAME);
+  } finally {
+    fs.readFile = originalReadFile;
+  }
+
+  assert.equal(result.writeGuard, "ambiguous-persistence");
+  assert.equal(result.state, undefined);
+  assert.equal(await fs.readFile(primaryPath, "utf8"), JSON.stringify(currentState));
+});
+
+test("persistent state retries a transient primary read before considering backup recovery", async () => {
+  const stateDir = await temporaryStateDir();
+  const primaryPath = path.join(stateDir, STATE_FILE_NAME);
+  const currentState = { ...multiWindowState(), primarySurfaceId: "sf_secondary" as never };
+  await fs.writeFile(primaryPath, JSON.stringify(currentState));
+
+  const originalReadFile = fs.readFile;
+  let attempts = 0;
+  fs.readFile = (async (...args: Parameters<typeof fs.readFile>) => {
+    if (args[0] === primaryPath && attempts++ === 0) {
+      throw Object.assign(new Error("temporary read failure"), { code: "EIO" });
+    }
+    return await originalReadFile(...args);
+  }) as typeof fs.readFile;
+  let result: Awaited<ReturnType<typeof loadPersistentStateFile>>;
+  try {
+    result = await loadPersistentStateFile(stateDir, STATE_FILE_NAME);
+  } finally {
+    fs.readFile = originalReadFile;
+  }
+
+  assert.equal(attempts, 2);
+  assert.deepEqual(result.state, currentState);
+  assert.equal(result.writeGuard, false);
 });
 
 test("backup failure cannot durably replace the primary before transaction rollback", async () => {
@@ -679,15 +730,4 @@ test("persistent state leaves unrecoverable corrupt primary available for future
   assert.equal(result.state, undefined);
   assert.equal(result.writeGuard, false);
   assert.equal(await fs.readFile(path.join(stateDir, STATE_FILE_NAME), "utf8"), "{");
-});
-
-test("persistent state guards parsed saved surfaces when any saved surface does not restore", () => {
-  assert.equal(shouldGuardUnrestorablePersistentState(multiWindowState(), 0), true);
-  assert.equal(shouldGuardUnrestorablePersistentState(multiWindowState(), 1), true);
-  assert.equal(shouldGuardUnrestorablePersistentState(multiWindowState(), 2), false);
-  assert.equal(shouldGuardUnrestorablePersistentState(undefined, 0), false);
-  assert.equal(
-    shouldGuardUnrestorablePersistentState({ primarySurfaceId: null, surfaces: [], version: 1 }, 0),
-    false,
-  );
 });

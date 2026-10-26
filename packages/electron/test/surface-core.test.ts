@@ -737,22 +737,14 @@ test("surface core persists and restores multiple live windows with pane content
   assert.equal(restoredSecondary.panes[0]?.content.contentType, "markdown");
 });
 
-test("surface core rejects persisted surfaces with invalid pane history", () => {
-  const core = new SurfaceCore({
-    persistentState: {
-      primarySurfaceId: null,
-      version: 1,
-    },
-  });
+test("surface core keeps the readable window when pane history is unreadable", () => {
+  const core = new SurfaceCore({ persistentState: { primarySurfaceId: null, version: 1 } });
   const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
   applyProviderBootstrap(core, surface.surfaceId, 3);
   core.contentSet(surface.surfaceId, {
-    content: { markdown: "# recovered" },
-    contentId: "ct_recovered" as never,
-    contentType: "markdown",
-    historyOwnerToken: "hot_recovered" as never,
-    paneId: 3 as never,
-    revision: 1 as Revision,
+    content: { markdown: "# recovered" }, contentId: "ct_recovered" as never,
+    contentType: "markdown", historyOwnerToken: "hot_recovered" as never,
+    paneId: 3 as never, revision: 1 as Revision,
   });
 
   const persistentState = core.getPersistentState();
@@ -760,42 +752,84 @@ test("surface core rejects persisted surfaces with invalid pane history", () => 
   const restoredCore = new SurfaceCore({ persistentState });
   const restoredSurfaces = restoredCore.restorePersistedSurfaces("Surf Ace", { height: 800, scale: 2, width: 1200 });
 
-  assert.deepEqual(restoredSurfaces, []);
-  assert.deepEqual(restoredCore.listSurfaces(), []);
+  assert.equal(restoredSurfaces.length, 1);
+  const restored = restoredCore.getRendererWindowState(surface.surfaceId);
+  assert.equal(restored.panes.length, 1);
+  assert.equal(restored.panes[0]?.paneId, 3);
+  assert.equal(restored.panes[0]?.content.contentId, null);
 });
 
-test("surface core rejects persisted surfaces with partially restorable pane topology", () => {
-  const core = new SurfaceCore({
-    persistentState: {
-      primarySurfaceId: null,
-      version: 1,
-    },
-  });
+test("surface core repairs partial saved pane order and layout while retaining readable panes", () => {
+  const core = new SurfaceCore({ persistentState: { primarySurfaceId: null, version: 1 } });
   const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
   const initialPaneId = applyProviderBootstrap(core, surface.surfaceId, 3);
   core.paneSplit(surface.surfaceId, {
-    count: 2,
-    direction: "horizontal",
-    newPaneIds: [5],
-    newPaneLabels: [5],
-    paneId: initialPaneId,
+    count: 2, direction: "horizontal", newPaneIds: [5], newPaneLabels: [5], paneId: initialPaneId,
   });
 
   const invalidPaneOrderState = core.getPersistentState();
   invalidPaneOrderState.surfaces![0]!.paneOrder = [3, 404];
   const invalidPaneOrderCore = new SurfaceCore({ persistentState: invalidPaneOrderState });
-  assert.deepEqual(
-    invalidPaneOrderCore.restorePersistedSurfaces("Surf Ace", { height: 800, scale: 2, width: 1200 }),
-    [],
-  );
+  assert.equal(invalidPaneOrderCore.restorePersistedSurfaces("Surf Ace", { height: 800, scale: 2, width: 1200 }).length, 1);
+  assert.equal(invalidPaneOrderCore.getRendererWindowState(surface.surfaceId).panes.length, 2);
 
   const invalidLayoutState = core.getPersistentState();
   invalidLayoutState.surfaces![0]!.layout = { paneId: 404, type: "pane" };
   const invalidLayoutCore = new SurfaceCore({ persistentState: invalidLayoutState });
-  assert.deepEqual(
-    invalidLayoutCore.restorePersistedSurfaces("Surf Ace", { height: 800, scale: 2, width: 1200 }),
-    [],
-  );
+  assert.equal(invalidLayoutCore.restorePersistedSurfaces("Surf Ace", { height: 800, scale: 2, width: 1200 }).length, 1);
+  assert.equal(invalidLayoutCore.getRendererWindowState(surface.surfaceId).panes.length, 2);
+});
+
+test("surface core treats an invalid saved registry identity as unbound", () => {
+  const core = new SurfaceCore({
+    clientIdentity: "client-current",
+    persistentState: {
+      primarySurfaceId: null,
+      registryBinding: { allocatorId: "missing-prefix", clientId: "client-current", fleetId: "fleet" } as never,
+      version: 1,
+    },
+  });
+
+  assert.equal(core.registryBinding(), null);
+});
+
+test("surface core retains readable windows when another saved record is undecodable", () => {
+  const viewport = { height: 800, scale: 2, width: 1200 };
+  const core = new SurfaceCore({ persistentState: { primarySurfaceId: null, version: 1 } });
+  const primary = core.ensurePrimarySurface("Primary", viewport);
+  const unreadable = core.createAdditionalSurface("Unreadable", viewport);
+  const readable = core.createAdditionalSurface("Readable", viewport);
+  for (const [index, surface] of [primary, readable].entries()) {
+    const paneId = applyProviderBootstrap(core, surface.surfaceId, 3 + index, index === 0 ? "a" : "b");
+    core.contentSet(surface.surfaceId, {
+      content: { markdown: `# ${surface.name}` },
+      contentId: `ct_${surface.name.toLowerCase()}` as never,
+      contentType: "markdown",
+      historyOwnerToken: `hot_${surface.name.toLowerCase()}` as never,
+      paneId: paneId as never,
+      revision: 1 as Revision,
+    });
+  }
+  const saved = core.getPersistentState();
+  const unreadableIndex = saved.surfaces!.findIndex((surface) => surface.surfaceId === unreadable.surfaceId);
+  (saved.surfaces as unknown[])[unreadableIndex] = null;
+
+  const restored = new SurfaceCore({ persistentState: saved });
+  const surfaces = restored.restorePersistedSurfaces("Surf Ace", viewport);
+
+  assert.deepEqual(surfaces.map((surface) => surface.surfaceId), [primary.surfaceId, readable.surfaceId]);
+  assert.equal(restored.getRendererWindowState(primary.surfaceId).panes[0]?.content.contentId, "ct_primary");
+  assert.equal(restored.getRendererWindowState(readable.surfaceId).panes[0]?.content.contentId, "ct_readable");
+});
+
+test("surface core remembers an abandoned registry identity after rebinding", () => {
+  const clientId = "client-current";
+  const core = new SurfaceCore({ clientIdentity: clientId });
+  core.bindRegistryIdentity({ clientId, allocatorId: "alloc_previous", fleetId: "fleet-previous" });
+  core.beginRegistryBinding({ clientId, allocatorId: "alloc_current", fleetId: "fleet-current" });
+
+  assert.equal(core.isPriorRegistryBinding(clientId, "alloc_previous", "fleet-previous"), true);
+  assert.equal(core.isPriorRegistryBinding(clientId, "alloc_current", "fleet-current"), false);
 });
 
 test("surface core persists and restores local window placement without changing surface identity", () => {

@@ -2176,6 +2176,77 @@ export class LocklessClientAuthority {
     return clone(this.state.pendingWindowReleases);
   }
 
+  holdPendingRegistryReleases(): {
+    paneReleases: PersistentPaneRetirement[];
+    windowReleases: PersistentWindowRetirement[];
+  } {
+    const held = {
+      paneReleases: clone(this.state.pendingPaneReleases),
+      windowReleases: clone(this.state.pendingWindowReleases),
+    };
+    this.state.pendingPaneReleases = [];
+    this.state.pendingWindowReleases = [];
+    this.clearTombstoneAllocationClaims();
+    return held;
+  }
+
+  discardRejectedPaneRelease(releaseId: string): void {
+    this.discardRejectedRelease(this.state.pendingPaneReleases, "pane", releaseId);
+  }
+
+  discardRejectedWindowRelease(releaseId: string): void {
+    this.discardRejectedRelease(this.state.pendingWindowReleases, "window", releaseId);
+  }
+
+  private discardRejectedRelease(
+    pending: Array<{ releaseId: string }>,
+    kind: "pane" | "window",
+    releaseId: string,
+  ): void {
+    if (!/^[a-f0-9]{64}$/.test(releaseId) || !pending.some((entry) => entry.releaseId === releaseId)) {
+      throw new LocklessAuthorityError("invalid_operation", `Rejected ${kind} release is not pending`);
+    }
+    if (kind === "pane") {
+      this.state.pendingPaneReleases = this.state.pendingPaneReleases.filter((entry) => entry.releaseId !== releaseId);
+    } else {
+      this.state.pendingWindowReleases = this.state.pendingWindowReleases.filter((entry) => entry.releaseId !== releaseId);
+    }
+  }
+
+  private clearTombstoneAllocationClaims(): void {
+    const clearPane = (pane: unknown): void => {
+      if (!pane || typeof pane !== "object" || Array.isArray(pane)) return;
+      const value = pane as Record<string, unknown>;
+      value.paneLabel = 0;
+      value.allocationGeneration = null;
+    };
+    const clearSurface = (surface: unknown): void => {
+      if (!surface || typeof surface !== "object" || Array.isArray(surface)) return;
+      const value = surface as Record<string, unknown>;
+      value.windowLabel = "";
+      value.windowLabelConfirmed = false;
+      value.windowAllocationGeneration = null;
+      if (Array.isArray(value.panes)) for (const pane of value.panes) clearPane(pane);
+    };
+    for (const tombstone of this.state.tombstones) {
+      if (!tombstone.payload || typeof tombstone.payload !== "object" || Array.isArray(tombstone.payload)) continue;
+      const payload = tombstone.payload as Record<string, unknown>;
+      if (tombstone.kind === "pane") {
+        clearPane(payload.pane);
+        continue;
+      }
+      clearSurface(payload.surface);
+      if (Array.isArray(payload.paneTombstones)) {
+        for (const nested of payload.paneTombstones) {
+          if (!nested || typeof nested !== "object" || Array.isArray(nested)) continue;
+          const nestedPayload = (nested as Record<string, unknown>).payload;
+          if (!nestedPayload || typeof nestedPayload !== "object" || Array.isArray(nestedPayload)) continue;
+          clearPane((nestedPayload as Record<string, unknown>).pane);
+        }
+      }
+    }
+  }
+
   acknowledgePaneReleases(releaseIds: string[]): void {
     if (new Set(releaseIds).size !== releaseIds.length ||
         releaseIds.some((releaseId) => !/^[a-f0-9]{64}$/.test(releaseId))) {
