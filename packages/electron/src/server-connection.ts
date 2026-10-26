@@ -4,14 +4,16 @@ import {
   type SurfAceDiscoveryService,
 } from "./surf-ace-discovery.js";
 import { ConfiguredServerRegistration } from "./configured-server.js";
-import type { ProvisionedRegistryBinding } from "./registry-binding.js";
 import type { PaneLabelAllocation, SurfaceCore } from "./surface-core.js";
+import type { RegistryIdentity } from "../../controller/src/wire.js";
 
 type SelectedRegistration = {
   address: string;
   configured: boolean;
   registration: ConfiguredServerRegistration;
 };
+
+type CandidateRegistration = SelectedRegistration & { context: string; identity: RegistryIdentity };
 
 function describeError(error: unknown): string {
   if (!(error instanceof Error)) return String(error);
@@ -25,6 +27,15 @@ function endpointAddress(endpoint: SurfAceDiscoveryEndpoint): string {
   return `ws://${host}:${endpoint.port}${endpoint.wsPath}`;
 }
 
+function endpointAddresses(endpoint: SurfAceDiscoveryEndpoint): string[] {
+  const addresses = [...new Set((endpoint.transportAddresses ?? []).map((transportAddress) => {
+    const unwrappedHost = transportAddress.replace(/^\[(.*)\]$/, "$1");
+    const host = unwrappedHost.includes(":") ? `[${unwrappedHost}]` : unwrappedHost;
+    return `ws://${host}:${endpoint.port}${endpoint.wsPath}`;
+  }))];
+  return [...new Set([...addresses, endpointAddress(endpoint)])];
+}
+
 function isServerContract(endpoint: SurfAceDiscoveryEndpoint): boolean {
   return endpoint.role === "server" && endpoint.protocolVersion === 1 && endpoint.wsPath === "/ws";
 }
@@ -32,6 +43,10 @@ function isServerContract(endpoint: SurfAceDiscoveryEndpoint): boolean {
 function isUnspecifiedAddress(host: string): boolean {
   const normalized = host.toLowerCase().replace(/^\[(.*)\]$/, "$1").replace(/\.$/, "");
   return normalized === "0.0.0.0" || normalized === "::" || normalized === "0:0:0:0:0:0:0:0";
+}
+
+function sameRegistry(left: RegistryIdentity, right: RegistryIdentity): boolean {
+  return left.allocatorId === right.allocatorId && left.fleetId === right.fleetId;
 }
 
 export class ServerConnection {
@@ -54,7 +69,6 @@ export class ServerConnection {
     onError?: (error: unknown) => void;
     discovery?: SurfAceDiscoveryService;
     requestTimeoutMs?: number;
-    provisionedBinding?: ProvisionedRegistryBinding | null;
   }) {
     this.discovery = options.discovery ?? createBonjourSurfAceDiscoveryService({ timeoutMs: 1500 });
   }
@@ -107,34 +121,6 @@ export class ServerConnection {
       if (this.stopped) return;
       if (!this.selected || this.status !== "connected") this.setStatus("connecting");
       const failures: string[] = [];
-      const tryAddress = async (address: string, configured = false, context = "configured registry"): Promise<boolean> => {
-        let candidate: ConfiguredServerRegistration | null = null;
-        try {
-          candidate = new ConfiguredServerRegistration(
-            address, this.options.clientId, this.options.core, this.options.persist,
-            this.options.onError, this.options.requestTimeoutMs ?? 2000,
-            this.options.provisionedBinding,
-            this.options.directEndpoint ?? null,
-          );
-          candidate.onClose(() => {
-            if (this.selected?.registration === candidate) {
-              this.setStatus("disconnected");
-            }
-          });
-          await candidate.synchronize();
-          if (this.stopped) { await candidate.stop(); return false; }
-          const previous = this.selected;
-          this.selected = { address, configured, registration: candidate };
-          this.clearFailure();
-          this.setStatus("connected");
-          await previous?.registration.stop();
-          return true;
-        } catch (error) {
-          await candidate?.stop();
-          this.reportFailure(`${context} ${address} failed: ${describeError(error)}`, !this.selected, failures);
-          return false;
-        }
-      };
 
       if (this.selected) {
         const current = this.selected;
@@ -143,28 +129,19 @@ export class ServerConnection {
           if (this.stopped) return;
           this.clearFailure();
           this.setStatus("connected");
+          return;
         } catch (error) {
           await current.registration.stop();
           this.selected = null;
           this.reportFailure(`registry ${current.address} reconnect failed: ${describeError(error)}`, true, failures);
           this.setStatus("connecting");
         }
-        if (this.selected) {
-          if (!this.selected.configured && this.options.configuredAddress) {
-            await tryAddress(this.options.configuredAddress, true, "configured registry recovery");
-          }
-          return;
-        }
       }
 
-      if (this.options.configuredAddress && await tryAddress(this.options.configuredAddress, true)) {
-        if (this.browsing) {
-          await this.discovery.stop();
-          this.browsing = false;
-        }
-        return;
+      const addresses: Array<{ address: string; configured: boolean; context: string }> = [];
+      if (this.options.configuredAddress) {
+        addresses.push({ address: this.options.configuredAddress, configured: true, context: "configured registry" });
       }
-      if (this.stopped) return;
 
       try {
         if (!this.browsing) {
@@ -202,9 +179,7 @@ export class ServerConnection {
       }
 
       const discoveryError = this.discovery.getLastError?.();
-      if (discoveryError) {
-        this.reportFailure(`DNS-SD discovery failed: ${discoveryError}`, true, failures);
-      }
+      if (discoveryError) this.reportFailure(`DNS-SD discovery failed: ${discoveryError}`, true, failures);
       if (servers.length === 0) {
         if (!discoveryError && endpoints.length === 0) {
           this.reportFailure("DNS-SD browse found no _surf-ace._tcp service with role=server v=1 ws=/ws", true, failures);
@@ -212,24 +187,113 @@ export class ServerConnection {
           this.reportFailure("DNS-SD browse found no service with role=server", true, failures);
         }
       }
-
       for (const endpoint of servers) {
-        // DNS-SD has already resolved these addresses for this service. Trying them
-        // before the SRV hostname avoids a slow dual-stack .local lookup consuming
-        // the WebSocket handshake deadline on an IPv4-only listener.
-        const addresses = [...new Set((endpoint.transportAddresses ?? []).map((transportAddress) => {
-          const unwrappedHost = transportAddress.replace(/^\[(.*)\]$/, "$1");
-          const host = unwrappedHost.includes(":") ? `[${unwrappedHost}]` : unwrappedHost;
-          return `ws://${host}:${endpoint.port}${endpoint.wsPath}`;
-        }))];
-        for (const address of new Set([...addresses, endpointAddress(endpoint)])) {
-          if (await tryAddress(address, false, `discovered registry ${endpoint.instanceName}`)) {
-            await this.discovery.stop();
-            this.browsing = false;
-            return;
-          }
+        for (const address of endpointAddresses(endpoint)) {
+          addresses.push({ address, configured: false, context: `discovered registry ${endpoint.instanceName}` });
         }
       }
+
+      const binding = this.options.core.registryBinding();
+      const boundForClient = binding?.clientId === this.options.clientId ? binding : null;
+      let matchingRegistrySeen = false;
+      let firstForeign: CandidateRegistration | null = null;
+      const visited = new Set<string>();
+
+      const adopt = async (candidate: CandidateRegistration, allowRebind: boolean): Promise<boolean> => {
+        try {
+          candidate.registration.onClose(() => {
+            if (this.selected?.registration === candidate.registration) this.setStatus("disconnected");
+          });
+          await candidate.registration.synchronize({
+            allowRebind,
+            expectedIdentity: candidate.identity,
+          });
+          if (this.stopped) { await candidate.registration.stop(); return false; }
+          const previous = this.selected;
+          this.selected = {
+            address: candidate.address,
+            configured: candidate.configured,
+            registration: candidate.registration,
+          };
+          if (firstForeign && firstForeign.registration !== candidate.registration) {
+            await firstForeign.registration.stop();
+          }
+          firstForeign = null;
+          this.clearFailure();
+          this.setStatus("connected");
+          await previous?.registration.stop();
+          if (this.browsing) {
+            await this.discovery.stop();
+            this.browsing = false;
+          }
+          return true;
+        } catch (error) {
+          await candidate.registration.stop();
+          this.reportFailure(`${candidate.context} ${candidate.address} failed: ${describeError(error)}`, !this.selected, failures);
+          return false;
+        }
+      };
+
+      for (const route of addresses) {
+        if (visited.has(route.address)) continue;
+        visited.add(route.address);
+        let registration: ConfiguredServerRegistration | null = null;
+        try {
+          registration = new ConfiguredServerRegistration(
+            route.address,
+            this.options.clientId,
+            this.options.core,
+            this.options.persist,
+            this.options.onError,
+            this.options.requestTimeoutMs ?? 2000,
+            this.options.directEndpoint ?? null,
+          );
+          const identity = await registration.readRegistryIdentity();
+          if (this.stopped) { await registration.stop(); return; }
+          const currentBinding = this.options.core.registryBinding();
+          const currentForClient = currentBinding?.clientId === this.options.clientId ? currentBinding : null;
+          if (!currentForClient) {
+            const first = { ...route, registration, identity };
+            if (await adopt(first, false)) return;
+            const afterFailure = this.options.core.registryBinding();
+            if (afterFailure?.clientId === this.options.clientId &&
+                afterFailure.allocatorId === identity.allocatorId && afterFailure.fleetId === identity.fleetId) {
+              matchingRegistrySeen = true;
+            }
+            registration = null;
+            continue;
+          }
+          if (currentForClient.allocatorId === identity.allocatorId && currentForClient.fleetId === identity.fleetId) {
+            matchingRegistrySeen = true;
+            const matching = { ...route, registration, identity };
+            if (await adopt(matching, false)) return;
+            registration = null;
+            continue;
+          }
+          if (this.options.core.isPriorRegistryBinding(this.options.clientId, identity.allocatorId, identity.fleetId)) {
+            this.reportFailure(
+              `${route.context} ${route.address} rejected: registry identity was previously abandoned`,
+              true,
+              failures,
+            );
+            await registration.stop();
+            registration = null;
+            continue;
+          }
+          if (!firstForeign) firstForeign = { ...route, registration, identity };
+          else await registration.stop();
+          registration = null;
+        } catch (error) {
+          await registration?.stop();
+          this.reportFailure(`${route.context} ${route.address} identity probe failed: ${describeError(error)}`, true, failures);
+        }
+      }
+
+      if (!matchingRegistrySeen && firstForeign) {
+        if (await adopt(firstForeign, true)) return;
+        firstForeign = null;
+      }
+      await firstForeign?.registration.stop();
 
       const message = failures.length > 0
         ? `no_surf_ace_server: ${failures.join("; ")}`

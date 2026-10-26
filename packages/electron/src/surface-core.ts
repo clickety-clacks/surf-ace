@@ -213,7 +213,10 @@ export type PersistentSurfaceState = {
   nextAdmissionAttemptSequence?: number;
   primarySurfaceId: string | null;
   registryBinding?: PersistentRegistryBinding;
+  registryBindingHistory?: PersistentRegistryBindingHistory[];
+  registryBindingPending?: boolean;
   registryEndpointLease?: PersistentRegistryEndpointLease | null;
+  registryRefusedClaims?: PersistentRegistryRefusedClaim[];
   surfaces?: PersistentSurfaceRecord[];
   version: 1;
 };
@@ -236,6 +239,23 @@ export type ConfirmedRegistryClaim = {
   windowAllocationGeneration?: number;
   windowLabel: string;
 };
+
+type PersistentRegistryBindingHistory = {
+  binding: PersistentRegistryBinding | null;
+  claims: ConfirmedRegistryClaim[];
+  heldPaneReleaseIds: string[];
+  heldWindowReleaseIds: string[];
+  paneLabels: Array<{ allocationGeneration: number | null; paneId: string; paneLabel: number; paneLineageId: string; surfaceId: string }>;
+  windowLabels: Array<{ allocationGeneration: number | null; surfaceId: string; windowLabel: string; windowLabelConfirmed: boolean | null }>;
+};
+
+type PersistentRegistryRefusedClaim =
+  | { kind: "surface"; surfaceId: string }
+  | { kind: "pane"; paneId: string; paneLineageId: string; surfaceId: string };
+
+type ReidentifiedRegistryClaim =
+  | { kind: "surface"; newSurfaceId: string; oldSurfaceId: string }
+  | { kind: "pane"; newPaneId: number; oldPaneId: number; surfaceId: string };
 
 type PersistentSurfaceRecord = {
   activeKeyboardPaneId: number | null;
@@ -930,9 +950,18 @@ export class SurfaceCore {
     if (typeof binding.clientId !== "string" || !/^[A-Za-z0-9._:-]{1,128}$/.test(binding.clientId) ||
         typeof binding.allocatorId !== "string" || !/^alloc_[A-Za-z0-9._:-]{3,64}$/.test(binding.allocatorId) ||
         typeof binding.fleetId !== "string" || !/^[A-Za-z0-9._:-]{1,128}$/.test(binding.fleetId)) {
-      throw new SurfaceCoreError("invalid_payload", "Stored registry binding is invalid");
+      return null;
     }
     return structuredClone(binding);
+  }
+
+  isPriorRegistryBinding(clientId: string, allocatorId: string, fleetId: string): boolean {
+    const history = this.persistentState.registryBindingHistory;
+    return Array.isArray(history) && history.some((entry) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
+      const binding = entry.binding;
+      return !!binding && binding.clientId === clientId && binding.allocatorId === allocatorId && binding.fleetId === fleetId;
+    });
   }
 
   bindRegistryIdentity(binding: PersistentRegistryBinding): void {
@@ -947,6 +976,238 @@ export class SurfaceCore {
       throw new SurfaceCoreError("invalid_payload", "Stored registry identity cannot be replaced implicitly");
     }
     this.persistentState.registryBinding = structuredClone(binding);
+  }
+
+  registryBindingPending(): boolean {
+    return this.persistentState.registryBindingPending === true;
+  }
+
+  beginRegistryBinding(binding: PersistentRegistryBinding): void {
+    if (typeof binding.clientId !== "string" || !/^[A-Za-z0-9._:-]{1,128}$/.test(binding.clientId) ||
+        typeof binding.allocatorId !== "string" || !/^alloc_[A-Za-z0-9._:-]{3,64}$/.test(binding.allocatorId) ||
+        typeof binding.fleetId !== "string" || !/^[A-Za-z0-9._:-]{1,128}$/.test(binding.fleetId)) {
+      throw new SurfaceCoreError("invalid_payload", "Proposed registry binding is invalid");
+    }
+    const existing = this.registryBinding();
+    if (existing && existing.clientId === binding.clientId && existing.allocatorId === binding.allocatorId &&
+        existing.fleetId === binding.fleetId) return;
+
+    const claims = this.confirmedRegistryClaims();
+    const paneLabels: PersistentRegistryBindingHistory["paneLabels"] = [];
+    const windowLabels: PersistentRegistryBindingHistory["windowLabels"] = [];
+    for (const surface of this.surfaces.values()) {
+      windowLabels.push({
+        allocationGeneration: surface.windowAllocationGeneration,
+        surfaceId: surface.surfaceId,
+        windowLabel: surface.windowLabel,
+        windowLabelConfirmed: surface.windowLabelConfirmed,
+      });
+      for (const pane of surface.panes.values()) {
+        paneLabels.push({
+          allocationGeneration: pane.allocationGeneration,
+          paneId: String(pane.paneId),
+          paneLabel: pane.paneLabel,
+          paneLineageId: pane.paneLineageId,
+          surfaceId: surface.surfaceId,
+        });
+      }
+    }
+    for (const tombstone of this.locklessAuthority.listTombstones()) {
+      if (tombstone.kind === "pane") {
+        const pane = (tombstone.payload as { pane?: Record<string, unknown> } | null)?.pane;
+        if (pane) paneLabels.push({
+          allocationGeneration: Number.isSafeInteger(pane.allocationGeneration) ? Number(pane.allocationGeneration) : null,
+          paneId: String(pane.paneId ?? ""),
+          paneLabel: Number.isSafeInteger(pane.paneLabel) ? Number(pane.paneLabel) : 0,
+          paneLineageId: typeof pane.paneLineageId === "string" ? pane.paneLineageId : "",
+          surfaceId: tombstone.surfaceId,
+        });
+        continue;
+      }
+      const payload = tombstone.payload as { surface?: Record<string, unknown>; paneTombstones?: unknown[] } | null;
+      const surface = payload?.surface;
+      if (!surface) continue;
+      const surfaceId = typeof surface.surfaceId === "string" ? surface.surfaceId : tombstone.surfaceId;
+      windowLabels.push({
+        allocationGeneration: Number.isSafeInteger(surface.windowAllocationGeneration)
+          ? Number(surface.windowAllocationGeneration) : null,
+        surfaceId,
+        windowLabel: typeof surface.windowLabel === "string" ? surface.windowLabel : "",
+        windowLabelConfirmed: typeof surface.windowLabelConfirmed === "boolean" ? surface.windowLabelConfirmed : null,
+      });
+      if (Array.isArray(surface.panes)) {
+        for (const candidate of surface.panes) {
+          if (!candidate || typeof candidate !== "object") continue;
+          const pane = candidate as Record<string, unknown>;
+          paneLabels.push({
+            allocationGeneration: Number.isSafeInteger(pane.allocationGeneration) ? Number(pane.allocationGeneration) : null,
+            paneId: String(pane.paneId ?? ""),
+            paneLabel: Number.isSafeInteger(pane.paneLabel) ? Number(pane.paneLabel) : 0,
+            paneLineageId: typeof pane.paneLineageId === "string" ? pane.paneLineageId : "",
+            surfaceId,
+          });
+        }
+      }
+      for (const nested of payload.paneTombstones ?? []) {
+        if (!nested || typeof nested !== "object") continue;
+        const nestedPayload = (nested as { payload?: { pane?: Record<string, unknown> } }).payload;
+        const pane = nestedPayload?.pane;
+        if (!pane) continue;
+        paneLabels.push({
+          allocationGeneration: Number.isSafeInteger(pane.allocationGeneration) ? Number(pane.allocationGeneration) : null,
+          paneId: String(pane.paneId ?? ""),
+          paneLabel: Number.isSafeInteger(pane.paneLabel) ? Number(pane.paneLabel) : 0,
+          paneLineageId: typeof pane.paneLineageId === "string" ? pane.paneLineageId : "",
+          surfaceId,
+        });
+      }
+    }
+    const held = this.locklessAuthority.holdPendingRegistryReleases();
+    if (existing || claims.length > 0 || held.paneReleases.length > 0 || held.windowReleases.length > 0) {
+      const history = Array.isArray(this.persistentState.registryBindingHistory)
+        ? this.persistentState.registryBindingHistory
+        : [];
+      history.push({
+        binding: existing,
+        claims: structuredClone(claims),
+        heldPaneReleaseIds: held.paneReleases.map((release) => release.releaseId),
+        heldWindowReleaseIds: held.windowReleases.map((release) => release.releaseId),
+        paneLabels,
+        windowLabels,
+      });
+      this.persistentState.registryBindingHistory = history;
+    }
+    this.persistentState.registryBinding = structuredClone(binding);
+    this.persistentState.registryBindingPending = true;
+    this.persistentState.registryEndpointLease = null;
+    this.confirmedPaneLabels.clear();
+    for (const surface of this.surfaces.values()) {
+      surface.windowLabel = "";
+      surface.windowLabelConfirmed = false;
+      surface.windowAllocationGeneration = null;
+      for (const pane of surface.panes.values()) {
+        pane.paneLabel = 0;
+        pane.allocationGeneration = null;
+      }
+      this.emit({ surfaceId: surface.surfaceId, type: "surface-changed" });
+    }
+  }
+
+  completeRegistryBinding(): void {
+    if (!this.registryBinding()) {
+      throw new SurfaceCoreError("invalid_operation", "Cannot complete a missing registry binding");
+    }
+    this.persistentState.registryBindingPending = false;
+  }
+
+  isRegistryClaimRefused(surfaceId: string, paneId?: number, paneLineageId?: string): boolean {
+    const refused = Array.isArray(this.persistentState.registryRefusedClaims)
+      ? this.persistentState.registryRefusedClaims
+      : [];
+    if (refused.some((claim) => claim.kind === "surface" && claim.surfaceId === surfaceId)) return true;
+    if (paneId === undefined) return false;
+    return refused.some((claim) => claim.kind === "pane" && claim.surfaceId === surfaceId &&
+      claim.paneId === String(paneId) && (paneLineageId === undefined || claim.paneLineageId === paneLineageId));
+  }
+
+  normalizeRefusedRegistryClaims(): boolean {
+    let changed = false;
+    for (const surface of [...this.surfaces.values()]) {
+      if (this.isRegistryClaimRefused(surface.surfaceId)) {
+        this.reidentifyRegistryClaim(surface.surfaceId);
+        changed = true;
+        continue;
+      }
+      for (const pane of [...surface.panes.values()]) {
+        if (this.isRegistryClaimRefused(surface.surfaceId, pane.paneId, pane.paneLineageId)) {
+          this.reidentifyRegistryClaim(surface.surfaceId, pane.paneId);
+          changed = true;
+        }
+      }
+    }
+    return changed;
+  }
+
+  reidentifyRegistryClaim(surfaceId: string, paneId?: number): ReidentifiedRegistryClaim {
+    const surface = this.getSurface(surfaceId);
+    if (paneId !== undefined) {
+      const pane = surface.panes.get(paneId);
+      if (!pane) throw new SurfaceCoreError("invalid_payload", `Unknown pane: ${paneId}`);
+      this.recordRefusedRegistryClaim({
+        kind: "pane", paneId: String(paneId), paneLineageId: pane.paneLineageId, surfaceId,
+      });
+      const unavailable = new Set([
+        ...surface.paneOrder,
+        ...this.locklessAuthority.unavailablePaneIds(surfaceId),
+      ]);
+      const maximum = Math.max(0, ...unavailable);
+      let newPaneId = Number.isSafeInteger(maximum + 1) ? maximum + 1 : 1;
+      while (unavailable.has(newPaneId)) {
+        if (newPaneId === Number.MAX_SAFE_INTEGER) newPaneId = 1;
+        else newPaneId += 1;
+        if (newPaneId === maximum) {
+          throw new SurfaceCoreError("internal_error", "No pane identity remains available");
+        }
+      }
+      this.confirmedPaneLabels.delete(`${surfaceId}\0${paneId}`);
+      surface.panes.delete(paneId);
+      pane.paneId = newPaneId;
+      pane.paneLineageId = `pl_${randomUUID().replaceAll("-", "")}`;
+      pane.paneLabel = 0;
+      pane.allocationGeneration = null;
+      invalidatePaneSnapshot(pane);
+      surface.panes.set(newPaneId, pane);
+      surface.paneOrder = surface.paneOrder.map((current) => current === paneId ? newPaneId : current);
+      if (surface.activeKeyboardPaneId === paneId) surface.activeKeyboardPaneId = newPaneId;
+      if (surface.layout) surface.layout = replacePaneIdentity(surface.layout, paneId, newPaneId);
+      surface.topologyRevision = Math.max(1, surface.topologyRevision + 1);
+      bumpGeometryRevision(surface);
+      this.emit({ surfaceId, type: "surface-changed" });
+      return { kind: "pane", newPaneId, oldPaneId: paneId, surfaceId };
+    }
+
+    this.recordRefusedRegistryClaim({ kind: "surface", surfaceId });
+    const oldSurfaceId = surface.surfaceId;
+    let newSurfaceId = "";
+    do {
+      newSurfaceId = `sf_${randomUUID().replaceAll("-", "").slice(0, 12)}`;
+    } while (this.surfaces.has(newSurfaceId) ||
+      this.locklessAuthority.listTombstones("surface").some((entry) => entry.surfaceId === newSurfaceId));
+    for (const key of this.confirmedPaneLabels.keys()) {
+      if (key.startsWith(`${oldSurfaceId}\0`)) this.confirmedPaneLabels.delete(key);
+    }
+    this.surfaces.delete(oldSurfaceId);
+    surface.surfaceId = newSurfaceId;
+    surface.surfaceEpoch = `${newSurfaceId}:${surface.surfaceEpochRevision}`;
+    surface.windowLabel = "";
+    surface.windowLabelConfirmed = false;
+    surface.windowAllocationGeneration = null;
+    for (const pane of surface.panes.values()) {
+      pane.paneLineageId = `pl_${randomUUID().replaceAll("-", "")}`;
+      pane.paneLabel = 0;
+      pane.allocationGeneration = null;
+      invalidatePaneSnapshot(pane);
+    }
+    if (this.persistentState.primarySurfaceId === oldSurfaceId) {
+      this.persistentState.primarySurfaceId = newSurfaceId;
+    }
+    this.surfaces.set(newSurfaceId, surface);
+    this.emit({ surfaceId: oldSurfaceId, type: "surface-removed" });
+    this.emit({ surfaceId: newSurfaceId, type: "surface-created" });
+    this.emit({ surfaceId: newSurfaceId, type: "surface-changed" });
+    return { kind: "surface", newSurfaceId, oldSurfaceId };
+  }
+
+  private recordRefusedRegistryClaim(claim: PersistentRegistryRefusedClaim): void {
+    const refused = Array.isArray(this.persistentState.registryRefusedClaims)
+      ? this.persistentState.registryRefusedClaims
+      : [];
+    const duplicate = refused.some((candidate) => candidate.kind === claim.kind &&
+      candidate.surfaceId === claim.surfaceId &&
+      (candidate.kind === "surface" || (claim.kind === "pane" &&
+        candidate.paneId === claim.paneId && candidate.paneLineageId === claim.paneLineageId)));
+    if (!duplicate) refused.push(structuredClone(claim));
+    this.persistentState.registryRefusedClaims = refused;
   }
 
   registryEndpointLease(): PersistentRegistryEndpointLease | null {
@@ -4419,21 +4680,37 @@ function serializeSurface(surface: SurfaceState): PersistentSurfaceRecord {
 }
 
 function deserializeSurface(record: PersistentSurfaceRecord, now: number): SurfaceState | null {
-  if (!Array.isArray(record.panes) || record.panes.length === 0) {
-    return null;
-  }
+  if (typeof record.surfaceId !== "string" || !/^sf_[A-Za-z0-9._:-]{3,64}$/.test(record.surfaceId) ||
+      !Array.isArray(record.panes)) return null;
   const panes = new Map<number, PaneState>();
   const paneOrder: number[] = [];
   let restoredLocalSaveCount = 0;
-  for (const paneRecord of record.panes) {
-    if (!Number.isInteger(paneRecord.paneId) || panes.has(paneRecord.paneId)) {
-      return null;
+  const persistedPaneIds = record.panes.map((candidate) =>
+    candidate && typeof candidate === "object" && Number.isSafeInteger((candidate as Record<string, unknown>).paneId)
+      ? Number((candidate as Record<string, unknown>).paneId) : 0,
+  );
+  const reservedPaneIds = new Set(persistedPaneIds.filter((paneId) => paneId > 0));
+  const maximumPaneId = Math.max(0, ...persistedPaneIds);
+  let nextFreshPaneId = maximumPaneId < Number.MAX_SAFE_INTEGER ? maximumPaneId + 1 : 1;
+  const freshPaneId = (): number => {
+    const firstCandidate = nextFreshPaneId;
+    while (reservedPaneIds.has(nextFreshPaneId) || panes.has(nextFreshPaneId)) {
+      nextFreshPaneId = nextFreshPaneId === Number.MAX_SAFE_INTEGER ? 1 : nextFreshPaneId + 1;
+      if (nextFreshPaneId === firstCandidate) throw new SurfaceCoreError("internal_error", "No pane identity remains available");
     }
-    if (!Array.isArray(paneRecord.history) || paneRecord.history.length === 0) {
-      return null;
-    }
+    const result = nextFreshPaneId;
+    reservedPaneIds.add(result);
+    nextFreshPaneId = result === Number.MAX_SAFE_INTEGER ? 1 : result + 1;
+    return result;
+  };
+  for (const candidate of record.panes as unknown[]) {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
+    const paneRecord = candidate as PersistentPaneRecord;
+    const storedPaneId = Number.isSafeInteger(paneRecord.paneId) && paneRecord.paneId > 0
+      ? paneRecord.paneId : null;
+    const paneId = storedPaneId !== null && !panes.has(storedPaneId) ? storedPaneId : freshPaneId();
     const pane = createPaneState(
-      paneRecord.paneId,
+      paneId,
       Number.isInteger(paneRecord.paneLabel) && paneRecord.paneLabel > 0 ? paneRecord.paneLabel : 0,
       now,
     );
@@ -4446,7 +4723,11 @@ function deserializeSurface(record: PersistentSurfaceRecord, now: number): Surfa
     pane.externalNative = false;
     pane.firstDirtyStrokeAt = typeof paneRecord.firstDirtyStrokeAt === "number" ? paneRecord.firstDirtyStrokeAt : null;
     pane.flushInFlight = false;
-    pane.history = structuredClone(paneRecord.history);
+    const readableHistory = Array.isArray(paneRecord.history)
+      ? paneRecord.history.filter((entry): entry is HistoryEntry => !!entry && typeof entry === "object" &&
+        Number.isSafeInteger((entry as HistoryEntry).revision) && (entry as HistoryEntry).revision >= 0)
+      : [];
+    pane.history = readableHistory.length > 0 ? structuredClone(readableHistory) : pane.history;
     pane.historyIndex = Math.min(
       Math.max(0, Math.trunc(Number(paneRecord.historyIndex ?? 0))),
       pane.history.length - 1,
@@ -4465,7 +4746,8 @@ function deserializeSurface(record: PersistentSurfaceRecord, now: number): Surfa
           ) + 1;
     pane.nativeHost = null;
     pane.nativeWindowGroup = null;
-    pane.paneLineageId = typeof paneRecord.paneLineageId === "string" && paneRecord.paneLineageId.length > 0
+    pane.paneLineageId = typeof paneRecord.paneLineageId === "string" &&
+      /^pl_[A-Za-z0-9._:-]{3,128}$/.test(paneRecord.paneLineageId)
       ? paneRecord.paneLineageId
       : pane.paneLineageId;
     pane.annotationLocalFrameId = validLocalAnnotationFrameId(paneRecord.annotationLocalFrameId)
@@ -4475,7 +4757,7 @@ function deserializeSurface(record: PersistentSurfaceRecord, now: number): Surfa
       delete pane.annotationLocalSave;
     }
     pane.pendingAnnotationCommit = Boolean(paneRecord.pendingAnnotationCommit);
-    pane.snapshot = paneRecord.snapshot
+    pane.snapshot = paneRecord.snapshot && typeof paneRecord.snapshot === "object" && !Array.isArray(paneRecord.snapshot)
       ? {
           ...structuredClone(paneRecord.snapshot),
           geometryRevision: Number.isInteger(paneRecord.snapshot.geometryRevision)
@@ -4494,22 +4776,28 @@ function deserializeSurface(record: PersistentSurfaceRecord, now: number): Surfa
     paneOrder.push(pane.paneId);
   }
   if (panes.size === 0) {
-    return null;
+    const paneId = freshPaneId();
+    panes.set(paneId, createPaneState(paneId, 0, now));
+    paneOrder.push(paneId);
   }
-  if (
-    !Array.isArray(record.paneOrder) ||
-    record.paneOrder.length === 0 ||
-    record.paneOrder.some((paneId) => !panes.has(paneId))
-  ) {
-    return null;
-  }
-  const finalPaneOrder = record.paneOrder;
+  const storedPaneOrder = Array.isArray(record.paneOrder) ? record.paneOrder : [];
+  const finalPaneOrder = [...new Set(storedPaneOrder.filter((paneId) => Number.isSafeInteger(paneId) && panes.has(paneId)))];
+  for (const paneId of paneOrder) if (!finalPaneOrder.includes(paneId)) finalPaneOrder.push(paneId);
   const knownPaneIds = new Set(finalPaneOrder);
-  if (record.layout && !layoutReferencesKnownPanes(record.layout, knownPaneIds)) {
-    return null;
+  let sanitizedLayout: LayoutNode | null = null;
+  if (isLayoutNode(record.layout)) sanitizedLayout = sanitizeLayoutNode(record.layout, knownPaneIds);
+  let layoutIds = sanitizedLayout ? layoutPaneIds(sanitizedLayout) : [];
+  if (!sanitizedLayout || new Set(layoutIds).size !== layoutIds.length || layoutIds.some((paneId) => !knownPaneIds.has(paneId))) {
+    sanitizedLayout = { paneId: finalPaneOrder[0]!, type: "pane" };
+    layoutIds = [finalPaneOrder[0]!];
   }
-  const sanitizedLayout = record.layout ? sanitizeLayoutNode(record.layout, knownPaneIds) : null;
-  const layout = collapseLayout(sanitizedLayout ?? { paneId: finalPaneOrder[0]!, type: "pane" });
+  for (const paneId of finalPaneOrder) {
+    if (!layoutIds.includes(paneId)) {
+      sanitizedLayout = { children: [sanitizedLayout, { paneId, type: "pane" }], direction: "horizontal", type: "split" };
+      layoutIds.push(paneId);
+    }
+  }
+  const layout = collapseLayout(sanitizedLayout);
   const surfaceEpochRevision = Math.max(1, Math.trunc(Number(record.surfaceEpochRevision ?? 1)));
   return {
     activeKeyboardPaneId: panes.has(Number(record.activeKeyboardPaneId)) ? Number(record.activeKeyboardPaneId) : finalPaneOrder[0]!,
@@ -4907,6 +5195,27 @@ function sanitizeLayoutNode(node: LayoutNode, knownPaneIds: Set<number>): Layout
     ...node,
     children: nextChildren,
   };
+}
+
+function isLayoutNode(value: unknown): value is LayoutNode {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const node = value as Record<string, unknown>;
+  if (node.type === "pane") return Number.isSafeInteger(node.paneId) && Number(node.paneId) > 0;
+  return node.type === "split" && (node.direction === "horizontal" || node.direction === "vertical") &&
+    Array.isArray(node.children) && node.children.length >= 2 && node.children.every(isLayoutNode);
+}
+
+function layoutPaneIds(node: LayoutNode): number[] {
+  return node.type === "pane" ? [node.paneId] : node.children.flatMap(layoutPaneIds);
+}
+
+function replacePaneIdentity(node: LayoutNode, oldPaneId: number, newPaneId: number): LayoutNode {
+  if (node.type === "pane") return node.paneId === oldPaneId ? { ...node, paneId: newPaneId } : node;
+  return { ...node, children: node.children.map((child) => replacePaneIdentity(child, oldPaneId, newPaneId)) };
+}
+
+function invalidatePaneSnapshot(pane: PaneState): void {
+  pane.snapshot = { ...pane.snapshot, geometryRevision: null, surfaceEpoch: null, topologyRevision: null };
 }
 
 function layoutReferencesKnownPanes(node: LayoutNode, knownPaneIds: Set<number>): boolean {
