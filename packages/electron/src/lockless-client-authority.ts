@@ -2253,6 +2253,20 @@ export class LocklessClientAuthority {
     // missing generation is longer than its former integer representation.
     // Keep retained-byte accounting synchronized with the modified payloads.
     refreshRetainedTombstoneBytes(this.state);
+    const maximumBytes = this.state.limits.maxRetainedTombstoneBytes;
+    while (
+      this.state.tombstones.some((tombstone) => tombstone.bytes > maximumBytes) ||
+      this.state.tombstones.reduce((total, tombstone) => total + tombstone.bytes, 0) > maximumBytes
+    ) {
+      const victim = this.state.tombstones.shift();
+      if (!victim) {
+        throw new LocklessAuthorityError(
+          "internal_error",
+          "Tombstone pool cannot be reconciled after allocator claims are cleared",
+        );
+      }
+      this.recordTombstoneReclamation(victim, "byte_capacity");
+    }
   }
 
   acknowledgePaneReleases(releaseIds: string[]): void {

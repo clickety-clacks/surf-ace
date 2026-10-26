@@ -4587,7 +4587,7 @@ function deserializeSurface(record: PersistentSurfaceRecord, now: number): Surfa
     candidate && typeof candidate === "object" && Number.isSafeInteger((candidate as Record<string, unknown>).paneId)
       ? Number((candidate as Record<string, unknown>).paneId) : 0,
   );
-  const reservedPaneIds = new Set(persistedPaneIds.filter((paneId) => paneId > 0));
+  const reservedPaneIds = new Set(persistedPaneIds.filter((paneId) => paneId >= 0));
   const maximumPaneId = Math.max(0, ...persistedPaneIds);
   let nextFreshPaneId = maximumPaneId < Number.MAX_SAFE_INTEGER ? maximumPaneId + 1 : 1;
   const freshPaneId = (): number => {
@@ -4604,7 +4604,7 @@ function deserializeSurface(record: PersistentSurfaceRecord, now: number): Surfa
   for (const candidate of record.panes as unknown[]) {
     if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
     const paneRecord = candidate as PersistentPaneRecord;
-    const storedPaneId = Number.isSafeInteger(paneRecord.paneId) && paneRecord.paneId > 0
+    const storedPaneId = Number.isSafeInteger(paneRecord.paneId) && paneRecord.paneId >= 0
       ? paneRecord.paneId : null;
     const paneId = storedPaneId !== null && !panes.has(storedPaneId) ? storedPaneId : freshPaneId();
     const pane = createPaneState(

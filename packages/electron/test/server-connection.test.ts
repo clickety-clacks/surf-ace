@@ -143,29 +143,36 @@ function emptyDiscovery() {
   };
 }
 
-async function centralFixture(registryIdentity: { allocatorId: string; fleetId: string } | null =
-  { allocatorId: "alloc_fixture", fleetId: "fixture-fleet" }) {
+async function centralFixture(
+  registryIdentity: { allocatorId: string; fleetId: string } | null =
+    { allocatorId: "alloc_fixture", fleetId: "fixture-fleet" },
+  options: { deferIdentityReplies?: boolean } = {},
+) {
   const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
   await new Promise<void>((resolve) => server.once("listening", resolve));
   const port = (server.address() as AddressInfo).port;
   const requests: Array<{ socket: WebSocket; message: any }> = [];
   const identityRequests: Array<{ socket: WebSocket; message: any }> = [];
+  const replyIdentity = (index: number): void => {
+    const { socket, message } = identityRequests[index]!;
+    socket.send(JSON.stringify({
+      type: "response", v: 1, id: message.id, op: message.op, ok: true,
+      payload: registryIdentity ? { registryIdentity } : {},
+    }));
+  };
   server.on("connection", (socket) => {
     socket.on("message", (raw) => {
       const message = JSON.parse(String(raw));
       if (message.op === "fleet.topology") {
         identityRequests.push({ socket, message });
-        socket.send(JSON.stringify({
-          type: "response", v: 1, id: message.id, op: message.op, ok: true,
-          payload: registryIdentity ? { registryIdentity } : {},
-        }));
+        if (!options.deferIdentityReplies) replyIdentity(identityRequests.length - 1);
       } else {
         requests.push({ socket, message });
       }
     });
   });
   return {
-    server, requests, identityRequests, port, address: `ws://127.0.0.1:${port}/`,
+    server, requests, identityRequests, replyIdentity, port, address: `ws://127.0.0.1:${port}/`,
     reply(index: number, ok = true, assignPaneLabels = true, paneLabelBase = 700, windowLabel?: string,
       responseIdentity: { allocatorId: string; fleetId: string } | null = registryIdentity,
       responseOptions: { windowGenerationV1?: boolean; completedWindowReleaseIds?: string[] } = { windowGenerationV1: true }) {
@@ -693,7 +700,7 @@ test("central status waits for registration and persistence; loss, retry and rec
 });
 
 test("a configured endpoint without a valid identity falls back through Bonjour", async () => {
-  const configured = await centralFixture(null);
+  const configured = await centralFixture(null, { deferIdentityReplies: true });
   const fallback = await centralFixture();
   const core = new SurfaceCore();
   const surface = core.ensurePrimarySurface("Fallback", { width: 800, height: 600, scale: 1 });
@@ -710,8 +717,11 @@ test("a configured endpoint without a valid identity falls back through Bonjour"
   try {
     const attempt = connection.synchronize();
     await until(() => configured.identityRequests.length === 1);
+    await until(() => status() === "connecting");
     assert.equal(status(), "connecting");
+    configured.replyIdentity(0);
     await until(() => fallback.requests.length === 1);
+    await until(() => status() === "connecting");
     assert.equal(status(), "connecting");
     fallback.reply(0);
     await attempt;
@@ -1693,7 +1703,8 @@ test("interrupted first binding write refuses registration and preserves display
     contentType: "markdown", historyOwnerToken: "hot_registry_bind",
     paneId: paneId as never, revision: 1 as never,
   });
-  const before = core.getRendererWindowState(surface.surfaceId);
+  const before = core.getPersistentState();
+  const beforeDisplay = core.getRendererWindowState(surface.surfaceId);
   const connection = new ConfiguredServerRegistration(registry.address, "fresh-client", core,
     async () => { throw new Error("binding_write_interrupted"); }, () => {}, 200);
   try {
@@ -1702,10 +1713,11 @@ test("interrupted first binding write refuses registration and preserves display
     assert.equal(registry.requests.length, 0);
     assert.equal(core.registryBinding(), null);
     assert.equal(core.registryBindingPending(), false);
+    assert.deepEqual(core.getPersistentState(), before);
     const after = core.getRendererWindowState(surface.surfaceId);
-    assert.equal(after.surfaceId, before.surfaceId);
-    assert.equal(after.name, before.name);
-    assert.equal(after.panes[0]?.paneLineageId, before.panes[0]?.paneLineageId);
+    assert.equal(after.surfaceId, beforeDisplay.surfaceId);
+    assert.equal(after.name, beforeDisplay.name);
+    assert.equal(after.panes[0]?.paneLineageId, beforeDisplay.panes[0]?.paneLineageId);
     assert.equal(after.panes[0]?.content.contentId, "ct_registry_bind");
     assert.equal(after.panes[0]?.label, "");
     assert.equal(after.windowLabel, "");
