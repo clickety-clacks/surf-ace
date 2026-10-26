@@ -1736,7 +1736,9 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         )
 
         try await registration.synchronize()
+        XCTAssertEqual(registration.status, .connected)
         registration.stop()
+        XCTAssertEqual(registration.status, .disconnected)
 
         let registered = await adapter.snapshot()
         XCTAssertNil(registered.liveSurfaces[refusedSurfaceId])
