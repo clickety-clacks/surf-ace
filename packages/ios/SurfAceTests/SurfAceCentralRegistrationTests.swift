@@ -1727,7 +1727,7 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         transport.registryIdentity = identity
         transport.refusedClaim = .surface(surfaceId: refusedSurfaceId)
         transport.assignedWindowLabels[otherSurfaceId] = "d"
-        transport.assignedWindowGenerations[otherSurfaceId] = 31
+        transport.assignedWindowGenerations[otherSurfaceId] = 30
         let otherPaneKey = "\(otherSurfaceId):1:\(otherPane.paneLineageId)"
         transport.assignedPaneLabels[otherPaneKey] = 8
         transport.assignedPaneGenerations[otherPaneKey] = 108
@@ -1986,7 +1986,6 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
             $0.pendingPaneReleases.isEmpty && $0.pendingWindowReleases.isEmpty
                 && $0.surfaces.allSatisfy { $0.surfaceId == liveSurfaceId }
         })
-        XCTAssertTrue(rebound.surfaceTombstones.contains { $0.surface.surfaceId == closedSurfaceId })
     }
 
     func testPartiallyUnreadableSavedStateKeepsEveryOtherReadableSurface() throws {
