@@ -44,10 +44,10 @@ test("central server publishes the server role, v1 protocol, and the served WebS
 });
 
 test("central server derives an explicit SRV target from its listener", () => {
-  assert.equal(centralServerAdvertisedHost("0.0.0.0", "racter"), "racter.local");
-  assert.equal(centralServerAdvertisedHost("::", "racter.local."), "racter.local");
-  assert.equal(centralServerAdvertisedHost("0:0:0:0:0:0:0:0", "racter"), "racter.local");
-  assert.equal(centralServerAdvertisedHost("192.168.50.93", "racter"), "192.168.50.93");
+  assert.equal(centralServerAdvertisedHost("0.0.0.0", "host-a"), "host-a.local");
+  assert.equal(centralServerAdvertisedHost("::", "host-a.local."), "host-a.local");
+  assert.equal(centralServerAdvertisedHost("0:0:0:0:0:0:0:0", "host-a"), "host-a.local");
+  assert.equal(centralServerAdvertisedHost("192.168.50.93", "host-a"), "192.168.50.93");
   assert.equal(centralServerBonjourDisableIPv6("0.0.0.0"), true);
   assert.equal(centralServerBonjourDisableIPv6("192.168.50.93"), true);
   assert.equal(centralServerBonjourDisableIPv6("::"), false);
@@ -86,7 +86,7 @@ test("a reachable topology endpoint is unhealthy while registration has no valid
 test("server self-check rejects an SRV target that resolves only through loopback", async () => {
   const attempted: string[] = [];
   await assert.rejects(
-    checkPublishedServerRecord(record({ host: "racter", addresses: ["192.0.2.18"] }), LISTENER_PORT, {
+    checkPublishedServerRecord(record({ host: "host-a", addresses: ["192.0.2.18"] }), LISTENER_PORT, {
       resolveTargetAddresses: async () => ["127.0.1.1"],
       requestTopology: async (endpoint) => {
         attempted.push(endpoint);
@@ -103,9 +103,9 @@ test("IPv4-only Bonjour records ignore macOS loopback aliases and unserved IPv6 
   const attempted: string[] = [];
   const result = await checkPublishedServerRecord(record({
     addresses: ["192.168.50.159"],
-    host: "eezo.local",
+    host: "host.local",
   }), LISTENER_PORT, {
-    expectedHost: "eezo.local",
+    expectedHost: "host.local",
     resolveTargetAddresses: async () => [
       "::1",
       "127.0.0.1",
@@ -233,7 +233,7 @@ test("server self-check rejects an SRV target that disagrees with its DNS-SD add
 test("multi-homed target stays healthy when its published LAN address handshakes", async () => {
   const attempted: string[] = [];
   const result = await checkPublishedServerRecord(record({
-    host: "gibson.local",
+    host: "server.local",
     addresses: ["192.168.50.216"],
   }), LISTENER_PORT, {
     resolveTargetAddresses: async () => ["100.92.53.87", "192.168.50.216"],

@@ -81,7 +81,7 @@ Fixed in `packages/ios/SurfAce/SurfAceRuntime.swift:71` and `packages/ios/SurfAc
 
 ### Provider-Side Repair Was Insufficient Alone
 
-The provider already repairs its live window-label invariant before pairing (`packages/extension/src/surf-ace-runtime.ts:5168`) and publishes the repaired label in `authority.state` (`packages/extension/src/surf-ace-runtime.ts:10682`). The client-side veto meant provider repair could still end in terminal yellow. That is why the live Aleph-style `window_label_mismatch` is a product bug, not expected steady state.
+The provider already repairs its live window-label invariant before pairing (`packages/extension/src/surf-ace-runtime.ts:5168`) and publishes the repaired label in `authority.state` (`packages/extension/src/surf-ace-runtime.ts:10682`). The client-side veto meant provider repair could still end in terminal yellow. That is why the live `window_label_mismatch` is a product bug, not expected steady state.
 
 ## Transient vs Bug Classification
 

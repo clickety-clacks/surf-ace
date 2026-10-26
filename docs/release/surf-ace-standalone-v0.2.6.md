@@ -44,7 +44,7 @@ The iPadOS app is development-signed separately for a device and is not a
 hosted release asset. No IPA or distribution-signing credential is part of this
 workflow. The signed app's source identity, `0.2.6` marketing version and
 incremented build number must be recorded with the installed version/build on
-the exact physical Aleph device before device acceptance is claimed.
+the exact physical iPad device before device acceptance is claimed.
 
 Legacy clients with confirmed labels require the owner-verified fleet and
 allocator identity migration in DESIGN §3.1.2. The provisioned binding must
@@ -78,7 +78,7 @@ record and a read-only `fleet.topology` handshake through the advertised
 transport addresses. The packaged Linux smoke exercises the shipped registry;
 the macOS smoke exercises the packaged desktop client and CLI. The release
 ships no Darwin registry publisher, so the macOS smoke is not evidence for one.
-Live cross-host desktop discovery and physical Aleph discovery-only registration remain rollout gates;
+Live cross-host desktop discovery and physical iPad discovery-only registration remain rollout gates;
 clients do not autostart on boot or require a manual iOS registry endpoint.
 
 ## Build, comparison, smoke, and coverage

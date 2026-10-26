@@ -78,7 +78,7 @@ def safety(stage):
             fail(f"{stage}_default_route")
         if command([IP, "-o", family, "addr", "show", "scope", "global"]):
             fail(f"{stage}_global_address")
-    # Route lookup emits no packet. No application request is sent to Gibson.
+    # Route lookup emits no packet. No application request is sent to the route destination.
     probe = subprocess.run([IP, "route", "get", "192.168.50.216"],
                            capture_output=True, timeout=3, check=False)
     if probe.returncode == 0:

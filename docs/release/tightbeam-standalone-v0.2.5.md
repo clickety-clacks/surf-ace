@@ -48,7 +48,7 @@ The iPadOS app is development-signed separately for a device and is not a
 hosted release asset. No IPA or distribution-signing credential is part of this
 workflow. The signed app's source identity, `0.2.5` marketing version and
 incremented build number must be recorded with the installed version/build on
-the exact physical Aleph device before device acceptance is claimed.
+the exact physical iPad device before device acceptance is claimed.
 
 ## Product and operation boundaries
 
@@ -74,7 +74,7 @@ record and a read-only `fleet.topology` handshake through the advertised
 transport addresses. The packaged Linux and macOS smokes must prove the
 candidate packages run, and the macOS smoke must expose a publisher visibility
 failure rather than treating source-only tests as proof. Live cross-host desktop
-discovery and physical Aleph discovery-only registration remain rollout gates;
+discovery and physical iPad discovery-only registration remain rollout gates;
 clients do not autostart on boot or require a manual iOS registry endpoint.
 
 ## Build, comparison, smoke, and coverage

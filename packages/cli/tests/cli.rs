@@ -4253,7 +4253,7 @@ fn cli_seven_pane_listing_uses_compact_control_projection_under_frame_cap() {
                 json!({
                     "surfaces": [{
                         "surfaceId": "sf_fixture",
-                        "name": "Aleph",
+                        "name": "Panel",
                         "windowLabel": "g",
                         "viewport": { "width": 4096, "height": 4096, "scale": 1 }
                     }]

@@ -78,6 +78,12 @@ import { verifySmokeReceipt, writeSmokeReceipt } from "./write-smoke-receipt.mjs
 import tightbeamServerLauncher from "./tightbeam-server-launcher.cjs";
 import { publicReleaseNames, publicReleaseNamesFromTags } from "./public-release-names.mjs";
 
+const environmentSpecificReference = new RegExp([
+  String.raw`\b[a-z0-9-]+\.local\b`,
+  String.raw`/(?:Users|home)/[^/\s]+`,
+  String.raw`\b100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])(?:\.\d{1,3}){2}\b`,
+].join("|"), "i");
+
 const testProductCommit = "a".repeat(40);
 process.env.PRODUCT_COMMIT = testProductCommit;
 
@@ -1742,7 +1748,7 @@ test("fleet-list discovery is the first client-selection step in the shipped ski
     const readme = await fs.readFile(path.join(repository, file), "utf8");
     assert.match(readme, /--registry[\s\S]{0,120}fleet-list/);
     assert.match(readme, /fleet-list/);
-    assert.doesNotMatch(readme, /\b(?:gibson|racter|shrdlu|plumbus|osanwe|eezo|tars)\b/i);
+    assert.doesNotMatch(readme, environmentSpecificReference);
   }
 });
 
@@ -2922,7 +2928,7 @@ test("stable v0.2.8 documentation stays historical and release gates bind the se
   assert.match(readme, /sha256sum -c SHA256SUMS/);
   assert.match(readme, /server archive\s+includes `docs\/OPERATIONS\.md`/);
   assert.match(skill, /verify\s+the skill before registering the content/);
-  assert.doesNotMatch(`${readme}\n${skill}`, /\b(?:Racter|Plumbus|Shrdlu|Gibson|Eezo)\b|\/Users\/mike\/|\b100\.64\.\d{1,3}\.\d{1,3}\b/i);
+  assert.doesNotMatch(`${readme}\n${skill}`, environmentSpecificReference);
   assert.match(workflow, /^on:\n  workflow_dispatch:/m);
   for (const match of workflow.matchAll(/^\s*uses:\s*([^\s]+)$/gm)) assert.match(match[1], /@[0-9a-f]{40}$/);
   assert.match(workflow, /run_smoke:[\s\S]*?default: false/);
