@@ -2249,6 +2249,10 @@ export class LocklessClientAuthority {
         }
       }
     }
+    // Clearing allocator claims can increase the serialized size because a
+    // missing generation is longer than its former integer representation.
+    // Keep retained-byte accounting synchronized with the modified payloads.
+    refreshRetainedTombstoneBytes(this.state);
   }
 
   acknowledgePaneReleases(releaseIds: string[]): void {

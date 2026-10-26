@@ -142,7 +142,7 @@ export class ConfiguredServerRegistration {
       this.registryIdentity = identity;
 
       const registrationPayload = await this.buildRegistrationPayload();
-      await this.deliverPendingReleases(registrationPayload, identity);
+      await this.deliverPendingReleases(registrationPayload);
       const registered = await this.registerLiveClaims(registrationPayload);
       const parsed = this.parseRegistrationResponse(registered.response, registered.payload, identity);
       await this.core.locklessAuthority.transactionAsync(() =>
@@ -384,27 +384,26 @@ export class ConfiguredServerRegistration {
 
   private async deliverPendingReleases(
     livePayload: RegistrationPayload,
-    identity: RegistryIdentity,
   ): Promise<void> {
     const paneReleases = this.core.locklessAuthority.listPendingPaneReleases();
     const windowReleases = this.core.locklessAuthority.listPendingWindowReleases();
     if (paneReleases.length === 0 && windowReleases.length === 0) return;
-    const registrationWithReleases: RegistrationPayload = {
+    // Free old allocations before registering any live claims that may reuse
+    // their labels. A release request must never carry replacement claims.
+    const releaseOnlyPayload: RegistrationPayload = {
       ...livePayload,
+      surfaces: [],
       pendingPaneReleases: paneReleases,
       pendingWindowReleases: windowReleases,
     };
     try {
-      const response = await this.sendRegistration(registrationWithReleases);
+      const response = await this.sendRegistration(releaseOnlyPayload);
       if (response.ok && this.completedReleasesMatch(response, paneReleases, windowReleases)) {
         await this.acknowledgeReleases(paneReleases, windowReleases);
         return;
       }
-      if (!response.ok) {
-        // A mixed batch may have committed earlier releases before a later one
-        // was refused. Isolate each exact item below; identical release evidence
-        // is idempotent, and the registry processes releases before claims.
-      }
+      // A refusal or incomplete acknowledgement can follow partial commits;
+      // resolve each exact release idempotently below, still without claims.
     } catch {
       // The request may have reached the allocator. Resolve each release using
       // its idempotent evidence before any later label claims are sent.
@@ -412,6 +411,7 @@ export class ConfiguredServerRegistration {
 
     const baseline: RegistrationPayload = {
       ...livePayload,
+      surfaces: [],
       pendingPaneReleases: [],
       pendingWindowReleases: [],
     };
@@ -428,7 +428,7 @@ export class ConfiguredServerRegistration {
       ...paneReleases.map((release) => ["pane", release] as const),
       ...windowReleases.map((release) => ["window", release] as const),
     ]) {
-      const response = await this.tryRelease(baseline, identity, kind, release);
+      const response = await this.tryRelease(baseline, kind, release);
       if (response === "unknown") break;
       if (response === "accepted") {
         await this.acknowledgeReleases(kind === "pane" ? [release as PersistentPaneRetirement] : [],
@@ -475,14 +475,13 @@ export class ConfiguredServerRegistration {
   }
 
   private async tryRelease(
-    livePayload: RegistrationPayload,
-    identity: RegistryIdentity,
+    releaseOnlyPayload: RegistrationPayload,
     kind: "pane" | "window",
     release: PersistentPaneRetirement | PersistentWindowRetirement,
   ): Promise<"accepted" | "rejected" | "unknown"> {
     const payload = kind === "pane"
-      ? { ...livePayload, pendingPaneReleases: [release as PersistentPaneRetirement] }
-      : { ...livePayload, pendingWindowReleases: [release as PersistentWindowRetirement] };
+      ? { ...releaseOnlyPayload, pendingPaneReleases: [release as PersistentPaneRetirement] }
+      : { ...releaseOnlyPayload, pendingWindowReleases: [release as PersistentWindowRetirement] };
     try {
       const response = await this.sendRegistration(payload);
       if (response.ok) {
@@ -502,12 +501,12 @@ export class ConfiguredServerRegistration {
         }
         return "unknown";
       }
-      const baseline = await this.sendRegistration(livePayload);
+      const baseline = await this.sendRegistration(releaseOnlyPayload);
       if (baseline.ok) return "rejected";
       return "unknown";
     } catch {
       try {
-        const baseline = await this.sendRegistration(livePayload);
+        const baseline = await this.sendRegistration(releaseOnlyPayload);
         if (baseline.ok) return "unknown";
       } catch {
         // Keep the release pending until a later attempt can isolate its outcome.
