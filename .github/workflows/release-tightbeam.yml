@@ -1078,6 +1078,6 @@ jobs:
             release/SHA256SUMS \
             --repo "${GITHUB_REPOSITORY}" \
             --verify-tag \
-            "${release_channel_args[@]}" \
+            "${release_channel_args[@]+"${release_channel_args[@]}"}" \
             --title "Surf Ace v${PRODUCT_VERSION}" \
             --notes "Surf Ace v${PRODUCT_VERSION}. Linux smoke attestation: ${LINUX_ATTESTATION_URL}\nmacOS smoke attestation: ${MACOS_ATTESTATION_URL}"
