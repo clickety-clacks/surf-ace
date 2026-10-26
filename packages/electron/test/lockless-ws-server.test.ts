@@ -510,6 +510,7 @@ test("surface.describe keeps saved windows observable and readable during uncert
     bindAddress: "127.0.0.1",
     capturePaneImage: async () => "cG5n",
     compositorSocketPath: null,
+    clientId: binding.clientId,
     core,
     endpointName: "Surf Ace fixture",
     hostName: "localhost",
@@ -616,8 +617,7 @@ test("surface.describe keeps saved windows observable and readable during uncert
 test("surface.describe reports readiness degradation until durable persistence commits", async () => {
   const fixture = describeFixture();
   const readiness = new PersistenceWriteReadiness();
-  let persistenceOutcomeUnknown = false;
-  const server = describeServer(fixture.core, () => readiness.isReady && !persistenceOutcomeUnknown);
+  const server = describeServer(fixture.core, () => readiness.isReady);
   let socket: WebSocket | null = null;
   try {
     await server.start();
@@ -685,7 +685,7 @@ test("surface.describe reports readiness degradation until durable persistence c
     assert.equal(rolledBack.ok, true, JSON.stringify(rolledBack));
     assert.equal(rolledBack.payload.endpointLeaseGeneration, 18);
 
-    persistenceOutcomeUnknown = true;
+    server.failStopPersistence(new PersistentStateOutcomeUnknownError(new Error("write outcome unknown")));
     const uncertain = await request(socket, "surface.describe", describePayload(fixture, {
       endpointLeaseGeneration: 18,
     }));
@@ -4690,6 +4690,7 @@ test("surface.describe returns topology when saved registry binding or lease is 
     const state = fixture.core.getPersistentState();
     item.prepare(state);
     const core = new SurfaceCore({ persistentState: state });
+    core.restorePersistedSurfaces("Surf Ace", { height: 800, scale: 2, width: 1200 });
     const savedBinding = core.registryBinding();
     const savedLease = core.registryEndpointLease();
     const server = describeServer(core, () => true, fixture.binding.clientId);
