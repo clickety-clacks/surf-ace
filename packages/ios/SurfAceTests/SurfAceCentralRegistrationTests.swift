@@ -1087,8 +1087,9 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         var recovered = try XCTUnwrap(store.load())
         XCTAssertNil(recovered.registryBinding)
         XCTAssertTrue(recovered.liveSurfaces.isEmpty)
+        let recoveredSurfaceSetRevision = recovered.surfaceSetRevision
         let surfaceId = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
-            state: &recovered, expectedSurfaceSetRevision: recovered.surfaceSetRevision
+            state: &recovered, expectedSurfaceSetRevision: recoveredSurfaceSetRevision
         ).surface.surfaceId
         try store.save(recovered)
 
@@ -1322,8 +1323,6 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         XCTAssertEqual(formerRegistry.clients, [clientId])
         let returned = await adapter.snapshot()
         XCTAssertEqual(returned.registryBinding?.allocatorId, homeIdentity.allocatorId)
-        let afterReturnAttempt = await adapter.snapshot()
-        XCTAssertEqual(afterReturnAttempt.registryBinding?.allocatorId, homeIdentity.allocatorId)
     }
 
     func testRefusedPaneClaimRotatesOnlyThatIdentityAndPreservesReadableContentAndLayout() async throws {
@@ -1565,13 +1564,14 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         XCTAssertEqual(registration.status, .connected)
         XCTAssertTrue((afterRetry.allocationReleaseIntents ?? []).allSatisfy { $0.status == .pending })
         XCTAssertTrue(transport.deliveredUnknownRelease)
-        XCTAssertFalse(transport.acceptedReleaseIds.contains(transport.unknownReleaseId!))
+        let unknownReleaseId = try XCTUnwrap(transport.unknownReleaseId)
+        XCTAssertFalse(transport.acceptedReleaseIds.contains(unknownReleaseId))
 
         try await registration.synchronize()
         registration.stop()
         let afterDelivery = await adapter.snapshot()
         XCTAssertTrue((afterDelivery.allocationReleaseIntents ?? []).allSatisfy { $0.status == .accepted })
-        XCTAssertEqual(transport.acceptedReleaseIds.filter { $0 == transport.unknownReleaseId }.count, 1)
+        XCTAssertEqual(transport.acceptedReleaseIds.filter { $0 == unknownReleaseId }.count, 1)
         XCTAssertTrue(afterDelivery.surfaceTombstones.contains { $0.surface.surfaceId == closedSurfaceId })
         XCTAssertTrue(transport.registrationInputs.contains {
             !$0.pendingPaneReleases.isEmpty || !$0.pendingWindowReleases.isEmpty
