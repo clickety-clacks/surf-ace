@@ -4741,8 +4741,9 @@ test("surface.describe returns topology when saved registry binding or lease is 
     item.prepare(state);
     const core = new SurfaceCore({ persistentState: state });
     core.restorePersistedSurfaces("Surf Ace", { height: 800, scale: 2, width: 1200 });
-    const savedBinding = core.registryBinding();
-    const savedLease = core.registryEndpointLease();
+    const savedRegistryState = core.getPersistentState();
+    const savedBinding = savedRegistryState.registryBinding;
+    const savedLease = savedRegistryState.registryEndpointLease;
     const server = describeServer(core, () => true, fixture.binding.clientId);
     let socket: WebSocket | null = null;
     try {
@@ -4773,8 +4774,9 @@ test("surface.describe returns topology when saved registry binding or lease is 
       assert.equal(admitted.ok, true, `${item.name}: ${JSON.stringify(admitted)}`);
       const panes = await request(socket, "panes.list", { surfaceId: fixture.surface.surfaceId });
       assert.equal(panes.ok, true, `${item.name}: ${JSON.stringify(panes)}`);
-      assert.deepEqual(core.registryBinding(), savedBinding);
-      assert.deepEqual(core.registryEndpointLease(), savedLease);
+      const registryStateAfterDescribe = core.getPersistentState();
+      assert.deepEqual(registryStateAfterDescribe.registryBinding, savedBinding);
+      assert.deepEqual(registryStateAfterDescribe.registryEndpointLease, savedLease);
       assert.deepEqual(
         core.getRendererWindowState(fixture.surface.surfaceId).panes[0]!.content.content,
         { markdown: "# preserved content" },
