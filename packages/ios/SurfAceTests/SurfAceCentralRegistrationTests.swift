@@ -623,14 +623,14 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         XCTAssertEqual(next.clients, ["stable-client"])
     }
 
-    func testConfiguredLocalNumericSuccessRemainsPinnedAndSkipsDiscovery() async throws {
+    func testConfiguredLocalNumericSuccessRemainsPinnedWhenDiscoveryReturnsNoCandidates() async throws {
         let configured = try XCTUnwrap(URL(string: "ws://100.64.12.34:43867/"))
         let transport = Transport()
         var attempted: [URL] = []
         let registration = SurfAceCentralRegistration(
             clientId: "numeric-client",
             configured: configured,
-            discover: { XCTFail("a successful configured numeric controller must not discover another controller"); return [] },
+            discover: { [] },
             makeTransport: { url in attempted.append(url); return transport },
             snapshot: { [.init(surfaceId: "sf_one", panes: [])] },
             apply: { _, _ in }, verifyRegistry: { _, _ in }
@@ -647,9 +647,9 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         let discovered = try XCTUnwrap(URL(string: "ws://racter:43867/"))
         let primary = Transport()
         primary.fails = true
-        primary.label = "configured"
+        primary.assignedWindowLabels["sf_one"] = "configured"
         let fallback = Transport()
-        fallback.label = "bonjour"
+        fallback.assignedWindowLabels["sf_one"] = "bonjour"
         var attempted: [URL] = []
         var applied: [String] = []
         var discoveredCalled = false
@@ -674,6 +674,12 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
 
         primary.fails = false
         try await registration.synchronize()
+        XCTAssertEqual(attempted, [configured, discovered])
+        XCTAssertEqual(applied, ["bonjour", "bonjour"])
+        XCTAssertEqual(registration.status, .connected)
+
+        fallback.fails = true
+        try await registration.synchronize()
         XCTAssertEqual(attempted, [configured, discovered, configured])
         XCTAssertEqual(applied, ["bonjour", "bonjour", "configured"])
         XCTAssertEqual(registration.status, .connected)
@@ -685,7 +691,7 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         let transport = Transport()
         var attempted: [URL] = []
         let registration = SurfAceCentralRegistration(clientId: "test", configured: configured,
-            discover: { XCTFail("configured success must not discover"); return [] },
+            discover: { [] },
             makeTransport: { url in attempted.append(url); return transport },
             snapshot: { [.init(surfaceId: "sf_one", panes: [])] }, apply: { _, _ in },
             verifyRegistry: { _, _ in })
@@ -837,6 +843,8 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         let primary = Transport()
         primary.fails = true
         let fallback = Transport()
+        primary.assignedWindowLabels["sf_one"] = "y"
+        fallback.assignedWindowLabels["sf_one"] = "z"
         var attempts: [URL] = []
         var discoveries = 0
         var applied: [String] = []
@@ -851,14 +859,17 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         XCTAssertEqual(discoveries, 1)
         XCTAssertEqual(applied, ["z"])
         primary.fails = false
-        primary.label = "y"
         try await registration.synchronize()
+        XCTAssertEqual(attempts, [configured, discovered])
+        XCTAssertEqual(discoveries, 1)
+        XCTAssertEqual(applied, ["z", "z"])
+        XCTAssertFalse(fallback.closed)
+        fallback.fails = true
+        try await registration.synchronize()
+        XCTAssertEqual(attempts, [configured, discovered, configured])
+        XCTAssertEqual(discoveries, 2)
         XCTAssertEqual(applied, ["z", "z", "y"])
         XCTAssertTrue(fallback.closed)
-        primary.fails = true
-        try await registration.synchronize()
-        XCTAssertEqual(discoveries, 2)
-        XCTAssertEqual(applied.last, "z")
         registration.stop()
         let count = attempts.count
         do { try await registration.synchronize(); XCTFail("stopped registration ran") } catch { }
@@ -1812,7 +1823,10 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         let remaining = try XCTUnwrap(afterRecovery.allocationReleaseIntents)
         XCTAssertEqual(remaining.map(\.releaseId), [acceptedWindowRelease.releaseId])
         XCTAssertEqual(remaining.first?.status, .accepted)
-        XCTAssertTrue(afterRecovery.surfaceTombstones.contains { $0.surface.surfaceId == closedSurfaceId })
+        XCTAssertFalse(afterRecovery.surfaceTombstones.contains { $0.surface.surfaceId == closedSurfaceId })
+        XCTAssertTrue(afterRecovery.terminalCloseRecords?.contains {
+            $0.allocationKind == .surface && $0.surfaceId == closedSurfaceId
+        } == true)
         XCTAssertTrue(transport.registrationInputs.contains {
             $0.pendingWindowReleases.contains { $0.releaseId == acceptedWindowRelease.releaseId }
                 && $0.pendingPaneReleases.contains { $0.releaseId == refusedPaneRelease.releaseId }
@@ -1889,7 +1903,10 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         let afterDelivery = await adapter.snapshot()
         XCTAssertTrue((afterDelivery.allocationReleaseIntents ?? []).allSatisfy { $0.status == .accepted })
         XCTAssertEqual(transport.acceptedReleaseIds.filter { $0 == unknownReleaseId }.count, 1)
-        XCTAssertTrue(afterDelivery.surfaceTombstones.contains { $0.surface.surfaceId == closedSurfaceId })
+        XCTAssertFalse(afterDelivery.surfaceTombstones.contains { $0.surface.surfaceId == closedSurfaceId })
+        XCTAssertTrue(afterDelivery.terminalCloseRecords?.contains {
+            $0.allocationKind == .surface && $0.surfaceId == closedSurfaceId
+        } == true)
         XCTAssertTrue(transport.registrationInputs.contains {
             !$0.pendingPaneReleases.isEmpty || !$0.pendingWindowReleases.isEmpty
         })
@@ -1941,7 +1958,10 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         registration.stop()
         let afterRetry = await adapter.snapshot()
         XCTAssertTrue((afterRetry.allocationReleaseIntents ?? []).allSatisfy { $0.status == .accepted })
-        XCTAssertTrue(afterRetry.surfaceTombstones.contains { $0.surface.surfaceId == closedSurfaceId })
+        XCTAssertFalse(afterRetry.surfaceTombstones.contains { $0.surface.surfaceId == closedSurfaceId })
+        XCTAssertTrue(afterRetry.terminalCloseRecords?.contains {
+            $0.allocationKind == .surface && $0.surfaceId == closedSurfaceId
+        } == true)
         XCTAssertTrue(transport.registrationInputs.contains {
             !$0.pendingPaneReleases.isEmpty || !$0.pendingWindowReleases.isEmpty
         })
