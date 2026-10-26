@@ -213,7 +213,7 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
     private final class DiscoveryService: NetService {
         var resolveTimeout: TimeInterval?
         var stopped = false
-        var resolvedHost = "racter."
+        var resolvedHost = "example.test."
         var resolvedPath = "/ws"
         var resolvedVersion = "1"
         var resolvedRole = "server"
@@ -247,7 +247,7 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         }
     }
 
-    private func discoveryService(name: String = "owned", host: String = "racter.") -> DiscoveryService {
+    private func discoveryService(name: String = "owned", host: String = "example.test.") -> DiscoveryService {
         let service = DiscoveryService(domain: "local.", type: "_surf-ace._tcp.", name: name, port: 43867)
         service.resolvedHost = host
         return service
@@ -414,7 +414,7 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         XCTAssertTrue(timedOutURLs.isEmpty)
         discovery.netServiceDidResolveAddress(timedOutService)
         discovery.netService(timedOutService, didNotResolve: [:])
-        XCTAssertTrue(discovery.transportURLs(for: URL(string: "ws://racter:43867/")!).isEmpty)
+        XCTAssertTrue(discovery.transportURLs(for: URL(string: "ws://example.test:43867/")!).isEmpty)
 
         let cancelledService = discoveryService(name: "cancelled")
         let cancelled = Task { await discovery.discover() }
@@ -425,7 +425,7 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         XCTAssertTrue(cancelledURLs.isEmpty)
         discovery.netServiceDidResolveAddress(cancelledService)
         discovery.netService(cancelledService, didNotResolve: [:])
-        XCTAssertTrue(discovery.transportURLs(for: URL(string: "ws://racter:43867/")!).isEmpty)
+        XCTAssertTrue(discovery.transportURLs(for: URL(string: "ws://example.test:43867/")!).isEmpty)
     }
 
     func testDiscoveryRejectsStaleTerminalCallbackDuringNextGeneration() async {
@@ -458,21 +458,21 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         discovery.netServiceDidResolveAddress(current)
 
         let secondURLs = await second.value
-        XCTAssertEqual(secondURLs, [URL(string: "ws://racter:43867/ws")!])
+        XCTAssertEqual(secondURLs, [URL(string: "ws://example.test:43867/ws")!])
         discovery.netServiceDidResolveAddress(current)
         XCTAssertTrue(current.stopped)
     }
 
-    func testDiscoveredLocalHostNormalizationMatchesConfiguredRacterURL() throws {
+    func testDiscoveredLocalHostNormalizationMatchesConfiguredHostnameURL() throws {
         let discovered = try XCTUnwrap(
-            SurfAceCentralDiscovery.localTransportURL(host: "racter.", port: 43867, path: "/ws")
+            SurfAceCentralDiscovery.localTransportURL(host: "example.test.", port: 43867, path: "/ws")
         )
-        XCTAssertEqual(discovered, URL(string: "ws://racter:43867/ws"))
+        XCTAssertEqual(discovered, URL(string: "ws://example.test:43867/ws"))
 
         let discoveredLocal = try XCTUnwrap(
-            SurfAceCentralDiscovery.localTransportURL(host: "racter.local.", port: 43867, path: "/socket")
+            SurfAceCentralDiscovery.localTransportURL(host: "server.local.", port: 43867, path: "/socket")
         )
-        XCTAssertEqual(discoveredLocal, URL(string: "ws://racter.local:43867/socket"))
+        XCTAssertEqual(discoveredLocal, URL(string: "ws://server.local:43867/socket"))
     }
 
     func testDiscoveryRequiresExactServerVersionAndWebSocketPath() async {
@@ -550,7 +550,7 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
     func testConfiguredLocalNumericEndpointUsesNarrowTransportPolicy() throws {
         let local = try XCTUnwrap(URL(string: "ws://100.64.12.34:43867/"))
         let remote = try XCTUnwrap(URL(string: "ws://203.0.113.9:43867/"))
-        let hostname = try XCTUnwrap(URL(string: "ws://racter:43867/"))
+        let hostname = try XCTUnwrap(URL(string: "ws://example.test:43867/"))
         let secure = try XCTUnwrap(URL(string: "wss://192.168.1.9:43867/"))
 
         XCTAssertTrue(SurfAceRegistrationEndpoint.usesLocalNumericTransport(local))
@@ -644,7 +644,7 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
 
     func testConfiguredLocalNumericFailureUsesBonjourFallbackAndRetriesConfigured() async throws {
         let configured = try XCTUnwrap(URL(string: "ws://100.64.12.34:43867/"))
-        let discovered = try XCTUnwrap(URL(string: "ws://racter:43867/"))
+        let discovered = try XCTUnwrap(URL(string: "ws://example.test:43867/"))
         let primary = Transport()
         primary.fails = true
         primary.assignedWindowLabels["sf_one"] = "configured"
@@ -1457,7 +1457,7 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         let discovery = SurfAceCentralDiscovery(makeBrowser: { browser }, sleep: { try await clock.sleep($0) })
         let advertisement = discoveryService(name: "surface-only")
         advertisement.resolvedRole = "surface"
-        let advertisedURL = URL(string: "ws://racter:43867/ws")!
+        let advertisedURL = URL(string: "ws://example.test:43867/ws")!
         let surfaceTransport = Transport()
         surfaceTransport.registryIdentity = foreign
         let registration = centralRegistration(
