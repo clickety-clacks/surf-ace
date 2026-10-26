@@ -213,7 +213,6 @@ export type PersistentSurfaceState = {
   nextAdmissionAttemptSequence?: number;
   primarySurfaceId: string | null;
   registryBinding?: PersistentRegistryBinding;
-  registryBindingHistory?: PersistentRegistryBindingHistory[];
   registryBindingPending?: boolean;
   registryEndpointLease?: PersistentRegistryEndpointLease | null;
   registryRefusedClaims?: PersistentRegistryRefusedClaim[];
@@ -238,15 +237,6 @@ export type ConfirmedRegistryClaim = {
   surfaceId: string;
   windowAllocationGeneration?: number;
   windowLabel: string;
-};
-
-type PersistentRegistryBindingHistory = {
-  binding: PersistentRegistryBinding | null;
-  claims: ConfirmedRegistryClaim[];
-  heldPaneReleaseIds: string[];
-  heldWindowReleaseIds: string[];
-  paneLabels: Array<{ allocationGeneration: number | null; paneId: string; paneLabel: number; paneLineageId: string; surfaceId: string }>;
-  windowLabels: Array<{ allocationGeneration: number | null; surfaceId: string; windowLabel: string; windowLabelConfirmed: boolean | null }>;
 };
 
 type PersistentRegistryRefusedClaim =
@@ -955,15 +945,6 @@ export class SurfaceCore {
     return structuredClone(binding);
   }
 
-  isPriorRegistryBinding(clientId: string, allocatorId: string, fleetId: string): boolean {
-    const history = this.persistentState.registryBindingHistory;
-    return Array.isArray(history) && history.some((entry) => {
-      if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
-      const binding = entry.binding;
-      return !!binding && binding.clientId === clientId && binding.allocatorId === allocatorId && binding.fleetId === fleetId;
-    });
-  }
-
   bindRegistryIdentity(binding: PersistentRegistryBinding): void {
     if (typeof binding.clientId !== "string" || !/^[A-Za-z0-9._:-]{1,128}$/.test(binding.clientId) ||
         typeof binding.allocatorId !== "string" || !/^alloc_[A-Za-z0-9._:-]{3,64}$/.test(binding.allocatorId) ||
@@ -992,91 +973,8 @@ export class SurfaceCore {
     if (existing && existing.clientId === binding.clientId && existing.allocatorId === binding.allocatorId &&
         existing.fleetId === binding.fleetId) return;
 
-    const claims = this.confirmedRegistryClaims();
-    const paneLabels: PersistentRegistryBindingHistory["paneLabels"] = [];
-    const windowLabels: PersistentRegistryBindingHistory["windowLabels"] = [];
-    for (const surface of this.surfaces.values()) {
-      windowLabels.push({
-        allocationGeneration: surface.windowAllocationGeneration,
-        surfaceId: surface.surfaceId,
-        windowLabel: surface.windowLabel,
-        windowLabelConfirmed: surface.windowLabelConfirmed,
-      });
-      for (const pane of surface.panes.values()) {
-        paneLabels.push({
-          allocationGeneration: pane.allocationGeneration,
-          paneId: String(pane.paneId),
-          paneLabel: pane.paneLabel,
-          paneLineageId: pane.paneLineageId,
-          surfaceId: surface.surfaceId,
-        });
-      }
-    }
-    for (const tombstone of this.locklessAuthority.listTombstones()) {
-      if (tombstone.kind === "pane") {
-        const pane = (tombstone.payload as { pane?: Record<string, unknown> } | null)?.pane;
-        if (pane) paneLabels.push({
-          allocationGeneration: Number.isSafeInteger(pane.allocationGeneration) ? Number(pane.allocationGeneration) : null,
-          paneId: String(pane.paneId ?? ""),
-          paneLabel: Number.isSafeInteger(pane.paneLabel) ? Number(pane.paneLabel) : 0,
-          paneLineageId: typeof pane.paneLineageId === "string" ? pane.paneLineageId : "",
-          surfaceId: tombstone.surfaceId,
-        });
-        continue;
-      }
-      const payload = tombstone.payload as { surface?: Record<string, unknown>; paneTombstones?: unknown[] } | null;
-      const surface = payload?.surface;
-      if (!surface) continue;
-      const surfaceId = typeof surface.surfaceId === "string" ? surface.surfaceId : tombstone.surfaceId;
-      windowLabels.push({
-        allocationGeneration: Number.isSafeInteger(surface.windowAllocationGeneration)
-          ? Number(surface.windowAllocationGeneration) : null,
-        surfaceId,
-        windowLabel: typeof surface.windowLabel === "string" ? surface.windowLabel : "",
-        windowLabelConfirmed: typeof surface.windowLabelConfirmed === "boolean" ? surface.windowLabelConfirmed : null,
-      });
-      if (Array.isArray(surface.panes)) {
-        for (const candidate of surface.panes) {
-          if (!candidate || typeof candidate !== "object") continue;
-          const pane = candidate as Record<string, unknown>;
-          paneLabels.push({
-            allocationGeneration: Number.isSafeInteger(pane.allocationGeneration) ? Number(pane.allocationGeneration) : null,
-            paneId: String(pane.paneId ?? ""),
-            paneLabel: Number.isSafeInteger(pane.paneLabel) ? Number(pane.paneLabel) : 0,
-            paneLineageId: typeof pane.paneLineageId === "string" ? pane.paneLineageId : "",
-            surfaceId,
-          });
-        }
-      }
-      for (const nested of payload.paneTombstones ?? []) {
-        if (!nested || typeof nested !== "object") continue;
-        const nestedPayload = (nested as { payload?: { pane?: Record<string, unknown> } }).payload;
-        const pane = nestedPayload?.pane;
-        if (!pane) continue;
-        paneLabels.push({
-          allocationGeneration: Number.isSafeInteger(pane.allocationGeneration) ? Number(pane.allocationGeneration) : null,
-          paneId: String(pane.paneId ?? ""),
-          paneLabel: Number.isSafeInteger(pane.paneLabel) ? Number(pane.paneLabel) : 0,
-          paneLineageId: typeof pane.paneLineageId === "string" ? pane.paneLineageId : "",
-          surfaceId,
-        });
-      }
-    }
-    const held = this.locklessAuthority.holdPendingRegistryReleases();
-    if (existing || claims.length > 0 || held.paneReleases.length > 0 || held.windowReleases.length > 0) {
-      const history = Array.isArray(this.persistentState.registryBindingHistory)
-        ? this.persistentState.registryBindingHistory
-        : [];
-      history.push({
-        binding: existing,
-        claims: structuredClone(claims),
-        heldPaneReleaseIds: held.paneReleases.map((release) => release.releaseId),
-        heldWindowReleaseIds: held.windowReleases.map((release) => release.releaseId),
-        paneLabels,
-        windowLabels,
-      });
-      this.persistentState.registryBindingHistory = history;
-    }
+    if (existing) this.locklessAuthority.holdPendingRegistryReleases();
+    else this.locklessAuthority.clearTombstoneAllocationClaims();
     this.persistentState.registryBinding = structuredClone(binding);
     this.persistentState.registryBindingPending = true;
     this.persistentState.registryEndpointLease = null;

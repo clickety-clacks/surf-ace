@@ -822,14 +822,39 @@ test("surface core retains readable windows when another saved record is undecod
   assert.equal(restored.getRendererWindowState(readable.surfaceId).panes[0]?.content.contentId, "ct_readable");
 });
 
-test("surface core remembers an abandoned registry identity after rebinding", () => {
+test("surface core replaces its binding without retaining a former-registry refusal list", () => {
   const clientId = "client-current";
   const core = new SurfaceCore({ clientIdentity: clientId });
   core.bindRegistryIdentity({ clientId, allocatorId: "alloc_previous", fleetId: "fleet-previous" });
   core.beginRegistryBinding({ clientId, allocatorId: "alloc_current", fleetId: "fleet-current" });
 
-  assert.equal(core.isPriorRegistryBinding(clientId, "alloc_previous", "fleet-previous"), true);
-  assert.equal(core.isPriorRegistryBinding(clientId, "alloc_current", "fleet-current"), false);
+  assert.deepEqual(core.registryBinding(), { clientId, allocatorId: "alloc_current", fleetId: "fleet-current" });
+  assert.equal("registryBindingHistory" in core.getPersistentState(), false);
+});
+
+test("first binding keeps unbound release intents while rebinding holds former-registry evidence", () => {
+  const clientId = "a".repeat(64);
+  const makePendingRelease = (binding?: { allocatorId: string; fleetId: string }) => {
+    const core = new SurfaceCore({ clientIdentity: clientId });
+    const surface = core.ensurePrimarySurface("Closed pane", { width: 800, height: 600, scale: 1 });
+    if (binding) core.bindRegistryIdentity({ clientId, ...binding });
+    core.locklessAuthority.recordPaneFinalClose({
+      closeTopologyRevision: 5,
+      pane: { allocationGeneration: 7, paneId: 9, paneLabel: 709, paneLineageId: "pl_binding_release" },
+    }, { closeRevision: 5, surfaceId: surface.surfaceId });
+    return { core, release: core.locklessAuthority.listPendingPaneReleases()[0]! };
+  };
+  const initial = makePendingRelease();
+  initial.core.beginRegistryBinding({ clientId, allocatorId: "alloc_first", fleetId: "fleet-first" });
+  assert.deepEqual(initial.core.locklessAuthority.listPendingPaneReleases().map((release) => release.releaseId),
+    [initial.release.releaseId]);
+
+  const rebound = makePendingRelease({ allocatorId: "alloc_old", fleetId: "fleet-old" });
+  rebound.core.beginRegistryBinding({ clientId, allocatorId: "alloc_new", fleetId: "fleet-new" });
+  assert.deepEqual(rebound.core.locklessAuthority.listPendingPaneReleases(), []);
+  assert.ok(rebound.core.getPersistentState().lockless!.paneRetirementAudits.some((entry) =>
+    entry.releaseId === rebound.release.releaseId && entry.paneLabel === rebound.release.paneLabel &&
+    entry.allocationGeneration === rebound.release.allocationGeneration));
 });
 
 test("surface core persists and restores local window placement without changing surface identity", () => {

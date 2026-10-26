@@ -226,6 +226,25 @@ test("persistent state writes primary and last-good backup as valid JSON", async
   );
 });
 
+test("an undecodable committed generation can be replaced by fresh durable state", async () => {
+  const stateDir = await temporaryStateDir();
+  const unreadable = multiWindowState();
+  const fresh = { ...multiWindowState(), primarySurfaceId: "sf_fresh_after_corruption" as never };
+  const statePath = path.join(stateDir, STATE_FILE_NAME);
+  await writePersistentStateFile(stateDir, STATE_FILE_NAME, unreadable);
+  await fs.writeFile(statePath, "{unreadable primary");
+  await fs.writeFile(path.join(stateDir, backupStateFileName(STATE_FILE_NAME)), "{unreadable backup");
+
+  const load = await loadPersistentStateFile(stateDir, STATE_FILE_NAME);
+  assert.equal(load.state, undefined);
+  assert.equal(load.writeGuard, "corrupt-primary");
+
+  await writePersistentStateFile(stateDir, STATE_FILE_NAME, fresh);
+  const recovered = await loadPersistentStateFile(stateDir, STATE_FILE_NAME);
+  assert.equal(recovered.writeGuard, false);
+  assert.deepEqual(recovered.state, fresh);
+});
+
 test("selector acknowledgement ambiguity can be reconciled to the exact committed generation", async () => {
   const stateDir = await temporaryStateDir();
   const before = multiWindowState();
