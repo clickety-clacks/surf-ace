@@ -101,21 +101,24 @@ test("surface.describe schema is a read-only pre-pair request and permits unknow
   });
   assert.deepEqual(response, { ok: true });
 
-  const positiveOnlyTopology = validateEnvelopeType("event.topology_changed", {
-    eventId: "ev_topology_zero_pane",
-    op: "event.topology_changed",
-    payload: {
-      surfaceId: "sf_fixture",
-      topologyRevision: 3,
-      layout: { paneId: 0, type: "pane" },
-      panes: [{ paneId: 0, paneLabel: 1, name: null }],
-    },
-    sentAt: Date.now(),
-    type: "event",
-    v: 1,
-  });
-  assert.equal(positiveOnlyTopology.ok, false,
-    "pane ID zero is valid in describe observations only");
+  const describeSchema = protocolSchemaDefs.SurfaceDescribeResponse as any;
+  const describePayloadSchema = describeSchema.properties.payload.properties;
+  assert.equal(describePayloadSchema.layout.$ref, "#/$defs/SurfaceDescribeLayoutNode");
+  assert.equal(
+    describePayloadSchema.panes.items.properties.paneId.$ref,
+    "#/$defs/SurfaceDescribePaneId",
+  );
+  assert.equal((protocolSchemaDefs.SurfaceDescribePaneId as any).minimum, 0);
+
+  const topologyChangedSchema = protocolSchemaDefs.TopologyChangedEvent as any;
+  const topologyPayloadSchema = topologyChangedSchema.properties.payload.properties;
+  assert.equal(topologyPayloadSchema.layout.$ref, "#/$defs/TopologyLayoutNode");
+  assert.equal(topologyPayloadSchema.panes.items.$ref, "#/$defs/TopologyPaneState");
+  assert.equal((protocolSchemaDefs.TopologyLayoutNode as any).oneOf[0].properties.paneId.$ref,
+    "#/$defs/PaneId");
+  assert.equal((protocolSchemaDefs.TopologyPaneState as any).properties.paneId.$ref,
+    "#/$defs/PaneId");
+  assert.equal((protocolSchemaDefs.PaneId as any).minimum, 1);
 
   const unavailableSavedRegistryState = validateEnvelopeType("surface.describe", {
     id: "rq_surface_describe_fixture",
