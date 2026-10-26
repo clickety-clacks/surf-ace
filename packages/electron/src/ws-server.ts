@@ -3355,9 +3355,16 @@ export class SurfaceWsServer {
       return errorResponse("surface.describe", request.id, "invalid_payload",
         validation.ok ? "surface.describe payload is invalid" : validation.reason);
     }
-    if (this.persistenceOutcomeUnknown || !this.isApplicationStateReady()) {
-      return errorResponse("surface.describe", request.id, "not_ready",
-        "Client application state is not ready for an authoritative pre-pair observation");
+    const persistenceOutcomeUnknown = this.persistenceOutcomeUnknown !== null;
+    const applicationStateReady = persistenceOutcomeUnknown
+      ? false
+      : this.isApplicationStateReady();
+    const readinessUncertain = persistenceOutcomeUnknown || !applicationStateReady;
+    if (readinessUncertain) {
+      persistentServerDiagnostic("warn", "prepair_surface_observation_degraded", {
+        persistence_outcome_unknown: persistenceOutcomeUnknown,
+        surface_id: request.payload.surfaceId,
+      });
     }
     let binding: ReturnType<SurfaceCore["registryBinding"]>;
     let lease: ReturnType<SurfaceCore["registryEndpointLease"]>;
@@ -3452,7 +3459,9 @@ export class SurfaceWsServer {
         surfaceId: request.payload.surfaceId,
         endpointLeaseGeneration: lease.leaseGeneration,
         observedAtMs,
-        applicationReadiness: { status: "ready", limitationCodes: [] },
+        applicationReadiness: readinessUncertain
+          ? { status: "degraded", limitationCodes: ["not_ready"] }
+          : { status: "ready", limitationCodes: [] },
         surfaceSetRevision: surfaceSetAfter,
         topologyRevision: snapshot.topologyRevision,
         layout: snapshot.layout,
