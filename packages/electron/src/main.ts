@@ -78,6 +78,10 @@ import { PANE_PRESENTATION_ENABLED } from "./pane-presentation-policy.js";
 import { PanePresentationCoordinator } from "./pane-presentation-coordinator.js";
 import { NativePresentationWindowBinding, panePresentationWindowRoute } from "./pane-presentation.js";
 import { PersistenceWriteReadiness } from "./persistence-write-readiness.js";
+import {
+  handleSurfaceWindowClose,
+  surfaceWindowCloseOrigin,
+} from "./window-close-lifecycle.js";
 import { AnnotationRegistryPublisher } from "./annotation-registry-publisher.js";
 import { AnnotationSourceCoordinator } from "./annotation-source-coordinator.js";
 import { AnnotationDoneFence } from "./annotation-done-state.js";
@@ -91,6 +95,7 @@ const EXPLICIT_WS_PORT = process.env.SURF_ACE_PORT != null;
 const STATE_FILE_NAME = "surface-core-state.json";
 const BIND_ADDRESS = process.env.SURF_ACE_BIND?.trim() || "0.0.0.0";
 let runtimeAppBindingDiagnostics: RuntimeAppBindingDiagnostics | null = null;
+const compositorRejectedStartupSurfaces = new Set<string>();
 const ADVERTISER_TXT_REFRESH_DEBOUNCE_MS = 500;
 const SURF_ACE_WEBAUTHN_KEYCHAIN_ACCESS_GROUP = "Z7R59J7QV8.ai.surf-ace.electron.webauthn";
 let persistentStateWriteGuard: PersistentStateLoadResult["writeGuard"] = false;
@@ -399,6 +404,12 @@ function endpointName(): string {
 
 async function acknowledgeCompositorMainAppBinding(): Promise<void> {
   await refreshRuntimeAppBindingDiagnostics();
+  compositorRejectedStartupSurfaces.clear();
+  if (runtimeAppBindingDiagnostics?.bindingAuthority === "blocked") {
+    for (const surface of core.listSurfaces()) {
+      compositorRejectedStartupSurfaces.add(surface.surfaceId);
+    }
+  }
 }
 
 async function refreshRuntimeAppBindingDiagnostics(): Promise<RuntimeAppBindingDiagnostics | null> {
@@ -1443,6 +1454,7 @@ async function createWindowForSurface(surfaceId: string): Promise<BrowserWindow>
   }
 
   const surface = core.getSurface(surfaceId);
+  const compositorRejectedStartup = compositorRejectedStartupSurfaces.has(surfaceId);
   const visibleWindowLabel = core.publicTopologyState(surfaceId).windowLabel;
   const compositorSocketPath = resolveCompositorControlSocketPath();
   const restoredPlacement = compositorSocketPath
@@ -1514,6 +1526,7 @@ async function createWindowForSurface(surfaceId: string): Promise<BrowserWindow>
     syncWindowViewport(surfaceId, window);
     syncWindowPlacement(surfaceId, window);
     readyWindows.add(surfaceId);
+    compositorRejectedStartupSurfaces.delete(surfaceId);
     flushPendingWindowState(surfaceId);
     clientInfo("window_renderer_ready", {
       pane_ids: core.activePaneIds(surfaceId).join(","),
@@ -1575,34 +1588,42 @@ async function createWindowForSurface(surfaceId: string): Promise<BrowserWindow>
   });
 
   window.on("close", (event) => {
-    if (isQuitting || programmaticSurfaceCloses.has(surfaceId)) return;
-    event.preventDefault();
-    if (persistentStateOutcomeUnknown) {
-      clientWarn("window_close_paused_uncertain_persistence", { surface_id: surfaceId });
-      return;
-    }
-    if (pendingLocalSurfaceCloses.has(surfaceId)) return;
-    pendingLocalSurfaceCloses.add(surfaceId);
-    void (async () => {
-      try {
-        try {
-          await releaseNativePaneInstancesForSurface(surfaceId, "window close");
-        } catch (error) {
-          console.warn(`[surf-ace] compositor native pane release failed on window close: ${error}`);
-          await sendCompositorOverlayRequest(overlayRegionsClearRequestForCompositor(surfaceId)).catch((overlayError) => {
-            console.warn(`[surf-ace] compositor overlay region clear failed: ${overlayError}`);
-          });
-        }
-        if (!isQuitting) await server.closeSurfaceFromLocalUser(surfaceId);
-      } catch (error) {
-        clientWarn("window_close_commit_failed", {
-          surface_id: surfaceId,
-          ...errorDiagnosticFields(error),
-        });
-      } finally {
-        pendingLocalSurfaceCloses.delete(surfaceId);
-      }
-    })();
+    const origin = surfaceWindowCloseOrigin({
+      compositorStartupRejected,
+      rendererReady: readyWindows.has(surfaceId),
+    });
+    void handleSurfaceWindowClose(event, origin, {
+      beginClose: () => pendingLocalSurfaceCloses.add(surfaceId),
+      clearOverlayRegions: async () => {
+        await sendCompositorOverlayRequest(overlayRegionsClearRequestForCompositor(surfaceId));
+      },
+      closeWindowWithoutFinalizing: () => {
+        programmaticSurfaceCloses.add(surfaceId);
+        window.close();
+      },
+      closeSurfaceFromLocalUser: async () => {
+        await server.closeSurfaceFromLocalUser(surfaceId);
+      },
+      finishClose: () => pendingLocalSurfaceCloses.delete(surfaceId),
+      isClosePending: () => pendingLocalSurfaceCloses.has(surfaceId),
+      isPersistenceOutcomeUnknown: () => Boolean(persistentStateOutcomeUnknown),
+      isProgrammaticClose: () => programmaticSurfaceCloses.has(surfaceId),
+      isQuitting: () => isQuitting,
+      onCloseFailed: (error) => clientWarn("window_close_commit_failed", {
+        surface_id: surfaceId,
+        ...errorDiagnosticFields(error),
+      }),
+      onClosePausedForPersistence: () =>
+        clientWarn("window_close_paused_uncertain_persistence", { surface_id: surfaceId }),
+      onCloseReleaseFailed: (error) =>
+        console.warn(`[surf-ace] compositor native pane release failed on window close: ${error}`),
+      onOverlayClearFailed: (error) =>
+        console.warn(`[surf-ace] compositor overlay region clear failed: ${error}`),
+      persistState,
+      releaseNativePanes: async () => {
+        await releaseNativePaneInstancesForSurface(surfaceId, "window close");
+      },
+    });
   });
 
   await window.loadFile(path.join(distDir, "renderer", "index.html"), {

@@ -207,6 +207,40 @@ test("explicit trusted compositor bind diagnostics become ready", () => {
   assert.deepEqual(diagnostics.diagnosticDrift, ["wayland_app_id_mismatch"]);
 });
 
+test("explicit compositor startup rejection remains distinguishable from degraded bind errors", () => {
+  const request = buildCompositorAppBindingRequest({
+    env: { SURF_ACE_LAUNCH_TOKEN: "ltok_123" },
+    pid: 4101,
+    ppid: 4100,
+    uiLabel: "tablet-a Surf Ace",
+    windowTitle: "tablet-a Surf Ace",
+  });
+
+  const diagnostics = runtimeAppBindingDiagnosticsFromCompositorResponse(request, {
+    bindingAuthority: "blocked",
+    bindingBlockReason: "process_lineage_mismatch",
+    bindingDegradedReasons: [],
+    diagnosticDrift: [],
+    expectedBundleId: SURF_ACE_ELECTRON_BUNDLE_ID,
+    expectedPackageName: SURF_ACE_ELECTRON_PACKAGE_NAME,
+    expectedRuntimeId: SURF_ACE_ELECTRON_RUNTIME_ID,
+    launchTokenStatus: "matched",
+    observedUiLabel: "tablet-a Surf Ace",
+    observedWaylandAppId: null,
+    observedWindowTitle: "tablet-a Surf Ace",
+    ok: false,
+    processLineageStatus: "mismatched",
+    reportedBundleId: SURF_ACE_ELECTRON_BUNDLE_ID,
+    reportedPackageName: SURF_ACE_ELECTRON_PACKAGE_NAME,
+    reportedRuntimeId: SURF_ACE_ELECTRON_RUNTIME_ID,
+  }, 790);
+
+  assert.equal(diagnostics.acknowledgement, "failed");
+  assert.equal(diagnostics.bindingAuthority, "blocked");
+  assert.equal(diagnostics.bindingBlockReason, "process_lineage_mismatch");
+  assert.equal(diagnostics.ready, false);
+});
+
 
 test("unsupported compositor bind request falls back to launch-token readiness", () => {
   const request = buildCompositorAppBindingRequest({
