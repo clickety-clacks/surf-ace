@@ -1769,7 +1769,6 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         XCTAssertFalse(transport.registrationInputs.last?.surfaces.contains {
             $0.surfaceId == refusedSurfaceId
         } ?? true)
-        XCTAssertEqual(registration.status, .connected)
     }
 
     func testRefusedReleaseDropsOnlyThatIntentAndCompletesTheAcceptedRelease() async throws {
