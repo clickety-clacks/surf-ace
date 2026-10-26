@@ -14,7 +14,7 @@ final class SurfAceBonjourPublisherTests: XCTestCase {
             diagnosticLog: { _ in }
         )
 
-        publisher.publish(name: "Emanator", port: 19_001, txtRecord: ["busy": "0"])
+        publisher.publish(name: "Example1", port: 19_001, txtRecord: ["busy": "0"])
         XCTAssertEqual(services.count, 1)
         XCTAssertEqual(services[0].publishCallCount, 1)
 
@@ -38,7 +38,7 @@ final class SurfAceBonjourPublisherTests: XCTestCase {
             diagnosticLog: { _ in }
         )
 
-        publisher.publish(name: "Emanator", port: 19_001, txtRecord: ["busy": "0"])
+        publisher.publish(name: "Example1", port: 19_001, txtRecord: ["busy": "0"])
         publisher.stop()
         publisher.updateTXTRecord(["busy": "1"])
 

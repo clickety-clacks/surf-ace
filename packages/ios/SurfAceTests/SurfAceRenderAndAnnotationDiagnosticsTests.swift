@@ -773,7 +773,7 @@ final class SurfAceRenderAndAnnotationDiagnosticsTests: XCTestCase {
                     contentId: "ct_aaaabbbb",
                     revision: 1,
                     contentType: .html,
-                    payload: .html(html: "<html><body style='margin:0;background:#f00;height:100vh'>T272-ALEPH-RETRY-1 pane capture visual oracle</body></html>", baseURL: nil),
+                    payload: .html(html: "<html><body style='margin:0;background:#f00;height:100vh'>T272-UNIT1-RETRY-1 pane capture visual oracle</body></html>", baseURL: nil),
                     reloadSource: nil,
                     title: nil,
                     scrollable: true,

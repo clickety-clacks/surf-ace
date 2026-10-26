@@ -7,12 +7,12 @@ function endpoint(params?: Partial<SurfAceDiscoveryEndpoint>): SurfAceDiscoveryE
   return {
     busy: false,
     capabilitiesBitmask: 31,
-    endpointId: "emanator.local:19001/ws",
+    endpointId: "example1.local:19001/ws",
     fingerprintPrefix: "e305802b",
-    host: "emanator.local",
-    instanceName: "Emanator Surf Ace",
+    host: "example1.local",
+    instanceName: "Example1 Surf Ace",
     lastSeenAt: 1234,
-    name: "Emanator",
+    name: "Example1",
     port: 19001,
     protocolVersion: 1,
     viewport: {
@@ -85,11 +85,11 @@ DATE: ---Sat 21 Mar 2026---
 
 test("macOS SRV target uses IPv4 transport records without waiting for missing AAAA", async () => {
   const calls: string[] = [];
-  const addresses = await __test.resolveIpv4TransportAddresses("gibson.local", async (host) => {
+  const addresses = await __test.resolveIpv4TransportAddresses("host-a.local", async (host) => {
     calls.push(host);
     return ["192.168.50.216", "192.168.50.216", "100.92.53.87", "::1"];
   });
-  assert.deepEqual(calls, ["gibson.local"]);
+  assert.deepEqual(calls, ["host-a.local"]);
   assert.deepEqual(addresses, ["192.168.50.216", "100.92.53.87"]);
   assert.deepEqual(await __test.resolveIpv4TransportAddresses("missing.local", async () => {
     throw new Error("DNS-SD address lookup unavailable");
@@ -178,7 +178,7 @@ test("refreshNow clears stale endpoints when a full refresh returns no advertise
   });
   discovery.started = true;
   discovery.browser = { update() {} };
-  discovery.snapshot.set("emanator.local:19001/ws", endpoint());
+  discovery.snapshot.set("example1.local:19001/ws", endpoint());
   discovery.queryCurrentEndpoints = async () => [];
 
   await discovery.refreshNow();
@@ -213,14 +213,14 @@ test("refreshNow removes endpoints missing from the refreshed snapshot", async (
     logger: {},
     now: () => 1234,
   }) as any;
-  const retained = endpoint({ endpointId: "emanator.local:19001/ws", instanceName: "Emanator Surf Ace" });
+  const retained = endpoint({ endpointId: "example1.local:19001/ws", instanceName: "Example1 Surf Ace" });
   const stale = endpoint({
-    endpointId: "emanator.local:29001/ws",
+    endpointId: "example1.local:29001/ws",
     fingerprintPrefix: "deadbeef",
-    host: "emanator.local",
-    instanceName: "Old Emanator Surf Ace",
+    host: "example1.local",
+    instanceName: "Old Example1 Surf Ace",
     lastSeenAt: 1200,
-    name: "Old Emanator",
+    name: "Old Example1",
     port: 29001,
   });
   discovery.started = true;

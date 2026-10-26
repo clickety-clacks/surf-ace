@@ -1398,7 +1398,7 @@ test("surface core snapshot omits text extracted from accepted HTML fragments", 
     content: { html: "<p>accepted fragment is visible</p>" },
     contentId: "ct_html_fragment",
     contentType: "html",
-    friendlyChatName: "Plumbus test",
+    friendlyChatName: "Example test",
     paneId,
   }, null);
 
