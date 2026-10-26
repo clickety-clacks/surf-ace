@@ -1646,7 +1646,11 @@ fn window_describe_exposes_a_bounded_server_not_ready_message() {
         let output = run_window_describe(&registry, "a");
         assert!(!output.status.success());
         let result: Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(result["error"]["code"], "client_not_ready");
+        assert_eq!(
+            result["error"]["code"],
+            "client_not_ready",
+            "result={result}"
+        );
         assert_eq!(
             result["error"]["details"]["applicationReadiness"]["status"],
             "not_ready"
