@@ -140,6 +140,7 @@ export type SurfaceWsServerOptions = {
   capturePaneImage: (surfaceId: string, paneId: number) => Promise<string | null>;
   claimPaneLabel?: (surfaceId: string, paneId: number, paneLineageId: string) => Promise<number | PaneLabelAllocation>;
   preparePaneLabelClaim?: () => Promise<void>;
+  clientId?: string;
   core: SurfaceCore;
   endpointName: string;
   hostName: string;
@@ -247,6 +248,7 @@ function pairStateDiagnosticSummary(state: ReturnType<SurfaceCore["pairState"]>)
 
 export class SurfaceWsServer {
   private readonly bindAddress: string;
+  private readonly clientId: string | null;
   private readonly compositorSocketPath: string | null;
   private readonly core: SurfaceCore;
   private readonly claimPaneLabel: (surfaceId: string, paneId: number, paneLineageId: string) => Promise<number | PaneLabelAllocation>;
@@ -296,6 +298,7 @@ export class SurfaceWsServer {
 
   constructor(options: SurfaceWsServerOptions) {
     this.bindAddress = options.bindAddress ?? "0.0.0.0";
+    this.clientId = options.clientId ?? null;
     this.capturePaneImage = options.capturePaneImage;
     this.compositorSocketPath = options.compositorSocketPath === undefined
       ? resolveCompositorControlSocketPath()
@@ -3355,11 +3358,18 @@ export class SurfaceWsServer {
       return errorResponse("surface.describe", request.id, "invalid_payload",
         validation.ok ? "surface.describe payload is invalid" : validation.reason);
     }
+    const clientId = this.clientId;
+    if (!clientId || request.payload.clientId !== clientId) {
+      return errorResponse("surface.describe", request.id, "identity_mismatch",
+        "Requested client identity does not match this client");
+    }
     const persistenceOutcomeUnknown = this.persistenceOutcomeUnknown !== null;
-    const applicationStateReady = persistenceOutcomeUnknown
-      ? false
-      : this.isApplicationStateReady();
-    const readinessUncertain = persistenceOutcomeUnknown || !applicationStateReady;
+    let applicationStateReady = false;
+    try {
+      applicationStateReady = !persistenceOutcomeUnknown && this.isApplicationStateReady();
+    } catch {
+      // A failed readiness check limits the observation; it does not make saved topology unreadable.
+    }
     let binding: ReturnType<SurfaceCore["registryBinding"]> = null;
     let lease: ReturnType<SurfaceCore["registryEndpointLease"]> = null;
     try {
@@ -3403,31 +3413,26 @@ export class SurfaceWsServer {
       return errorResponse("surface.describe", request.id, "not_ready",
         "Client revision or observation clock is unavailable");
     }
-    const bindingMatches = binding !== null &&
-      request.payload.clientId === binding.clientId &&
+    const bindingMatchesRequest = binding !== null &&
+      binding.clientId === clientId &&
       request.payload.registryIdentity.allocatorId === binding.allocatorId &&
       request.payload.registryIdentity.fleetId === binding.fleetId;
-    const bindingConsistency = !binding
-      ? "unavailable" as const
-      : readinessUncertain
-        ? "unverified" as const
-        : bindingMatches ? "matched" as const : "mismatched" as const;
-    const endpointLeaseConsistency = !lease
-      ? "unavailable" as const
-      : readinessUncertain
-        ? "unverified" as const
-        : lease.leaseExpiresAtMs <= observedAtMs
-          ? "stale" as const
-          : lease.leaseGeneration === request.payload.endpointLeaseGeneration
-            ? "matched" as const
-            : "stale" as const;
-    if (readinessUncertain || bindingConsistency !== "matched" ||
-        endpointLeaseConsistency !== "matched") {
+    const limitationCodes: string[] = [];
+    if (persistenceOutcomeUnknown) limitationCodes.push("persistence_outcome_unknown");
+    if (!applicationStateReady) limitationCodes.push("application_state_unverified");
+    if (!binding) {
+      limitationCodes.push("registry_binding_unavailable");
+    } else if (!bindingMatchesRequest) {
+      limitationCodes.push("registry_binding_stale");
+    }
+    if (!lease) {
+      limitationCodes.push("endpoint_lease_unavailable");
+    } else if (lease.leaseGeneration !== request.payload.endpointLeaseGeneration) {
+      limitationCodes.push("endpoint_lease_stale");
+    }
+    if (limitationCodes.length > 0) {
       persistentServerDiagnostic("warn", "prepair_surface_observation_degraded", {
-        application_readiness: readinessUncertain ? "degraded" : "ready",
-        binding_consistency: bindingConsistency,
-        endpoint_lease_consistency: endpointLeaseConsistency,
-        persistence_outcome_unknown: persistenceOutcomeUnknown,
+        limitation_codes: limitationCodes.join(","),
         surface_id: request.payload.surfaceId,
       });
     }
@@ -3468,15 +3473,15 @@ export class SurfaceWsServer {
       op: "surface.describe",
       payload: {
         nonce: request.payload.nonce,
-        clientId: binding?.clientId ?? null,
+        clientId,
         registryIdentity: binding
           ? { allocatorId: binding.allocatorId, fleetId: binding.fleetId }
           : null,
         surfaceId: request.payload.surfaceId,
-        endpointLease: lease,
+        endpointLeaseGeneration: lease?.leaseGeneration ?? null,
         observedAtMs,
-        applicationReadiness: readinessUncertain
-          ? { status: "degraded", limitationCodes: ["not_ready"] }
+        applicationReadiness: limitationCodes.length > 0
+          ? { status: "degraded", limitationCodes }
           : { status: "ready", limitationCodes: [] },
         surfaceSetRevision: surfaceSetAfter,
         topologyRevision: snapshot.topologyRevision,

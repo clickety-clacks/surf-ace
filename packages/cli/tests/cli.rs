@@ -689,8 +689,6 @@ fn describe_observation(
     client_id: &str,
     surface_id: &str,
     generation: u64,
-    registration_observed_at_ms: u64,
-    lease_expires_at_ms: u64,
 ) -> Value {
     let now = epoch_ms();
     json!({
@@ -698,11 +696,7 @@ fn describe_observation(
         "clientId": client_id,
         "registryIdentity": { "allocatorId": "alloc_fixture", "fleetId": "fleet_fixture" },
         "surfaceId": surface_id,
-        "endpointLease": {
-            "leaseGeneration": generation,
-            "registrationObservedAtMs": registration_observed_at_ms,
-            "leaseExpiresAtMs": lease_expires_at_ms
-        },
+        "endpointLeaseGeneration": generation,
         "observedAtMs": now,
         "applicationReadiness": { "status": "ready", "limitationCodes": [] },
         "surfaceSetRevision": 4,
@@ -810,7 +804,10 @@ fn help_and_schema_are_json_and_do_not_require_operational_arguments() {
     )
     .expect("window-describe example validates against its published input schema");
     let window_result_schema = &window_command["resultSchema"]["properties"]["result"];
-    assert_eq!(window_result_schema["properties"]["registryConsistency"]["required"], json!(["binding", "endpointLease"]));
+    assert_eq!(
+        window_result_schema["properties"]["identityConsistency"]["required"],
+        json!(["clientId", "surfaceId", "registryIdentity", "endpointLease"])
+    );
     assert!(
         window_result_schema["properties"]["surfaceObservation"]["properties"]["panes"]["items"]
             ["properties"]["contentObservation"]["properties"]["revision"]["type"]
@@ -1095,13 +1092,8 @@ fn window_describe_reads_a_leased_endpoint_before_pairing_and_rechecks_the_regis
     let now = epoch_ms();
     let client_id = "a".repeat(64);
     let surface_id = "sf_window_fixture";
-    let (endpoint, endpoint_server) = spawn_surface_describe_server(describe_observation(
-        &client_id,
-        surface_id,
-        9,
-        now - 100,
-        now + 10_000,
-    ));
+    let (endpoint, endpoint_server) =
+        spawn_surface_describe_server(describe_observation(&client_id, surface_id, 9));
     let first = discovery_topology(
         vec![discovery_client(
             &client_id,
@@ -1162,8 +1154,10 @@ fn window_describe_reads_a_leased_endpoint_before_pairing_and_rechecks_the_regis
         endpoint
     );
     assert_eq!(result["result"]["applicationReadiness"]["status"], "ready");
-    assert_eq!(result["result"]["registryConsistency"]["binding"], "matched");
-    assert_eq!(result["result"]["registryConsistency"]["endpointLease"], "matched");
+    assert_eq!(result["result"]["identityConsistency"]["clientId"], "matched");
+    assert_eq!(result["result"]["identityConsistency"]["surfaceId"], "matched");
+    assert_eq!(result["result"]["identityConsistency"]["registryIdentity"], "matched");
+    assert_eq!(result["result"]["identityConsistency"]["endpointLease"], "matched");
     assert_eq!(
         result["result"]["registryBefore"]["endpointLease"]["leaseGeneration"],
         9
@@ -1363,13 +1357,8 @@ fn window_describe_requires_selected_row_identity_to_match_registry_identity() {
 
     let now = epoch_ms();
     let surface_id = "sf_row_identity_recheck";
-    let (direct_endpoint, direct_server) = spawn_surface_describe_server(describe_observation(
-        &client_id,
-        surface_id,
-        4,
-        now - 10,
-        now + 10_000,
-    ));
+    let (direct_endpoint, direct_server) =
+        spawn_surface_describe_server(describe_observation(&client_id, surface_id, 4));
     let before = discovery_topology(
         vec![discovery_client(
             &client_id,
@@ -1444,13 +1433,8 @@ fn window_describe_rejects_unreachable_endpoints_and_stale_rechecks() {
     assert_eq!(server.join().unwrap().len(), 2);
 
     let surface_id = "sf_stale_after_probe";
-    let (endpoint, endpoint_server) = spawn_surface_describe_server(describe_observation(
-        &client_id,
-        surface_id,
-        5,
-        now - 10,
-        now + 10_000,
-    ));
+    let (endpoint, endpoint_server) =
+        spawn_surface_describe_server(describe_observation(&client_id, surface_id, 5));
     let first = discovery_topology(
         vec![discovery_client(
             &client_id,
@@ -1506,13 +1490,7 @@ fn window_describe_preserves_transport_and_unknown_readiness_when_recheck_fails(
     let client_id = "7".repeat(64);
     let surface_id = "sf_invalid_then_stale";
     for recheck_kind in ["stale", "ambiguous", "unavailable"] {
-        let mut invalid_observation = describe_observation(
-            &client_id,
-            surface_id,
-            5,
-            now - 10,
-            now + 10_000,
-        );
+        let mut invalid_observation = describe_observation(&client_id, surface_id, 5);
         invalid_observation
             .as_object_mut()
             .unwrap()
@@ -1705,18 +1683,43 @@ fn window_describe_exposes_a_bounded_server_not_ready_message() {
 }
 
 #[test]
-fn window_describe_reports_direct_identity_mismatch_without_suppressing_topology() {
+fn window_describe_rejects_a_different_client_but_keeps_registry_mismatch_readable() {
     let now = epoch_ms();
     let client_id = "d".repeat(64);
     let wrong_client_id = "e".repeat(64);
     let surface_id = "sf_identity_mismatch";
-    let (endpoint, endpoint_server) = spawn_surface_describe_server(describe_observation(
-        &wrong_client_id,
-        surface_id,
-        7,
-        now - 10,
-        now + 10_000,
-    ));
+    let (endpoint, endpoint_server) =
+        spawn_surface_describe_server(describe_observation(&wrong_client_id, surface_id, 7));
+    let topology = discovery_topology(
+        vec![discovery_client(
+            &client_id,
+            Some(&endpoint),
+            vec![discovery_surface(surface_id, "a")],
+            7,
+            now - 10,
+            now + 10_000,
+            true,
+        )],
+        now,
+    );
+    let (registry, server) = spawn_registry_sequence(vec![topology.clone(), topology]);
+    let output = run_window_describe(&registry, "a");
+    assert!(!output.status.success());
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["error"]["code"], "identity_mismatch");
+    assert_eq!(server.join().unwrap().len(), 2);
+    assert_eq!(endpoint_server.join().unwrap()["op"], "surface.describe");
+
+    let mut mismatched_binding = describe_observation(&client_id, surface_id, 7);
+    mismatched_binding["registryIdentity"] = json!({
+        "allocatorId": "alloc_other",
+        "fleetId": "fleet_other",
+    });
+    mismatched_binding["applicationReadiness"] = json!({
+        "status": "degraded",
+        "limitationCodes": ["registry_binding_stale"],
+    });
+    let (endpoint, endpoint_server) = spawn_surface_describe_server(mismatched_binding);
     let topology = discovery_topology(
         vec![discovery_client(
             &client_id,
@@ -1733,9 +1736,9 @@ fn window_describe_reports_direct_identity_mismatch_without_suppressing_topology
     let output = run_window_describe(&registry, "a");
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
     let result: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(result["result"]["registryConsistency"]["binding"], "mismatched");
-    assert_eq!(result["result"]["registryConsistency"]["endpointLease"], "matched");
-    assert_eq!(result["result"]["surfaceObservation"]["clientId"], wrong_client_id);
+    assert_eq!(result["result"]["identityConsistency"]["clientId"], "matched");
+    assert_eq!(result["result"]["identityConsistency"]["registryIdentity"], "differs");
+    assert_eq!(result["result"]["identityConsistency"]["endpointLease"], "matched");
     assert_eq!(result["result"]["surfaceObservation"]["topologyRevision"], 8);
     assert_eq!(server.join().unwrap().len(), 2);
     assert_eq!(endpoint_server.join().unwrap()["op"], "surface.describe");
@@ -1753,36 +1756,46 @@ fn window_describe_keeps_topology_when_saved_registry_state_is_unavailable_stale
         let now = epoch_ms();
         let client_id = "c".repeat(64);
         let surface_id = "sf_registry_state_status";
-        let mut observation = describe_observation(
-            &client_id,
-            surface_id,
-            8,
-            now - 10,
-            now + 10_000,
-        );
+        let mut observation = describe_observation(&client_id, surface_id, 8);
         match state {
             "unavailable" => {
-                observation["clientId"] = Value::Null;
                 observation["registryIdentity"] = Value::Null;
-                observation["endpointLease"] = Value::Null;
+                observation["endpointLeaseGeneration"] = Value::Null;
+                observation["applicationReadiness"] = json!({
+                    "status": "degraded",
+                    "limitationCodes": ["registry_binding_unavailable", "endpoint_lease_unavailable"],
+                });
             }
             "binding-unavailable" => {
-                observation["clientId"] = Value::Null;
                 observation["registryIdentity"] = Value::Null;
+                observation["applicationReadiness"] = json!({
+                    "status": "degraded",
+                    "limitationCodes": ["registry_binding_unavailable"],
+                });
             }
             "lease-unavailable" => {
-                observation["endpointLease"] = Value::Null;
+                observation["endpointLeaseGeneration"] = Value::Null;
+                observation["applicationReadiness"] = json!({
+                    "status": "degraded",
+                    "limitationCodes": ["endpoint_lease_unavailable"],
+                });
             }
             "stale" => {
-                observation["endpointLease"]["leaseGeneration"] = json!(7);
-                observation["endpointLease"]["leaseExpiresAtMs"] = json!(now - 1);
+                observation["registryIdentity"] = json!({
+                    "allocatorId": "alloc_other",
+                    "fleetId": "fleet_other",
+                });
+                observation["endpointLeaseGeneration"] = json!(7);
+                observation["applicationReadiness"] = json!({
+                    "status": "degraded",
+                    "limitationCodes": ["registry_binding_stale", "endpoint_lease_stale"],
+                });
             }
             _ => {
                 observation["applicationReadiness"] = json!({
-                    "status": "degraded", "limitationCodes": ["not_ready"]
+                    "status": "degraded",
+                    "limitationCodes": ["persistence_outcome_unknown", "application_state_unverified"],
                 });
-                observation["clientId"] = json!("d".repeat(64));
-                observation["endpointLease"]["leaseGeneration"] = json!(7);
             }
         }
         let (endpoint, endpoint_server) = spawn_surface_describe_server(observation);
@@ -1802,27 +1815,27 @@ fn window_describe_keeps_topology_when_saved_registry_state_is_unavailable_stale
         let output = run_window_describe(&registry, "a");
         assert!(output.status.success(), "state={state}, output={}", String::from_utf8_lossy(&output.stdout));
         let result: Value = serde_json::from_slice(&output.stdout).unwrap();
-        let consistency = &result["result"]["registryConsistency"];
+        let consistency = &result["result"]["identityConsistency"];
         match state {
             "unavailable" => {
-                assert_eq!(consistency["binding"], "unavailable");
-                assert_eq!(consistency["endpointLease"], "unavailable");
-                assert_eq!(result["result"]["surfaceObservation"]["clientId"], Value::Null);
+                assert_eq!(consistency["clientId"], "matched");
+                assert_eq!(consistency["registryIdentity"], "absent");
+                assert_eq!(consistency["endpointLease"], "absent");
             }
             "binding-unavailable" => {
-                assert_eq!(consistency["binding"], "unavailable");
+                assert_eq!(consistency["registryIdentity"], "absent");
                 assert_eq!(consistency["endpointLease"], "matched");
             }
             "lease-unavailable" => {
-                assert_eq!(consistency["binding"], "matched");
-                assert_eq!(consistency["endpointLease"], "unavailable");
+                assert_eq!(consistency["registryIdentity"], "matched");
+                assert_eq!(consistency["endpointLease"], "absent");
             }
             "stale" => {
-                assert_eq!(consistency["binding"], "matched");
-                assert_eq!(consistency["endpointLease"], "stale");
+                assert_eq!(consistency["registryIdentity"], "differs");
+                assert_eq!(consistency["endpointLease"], "differs");
             }
             _ => {
-                assert_eq!(consistency["binding"], "unverified");
+                assert_eq!(consistency["registryIdentity"], "unverified");
                 assert_eq!(consistency["endpointLease"], "unverified");
                 assert_eq!(result["result"]["applicationReadiness"]["status"], "degraded");
             }

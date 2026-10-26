@@ -393,14 +393,10 @@ export type SurfaceDescribeRequest = RequestBase<"surface.describe"> & {
 export type SurfaceDescribeResponse = ResponseBase<"surface.describe"> & {
   payload: {
     nonce: string;
-    clientId: string | null;
+    clientId: string;
     registryIdentity: { allocatorId: string; fleetId: string } | null;
     surfaceId: SurfaceId;
-    endpointLease: {
-      leaseGeneration: number;
-      registrationObservedAtMs: EpochMs;
-      leaseExpiresAtMs: EpochMs;
-    } | null;
+    endpointLeaseGeneration: number | null;
     observedAtMs: EpochMs;
     applicationReadiness: { status: "ready" | "degraded"; limitationCodes: string[] };
     surfaceSetRevision: number;

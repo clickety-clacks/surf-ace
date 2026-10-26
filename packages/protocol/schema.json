@@ -1133,15 +1133,10 @@
         "payload": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["nonce", "clientId", "registryIdentity", "surfaceId", "endpointLease", "observedAtMs", "applicationReadiness", "surfaceSetRevision", "topologyRevision", "layout", "panes"],
+          "required": ["nonce", "clientId", "registryIdentity", "surfaceId", "endpointLeaseGeneration", "observedAtMs", "applicationReadiness", "surfaceSetRevision", "topologyRevision", "layout", "panes"],
           "properties": {
             "nonce": { "type": "string", "pattern": "^[a-f0-9]{32,128}$" },
-            "clientId": {
-              "oneOf": [
-                { "type": "string", "pattern": "^[A-Za-z0-9._:-]{1,128}$" },
-                { "type": "null" }
-              ]
-            },
+            "clientId": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
             "registryIdentity": {
               "oneOf": [
                 {
@@ -1157,18 +1152,9 @@
               ]
             },
             "surfaceId": { "$ref": "#/$defs/SurfaceId" },
-            "endpointLease": {
+            "endpointLeaseGeneration": {
               "oneOf": [
-                {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "required": ["leaseGeneration", "registrationObservedAtMs", "leaseExpiresAtMs"],
-                  "properties": {
-                    "leaseGeneration": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
-                    "registrationObservedAtMs": { "$ref": "#/$defs/EpochMs" },
-                    "leaseExpiresAtMs": { "$ref": "#/$defs/EpochMs" }
-                  }
-                },
+                { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
                 { "type": "null" }
               ]
             },

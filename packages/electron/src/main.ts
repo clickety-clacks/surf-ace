@@ -270,10 +270,11 @@ function candidatePorts(preferredPort: number): number[] {
   return ports;
 }
 
-function createServer(coreValue: SurfaceCore): SurfaceWsServer {
+function createServer(coreValue: SurfaceCore, clientId: string): SurfaceWsServer {
   return new SurfaceWsServer({
       bindAddress: BIND_ADDRESS,
       capturePaneImage,
+      clientId,
       claimPaneLabel: async (surfaceId, paneId, paneLineageId) => {
         if (!configuredRegistration) throw new Error("allocator_unavailable");
         return await configuredRegistration.claimPaneLabel(surfaceId, paneId, paneLineageId);
@@ -2230,7 +2231,7 @@ async function boot(): Promise<void> {
     restored_surface_count: restoredSurfaces.length,
   });
 
-  server = createServer(core);
+  server = createServer(core, registrationClientId(identity.publicKeyPem));
 
   annotationSourceCoordinator = new AnnotationSourceCoordinator(
     core, persistState, () => annotationRegistryPublisher?.sourceSaved(),

@@ -134,6 +134,7 @@ test("pre-pair describe hides candidate topology through held geometry and rollb
     capturePaneImage: async () => null,
     claimPaneLabel: async (_surfaceId, paneId) => ({ allocationGeneration: paneId, paneLabel: paneId }),
     compositorSocketPath: null,
+    clientId: binding.clientId,
     core,
     endpointName: "readiness geometry fixture",
     hostName: "localhost",
