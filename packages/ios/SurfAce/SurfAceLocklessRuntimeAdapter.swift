@@ -485,11 +485,17 @@ actor SurfAceLocklessRuntimeAdapter {
                     throw SurfAceRegistrationError.foreignRegistryIdentity
                 }
                 state.registryBinding = binding
-                for surfaceId in state.liveSurfaces.keys {
-                    state.liveSurfaces[surfaceId]?.windowLabelConfirmed = false
+                for surfaceId in Array(state.liveSurfaces.keys) {
+                    guard var surface = state.liveSurfaces[surfaceId] else { continue }
+                    surface.windowLabelConfirmed = false
+                    try SurfAceLocklessTopologyOperations.clearPreBindingPaneAllocations(from: &surface)
+                    state.liveSurfaces[surfaceId] = surface
                 }
                 for index in state.surfaceTombstones.indices {
-                    state.surfaceTombstones[index].surface.windowLabelConfirmed = false
+                    var surface = state.surfaceTombstones[index].surface
+                    surface.windowLabelConfirmed = false
+                    try SurfAceLocklessTopologyOperations.clearPreBindingPaneAllocations(from: &surface)
+                    state.surfaceTombstones[index].surface = surface
                     let tombstone = state.surfaceTombstones[index]
                     state.surfaceTombstones[index].bytes = try SurfAceLocklessTopologyOperations.restoredSurfaceTombstoneBytes(
                         closedSequence: tombstone.closedSequence, scopes: tombstone.scopes,

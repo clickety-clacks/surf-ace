@@ -1265,8 +1265,6 @@ final class SurfAceCentralRegistration {
         if selected == nil { setStatus(.connecting) }
         defer { if status == .connecting { setStatus(.disconnected) } }
         let input = try await currentInputSnapshot()
-        guard !input.surfaces.isEmpty || !input.pendingPaneReleases.isEmpty
-            || !input.pendingWindowReleases.isEmpty else { return }
         guard !stopped else { throw SurfAceRegistrationError.stopped }
 
         let failures = FailureCollector()

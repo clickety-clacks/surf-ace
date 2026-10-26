@@ -105,6 +105,23 @@ struct SurfAceLocklessSurfaceRestoreResult: Equatable, Sendable {
 }
 
 enum SurfAceLocklessTopologyOperations {
+    // Pre-binding pane allocations are not claims against a newly selected registry.
+    // Keep the tombstones and their identities/content, but let a later restore ask
+    // the current allocator for the pane's label and generation.
+    static func clearPreBindingPaneAllocations(
+        from surface: inout SurfAceLocklessSurfaceMaterial
+    ) throws {
+        for index in surface.paneTombstones.indices {
+            surface.paneTombstones[index].pane.paneLabel = 0
+            surface.paneTombstones[index].pane.allocationGeneration = nil
+            let tombstone = surface.paneTombstones[index]
+            surface.paneTombstones[index].bytes = try restoredPaneTombstoneBytes(
+                closedSequence: tombstone.closedSequence, pane: tombstone.pane,
+                scope: tombstone.scope, tombstoneId: tombstone.tombstoneId
+            )
+        }
+    }
+
     // Validate the complete assignment before publishing any changed label.
     static func applyWindowLabels(
         state: inout SurfAceLocklessAuthorityState,

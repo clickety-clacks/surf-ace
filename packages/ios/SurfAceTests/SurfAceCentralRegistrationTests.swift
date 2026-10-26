@@ -41,7 +41,7 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
             var result = ""
             while number > 0 {
                 number -= 1
-                result = String(UnicodeScalar(65 + number % 26)!) + result
+                result = String(UnicodeScalar(97 + number % 26)!) + result
                 number /= 26
             }
             return result
@@ -110,9 +110,18 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
             }
             acceptedReleaseIds.append(contentsOf: releaseIds)
 
+            var usedWindowLabels = Set(assignedWindowLabels.values)
             let assignments = input.surfaces.enumerated().map { index, surface in
-                let label = assignedWindowLabels[surface.surfaceId] ?? Self.alphabeticLabel(index + 1)
+                let label: String
+                if let assigned = assignedWindowLabels[surface.surfaceId] {
+                    label = assigned
+                } else {
+                    var ordinal = 1
+                    while usedWindowLabels.contains(Self.alphabeticLabel(ordinal)) { ordinal += 1 }
+                    label = Self.alphabeticLabel(ordinal)
+                }
                 assignedWindowLabels[surface.surfaceId] = label
+                usedWindowLabels.insert(label)
                 let panes = surface.panes.map { pane in
                     let key = "\(surface.surfaceId):\(pane.paneId):\(pane.paneLineageId)"
                     let paneLabel: Int64
@@ -151,6 +160,29 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
                     completedPaneReleaseIds: input.pendingPaneReleases.map(\.releaseId),
                     completedWindowReleaseIds: input.pendingWindowReleases.map(\.releaseId)
                 )
+            )
+        }
+
+        func claimPaneLabel(
+            clientId: String,
+            surfaceId: String,
+            paneId: Int64,
+            paneLineageId: String
+        ) async throws -> SurfAcePaneAllocation {
+            let key = "\(surfaceId):\(paneId):\(paneLineageId)"
+            let paneLabel: Int64
+            if let assigned = assignedPaneLabels[key] {
+                paneLabel = assigned
+            } else {
+                paneLabel = nextPaneLabel
+                assignedPaneLabels[key] = paneLabel
+                nextPaneLabel += 1
+            }
+            let generation = assignedPaneGenerations[key] ?? paneLabel + 100
+            assignedPaneGenerations[key] = generation
+            return SurfAcePaneAllocation(
+                paneLabel: paneLabel,
+                allocationGeneration: returnsGenerationV1 ? generation : nil
             )
         }
 
@@ -753,15 +785,49 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         XCTAssertEqual(statuses, [.connecting, .disconnected])
     }
 
-    func testEmptyStartupNeverPublishesConnected() async throws {
+    func testEmptyStartupPublishesConnectedAfterRegistryBind() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("registry-empty-startup-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = SurfAceLocklessGenerationStore(stateURL: root.appendingPathComponent("state.json"))
+        try store.save(SurfAceLocklessAuthorityState.empty())
+        let adapter = try SurfAceLocklessRuntimeAdapter(store: store)
+        let clientId = String(repeating: "e", count: 64)
+        let identity = SurfAceRegistryIdentity(allocatorId: "alloc_empty", fleetId: "empty-fleet")
+        let endpoint = URL(string: "ws://127.0.0.1:24030/ws")!
+        let transport = Transport()
+        transport.registryIdentity = identity
         var statuses: [SurfAceCentralRegistrationStatus] = []
-        let registration = SurfAceCentralRegistration(clientId: "test", configured: nil,
-            discover: { XCTFail("empty surface discovery"); return [] },
-            snapshot: { [] }, apply: { _, _ in XCTFail("empty registration") }, verifyRegistry: { _, _ in },
+        let registration = SurfAceCentralRegistration(clientId: clientId, configured: endpoint,
+            discover: { [] }, makeTransport: { _ in transport },
+            snapshot: { [] },
+            apply: { _, _ in },
+            verifyRegistry: { identity, surfaces in
+                _ = try await adapter.bindRegistryIdentity(
+                    identity, clientId: clientId, expectedSurfaces: surfaces, allowRebinding: false
+                )
+            },
+            bindRegistry: { identity, surfaces in
+                _ = try await adapter.bindRegistryIdentity(
+                    identity, clientId: clientId, expectedSurfaces: surfaces, allowRebinding: true
+                )
+            },
+            inputSnapshot: {
+                try SurfAceRegistrationInput(state: await adapter.snapshot(), clientId: clientId)
+            },
+            applyReplySubset: { reply, expected, request in
+                _ = try await adapter.applyRegistration(
+                    reply, expectedInput: expected, requestInput: request, clientId: clientId
+                )
+            },
             onStatusChange: { statuses.append($0) })
         try await registration.synchronize()
-        XCTAssertEqual(registration.status, .disconnected)
-        XCTAssertFalse(statuses.contains(.connected))
+        XCTAssertEqual(registration.status, .connected)
+        XCTAssertTrue(statuses.contains(.connected))
+        XCTAssertEqual((try store.load())?.registryBinding, .init(
+            allocatorId: identity.allocatorId, clientId: clientId, fleetId: identity.fleetId
+        ))
+        XCTAssertTrue(transport.registrationInputs.last?.surfaces.isEmpty == true)
         registration.stop()
     }
 
@@ -1045,7 +1111,7 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         let endpoint = URL(string: "ws://127.0.0.1:24027/ws")!
         let transport = Transport()
         transport.registryIdentity = identity
-        transport.assignedWindowLabels[surfaceId] = "K"
+        transport.assignedWindowLabels[surfaceId] = "k"
         let pane = try XCTUnwrap(state.liveSurfaces[surfaceId]?.panes["1"])
         let paneKey = "\(surfaceId):1:\(pane.paneLineageId)"
         transport.assignedPaneLabels[paneKey] = 61
@@ -1072,9 +1138,225 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         XCTAssertEqual(diskBindingOnFirstRegistration, expectedBinding)
         XCTAssertTrue(labelStillUnconfirmedOnFirstRegistration == true)
         let registered = try XCTUnwrap(store.load()?.liveSurfaces[surfaceId])
-        XCTAssertEqual(registered.windowLabel, "K")
+        XCTAssertEqual(registered.windowLabel, "k")
         XCTAssertEqual(registered.windowLabelConfirmed, true)
         XCTAssertEqual(registered.panes["1"]?.paneLabel, 61)
+    }
+
+    func testNewBindingWithoutRegistryRecordKeepsReadableStateAndTakesFreshLabels() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("registry-new-allocation-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = SurfAceLocklessGenerationStore(stateURL: root.appendingPathComponent("state.json"))
+        var state = try SurfAceLocklessAuthorityState.empty()
+        let surfaceId = try addSavedSurface(to: &state, windowLabel: "c", paneLabel: 7)
+        let original = try XCTUnwrap(state.liveSurfaces[surfaceId])
+        let originalPane = try XCTUnwrap(original.panes["1"])
+        try store.save(state)
+
+        let adapter = try SurfAceLocklessRuntimeAdapter(store: store)
+        let clientId = String(repeating: "c", count: 64)
+        let identity = SurfAceRegistryIdentity(allocatorId: "alloc_unrecorded", fleetId: "fresh-fleet")
+        let endpoint = URL(string: "ws://127.0.0.1:24028/ws")!
+        let transport = Transport()
+        transport.registryIdentity = identity
+        transport.nextPaneLabel = 1
+        var bindingAtRegistration: SurfAceRegistryBinding?
+        var durableBindingAtRegistration: SurfAceRegistryBinding?
+        var labelsPendingAtRegistration: Bool?
+        transport.onInputRegister = { input in
+            bindingAtRegistration = await adapter.snapshot().registryBinding
+            durableBindingAtRegistration = try? store.load()?.registryBinding
+            let saved = await adapter.snapshot()
+            labelsPendingAtRegistration = saved.liveSurfaces[surfaceId]?.windowLabelConfirmed == false
+                && input.surfaces.first?.panes.first?.paneLabel == 0
+                && input.surfaces.first?.panes.first?.allocationGeneration == nil
+        }
+        let registration = centralRegistration(
+            adapter: adapter, clientId: clientId, configured: endpoint, discovered: [], transports: [endpoint: transport]
+        )
+
+        try await registration.synchronize()
+        registration.stop()
+
+        let expectedBinding = SurfAceRegistryBinding(
+            allocatorId: identity.allocatorId, clientId: clientId, fleetId: identity.fleetId
+        )
+        XCTAssertEqual(bindingAtRegistration, expectedBinding)
+        XCTAssertEqual(durableBindingAtRegistration, expectedBinding)
+        XCTAssertTrue(labelsPendingAtRegistration == true)
+        XCTAssertEqual(transport.registrationInputs.first?.surfaces.map(\.surfaceId), [surfaceId])
+
+        let registered = try XCTUnwrap(store.load()?.liveSurfaces[surfaceId])
+        let registeredPane = try XCTUnwrap(registered.panes["1"])
+        XCTAssertEqual(registered.windowLabel, "a")
+        XCTAssertEqual(registered.windowLabelConfirmed, true)
+        XCTAssertEqual(registeredPane.paneLabel, 1)
+        XCTAssertNotEqual(registered.windowLabel, original.windowLabel)
+        XCTAssertNotEqual(registeredPane.paneLabel, originalPane.paneLabel)
+        XCTAssertEqual(registered.surfaceId, original.surfaceId)
+        XCTAssertEqual(registered.topology, original.topology)
+        XCTAssertEqual(registeredPane.paneId, originalPane.paneId)
+        XCTAssertEqual(registeredPane.paneLineageId, originalPane.paneLineageId)
+        XCTAssertEqual(registeredPane.history.visible.contentId, originalPane.history.visible.contentId)
+        XCTAssertEqual(registeredPane.history.visible.content, originalPane.history.visible.content)
+        XCTAssertEqual(registeredPane.history.visible.revision, originalPane.history.visible.revision)
+        XCTAssertEqual(registeredPane.target, originalPane.target)
+    }
+
+    func testUnmarkedSurfacesAndRetainedTombstonesUseCurrentRegistryAllocations() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("registry-retained-tombstones-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = SurfAceLocklessGenerationStore(stateURL: root.appendingPathComponent("state.json"))
+        var state = try SurfAceLocklessAuthorityState.empty()
+        let liveSurfaceId = try addSavedSurface(to: &state, windowLabel: "c", paneLabel: 7)
+        state.liveSurfaces[liveSurfaceId]?.windowLabelConfirmed = nil
+
+        let retainedSurfaceId = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
+            state: &state, expectedSurfaceSetRevision: state.surfaceSetRevision
+        ).surface.surfaceId
+        var retainedSurface = try XCTUnwrap(state.liveSurfaces[retainedSurfaceId])
+        retainedSurface.windowLabel = "d"
+        retainedSurface.windowLabelConfirmed = nil
+        retainedSurface.allocationGeneration = 31
+        var retainedPane = try XCTUnwrap(retainedSurface.panes["1"])
+        retainedPane.paneLabel = 8
+        retainedPane.allocationGeneration = 108
+        retainedPane.history.visible.contentId = "retained-window-pane"
+        retainedPane.history.visible.contentType = "html"
+        retainedPane.history.visible.content = .object(["html": .string("<h1>retained window</h1>")])
+        retainedSurface.panes["1"] = retainedPane
+        state.liveSurfaces[retainedSurfaceId] = retainedSurface
+        let split = try SurfAceLocklessTopologyOperations.paneSplit(
+            state: &state, surfaceId: retainedSurfaceId, paneId: 1, count: 2,
+            direction: "horizontal", expectedTopologyRevision: retainedSurface.topologyRevision
+        )
+        let retainedPaneId = try XCTUnwrap(split.newPaneIds.first)
+        var splitSurface = try XCTUnwrap(state.liveSurfaces[retainedSurfaceId])
+        var paneToRetain = try XCTUnwrap(splitSurface.panes[String(retainedPaneId)])
+        paneToRetain.paneLabel = 9
+        paneToRetain.allocationGeneration = 109
+        paneToRetain.history.visible.contentId = "retained-pane-tombstone"
+        paneToRetain.history.visible.contentType = "html"
+        paneToRetain.history.visible.content = .object(["html": .string("<h1>retained pane</h1>")])
+        splitSurface.panes[String(retainedPaneId)] = paneToRetain
+        state.liveSurfaces[retainedSurfaceId] = splitSurface
+        let paneClose = try SurfAceLocklessTopologyOperations.paneClose(
+            state: &state, surfaceId: retainedSurfaceId, paneId: retainedPaneId,
+            expectedTopologyRevision: split.topologyRevision
+        )
+        let retainedSurfaceAtClose = try XCTUnwrap(state.liveSurfaces[retainedSurfaceId])
+        let originalRetainedPane = try XCTUnwrap(retainedSurfaceAtClose.paneTombstones.first?.pane)
+        let windowClose = try SurfAceLocklessTopologyOperations.surfaceWindowClose(
+            state: &state, surfaceId: retainedSurfaceId,
+            expectedSurfaceSetRevision: state.surfaceSetRevision,
+            expectedTopologyRevision: paneClose.topologyRevision
+        )
+        let originalTombstoneSurface = try XCTUnwrap(
+            state.surfaceTombstones.first(where: { $0.tombstoneId == windowClose.tombstoneId })?.surface
+        )
+        try store.save(state)
+
+        let adapter = try SurfAceLocklessRuntimeAdapter(store: store)
+        let clientId = String(repeating: "d", count: 64)
+        let identity = SurfAceRegistryIdentity(allocatorId: "alloc_tombstones", fleetId: "tombstone-fleet")
+        let endpoint = URL(string: "ws://127.0.0.1:24029/ws")!
+        let transport = Transport()
+        transport.registryIdentity = identity
+        transport.nextPaneLabel = 11
+        var bindingAtFirstRegistration: SurfAceRegistryBinding?
+        var firstSavedBinding: SurfAceRegistryBinding?
+        transport.onInputRegister = { _ in
+            bindingAtFirstRegistration = await adapter.snapshot().registryBinding
+            firstSavedBinding = try? store.load()?.registryBinding
+        }
+        let registration = centralRegistration(
+            adapter: adapter, clientId: clientId, configured: endpoint, discovered: [], transports: [endpoint: transport]
+        )
+        try await registration.synchronize()
+        let firstInput = try XCTUnwrap(transport.registrationInputs.first)
+        let firstState = await adapter.snapshot()
+        registration.stop()
+
+        XCTAssertEqual(bindingAtFirstRegistration, .init(
+            allocatorId: identity.allocatorId, clientId: clientId, fleetId: identity.fleetId
+        ))
+        XCTAssertEqual(firstSavedBinding, bindingAtFirstRegistration)
+        XCTAssertEqual(firstInput.surfaces.map(\.surfaceId), [liveSurfaceId])
+        XCTAssertEqual(firstInput.surfaces.first?.panes.first?.paneLabel, 0)
+        XCTAssertNil(firstInput.surfaces.first?.panes.first?.allocationGeneration)
+        let savedTombstone = try XCTUnwrap(firstState.surfaceTombstones.first)
+        XCTAssertEqual(savedTombstone.tombstoneId, windowClose.tombstoneId)
+        XCTAssertEqual(savedTombstone.surface.windowLabelConfirmed, false)
+        XCTAssertEqual(savedTombstone.surface.panes["1"]?.history.visible.content, originalTombstoneSurface.panes["1"]?.history.visible.content)
+        let unclaimedPaneTombstone = try XCTUnwrap(savedTombstone.surface.paneTombstones.first)
+        XCTAssertEqual(unclaimedPaneTombstone.pane.paneLabel, 0)
+        XCTAssertNil(unclaimedPaneTombstone.pane.allocationGeneration)
+        XCTAssertEqual(unclaimedPaneTombstone.pane.history.visible.content, originalRetainedPane.history.visible.content)
+
+        var stateAfterBinding = try XCTUnwrap(store.load())
+        let restoredSurface = try SurfAceLocklessTopologyOperations.surfaceWindowRestore(
+            state: &stateAfterBinding, tombstoneId: windowClose.tombstoneId,
+            expectedSurfaceSetRevision: stateAfterBinding.surfaceSetRevision
+        )
+        XCTAssertEqual(restoredSurface.surface.windowLabel, "d")
+        XCTAssertEqual(restoredSurface.surface.windowLabelConfirmed, false)
+        try store.save(stateAfterBinding)
+        let restoredTransport = Transport()
+        restoredTransport.registryIdentity = identity
+        restoredTransport.assignedWindowLabels = transport.assignedWindowLabels
+        restoredTransport.assignedWindowLabels[retainedSurfaceId] = "z"
+        restoredTransport.assignedWindowGenerations = transport.assignedWindowGenerations
+        restoredTransport.assignedWindowGenerations[retainedSurfaceId] = 909
+        restoredTransport.assignedPaneLabels = transport.assignedPaneLabels
+        restoredTransport.assignedPaneGenerations = transport.assignedPaneGenerations
+        restoredTransport.nextPaneLabel = transport.nextPaneLabel
+
+        let restoredAdapter = try SurfAceLocklessRuntimeAdapter(store: store)
+        let restoreRegistration = centralRegistration(
+            adapter: restoredAdapter, clientId: clientId, configured: endpoint,
+            discovered: [], transports: [endpoint: restoredTransport]
+        )
+        try await restoreRegistration.synchronize()
+        let inputAfterRestore = try XCTUnwrap(restoredTransport.registrationInputs.last)
+        let requestedRestoredSurface = try XCTUnwrap(inputAfterRestore.surfaces.first(where: { $0.surfaceId == retainedSurfaceId }))
+        XCTAssertEqual(requestedRestoredSurface.panes.first?.paneLabel, 0)
+        XCTAssertNil(requestedRestoredSurface.panes.first?.allocationGeneration)
+        let registeredState = await restoredAdapter.snapshot()
+        let registeredSurface = try XCTUnwrap(registeredState.liveSurfaces[retainedSurfaceId])
+        XCTAssertEqual(registeredSurface.windowLabel, "z")
+        XCTAssertEqual(registeredSurface.allocationGeneration, 909)
+        XCTAssertEqual(registeredSurface.topology, originalTombstoneSurface.topology)
+        XCTAssertEqual(registeredSurface.panes["1"]?.paneLabel, 12)
+        XCTAssertEqual(registeredSurface.panes["1"]?.history.visible.content, originalTombstoneSurface.panes["1"]?.history.visible.content)
+        XCTAssertEqual(registeredSurface.paneTombstones.first?.pane.history.visible.content, originalRetainedPane.history.visible.content)
+
+        let paneAllocation = try await restoreRegistration.claimPaneLabel(
+            surfaceId: retainedSurfaceId, paneId: retainedPaneId,
+            paneLineageId: originalRetainedPane.paneLineageId
+        )
+        restoreRegistration.stop()
+        XCTAssertEqual(paneAllocation.paneLabel, 13)
+        XCTAssertEqual(paneAllocation.allocationGeneration, 113)
+        var stateAfterPaneClaim = try XCTUnwrap(store.load())
+        let surfaceBeforePaneRestore = try XCTUnwrap(stateAfterPaneClaim.liveSurfaces[retainedSurfaceId])
+        let paneRestore = try SurfAceLocklessTopologyOperations.paneRestore(
+            state: &stateAfterPaneClaim, surfaceId: retainedSurfaceId,
+            tombstoneId: try XCTUnwrap(surfaceBeforePaneRestore.paneTombstones.first?.tombstoneId),
+            anchorPaneId: 1, direction: "horizontal",
+            expectedTopologyRevision: surfaceBeforePaneRestore.topologyRevision,
+            assignedPaneLabel: paneAllocation.paneLabel,
+            assignedPaneGeneration: paneAllocation.allocationGeneration
+        )
+        try store.save(stateAfterPaneClaim)
+        let restoredPane = try XCTUnwrap(stateAfterPaneClaim.liveSurfaces[retainedSurfaceId]?.panes[String(paneRestore.paneId)])
+        XCTAssertEqual(restoredPane.paneId, originalRetainedPane.paneId)
+        XCTAssertEqual(restoredPane.paneLineageId, originalRetainedPane.paneLineageId)
+        XCTAssertEqual(restoredPane.paneLabel, paneAllocation.paneLabel)
+        XCTAssertEqual(restoredPane.allocationGeneration, paneAllocation.allocationGeneration)
+        XCTAssertEqual(restoredPane.history.visible.contentId, originalRetainedPane.history.visible.contentId)
+        XCTAssertEqual(restoredPane.history.visible.content, originalRetainedPane.history.visible.content)
     }
 
     func testWhollyUndecodableSavedStateRegistersOneFreshWindow() async throws {
@@ -1287,6 +1569,39 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         XCTAssertTrue(replacement.clients.isEmpty)
         let afterMatching = await adapter.snapshot()
         XCTAssertEqual(afterMatching.registryBinding?.allocatorId, homeIdentity.allocatorId)
+        let homeSurface = try XCTUnwrap(afterMatching.liveSurfaces[surfaceId])
+        let homePane = try XCTUnwrap(homeSurface.panes["1"])
+        XCTAssertEqual(homeSurface.windowLabel, "b")
+        XCTAssertEqual(homeSurface.allocationGeneration, 30)
+        XCTAssertEqual(homePane.paneLabel, 3)
+        XCTAssertEqual(homePane.allocationGeneration, 103)
+        XCTAssertEqual(homeSurface.topology, state.liveSurfaces[surfaceId]?.topology)
+        XCTAssertEqual(homePane.history.visible.content, state.liveSurfaces[surfaceId]?.panes["1"]?.history.visible.content)
+
+        let restartedHomeURL = URL(string: "ws://127.0.0.1:24025/ws")!
+        let restartedHome = Transport()
+        restartedHome.registryIdentity = homeIdentity
+        restartedHome.assignedWindowLabels[surfaceId] = "b"
+        restartedHome.assignedWindowGenerations[surfaceId] = 30
+        restartedHome.assignedPaneLabels[savedPaneKey] = 3
+        restartedHome.assignedPaneGenerations[savedPaneKey] = 103
+        let reconnectRegistration = centralRegistration(
+            adapter: adapter, clientId: clientId, configured: restartedHomeURL,
+            discovered: [], transports: [restartedHomeURL: restartedHome]
+        )
+        try await reconnectRegistration.synchronize()
+        XCTAssertEqual(reconnectRegistration.status, .connected)
+        let afterRestart = await adapter.snapshot()
+        let restartedSurface = try XCTUnwrap(afterRestart.liveSurfaces[surfaceId])
+        let restartedPane = try XCTUnwrap(restartedSurface.panes["1"])
+        XCTAssertEqual(afterRestart.registryBinding?.allocatorId, homeIdentity.allocatorId)
+        XCTAssertEqual(restartedSurface.windowLabel, "b")
+        XCTAssertEqual(restartedSurface.allocationGeneration, 30)
+        XCTAssertEqual(restartedPane.paneLabel, 3)
+        XCTAssertEqual(restartedPane.allocationGeneration, 103)
+        XCTAssertEqual(restartedPane.history.visible.content, homePane.history.visible.content)
+        XCTAssertEqual(restartedSurface.topology, homeSurface.topology)
+        reconnectRegistration.stop()
 
         let rebindRegistration = centralRegistration(
             adapter: adapter, clientId: clientId, configured: replacementURL,
