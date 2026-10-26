@@ -1674,7 +1674,9 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         )
 
         try await registration.synchronize()
+        XCTAssertEqual(registration.status, .connected)
         registration.stop()
+        XCTAssertEqual(registration.status, .disconnected)
 
         let registered = await adapter.snapshot()
         let refusedSurface = try XCTUnwrap(registered.liveSurfaces[refusedSurfaceId])
@@ -1697,7 +1699,6 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         XCTAssertEqual(unchangedPane.paneId, otherPane.paneId)
         XCTAssertEqual(unchangedPane.paneLineageId, otherPane.paneLineageId)
         XCTAssertEqual(unchangedPane.paneLabel, 8)
-        XCTAssertEqual(registration.status, .connected)
         XCTAssertTrue(transport.registrationInputs.contains {
             $0.surfaces.contains { $0.surfaceId == refusedSurfaceId && $0.panes.contains { $0.paneId == "1" } }
         })
