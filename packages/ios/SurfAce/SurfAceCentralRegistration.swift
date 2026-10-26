@@ -79,7 +79,6 @@ struct SurfAceWindowReleaseRequest: Codable, Equatable, Sendable {
 struct SurfAceRegistrationInput: Equatable, Sendable {
     let clientId: String?
     let registryIdentity: SurfAceRegistryIdentity?
-    let previousRegistryIdentities: [SurfAceRegistryIdentity]
     let surfaces: [SurfAceRegistrationSurface]
     let pendingPaneReleases: [SurfAcePaneReleaseRequest]
     let pendingWindowReleases: [SurfAceWindowReleaseRequest]
@@ -87,14 +86,12 @@ struct SurfAceRegistrationInput: Equatable, Sendable {
     init(
         clientId: String? = nil,
         registryIdentity: SurfAceRegistryIdentity? = nil,
-        previousRegistryIdentities: [SurfAceRegistryIdentity] = [],
         surfaces: [SurfAceRegistrationSurface],
         pendingPaneReleases: [SurfAcePaneReleaseRequest],
         pendingWindowReleases: [SurfAceWindowReleaseRequest]
     ) {
         self.clientId = clientId
         self.registryIdentity = registryIdentity
-        self.previousRegistryIdentities = previousRegistryIdentities
         self.surfaces = surfaces
         self.pendingPaneReleases = pendingPaneReleases
         self.pendingWindowReleases = pendingWindowReleases
@@ -106,9 +103,6 @@ struct SurfAceRegistrationInput: Equatable, Sendable {
         let identity = binding.map { SurfAceRegistryIdentity(allocatorId: $0.allocatorId, fleetId: $0.fleetId) }
         self.clientId = currentClientId
         registryIdentity = identity
-        previousRegistryIdentities = (state.previousRegistryBindings ?? [])
-            .filter { $0.clientId == currentClientId }
-            .map { SurfAceRegistryIdentity(allocatorId: $0.allocatorId, fleetId: $0.fleetId) }
         surfaces = SurfAceRegistrationSurface.snapshot(state).map { surface in
             guard binding != nil,
                   state.liveSurfaces[surface.surfaceId]?.windowLabelConfirmed != false else {
@@ -189,7 +183,6 @@ struct SurfAceRegistrationInput: Equatable, Sendable {
         Self(
             clientId: clientId,
             registryIdentity: registryIdentity,
-            previousRegistryIdentities: previousRegistryIdentities,
             surfaces: surfaces ?? self.surfaces,
             pendingPaneReleases: pendingPaneReleases ?? self.pendingPaneReleases,
             pendingWindowReleases: pendingWindowReleases ?? self.pendingWindowReleases
@@ -1269,9 +1262,51 @@ final class SurfAceCentralRegistration {
 
     private func synchronizeOnce() async throws {
         guard !stopped else { throw SurfAceRegistrationError.stopped }
-        setStatus(.connecting)
+        if selected == nil { setStatus(.connecting) }
         defer { if status == .connecting { setStatus(.disconnected) } }
+        let input = try await currentInputSnapshot()
+        guard !input.surfaces.isEmpty || !input.pendingPaneReleases.isEmpty
+            || !input.pendingWindowReleases.isEmpty else { return }
+        guard !stopped else { throw SurfAceRegistrationError.stopped }
+
         let failures = FailureCollector()
+        var selectedRegistrationFailed = false
+
+        // A healthy selected route is the steady-state path. Reuse its socket
+        // and avoid a Bonjour scan and identity connections to other addresses
+        // on every timer tick.
+        if let selected {
+            do {
+                let identity = try await selected.transport.readRegistryIdentity()
+                guard identity.isValid else { throw SurfAceRegistrationError.registryIdentityMissing }
+                guard input.registryIdentity == nil || input.registryIdentity == identity else {
+                    throw SurfAceRegistrationError.foreignRegistryIdentity
+                }
+                try await bindCandidateRegistry(identity, input: input, surfaces: try await snapshot())
+                let boundInput = try await currentInputSnapshot()
+                guard inputSnapshot == nil || boundInput.registryIdentity == identity else {
+                    throw SurfAceRegistrationError.registryBindingPersistencePending
+                }
+                selectedRegistrationFailed = true
+                try await registerAndApply(using: selected.transport, identity: identity, input: boundInput)
+                guard !stopped else { throw SurfAceRegistrationError.stopped }
+                setLastError(nil)
+                lastReportedError = nil
+                setStatus(.connected)
+                onVerifiedEndpoint(selected.url)
+                return
+            } catch {
+                if stopped { throw SurfAceRegistrationError.stopped }
+                failures.values.append(reportFailure(
+                    phase: "reconnect",
+                    endpoint: selected.url,
+                    underlying: surfAceRegistrationErrorDescription(error),
+                    showInStatus: false
+                ).errorDescription ?? surfAceRegistrationErrorDescription(error))
+                setStatus(.connecting)
+            }
+        }
+
         let discovered = await discover()
         if let reason = discoveryError() {
             failures.values.append(reportFailure(
@@ -1316,34 +1351,17 @@ final class SurfAceCentralRegistration {
             }
         }
 
-        let input = try await currentInputSnapshot()
-        guard !input.surfaces.isEmpty || !input.pendingPaneReleases.isEmpty
-            || !input.pendingWindowReleases.isEmpty else {
-            for candidate in candidates { candidate.transport.close() }
-            return
-        }
         guard !stopped else { throw SurfAceRegistrationError.stopped }
 
         let matching = input.registryIdentity.flatMap { identity in
             identified.first(where: { $0.identity == identity })
         }
-        let eligibleIdentified = identified.filter {
-            !input.previousRegistryIdentities.contains($0.identity)
-        }
-        let selectedCandidate: IdentifiedCandidate?
-        if let matching {
-            selectedCandidate = matching
-        } else {
-            let routeOrder = Dictionary(uniqueKeysWithValues: routeURLs.enumerated().map {
-                ($0.element.0.absoluteString, $0.offset)
-            })
-            selectedCandidate = eligibleIdentified
-                .filter { routeOrder[$0.candidate.url.absoluteString] != nil }
-                .min { routeOrder[$0.candidate.url.absoluteString]! < routeOrder[$1.candidate.url.absoluteString]! }
-                ?? eligibleIdentified.first
-        }
+        // Keep the current identity while any endpoint for it is discoverable.
+        // Otherwise endpoint order chooses the next valid registry, including
+        // a registry the client used before its current binding.
+        let selectedIdentity = matching?.identity ?? identified.first?.identity
 
-        guard let selectedCandidate else {
+        guard let selectedIdentity else {
             let reason = failures.values.isEmpty
                 ? "Bonjour found no _surf-ace._tcp service with role=server v=1 ws=/ws"
                 : failures.values.joined(separator: "; ")
@@ -1354,48 +1372,65 @@ final class SurfAceCentralRegistration {
                 onError(failure)
             }
             for candidate in candidates { candidate.transport.close() }
+            if let selected { selected.transport.close() }
             selected = nil
             throw failure
         }
 
-        do {
-            try await bindCandidateRegistry(
-                selectedCandidate.identity, input: input, surfaces: try await snapshot()
-            )
-            let boundInput = try await currentInputSnapshot()
-            guard boundInput.registryIdentity == selectedCandidate.identity else {
-                throw SurfAceRegistrationError.registryBindingPersistencePending
+        for identifiedCandidate in identified where identifiedCandidate.identity == selectedIdentity {
+            let candidate = identifiedCandidate.candidate
+            if selectedRegistrationFailed, let selected, selected.url == candidate.url { continue }
+            do {
+                try await bindCandidateRegistry(
+                    identifiedCandidate.identity, input: try await currentInputSnapshot(), surfaces: try await snapshot()
+                )
+                let boundInput = try await currentInputSnapshot()
+                guard inputSnapshot == nil || boundInput.registryIdentity == identifiedCandidate.identity else {
+                    throw SurfAceRegistrationError.registryBindingPersistencePending
+                }
+                try await registerAndApply(
+                    using: candidate.transport,
+                    identity: identifiedCandidate.identity,
+                    input: boundInput
+                )
+                guard !stopped else { throw SurfAceRegistrationError.stopped }
+                for other in candidates where other.transport !== candidate.transport {
+                    other.transport.close()
+                }
+                if let prior = selected, prior.transport !== candidate.transport {
+                    prior.transport.close()
+                }
+                selected = (candidate.url, candidate.transport)
+                setLastError(nil)
+                lastReportedError = nil
+                setStatus(.connected)
+                onVerifiedEndpoint(candidate.url)
+                return
+            } catch {
+                if stopped {
+                    for other in candidates {
+                        if let selected, other.transport === selected.transport { continue }
+                        other.transport.close()
+                    }
+                    throw SurfAceRegistrationError.stopped
+                }
+                failures.values.append(reportFailure(
+                    phase: candidate.phase,
+                    endpoint: candidate.url,
+                    underlying: surfAceRegistrationErrorDescription(error),
+                    showInStatus: false
+                ).errorDescription ?? surfAceRegistrationErrorDescription(error))
             }
-            try await registerAndApply(
-                using: selectedCandidate.candidate.transport,
-                identity: selectedCandidate.identity,
-                input: boundInput
-            )
-            guard !stopped else { throw SurfAceRegistrationError.stopped }
-            for candidate in candidates where candidate.transport !== selectedCandidate.candidate.transport {
-                candidate.transport.close()
-            }
-            if let prior = selected, prior.transport !== selectedCandidate.candidate.transport {
-                prior.transport.close()
-            }
-            selected = (selectedCandidate.candidate.url, selectedCandidate.candidate.transport)
-            setLastError(nil)
-            lastReportedError = nil
-            setStatus(.connected)
-            onVerifiedEndpoint(selectedCandidate.candidate.url)
-        } catch {
-            for candidate in candidates { candidate.transport.close() }
-            if let selected { selected.transport.close() }
-            self.selected = nil
-            setStatus(.disconnected)
-            if stopped { throw SurfAceRegistrationError.stopped }
-            throw reportFailure(
-                phase: selectedCandidate.candidate.phase,
-                endpoint: selectedCandidate.candidate.url,
-                underlying: surfAceRegistrationErrorDescription(error),
-                showInStatus: true
-            )
         }
+
+        for candidate in candidates { candidate.transport.close() }
+        if let selected { selected.transport.close() }
+        self.selected = nil
+        setStatus(.disconnected)
+        let reason = failures.values.isEmpty
+            ? "registry registration failed for every endpoint with identity \(selectedIdentity.allocatorId)/\(selectedIdentity.fleetId)"
+            : failures.values.joined(separator: "; ")
+        throw reportFailure(phase: "retry", endpoint: nil, underlying: reason, showInStatus: true)
     }
 
     private func candidateURLs(discovered: [URL]) -> [(URL, String)] {

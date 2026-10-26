@@ -465,10 +465,6 @@ actor SurfAceLocklessRuntimeAdapter {
             allocatorId: identity.allocatorId, clientId: clientId, fleetId: identity.fleetId
         )
         if current.registryBinding == binding { return false }
-        if current.registryBinding?.clientId == clientId,
-           (current.previousRegistryBindings ?? []).contains(binding) {
-            throw SurfAceRegistrationError.foreignRegistryIdentity
-        }
         if let existing = current.registryBinding,
            existing.clientId == clientId,
            !allowRebinding {
@@ -483,19 +479,10 @@ actor SurfAceLocklessRuntimeAdapter {
                     throw SurfAceRegistrationError.topologyChanged
                 }
                 if state.registryBinding == binding { return false }
-                if state.registryBinding?.clientId == clientId,
-                   (state.previousRegistryBindings ?? []).contains(binding) {
-                    throw SurfAceRegistrationError.foreignRegistryIdentity
-                }
                 if let existing = state.registryBinding,
                    existing.clientId == clientId,
                    !allowRebinding {
                     throw SurfAceRegistrationError.foreignRegistryIdentity
-                }
-                if let existing = state.registryBinding, existing.clientId == clientId {
-                    var previous = state.previousRegistryBindings ?? []
-                    if !previous.contains(existing) { previous.append(existing) }
-                    state.previousRegistryBindings = previous
                 }
                 state.registryBinding = binding
                 for surfaceId in state.liveSurfaces.keys {

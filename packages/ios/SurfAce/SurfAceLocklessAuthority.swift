@@ -562,7 +562,6 @@ struct SurfAceLocklessAuthorityState: Codable, Equatable, Sendable {
     var pendingControllerRetentionReclamations: [SurfAceLocklessControllerRetentionReclamation]?
     var pendingTombstoneReclamations: [SurfAceLocklessTombstoneReclamation]?
     var registryBinding: SurfAceRegistryBinding?
-    var previousRegistryBindings: [SurfAceRegistryBinding]? = nil
     var unconfirmedMigration: SurfAceUnconfirmedMigrationReceipt?
     var sceneSurfaceIds: [String: String]
     var scopes: [String: SurfAceLocklessConsumableScope]
@@ -587,7 +586,6 @@ struct SurfAceLocklessAuthorityState: Codable, Equatable, Sendable {
             pendingControllerRetentionReclamations: [],
             pendingTombstoneReclamations: [],
             registryBinding: nil,
-            previousRegistryBindings: [],
             unconfirmedMigration: nil,
             sceneSurfaceIds: [:],
             scopes: [:],
@@ -628,16 +626,6 @@ struct SurfAceLocklessAuthorityState: Codable, Equatable, Sendable {
                   ).isValid else {
                 throw SurfAceLocklessAuthorityError.invalidState("registry_binding")
             }
-        }
-        let previousBindings = previousRegistryBindings ?? []
-        guard Set(previousBindings).count == previousBindings.count,
-              previousBindings.allSatisfy({
-                  !$0.clientId.isEmpty && SurfAceRegistryIdentity(
-                      allocatorId: $0.allocatorId, fleetId: $0.fleetId
-                  ).isValid
-              }),
-              !previousBindings.contains(where: { $0 == registryBinding }) else {
-            throw SurfAceLocklessAuthorityError.invalidState("registry_binding_history")
         }
         try limits.validate()
         if let annotationPublisher {
@@ -1270,16 +1258,6 @@ struct SurfAceLocklessGenerationStore: Sendable {
             }
             return binding
         }
-        state.previousRegistryBindings = decode(root["previousRegistryBindings"], as: [SurfAceRegistryBinding].self)
-            .map { bindings in
-                var seen = Set<SurfAceRegistryBinding>()
-                return bindings.filter { binding in
-                    binding.clientId.isEmpty == false
-                        && SurfAceRegistryIdentity(allocatorId: binding.allocatorId, fleetId: binding.fleetId).isValid
-                        && seen.insert(binding).inserted
-                        && binding != state.registryBinding
-                }
-            } ?? []
         // Pre-binding migration receipts have no role in recovery.
         state.unconfirmedMigration = nil
         state.annotationPublisher = salvageAnnotationOutbox(root["annotationPublisher"])
@@ -1405,7 +1383,6 @@ struct SurfAceLocklessGenerationStore: Sendable {
         recovered.sequences = source.sequences
         recovered.surfaceSetRevision = source.surfaceSetRevision
         recovered.registryBinding = source.registryBinding
-        recovered.previousRegistryBindings = source.previousRegistryBindings
         recovered.annotationPublisher = source.annotationPublisher
         recovered.controllers = [:]
         recovered.terminalCloseRecords = source.terminalCloseRecords
