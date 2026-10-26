@@ -1395,7 +1395,7 @@ struct SurfAceCompositeProvenance: Equatable {
 @Observable
 final class SurfAceSurfaceModel {
     let sceneKey: String
-    let surfaceId: String
+    var surfaceId: String
     var windowLabel: String
     var name: String
     var providerName: String?

@@ -330,7 +330,6 @@ struct SurfAceRootView: View {
     @Bindable var runtime: SurfAceRuntime
     @Environment(\.displayScale) private var displayScale
     @State private var sceneKey: String?
-    @State private var surfaceId: String?
 
     var body: some View {
         ZStack {
@@ -354,9 +353,7 @@ struct SurfAceRootView: View {
                     onConnect: { key, scene in
                         Task { @MainActor in
                             sceneKey = key
-                            if let surface = await runtime.registerSurfaceForScene(sceneKey: key, scene: scene) {
-                                surfaceId = surface.surfaceId
-                            }
+                            _ = await runtime.registerSurfaceForScene(sceneKey: key, scene: scene)
                         }
                     }
                 )
@@ -365,8 +362,8 @@ struct SurfAceRootView: View {
     }
 
     private var surface: SurfAceSurfaceModel? {
-        guard let surfaceId else { return nil }
-        return runtime.surfaces.first { $0.surfaceId == surfaceId }
+        guard let sceneKey else { return nil }
+        return runtime.surfaces.first { $0.sceneKey == sceneKey }
     }
 }
 
@@ -1610,11 +1607,26 @@ private struct SurfAcePaneIdentityOverlay: View {
                                 .strokeBorder(connectionColor.opacity(0.35), lineWidth: max(1, fontSize * 0.008))
                         }
                         .alignmentGuide(.surfAceIdentityBaseline) { dimensions in dimensions[.bottom] }
+                } else {
+                    RoundedRectangle(cornerRadius: fontSize * 0.04, style: .continuous)
+                        .strokeBorder(connectionColor.opacity(0.35), lineWidth: max(1, fontSize * 0.008))
+                        .frame(
+                            width: fontSize * SurfAceRajdhaniMetrics.windowBoxHeightRatio,
+                            height: fontSize * SurfAceRajdhaniMetrics.windowBoxHeightRatio
+                        )
+                        .accessibilityLabel("Window label pending")
+                        .alignmentGuide(.surfAceIdentityBaseline) { dimensions in dimensions[.bottom] }
                 }
 
-                SurfAcePaneNumberText(paneLabel: displayId.uppercased(), fontSize: fontSize)
+                SurfAcePaneNumberText(
+                    paneLabel: displayId.isEmpty ? "…" : displayId.uppercased(),
+                    fontSize: fontSize,
+                    isPending: displayId.isEmpty,
+                    pendingColor: connectionColor
+                )
                     .lineLimit(1)
                     .minimumScaleFactor(0.35)
+                    .accessibilityLabel(displayId.isEmpty ? "Pane label pending" : "Pane \(displayId)")
                     .alignmentGuide(.surfAceIdentityBaseline) { dimensions in dimensions[.lastTextBaseline] }
             }
         }
@@ -2219,6 +2231,8 @@ private struct SurfAceKeyboardActiveBorder: View {
 private struct SurfAcePaneNumberText: View {
     let paneLabel: String
     let fontSize: CGFloat
+    var isPending = false
+    var pendingColor: Color? = nil
 
     var body: some View {
         paneNumberText
@@ -2229,7 +2243,9 @@ private struct SurfAcePaneNumberText: View {
             .font(.custom(SurfAceChromeFont.boldName, size: fontSize))
             .monospacedDigit()
             .tracking(fontSize * SurfAceRajdhaniMetrics.paneNumberTrackingRatio)
-            .foregroundStyle(Color(red: 0.5, green: 0.5, blue: 0.5).opacity(0.3))
+            .foregroundStyle(isPending
+                ? (pendingColor ?? Color.secondary).opacity(0.65)
+                : Color(red: 0.5, green: 0.5, blue: 0.5).opacity(0.3))
     }
 }
 

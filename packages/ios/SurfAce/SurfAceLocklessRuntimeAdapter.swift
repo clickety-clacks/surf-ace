@@ -175,7 +175,6 @@ actor SurfAceLocklessRuntimeAdapter {
     private var connectionByController: [String: String] = [:]
     private var controllerByConnection: [String: String] = [:]
     private var targetWorkRecovered: Bool
-    private var pendingRegistryBinding: SurfAceRegistryBinding?
 
     init(
         store: SurfAceLocklessGenerationStore,
@@ -450,110 +449,76 @@ actor SurfAceLocklessRuntimeAdapter {
         }
     }
 
+    @discardableResult
     func bindRegistryIdentity(
         _ identity: SurfAceRegistryIdentity,
         clientId: String,
         expectedSurfaces: [SurfAceRegistrationSurface],
-        provisioned: SurfAceProvisionedRegistryBinding?,
-        verifiedUnconfirmed: SurfAceVerifiedUnconfirmedMigration? = nil
-    ) async throws {
+        allowRebinding: Bool = false
+    ) async throws -> Bool {
         guard identity.isValid else { throw SurfAceRegistrationError.registryIdentityMissing }
-        var current = try await coordinator.registryBindingDurableSnapshot()
+        let current = await coordinator.snapshot()
         guard SurfAceRegistrationSurface.snapshot(current) == expectedSurfaces else {
             throw SurfAceRegistrationError.topologyChanged
         }
-        if let binding = current.registryBinding {
-            if let pendingRegistryBinding, pendingRegistryBinding != binding {
-                throw SurfAceRegistrationError.foreignRegistryIdentity
-            }
-            guard binding.matches(identity, clientId: clientId) else {
-                throw SurfAceRegistrationError.foreignRegistryIdentity
-            }
-            pendingRegistryBinding = nil
-            return
-        }
-        if let pendingRegistryBinding,
-           !pendingRegistryBinding.matches(identity, clientId: clientId) {
+        let binding = SurfAceRegistryBinding(
+            allocatorId: identity.allocatorId, clientId: clientId, fleetId: identity.fleetId
+        )
+        if current.registryBinding == binding { return false }
+        if current.registryBinding?.clientId == clientId,
+           (current.previousRegistryBindings ?? []).contains(binding) {
             throw SurfAceRegistrationError.foreignRegistryIdentity
         }
-        var claims = SurfAceProvisionedRegistryBinding.confirmedClaims(current)
-        if !claims.isEmpty, let verifiedUnconfirmed,
-           let surfaceIds = verifiedUnconfirmed.matchingSurfaceIds(in: current, clientId: clientId) {
-            let receipt = SurfAceUnconfirmedMigrationReceipt(
-                clientId: clientId, evidenceId: verifiedUnconfirmed.evidenceId,
-                allocationHistoryEvidence: verifiedUnconfirmed.allocationHistoryEvidence,
-                localProvenanceEvidence: verifiedUnconfirmed.localProvenanceEvidence,
-                otherFleetCheckEvidence: verifiedUnconfirmed.otherFleetCheckEvidence,
-                localClaims: verifiedUnconfirmed.localClaims
-            )
-            do {
-                _ = try await coordinator.transact(trigger: "verified_unconfirmed_migration") { state in
-                    guard SurfAceRegistrationSurface.snapshot(state) == expectedSurfaces,
-                          verifiedUnconfirmed.matchingSurfaceIds(in: state, clientId: clientId) == surfaceIds else {
-                        throw SurfAceRegistrationError.topologyChanged
-                    }
-                    for id in surfaceIds {
-                        if state.liveSurfaces[id] != nil {
-                            state.liveSurfaces[id]?.windowLabelConfirmed = false
-                        } else if let index = state.surfaceTombstones.firstIndex(where: { $0.surface.surfaceId == id }) {
-                            state.surfaceTombstones[index].surface.windowLabelConfirmed = false
-                            let tombstone = state.surfaceTombstones[index]
-                            state.surfaceTombstones[index].bytes = try SurfAceLocklessTopologyOperations.restoredSurfaceTombstoneBytes(
-                                closedSequence: tombstone.closedSequence, scopes: tombstone.scopes,
-                                surface: tombstone.surface, tombstoneId: tombstone.tombstoneId
-                            )
-                        }
-                    }
-                    state.unconfirmedMigration = receipt
-                    return state
-                }
-                current = try await coordinator.registryBindingDurableSnapshot()
-            } catch {
-                if case SurfAceRegistrationError.topologyChanged = error { throw error }
-                guard let restored = try? await coordinator.reconcileUnconfirmedMigration(receipt) else {
-                    throw error
-                }
-                current = restored
-            }
-            claims = SurfAceProvisionedRegistryBinding.confirmedClaims(current)
-            guard claims.isEmpty else { throw SurfAceRegistrationError.unconfirmedMigrationPending }
-        }
-        let binding: SurfAceRegistryBinding
-        if claims.isEmpty {
-            binding = SurfAceRegistryBinding(
-                allocatorId: identity.allocatorId, clientId: clientId, fleetId: identity.fleetId
-            )
-        } else {
-            guard let provisioned, provisioned.binding.clientId == clientId,
-                  SurfAceProvisionedRegistryBinding.matchesConfirmedClaims(provisioned.confirmedClaims, claims) else {
-                throw SurfAceRegistrationError.legacyRegistryBindingPending
-            }
-            guard provisioned.binding.matches(identity, clientId: clientId) else {
-                throw SurfAceRegistrationError.foreignRegistryIdentity
-            }
-            binding = provisioned.binding
+        if let existing = current.registryBinding,
+           existing.clientId == clientId,
+           !allowRebinding {
+            throw SurfAceRegistrationError.foreignRegistryIdentity
         }
         do {
-            _ = try await coordinator.transact(trigger: "registry_identity_binding") { state in
-                guard SurfAceRegistrationSurface.snapshot(state) == expectedSurfaces,
-                      state.registryBinding == nil else {
+            return try await coordinator.transact(trigger: "registry_identity_binding") { state in
+                guard SurfAceRegistrationSurface.snapshot(state) == expectedSurfaces else {
                     throw SurfAceRegistrationError.topologyChanged
                 }
-                state.registryBinding = binding
-                return state
-            }
-            pendingRegistryBinding = nil
-        } catch {
-            if case SurfAceRegistrationError.topologyChanged = error { throw error }
-            if let restored = try? await coordinator.registryBindingDurableSnapshot(),
-               let durableBinding = restored.registryBinding {
-                pendingRegistryBinding = nil
-                guard durableBinding == binding else {
+                guard state.registryBinding == current.registryBinding else {
+                    throw SurfAceRegistrationError.topologyChanged
+                }
+                if state.registryBinding == binding { return false }
+                if state.registryBinding?.clientId == clientId,
+                   (state.previousRegistryBindings ?? []).contains(binding) {
                     throw SurfAceRegistrationError.foreignRegistryIdentity
                 }
-                return
+                if let existing = state.registryBinding,
+                   existing.clientId == clientId,
+                   !allowRebinding {
+                    throw SurfAceRegistrationError.foreignRegistryIdentity
+                }
+                if let existing = state.registryBinding, existing.clientId == clientId {
+                    var previous = state.previousRegistryBindings ?? []
+                    if !previous.contains(existing) { previous.append(existing) }
+                    state.previousRegistryBindings = previous
+                }
+                state.registryBinding = binding
+                for surfaceId in state.liveSurfaces.keys {
+                    state.liveSurfaces[surfaceId]?.windowLabelConfirmed = false
+                }
+                for index in state.surfaceTombstones.indices {
+                    state.surfaceTombstones[index].surface.windowLabelConfirmed = false
+                    let tombstone = state.surfaceTombstones[index]
+                    state.surfaceTombstones[index].bytes = try SurfAceLocklessTopologyOperations.restoredSurfaceTombstoneBytes(
+                        closedSequence: tombstone.closedSequence, scopes: tombstone.scopes,
+                        surface: tombstone.surface, tombstoneId: tombstone.tombstoneId
+                    )
+                }
+                return true
             }
-            pendingRegistryBinding = binding
+        } catch {
+            if case SurfAceRegistrationError.topologyChanged = error { throw error }
+            if let restored = try? await coordinator.reconcileRegistryBinding(binding) {
+                guard SurfAceRegistrationSurface.snapshot(restored) == expectedSurfaces else {
+                    throw SurfAceRegistrationError.topologyChanged
+                }
+                return true
+            }
             throw error
         }
     }
@@ -562,7 +527,7 @@ actor SurfAceLocklessRuntimeAdapter {
         _ assignments: [SurfAceRegistrationAssignment],
         expectedSurfaces: [SurfAceRegistrationSurface]
     ) async throws -> SurfAceLocklessAuthorityState {
-        try await coordinator.transact(trigger: "central_registration", skipUnchanged: true) { state in
+        return try await coordinator.transact(trigger: "central_registration", skipUnchanged: true) { state in
             guard SurfAceRegistrationSurface.snapshot(state) == expectedSurfaces,
                   assignments.count == expectedSurfaces.count,
                   Set(assignments.map(\.surfaceId)) == Set(expectedSurfaces.map(\.surfaceId)) else {
@@ -600,20 +565,64 @@ actor SurfAceLocklessRuntimeAdapter {
         }
     }
 
-    func applyRegistration(
-        _ reply: SurfAceRegistrationReply,
-        expectedInput: SurfAceRegistrationInput
-    ) async throws -> SurfAceLocklessAuthorityState {
-        try await coordinator.transact(trigger: "central_registration", skipUnchanged: true) { state in
-            guard try SurfAceRegistrationInput(state: state) == expectedInput else {
+    func dropRefusedRelease(releaseId: String) async throws {
+        try await coordinator.transact(trigger: "refused_allocation_release") { state in
+            guard var intents = state.allocationReleaseIntents,
+                  let index = intents.firstIndex(where: { $0.releaseId == releaseId && $0.status == .pending }) else {
                 throw SurfAceRegistrationError.topologyChanged
             }
-            guard reply.assignments.count == expectedInput.surfaces.count,
-                  Set(reply.assignments.map(\.surfaceId)) == Set(expectedInput.surfaces.map(\.surfaceId)),
-                  reply.projection.completedPaneReleaseIds == expectedInput.pendingPaneReleases.map(\.releaseId),
-                  reply.projection.completedWindowReleaseIds == expectedInput.pendingWindowReleases.map(\.releaseId) else {
+            intents.remove(at: index)
+            state.allocationReleaseIntents = intents
+        }
+    }
+
+    func rotateRefusedClaim(_ claim: SurfAceRegistrationClaim) async throws -> SurfAceLocklessAuthorityState {
+        try await coordinator.transact(trigger: "refused_registration_claim") { state in
+            switch claim {
+            case .surface(let surfaceId):
+                try SurfAceLocklessTopologyOperations.reidentifyRefusedSurface(
+                    state: &state, surfaceId: surfaceId
+                )
+            case .pane(let surfaceId, let paneId, let paneLineageId):
+                try SurfAceLocklessTopologyOperations.reidentifyRefusedPane(
+                    state: &state, surfaceId: surfaceId, paneId: paneId, paneLineageId: paneLineageId
+                )
+            }
+            return state
+        }
+    }
+
+    func applyRegistration(
+        _ reply: SurfAceRegistrationReply,
+        expectedInput: SurfAceRegistrationInput,
+        requestInput: SurfAceRegistrationInput? = nil,
+        clientId: String? = nil
+    ) async throws -> SurfAceLocklessAuthorityState {
+        let requested = requestInput ?? expectedInput
+        guard let expectedClientId = clientId ?? expectedInput.clientId else {
+            throw SurfAceRegistrationError.registryIdentityMissing
+        }
+        return try await coordinator.transact(trigger: "central_registration", skipUnchanged: true) { state in
+            guard try SurfAceRegistrationInput(state: state, clientId: expectedClientId) == expectedInput else {
+                throw SurfAceRegistrationError.topologyChanged
+            }
+            let expectedWindowReleases = Set(expectedInput.pendingWindowReleases.map(\.releaseId))
+            let expectedPaneReleases = Set(expectedInput.pendingPaneReleases.map(\.releaseId))
+            guard requested.clientId == expectedInput.clientId,
+                  requested.registryIdentity == expectedInput.registryIdentity,
+                  requested.surfaces == expectedInput.surfaces,
+                  Set(requested.pendingPaneReleases.map(\.releaseId)).isSubset(of: expectedPaneReleases),
+                  Set(requested.pendingWindowReleases.map(\.releaseId)).isSubset(of: expectedWindowReleases),
+                  reply.assignments.count == requested.surfaces.count,
+                  Set(reply.assignments.map(\.surfaceId)) == Set(requested.surfaces.map(\.surfaceId)),
+                  reply.projection.completedPaneReleaseIds == requested.pendingPaneReleases.map(\.releaseId),
+                  reply.projection.completedWindowReleaseIds == requested.pendingWindowReleases.map(\.releaseId) else {
                 throw SurfAceRegistrationError.invalidResponse
             }
+
+            let labelsWereConfirmed = Dictionary(uniqueKeysWithValues: state.liveSurfaces.values.map {
+                ($0.surfaceId, state.registryBinding != nil && $0.windowLabelConfirmed != false)
+            })
 
             try SurfAceLocklessTopologyOperations.applyWindowLabels(
                 state: &state, assignments: reply.assignments.map { ($0.surfaceId, $0.windowLabel) }
@@ -621,7 +630,7 @@ actor SurfAceLocklessRuntimeAdapter {
             var usedPaneLabels = Set<Int64>()
             for assignment in reply.assignments {
                 guard var surface = state.liveSurfaces[assignment.surfaceId],
-                      let expected = expectedInput.surfaces.first(where: { $0.surfaceId == assignment.surfaceId }),
+                      let expected = requested.surfaces.first(where: { $0.surfaceId == assignment.surfaceId }),
                       assignment.panes.count == surface.panes.count,
                       expected.panes.count == surface.panes.count else {
                     throw SurfAceRegistrationError.invalidResponse
@@ -631,13 +640,14 @@ actor SurfAceLocklessRuntimeAdapter {
                           generation > 0, generation <= 9_007_199_254_740_991 else {
                         throw SurfAceRegistrationError.invalidResponse
                     }
-                    if let current = surface.allocationGeneration, current != generation {
-                        throw SurfAceRegistrationError.invalidResponse
-                    }
-                    if surface.allocationGeneration != nil,
-                       surface.windowLabelConfirmed == true,
-                       surface.windowLabel != assignment.windowLabel {
-                        throw SurfAceRegistrationError.invalidResponse
+                    if labelsWereConfirmed[assignment.surfaceId] == true {
+                        if let current = surface.allocationGeneration, current != generation {
+                            throw SurfAceRegistrationError.invalidResponse
+                        }
+                        if surface.allocationGeneration != nil,
+                           surface.windowLabel != assignment.windowLabel {
+                            throw SurfAceRegistrationError.invalidResponse
+                        }
                     }
                     surface.allocationGeneration = generation
                 }
@@ -662,6 +672,7 @@ actor SurfAceLocklessRuntimeAdapter {
                         throw SurfAceRegistrationError.invalidResponse
                     }
                     if reply.projection.allocationGenerationV1,
+                       labelsWereConfirmed[assignment.surfaceId] == true,
                        let currentGeneration = pane.allocationGeneration,
                        currentGeneration != paneAssignment.allocationGeneration {
                         throw SurfAceRegistrationError.invalidResponse

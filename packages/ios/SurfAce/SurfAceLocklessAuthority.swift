@@ -562,6 +562,7 @@ struct SurfAceLocklessAuthorityState: Codable, Equatable, Sendable {
     var pendingControllerRetentionReclamations: [SurfAceLocklessControllerRetentionReclamation]?
     var pendingTombstoneReclamations: [SurfAceLocklessTombstoneReclamation]?
     var registryBinding: SurfAceRegistryBinding?
+    var previousRegistryBindings: [SurfAceRegistryBinding]? = nil
     var unconfirmedMigration: SurfAceUnconfirmedMigrationReceipt?
     var sceneSurfaceIds: [String: String]
     var scopes: [String: SurfAceLocklessConsumableScope]
@@ -586,6 +587,7 @@ struct SurfAceLocklessAuthorityState: Codable, Equatable, Sendable {
             pendingControllerRetentionReclamations: [],
             pendingTombstoneReclamations: [],
             registryBinding: nil,
+            previousRegistryBindings: [],
             unconfirmedMigration: nil,
             sceneSurfaceIds: [:],
             scopes: [:],
@@ -618,6 +620,24 @@ struct SurfAceLocklessAuthorityState: Codable, Equatable, Sendable {
                   !unconfirmedMigration.localClaims.isEmpty else {
                 throw SurfAceLocklessAuthorityError.invalidState("unconfirmed_migration_evidence")
             }
+        }
+        if let registryBinding {
+            guard !registryBinding.clientId.isEmpty,
+                  SurfAceRegistryIdentity(
+                    allocatorId: registryBinding.allocatorId, fleetId: registryBinding.fleetId
+                  ).isValid else {
+                throw SurfAceLocklessAuthorityError.invalidState("registry_binding")
+            }
+        }
+        let previousBindings = previousRegistryBindings ?? []
+        guard Set(previousBindings).count == previousBindings.count,
+              previousBindings.allSatisfy({
+                  !$0.clientId.isEmpty && SurfAceRegistryIdentity(
+                      allocatorId: $0.allocatorId, fleetId: $0.fleetId
+                  ).isValid
+              }),
+              !previousBindings.contains(where: { $0 == registryBinding }) else {
+            throw SurfAceLocklessAuthorityError.invalidState("registry_binding_history")
         }
         try limits.validate()
         if let annotationPublisher {
@@ -1217,11 +1237,425 @@ struct SurfAceLocklessGenerationStore: Sendable {
 
     func load() throws -> SurfAceLocklessAuthorityState? {
         guard FileManager.default.fileExists(atPath: stateURL.path) else { return nil }
-        let state = try JSONDecoder().decode(
-            SurfAceLocklessAuthorityState.self,
-            from: Data(contentsOf: stateURL)
+        let bytes = try Data(contentsOf: stateURL)
+        do {
+            let state = try JSONDecoder().decode(SurfAceLocklessAuthorityState.self, from: bytes)
+            return try state.validated(for: .restart)
+        } catch {
+            return try salvageReadableState(from: bytes)
+        }
+    }
+
+    private func salvageReadableState(from bytes: Data) throws -> SurfAceLocklessAuthorityState {
+        guard let root = (try? JSONSerialization.jsonObject(with: bytes, options: [.fragmentsAllowed])) as? [String: Any]
+        else { return try .empty() }
+
+        var state = try SurfAceLocklessAuthorityState.empty()
+        if let limits = decode(root["limits"], as: SurfAceLocklessCapacityLimits.self),
+           (try? limits.validate()) != nil {
+            state.limits = limits
+        }
+        state.generation = max(0, integer(root["generation"]) ?? 0)
+        state.surfaceSetRevision = max(0, integer(root["surfaceSetRevision"]) ?? 0)
+        state.sequences = decode(root["sequences"], as: SurfAceLocklessClientSequences.self)
+            .flatMap { sequence in
+                [sequence.nextClosedSequence, sequence.nextCommitSequence, sequence.nextDormantSequence,
+                 sequence.nextSurfaceId, sequence.nextSurfaceLabel].allSatisfy { $0 > 0 } ? sequence : nil
+            } ?? state.sequences
+        let savedBinding = decode(root["registryBinding"], as: SurfAceRegistryBinding.self)
+        state.registryBinding = savedBinding.flatMap { binding in
+            guard !binding.clientId.isEmpty,
+                  SurfAceRegistryIdentity(allocatorId: binding.allocatorId, fleetId: binding.fleetId).isValid else {
+                return nil
+            }
+            return binding
+        }
+        state.previousRegistryBindings = decode(root["previousRegistryBindings"], as: [SurfAceRegistryBinding].self)
+            .map { bindings in
+                var seen = Set<SurfAceRegistryBinding>()
+                return bindings.filter { binding in
+                    binding.clientId.isEmpty == false
+                        && SurfAceRegistryIdentity(allocatorId: binding.allocatorId, fleetId: binding.fleetId).isValid
+                        && seen.insert(binding).inserted
+                        && binding != state.registryBinding
+                }
+            } ?? []
+        // Pre-binding migration receipts have no role in recovery.
+        state.unconfirmedMigration = nil
+        state.annotationPublisher = salvageAnnotationOutbox(root["annotationPublisher"])
+        if let outbox = state.annotationPublisher {
+            if state.limits.maxAnnotationPublisherStateBytesPerSurface == nil {
+                state.limits.maxAnnotationPublisherStateBytesPerSurface = Int64(SurfAceAnnotationOutbox.maximumBytes)
+            }
+            if state.limits.maxAnnotationPublisherRecordsPerSurface == nil {
+                state.limits.maxAnnotationPublisherRecordsPerSurface = Int64(SurfAceAnnotationOutbox.maximumRecords)
+            }
+            let maxBytes = state.limits.maxAnnotationPublisherStateBytesPerSurface.map(Int.init)
+                ?? SurfAceAnnotationOutbox.maximumBytes
+            let maxRecords = state.limits.maxAnnotationPublisherRecordsPerSurface.map(Int.init)
+                ?? SurfAceAnnotationOutbox.maximumRecords
+            if (try? outbox.validate(maxBytes: maxBytes, maxRecords: maxRecords)) == nil {
+                state.annotationPublisher = nil
+            }
+        }
+
+        if let rawControllers = root["controllers"] as? [String: Any] {
+            for (key, raw) in rawControllers {
+                guard let controller = decode(raw, as: SurfAceLocklessControllerBundle.self),
+                      controller.controllerInstanceId == key else { continue }
+                state.controllers[key] = controller
+            }
+        }
+        if let rawScopes = root["scopes"] as? [String: Any] {
+            for (key, raw) in rawScopes {
+                guard var scope = decode(raw, as: SurfAceLocklessConsumableScope.self) else { continue }
+                scope.scopeId = key
+                scope.cursors = scope.cursors.filter { state.controllers[$0.key] != nil }
+                state.scopes[key] = scope
+            }
+        }
+
+        if let rawSurfaces = root["liveSurfaces"] as? [String: Any] {
+            for (key, raw) in rawSurfaces {
+                guard var surface = salvageSurface(raw), surface.surfaceId == key else { continue }
+                clearUnknownCursorOwners(in: &surface, controllers: state.controllers)
+                state.liveSurfaces[key] = surface
+            }
+        }
+        if let rawTombstones = root["surfaceTombstones"] as? [Any] {
+            for raw in rawTombstones {
+                guard var tombstone = salvageSurfaceTombstone(raw),
+                      !state.liveSurfaces.keys.contains(tombstone.surface.surfaceId),
+                      !state.surfaceTombstones.contains(where: { $0.surface.surfaceId == tombstone.surface.surfaceId }) else {
+                    continue
+                }
+                clearUnknownCursorOwners(in: &tombstone, controllers: state.controllers)
+                state.surfaceTombstones.append(tombstone)
+            }
+        }
+        let savedSceneSurfaceIds = decode(root["sceneSurfaceIds"], as: [String: String].self) ?? [:]
+        state.sceneSurfaceIds = savedSceneSurfaceIds.filter { _, surfaceId in
+            state.liveSurfaces[surfaceId] != nil || state.surfaceTombstones.contains { $0.surface.surfaceId == surfaceId }
+        }
+
+        state.terminalCloseRecords = salvageArray(root["terminalCloseRecords"], as: SurfAceLocklessFinalCloseRecord.self)
+            .filter { record in
+                !record.recordId.isEmpty && !record.surfaceId.isEmpty && !record.sourceTombstoneId.isEmpty
+                    && record.closedSequence > 0 && record.closeTopologyRevision >= 0
+                    && record.terminalRetirementRevision > 0
+                    && (record.allocationGeneration.map { $0 > 0 } ?? true)
+                    && (record.allocationKind == .pane
+                        ? record.paneId != nil && record.paneLineageId?.isEmpty == false && record.windowLabel == nil
+                        : record.paneId == nil && record.paneLineageId == nil && record.paneLabel == nil)
+            }
+        var uniqueCloseRecords: [SurfAceLocklessFinalCloseRecord] = []
+        var closeIds = Set<String>()
+        for record in state.terminalCloseRecords ?? [] where closeIds.insert(record.recordId).inserted {
+            uniqueCloseRecords.append(record)
+        }
+        state.terminalCloseRecords = uniqueCloseRecords
+        var releaseIntents: [SurfAceLocklessAllocationReleaseIntent] = salvageArray(
+            root["allocationReleaseIntents"], as: SurfAceLocklessAllocationReleaseIntent.self
         )
-        return try state.validated(for: .restart)
+        let closeRecordIds = Set(uniqueCloseRecords.map(\.recordId))
+        let validCloseRecordIds = closeRecordIds
+        releaseIntents = releaseIntents.filter { intent in
+            SurfAceLocklessAllocationReleaseIdentity.matches(intent)
+                && intent.idempotencyKey == intent.releaseId
+                && (intent.status == .accepted || validCloseRecordIds.contains(intent.recordId))
+        }
+        var releaseIds = Set<String>()
+        var releaseRecordIds = Set<String>()
+        releaseIntents = releaseIntents.filter {
+            releaseIds.insert($0.releaseId).inserted && releaseRecordIds.insert($0.recordId).inserted
+        }
+        state.allocationReleaseIntents = releaseIntents
+        state.pendingControllerRetentionReclamations = salvageArray(
+            root["pendingControllerRetentionReclamations"], as: SurfAceLocklessControllerRetentionReclamation.self
+        )
+        state.pendingTombstoneReclamations = salvageArray(
+            root["pendingTombstoneReclamations"], as: SurfAceLocklessTombstoneReclamation.self
+        )
+        state.targetApplyResults = salvageDictionary(root["targetApplyResults"], as: SurfAceLocklessTargetResult.self)
+            .filter { $0.key == $0.value.identity.storageKey }
+        let targetWorkItems = salvageDictionary(root["targetApplyWorkItems"], as: SurfAceLocklessTargetWorkItem.self)
+            .filter { key, work in
+                key == work.identity.storageKey && (state.liveSurfaces[work.surfaceId] != nil
+                    || state.surfaceTombstones.contains { $0.surface.surfaceId == work.surfaceId })
+            }
+        state.targetApplyWorkItems = targetWorkItems
+        for key in Array(state.targetApplyWorkItems.keys) {
+            guard var work = state.targetApplyWorkItems[key],
+                  let bytes = try? SurfAceLocklessExactDurableAccounting.targetWorkBytes(work) else {
+                state.targetApplyWorkItems.removeValue(forKey: key)
+                continue
+            }
+            work.bytes = bytes
+            state.targetApplyWorkItems[key] = work
+        }
+
+        ensureReadableSurfaceScopes(in: &state)
+        if let validated = try? state.validated(for: .restart) { return validated }
+        return try salvageContentSurfaces(from: state)
+    }
+
+    private func salvageContentSurfaces(from source: SurfAceLocklessAuthorityState) throws -> SurfAceLocklessAuthorityState {
+        var recovered = try SurfAceLocklessAuthorityState.empty(limits: source.limits)
+        recovered.generation = source.generation
+        recovered.sequences = source.sequences
+        recovered.surfaceSetRevision = source.surfaceSetRevision
+        recovered.registryBinding = source.registryBinding
+        recovered.previousRegistryBindings = source.previousRegistryBindings
+        recovered.annotationPublisher = source.annotationPublisher
+        recovered.controllers = [:]
+        recovered.terminalCloseRecords = source.terminalCloseRecords
+        recovered.allocationReleaseIntents = source.allocationReleaseIntents
+        recovered.sceneSurfaceIds = source.sceneSurfaceIds
+
+        for surface in source.liveSurfaces.values.sorted(by: { $0.surfaceId < $1.surfaceId }) {
+            var candidate = recovered
+            var readable = surface
+            clearUnknownCursorOwners(in: &readable, controllers: candidate.controllers)
+            candidate.liveSurfaces[readable.surfaceId] = readable
+            let candidateSurfaceIds = Set(candidate.liveSurfaces.keys)
+            let candidateScopeIds = candidate.liveSurfaces.values.reduce(into: Set<String>()) { result, surface in
+                result.insert(SurfAceLocklessTopologyOperations.recoverySurfaceScopeId(surface.surfaceId))
+                for pane in surface.panes.values {
+                    result.insert(SurfAceLocklessTopologyOperations.recoveryPaneScopeId(surface.surfaceId, pane.paneId))
+                }
+            }
+            candidate.scopes = source.scopes.filter { key, _ in
+                candidateScopeIds.contains(key)
+            }
+            for key in Array(candidate.scopes.keys) {
+                guard var scope = candidate.scopes[key] else { continue }
+                scope.cursors = scope.cursors.filter { candidate.controllers[$0.key] != nil }
+                candidate.scopes[key] = scope
+            }
+            ensureReadableSurfaceScopes(in: &candidate)
+            candidate.sceneSurfaceIds = source.sceneSurfaceIds.filter {
+                candidateSurfaceIds.contains($0.value)
+            }
+            if let validated = try? candidate.validated(for: .restart) { recovered = validated }
+        }
+        for tombstone in source.surfaceTombstones.sorted(by: { $0.closedSequence < $1.closedSequence }) {
+            var candidate = recovered
+            var readable = tombstone
+            clearUnknownCursorOwners(in: &readable, controllers: candidate.controllers)
+            guard candidate.liveSurfaces[readable.surface.surfaceId] == nil else { continue }
+            candidate.surfaceTombstones.append(readable)
+            candidate.sceneSurfaceIds.merge(source.sceneSurfaceIds.filter { $0.value == readable.surface.surfaceId }) { _, new in new }
+            if let validated = try? candidate.validated(for: .restart) { recovered = validated }
+        }
+        return try recovered.validated(for: .restart)
+    }
+
+    private func ensureReadableSurfaceScopes(in state: inout SurfAceLocklessAuthorityState) {
+        for surface in state.liveSurfaces.values {
+            let surfaceId = surface.surfaceId
+            let surfaceScope = SurfAceLocklessTopologyOperations.recoverySurfaceScopeId(surfaceId)
+            if state.scopes[surfaceScope] == nil {
+                state.scopes[surfaceScope] = SurfAceLocklessTopologyOperations.recoveryEmptyScope(
+                    id: surfaceScope, kind: "surface", controllers: state.controllers
+                )
+            }
+            for pane in surface.panes.values {
+                let scopeId = SurfAceLocklessTopologyOperations.recoveryPaneScopeId(surfaceId, pane.paneId)
+                if state.scopes[scopeId] == nil {
+                    state.scopes[scopeId] = SurfAceLocklessTopologyOperations.recoveryEmptyScope(
+                        id: scopeId, kind: "pane", controllers: state.controllers
+                    )
+                }
+            }
+        }
+        for key in Array(state.scopes.keys) {
+            guard var scope = state.scopes[key] else { continue }
+            scope.cursors = scope.cursors.filter { state.controllers[$0.key] != nil }
+            state.scopes[key] = scope
+        }
+    }
+
+    private func clearUnknownCursorOwners(
+        in surface: inout SurfAceLocklessSurfaceMaterial,
+        controllers: [String: SurfAceLocklessControllerBundle]
+    ) {
+        for index in surface.paneTombstones.indices {
+            surface.paneTombstones[index].scope.cursors = surface.paneTombstones[index].scope.cursors.filter {
+                controllers[$0.key] != nil
+            }
+            if let bytes = try? SurfAceLocklessTopologyOperations.restoredPaneTombstoneBytes(
+                closedSequence: surface.paneTombstones[index].closedSequence,
+                pane: surface.paneTombstones[index].pane,
+                scope: surface.paneTombstones[index].scope,
+                tombstoneId: surface.paneTombstones[index].tombstoneId
+            ) { surface.paneTombstones[index].bytes = bytes }
+        }
+    }
+
+    private func clearUnknownCursorOwners(
+        in tombstone: inout SurfAceLocklessSurfaceTombstone,
+        controllers: [String: SurfAceLocklessControllerBundle]
+    ) {
+        clearUnknownCursorOwners(in: &tombstone.surface, controllers: controllers)
+        for key in Array(tombstone.scopes.keys) {
+            guard var scope = tombstone.scopes[key] else { continue }
+            scope.cursors = scope.cursors.filter { controllers[$0.key] != nil }
+            tombstone.scopes[key] = scope
+        }
+        if let bytes = try? SurfAceLocklessTopologyOperations.restoredSurfaceTombstoneBytes(
+            closedSequence: tombstone.closedSequence, scopes: tombstone.scopes,
+            surface: tombstone.surface, tombstoneId: tombstone.tombstoneId
+        ) { tombstone.bytes = bytes }
+    }
+
+    private func salvageSurface(_ value: Any) -> SurfAceLocklessSurfaceMaterial? {
+        if let surface = decode(value, as: SurfAceLocklessSurfaceMaterial.self) { return surface }
+        guard let fields = value as? [String: Any],
+              let rawPanes = fields["panes"] as? [String: Any] else { return nil }
+        var panes: [String: SurfAceLocklessPaneMaterial] = [:]
+        for (key, raw) in rawPanes {
+            guard let pane = decode(raw, as: SurfAceLocklessPaneMaterial.self),
+                  String(pane.paneId) == key else { continue }
+            panes[key] = pane
+        }
+        guard !panes.isEmpty,
+              let surfaceId = fields["surfaceId"] as? String else { return nil }
+        var paneTombstones = (fields["paneTombstones"] as? [Any] ?? []).compactMap {
+            decode($0, as: SurfAceLocklessPaneTombstone.self)
+        }
+        var topology = decode(fields["topology"], as: SurfAceLocklessJSON.self)
+        let paneIds = Set(panes.values.map(\.paneId))
+        if var current = topology {
+            let topologyIds = Self.topologyPaneIds(current)
+            for missing in topologyIds.subtracting(paneIds).sorted() {
+                current = SurfAceLocklessTopologyOperations.recoveryRemovingPane(from: current, paneId: missing) ?? current
+            }
+            if Self.topologyPaneIds(current) == paneIds,
+               let canonical = try? SurfAceLocklessTopologyCodec.canonical(current) {
+                topology = canonical
+            } else {
+                topology = Self.freshTopology(for: paneIds.sorted())
+            }
+        }
+        if topology == nil {
+            topology = Self.freshTopology(for: panes.values.map(\.paneId).sorted())
+        }
+        let decodedSceneKeys = decode(fields["sceneKeys"], as: [String].self) ?? []
+        var surface = SurfAceLocklessSurfaceMaterial(
+            allocationGeneration: decode(fields["allocationGeneration"], as: Int64.self),
+            name: fields["name"] as? String ?? "Surf Ace",
+            nativeRestoreMaterial: decode(fields["nativeRestoreMaterial"], as: SurfAceLocklessJSON.self) ?? .object([:]),
+            nextPaneId: max(integer(fields["nextPaneId"]) ?? 1, (panes.values.map(\.paneId).max() ?? 0) + 1),
+            nextPaneLabel: max(integer(fields["nextPaneLabel"]) ?? 1, 1),
+            paneTombstones: paneTombstones,
+            panes: panes,
+            sceneKeys: Array(Set(decodedSceneKeys)).sorted(),
+            surfaceId: surfaceId,
+            surfaceRevision: max(integer(fields["surfaceRevision"]) ?? 1, 1),
+            topology: topology ?? Self.freshTopology(for: panes.values.map(\.paneId).sorted()),
+            topologyRevision: max(integer(fields["topologyRevision"]) ?? 0, 0),
+            windowLabel: fields["windowLabel"] as? String ?? "a",
+            windowLabelConfirmed: decode(fields["windowLabelConfirmed"], as: Bool.self)
+        )
+        for index in paneTombstones.indices {
+            paneTombstones[index].scope.cursors = [:]
+            if let bytes = try? SurfAceLocklessTopologyOperations.restoredPaneTombstoneBytes(
+                closedSequence: paneTombstones[index].closedSequence,
+                pane: paneTombstones[index].pane, scope: paneTombstones[index].scope,
+                tombstoneId: paneTombstones[index].tombstoneId
+            ) { paneTombstones[index].bytes = bytes }
+        }
+        surface.paneTombstones = paneTombstones
+        return surface
+    }
+
+    private func salvageSurfaceTombstone(_ value: Any) -> SurfAceLocklessSurfaceTombstone? {
+        if let tombstone = decode(value, as: SurfAceLocklessSurfaceTombstone.self) { return tombstone }
+        guard let fields = value as? [String: Any],
+              let surface = fields["surface"].flatMap(salvageSurface),
+              let closedSequence = integer(fields["closedSequence"]),
+              let tombstoneId = fields["tombstoneId"] as? String else { return nil }
+        var scopes: [String: SurfAceLocklessConsumableScope] = [:]
+        if let rawScopes = fields["scopes"] as? [String: Any] {
+            for (key, raw) in rawScopes {
+                guard var scope = decode(raw, as: SurfAceLocklessConsumableScope.self) else { continue }
+                scope.scopeId = key
+                scope.cursors = [:]
+                scopes[key] = scope
+            }
+        }
+        let origin = decode(fields["origin"], as: SurfAceLocklessTombstoneOrigin.self)
+        let bytes = (try? SurfAceLocklessTopologyOperations.restoredSurfaceTombstoneBytes(
+            closedSequence: closedSequence, scopes: scopes, surface: surface, tombstoneId: tombstoneId
+        )) ?? 0
+        return SurfAceLocklessSurfaceTombstone(
+            bytes: bytes, closedSequence: closedSequence, origin: origin,
+            scopes: scopes, surface: surface, tombstoneId: tombstoneId
+        )
+    }
+
+    private func salvageAnnotationOutbox(_ value: Any?) -> SurfAceAnnotationOutbox? {
+        guard let value else { return nil }
+        if let outbox = decode(value, as: SurfAceAnnotationOutbox.self) { return outbox }
+        guard let fields = value as? [String: Any],
+              let clientId = fields["clientId"] as? String,
+              let sourceEpoch = fields["sourceEpoch"] as? String,
+              var outbox = try? SurfAceAnnotationOutbox(clientId: clientId, sourceEpoch: sourceEpoch) else { return nil }
+        outbox.version = decode(fields["version"], as: Int.self) ?? 1
+        outbox.finalizedSurfaceIds = decode(fields["finalizedSurfaceIds"], as: [String].self)
+        if let rawSurfaces = fields["surfaces"] as? [String: Any] {
+            for (surfaceId, raw) in rawSurfaces {
+                guard let surface = decode(raw, as: SurfAceAnnotationSurfaceOutbox.self) else { continue }
+                outbox.surfaces[surfaceId] = surface
+            }
+        }
+        return outbox
+    }
+
+    private func salvageDictionary<Value: Decodable>(_ value: Any?, as type: Value.Type) -> [String: Value] {
+        guard let fields = value as? [String: Any] else { return [:] }
+        return fields.compactMapValues { decode($0, as: type) }
+    }
+
+    private func salvageArray<Value: Decodable>(_ value: Any?, as type: Value.Type) -> [Value] {
+        guard let values = value as? [Any] else { return [] }
+        return values.compactMap { decode($0, as: type) }
+    }
+
+    private func decode<Value: Decodable>(_ value: Any?, as type: Value.Type) -> Value? {
+        guard let value,
+              let data = try? JSONSerialization.data(withJSONObject: value, options: [.fragmentsAllowed]) else { return nil }
+        return try? JSONDecoder().decode(type, from: data)
+    }
+
+    private func integer(_ value: Any?) -> Int64? {
+        guard let value = value as? NSNumber else { return nil }
+        return value.int64Value
+    }
+
+    private static func topologyPaneIds(_ topology: SurfAceLocklessJSON) -> Set<Int64> {
+        switch topology {
+        case .object(let fields):
+            if case .string("pane") = fields["type"], case .integer(let paneId) = fields["paneId"] {
+                return [paneId]
+            }
+            if case .array(let children) = fields["children"] {
+                return children.reduce(into: Set<Int64>()) { $0.formUnion(topologyPaneIds($1)) }
+            }
+            return []
+        case .array(let values):
+            return values.reduce(into: Set<Int64>()) { $0.formUnion(topologyPaneIds($1)) }
+        default:
+            return []
+        }
+    }
+
+    private static func freshTopology(for paneIds: [Int64]) -> SurfAceLocklessJSON {
+        let leaves = paneIds.map { SurfAceLocklessJSON.object(["paneId": .integer($0), "type": .string("pane")]) }
+        guard leaves.count > 1 else { return leaves.first ?? .null }
+        return .object([
+            "children": .array(leaves), "direction": .string("horizontal"), "type": .string("split")
+        ])
     }
 
     func save(_ state: SurfAceLocklessAuthorityState) throws {
@@ -1294,6 +1728,25 @@ final class SurfAceLocklessTransactionCoordinator: @unchecked Sendable {
                         self.state = stored
                     }
                     continuation.resume(returning: self.state)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    func reconcileRegistryBinding(
+        _ binding: SurfAceRegistryBinding
+    ) async throws -> SurfAceLocklessAuthorityState {
+        try await withCheckedThrowingContinuation { continuation in
+            queue.async {
+                do {
+                    guard let stored = try self.store.load(), stored.registryBinding == binding else {
+                        throw SurfAceRegistrationError.registryBindingPersistencePending
+                    }
+                    try stored.validate()
+                    self.state = stored
+                    continuation.resume(returning: stored)
                 } catch {
                     continuation.resume(throwing: error)
                 }

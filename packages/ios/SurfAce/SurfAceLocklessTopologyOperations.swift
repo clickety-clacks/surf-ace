@@ -483,6 +483,134 @@ enum SurfAceLocklessTopologyOperations {
         }
     }
 
+    static func reidentifyRefusedSurface(
+        state: inout SurfAceLocklessAuthorityState,
+        surfaceId: String
+    ) throws {
+        try atomically(&state) { candidate in
+            guard var surface = candidate.liveSurfaces[surfaceId] else {
+                throw SurfAceRegistrationError.topologyChanged
+            }
+            let replacementSurfaceId = allocateSurfaceId(&candidate)
+            surface.surfaceId = replacementSurfaceId
+            surface.windowLabel = allocateWindowLabel(&candidate)
+            surface.windowLabelConfirmed = false
+            surface.allocationGeneration = nil
+            surface.surfaceRevision += 1
+            for index in surface.paneTombstones.indices {
+                let oldScopeId = paneScopeId(surfaceId, surface.paneTombstones[index].pane.paneId)
+                let newScopeId = paneScopeId(replacementSurfaceId, surface.paneTombstones[index].pane.paneId)
+                var tombstone = surface.paneTombstones[index]
+                let retainedGlobally = candidate.scopes[oldScopeId] != nil
+                let oldScope = candidate.scopes.removeValue(forKey: oldScopeId) ?? tombstone.scope
+                tombstone.scope = reidentifiedScope(
+                    oldScope,
+                    scopeId: newScopeId,
+                    oldSurfaceId: surfaceId,
+                    replacementSurfaceId: replacementSurfaceId,
+                    paneIds: [:], lineages: [:]
+                )
+                tombstone.bytes = try restoredPaneTombstoneBytes(
+                    closedSequence: tombstone.closedSequence, pane: tombstone.pane,
+                    scope: tombstone.scope, tombstoneId: tombstone.tombstoneId
+                )
+                surface.paneTombstones[index] = tombstone
+                if retainedGlobally {
+                    candidate.scopes[tombstone.scope.scopeId] = tombstone.scope
+                }
+            }
+
+            let oldSurfaceScope = surfaceScopeId(surfaceId)
+            let newSurfaceScope = surfaceScopeId(replacementSurfaceId)
+            let oldSurfaceScopeValue = candidate.scopes.removeValue(forKey: oldSurfaceScope)
+                ?? emptyScope(id: oldSurfaceScope, kind: "surface", controllers: candidate.controllers)
+            candidate.scopes[newSurfaceScope] = reidentifiedScope(
+                oldSurfaceScopeValue, scopeId: newSurfaceScope,
+                oldSurfaceId: surfaceId, replacementSurfaceId: replacementSurfaceId,
+                paneIds: [:], lineages: [:]
+            )
+            for pane in surface.panes.values {
+                let oldScopeId = paneScopeId(surfaceId, pane.paneId)
+                let newScopeId = paneScopeId(replacementSurfaceId, pane.paneId)
+                let oldScope = candidate.scopes.removeValue(forKey: oldScopeId)
+                    ?? emptyScope(id: oldScopeId, kind: "pane", controllers: candidate.controllers)
+                candidate.scopes[newScopeId] = reidentifiedScope(
+                    oldScope, scopeId: newScopeId,
+                    oldSurfaceId: surfaceId, replacementSurfaceId: replacementSurfaceId,
+                    paneIds: [:], lineages: [:]
+                )
+            }
+            for sceneKey in candidate.sceneSurfaceIds.keys where candidate.sceneSurfaceIds[sceneKey] == surfaceId {
+                candidate.sceneSurfaceIds[sceneKey] = replacementSurfaceId
+            }
+            candidate.liveSurfaces.removeValue(forKey: surfaceId)
+            candidate.liveSurfaces[replacementSurfaceId] = surface
+            for key in Array(candidate.targetApplyWorkItems.keys) {
+                guard var work = candidate.targetApplyWorkItems[key], work.surfaceId == surfaceId else { continue }
+                work.surfaceId = replacementSurfaceId
+                work.request = replacingClaimIdentityFields(
+                    work.request, surfaceId: surfaceId, replacementSurfaceId: replacementSurfaceId,
+                    paneIds: [:], lineages: [:]
+                )
+                work.bytes = try SurfAceLocklessExactDurableAccounting.targetWorkBytes(work)
+                candidate.targetApplyWorkItems[key] = work
+            }
+            candidate.surfaceSetRevision += 1
+        }
+    }
+
+    static func reidentifyRefusedPane(
+        state: inout SurfAceLocklessAuthorityState,
+        surfaceId: String,
+        paneId: String,
+        paneLineageId: String
+    ) throws {
+        guard let numericPaneId = Int64(paneId) else { throw SurfAceRegistrationError.topologyChanged }
+        try atomically(&state) { candidate in
+            guard var surface = candidate.liveSurfaces[surfaceId],
+                  var pane = surface.panes[paneId],
+                  pane.paneLineageId == paneLineageId else {
+                throw SurfAceRegistrationError.topologyChanged
+            }
+            let replacementPaneId = allocatePaneIdentity(surface: &surface)
+            let replacementLineage = "pl_\(surfaceId)_\(replacementPaneId)"
+            pane.paneId = replacementPaneId
+            pane.paneLineageId = replacementLineage
+            pane.paneLabel = 0
+            pane.allocationGeneration = nil
+            guard let topology = replacingPaneIdentity(
+                in: surface.topology, oldPaneId: numericPaneId, newPaneId: replacementPaneId
+            ) else { throw SurfAceLocklessTopologyOperationError.invalidTopology("pane_claim_identity") }
+            surface.panes.removeValue(forKey: paneId)
+            surface.panes[String(replacementPaneId)] = pane
+            surface.topology = try SurfAceLocklessTopologyCodec.canonical(topology)
+            surface.topologyRevision += 1
+            surface.surfaceRevision += 1
+
+            let oldScopeId = paneScopeId(surfaceId, numericPaneId)
+            let newScopeId = paneScopeId(surfaceId, replacementPaneId)
+            let oldScope = candidate.scopes.removeValue(forKey: oldScopeId)
+                ?? emptyScope(id: oldScopeId, kind: "pane", controllers: candidate.controllers)
+            candidate.scopes[newScopeId] = reidentifiedScope(
+                oldScope, scopeId: newScopeId,
+                oldSurfaceId: surfaceId, replacementSurfaceId: surfaceId,
+                paneIds: [numericPaneId: replacementPaneId],
+                lineages: [paneLineageId: replacementLineage]
+            )
+            candidate.liveSurfaces[surfaceId] = surface
+            for key in Array(candidate.targetApplyWorkItems.keys) {
+                guard var work = candidate.targetApplyWorkItems[key], work.surfaceId == surfaceId else { continue }
+                work.request = replacingClaimIdentityFields(
+                    work.request, surfaceId: surfaceId, replacementSurfaceId: surfaceId,
+                    paneIds: [numericPaneId: replacementPaneId],
+                    lineages: [paneLineageId: replacementLineage]
+                )
+                work.bytes = try SurfAceLocklessExactDurableAccounting.targetWorkBytes(work)
+                candidate.targetApplyWorkItems[key] = work
+            }
+        }
+    }
+
     static func surfaceWindowClose(
         state: inout SurfAceLocklessAuthorityState,
         surfaceId: String,
@@ -1283,6 +1411,83 @@ private extension SurfAceLocklessTopologyOperations {
         let id = surface.nextPaneId; surface.nextPaneId += 1
         return id
     }
+
+    private static func replacingPaneIdentity(
+        in node: SurfAceLocklessJSON,
+        oldPaneId: Int64,
+        newPaneId: Int64
+    ) -> SurfAceLocklessJSON? {
+        guard case .object(var object) = node else { return nil }
+        if case .string("pane") = object["type"], case .integer(oldPaneId) = object["paneId"] {
+            object["paneId"] = .integer(newPaneId)
+            return .object(object)
+        }
+        guard case .string("split") = object["type"], case .array(let children) = object["children"] else {
+            return nil
+        }
+        var replaced = false
+        object["children"] = .array(children.map { child in
+            guard !replaced,
+                  let updated = replacingPaneIdentity(in: child, oldPaneId: oldPaneId, newPaneId: newPaneId) else {
+                return child
+            }
+            replaced = true
+            return updated
+        })
+        return replaced ? .object(object) : nil
+    }
+
+    private static func reidentifiedScope(
+        _ scope: SurfAceLocklessConsumableScope,
+        scopeId: String,
+        oldSurfaceId: String,
+        replacementSurfaceId: String,
+        paneIds: [Int64: Int64],
+        lineages: [String: String]
+    ) -> SurfAceLocklessConsumableScope {
+        var result = scope
+        result.scopeId = scopeId
+        for index in result.records.indices {
+            result.records[index].payload = replacingClaimIdentityFields(
+                result.records[index].payload, surfaceId: oldSurfaceId,
+                replacementSurfaceId: replacementSurfaceId, paneIds: paneIds, lineages: lineages
+            )
+        }
+        for key in Array(result.liveFrames.keys) {
+            guard var record = result.liveFrames[key] else { continue }
+            record.payload = replacingClaimIdentityFields(
+                record.payload, surfaceId: oldSurfaceId,
+                replacementSurfaceId: replacementSurfaceId, paneIds: paneIds, lineages: lineages
+            )
+            result.liveFrames[key] = record
+        }
+        return result
+    }
+
+    private static func replacingClaimIdentityFields(
+        _ value: SurfAceLocklessJSON,
+        surfaceId: String,
+        replacementSurfaceId: String,
+        paneIds: [Int64: Int64],
+        lineages: [String: String]
+    ) -> SurfAceLocklessJSON {
+        guard case .object(var fields) = value else { return value }
+        if case .string(surfaceId) = fields["surfaceId"] {
+            fields["surfaceId"] = .string(replacementSurfaceId)
+        }
+        if case .integer(let oldPaneId) = fields["paneId"], let newPaneId = paneIds[oldPaneId] {
+            fields["paneId"] = .integer(newPaneId)
+        } else if case .string(let rawPaneId) = fields["paneId"],
+                  let oldPaneId = Int64(rawPaneId), let newPaneId = paneIds[oldPaneId] {
+            fields["paneId"] = .string(String(newPaneId))
+        }
+        if case .string(let oldLineage) = fields["paneLineageId"],
+           let newLineage = lineages[oldLineage] {
+            fields["paneLineageId"] = .string(newLineage)
+        }
+        return .object(fields)
+    }
+
     static func allocateSurfaceId(_ state: inout SurfAceLocklessAuthorityState) -> String {
         let retained = Set(state.surfaceTombstones.map(\.surface.surfaceId))
         while true {
@@ -1390,5 +1595,27 @@ private extension SurfAceLocklessTopologyOperations {
     }
     static func surfaceTombstoneOrder(_ left: SurfAceLocklessSurfaceTombstone, _ right: SurfAceLocklessSurfaceTombstone) -> Bool {
         (left.closedSequence, left.tombstoneId) < (right.closedSequence, right.tombstoneId)
+    }
+}
+
+extension SurfAceLocklessTopologyOperations {
+    static func recoverySurfaceScopeId(_ surfaceId: String) -> String {
+        surfaceScopeId(surfaceId)
+    }
+
+    static func recoveryPaneScopeId(_ surfaceId: String, _ paneId: Int64) -> String {
+        paneScopeId(surfaceId, paneId)
+    }
+
+    static func recoveryEmptyScope(
+        id: String,
+        kind: String,
+        controllers: [String: SurfAceLocklessControllerBundle]
+    ) -> SurfAceLocklessConsumableScope {
+        emptyScope(id: id, kind: kind, controllers: controllers)
+    }
+
+    static func recoveryRemovingPane(from node: SurfAceLocklessJSON, paneId: Int64) -> SurfAceLocklessJSON? {
+        removingPane(from: node, paneId: paneId)
     }
 }
