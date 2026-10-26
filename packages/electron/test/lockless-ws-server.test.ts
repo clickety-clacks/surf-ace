@@ -2037,6 +2037,11 @@ test("AC-TOPO-04: split rename resize close restore and realization share stable
 
 test("new panes stay unnumbered when the registry rejects a pane claim and recover by lineage on client.register", async () => {
   const core = new SurfaceCore();
+  core.bindRegistryIdentity({
+    clientId: "allocator-recovery-client",
+    allocatorId: "alloc_fixture",
+    fleetId: "fixture-fleet",
+  });
   const surface = core.ensurePrimarySurface("Surf Ace", {
     height: 800,
     scale: 2,
@@ -2066,10 +2071,6 @@ test("new panes stay unnumbered when the registry rejects a pane claim and recov
   const registryAddress = `ws://127.0.0.1:${(registry.address() as AddressInfo).port}/`;
   const clientRegistration = new ConfiguredServerRegistration(
     registryAddress, "allocator-recovery-client", core, async () => {}, () => {}, 500,
-    {
-      binding: { clientId: "allocator-recovery-client", allocatorId: "alloc_fixture", fleetId: "fixture-fleet" },
-      confirmedClaims: core.confirmedRegistryClaims(),
-    },
   );
   try {
     assert.equal((await pair(controller, "allocator-recovery-controller", surface.surfaceId)).ok, true);
@@ -3375,6 +3376,11 @@ test("explicit window close sends an allocator-compatible windowGeneration relea
     scale: 2,
     width: 1200,
   });
+  const survivingSurface = core.createAdditionalSurface("Surf Ace surviving", {
+    height: 800,
+    scale: 2,
+    width: 1200,
+  });
   core.bindRegistryIdentity({ clientId, allocatorId, fleetId });
   initializeRegistryBootstrapPanes(core);
 
@@ -3421,6 +3427,27 @@ test("explicit window close sends an allocator-compatible windowGeneration relea
     windowGeneration: release.windowGeneration,
     windowLabel: release.windowLabel,
   })).digest("hex");
+  const activeWindows = new Map<string, { windowGeneration: number; windowLabel: string }>();
+  const availableWindowLabels = new Set<string>();
+  let nextWindowLabelOrdinal = 1;
+  let nextWindowGeneration = 17;
+  const activeWindowsHasLabel = (label: string) =>
+    [...activeWindows.values()].some((allocation) => allocation.windowLabel === label);
+  const freshWindowLabel = () => {
+    while (activeWindowsHasLabel(String.fromCharCode(96 + nextWindowLabelOrdinal))) {
+      nextWindowLabelOrdinal += 1;
+    }
+    return String.fromCharCode(96 + nextWindowLabelOrdinal++);
+  };
+  const assignWindow = (surfaceId: string) => {
+    const existing = activeWindows.get(surfaceId);
+    if (existing) return existing;
+    const label = [...availableWindowLabels].sort()[0] ?? freshWindowLabel();
+    availableWindowLabels.delete(label);
+    const allocation = { windowGeneration: nextWindowGeneration++, windowLabel: label };
+    activeWindows.set(surfaceId, allocation);
+    return allocation;
+  };
   registry.on("connection", (socket) => {
     socket.on("message", (raw) => {
       const message = JSON.parse(String(raw));
@@ -3444,7 +3471,6 @@ test("explicit window close sends an allocator-compatible windowGeneration relea
   const respondAsAllocator = (
     socket: WebSocket,
     message: any,
-    windowGeneration: number,
   ) => {
     assert.equal(message.payload.windowGenerationV1, true);
     const completedWindowReleaseIds = (message.payload.pendingWindowReleases ?? []).map((release: any) => {
@@ -3458,8 +3484,23 @@ test("explicit window close sends an allocator-compatible windowGeneration relea
       assert.ok(Number.isSafeInteger(release.terminalRetirementRevision) && release.terminalRetirementRevision > 0);
       assert.match(release.releaseId, /^[a-f0-9]{64}$/);
       assert.equal(release.releaseId, releaseIdFor(release));
+      assert.deepEqual(activeWindows.get(release.surfaceId), {
+        windowGeneration: release.windowGeneration,
+        windowLabel: release.windowLabel,
+      });
+      activeWindows.delete(release.surfaceId);
+      availableWindowLabels.add(release.windowLabel);
       return release.releaseId;
     });
+    const surfaces = message.payload.surfaces.map((entry: any) => ({
+      surfaceId: entry.surfaceId,
+      ...assignWindow(entry.surfaceId),
+      panes: entry.panes.map((pane: any, index: number) => ({
+        ...pane,
+        allocationGeneration: pane.allocationGeneration ?? index + 1,
+        paneLabel: pane.paneLabel > 0 ? pane.paneLabel : index + 1,
+      })),
+    }));
     socket.send(JSON.stringify({
       id: message.id,
       ok: true,
@@ -3470,22 +3511,14 @@ test("explicit window close sends an allocator-compatible windowGeneration relea
           .map((release: { releaseId: string }) => release.releaseId),
         completedWindowReleaseIds,
         registryIdentity: { allocatorId, fleetId },
-        surfaces: message.payload.surfaces.map((entry: any) => ({
-          surfaceId: entry.surfaceId,
-          windowGeneration,
-          windowLabel: "a",
-          panes: entry.panes.map((pane: any, index: number) => ({
-            ...pane,
-            allocationGeneration: pane.allocationGeneration ?? index + 1,
-            paneLabel: pane.paneLabel > 0 ? pane.paneLabel : index + 1,
-          })),
-        })),
+        surfaces,
         windowGenerationV1: true,
       },
       type: "response",
       v: 1,
     }));
   };
+  let activeSync: Promise<void> | undefined;
 
   try {
     assert.equal((await pair(lifecycle, "explicit-window-close-controller")).ok, true);
@@ -3496,13 +3529,16 @@ test("explicit window close sends an allocator-compatible windowGeneration relea
 
     const firstRequestPromise = waitForRegistration();
     const firstSync = registration.synchronize();
+    activeSync = firstSync;
     const { socket: registrySocket, message: firstRequest } = await firstRequestPromise;
     assert.equal(firstRequest.payload.windowGenerationV1, true);
-    assert.equal(firstRequest.payload.surfaces[0].windowGeneration, null);
+    assert.deepEqual(firstRequest.payload.surfaces.map((entry: any) => entry.windowGeneration), [null, null]);
     assert.deepEqual(firstRequest.payload.pendingWindowReleases, []);
-    respondAsAllocator(registrySocket, firstRequest, 17);
+    respondAsAllocator(registrySocket, firstRequest);
     await firstSync;
+    activeSync = undefined;
     assert.equal(core.listSurfaces()[0]!.windowAllocationGeneration, 17);
+    assert.equal(core.listSurfaces()[1]!.windowAllocationGeneration, 18);
 
     const listed = await request(lifecycle, "surfaces.list", {});
     const closed = await request(surfaceController, "surface.window.close", {
@@ -3512,6 +3548,11 @@ test("explicit window close sends an allocator-compatible windowGeneration relea
     });
     assert.equal(closed.ok, true, JSON.stringify(closed));
     assert.equal(closed.payload.recoverable, false);
+    const replacementSurface = core.createAdditionalSurface("Surf Ace replacement", {
+      height: 800,
+      scale: 2,
+      width: 1200,
+    });
 
     const pending = core.locklessAuthority.listPendingWindowReleases();
     assert.equal(pending.length, 1);
@@ -3527,6 +3568,7 @@ test("explicit window close sends an allocator-compatible windowGeneration relea
 
     const releaseRequestPromise = waitForRegistration();
     const releaseSync = registration.synchronize();
+    activeSync = releaseSync;
     const { socket: releaseSocket, message: releaseRequest } = await releaseRequestPromise;
     assert.equal(releaseRequest.payload.windowGenerationV1, true);
     assert.deepEqual(releaseRequest.payload.surfaces, []);
@@ -3536,10 +3578,27 @@ test("explicit window close sends an allocator-compatible windowGeneration relea
       releaseRequest.payload.pendingWindowReleases.map((entry: { releaseId: string }) => entry.releaseId),
       [expectedReleaseId],
     );
-    respondAsAllocator(releaseSocket, releaseRequest, 17);
+    const replacementClaimPromise = waitForRegistration();
+    respondAsAllocator(releaseSocket, releaseRequest);
+    const { socket: claimSocket, message: claimRequest } = await replacementClaimPromise;
+    assert.deepEqual(claimRequest.payload.surfaces.map((entry: any) => entry.surfaceId), [
+      replacementSurface.surfaceId,
+      survivingSurface.surfaceId,
+    ]);
+    assert.deepEqual(claimRequest.payload.pendingPaneReleases, []);
+    assert.deepEqual(claimRequest.payload.pendingWindowReleases, []);
+    respondAsAllocator(claimSocket, claimRequest);
     await releaseSync;
+    activeSync = undefined;
     assert.deepEqual(core.locklessAuthority.listPendingWindowReleases(), []);
+    const surviving = core.listSurfaces().find((entry) => entry.surfaceId === survivingSurface.surfaceId)!;
+    const replacement = core.listSurfaces().find((entry) => entry.surfaceId === replacementSurface.surfaceId)!;
+    assert.equal(surviving.windowLabel, "b");
+    assert.equal(surviving.windowAllocationGeneration, 18);
+    assert.equal(replacement.windowLabel, "a");
+    assert.equal(replacement.windowAllocationGeneration, 19);
   } finally {
+    if (activeSync) await activeSync.catch(() => undefined);
     await registration.stop();
     lifecycle.close();
     surfaceController.close();

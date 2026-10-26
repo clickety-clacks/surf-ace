@@ -66,6 +66,64 @@ test("retained publisher growth reclaims the oldest tombstone at the byte bounda
   assert.deepEqual(reclaimed, [first.tombstoneId]);
 });
 
+test("clearing allocator claims refreshes tombstone bytes and reclaims to the byte cap", () => {
+  const compact = {
+    ...limits,
+    maxPanesPerSurface: 1,
+    maxSurfaceRecoverableBaseBytes: 1,
+    maxPaneRecoverableStateBytes: 1,
+    maxPaneAnnotationRestoreBytes: 1,
+    maxRetainedTombstones: 2,
+    maxPaneConsumableBytes: 1,
+    maxSurfaceConsumableBytes: 1,
+    maxConsumableCursorStateBytesPerScope: 1,
+  };
+  const roomy = {
+    ...compact,
+    maxRecoverableSurfaceBytes: locklessRecoverableSurfaceMinimumBytes(compact),
+    maxRetainedTombstoneBytes: 100_000,
+  };
+  const makeAuthority = () => new LocklessClientAuthority(createEmptyLocklessClientState(roomy));
+  const payload = () => ({
+    paneTombstones: [],
+    surface: {
+      windowLabel: "f",
+      windowLabelConfirmed: true,
+      windowAllocationGeneration: 5,
+      panes: [{ paneId: 1, paneLabel: 44, allocationGeneration: 6 }],
+    },
+  });
+  const exactBytes = (tombstone: ReturnType<LocklessClientAuthority["createTombstone"]>) => {
+    const { bytes: _bytes, ...material } = tombstone;
+    return exactDurableBytes({ version: 1, ...material }) +
+      (tombstone.annotationPublisherPartitionBytes ?? 0);
+  };
+
+  const aggregate = makeAuthority();
+  const reclaimed: string[] = [];
+  aggregate.subscribe((event) => {
+    if (event.type === "event.tombstone_reclaimed") reclaimed.push(event.tombstoneId);
+  });
+  const first = aggregate.createTombstone({ kind: "surface", payload: payload(), surfaceId: "sf_first" });
+  const second = aggregate.createTombstone({ kind: "surface", payload: payload(), surfaceId: "sf_second" });
+  const aggregateLimit = first.bytes + second.bytes;
+  aggregate.configureLimits({ ...roomy, maxRetainedTombstoneBytes: aggregateLimit });
+  aggregate.clearTombstoneAllocationClaims();
+  assert.deepEqual(aggregate.listTombstones().map((entry) => entry.tombstoneId), [second.tombstoneId]);
+  assert.deepEqual(reclaimed, [first.tombstoneId]);
+  assert.deepEqual(aggregate.listPendingPaneReleases(), []);
+  assert.deepEqual(aggregate.listPendingWindowReleases(), []);
+  const retained = aggregate.listTombstones()[0]!;
+  assert.equal(retained.bytes, exactBytes(retained));
+  assert.ok(retained.bytes <= aggregateLimit);
+
+  const individual = makeAuthority();
+  const only = individual.createTombstone({ kind: "surface", payload: payload(), surfaceId: "sf_only" });
+  individual.configureLimits({ ...roomy, maxRetainedTombstoneBytes: only.bytes });
+  individual.clearTombstoneAllocationClaims();
+  assert.deepEqual(individual.listTombstones(), []);
+});
+
 function admit(
   target: LocklessClientAuthority,
   controllerInstanceId: string,
