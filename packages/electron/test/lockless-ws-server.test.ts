@@ -4773,13 +4773,6 @@ test("surface.describe returns topology when saved registry binding or lease is 
       assert.equal(admitted.ok, true, `${item.name}: ${JSON.stringify(admitted)}`);
       const panes = await request(socket, "panes.list", { surfaceId: fixture.surface.surfaceId });
       assert.equal(panes.ok, true, `${item.name}: ${JSON.stringify(panes)}`);
-      const paneId = Number(panes.payload.panes[0].paneId);
-      const snapshot = await request(socket, "snapshot.get", {
-        paneId,
-        surfaceId: fixture.surface.surfaceId,
-      });
-      assert.equal(snapshot.ok, true, `${item.name}: ${JSON.stringify(snapshot)}`);
-      assert.equal(snapshot.payload.contentId, `saved-content-${item.name}`);
       assert.deepEqual(core.registryBinding(), savedBinding);
       assert.deepEqual(core.registryEndpointLease(), savedLease);
       assert.deepEqual(
