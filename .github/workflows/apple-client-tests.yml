@@ -1,0 +1,44 @@
+name: Apple client tests
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "packages/ios/**"
+      - ".github/workflows/apple-client-tests.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  registration:
+    runs-on: xcode-27
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Record source and toolchain
+        run: |
+          git rev-parse HEAD HEAD^{tree}
+          sudo xcode-select --switch /Applications/Xcode_27.0.0.app
+          xcodebuild -version
+          xcrun simctl list runtimes
+      - name: Test registration and saved-state adoption
+        run: |
+          xcodebuild test \
+            -project packages/ios/SurfAce.xcodeproj \
+            -scheme SurfAce \
+            -configuration Release \
+            ENABLE_TESTABILITY=YES \
+            -parallel-testing-enabled NO \
+            -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M5),OS=27.0' \
+            -only-testing:SurfAceTests/SurfAceCentralRegistrationTests \
+            -resultBundlePath "$RUNNER_TEMP/registration.xcresult"
+      - name: Preserve test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: apple-registration-results
+          path: ${{ runner.temp }}/registration.xcresult
+          if-no-files-found: warn

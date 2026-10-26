@@ -96,6 +96,53 @@ test("the pinned release workflow uses the product title, not integration brandi
   }
 });
 
+test("RC releases are prereleases while stable releases stay regular releases", async (t) => {
+  const workflow = await fs.readFile(new URL("../../.github/workflows/release-tightbeam.yml", import.meta.url), "utf8");
+  const stepMarker = "      - name: Publish only after both verified receipts\n";
+  const runMarker = "        run: |\n";
+  const stepStart = workflow.indexOf(stepMarker);
+  const runStart = workflow.indexOf(runMarker, stepStart);
+  assert.ok(stepStart >= 0 && runStart >= 0, "release publish step is present");
+  const script = workflow.slice(runStart + runMarker.length)
+    .split("\n")
+    .map((line) => line.startsWith("          ") ? line.slice(10) : line)
+    .join("\n");
+
+  const temporaryDirectory = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-prerelease-route-"));
+  t.after(() => fs.rm(temporaryDirectory, { recursive: true, force: true }));
+  const binDirectory = path.join(temporaryDirectory, "bin");
+  await fs.mkdir(binDirectory);
+  const ghStubPath = path.join(binDirectory, "gh");
+  await fs.writeFile(ghStubPath, `#!/bin/bash
+set -euo pipefail
+printf '%s\\0' "$@" > "$GH_ARGS_PATH"
+`);
+  await fs.chmod(ghStubPath, 0o755);
+
+  for (const { version, prerelease } of [
+    { version: "0.2.10-rc2", prerelease: true },
+    { version: "0.2.10-rc10", prerelease: true },
+    { version: "0.2.10", prerelease: false },
+  ]) {
+    const argsPath = path.join(temporaryDirectory, `${version}.args`);
+    await execFileAsync("bash", ["--noprofile", "--norc", "-e", "-u", "-o", "pipefail", "-c", script], {
+      env: {
+        ...process.env,
+        PATH: `${binDirectory}${path.delimiter}${process.env.PATH ?? ""}`,
+        PRODUCT_VERSION: version,
+        PRODUCT_TAG: `surf-ace-v${version}-r9`,
+        GITHUB_REPOSITORY: "clickety-clacks/surf-ace",
+        LINUX_ATTESTATION_URL: "https://example.invalid/linux",
+        MACOS_ATTESTATION_URL: "https://example.invalid/macos",
+        GH_ARGS_PATH: argsPath,
+      },
+    });
+    const args = (await fs.readFile(argsPath, "utf8")).split("\0").filter(Boolean);
+    assert.deepEqual(args.slice(0, 2), ["release", "create"]);
+    assert.equal(args.includes("--prerelease"), prerelease, `${version} prerelease flag`);
+  }
+});
+
 test("the release guard accepts a72e77c with distinct immutable RC2 tag inputs", async (t) => {
   const workflow = await fs.readFile(new URL("../../.github/workflows/release-tightbeam.yml", import.meta.url), "utf8");
   const stepMarker = "      - name: Require exact manual tooling and immutable release tags\n";

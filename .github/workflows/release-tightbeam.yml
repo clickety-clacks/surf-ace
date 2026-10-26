@@ -1063,6 +1063,10 @@ jobs:
           set -euo pipefail
           test -n "${LINUX_ATTESTATION_URL}"
           test -n "${MACOS_ATTESTATION_URL}"
+          release_channel_args=()
+          if [[ "${PRODUCT_VERSION}" =~ -rc[1-9][0-9]*$ ]]; then
+            release_channel_args+=(--prerelease)
+          fi
           gh release create "${PRODUCT_TAG}" \
             "release/surf-ace-server-linux-x86_64-v${PRODUCT_VERSION}.tar.gz" \
             "release/surf-ace-cli-linux-x86_64-v${PRODUCT_VERSION}.tar.gz" \
@@ -1074,5 +1078,6 @@ jobs:
             release/SHA256SUMS \
             --repo "${GITHUB_REPOSITORY}" \
             --verify-tag \
+            "${release_channel_args[@]+"${release_channel_args[@]}"}" \
             --title "Surf Ace v${PRODUCT_VERSION}" \
             --notes "Surf Ace v${PRODUCT_VERSION}. Linux smoke attestation: ${LINUX_ATTESTATION_URL}\nmacOS smoke attestation: ${MACOS_ATTESTATION_URL}"

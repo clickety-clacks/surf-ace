@@ -624,34 +624,49 @@ final class SurfAceRuntime {
             verifyRegistry: { [weak self] registryIdentity, expected in
                 guard let self else { throw SurfAceRegistrationError.stopped }
                 let adapter = try self.ensureLocklessAdapter()
-                let directory = self.locklessStateURLOverride?.deletingLastPathComponent()
-                    ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-                        .appendingPathComponent("SurfAce", isDirectory: true)
-                let stored = await adapter.snapshot()
-                let provisioned = stored.registryBinding == nil
-                    ? try SurfAceProvisionedRegistryBinding.load(from: directory) : nil
-                let verifiedUnconfirmed = stored.registryBinding == nil
-                    ? try SurfAceVerifiedUnconfirmedMigration.load(from: directory) : nil
-                try await adapter.bindRegistryIdentity(
+                _ = try await adapter.bindRegistryIdentity(
                     registryIdentity, clientId: identity.clientId,
-                    expectedSurfaces: expected, provisioned: provisioned,
-                    verifiedUnconfirmed: verifiedUnconfirmed
+                    expectedSurfaces: expected, allowRebinding: false
                 )
+            },
+            bindRegistry: { [weak self] registryIdentity, expected in
+                guard let self else { throw SurfAceRegistrationError.stopped }
+                let adapter = try self.ensureLocklessAdapter()
+                let changed = try await adapter.bindRegistryIdentity(
+                    registryIdentity, clientId: identity.clientId,
+                    expectedSurfaces: expected, allowRebinding: true
+                )
+                if changed {
+                    self.confirmedPaneLabels.removeAll(keepingCapacity: true)
+                    try self.projectLocklessAuthorityState(await adapter.snapshot())
+                }
             },
             inputSnapshot: { [weak self] in
                 guard let self else { throw SurfAceRegistrationError.stopped }
                 let adapter = try self.ensureLocklessAdapter()
-                return try SurfAceRegistrationInput(state: await adapter.snapshot())
+                return try SurfAceRegistrationInput(state: await adapter.snapshot(), clientId: identity.clientId)
             },
-            applyReply: { [weak self] reply, input in
+            applyReplySubset: { [weak self] reply, input, request in
                 guard let self else { throw SurfAceRegistrationError.stopped }
                 let adapter = try self.ensureLocklessAdapter()
-                let state = try await adapter.applyRegistration(reply, expectedInput: input)
+                let state = try await adapter.applyRegistration(
+                    reply, expectedInput: input, requestInput: request, clientId: identity.clientId
+                )
                 self.confirmedPaneLabels = Dictionary(uniqueKeysWithValues: reply.assignments.flatMap { assignment in
                     assignment.panes.map { pane in
                         ("\(assignment.surfaceId):\(pane.paneLineageId)", pane.paneLabel)
                     }
                 })
+                try self.projectLocklessAuthorityState(state)
+            },
+            recoverRefusedRelease: { [weak self] releaseId in
+                guard let self else { throw SurfAceRegistrationError.stopped }
+                try await self.ensureLocklessAdapter().dropRefusedRelease(releaseId: releaseId)
+            },
+            recoverRefusedClaim: { [weak self] claim in
+                guard let self else { throw SurfAceRegistrationError.stopped }
+                let adapter = try self.ensureLocklessAdapter()
+                let state = try await adapter.rotateRefusedClaim(claim)
                 try self.projectLocklessAuthorityState(state)
             },
             onError: { error in
@@ -1207,6 +1222,23 @@ final class SurfAceRuntime {
         _ state: SurfAceLocklessAuthorityState,
         connectedSceneKey: String? = nil
     ) throws {
+        var reidentifiedSurface = false
+        for surface in surfaces {
+            guard state.liveSurfaces[surface.surfaceId] == nil,
+                  let replacementId = state.sceneSurfaceIds[surface.sceneKey],
+                  replacementId != surface.surfaceId,
+                  state.liveSurfaces[replacementId] != nil else { continue }
+            let oldId = surface.surfaceId
+            surfaceById.removeValue(forKey: oldId)
+            surface.surfaceId = replacementId
+            surfaceById[replacementId] = surface
+            surfaceIdBySceneKey[surface.sceneKey] = replacementId
+            identityMapping.surfacesBySceneKey[surface.sceneKey] = StoredSurfaceIdentity(surfaceId: replacementId)
+            persistedSurfaceTopologies.removeValue(forKey: oldId)
+            reidentifiedSurface = true
+        }
+        if reidentifiedSurface { persistIdentityMapping() }
+
         var projectedSurfaceIds = Set(surfaces.map(\.surfaceId))
         if let connectedSceneKey, let surfaceId = state.sceneSurfaceIds[connectedSceneKey] {
             projectedSurfaceIds.insert(surfaceId)
@@ -1217,10 +1249,12 @@ final class SurfAceRuntime {
            let surfaceId = state.sceneSurfaceIds[connectedSceneKey],
            let topology = topologies[surfaceId],
            surfaceById[surfaceId] == nil {
+            let labelsConfirmed = state.registryBinding?.clientId == identity?.clientId
+                && state.liveSurfaces[surfaceId]?.windowLabelConfirmed != false
             let surface = SurfAceSurfaceModel(
                 sceneKey: connectedSceneKey,
                 surfaceId: surfaceId,
-                windowLabel: topology.windowLabel,
+                windowLabel: labelsConfirmed ? topology.windowLabel : "",
                 name: topology.name
             )
             topology.apply(to: surface)
@@ -1234,11 +1268,14 @@ final class SurfAceRuntime {
 
         for surface in surfaces {
             guard let topology = topologies[surface.surfaceId] else { continue }
-            project(topology: topology, onto: surface)
+            let labelsConfirmed = state.registryBinding?.clientId == identity?.clientId
+                && state.liveSurfaces[surface.surfaceId]?.windowLabelConfirmed != false
+            project(topology: topology, onto: surface, labelsConfirmed: labelsConfirmed)
             if let authoritySurface = state.liveSurfaces[surface.surfaceId] {
                 surface.topologyEpoch = Int(authoritySurface.topologyRevision)
                 surface.surfaceEpoch = Int(authoritySurface.surfaceRevision)
             }
+            if reidentifiedSurface { persistSurfaceTopology(surfaceId: surface.surfaceId) }
         }
         projectAnnotationDeliveryFeedback(state)
     }
@@ -1286,9 +1323,10 @@ final class SurfAceRuntime {
 
     func project(
         topology: SurfAcePersistedSurfaceTopology,
-        onto surface: SurfAceSurfaceModel
+        onto surface: SurfAceSurfaceModel,
+        labelsConfirmed: Bool = true
     ) {
-        surface.windowLabel = topology.windowLabel
+        surface.windowLabel = labelsConfirmed ? topology.windowLabel : ""
         surface.name = topology.name
         let projectedPaneIds = Set(topology.panes.map(\.paneId))
         for persistedPane in topology.panes {
@@ -2563,7 +2601,8 @@ final class SurfAceRuntime {
             if controlProjection { controlProjectionConnections.insert(connectionUUID) }
             let state = publicPaneLabelProjection(controlProjection
                 ? Self.foundationJSON(SurfAceLocklessControlProjection.state(admittedState))
-                : try Self.jsonObject(admittedState))
+                : try Self.jsonObject(admittedState),
+                windowLabelConfirmations: windowLabelConfirmations(admittedState))
             let limits = try Self.jsonObject(admission.limits)
             let admittedScopeIds: [String]
             if let surfaceId, let surface = admittedState.liveSurfaces[surfaceId] {
@@ -2640,12 +2679,31 @@ final class SurfAceRuntime {
         }
     }
 
-    private func publicPaneLabelProjection(_ value: Any, surfaceId: String? = nil) -> Any {
+    private func windowLabelConfirmations(_ state: SurfAceLocklessAuthorityState) -> [String: Bool] {
+        let bindingExists = state.registryBinding?.clientId == identity?.clientId
+        var result = Dictionary(uniqueKeysWithValues: state.liveSurfaces.values.map {
+            ($0.surfaceId, bindingExists && $0.windowLabelConfirmed != false)
+        })
+        for tombstone in state.surfaceTombstones {
+            result[tombstone.surface.surfaceId] = bindingExists && tombstone.surface.windowLabelConfirmed != false
+        }
+        return result
+    }
+
+    private func publicPaneLabelProjection(
+        _ value: Any,
+        surfaceId: String? = nil,
+        windowLabelConfirmations: [String: Bool] = [:]
+    ) -> Any {
         if let object = value as? [String: Any] {
-            let scope = object["surfaceId"] as? String ?? surfaceId
+            let objectSurfaceId = object["surfaceId"] as? String
+            let scope = objectSurfaceId ?? surfaceId
             var projected: [String: Any] = [:]
             for (key, child) in object {
-                if key == "paneLabel" {
+                if key == "windowLabel" {
+                    let confirmed = objectSurfaceId.map { windowLabelConfirmations[$0] == true } ?? false
+                    projected[key] = confirmed ? child : NSNull()
+                } else if key == "paneLabel" {
                     let lineage = object["paneLineageId"] as? String
                     let number = (child as? NSNumber)?.int64Value
                     if let scope, let lineage, let number, number > 0,
@@ -2655,13 +2713,19 @@ final class SurfAceRuntime {
                         projected[key] = NSNull()
                     }
                 } else {
-                    projected[key] = publicPaneLabelProjection(child, surfaceId: scope)
+                    projected[key] = publicPaneLabelProjection(
+                        child, surfaceId: scope, windowLabelConfirmations: windowLabelConfirmations
+                    )
                 }
             }
             return projected
         }
         if let array = value as? [Any] {
-            return array.map { publicPaneLabelProjection($0, surfaceId: surfaceId) }
+            return array.map {
+                publicPaneLabelProjection(
+                    $0, surfaceId: surfaceId, windowLabelConfirmations: windowLabelConfirmations
+                )
+            }
         }
         return value
     }
@@ -2684,9 +2748,17 @@ final class SurfAceRuntime {
                 let snapshot = await adapter.snapshot()
                 responsePayload = [
                     "surfaceSetRevision": snapshot.surfaceSetRevision,
-                    "surfaceTombstones": snapshot.surfaceTombstones.map { Self.foundationJSON(SurfAceLocklessControlProjection.tombstone($0)) },
+                    "surfaceTombstones": snapshot.surfaceTombstones.map {
+                        publicPaneLabelProjection(
+                            Self.foundationJSON(SurfAceLocklessControlProjection.tombstone($0)),
+                            windowLabelConfirmations: windowLabelConfirmations(snapshot)
+                        )
+                    },
                     "surfaces": snapshot.liveSurfaces.values.sorted { $0.surfaceId < $1.surfaceId }
-                        .map { publicPaneLabelProjection(Self.foundationJSON(SurfAceLocklessControlProjection.surface($0))) },
+                        .map { publicPaneLabelProjection(
+                            Self.foundationJSON(SurfAceLocklessControlProjection.surface($0)),
+                            windowLabelConfirmations: windowLabelConfirmations(snapshot)
+                        ) },
                 ]
             case "panes.list":
                 let snapshot = await adapter.snapshot()
@@ -2705,7 +2777,9 @@ final class SurfAceRuntime {
                         return value
                     },
                     "surfaceId": surfaceId,
-                    "windowLabel": surface.windowLabel,
+                        "windowLabel": snapshot.registryBinding?.clientId == identity?.clientId
+                            && surface.windowLabelConfirmed != false
+                            ? surface.windowLabel as Any : NSNull(),
                     "topologyRevision": surface.topologyRevision,
                     "topology": Self.foundationJSON(surface.topology),
                 ]
