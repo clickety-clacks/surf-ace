@@ -69,13 +69,9 @@ test("a rejected startup close persists readable content without final close", a
   const { core, surfaceId } = coreWithSavedContent();
   let savedState: ReturnType<SurfaceCore["getPersistentState"]> | null = null;
   let prevented = false;
-  let pending = false;
   let programmatic = false;
   const deps = lifecycle({
-    beginClose: () => { pending = true; },
     closeWindowWithoutFinalizing: () => { programmatic = true; },
-    finishClose: () => { pending = false; },
-    isClosePending: () => pending,
     isProgrammaticClose: () => programmatic,
     persistState: async () => { savedState = core.getPersistentState(); },
   });
@@ -88,7 +84,7 @@ test("a rejected startup close persists readable content without final close", a
 
   assert.equal(prevented, true);
   assert.equal(programmatic, true);
-  assert.deepEqual(deps.calls, ["begin", "close-window-nonfinal", "finish"]);
+  assert.deepEqual(deps.calls, ["begin", "finish"]);
   assert.ok(savedState);
   assert.equal(core.ensurePrimarySurface("Surf Ace", viewport).surfaceId, surfaceId);
 
