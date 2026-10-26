@@ -19,3 +19,31 @@ test("identity fingerprint prefix is derived from the persisted public key", asy
     await fs.rm(stateDir, { force: true, recursive: true });
   }
 });
+
+test("an unreadable identity starts fresh without retrying the failed read", async () => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-electron-identity-"));
+  const identityPath = path.join(stateDir, "surface-identity.json");
+  try {
+    const original = await loadOrCreateIdentity(stateDir);
+    const originalReadFile = fs.readFile;
+    let attempts = 0;
+    fs.readFile = (async (...args: Parameters<typeof fs.readFile>) => {
+      if (args[0] === identityPath && attempts++ === 0) {
+        throw Object.assign(new Error("temporary read failure"), { code: "EIO" });
+      }
+      return await originalReadFile(...args);
+    }) as typeof fs.readFile;
+    let restored: Awaited<ReturnType<typeof loadOrCreateIdentity>>;
+    try {
+      restored = await loadOrCreateIdentity(stateDir);
+    } finally {
+      fs.readFile = originalReadFile;
+    }
+
+    assert.equal(attempts, 1);
+    assert.notEqual(restored.publicKeyPem, original.publicKeyPem);
+    assert.deepEqual(await loadOrCreateIdentity(stateDir), restored);
+  } finally {
+    await fs.rm(stateDir, { force: true, recursive: true });
+  }
+});

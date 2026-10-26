@@ -2168,12 +2168,111 @@ export class LocklessClientAuthority {
     );
   }
 
+  isSurfaceFinallyClosed(surfaceId: string): boolean {
+    return this.state.finalCloseRecords.some((entry) =>
+      entry.kind === "surface" && entry.surfaceId === surfaceId,
+    );
+  }
+
   listPendingPaneReleases(): PersistentPaneRetirement[] {
     return clone(this.state.pendingPaneReleases);
   }
 
   listPendingWindowReleases(): PersistentWindowRetirement[] {
     return clone(this.state.pendingWindowReleases);
+  }
+
+  holdPendingRegistryReleases(): {
+    paneReleases: PersistentPaneRetirement[];
+    windowReleases: PersistentWindowRetirement[];
+  } {
+    const held = {
+      paneReleases: clone(this.state.pendingPaneReleases),
+      windowReleases: clone(this.state.pendingWindowReleases),
+    };
+    this.state.pendingPaneReleases = [];
+    this.state.pendingWindowReleases = [];
+    this.clearTombstoneAllocationClaims();
+    return held;
+  }
+
+  clearTombstoneAllocationClaims(): void {
+    this.clearTombstoneAllocationClaimsInState();
+  }
+
+  discardRejectedPaneRelease(releaseId: string): void {
+    this.discardRejectedRelease(this.state.pendingPaneReleases, "pane", releaseId);
+  }
+
+  discardRejectedWindowRelease(releaseId: string): void {
+    this.discardRejectedRelease(this.state.pendingWindowReleases, "window", releaseId);
+  }
+
+  private discardRejectedRelease(
+    pending: Array<{ releaseId: string }>,
+    kind: "pane" | "window",
+    releaseId: string,
+  ): void {
+    if (!/^[a-f0-9]{64}$/.test(releaseId) || !pending.some((entry) => entry.releaseId === releaseId)) {
+      throw new LocklessAuthorityError("invalid_operation", `Rejected ${kind} release is not pending`);
+    }
+    if (kind === "pane") {
+      this.state.pendingPaneReleases = this.state.pendingPaneReleases.filter((entry) => entry.releaseId !== releaseId);
+    } else {
+      this.state.pendingWindowReleases = this.state.pendingWindowReleases.filter((entry) => entry.releaseId !== releaseId);
+    }
+  }
+
+  private clearTombstoneAllocationClaimsInState(): void {
+    const clearPane = (pane: unknown): void => {
+      if (!pane || typeof pane !== "object" || Array.isArray(pane)) return;
+      const value = pane as Record<string, unknown>;
+      value.paneLabel = 0;
+      value.allocationGeneration = null;
+    };
+    const clearSurface = (surface: unknown): void => {
+      if (!surface || typeof surface !== "object" || Array.isArray(surface)) return;
+      const value = surface as Record<string, unknown>;
+      value.windowLabel = "";
+      value.windowLabelConfirmed = false;
+      value.windowAllocationGeneration = null;
+      if (Array.isArray(value.panes)) for (const pane of value.panes) clearPane(pane);
+    };
+    for (const tombstone of this.state.tombstones) {
+      if (!tombstone.payload || typeof tombstone.payload !== "object" || Array.isArray(tombstone.payload)) continue;
+      const payload = tombstone.payload as Record<string, unknown>;
+      if (tombstone.kind === "pane") {
+        clearPane(payload.pane);
+        continue;
+      }
+      clearSurface(payload.surface);
+      if (Array.isArray(payload.paneTombstones)) {
+        for (const nested of payload.paneTombstones) {
+          if (!nested || typeof nested !== "object" || Array.isArray(nested)) continue;
+          const nestedPayload = (nested as Record<string, unknown>).payload;
+          if (!nestedPayload || typeof nestedPayload !== "object" || Array.isArray(nestedPayload)) continue;
+          clearPane((nestedPayload as Record<string, unknown>).pane);
+        }
+      }
+    }
+    // Clearing allocator claims can increase the serialized size because a
+    // missing generation is longer than its former integer representation.
+    // Keep retained-byte accounting synchronized with the modified payloads.
+    refreshRetainedTombstoneBytes(this.state);
+    const maximumBytes = this.state.limits.maxRetainedTombstoneBytes;
+    while (
+      this.state.tombstones.some((tombstone) => tombstone.bytes > maximumBytes) ||
+      this.state.tombstones.reduce((total, tombstone) => total + tombstone.bytes, 0) > maximumBytes
+    ) {
+      const victim = this.state.tombstones.shift();
+      if (!victim) {
+        throw new LocklessAuthorityError(
+          "internal_error",
+          "Tombstone pool cannot be reconciled after allocator claims are cleared",
+        );
+      }
+      this.recordTombstoneReclamation(victim, "byte_capacity");
+    }
   }
 
   acknowledgePaneReleases(releaseIds: string[]): void {

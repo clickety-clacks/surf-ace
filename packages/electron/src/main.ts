@@ -34,12 +34,10 @@ import {
   recordClientDiagnostic,
 } from "./client-flight-recorder.js";
 import { loadOrCreateIdentity } from "./identity.js";
-import { loadProvisionedRegistryBinding } from "./registry-binding.js";
 import {
   loadPersistentStateFile,
   PersistentStateOutcomeUnknownError,
   PersistentStateWriteGuardError,
-  shouldGuardUnrestorablePersistentState,
   writePersistentStateFile,
   type PersistentStateLoadResult,
 } from "./persistent-state-file.js";
@@ -498,7 +496,7 @@ async function loadPersistentState(): Promise<PersistentSurfaceState | undefined
 
 async function persistState(): Promise<void> {
   if (persistentStateOutcomeUnknown) throw new Error("Local persistence is paused pending reconciliation");
-  if (persistentStateWriteGuard) {
+  if (persistentStateWriteGuard && persistentStateWriteGuard !== "corrupt-primary") {
     clientWarn("state_persist_skipped_corrupt_restore", {
       path: path.join(stateDir, STATE_FILE_NAME),
       write_guard: persistentStateWriteGuard,
@@ -515,6 +513,7 @@ async function persistState(): Promise<void> {
         if (persistentStateOutcomeUnknown) throw new Error("Local persistence is paused pending reconciliation");
         try {
           await writePersistentStateFile(stateDir, STATE_FILE_NAME, candidate);
+          persistentStateWriteGuard = false;
           confirmedAnnotationLocalSaves.confirm(candidate);
         } catch (error) {
           if (error instanceof PersistentStateOutcomeUnknownError) {
@@ -539,7 +538,9 @@ async function persistState(): Promise<void> {
 }
 
 async function persistRegistryState(): Promise<void> {
-  if (persistentStateWriteGuard) throw new Error("registry_binding_persistence_pending");
+  if (persistentStateWriteGuard && persistentStateWriteGuard !== "corrupt-primary") {
+    throw new Error("registry_binding_persistence_pending");
+  }
   await persistState();
 }
 
@@ -2194,23 +2195,12 @@ async function boot(): Promise<void> {
     persistentState,
   });
   const restoredSurfaces = core.restorePersistedSurfaces(endpointName(), displayViewport());
-  if (shouldGuardUnrestorablePersistentState(persistentState, restoredSurfaces.length)) {
-    persistentStateWriteGuard = "unrestorable-primary";
-    clientWarn("state_restore_unrestorable_write_guard", {
-      persisted_surface_count: persistentState.surfaces?.length ?? 0,
-      write_guard: persistentStateWriteGuard,
-    });
-  }
-  const retainedSurfaceTombstones =
-    core.locklessAuthority.listTombstones("surface");
   const primarySurface =
     restoredSurfaces.find(
       (surface) => surface.surfaceId === persistentState?.primarySurfaceId,
     ) ??
     restoredSurfaces[0] ??
-    (retainedSurfaceTombstones.length === 0
-      ? core.ensurePrimarySurface(endpointName(), displayViewport())
-      : null);
+    core.ensurePrimarySurface(endpointName(), displayViewport());
   clientInfo("surface_restore_result", {
     primary_surface_id: primarySurface?.surfaceId ?? "nil",
     restored_surface_summary: restoredSurfaceDiagnosticSummary(),
@@ -2260,17 +2250,12 @@ async function boot(): Promise<void> {
   installWebAuthnAccountSelection();
   await acknowledgeCompositorMainAppBinding();
 
-  const provisionedBinding = await loadProvisionedRegistryBinding(stateDir).catch((error) => {
-    clientWarn("registry_provisioning_invalid", errorDiagnosticFields(error));
-    return null;
-  });
   configuredRegistration = new ServerConnection({
     configuredAddress,
     directEndpoint: configuredDirectEndpoint,
     clientId: registrationClientId(identity.publicKeyPem),
     core,
     persist: persistRegistryState,
-    provisionedBinding,
     onError: (error) => clientWarn("server_registration_failed", errorDiagnosticFields(error)),
   });
   configuredRegistration.start();
