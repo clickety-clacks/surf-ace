@@ -53,7 +53,7 @@ jobs:
             -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M5),OS=27.0' \
             -only-testing:SurfAceTests/SurfAceCentralRegistrationTests \
             -resultBundlePath "$RUNNER_TEMP/apple-registration-tests.xcresult"
-      - name: Test lockless authority and reclamation recovery
+      - name: Test lockless authority, reclamation, and mounted pixels
         if: steps.ios_source.outputs.changed == 'true'
         run: |
           xcodebuild test \
@@ -65,6 +65,7 @@ jobs:
             -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M5),OS=27.0' \
             -only-testing:SurfAceTests/SurfAceLocklessAuthorityTests \
             -only-testing:SurfAceTests/SurfAceControllerReclamationAccountingTests \
+            -only-testing:SurfAceTests/SurfAceLocklessWebSocketIntegrationTests/testContentSetReachesMountedVisiblePixels \
             -resultBundlePath "$RUNNER_TEMP/apple-recovery-tests.xcresult"
       - name: Preserve test results
         if: always()
