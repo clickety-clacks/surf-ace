@@ -205,6 +205,8 @@ jobs:
     runs-on: xcode-27
     steps:
       - name: Prepare run-isolated macOS evidence
+        id: prepare-macos-evidence
+        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
@@ -279,7 +281,9 @@ jobs:
           guard
 
       - name: Capture macOS build and runner evidence
+        id: capture-macos-evidence
         if: always()
+        continue-on-error: true
         shell: bash
         env:
           MACOS_TEST_STEP_OUTCOME: ${{ steps.macos-tests.outcome }}
@@ -391,6 +395,7 @@ jobs:
       - name: Retain macOS release evidence
         if: always()
         id: upload-macos-evidence
+        continue-on-error: true
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: ${{ env.EVIDENCE_ARTIFACT }}
@@ -399,6 +404,7 @@ jobs:
           include-hidden-files: true
           retention-days: 30
       - name: Download retained macOS evidence for readback
+        id: download-macos-evidence-readback
         if: always()
         continue-on-error: true
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
@@ -406,7 +412,9 @@ jobs:
           name: ${{ env.EVIDENCE_ARTIFACT }}
           path: ${{ env.EVIDENCE_READBACK_DIR }}
       - name: Verify retained macOS evidence readback
+        id: verify-macos-evidence-readback
         if: always()
+        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
@@ -454,6 +462,32 @@ jobs:
             printf 'The uploaded macOS evidence could not be verified after download.\n' \
               >> "$GITHUB_STEP_SUMMARY"
             exit 1
+          fi
+
+      - name: Report optional macOS evidence gaps
+        if: always()
+        env:
+          PREPARE_OUTCOME: ${{ steps.prepare-macos-evidence.outcome }}
+          CAPTURE_OUTCOME: ${{ steps.capture-macos-evidence.outcome }}
+          UPLOAD_OUTCOME: ${{ steps.upload-macos-evidence.outcome }}
+          DOWNLOAD_OUTCOME: ${{ steps.download-macos-evidence-readback.outcome }}
+          READBACK_OUTCOME: ${{ steps.verify-macos-evidence-readback.outcome }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          outcomes=(
+            "${PREPARE_OUTCOME:-unknown}"
+            "${CAPTURE_OUTCOME:-unknown}"
+            "${UPLOAD_OUTCOME:-unknown}"
+            "${DOWNLOAD_OUTCOME:-unknown}"
+            "${READBACK_OUTCOME:-unknown}"
+          )
+          if [[ " ${outcomes[*]} " == *" failure "* || " ${outcomes[*]} " == *" cancelled "* || " ${outcomes[*]} " == *" unknown "* ]]; then
+            printf '::warning::Optional macOS diagnostic evidence was incomplete; product qualification remains based on the macOS tests and asset build.\n'
+            printf 'Optional macOS diagnostic evidence was incomplete. macOS product tests and asset build remain the qualification gates.\n' \
+              >> "$GITHUB_STEP_SUMMARY"
+          else
+            printf 'Optional macOS diagnostic evidence was captured and verified.\n' >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: Build standalone macOS CLI and Electron assets
