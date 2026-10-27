@@ -25,7 +25,7 @@ jobs:
           sudo xcode-select --switch /Applications/Xcode_27.0.0.app
           xcodebuild -version
           xcrun simctl list runtimes
-      - name: Test registration and saved-state adoption
+      - name: Test registration, lockless authority, and reclamation recovery
         run: |
           xcodebuild test \
             -project packages/ios/SurfAce.xcodeproj \
@@ -35,11 +35,13 @@ jobs:
             -parallel-testing-enabled NO \
             -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M5),OS=27.0' \
             -only-testing:SurfAceTests/SurfAceCentralRegistrationTests \
-            -resultBundlePath "$RUNNER_TEMP/registration.xcresult"
+            -only-testing:SurfAceTests/SurfAceLocklessAuthorityTests \
+            -only-testing:SurfAceTests/SurfAceControllerReclamationAccountingTests \
+            -resultBundlePath "$RUNNER_TEMP/apple-focused-ios-tests.xcresult"
       - name: Preserve test results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: apple-registration-results
-          path: ${{ runner.temp }}/registration.xcresult
+          name: apple-focused-ios-tests
+          path: ${{ runner.temp }}/apple-focused-ios-tests.xcresult
           if-no-files-found: warn
