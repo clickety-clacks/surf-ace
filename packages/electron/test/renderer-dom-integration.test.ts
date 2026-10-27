@@ -93,7 +93,6 @@ test("renderer DOM integrates authoritative connection states and live scale con
   const mutationCallbacks: Array<() => void> = [];
   const fontCallbacks: Array<() => void> = [];
   const surfAce = {
-    panePresentationEnabled: false,
     finishAnnotation() {
       finishCalls++;
       return new Promise((resolve) => { finishReply = resolve; });
@@ -220,9 +219,8 @@ test("renderer DOM integrates authoritative connection states and live scale con
   assert.equal(chrome().pane.hasAttribute("hidden"), false);
   assert.equal(chrome().window.hasAttribute("hidden"), false);
 
-  assert.equal(document.querySelector(".pane-pop-out"), null, "default-off presentation exposes no Solo control");
-  assert.equal(presentations.length, 0, "default-off rendering sends no presentation request");
-  surfAce.panePresentationEnabled = true; // Explicit isolated fixture opt-in.
+  assert.ok(document.querySelector(".pane-pop-out"), "default-on presentation exposes the Solo control immediately");
+  assert.equal(presentations.length, 0, "showing the default-on control does not change presentation state");
   stateListener!(state("connecting"));
   assert.equal(chrome().glyph.hasAttribute("hidden"), true);
   assert.equal(chrome().pane.hasAttribute("hidden"), false);
@@ -1588,13 +1586,13 @@ test("renderer DOM integrates authoritative connection states and live scale con
     Object.assign(surfAce, { reportSnapshot: oldSnapshot, reportOverlayRegions: oldOverlay });
   });
 
-  await test("real core viewport epoch keeps mounted divider slots while presentation is disabled", async () => {
-    surfAce.panePresentationEnabled = false;
+  await test("real core viewport epoch keeps mounted divider slots with default-on presentation idle", async () => {
     const f = realViewportFixture();
     const before = f.state();
     stateListener!(before);
     const roots = [...document.querySelectorAll<HTMLElement>(".pane-shell")];
     const guests = roots.map(root => root.querySelector("webview"));
+    const toggles = roots.map(root => root.querySelector(".pane-pop-out"));
     const rectangle = Object.getOwnPropertyDescriptor(window.HTMLElement.prototype, "getBoundingClientRect")!;
     Object.defineProperty(window.HTMLElement.prototype, "getBoundingClientRect", { configurable: true,
       value(this: HTMLElement) {
@@ -1606,7 +1604,8 @@ test("renderer DOM integrates authoritative connection states and live scale con
       const resized = f.state();
       assert.notEqual(resized.surfaceEpoch, before.surfaceEpoch, "real viewport rotates epoch");
       stateListener!(resized);
-      assert.equal(document.querySelector(".pane-pop-out"), null);
+      assert.deepEqual(roots.map(root => root.querySelector(".pane-pop-out")), toggles,
+        "default-on controls remain attached when no pane is popped out");
       assert.deepEqual([...document.querySelectorAll(".pane-shell")], roots);
       assert.deepEqual(roots.map(root => root.querySelector("webview")), guests);
       const commits: any[] = [];
@@ -1638,7 +1637,6 @@ test("renderer DOM integrates authoritative connection states and live scale con
       assert.ok([...document.querySelectorAll<HTMLElement>(".pane-layout-slot")].every(slot => slot.isConnected));
     } finally {
       Object.defineProperty(window.HTMLElement.prototype, "getBoundingClientRect", rectangle);
-      surfAce.panePresentationEnabled = true;
     }
   });
 
