@@ -116,7 +116,7 @@ const DESIGN_INVARIANT_CHECKS = [
   ["Floating History Controls", [{ suite: "electron", file: "packages/electron/test/renderer-dom-integration.test.ts", marker: "test(\"renderer DOM integrates authoritative connection states and live scale controls\"" }]],
   ["Disabled History Controls", [{ suite: "electron", file: "packages/electron/test/renderer-ui-projection.test.ts", marker: "test(\"disabled history controls stay disabled without a hover affordance\"" }]],
   ["No History Counters", [{ suite: "electron", file: "packages/electron/test/renderer-ui-projection.test.ts", marker: "test(\"history controls expose no depth counters\"" }]],
-  ["Degraded Restore Safety", [{ suite: "electron", file: "packages/electron/test/surface-core.test.ts", marker: "test(\"surface core rejects persisted surfaces with partially restorable pane topology\"" }]],
+  ["Degraded Restore Safety", [{ suite: "electron", file: "packages/electron/test/surface-core.test.ts", marker: "test(\"surface core repairs partial saved pane order and layout while retaining readable panes\"" }]],
   ["Restore Failure UI", [{ suite: "ios", file: "packages/ios/SurfAceTests/SurfAceBrowserURLTargetApplyTests.swift", marker: "func testBrowserURLTargetApplyRecordsFailedNavigationEvidence" }]],
   ["Connection State Indicator", [{ suite: "electron", file: "packages/electron/test/renderer-ui-projection.test.ts", marker: "test(\"assigned identity labels remain visible across connection states\"" }]],
   ["Connected State UI", [{ suite: "ios", file: "packages/ios/SurfAceTests/SurfAceCentralRegistrationTests.swift", marker: "func testCentralStatusTracksRegistrationPersistenceLossRetryAndStop" }]],
@@ -675,7 +675,7 @@ test("Electron smoke checks the running app version before any CLI request", asy
     },
     stateRoot: path.join(root, "cli-state"),
     waitForEndpoint: async () => undefined,
-  }), /tightbeam_client_app_version_mismatch:0\.1\.0:0\.2\.8/);
+  }), (error) => error.message === `tightbeam_client_app_version_mismatch:0.1.0:${TIGHTBEAM.version}`);
   assert.equal(cliCalls, 0);
 });
 
@@ -1333,18 +1333,28 @@ test("fresh-install smoke requests no image option and validates returned screen
 
 test("Tightbeam SHA256SUMS binds exactly the six hosted assets and manifest", async (t) => {
   const root = await temporary(t);
-  const names = [...TIGHTBEAM.assets, TIGHTBEAM.manifest].sort();
+  const assets = [...TIGHTBEAM.assets].sort();
   const lines = [];
-  for (const name of names) {
+  const assetDetails = [];
+  for (const name of assets) {
     const bytes = `fixture:${name}\n`;
     await fs.writeFile(path.join(root, name), bytes);
-    lines.push(`${createHash("sha256").update(bytes).digest("hex")}  ${name}`);
+    assetDetails.push({ name, sha256: createHash("sha256").update(bytes).digest("hex"), sizeBytes: Buffer.byteLength(bytes) });
+  }
+  const manifestPath = path.join(root, TIGHTBEAM.manifest);
+  await fs.writeFile(manifestPath, `${JSON.stringify({
+    assets: assetDetails,
+    checksums: Object.fromEntries(assetDetails.map(({ name, sha256 }) => [name, sha256])),
+    components: ["linux", "macos"],
+  })}\n`);
+  for (const name of [...assets, TIGHTBEAM.manifest].sort()) {
+    lines.push(`${createHash("sha256").update(await fs.readFile(path.join(root, name))).digest("hex")}  ${name}`);
   }
   const sums = path.join(root, TIGHTBEAM.checksums);
   await fs.writeFile(sums, `${lines.join("\n")}\n`);
-  assert.deepEqual((await verifyTightbeamChecksums(path.join(root, TIGHTBEAM.manifest))).files, names);
-  await fs.writeFile(path.join(root, names[0]), "tampered\n");
-  await assert.rejects(verifyTightbeamChecksums(path.join(root, TIGHTBEAM.manifest)), /tightbeam_checksum_mismatch/);
+  assert.deepEqual((await verifyTightbeamChecksums(manifestPath)).files, [...assets, TIGHTBEAM.manifest].sort());
+  await fs.writeFile(path.join(root, assets[0]), "tampered\n");
+  await assert.rejects(verifyTightbeamChecksums(manifestPath), /tightbeam_checksum_mismatch/);
 });
 
 test("Tightbeam manifest assembles the six hosted assets including the exact skill bytes without iOS distribution signing", async (t) => {
@@ -1409,7 +1419,12 @@ test("Tightbeam manifests and SHA256SUMS can contain one fully gated platform", 
       for (const name of selectedAssets) {
         if (name !== TIGHTBEAM_SKILL_ASSET) await fs.writeFile(path.join(outputDir, name), `fixture:${name}\n`);
       }
-      if (component === "linux") await copyTightbeamSkillAsset(toolingSkillDir, outputDir);
+      if (component === "linux") {
+        const sourceSkill = path.join(toolingSkillDir, "integrations/tightbeam/skills/surf-ace/SKILL.md");
+        await fs.mkdir(path.dirname(sourceSkill), { recursive: true });
+        await fs.writeFile(sourceSkill, "fixture skill\n");
+        await copyTightbeamSkillAsset(toolingSkillDir, outputDir);
+      }
 
       const result = await writeTightbeamManifest({
         components: [component],

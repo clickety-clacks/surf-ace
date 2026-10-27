@@ -186,7 +186,7 @@ esac
     },
   });
 
-  assert.equal(await fs.readFile(outputPath, "utf8"), `product_commit=${productCommit}\nproduct_version=0.2.10-rc2\n`);
+  assert.equal(await fs.readFile(outputPath, "utf8"), `product_commit=${productCommit}\nproduct_version=0.2.10-rc2\nversion_name_mismatch=false\n`);
   const calls = await fs.readFile(callsPath, "utf8");
   assert.ok(calls.includes(`git/ref/tags/${toolingTag}`));
   assert.ok(calls.includes(`git/ref/tags/${productTag}`));
