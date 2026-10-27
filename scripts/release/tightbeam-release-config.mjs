@@ -56,11 +56,9 @@ export const TIGHTBEAM_PUBLIC_FILES = Object.freeze([
 ]);
 
 export const TIGHTBEAM_PLATFORM_ASSETS = Object.freeze({
-  linux: Object.freeze([
-    ...TIGHTBEAM.assets.slice(0, 3),
-    TIGHTBEAM_SKILL_ASSET,
-  ]),
+  linux: Object.freeze(TIGHTBEAM.assets.slice(0, 3)),
   macos: Object.freeze(TIGHTBEAM.assets.slice(3, 5)),
+  skill: Object.freeze([TIGHTBEAM_SKILL_ASSET]),
 });
 
 export function tightbeamAssetsForComponents(components) {

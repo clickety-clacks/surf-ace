@@ -82,8 +82,8 @@ jobs:
           version_name_mismatch=false
           if [[ "${tooling_version}" != "${product_version}" ]]; then
             version_name_mismatch=true
-            echo "::warning::The tooling tag version label differs from the product version label; the product tag determines asset names."
-            printf 'The tooling tag version label differs from the product version label. Asset names follow the product version.\n' \
+            echo "::warning::The tooling tag version label differs; exact tag pins remain required, asset names follow the product tag, and platform smoke still checks the app version."
+            printf 'The tooling tag version label differs; exact tag pins remain required, asset names follow the product tag, and platform smoke still checks the app version.\n' \
               >> "$GITHUB_STEP_SUMMARY"
           fi
           peel_tag() {
@@ -186,7 +186,22 @@ jobs:
             --source-commit "${PRODUCT_COMMIT}" \
             --version "${PRODUCT_VERSION}" \
             --target "${LINUX_RUST_TARGET}"
-      - name: Retain deterministic Linux assets and standalone skill
+      - name: Include the shared skill asset when its pinned bytes are available
+        shell: bash
+        run: |
+          set -euo pipefail
+          skill_source="tooling/integrations/tightbeam/skills/surf-ace/SKILL.md"
+          skill_asset="build/release/tightbeam/surf-ace-skill-v${PRODUCT_VERSION}.md"
+          if [[ -s "${skill_source}" ]] && cp "${skill_source}" "${skill_asset}" && cmp -s "${skill_source}" "${skill_asset}"; then
+            printf 'The shared skill asset was copied from the pinned tooling source and will be included only if final manifest verification succeeds.\n' \
+              >> "$GITHUB_STEP_SUMMARY"
+          else
+            rm -f "${skill_asset}"
+            printf '::warning::The shared skill asset was unavailable or could not be verified; qualified Linux assets remain eligible.\n'
+            printf 'The shared skill asset was unavailable or could not be verified; qualified Linux assets remain eligible.\n' \
+              >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Retain deterministic Linux assets and optional shared skill
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: tightbeam-linux-${{ matrix.lane }}
@@ -195,7 +210,7 @@ jobs:
             build/release/tightbeam/surf-ace-cli-linux-x86_64-v${{ env.PRODUCT_VERSION }}.tar.gz
             build/release/tightbeam/surf-ace-electron-linux-x86_64-v${{ env.PRODUCT_VERSION }}.zip
             build/release/tightbeam/surf-ace-skill-v${{ env.PRODUCT_VERSION }}.md
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 30
       - name: Remove job-owned checkout and build paths
         if: always()
@@ -877,8 +892,7 @@ jobs:
           for file in \
             surf-ace-server-linux-x86_64-v${PRODUCT_VERSION}.tar.gz \
             surf-ace-cli-linux-x86_64-v${PRODUCT_VERSION}.tar.gz \
-            surf-ace-electron-linux-x86_64-v${PRODUCT_VERSION}.zip \
-            surf-ace-skill-v${PRODUCT_VERSION}.md; do
+            surf-ace-electron-linux-x86_64-v${PRODUCT_VERSION}.zip; do
             for lane in build-a build-b; do
               source="build/downloads/tightbeam-linux-${lane}/${file}"
               test -s "${source}"
@@ -889,7 +903,7 @@ jobs:
           node tooling/scripts/release/compare-release-builds.mjs \
             --build-a build-a \
             --build-b build-b \
-            --files surf-ace-server-linux-x86_64-v${PRODUCT_VERSION}.tar.gz,surf-ace-cli-linux-x86_64-v${PRODUCT_VERSION}.tar.gz,surf-ace-electron-linux-x86_64-v${PRODUCT_VERSION}.zip,surf-ace-skill-v${PRODUCT_VERSION}.md \
+            --files surf-ace-server-linux-x86_64-v${PRODUCT_VERSION}.tar.gz,surf-ace-cli-linux-x86_64-v${PRODUCT_VERSION}.tar.gz,surf-ace-electron-linux-x86_64-v${PRODUCT_VERSION}.zip \
             > linux-byte-comparison.json
       - name: Report Linux comparison gate
         id: finalize
@@ -1107,6 +1121,7 @@ jobs:
           set -euo pipefail
           test "$(git -C tooling rev-parse HEAD)" = "${GITHUB_SHA}"
           test "$(git -C source rev-parse HEAD)" = "${PRODUCT_COMMIT}"
+          rm -f "build/release/tightbeam/surf-ace-skill-v${PRODUCT_VERSION}.md"
           node tooling/scripts/release/build-tightbeam-release.mjs \
             --source-dir source \
             --output-dir build/release/tightbeam \
@@ -1379,7 +1394,7 @@ jobs:
           node tooling/scripts/release/write-smoke-receipt.mjs \
             --channel tightbeam-linux \
             --manifest "build/release/tightbeam/surf-ace-v${PRODUCT_VERSION}-manifest.json" \
-            --files "build/release/tightbeam/surf-ace-server-linux-x86_64-v${PRODUCT_VERSION}.tar.gz,build/release/tightbeam/surf-ace-cli-linux-x86_64-v${PRODUCT_VERSION}.tar.gz,build/release/tightbeam/surf-ace-electron-linux-x86_64-v${PRODUCT_VERSION}.zip,build/release/tightbeam/surf-ace-skill-v${PRODUCT_VERSION}.md" \
+            --files "build/release/tightbeam/surf-ace-server-linux-x86_64-v${PRODUCT_VERSION}.tar.gz,build/release/tightbeam/surf-ace-cli-linux-x86_64-v${PRODUCT_VERSION}.tar.gz,build/release/tightbeam/surf-ace-electron-linux-x86_64-v${PRODUCT_VERSION}.zip" \
             --output linux-smoke-receipt.json
       - name: Retain Linux smoke result and receipt
         id: retain-linux-smoke
@@ -1571,6 +1586,7 @@ jobs:
       components: ${{ steps.select.outputs.components }}
       linux_status: ${{ steps.select.outputs.linux_status }}
       macos_status: ${{ steps.select.outputs.macos_status }}
+      skill_status: ${{ steps.select.outputs.skill_status }}
     env:
       PRODUCT_COMMIT: ${{ needs.guard.outputs.product_commit }}
       PRODUCT_VERSION: ${{ needs.guard.outputs.product_version }}
@@ -1642,7 +1658,6 @@ jobs:
             "surf-ace-server-linux-x86_64-v${PRODUCT_VERSION}.tar.gz"
             "surf-ace-cli-linux-x86_64-v${PRODUCT_VERSION}.tar.gz"
             "surf-ace-electron-linux-x86_64-v${PRODUCT_VERSION}.zip"
-            "surf-ace-skill-v${PRODUCT_VERSION}.md"
           )
           macos_files=(
             "surf-ace-cli-macos-arm64-v${PRODUCT_VERSION}.tar.gz"
@@ -1671,6 +1686,16 @@ jobs:
               >> "$GITHUB_STEP_SUMMARY"
             echo "No platform candidate passed its required gates." >&2
             exit 1
+          fi
+          skill_status=unavailable
+          skill_source="tooling/integrations/tightbeam/skills/surf-ace/SKILL.md"
+          skill_asset="surf-ace-skill-v${PRODUCT_VERSION}.md"
+          if [[ -s "${skill_source}" ]] && cp "${skill_source}" "build/release/tightbeam/${skill_asset}" && cmp -s "${skill_source}" "build/release/tightbeam/${skill_asset}"; then
+            components+=(skill)
+            skill_status=included
+          else
+            rm -f "build/release/tightbeam/${skill_asset}"
+            printf '::warning::The shared skill asset was omitted because its pinned source bytes were unavailable or unverifiable.\n'
           fi
           components_csv="$(IFS=,; printf '%s' "${components[*]}")"
           printf 'components=%s\n' "${components_csv}" >> "$GITHUB_OUTPUT"
@@ -1713,7 +1738,9 @@ jobs:
           fi
           printf 'linux_status=%s\n' "$linux_status" >> "$GITHUB_OUTPUT"
           printf 'macos_status=%s\n' "$macos_status" >> "$GITHUB_OUTPUT"
+          printf 'skill_status=%s\n' "$skill_status" >> "$GITHUB_OUTPUT"
           printf 'Linux assets: %s\nmacOS assets: %s\n' "$linux_status" "$macos_status" >> "$GITHUB_STEP_SUMMARY"
+          printf 'Shared skill asset: %s.\n' "$skill_status" >> "$GITHUB_STEP_SUMMARY"
           printf 'iOS XCTest state: %s.\n' "${IOS_TEST_STATE:-unavailable}" >> "$GITHUB_STEP_SUMMARY"
           if [[ "${ALL_ASSETS_COMPARE_STATE:-warning}" != passed ]]; then
             printf 'The informational six-file comparison was %s; per-platform comparisons govern asset eligibility.\n' \
@@ -1754,7 +1781,7 @@ jobs:
 
   publish:
     if: >-
-      ${{ inputs.publish_release && inputs.run_smoke && needs.guard.result == 'success' &&
+      ${{ always() && inputs.publish_release && inputs.run_smoke && needs.guard.result == 'success' &&
       needs.assemble.result == 'success' &&
       (needs.assemble.outputs.has_linux == 'true' || needs.assemble.outputs.has_macos == 'true') }}
     needs:
@@ -1781,6 +1808,7 @@ jobs:
       COMPONENTS: ${{ needs.assemble.outputs.components }}
       LINUX_STATUS: ${{ needs.assemble.outputs.linux_status }}
       MACOS_STATUS: ${{ needs.assemble.outputs.macos_status }}
+      SKILL_STATUS: ${{ needs.assemble.outputs.skill_status }}
       IOS_TEST_STATE: ${{ needs.summarize-ios-tests.outputs.state }}
       IOS_TEST_BUILD_A: ${{ needs.summarize-ios-tests.outputs.build_a }}
       IOS_TEST_BUILD_B: ${{ needs.summarize-ios-tests.outputs.build_b }}
@@ -1848,7 +1876,7 @@ jobs:
           node tooling/scripts/release/write-smoke-receipt.mjs \
             --channel tightbeam-linux \
             --manifest "release/surf-ace-v${PRODUCT_VERSION}-manifest.json" \
-            --files "release/surf-ace-server-linux-x86_64-v${PRODUCT_VERSION}.tar.gz,release/surf-ace-cli-linux-x86_64-v${PRODUCT_VERSION}.tar.gz,release/surf-ace-electron-linux-x86_64-v${PRODUCT_VERSION}.zip,release/surf-ace-skill-v${PRODUCT_VERSION}.md" \
+            --files "release/surf-ace-server-linux-x86_64-v${PRODUCT_VERSION}.tar.gz,release/surf-ace-cli-linux-x86_64-v${PRODUCT_VERSION}.tar.gz,release/surf-ace-electron-linux-x86_64-v${PRODUCT_VERSION}.zip" \
             --output release/.receipts/linux-smoke-receipt.json
       - name: Create macOS smoke receipt
         id: create-macos-receipt
@@ -1871,7 +1899,7 @@ jobs:
           node tooling/scripts/release/write-smoke-receipt.mjs \
             --channel tightbeam-linux \
             --manifest "release/surf-ace-v${PRODUCT_VERSION}-manifest.json" \
-            --files "release/surf-ace-server-linux-x86_64-v${PRODUCT_VERSION}.tar.gz,release/surf-ace-cli-linux-x86_64-v${PRODUCT_VERSION}.tar.gz,release/surf-ace-electron-linux-x86_64-v${PRODUCT_VERSION}.zip,release/surf-ace-skill-v${PRODUCT_VERSION}.md" \
+            --files "release/surf-ace-server-linux-x86_64-v${PRODUCT_VERSION}.tar.gz,release/surf-ace-cli-linux-x86_64-v${PRODUCT_VERSION}.tar.gz,release/surf-ace-electron-linux-x86_64-v${PRODUCT_VERSION}.zip" \
             --receipt release/.receipts/linux-smoke-receipt.json
       - name: Verify macOS smoke receipt
         id: verify-macos-receipt
@@ -1919,6 +1947,7 @@ jobs:
           Included components: ${COMPONENTS}.
           Linux: ${LINUX_STATUS}
           macOS: ${MACOS_STATUS}
+          Shared skill asset: ${SKILL_STATUS}
           iOS app: not included in this release. The iOS XCTest lanes were build-a=${IOS_TEST_BUILD_A:-unavailable} and build-b=${IOS_TEST_BUILD_B:-unavailable} (${IOS_TEST_STATE:-unavailable}).
 
           The informational six-file comparison state was ${SIX_FILE_COMPARE_STATE:-unavailable}; per-platform comparisons determine asset eligibility.
@@ -1928,7 +1957,7 @@ jobs:
               "${IOS_TEST_STATE:-unavailable}" >> release-notes.md
           fi
           if [[ "${VERSION_NAME_MISMATCH:-false}" == true ]]; then
-            printf '\nThe tooling tag version label differs from the product tag version label; asset names follow the product version.\n' \
+            printf '\nThe tooling tag version label differs from the product tag version label; exact tag pins remain required, asset names follow the product version, and smoke still checks the app version.\n' \
               >> release-notes.md
           fi
           if [[ "${HAS_LINUX}" == true ]]; then

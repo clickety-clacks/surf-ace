@@ -1321,7 +1321,7 @@ export async function smokeTightbeam(options) {
   await assertTrackedInputsUnchanged(sourceDir);
   await assertTrackedInputsUnchanged(toolingRoot);
   const component = process.env.SURF_ACE_SMOKE_COMPONENT;
-  if (!(component in TIGHTBEAM_PLATFORM_ASSETS)) throw new Error("SURF_ACE_SMOKE_COMPONENT_must_be_linux_or_macos");
+  if (!["linux", "macos"].includes(component)) throw new Error("SURF_ACE_SMOKE_COMPONENT_must_be_linux_or_macos");
   const listedManifest = JSON.parse(await fs.readFile(options.manifest, "utf8"));
   const manifestAssetNames = listedManifest.assets?.map(({ name }) => name);
   const manifestComponents = tightbeamComponentsForAssets(manifestAssetNames);

@@ -407,7 +407,7 @@ export async function writeTightbeamManifest({
   outputDir,
   toolingCommit,
   skillSourceDir = toolingRoot,
-  components = ["linux", "macos"],
+  components = ["linux", "macos", "skill"],
 }) {
   const source = path.resolve(sourceDir);
   const output = path.resolve(outputDir);
@@ -558,7 +558,7 @@ export async function buildTightbeamRelease(options) {
   }
   await fs.mkdir(outputDir, { recursive: true });
   if (component === "linux") {
-    return { ...await buildTightbeamLinuxPackages({ sourceDir: sourceArgument, outputDir, target: options.target ?? TOOLCHAINS.linuxRustTarget, skillSourceDir: toolingRoot }), sourceCommit: options.sourceCommit, toolingCommit };
+    return { ...await buildTightbeamLinuxPackages({ sourceDir: sourceArgument, outputDir, target: options.target ?? TOOLCHAINS.linuxRustTarget, includeSkillAsset: false, skillSourceDir: toolingRoot }), sourceCommit: options.sourceCommit, toolingCommit };
   }
   if (component === "macos") {
     return { ...await buildTightbeamMacosPackages({ sourceDir: sourceArgument, outputDir }), sourceCommit: options.sourceCommit, toolingCommit };
@@ -568,7 +568,7 @@ export async function buildTightbeamRelease(options) {
     sourceDir,
     skillSourceDir: toolingRoot,
     toolingCommit,
-    components: options.components ?? ["linux", "macos"],
+    components: options.components ?? ["linux", "macos", "skill"],
   });
   return { ...manifest, outputDir, sourceCommit: options.sourceCommit, toolingCommit };
 }

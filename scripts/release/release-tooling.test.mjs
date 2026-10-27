@@ -142,7 +142,7 @@ const DESIGN_INVARIANT_CHECKS = [
   ["Flush Indicator Completion Rule", [{ suite: "electron", file: "packages/electron/test/renderer-ui-projection.test.ts", marker: "test(\"drawing flush animation follows the in-flight bit and ends with the flush\"" }]],
   ["Content Area Fill", [{ suite: "ios", file: "packages/ios/SurfAceTests/SurfAceRenderAndAnnotationDiagnosticsTests.swift", marker: "func testRootContentFillIgnoresBottomSafeAreaButKeepsTopStatusBarSafeArea" }]],
   ["Normal Interaction Affordances", [{ suite: "electron", file: "packages/electron/test/renderer-sizing.test.ts", marker: "test(\"renderer applies keyboard scroll intents to regular and browser-hosted pane content\"" }]],
-  ["Annotation Interaction Suspension", [{ suite: "ios", file: "packages/ios/SurfAceTests/SurfAceLocklessContentOperationsTests.swift", marker: "func testAnnotationGuardAndExactPaneCapacityRejectWithoutMutation" }]],
+  ["Annotation Interaction Suspension", [{ suite: "ios", file: "packages/ios/SurfAceTests/SurfAceLocklessContentOperationsTests.swift", marker: "func testAnnotationGuardRejectsWithoutMutation" }]],
   ["Annotation Visibility Lock", [{ suite: "ios", file: "packages/ios/SurfAceTests/SurfAceBrowserURLTargetApplyTests.swift", marker: "func testHTMLNavigationEventIsRejectedWhileAnnotationModeIsActive" }]],
   ["Post-Done Context Switch", [
     { suite: "ios", file: "packages/ios/SurfAceTests/SurfAceRenderAndAnnotationDiagnosticsTests.swift", marker: "func testDoneExitsAnnotationModeAndClearsRenderedAndStoredMarks" },
@@ -1345,7 +1345,7 @@ test("Tightbeam SHA256SUMS binds exactly the six hosted assets and manifest", as
   await fs.writeFile(manifestPath, `${JSON.stringify({
     assets: assetDetails,
     checksums: Object.fromEntries(assetDetails.map(({ name, sha256 }) => [name, sha256])),
-    components: ["linux", "macos"],
+    components: ["linux", "macos", "skill"],
   })}\n`);
   for (const name of [...assets, TIGHTBEAM.manifest].sort()) {
     lines.push(`${createHash("sha256").update(await fs.readFile(path.join(root, name))).digest("hex")}  ${name}`);
@@ -1410,7 +1410,7 @@ test("Tightbeam manifest assembles the six hosted assets including the exact ski
   }), /public_file_set_mismatch/);
 });
 
-test("Tightbeam manifests and SHA256SUMS can contain one fully gated platform", async (t) => {
+test("Tightbeam manifests and SHA256SUMS can contain one fully gated platform without the shared skill", async (t) => {
   for (const component of ["linux", "macos"]) {
     await t.test(component, async (subtest) => {
       const outputDir = await temporary(subtest);
@@ -1419,13 +1419,6 @@ test("Tightbeam manifests and SHA256SUMS can contain one fully gated platform", 
       for (const name of selectedAssets) {
         if (name !== TIGHTBEAM_SKILL_ASSET) await fs.writeFile(path.join(outputDir, name), `fixture:${name}\n`);
       }
-      if (component === "linux") {
-        const sourceSkill = path.join(toolingSkillDir, "integrations/tightbeam/skills/surf-ace/SKILL.md");
-        await fs.mkdir(path.dirname(sourceSkill), { recursive: true });
-        await fs.writeFile(sourceSkill, "fixture skill\n");
-        await copyTightbeamSkillAsset(toolingSkillDir, outputDir);
-      }
-
       const result = await writeTightbeamManifest({
         components: [component],
         outputDir,
@@ -3033,6 +3026,7 @@ test("stable v0.2.8 documentation stays historical and release gates bind the se
   assert.match(workflow, /needs\.smoke-macos\.outputs\.gate_state == 'passed'/);
   assert.match(publishJob, /needs\.assemble\.outputs\.has_linux == 'true'/);
   assert.match(publishJob, /needs\.assemble\.outputs\.has_macos == 'true'/);
+  assert.match(publishJob, /if:\s*>-\s*\n\s*\$\{\{\s*always\(\)\s*&&/);
   assert.match(publishJob, /The iOS app is withheld because the complete iOS XCTest result was/);
   assert.match(publishJob, /The tooling tag version label differs from the product tag version label/);
   assert.match(publishJob, /release_assets\+=\("release\/\$\{name\}"\)/);
