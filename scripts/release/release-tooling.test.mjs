@@ -121,7 +121,7 @@ const DESIGN_INVARIANT_CHECKS = [
   ["Connection State Indicator", [{ suite: "electron", file: "packages/electron/test/renderer-ui-projection.test.ts", marker: "test(\"assigned identity labels remain visible across connection states\"" }]],
   ["Connected State UI", [{ suite: "ios", file: "packages/ios/SurfAceTests/SurfAceCentralRegistrationTests.swift", marker: "func testCentralStatusTracksRegistrationPersistenceLossRetryAndStop" }]],
   ["Connecting State UI", [{ suite: "ios", file: "packages/ios/SurfAceTests/SurfAceCentralRegistrationTests.swift", marker: "func testCentralStatusTracksRegistrationPersistenceLossRetryAndStop" }]],
-  ["Disconnected State UI", [{ suite: "ios", file: "packages/ios/SurfAceTests/SurfAceCentralRegistrationTests.swift", marker: "func testEmptyStartupNeverPublishesConnected" }]],
+  ["Disconnected State UI", [{ suite: "ios", file: "packages/ios/SurfAceTests/SurfAceCentralRegistrationTests.swift", marker: "func testEmptyStartupPublishesConnectedAfterRegistryBind" }]],
   ["Window Label Placement", [{ suite: "electron", file: "packages/electron/test/renderer-sizing.test.ts", marker: "test(\"renderer fits pane identity labels inside pane bounds for native and renderer panes\"" }]],
   ["Window Label Visibility", [{ suite: "electron", file: "packages/electron/test/renderer-ui-projection.test.ts", marker: "test(\"an assigned window label remains visible while a pane awaits its registry number\"" }]],
   ["Primary Addressing Handle", [{ suite: "ios", file: "packages/ios/SurfAceTests/SurfAceSurfaceTopologyPersistenceTests.swift", marker: "func testPaneChromeIdentityUsesGlobalPaneTokenAndWindowLabelOnly" }]],
