@@ -65,21 +65,47 @@ final class SurfAceControllerReclamationAccountingTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: store.stateURL), bytes)
     }
 
-    func testInvalidLifecycleSequenceIsRejectedBeforeStartupWrites() throws {
-        var before = try fixture()
-        // Invalid lifecycle input must be rejected before dormant-pressure cleanup writes.
-        before.sequences.nextClosedSequence = 0
-        let directory = try temporaryDirectory()
-        let store = SurfAceLocklessGenerationStore(stateURL: directory.appendingPathComponent("invalid.json"))
-        let bytes = try JSONEncoder().encode(before)
-        try bytes.write(to: store.stateURL)
-        XCTAssertThrowsError(try SurfAceLocklessRuntimeAdapter(store: store)) { error in
-            guard case SurfAceLocklessAuthorityError.invalidState(let reason) = error else {
-                return XCTFail("Unexpected error: \(error)")
+    func testInvalidLifecycleCountersRecoverIndependentlyBeforeRestoringLiveControllers() throws {
+        let baseline = try fixture()
+        let sequenceFields: [(String, WritableKeyPath<SurfAceLocklessClientSequences, Int64>)] = [
+            ("nextClosedSequence", \.nextClosedSequence),
+            ("nextCommitSequence", \.nextCommitSequence),
+            ("nextDormantSequence", \.nextDormantSequence),
+            ("nextSurfaceId", \.nextSurfaceId),
+            ("nextSurfaceLabel", \.nextSurfaceLabel),
+        ]
+
+        for (name, keyPath) in sequenceFields {
+            var invalid = baseline
+            invalid.sequences[keyPath: keyPath] = 0
+            XCTAssertThrowsError(try invalid.validate(), "Direct validation accepted invalid \(name)") { error in
+                guard case SurfAceLocklessAuthorityError.invalidState(let reason) = error else {
+                    return XCTFail("Unexpected error: \(error)")
+                }
+                XCTAssertEqual(reason, "client_sequences")
             }
-            XCTAssertEqual(reason, "client_sequences")
+
+            let directory = try temporaryDirectory()
+            let store = SurfAceLocklessGenerationStore(stateURL: directory.appendingPathComponent("invalid-\(name).json"))
+            let bytes = try JSONEncoder().encode(invalid)
+            try bytes.write(to: store.stateURL)
+
+            let recovered = try XCTUnwrap(store.load(), "Recovery failed for \(name)")
+            try recovered.validate()
+            XCTAssertEqual(recovered.sequences, baseline.sequences, "A bad \(name) reset valid counters")
+            XCTAssertEqual(recovered.liveSurfaces, baseline.liveSurfaces, "Recovery changed readable surfaces for \(name)")
+            XCTAssertEqual(recovered.surfaceTombstones, baseline.surfaceTombstones, "Recovery changed retained identities for \(name)")
+            XCTAssertEqual(recovered.controllers, baseline.controllers, "Recovery changed controller state for \(name)")
+            XCTAssertEqual(try Data(contentsOf: store.stateURL), bytes, "Loading wrote before startup for \(name)")
+
+            _ = try SurfAceLocklessRuntimeAdapter(store: store)
+            let after = try XCTUnwrap(store.load())
+            try after.validate()
+            XCTAssertEqual(after.controllers["controller-13"]?.dormantSequence, 13)
+            XCTAssertEqual(after.controllers["controller-14"]?.dormantSequence, 14)
+            XCTAssertEqual(after.sequences.nextDormantSequence, 15)
+            try assertMaterialPreserved(recovered, after, removed: ["controller-01", "controller-02"])
         }
-        XCTAssertEqual(try Data(contentsOf: store.stateURL), bytes)
     }
 
     private func fixture() throws -> SurfAceLocklessAuthorityState {

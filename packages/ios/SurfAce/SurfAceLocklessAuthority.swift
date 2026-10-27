@@ -1245,11 +1245,14 @@ struct SurfAceLocklessGenerationStore: Sendable {
         }
         state.generation = max(0, integer(root["generation"]) ?? 0)
         state.surfaceSetRevision = max(0, integer(root["surfaceSetRevision"]) ?? 0)
-        state.sequences = decode(root["sequences"], as: SurfAceLocklessClientSequences.self)
-            .flatMap { sequence in
-                [sequence.nextClosedSequence, sequence.nextCommitSequence, sequence.nextDormantSequence,
-                 sequence.nextSurfaceId, sequence.nextSurfaceLabel].allSatisfy { $0 > 0 } ? sequence : nil
-            } ?? state.sequences
+        let savedSequences = root["sequences"] as? [String: Any] ?? [:]
+        state.sequences = SurfAceLocklessClientSequences(
+            nextClosedSequence: recoveredSequence(savedSequences["nextClosedSequence"]),
+            nextCommitSequence: recoveredSequence(savedSequences["nextCommitSequence"]),
+            nextDormantSequence: recoveredSequence(savedSequences["nextDormantSequence"]),
+            nextSurfaceId: recoveredSequence(savedSequences["nextSurfaceId"]),
+            nextSurfaceLabel: recoveredSequence(savedSequences["nextSurfaceLabel"])
+        )
         let savedBinding = decode(root["registryBinding"], as: SurfAceRegistryBinding.self)
         state.registryBinding = savedBinding.flatMap { binding in
             guard !binding.clientId.isEmpty,
@@ -1373,8 +1376,105 @@ struct SurfAceLocklessGenerationStore: Sendable {
         }
 
         ensureReadableSurfaceScopes(in: &state)
+        try reconcileRecoveredSequences(in: &state)
         if let validated = try? state.validated(for: .restart) { return validated }
         return try salvageContentSurfaces(from: state)
+    }
+
+    private func recoveredSequence(_ value: Any?) -> Int64 {
+        guard let sequence = decode(value, as: Int64.self), sequence > 0 else { return 1 }
+        return sequence
+    }
+
+    private func reconcileRecoveredSequences(in state: inout SurfAceLocklessAuthorityState) throws {
+        let surfaces = Array(state.liveSurfaces.values) + state.surfaceTombstones.map(\.surface)
+        let retainedPaneTombstones = surfaces.flatMap(\.paneTombstones)
+
+        let closedSequenceHighWater = (
+            state.surfaceTombstones.map(\.closedSequence)
+                + retainedPaneTombstones.map(\.closedSequence)
+                + (state.terminalCloseRecords ?? []).map(\.closedSequence)
+                + (state.pendingTombstoneReclamations ?? []).map(\.closedSequence)
+        ).max() ?? 0
+        state.sequences.nextClosedSequence = try nextSequence(
+            state.sequences.nextClosedSequence, beyond: closedSequenceHighWater
+        )
+
+        var retainedCommitSequences: [Int64] = []
+        for controller in state.controllers.values {
+            for receipt in controller.pendingOperationReceipts.values {
+                if let sequence = receipt.commitSequence {
+                    retainedCommitSequences.append(sequence)
+                }
+            }
+        }
+        retainedCommitSequences.append(
+            contentsOf: (state.pendingControllerRetentionReclamations ?? []).map(\.commitSequence)
+        )
+        retainedCommitSequences.append(
+            contentsOf: (state.pendingTombstoneReclamations ?? []).map(\.commitSequence)
+        )
+        retainedCommitSequences.append(contentsOf: state.targetApplyWorkItems.values.map(\.intentCommitSequence))
+        retainedCommitSequences.append(contentsOf: state.targetApplyResults.values.map(\.intentCommitSequence))
+        let commitSequenceHighWater = retainedCommitSequences.max() ?? 0
+        state.sequences.nextCommitSequence = try nextSequence(
+            state.sequences.nextCommitSequence, beyond: commitSequenceHighWater
+        )
+
+        let dormantSequenceHighWater = (
+            state.controllers.values.compactMap(\.dormantSequence)
+                + (state.pendingControllerRetentionReclamations ?? []).map(\.dormantSequence)
+        ).max() ?? 0
+        state.sequences.nextDormantSequence = try nextSequence(
+            state.sequences.nextDormantSequence, beyond: dormantSequenceHighWater
+        )
+
+        let retainedSurfaceIds = Array(state.liveSurfaces.keys)
+            + state.surfaceTombstones.map { $0.surface.surfaceId }
+            + (state.terminalCloseRecords ?? []).map(\.surfaceId)
+            + (state.allocationReleaseIntents ?? []).map(\.surfaceId)
+            + Array(state.sceneSurfaceIds.values)
+        let surfaceIdHighWater = retainedSurfaceIds.compactMap(surfaceIdSequence).max() ?? 0
+        state.sequences.nextSurfaceId = try nextSequence(state.sequences.nextSurfaceId, beyond: surfaceIdHighWater)
+
+        let retainedWindowLabels = state.liveSurfaces.values.map(\.windowLabel)
+            + state.surfaceTombstones.map { $0.surface.windowLabel }
+        let surfaceLabelHighWater = retainedWindowLabels.compactMap(surfaceLabelSequence).max() ?? 0
+        state.sequences.nextSurfaceLabel = try nextSequence(
+            state.sequences.nextSurfaceLabel, beyond: surfaceLabelHighWater
+        )
+    }
+
+    private func nextSequence(_ value: Int64, beyond highWater: Int64) throws -> Int64 {
+        guard value > 0 else { throw SurfAceLocklessAuthorityError.invalidState("client_sequences") }
+        guard value > highWater else {
+            guard highWater < Int64.max else {
+                throw SurfAceLocklessAuthorityError.invalidState("client_sequences")
+            }
+            return highWater + 1
+        }
+        return value
+    }
+
+    private func surfaceIdSequence(_ surfaceId: String) -> Int64? {
+        guard surfaceId.hasPrefix("sf_"),
+              let value = UInt64(surfaceId.dropFirst(3), radix: 16), value <= UInt64(Int64.max) else {
+            return nil
+        }
+        return Int64(value)
+    }
+
+    private func surfaceLabelSequence(_ label: String) -> Int64? {
+        let scalars = label.lowercased().unicodeScalars
+        guard !scalars.isEmpty else { return nil }
+        var value: Int64 = 0
+        for scalar in scalars {
+            guard (97...122).contains(scalar.value) else { return nil }
+            let digit = Int64(scalar.value - 96)
+            guard value <= (Int64.max - digit) / 26 else { return nil }
+            value = value * 26 + digit
+        }
+        return value
     }
 
     private func salvageContentSurfaces(from source: SurfAceLocklessAuthorityState) throws -> SurfAceLocklessAuthorityState {
