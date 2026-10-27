@@ -112,7 +112,6 @@ jobs:
 
   build-linux:
     needs: guard
-    continue-on-error: true
     env:
       PRODUCT_COMMIT: ${{ needs.guard.outputs.product_commit }}
       PRODUCT_VERSION: ${{ needs.guard.outputs.product_version }}
@@ -218,7 +217,6 @@ jobs:
 
   build-macos:
     needs: guard
-    continue-on-error: true
     env:
       PRODUCT_COMMIT: ${{ needs.guard.outputs.product_commit }}
       PRODUCT_VERSION: ${{ needs.guard.outputs.product_version }}
