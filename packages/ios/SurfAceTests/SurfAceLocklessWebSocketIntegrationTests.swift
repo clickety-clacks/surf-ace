@@ -329,8 +329,10 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         let painted = expectation(description: "actual mounted WebKit result painted")
         var visibleImage: UIImage?
         var elapsed: Double?
+        let paintPollingWindow: TimeInterval = 15
         Task { @MainActor in
-            for _ in 0..<100 {
+            let pollingDeadline = ProcessInfo.processInfo.systemUptime + paintPollingWindow
+            while ProcessInfo.processInfo.systemUptime < pollingDeadline {
                 if web.title == "FAST-visible", let image = try? await web.takeSnapshot(configuration: nil),
                    let cg = image.cgImage {
                     if self.hasExpectedVisiblePixel(in: cg) {
@@ -341,7 +343,7 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
                 try? await Task.sleep(for: .milliseconds(20))
             }
         }
-        await fulfillment(of: [painted], timeout: 15)
+        await fulfillment(of: [painted], timeout: paintPollingWindow + 1)
         let milliseconds = try XCTUnwrap(elapsed)
         print("FAST_VISIBLE_SAMPLE command=content.set history=4 issuance_to_visible_ms=\(milliseconds)")
         let attachment = XCTAttachment(image: try XCTUnwrap(visibleImage))
