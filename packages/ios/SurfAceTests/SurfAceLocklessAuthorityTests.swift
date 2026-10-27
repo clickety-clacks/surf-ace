@@ -130,7 +130,7 @@ final class SurfAceLocklessAuthorityTests: XCTestCase {
         }
     }
 
-    func testGenerationLoadRejectsOverLimitDormantAndCursorStateWithoutTrimming() throws {
+    func testGenerationLoadRecoversOverLimitDormantAndCursorStatePreservingReadableContent() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("SurfAceLocklessInvalidRestoreTests-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -138,31 +138,35 @@ final class SurfAceLocklessAuthorityTests: XCTestCase {
         let store = SurfAceLocklessGenerationStore(stateURL: directory.appendingPathComponent("authority-v1.json"))
         var state = try SurfAceLocklessAuthorityState.empty()
         state.controllers["controller-a"] = dormantBundle(id: "controller-a", sequence: 1)
-        state.scopes["surface:one"] = retentionScope(controllerIds: ["controller-a"])
+        let readableSurface = try addReadableSurface(to: &state)
         let usage = try SurfAceLocklessDormantRetention.usage(in: state)
         state.limits.maxDormantControllerBytes = usage.bytes - 1
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         try encoder.encode(state).write(to: store.stateURL)
 
-        XCTAssertThrowsError(try store.load()) { error in
+        XCTAssertThrowsError(try state.validate()) { error in
             XCTAssertEqual(error as? SurfAceLocklessAuthorityError, .invalidState("dormant_controller_bytes"))
         }
-        XCTAssertEqual(state.controllers.count, 1)
-        XCTAssertEqual(state.scopes["surface:one"]?.cursors.count, 1)
+        let dormantRecovery = try XCTUnwrap(store.load())
+        try dormantRecovery.validate()
+        try assertReadableSurfacePreserved(readableSurface, in: dormantRecovery)
 
         state.limits.maxDormantControllerBytes = .max
         state.limits.maxConsumableCursorStateBytesPerScope = 1
         try encoder.encode(state).write(to: store.stateURL)
-        XCTAssertThrowsError(try store.load()) { error in
-            XCTAssertEqual(
-                error as? SurfAceLocklessAuthorityError,
-                .invalidState("consumable_cursor_bytes:surface:one")
-            )
+        XCTAssertThrowsError(try state.validate()) { error in
+            guard case SurfAceLocklessAuthorityError.invalidState(let reason) = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+            XCTAssertTrue(reason.hasPrefix("consumable_cursor_bytes:"))
         }
+        let cursorRecovery = try XCTUnwrap(store.load())
+        try cursorRecovery.validate()
+        try assertReadableSurfacePreserved(readableSurface, in: cursorRecovery)
     }
 
-    func testGenerationLoadRejectsImpossibleReclamationDeliveredRecipient() throws {
+    func testGenerationLoadRecoversImpossibleReclamationDeliveryWithoutFabricatingDelivery() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("SurfAceLocklessInvalidDeliveryTests-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -175,6 +179,7 @@ final class SurfAceLocklessAuthorityTests: XCTestCase {
         live.disconnectedAt = nil
         live.dormantSequence = nil
         state.controllers["controller-live"] = live
+        let readableSurface = try addReadableSurface(to: &state)
         _ = try SurfAceLocklessDormantRetention.reclaimOldest(in: &state)
         state.pendingControllerRetentionReclamations?[0].deliveredControllerInstanceIds = [
             "controller-impossible"
@@ -183,11 +188,17 @@ final class SurfAceLocklessAuthorityTests: XCTestCase {
         encoder.outputFormatting = [.sortedKeys]
         try encoder.encode(state).write(to: store.stateURL)
 
-        XCTAssertThrowsError(try store.load()) { error in
+        XCTAssertThrowsError(try state.validate()) { error in
             XCTAssertEqual(
                 error as? SurfAceLocklessAuthorityError,
                 .invalidState("controller_retention_reclamation_delivery:controller-reclamation:1")
             )
+        }
+        let recovered = try XCTUnwrap(store.load())
+        try recovered.validate()
+        try assertReadableSurfacePreserved(readableSurface, in: recovered)
+        for event in recovered.pendingControllerRetentionReclamations ?? [] {
+            XCTAssertTrue(Set(event.deliveredControllerInstanceIds).isSubset(of: Set(event.recipientControllerInstanceIds)))
         }
     }
 
@@ -276,6 +287,60 @@ final class SurfAceLocklessAuthorityTests: XCTestCase {
             projectionCapacityBytes: 8 * 1_024 * 1_024,
             status: .dormant
         )
+    }
+
+    private struct ReadableSurfaceEvidence {
+        let paneKey: String
+        let paneId: Int64
+        let paneLabel: Int64
+        let paneLineageId: String
+        let content: SurfAceLocklessJSON
+        let surfaceId: String
+        let windowLabel: String
+        let windowLabelConfirmed: Bool?
+    }
+
+    private func addReadableSurface(to state: inout SurfAceLocklessAuthorityState) throws -> ReadableSurfaceEvidence {
+        let surfaceId = try SurfAceLocklessTopologyOperations.surfaceWindowOpen(
+            state: &state, expectedSurfaceSetRevision: state.surfaceSetRevision
+        ).surface.surfaceId
+        let surface = try XCTUnwrap(state.liveSurfaces[surfaceId])
+        let paneKey = try XCTUnwrap(surface.panes.keys.sorted().first)
+        var pane = try XCTUnwrap(surface.panes[paneKey])
+        let content = SurfAceLocklessJSON.string("recoverable pane content")
+        pane.history.visible.content = content
+        pane.history.visible.annotations = .object(["kept": .bool(true)])
+        state.liveSurfaces[surfaceId]?.panes[paneKey] = pane
+        return ReadableSurfaceEvidence(
+            paneKey: paneKey,
+            paneId: pane.paneId,
+            paneLabel: pane.paneLabel,
+            paneLineageId: pane.paneLineageId,
+            content: content,
+            surfaceId: surface.surfaceId,
+            windowLabel: surface.windowLabel,
+            windowLabelConfirmed: surface.windowLabelConfirmed
+        )
+    }
+
+    private func assertReadableSurfacePreserved(
+        _ evidence: ReadableSurfaceEvidence,
+        in state: SurfAceLocklessAuthorityState,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) throws {
+        XCTAssertEqual(Set(state.liveSurfaces.keys), Set([evidence.surfaceId]), file: file, line: line)
+        let surface = try XCTUnwrap(state.liveSurfaces[evidence.surfaceId], file: file, line: line)
+        XCTAssertEqual(surface.surfaceId, evidence.surfaceId, file: file, line: line)
+        XCTAssertEqual(surface.windowLabel, evidence.windowLabel, file: file, line: line)
+        XCTAssertEqual(surface.windowLabelConfirmed, evidence.windowLabelConfirmed, file: file, line: line)
+        XCTAssertEqual(Set(surface.panes.keys), Set([evidence.paneKey]), file: file, line: line)
+        let pane = try XCTUnwrap(surface.panes[evidence.paneKey], file: file, line: line)
+        XCTAssertEqual(pane.paneId, evidence.paneId, file: file, line: line)
+        XCTAssertEqual(pane.paneLabel, evidence.paneLabel, file: file, line: line)
+        XCTAssertEqual(pane.paneLineageId, evidence.paneLineageId, file: file, line: line)
+        XCTAssertEqual(pane.history.visible.content, evidence.content, file: file, line: line)
+        XCTAssertEqual(pane.history.visible.annotations, .object(["kept": .bool(true)]), file: file, line: line)
     }
 
     private func dormantBundle(id: String, sequence: Int64) -> SurfAceLocklessControllerBundle {
