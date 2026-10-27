@@ -1565,7 +1565,7 @@ async function togglePanePopOut(view: PaneView): Promise<void> {
 }
 
 async function requestPanePopOut(view: PaneView, selected: number | null): Promise<void> {
-  if (!latestState || window.surfAce.panePresentationEnabled !== true) return;
+  if (!latestState) return;
   if (resizeCommitPending) {
     view.popOutButton.title = "Wait for the divider resize to finish";
     return;
@@ -1985,7 +1985,7 @@ function buildControls(view: PaneView, pane: RendererPaneState): void {
   });
   annotate.classList.toggle("active", pane.showDone);
   annotationPill.appendChild(annotate);
-  if (window.surfAce.panePresentationEnabled === true) annotationPill.appendChild(view.popOutButton);
+  annotationPill.appendChild(view.popOutButton);
 
   if (pane.showDone || doneBusy) {
     const spinning = doneBusy && doneState.phase !== "waiting";
@@ -3912,7 +3912,6 @@ async function init(): Promise<void> {
   });
 
   window.surfAce.onPanePresentationOwnership((payload) => {
-    if (window.surfAce.panePresentationEnabled !== true) return;
     if (!payload || typeof payload !== "object" || !latestState) return;
     const notice = payload as { surfaceId?: unknown; surfaceEpoch?: unknown; revision?: unknown; authorityRevision?: unknown; phase?: unknown };
     if (notice.surfaceId !== latestState.surfaceId || notice.surfaceEpoch !== latestState.surfaceEpoch ||

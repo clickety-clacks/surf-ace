@@ -38,7 +38,7 @@ const guest = path.join(scratch, "guest.cjs");
 await fs.writeFile(guest, "// No network or host bridge in fixture guest.\n");
 await fs.writeFile(preload, `window.fixtureState=${JSON.stringify(state)};
 window.fixtureCommands=[];window.fixtureSnapshots=[];
-window.surfAce={panePresentationEnabled:true,guestPreloadPath:${JSON.stringify(guest)},
+window.surfAce={guestPreloadPath:${JSON.stringify(guest)},
 getBootstrap:async()=>({state:window.fixtureState,surfaceId:'fixture'}),
 onState:f=>window.fixtureUpdate=f,onPanePresentationOwnership: () => () => {},
       onKeyboardIntent:f=>window.fixtureKeyboard=f,

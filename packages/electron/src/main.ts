@@ -74,7 +74,6 @@ import {
 } from "./runtime-identity.js";
 import { isAddressInUse, isPortBoundOnIpv6Any } from "./port-selection.js";
 import { SurfaceWsServer } from "./ws-server.js";
-import { PANE_PRESENTATION_ENABLED } from "./pane-presentation-policy.js";
 import { PanePresentationCoordinator } from "./pane-presentation-coordinator.js";
 import { NativePresentationWindowBinding, panePresentationWindowRoute } from "./pane-presentation.js";
 import { PersistenceWriteReadiness } from "./persistence-write-readiness.js";
@@ -1869,7 +1868,6 @@ function installIpc(): void {
   panePresentation = coordinator;
   reconcilePresentationWindowOwnership();
   ipcMain.handle("surface:pane-presentation", async (event, payload: unknown) => {
-    if (!PANE_PRESENTATION_ENABLED) return { ok: false, error: "pane presentation is disabled" };
     const surfaceId = surfaceIdForSender(event.sender);
     if (!surfaceId) return { ok: false, error: "renderer surface is unavailable" };
     return coordinator.applyRendererOutcome(surfaceId, payload);

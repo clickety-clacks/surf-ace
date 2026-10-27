@@ -1,10 +1,7 @@
 import { contextBridge, ipcRenderer } from "electron";
-import { PANE_PRESENTATION_ENABLED } from "./pane-presentation-policy.js";
-
 const guestPreloadPath = String(ipcRenderer.sendSync("surface:get-guest-preload-path"));
 
 contextBridge.exposeInMainWorld("surfAce", {
-  panePresentationEnabled: PANE_PRESENTATION_ENABLED,
   clearToast: (paneId: number) => ipcRenderer.send("surface:clear-toast", { paneId }),
   command: (payload: Record<string, unknown>) => ipcRenderer.send("surface:command", payload),
   finishAnnotation: (payload: Record<string, unknown>) => ipcRenderer.invoke("surface:annotation-done", payload) as Promise<import("./annotation-done-state.js").AnnotationDoneState>,
@@ -47,7 +44,6 @@ contextBridge.exposeInMainWorld("surfAce", {
 declare global {
   interface Window {
     surfAce: {
-      panePresentationEnabled?: boolean;
       clearToast: (paneId: number) => void;
       command: (payload: Record<string, unknown>) => void;
       finishAnnotation: (payload: Record<string, unknown>) => Promise<import("./annotation-done-state.js").AnnotationDoneState>;
