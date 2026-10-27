@@ -6,6 +6,7 @@ on:
     paths:
       - "packages/ios/**"
       - ".github/workflows/apple-client-tests.yml"
+      - ".github/workflows/release-tightbeam.yml"
 
 permissions:
   contents: read

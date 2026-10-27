@@ -55,6 +55,35 @@ export const TIGHTBEAM_PUBLIC_FILES = Object.freeze([
   TIGHTBEAM.checksums,
 ]);
 
+export const TIGHTBEAM_PLATFORM_ASSETS = Object.freeze({
+  linux: Object.freeze(TIGHTBEAM.assets.slice(0, 3)),
+  macos: Object.freeze(TIGHTBEAM.assets.slice(3, 5)),
+  skill: Object.freeze([TIGHTBEAM_SKILL_ASSET]),
+});
+
+export function tightbeamAssetsForComponents(components) {
+  if (!Array.isArray(components) || components.length === 0 ||
+      new Set(components).size !== components.length ||
+      components.some((component) => !Object.hasOwn(TIGHTBEAM_PLATFORM_ASSETS, component))) {
+    throw new Error("tightbeam_release_components_invalid");
+  }
+  const included = new Set(components.flatMap((component) => TIGHTBEAM_PLATFORM_ASSETS[component]));
+  return TIGHTBEAM.assets.filter((name) => included.has(name));
+}
+
+export function tightbeamComponentsForAssets(assetNames) {
+  if (!Array.isArray(assetNames) || assetNames.length === 0 || new Set(assetNames).size !== assetNames.length) {
+    throw new Error("tightbeam_release_asset_set_invalid");
+  }
+  const components = Object.keys(TIGHTBEAM_PLATFORM_ASSETS).filter((component) =>
+    TIGHTBEAM_PLATFORM_ASSETS[component].every((name) => assetNames.includes(name)));
+  const expected = tightbeamAssetsForComponents(components);
+  if (JSON.stringify([...assetNames].sort()) !== JSON.stringify([...expected].sort())) {
+    throw new Error("tightbeam_release_asset_set_invalid");
+  }
+  return components;
+}
+
 export const TIGHTBEAM_TEST_COMMANDS = Object.freeze([
   "pnpm --dir source --filter @surf-ace/protocol build",
   "pnpm --dir source --filter @surf-ace/allocator build",

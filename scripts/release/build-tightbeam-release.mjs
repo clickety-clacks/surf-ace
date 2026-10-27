@@ -5,12 +5,13 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   TIGHTBEAM,
   TIGHTBEAM_BUILD_COMMANDS,
-  TIGHTBEAM_PUBLIC_FILES,
   TIGHTBEAM_ROUTING,
   TIGHTBEAM_SKILL_ASSET,
   TIGHTBEAM_TEST_COMMANDS,
   TIGHTBEAM_TOOLING_TAG,
   TOOLCHAINS,
+  tightbeamAssetsForComponents,
+  tightbeamComponentsForAssets,
 } from "./tightbeam-release-config.mjs";
 import {
   assertDisjointTrees,
@@ -401,13 +402,22 @@ export async function installLinuxElectronLauncher(electronRoot) {
   return launcher;
 }
 
-export async function writeTightbeamManifest({ sourceDir, outputDir, toolingCommit, skillSourceDir = toolingRoot }) {
+export async function writeTightbeamManifest({
+  sourceDir,
+  outputDir,
+  toolingCommit,
+  skillSourceDir = toolingRoot,
+  components = ["linux", "macos", "skill"],
+}) {
   const source = path.resolve(sourceDir);
   const output = path.resolve(outputDir);
+  const assetNames = tightbeamAssetsForComponents(components);
+  const selectedComponents = tightbeamComponentsForAssets(assetNames);
+  const publicFiles = [...assetNames, TIGHTBEAM.manifest, TIGHTBEAM.checksums];
   await verifyStandaloneElectronSource(source);
-  await verifyTightbeamSkillAsset(skillSourceDir, output);
+  if (assetNames.includes(TIGHTBEAM_SKILL_ASSET)) await verifyTightbeamSkillAsset(skillSourceDir, output);
   const assetDetails = [];
-  for (const name of TIGHTBEAM.assets) {
+  for (const name of assetNames) {
     const file = path.join(output, name);
     const info = await fs.stat(file);
     if (!info.isFile() || info.size === 0) throw new Error(`tightbeam_asset_missing_or_empty:${name}`);
@@ -431,6 +441,7 @@ export async function writeTightbeamManifest({ sourceDir, outputDir, toolingComm
     assets: assetDetails,
     channel: TIGHTBEAM.channel,
     checksums: Object.fromEntries(assetDetails.map(({ name, sha256: digest }) => [name, digest])),
+    components: selectedComponents,
     commands: { build: TIGHTBEAM_BUILD_COMMANDS, tests: TIGHTBEAM_TEST_COMMANDS },
     dependencyInventory: { cargo: cargoDependencies, node: nodeDependencies },
     formatVersion: 2,
@@ -439,23 +450,23 @@ export async function writeTightbeamManifest({ sourceDir, outputDir, toolingComm
       pnpmSha256: await sha256(path.join(source, "pnpm-lock.yaml")),
     },
     source: { commit: TIGHTBEAM.candidateCommit, tag: TIGHTBEAM.sourceTag },
-    serverPackage: {
+    ...(assetNames.includes(TIGHTBEAM.assets[0]) ? { serverPackage: {
       schemaMigrations: [{
         path: windowLabelMigrationPath,
         sha256: await sha256(windowLabelMigration),
         sizeBytes: (await fs.stat(windowLabelMigration)).size,
       }],
-    },
+    } } : {}),
     toolchains: TOOLCHAINS,
     tooling: { commit: toolingCommit, tag: TIGHTBEAM_TOOLING_TAG },
     version: TIGHTBEAM.version,
   });
-  const checksumNames = [...TIGHTBEAM.assets, TIGHTBEAM.manifest].sort();
+  const checksumNames = [...assetNames, TIGHTBEAM.manifest].sort();
   const lines = [];
   for (const name of checksumNames) lines.push(`${await sha256(path.join(output, name))}  ${name}`);
   await fs.writeFile(path.join(output, TIGHTBEAM.checksums), `${lines.join("\n")}\n`);
-  await assertExactPublicFiles(output, TIGHTBEAM_PUBLIC_FILES);
-  return { files: TIGHTBEAM_PUBLIC_FILES, manifestPath };
+  await assertExactPublicFiles(output, publicFiles);
+  return { files: publicFiles, manifestPath };
 }
 
 export function assertTightbeamLinuxQualificationClaims({ sourceCommit, toolingCommit, version, target }) {
@@ -547,7 +558,7 @@ export async function buildTightbeamRelease(options) {
   }
   await fs.mkdir(outputDir, { recursive: true });
   if (component === "linux") {
-    return { ...await buildTightbeamLinuxPackages({ sourceDir: sourceArgument, outputDir, target: options.target ?? TOOLCHAINS.linuxRustTarget, skillSourceDir: toolingRoot }), sourceCommit: options.sourceCommit, toolingCommit };
+    return { ...await buildTightbeamLinuxPackages({ sourceDir: sourceArgument, outputDir, target: options.target ?? TOOLCHAINS.linuxRustTarget, includeSkillAsset: false, skillSourceDir: toolingRoot }), sourceCommit: options.sourceCommit, toolingCommit };
   }
   if (component === "macos") {
     return { ...await buildTightbeamMacosPackages({ sourceDir: sourceArgument, outputDir }), sourceCommit: options.sourceCommit, toolingCommit };
@@ -557,12 +568,13 @@ export async function buildTightbeamRelease(options) {
     sourceDir,
     skillSourceDir: toolingRoot,
     toolingCommit,
+    components: options.components ?? ["linux", "macos", "skill"],
   });
   return { ...manifest, outputDir, sourceCommit: options.sourceCommit, toolingCommit };
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const args = parseArgs(process.argv.slice(2), ["source-dir", "output-dir", "version"], ["qualification-only", "source-tag", "source-commit", "tooling-commit", "target"]);
+  const args = parseArgs(process.argv.slice(2), ["source-dir", "output-dir", "version"], ["qualification-only", "source-tag", "source-commit", "tooling-commit", "target", "components"]);
   let result;
   if (args["qualification-only"] !== undefined) {
     if (args["qualification-only"] !== "linux" || args["source-tag"] !== undefined) {
@@ -587,6 +599,7 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
       sourceTag: args["source-tag"],
       target: args.target,
       version: args.version,
+      components: args.components?.split(","),
     });
   }
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);

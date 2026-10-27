@@ -62,7 +62,7 @@ test("the selected rc2 names bind the exact candidate version and source", () =>
   assert.throws(() => publicReleaseNames({ version: "0.2.10-beta.1", sourceRevision: "r1", toolingRevision: "r1" }), /release_version_invalid/);
 });
 
-test("release names derive from distinct matching product and tooling tags", () => {
+test("release names derive from distinct product and tooling tags", () => {
   const names = publicReleaseNamesFromTags({
     productTag: "surf-ace-v0.2.10-rc2-r2",
     toolingTag: "surf-ace-release-tooling-v0.2.10-rc2-r3",
@@ -70,10 +70,13 @@ test("release names derive from distinct matching product and tooling tags", () 
   assert.equal(names.version, "0.2.10-rc2");
   assert.equal(names.sourceTag, "surf-ace-v0.2.10-rc2-r2");
   assert.equal(names.toolingTag, "surf-ace-release-tooling-v0.2.10-rc2-r3");
-  assert.throws(() => publicReleaseNamesFromTags({
+  const versionNameMismatch = publicReleaseNamesFromTags({
     productTag: "surf-ace-v0.2.10-rc2-r2",
     toolingTag: "surf-ace-release-tooling-v0.2.10-rc1-r3",
-  }), /release_tag_version_mismatch/);
+  });
+  assert.equal(versionNameMismatch.version, "0.2.10-rc2");
+  assert.equal(versionNameMismatch.sourceTag, "surf-ace-v0.2.10-rc2-r2");
+  assert.equal(versionNameMismatch.toolingTag, "surf-ace-release-tooling-v0.2.10-rc1-r3");
   assert.throws(() => publicReleaseNamesFromTags({
     productTag: "surf-ace-v0.2.10-rc2",
     toolingTag: "surf-ace-release-tooling-v0.2.10-rc2-r9",
@@ -96,50 +99,33 @@ test("the pinned release workflow uses the product title, not integration brandi
   }
 });
 
-test("RC releases are prereleases while stable releases stay regular releases", async (t) => {
+test("RC releases are prereleases while stable releases stay regular releases", async () => {
   const workflow = await fs.readFile(new URL("../../.github/workflows/release-tightbeam.yml", import.meta.url), "utf8");
-  const stepMarker = "      - name: Publish only after both verified receipts\n";
+  const stepMarker = "      - name: Publish after included platform receipts verify\n";
   const runMarker = "        run: |\n";
   const stepStart = workflow.indexOf(stepMarker);
   const runStart = workflow.indexOf(runMarker, stepStart);
   assert.ok(stepStart >= 0 && runStart >= 0, "release publish step is present");
-  const script = workflow.slice(runStart + runMarker.length)
+  const publishBody = workflow.slice(runStart + runMarker.length);
+  const channelStart = publishBody.indexOf("          release_channel_args=()");
+  const notesStart = publishBody.indexOf("          cat > release-notes.md", channelStart);
+  assert.ok(channelStart >= 0 && notesStart > channelStart, "release channel selection is present");
+  const channelScript = publishBody.slice(channelStart, notesStart)
     .split("\n")
     .map((line) => line.startsWith("          ") ? line.slice(10) : line)
     .join("\n");
-
-  const temporaryDirectory = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-prerelease-route-"));
-  t.after(() => fs.rm(temporaryDirectory, { recursive: true, force: true }));
-  const binDirectory = path.join(temporaryDirectory, "bin");
-  await fs.mkdir(binDirectory);
-  const ghStubPath = path.join(binDirectory, "gh");
-  await fs.writeFile(ghStubPath, `#!/bin/bash
-set -euo pipefail
-printf '%s\\0' "$@" > "$GH_ARGS_PATH"
-`);
-  await fs.chmod(ghStubPath, 0o755);
+  assert.ok(publishBody.includes('"${release_channel_args[@]+"${release_channel_args[@]}"}"'));
 
   for (const { version, prerelease } of [
     { version: "0.2.10-rc2", prerelease: true },
     { version: "0.2.10-rc10", prerelease: true },
     { version: "0.2.10", prerelease: false },
   ]) {
-    const argsPath = path.join(temporaryDirectory, `${version}.args`);
-    await execFileAsync("bash", ["--noprofile", "--norc", "-e", "-u", "-o", "pipefail", "-c", script], {
-      env: {
-        ...process.env,
-        PATH: `${binDirectory}${path.delimiter}${process.env.PATH ?? ""}`,
-        PRODUCT_VERSION: version,
-        PRODUCT_TAG: `surf-ace-v${version}-r9`,
-        GITHUB_REPOSITORY: "clickety-clacks/surf-ace",
-        LINUX_ATTESTATION_URL: "https://example.invalid/linux",
-        MACOS_ATTESTATION_URL: "https://example.invalid/macos",
-        GH_ARGS_PATH: argsPath,
-      },
+    const { stdout } = await execFileAsync("bash", ["--noprofile", "--norc", "-e", "-u", "-o", "pipefail", "-c",
+      `${channelScript}\nprintf '%s\\n' "\${release_channel_args[@]}"`], {
+      env: { ...process.env, PRODUCT_VERSION: version },
     });
-    const args = (await fs.readFile(argsPath, "utf8")).split("\0").filter(Boolean);
-    assert.deepEqual(args.slice(0, 2), ["release", "create"]);
-    assert.equal(args.includes("--prerelease"), prerelease, `${version} prerelease flag`);
+    assert.equal(stdout.trim(), prerelease ? "--prerelease" : "", `${version} prerelease flag`);
   }
 });
 
@@ -200,7 +186,7 @@ esac
     },
   });
 
-  assert.equal(await fs.readFile(outputPath, "utf8"), `product_commit=${productCommit}\nproduct_version=0.2.10-rc2\n`);
+  assert.equal(await fs.readFile(outputPath, "utf8"), `product_commit=${productCommit}\nproduct_version=0.2.10-rc2\ntooling_version=0.2.10-rc2\nversion_name_mismatch=false\n`);
   const calls = await fs.readFile(callsPath, "utf8");
   assert.ok(calls.includes(`git/ref/tags/${toolingTag}`));
   assert.ok(calls.includes(`git/ref/tags/${productTag}`));

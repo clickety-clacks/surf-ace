@@ -49,6 +49,7 @@ import {
 import {
   TIGHTBEAM,
   TIGHTBEAM_BUILD_COMMANDS,
+  TIGHTBEAM_PLATFORM_ASSETS,
   TIGHTBEAM_PUBLIC_FILES,
   TIGHTBEAM_ROUTING,
   TIGHTBEAM_SKILL_ASSET,
@@ -115,12 +116,12 @@ const DESIGN_INVARIANT_CHECKS = [
   ["Floating History Controls", [{ suite: "electron", file: "packages/electron/test/renderer-dom-integration.test.ts", marker: "test(\"renderer DOM integrates authoritative connection states and live scale controls\"" }]],
   ["Disabled History Controls", [{ suite: "electron", file: "packages/electron/test/renderer-ui-projection.test.ts", marker: "test(\"disabled history controls stay disabled without a hover affordance\"" }]],
   ["No History Counters", [{ suite: "electron", file: "packages/electron/test/renderer-ui-projection.test.ts", marker: "test(\"history controls expose no depth counters\"" }]],
-  ["Degraded Restore Safety", [{ suite: "electron", file: "packages/electron/test/surface-core.test.ts", marker: "test(\"surface core rejects persisted surfaces with partially restorable pane topology\"" }]],
+  ["Degraded Restore Safety", [{ suite: "electron", file: "packages/electron/test/surface-core.test.ts", marker: "test(\"surface core repairs partial saved pane order and layout while retaining readable panes\"" }]],
   ["Restore Failure UI", [{ suite: "ios", file: "packages/ios/SurfAceTests/SurfAceBrowserURLTargetApplyTests.swift", marker: "func testBrowserURLTargetApplyRecordsFailedNavigationEvidence" }]],
   ["Connection State Indicator", [{ suite: "electron", file: "packages/electron/test/renderer-ui-projection.test.ts", marker: "test(\"assigned identity labels remain visible across connection states\"" }]],
   ["Connected State UI", [{ suite: "ios", file: "packages/ios/SurfAceTests/SurfAceCentralRegistrationTests.swift", marker: "func testCentralStatusTracksRegistrationPersistenceLossRetryAndStop" }]],
   ["Connecting State UI", [{ suite: "ios", file: "packages/ios/SurfAceTests/SurfAceCentralRegistrationTests.swift", marker: "func testCentralStatusTracksRegistrationPersistenceLossRetryAndStop" }]],
-  ["Disconnected State UI", [{ suite: "ios", file: "packages/ios/SurfAceTests/SurfAceCentralRegistrationTests.swift", marker: "func testEmptyStartupNeverPublishesConnected" }]],
+  ["Disconnected State UI", [{ suite: "ios", file: "packages/ios/SurfAceTests/SurfAceCentralRegistrationTests.swift", marker: "func testEmptyStartupPublishesConnectedAfterRegistryBind" }]],
   ["Window Label Placement", [{ suite: "electron", file: "packages/electron/test/renderer-sizing.test.ts", marker: "test(\"renderer fits pane identity labels inside pane bounds for native and renderer panes\"" }]],
   ["Window Label Visibility", [{ suite: "electron", file: "packages/electron/test/renderer-ui-projection.test.ts", marker: "test(\"an assigned window label remains visible while a pane awaits its registry number\"" }]],
   ["Primary Addressing Handle", [{ suite: "ios", file: "packages/ios/SurfAceTests/SurfAceSurfaceTopologyPersistenceTests.swift", marker: "func testPaneChromeIdentityUsesGlobalPaneTokenAndWindowLabelOnly" }]],
@@ -141,7 +142,7 @@ const DESIGN_INVARIANT_CHECKS = [
   ["Flush Indicator Completion Rule", [{ suite: "electron", file: "packages/electron/test/renderer-ui-projection.test.ts", marker: "test(\"drawing flush animation follows the in-flight bit and ends with the flush\"" }]],
   ["Content Area Fill", [{ suite: "ios", file: "packages/ios/SurfAceTests/SurfAceRenderAndAnnotationDiagnosticsTests.swift", marker: "func testRootContentFillIgnoresBottomSafeAreaButKeepsTopStatusBarSafeArea" }]],
   ["Normal Interaction Affordances", [{ suite: "electron", file: "packages/electron/test/renderer-sizing.test.ts", marker: "test(\"renderer applies keyboard scroll intents to regular and browser-hosted pane content\"" }]],
-  ["Annotation Interaction Suspension", [{ suite: "ios", file: "packages/ios/SurfAceTests/SurfAceLocklessContentOperationsTests.swift", marker: "func testAnnotationGuardAndExactPaneCapacityRejectWithoutMutation" }]],
+  ["Annotation Interaction Suspension", [{ suite: "ios", file: "packages/ios/SurfAceTests/SurfAceLocklessContentOperationsTests.swift", marker: "func testAnnotationGuardRejectsWithoutMutation" }]],
   ["Annotation Visibility Lock", [{ suite: "ios", file: "packages/ios/SurfAceTests/SurfAceBrowserURLTargetApplyTests.swift", marker: "func testHTMLNavigationEventIsRejectedWhileAnnotationModeIsActive" }]],
   ["Post-Done Context Switch", [
     { suite: "ios", file: "packages/ios/SurfAceTests/SurfAceRenderAndAnnotationDiagnosticsTests.swift", marker: "func testDoneExitsAnnotationModeAndClearsRenderedAndStoredMarks" },
@@ -674,7 +675,7 @@ test("Electron smoke checks the running app version before any CLI request", asy
     },
     stateRoot: path.join(root, "cli-state"),
     waitForEndpoint: async () => undefined,
-  }), /tightbeam_client_app_version_mismatch:0\.1\.0:0\.2\.8/);
+  }), (error) => error.message === `tightbeam_client_app_version_mismatch:0.1.0:${TIGHTBEAM.version}`);
   assert.equal(cliCalls, 0);
 });
 
@@ -1332,18 +1333,28 @@ test("fresh-install smoke requests no image option and validates returned screen
 
 test("Tightbeam SHA256SUMS binds exactly the six hosted assets and manifest", async (t) => {
   const root = await temporary(t);
-  const names = [...TIGHTBEAM.assets, TIGHTBEAM.manifest].sort();
+  const assets = [...TIGHTBEAM.assets].sort();
   const lines = [];
-  for (const name of names) {
+  const assetDetails = [];
+  for (const name of assets) {
     const bytes = `fixture:${name}\n`;
     await fs.writeFile(path.join(root, name), bytes);
-    lines.push(`${createHash("sha256").update(bytes).digest("hex")}  ${name}`);
+    assetDetails.push({ name, sha256: createHash("sha256").update(bytes).digest("hex"), sizeBytes: Buffer.byteLength(bytes) });
+  }
+  const manifestPath = path.join(root, TIGHTBEAM.manifest);
+  await fs.writeFile(manifestPath, `${JSON.stringify({
+    assets: assetDetails,
+    checksums: Object.fromEntries(assetDetails.map(({ name, sha256 }) => [name, sha256])),
+    components: ["linux", "macos", "skill"],
+  })}\n`);
+  for (const name of [...assets, TIGHTBEAM.manifest].sort()) {
+    lines.push(`${createHash("sha256").update(await fs.readFile(path.join(root, name))).digest("hex")}  ${name}`);
   }
   const sums = path.join(root, TIGHTBEAM.checksums);
   await fs.writeFile(sums, `${lines.join("\n")}\n`);
-  assert.deepEqual((await verifyTightbeamChecksums(path.join(root, TIGHTBEAM.manifest))).files, names);
-  await fs.writeFile(path.join(root, names[0]), "tampered\n");
-  await assert.rejects(verifyTightbeamChecksums(path.join(root, TIGHTBEAM.manifest)), /tightbeam_checksum_mismatch/);
+  assert.deepEqual((await verifyTightbeamChecksums(manifestPath)).files, [...assets, TIGHTBEAM.manifest].sort());
+  await fs.writeFile(path.join(root, assets[0]), "tampered\n");
+  await assert.rejects(verifyTightbeamChecksums(manifestPath), /tightbeam_checksum_mismatch/);
 });
 
 test("Tightbeam manifest assembles the six hosted assets including the exact skill bytes without iOS distribution signing", async (t) => {
@@ -1397,6 +1408,34 @@ test("Tightbeam manifest assembles the six hosted assets including the exact ski
     skillSourceDir: toolingSkillDir,
     toolingCommit: "a".repeat(40),
   }), /public_file_set_mismatch/);
+});
+
+test("Tightbeam manifests and SHA256SUMS can contain one fully gated platform without the shared skill", async (t) => {
+  for (const component of ["linux", "macos"]) {
+    await t.test(component, async (subtest) => {
+      const outputDir = await temporary(subtest);
+      const toolingSkillDir = await temporary(subtest);
+      const selectedAssets = TIGHTBEAM_PLATFORM_ASSETS[component];
+      for (const name of selectedAssets) {
+        if (name !== TIGHTBEAM_SKILL_ASSET) await fs.writeFile(path.join(outputDir, name), `fixture:${name}\n`);
+      }
+      const result = await writeTightbeamManifest({
+        components: [component],
+        outputDir,
+        sourceDir: repository,
+        skillSourceDir: toolingSkillDir,
+        toolingCommit: "b".repeat(40),
+      });
+      const manifest = JSON.parse(await fs.readFile(result.manifestPath, "utf8"));
+      assert.deepEqual(manifest.components, [component]);
+      assert.deepEqual(manifest.assets.map(({ name }) => name), TIGHTBEAM.assets.filter((name) => selectedAssets.includes(name)));
+      assert.deepEqual(result.files, [...selectedAssets, TIGHTBEAM.manifest, TIGHTBEAM.checksums]);
+      assert.deepEqual((await verifyTightbeamChecksums(result.manifestPath)).files,
+        [...selectedAssets, TIGHTBEAM.manifest].sort());
+      assert.deepEqual((await fs.readdir(outputDir)).sort(), [...result.files].sort());
+      assert.equal(Object.hasOwn(manifest, "serverPackage"), component === "linux");
+    });
+  }
 });
 
 test("v0.2.8 packages the skill from the tooling identity, not the product checkout", async (t) => {
@@ -2956,13 +2995,43 @@ test("stable v0.2.8 documentation stays historical and release gates bind the se
   assert.match(workflow, /PRODUCT_COMMIT="\$product_commit" \\\s+PRODUCT_TAG="\$PRODUCT_TAG" \\\s+TOOLING_TAG="\$TOOLING_TAG" \\\s+SURF_ACE_SMOKE_COMPONENT=linux \\\s+SURF_ACE_TIGHTBEAM_STATE_DRIVER="\$state_driver"/);
   assert.match(workflow, /subject-path: release\/\.receipts\/linux-smoke-receipt\.json/);
   assert.match(workflow, /subject-path: release\/\.receipts\/macos-smoke-receipt\.json/);
-  const compareStart = workflow.indexOf("  compare:\n");
-  const assembleStart = workflow.indexOf("  assemble:\n", compareStart);
-  const compareJob = workflow.slice(compareStart, assembleStart);
-  for (const name of TIGHTBEAM.assets) {
-    assert.ok(compareJob.includes(name.replace(TIGHTBEAM.version, "${PRODUCT_VERSION}")));
+  const linuxCompareStart = workflow.indexOf("  compare-linux:\n");
+  const macosCompareStart = workflow.indexOf("  compare-macos:\n");
+  const aggregateCompareStart = workflow.indexOf("  compare-six-file-warning:\n");
+  const linuxCompareJob = workflow.slice(linuxCompareStart, macosCompareStart);
+  const macosCompareJob = workflow.slice(macosCompareStart, aggregateCompareStart);
+  for (const name of TIGHTBEAM_PLATFORM_ASSETS.linux) {
+    assert.ok(linuxCompareJob.includes(name.replace(TIGHTBEAM.version, "${PRODUCT_VERSION}")));
   }
-  assert.match(workflow, /needs: \[assemble, smoke-linux, smoke-macos, guard\]/);
+  for (const name of TIGHTBEAM_PLATFORM_ASSETS.macos) {
+    assert.ok(macosCompareJob.includes(name.replace(TIGHTBEAM.version, "${PRODUCT_VERSION}")));
+  }
+  const aggregateAssembleStart = workflow.indexOf("  assemble-linux:\n", aggregateCompareStart);
+  const aggregateCompareJob = workflow.slice(aggregateCompareStart, aggregateAssembleStart);
+  for (const name of TIGHTBEAM.assets) {
+    assert.ok(aggregateCompareJob.includes(name.replace(TIGHTBEAM.version, "${PRODUCT_VERSION}")));
+  }
+  assert.match(aggregateCompareJob, /continue-on-error: true/);
+  const assemblerStart = workflow.indexOf("  assemble:\n");
+  const publishStart = workflow.indexOf("  publish:\n", assemblerStart);
+  const assemblerJob = workflow.slice(assemblerStart, publishStart);
+  const publishJob = workflow.slice(publishStart);
+  for (const dependency of ["test-ios", "summarize-ios-tests", "compare-linux", "compare-macos", "compare-six-file-warning"]) {
+    assert.ok(assemblerJob.includes(`- ${dependency}\n`), `final assembly does not wait for ${dependency}`);
+  }
+  for (const dependency of ["test-ios", "summarize-ios-tests", "smoke-linux", "smoke-macos", "assemble"]) {
+    assert.ok(publishJob.includes(`- ${dependency}\n`), `publish does not wait for ${dependency}`);
+  }
+  assert.match(workflow, /needs\.smoke-linux\.outputs\.gate_state == 'passed'/);
+  assert.match(workflow, /needs\.smoke-macos\.outputs\.gate_state == 'passed'/);
+  assert.match(publishJob, /needs\.assemble\.outputs\.has_linux == 'true'/);
+  assert.match(publishJob, /needs\.assemble\.outputs\.has_macos == 'true'/);
+  assert.match(publishJob, /if:\s*>-\s*\n\s*\$\{\{\s*always\(\)\s*&&/);
+  assert.match(publishJob, /The iOS app is withheld because the complete iOS XCTest result was/);
+  assert.match(publishJob, /The tooling tag version label differs from the product tag version label/);
+  assert.match(publishJob, /release_assets\+=\("release\/\$\{name\}"\)/);
+  assert.match(workflow, /VERSION_NAME_MISMATCH/);
+  assert.doesNotMatch(workflow, /test "\$\{tooling_version\}" = "\$\{product_version\}"/);
   assert.doesNotMatch(TIGHTBEAM_BUILD_COMMANDS.join("\n"), /xcodebuild archive|-exportArchive|\.ipa\b/);
 });
 

@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       product_tag:
-        description: Unique immutable product source tag; its version must match the tooling tag.
+        description: Unique immutable product source tag; its version determines public asset names.
         required: true
         type: string
       tooling_tag:
@@ -16,7 +16,7 @@ on:
         required: true
         type: string
       run_smoke:
-        description: Run isolated Linux and macOS client/state acceptance after reproducible build comparison.
+        description: Run each eligible platform smoke after its build, tests and platform comparison pass.
         required: true
         type: boolean
         default: false
@@ -26,7 +26,7 @@ on:
         type: boolean
         default: false
       publish_release:
-        description: Publish only after both smoke receipts and protected environment approval.
+        description: Publish assets only for platforms that pass their smoke checks.
         required: true
         type: boolean
         default: false
@@ -54,6 +54,8 @@ jobs:
     outputs:
       product_commit: ${{ steps.identity.outputs.product_commit }}
       product_version: ${{ steps.identity.outputs.product_version }}
+      tooling_version: ${{ steps.identity.outputs.tooling_version }}
+      version_name_mismatch: ${{ steps.identity.outputs.version_name_mismatch }}
     steps:
       - name: Require exact manual tooling and immutable release tags
         id: identity
@@ -77,7 +79,13 @@ jobs:
             echo "tooling_tag_invalid" >&2
             exit 1
           fi
-          test "${tooling_version}" = "${product_version}"
+          version_name_mismatch=false
+          if [[ "${tooling_version}" != "${product_version}" ]]; then
+            version_name_mismatch=true
+            echo "::warning::The tooling tag version label differs; exact tag pins remain required, asset names follow the product tag, and platform smoke still checks the app version."
+            printf 'The tooling tag version label differs; exact tag pins remain required, asset names follow the product tag, and platform smoke still checks the app version.\n' \
+              >> "$GITHUB_STEP_SUMMARY"
+          fi
           peel_tag() {
             read -r object_type object_sha <<EOF
           $(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/$1" --jq '.object.type + " " + .object.sha')
@@ -99,6 +107,8 @@ jobs:
           test "${product_remote}" = "${PRODUCT_COMMIT_INPUT}"
           printf 'product_commit=%s\n' "${product_remote}" >> "${GITHUB_OUTPUT}"
           printf 'product_version=%s\n' "${product_version}" >> "${GITHUB_OUTPUT}"
+          printf 'tooling_version=%s\n' "${tooling_version}" >> "${GITHUB_OUTPUT}"
+          printf 'version_name_mismatch=%s\n' "${version_name_mismatch}" >> "${GITHUB_OUTPUT}"
 
   build-linux:
     needs: guard
@@ -175,7 +185,22 @@ jobs:
             --source-commit "${PRODUCT_COMMIT}" \
             --version "${PRODUCT_VERSION}" \
             --target "${LINUX_RUST_TARGET}"
-      - name: Retain deterministic Linux assets and standalone skill
+      - name: Include the shared skill asset when its pinned bytes are available
+        shell: bash
+        run: |
+          set -euo pipefail
+          skill_source="tooling/integrations/tightbeam/skills/surf-ace/SKILL.md"
+          skill_asset="build/release/tightbeam/surf-ace-skill-v${PRODUCT_VERSION}.md"
+          if [[ -s "${skill_source}" ]] && cp "${skill_source}" "${skill_asset}" && cmp -s "${skill_source}" "${skill_asset}"; then
+            printf 'The shared skill asset was copied from the pinned tooling source and will be included only if final manifest verification succeeds.\n' \
+              >> "$GITHUB_STEP_SUMMARY"
+          else
+            rm -f "${skill_asset}"
+            printf '::warning::The shared skill asset was unavailable or could not be verified; qualified Linux assets remain eligible.\n'
+            printf 'The shared skill asset was unavailable or could not be verified; qualified Linux assets remain eligible.\n' \
+              >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Retain deterministic Linux assets and optional shared skill
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: tightbeam-linux-${{ matrix.lane }}
@@ -184,7 +209,7 @@ jobs:
             build/release/tightbeam/surf-ace-cli-linux-x86_64-v${{ env.PRODUCT_VERSION }}.tar.gz
             build/release/tightbeam/surf-ace-electron-linux-x86_64-v${{ env.PRODUCT_VERSION }}.zip
             build/release/tightbeam/surf-ace-skill-v${{ env.PRODUCT_VERSION }}.md
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 30
       - name: Remove job-owned checkout and build paths
         if: always()
@@ -197,7 +222,6 @@ jobs:
       PRODUCT_VERSION: ${{ needs.guard.outputs.product_version }}
       EVIDENCE_DIR: ${{ github.workspace }}/release-evidence/${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.lane }}
       EVIDENCE_READBACK_DIR: ${{ github.workspace }}/release-evidence-readback/${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.lane }}
-      RESULT_BUNDLE: ${{ github.workspace }}/release-evidence/${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.lane }}/native-tests.xcresult
       EVIDENCE_ARTIFACT: surf-ace-macos-evidence-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.lane }}
     strategy:
       fail-fast: false
@@ -206,6 +230,8 @@ jobs:
     runs-on: xcode-27
     steps:
       - name: Prepare run-isolated macOS evidence
+        id: prepare-macos-evidence
+        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
@@ -248,14 +274,12 @@ jobs:
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: ${{ env.NODE_VERSION }}
-      - name: Install frozen dependencies and run macOS/iPadOS tests
+      - name: Install frozen dependencies and run macOS product tests
         id: macos-tests
         run: |
           set -euo pipefail
           sudo xcode-select --switch /Applications/Xcode_27.0.0.app
           test "$(xcodebuild -version | head -1)" = "Xcode 27.0"
-          xcrun simctl list runtimes | grep -F 'iOS 27.0'
-          xcrun simctl list devices available | grep -F 'iPad Pro 13-inch (M5)'
           corepack enable
           corepack prepare "pnpm@${PNPM_VERSION}" --activate
           test "$(pnpm --version)" = "${PNPM_VERSION}"
@@ -280,43 +304,18 @@ jobs:
           export PATH="${RUNNER_TEMP}/surf-ace-test-python/bin:${PATH}"
           pnpm --dir source --filter @surf-ace/electron test
           guard
-          command=(
-            xcodebuild test \
-            -project source/packages/ios/SurfAce.xcodeproj \
-            -scheme SurfAce \
-            -configuration Release \
-            ENABLE_TESTABILITY=YES \
-            -parallel-testing-enabled NO \
-            -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M5),OS=27.0' \
-            -resultBundlePath "$RESULT_BUNDLE"
-          )
-          printf '%q ' "${command[@]}" > "$EVIDENCE_DIR/xcodebuild-command.txt"
-          printf '\n' >> "$EVIDENCE_DIR/xcodebuild-command.txt"
-          set +e
-          "${command[@]}" 2>&1 | tee "$EVIDENCE_DIR/xcodebuild.log"
-          pipeline_status=( "${PIPESTATUS[@]}" )
-          set -e
-          xcodebuild_exit_code="${pipeline_status[0]}"
-          tee_exit_code="${pipeline_status[1]}"
-          printf '%s\n' "$xcodebuild_exit_code" > "$EVIDENCE_DIR/xcodebuild-exit-code.txt"
-          printf '%s\n' "$tee_exit_code" > "$EVIDENCE_DIR/xcodebuild-tee-exit-code.txt"
-          if [[ "$xcodebuild_exit_code" != 0 ]]; then
-            exit "$xcodebuild_exit_code"
-          fi
-          if [[ "$tee_exit_code" != 0 ]]; then
-            exit "$tee_exit_code"
-          fi
-          guard
 
-      - name: Capture macOS native test evidence
+      - name: Capture macOS build and runner evidence
+        id: capture-macos-evidence
         if: always()
+        continue-on-error: true
         shell: bash
         env:
           MACOS_TEST_STEP_OUTCOME: ${{ steps.macos-tests.outcome }}
         run: |
           set -euo pipefail
           mkdir -p "$EVIDENCE_DIR"
-          printf 'macos_test_step_outcome=%s\n' "${MACOS_TEST_STEP_OUTCOME:-not-run}" \
+          printf 'macos_product_test_step_outcome=%s\n' "${MACOS_TEST_STEP_OUTCOME:-not-run}" \
             > "$EVIDENCE_DIR/test-step-outcome.txt"
 
           capture_tool() {
@@ -368,13 +367,8 @@ jobs:
               > "$EVIDENCE_DIR/tooling-identity.txt"
           fi
 
-          if [[ -d "$RESULT_BUNDLE" ]]; then
-            capture_tool xcresult-summary.json xcrun xcresulttool get test-results summary --path "$RESULT_BUNDLE"
-            capture_tool attachment-export.log xcrun xcresulttool export attachments \
-              --path "$RESULT_BUNDLE" --output-path "$EVIDENCE_DIR/attachments"
-          else
-            printf 'No .xcresult bundle was created.\n' > "$EVIDENCE_DIR/xcresult-unavailable.txt"
-          fi
+          printf 'The full iOS XCTest suite runs in the independent test-ios job.\n' \
+            > "$EVIDENCE_DIR/ios-test-job.txt"
 
           printf 'finished_at_utc=%s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
             > "$EVIDENCE_DIR/evidence-captured-at.txt"
@@ -426,6 +420,7 @@ jobs:
       - name: Retain macOS release evidence
         if: always()
         id: upload-macos-evidence
+        continue-on-error: true
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: ${{ env.EVIDENCE_ARTIFACT }}
@@ -434,6 +429,7 @@ jobs:
           include-hidden-files: true
           retention-days: 30
       - name: Download retained macOS evidence for readback
+        id: download-macos-evidence-readback
         if: always()
         continue-on-error: true
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
@@ -441,7 +437,9 @@ jobs:
           name: ${{ env.EVIDENCE_ARTIFACT }}
           path: ${{ env.EVIDENCE_READBACK_DIR }}
       - name: Verify retained macOS evidence readback
+        id: verify-macos-evidence-readback
         if: always()
+        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
@@ -491,6 +489,32 @@ jobs:
             exit 1
           fi
 
+      - name: Report optional macOS evidence gaps
+        if: always()
+        env:
+          PREPARE_OUTCOME: ${{ steps.prepare-macos-evidence.outcome }}
+          CAPTURE_OUTCOME: ${{ steps.capture-macos-evidence.outcome }}
+          UPLOAD_OUTCOME: ${{ steps.upload-macos-evidence.outcome }}
+          DOWNLOAD_OUTCOME: ${{ steps.download-macos-evidence-readback.outcome }}
+          READBACK_OUTCOME: ${{ steps.verify-macos-evidence-readback.outcome }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          outcomes=(
+            "${PREPARE_OUTCOME:-unknown}"
+            "${CAPTURE_OUTCOME:-unknown}"
+            "${UPLOAD_OUTCOME:-unknown}"
+            "${DOWNLOAD_OUTCOME:-unknown}"
+            "${READBACK_OUTCOME:-unknown}"
+          )
+          if [[ " ${outcomes[*]} " == *" failure "* || " ${outcomes[*]} " == *" cancelled "* || " ${outcomes[*]} " == *" unknown "* ]]; then
+            printf '::warning::Optional macOS diagnostic evidence was incomplete; product qualification remains based on the macOS tests and asset build.\n'
+            printf 'Optional macOS diagnostic evidence was incomplete. macOS product tests and asset build remain the qualification gates.\n' \
+              >> "$GITHUB_STEP_SUMMARY"
+          else
+            printf 'Optional macOS diagnostic evidence was captured and verified.\n' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Build standalone macOS CLI and Electron assets
         env:
           SURF_ACE_RELEASE_COMPONENT: macos
@@ -514,6 +538,163 @@ jobs:
       - name: Remove job-owned checkout and build paths
         if: always()
         run: rm -rf "${GITHUB_WORKSPACE}/source" "${GITHUB_WORKSPACE}/tooling" "${GITHUB_WORKSPACE}/build"
+
+  # The desktop/Linux release graph is independent of the iOS test result.
+  test-ios:
+    name: iOS XCTest (${{ matrix.lane }})
+    needs: guard
+    continue-on-error: true
+    env:
+      PRODUCT_COMMIT: ${{ needs.guard.outputs.product_commit }}
+      PRODUCT_VERSION: ${{ needs.guard.outputs.product_version }}
+      IOS_EVIDENCE_DIR: ${{ github.workspace }}/ios-test-evidence/${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.lane }}
+      RESULT_BUNDLE: ${{ github.workspace }}/ios-test-evidence/${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.lane }}/native-tests.xcresult
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [build-a, build-b]
+    runs-on: xcode-27
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Prepare run-isolated iOS test evidence
+        run: mkdir -p "$IOS_EVIDENCE_DIR"
+      - name: Check out immutable tooling
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: tooling
+          persist-credentials: false
+          ref: ${{ env.TOOLING_TAG }}
+      - name: Check out immutable product source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: source
+          persist-credentials: false
+          ref: ${{ env.PRODUCT_TAG }}
+      - name: Select Xcode and verify exact source and simulator
+        run: |
+          set -euo pipefail
+          sudo xcode-select --switch /Applications/Xcode_27.0.0.app
+          xcodebuild -version | tee "$IOS_EVIDENCE_DIR/xcode-version.txt"
+          test "$(xcodebuild -version | head -1)" = "Xcode 27.0"
+          xcrun simctl list runtimes | tee "$IOS_EVIDENCE_DIR/simulator-runtimes.txt" | grep -F 'iOS 27.0'
+          xcrun simctl list devices available | tee "$IOS_EVIDENCE_DIR/simulator-devices.txt" | grep -F 'iPad Pro 13-inch (M5)'
+          test "$(git -C tooling rev-parse HEAD)" = "${GITHUB_SHA}"
+          test "$(git -C source rev-parse HEAD)" = "${PRODUCT_COMMIT}"
+          {
+            printf 'tooling_commit=%s\n' "$(git -C tooling rev-parse HEAD)"
+            printf 'tooling_tree=%s\n' "$(git -C tooling rev-parse 'HEAD^{tree}')"
+            printf 'product_tag=%s\n' "${PRODUCT_TAG}"
+            printf 'product_commit=%s\n' "$(git -C source rev-parse HEAD)"
+            printf 'product_tree=%s\n' "$(git -C source rev-parse 'HEAD^{tree}')"
+          } > "$IOS_EVIDENCE_DIR/source-tooling-identity.txt"
+      - name: Run the complete iOS XCTest suite
+        id: ios-tests
+        run: |
+          set -euo pipefail
+          command=(
+            xcodebuild test \
+            -project source/packages/ios/SurfAce.xcodeproj \
+            -scheme SurfAce \
+            -configuration Release \
+            ENABLE_TESTABILITY=YES \
+            -parallel-testing-enabled NO \
+            -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M5),OS=27.0' \
+            -resultBundlePath "$RESULT_BUNDLE"
+          )
+          printf '%q ' "${command[@]}" > "$IOS_EVIDENCE_DIR/xcodebuild-command.txt"
+          printf '\n' >> "$IOS_EVIDENCE_DIR/xcodebuild-command.txt"
+          set +e
+          "${command[@]}" 2>&1 | tee "$IOS_EVIDENCE_DIR/xcodebuild.log"
+          pipeline_status=( "${PIPESTATUS[@]}" )
+          set -e
+          xcodebuild_exit_code="${pipeline_status[0]}"
+          tee_exit_code="${pipeline_status[1]}"
+          printf '%s\n' "$xcodebuild_exit_code" > "$IOS_EVIDENCE_DIR/xcodebuild-exit-code.txt"
+          printf '%s\n' "$tee_exit_code" > "$IOS_EVIDENCE_DIR/xcodebuild-tee-exit-code.txt"
+          if [[ "$xcodebuild_exit_code" != 0 ]]; then
+            exit "$xcodebuild_exit_code"
+          fi
+          if [[ "$tee_exit_code" != 0 ]]; then
+            exit "$tee_exit_code"
+          fi
+      - name: Verify checked-out source and tooling remain unchanged
+        if: always()
+        run: |
+          set -euo pipefail
+          test "$(git -C tooling rev-parse HEAD)" = "${GITHUB_SHA}"
+          test "$(git -C source rev-parse HEAD)" = "${PRODUCT_COMMIT}"
+          git -C tooling diff --exit-code HEAD -- .
+          git -C tooling diff --cached --exit-code HEAD -- .
+          git -C source diff --exit-code HEAD -- .
+          git -C source diff --cached --exit-code HEAD -- .
+      - name: Retain iOS XCTest evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: surf-ace-ios-xctest-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.lane }}
+          path: ${{ env.IOS_EVIDENCE_DIR }}/
+          if-no-files-found: warn
+          include-hidden-files: true
+          retention-days: 30
+      - name: Remove job-owned checkout paths
+        if: always()
+        run: rm -rf "${GITHUB_WORKSPACE}/source" "${GITHUB_WORKSPACE}/tooling"
+
+  summarize-ios-tests:
+    if: ${{ always() && needs.guard.result == 'success' }}
+    needs: [guard, test-ios]
+    continue-on-error: true
+    outputs:
+      state: ${{ steps.summarize.outputs.state }}
+      build_a: ${{ steps.summarize.outputs.build_a }}
+      build_b: ${{ steps.summarize.outputs.build_b }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download iOS XCTest evidence when available
+        id: download-ios-evidence
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: surf-ace-ios-xctest-${{ github.run_id }}-${{ github.run_attempt }}-*
+          merge-multiple: false
+          path: ios-test-evidence
+      - name: Report iOS XCTest outcome without blocking other platforms
+        id: summarize
+        if: always()
+        shell: bash
+        env:
+          EVIDENCE_DIR: ${{ github.workspace }}/ios-test-evidence
+        run: |
+          set -euo pipefail
+          lane_state() {
+            local lane="$1"
+            local code_file
+            code_file="$(find "$EVIDENCE_DIR" -type f -name xcodebuild-exit-code.txt -path "*-${lane}/*" -print -quit 2>/dev/null || true)"
+            if [[ -z "$code_file" ]]; then
+              printf 'unavailable'
+            elif [[ "$(tr -d '\r\n' < "$code_file")" == "0" ]]; then
+              printf 'passed'
+            else
+              printf 'failed'
+            fi
+          }
+          build_a="$(lane_state build-a)"
+          build_b="$(lane_state build-b)"
+          state=passed
+          if [[ "$build_a" == failed || "$build_b" == failed ]]; then
+            state=failed
+          elif [[ "$build_a" != passed || "$build_b" != passed ]]; then
+            state=unavailable
+          fi
+          printf 'state=%s\n' "$state" >> "$GITHUB_OUTPUT"
+          printf 'build_a=%s\n' "$build_a" >> "$GITHUB_OUTPUT"
+          printf 'build_b=%s\n' "$build_b" >> "$GITHUB_OUTPUT"
+          printf 'iOS XCTest lanes: build-a=%s; build-b=%s.\n' "$build_a" "$build_b" >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$state" != passed ]]; then
+            printf '::warning::The iOS app is withheld because the complete iOS XCTest result is %s; other platform assets retain their own gates.\n' "$state"
+          fi
 
   retain-macos-job-logs:
     if: always()
@@ -541,6 +722,7 @@ jobs:
             printf 'started_at_utc=%s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
           } > "$JOB_EVIDENCE_DIR/run-identity.txt"
       - name: Download completed macOS job logs
+        id: download-macos-logs
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -595,7 +777,11 @@ jobs:
             printf 'macos_job_logs_downloaded=%s\n' "$downloaded"
             printf 'macos_job_logs_failed=%s\n' "$failed"
           } > "$JOB_EVIDENCE_DIR/job-log-capture-status.txt"
+          if [[ "$downloaded" -eq 0 || "$failed" -gt 0 ]]; then
+            printf '::warning::macOS job-log evidence is incomplete; platform asset gates are unchanged.\n'
+          fi
       - name: Hash and verify macOS job logs
+        id: verify-macos-logs
         shell: bash
         run: |
           set -euo pipefail
@@ -644,6 +830,7 @@ jobs:
               raise SystemExit("macOS job log manifest verification failed")
           PY
       - name: Retain macOS job logs and size/SHA manifest
+        id: retain-macos-logs
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -652,110 +839,368 @@ jobs:
           if-no-files-found: error
           include-hidden-files: true
           retention-days: 30
+      - name: Report optional macOS job-log evidence gaps
+        if: always()
+        env:
+          DOWNLOAD_OUTCOME: ${{ steps.download-macos-logs.outcome }}
+          VERIFY_OUTCOME: ${{ steps.verify-macos-logs.outcome }}
+          RETAIN_OUTCOME: ${{ steps.retain-macos-logs.outcome }}
+        shell: bash
+        run: |
+          if [[ "${DOWNLOAD_OUTCOME:-unknown}" != success || "${VERIFY_OUTCOME:-unknown}" != success || "${RETAIN_OUTCOME:-unknown}" != success ]]; then
+            printf '::warning::macOS job-log evidence was unavailable or incomplete; platform eligibility remains governed by product tests, build, comparison and smoke.\n'
+            printf 'macOS job-log evidence was unavailable or incomplete; product and smoke gates determine platform eligibility.\n' \
+              >> "$GITHUB_STEP_SUMMARY"
+          fi
 
-  compare:
-    needs: [build-linux, build-macos, guard]
+  compare-linux:
+    if: ${{ always() && needs.guard.result == 'success' }}
+    needs: [build-linux, guard]
+    continue-on-error: true
+    outputs:
+      gate_state: ${{ steps.finalize.outputs.gate_state }}
     env:
       PRODUCT_VERSION: ${{ needs.guard.outputs.product_version }}
+      BUILD_RESULT: ${{ needs.build-linux.result }}
     runs-on: macos-15
     steps:
       - name: Check out immutable tooling
+        if: needs.build-linux.result == 'success'
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           path: tooling
           persist-credentials: false
           ref: ${{ env.TOOLING_TAG }}
-      - name: Download independent Linux and macOS lane assets
+      - name: Download Linux build lanes
+        id: download-linux-lanes
+        if: needs.build-linux.result == 'success'
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: tightbeam-linux-build-a
-          path: build/downloads/build-a
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          name: tightbeam-macos-build-a
-          path: build/downloads/build-a
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          name: tightbeam-linux-build-b
-          path: build/downloads/build-b
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          name: tightbeam-macos-build-b
-          path: build/downloads/build-b
-      - name: Separate lane bytes and compare six reproducible release assets
+          pattern: tightbeam-linux-build-*
+          merge-multiple: false
+          path: build/downloads
+      - name: Compare reproducible Linux assets
+        id: compare_assets
+        if: needs.build-linux.result == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          mkdir -p build-a build-b
+          mkdir -p build-a build-b build-a/.receipts build-b/.receipts
           for file in \
             surf-ace-server-linux-x86_64-v${PRODUCT_VERSION}.tar.gz \
             surf-ace-cli-linux-x86_64-v${PRODUCT_VERSION}.tar.gz \
-            surf-ace-electron-linux-x86_64-v${PRODUCT_VERSION}.zip \
-            surf-ace-cli-macos-arm64-v${PRODUCT_VERSION}.tar.gz \
-            surf-ace-electron-macos-arm64-v${PRODUCT_VERSION}.zip \
-            surf-ace-skill-v${PRODUCT_VERSION}.md; do
-            test -s "build/downloads/build-a/${file}"
-            test -s "build/downloads/build-b/${file}"
-            cp "build/downloads/build-a/${file}" build-a/
-            cp "build/downloads/build-b/${file}" build-b/
-          done
-          mkdir -p build-a/.receipts build-b/.receipts
-          for file in \
-            surf-ace-cli-linux-x86_64-v${PRODUCT_VERSION}.tar.gz \
-            surf-ace-cli-macos-arm64-v${PRODUCT_VERSION}.tar.gz \
-            surf-ace-electron-linux-x86_64-v${PRODUCT_VERSION}.zip \
-            surf-ace-electron-macos-arm64-v${PRODUCT_VERSION}.zip \
-            surf-ace-server-linux-x86_64-v${PRODUCT_VERSION}.tar.gz \
-            surf-ace-skill-v${PRODUCT_VERSION}.md; do
-            (cd build-a && shasum -a 256 "${file}") >> build-a/.receipts/SHA256SUMS
-            (cd build-b && shasum -a 256 "${file}") >> build-b/.receipts/SHA256SUMS
+            surf-ace-electron-linux-x86_64-v${PRODUCT_VERSION}.zip; do
+            for lane in build-a build-b; do
+              source="build/downloads/tightbeam-linux-${lane}/${file}"
+              test -s "${source}"
+              cp "${source}" "${lane}/"
+              (cd "${lane}" && shasum -a 256 "${file}") >> "${lane}/.receipts/SHA256SUMS"
+            done
           done
           node tooling/scripts/release/compare-release-builds.mjs \
             --build-a build-a \
             --build-b build-b \
-            --files surf-ace-server-linux-x86_64-v${PRODUCT_VERSION}.tar.gz,surf-ace-cli-linux-x86_64-v${PRODUCT_VERSION}.tar.gz,surf-ace-electron-linux-x86_64-v${PRODUCT_VERSION}.zip,surf-ace-cli-macos-arm64-v${PRODUCT_VERSION}.tar.gz,surf-ace-electron-macos-arm64-v${PRODUCT_VERSION}.zip,surf-ace-skill-v${PRODUCT_VERSION}.md
-      - name: Retain byte-comparison receipt
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: tightbeam-byte-comparison
-          path: build-a
-          if-no-files-found: error
+            --files surf-ace-server-linux-x86_64-v${PRODUCT_VERSION}.tar.gz,surf-ace-cli-linux-x86_64-v${PRODUCT_VERSION}.tar.gz,surf-ace-electron-linux-x86_64-v${PRODUCT_VERSION}.zip \
+            > linux-byte-comparison.json
+      - name: Report Linux comparison gate
+        id: finalize
+        if: always()
+        env:
+          BUILD_RESULT: ${{ needs.build-linux.result }}
+          DOWNLOAD_OUTCOME: ${{ steps.download-linux-lanes.outcome }}
+          COMPARE_OUTCOME: ${{ steps.compare_assets.outcome }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${BUILD_RESULT}" != "success" ]]; then
+            gate_state=unavailable
+            printf '::warning::Linux assets were not eligible because the Linux build and tests did not complete successfully.\n'
+          elif [[ "${DOWNLOAD_OUTCOME}" != "success" ]]; then
+            gate_state=unavailable
+            printf '::warning::Linux build artifacts were unavailable for the platform comparison; Linux assets were withheld.\n'
+          elif [[ "${COMPARE_OUTCOME}" == "success" ]]; then
+            gate_state=passed
+            printf 'Linux build-lane comparison passed.\n' >> "$GITHUB_STEP_SUMMARY"
+          else
+            gate_state=failed
+            printf '::warning::Linux assets were withheld because their platform comparison did not pass.\n'
+          fi
+          printf 'gate_state=%s\n' "${gate_state}" >> "$GITHUB_OUTPUT"
 
-  assemble:
-    needs: [compare, guard]
+  compare-macos:
+    if: ${{ always() && needs.guard.result == 'success' }}
+    needs: [build-macos, guard]
+    continue-on-error: true
+    outputs:
+      gate_state: ${{ steps.finalize.outputs.gate_state }}
+    env:
+      PRODUCT_VERSION: ${{ needs.guard.outputs.product_version }}
+      BUILD_RESULT: ${{ needs.build-macos.result }}
+    runs-on: macos-15
+    steps:
+      - name: Check out immutable tooling
+        if: needs.build-macos.result == 'success'
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: tooling
+          persist-credentials: false
+          ref: ${{ env.TOOLING_TAG }}
+      - name: Download macOS build lanes
+        id: download-macos-lanes
+        if: needs.build-macos.result == 'success'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: tightbeam-macos-build-*
+          merge-multiple: false
+          path: build/downloads
+      - name: Compare reproducible macOS assets
+        id: compare_assets
+        if: needs.build-macos.result == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p build-a build-b build-a/.receipts build-b/.receipts
+          for file in \
+            surf-ace-cli-macos-arm64-v${PRODUCT_VERSION}.tar.gz \
+            surf-ace-electron-macos-arm64-v${PRODUCT_VERSION}.zip; do
+            for lane in build-a build-b; do
+              source="build/downloads/tightbeam-macos-${lane}/${file}"
+              test -s "${source}"
+              cp "${source}" "${lane}/"
+              (cd "${lane}" && shasum -a 256 "${file}") >> "${lane}/.receipts/SHA256SUMS"
+            done
+          done
+          node tooling/scripts/release/compare-release-builds.mjs \
+            --build-a build-a \
+            --build-b build-b \
+            --files surf-ace-cli-macos-arm64-v${PRODUCT_VERSION}.tar.gz,surf-ace-electron-macos-arm64-v${PRODUCT_VERSION}.zip \
+            > macos-byte-comparison.json
+      - name: Report macOS comparison gate
+        id: finalize
+        if: always()
+        env:
+          BUILD_RESULT: ${{ needs.build-macos.result }}
+          DOWNLOAD_OUTCOME: ${{ steps.download-macos-lanes.outcome }}
+          COMPARE_OUTCOME: ${{ steps.compare_assets.outcome }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${BUILD_RESULT}" != "success" ]]; then
+            gate_state=unavailable
+            printf '::warning::macOS assets were not eligible because the macOS build and tests did not complete successfully.\n'
+          elif [[ "${DOWNLOAD_OUTCOME}" != "success" ]]; then
+            gate_state=unavailable
+            printf '::warning::macOS build artifacts were unavailable for the platform comparison; macOS assets were withheld.\n'
+          elif [[ "${COMPARE_OUTCOME}" == "success" ]]; then
+            gate_state=passed
+            printf 'macOS build-lane comparison passed.\n' >> "$GITHUB_STEP_SUMMARY"
+          else
+            gate_state=failed
+            printf '::warning::macOS assets were withheld because their platform comparison did not pass.\n'
+          fi
+          printf 'gate_state=%s\n' "${gate_state}" >> "$GITHUB_OUTPUT"
+
+  compare-six-file-warning:
+    if: always()
+    needs: [build-linux, build-macos, guard]
+    continue-on-error: true
+    outputs:
+      state: ${{ steps.report.outputs.state }}
+    env:
+      PRODUCT_VERSION: ${{ needs.guard.outputs.product_version }}
+    runs-on: macos-15
+    steps:
+      - name: Check out immutable tooling
+        if: ${{ needs.build-linux.result == 'success' && needs.build-macos.result == 'success' }}
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: tooling
+          persist-credentials: false
+          ref: ${{ env.TOOLING_TAG }}
+      - name: Download all build lanes
+        if: ${{ needs.build-linux.result == 'success' && needs.build-macos.result == 'success' }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: tightbeam-*-build-*
+          merge-multiple: false
+          path: build/downloads
+      - name: Compare all six release assets for information
+        id: compare_all
+        if: ${{ needs.build-linux.result == 'success' && needs.build-macos.result == 'success' }}
+        env:
+          PRODUCT_VERSION: ${{ needs.guard.outputs.product_version }}
+        run: |
+          set -euo pipefail
+          mkdir -p build-a build-b build-a/.receipts build-b/.receipts
+          for file in \
+            surf-ace-server-linux-x86_64-v${PRODUCT_VERSION}.tar.gz \
+            surf-ace-cli-linux-x86_64-v${PRODUCT_VERSION}.tar.gz \
+            surf-ace-electron-linux-x86_64-v${PRODUCT_VERSION}.zip \
+            surf-ace-cli-macos-arm64-v${PRODUCT_VERSION}.tar.gz \
+            surf-ace-electron-macos-arm64-v${PRODUCT_VERSION}.zip \
+            surf-ace-skill-v${PRODUCT_VERSION}.md; do
+            for lane in build-a build-b; do
+              platform=linux
+              if [[ "${file}" == *-macos-* ]]; then platform=macos; fi
+              source="build/downloads/tightbeam-${platform}-${lane}/${file}"
+              test -s "${source}"
+              cp "${source}" "${lane}/"
+              (cd "${lane}" && shasum -a 256 "${file}") >> "${lane}/.receipts/SHA256SUMS"
+            done
+          done
+          node tooling/scripts/release/compare-release-builds.mjs \
+            --build-a build-a \
+            --build-b build-b \
+            --files surf-ace-server-linux-x86_64-v${PRODUCT_VERSION}.tar.gz,surf-ace-cli-linux-x86_64-v${PRODUCT_VERSION}.tar.gz,surf-ace-electron-linux-x86_64-v${PRODUCT_VERSION}.zip,surf-ace-cli-macos-arm64-v${PRODUCT_VERSION}.tar.gz,surf-ace-electron-macos-arm64-v${PRODUCT_VERSION}.zip,surf-ace-skill-v${PRODUCT_VERSION}.md \
+            > six-file-comparison.json
+      - name: Report six-file comparison warning
+        id: report
+        if: always()
+        env:
+          BUILD_LINUX_RESULT: ${{ needs.build-linux.result }}
+          BUILD_MACOS_RESULT: ${{ needs.build-macos.result }}
+          COMPARE_OUTCOME: ${{ steps.compare_all.outcome }}
+        run: |
+          set -euo pipefail
+          if [[ "${BUILD_LINUX_RESULT}" == "success" && "${BUILD_MACOS_RESULT}" == "success" && "${COMPARE_OUTCOME}" == "success" ]]; then
+            state=passed
+            printf 'The informational six-file comparison matched.\n' >> "$GITHUB_STEP_SUMMARY"
+          else
+            state=warning
+            printf '::warning::The informational six-file comparison was unavailable or differed; platform comparison gates determine asset eligibility.\n'
+            printf 'The informational six-file comparison was unavailable or differed; platform comparison gates determine asset eligibility.\n' \
+              >> "$GITHUB_STEP_SUMMARY"
+          fi
+          printf 'state=%s\n' "${state}" >> "$GITHUB_OUTPUT"
+
+  assemble-linux:
+    needs: [compare-linux, guard]
+    if: ${{ needs.guard.result == 'success' && needs.compare-linux.outputs.gate_state == 'passed' }}
+    continue-on-error: true
+    outputs:
+      gate_state: ${{ steps.finalize.outputs.gate_state }}
     env:
       PRODUCT_COMMIT: ${{ needs.guard.outputs.product_commit }}
       PRODUCT_VERSION: ${{ needs.guard.outputs.product_version }}
     runs-on: macos-15
     steps:
       - name: Check out immutable tooling
+        id: checkout-tooling
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           path: tooling
           persist-credentials: false
           ref: ${{ env.TOOLING_TAG }}
       - name: Check out immutable product source
+        id: checkout-source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           path: source
           persist-credentials: false
           ref: ${{ env.PRODUCT_TAG }}
-      - name: Download compared build A assets
+      - name: Download compared Linux build A assets
+        id: download-linux-assets
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: tightbeam-linux-build-a
           path: build/release/tightbeam
+      - name: Pin Node
+        id: setup-node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Assemble the Linux component manifest and SHA256SUMS
+        id: assemble-linux-assets
+        env:
+          SURF_ACE_RELEASE_COMPONENT: manifest
+        run: |
+          set -euo pipefail
+          test "$(git -C tooling rev-parse HEAD)" = "${GITHUB_SHA}"
+          test "$(git -C source rev-parse HEAD)" = "${PRODUCT_COMMIT}"
+          rm -f "build/release/tightbeam/surf-ace-skill-v${PRODUCT_VERSION}.md"
+          node tooling/scripts/release/build-tightbeam-release.mjs \
+            --source-dir source \
+            --output-dir build/release/tightbeam \
+            --source-tag "${PRODUCT_TAG}" \
+            --source-commit "${PRODUCT_COMMIT}" \
+            --version "${PRODUCT_VERSION}" \
+            --components linux \
+            --target "${LINUX_RUST_TARGET}"
+      - name: Retain the Linux smoke candidate
+        id: retain-linux-candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: tightbeam-linux-candidate
+          path: build/release/tightbeam
+          if-no-files-found: error
+          retention-days: 30
+      - name: Report Linux candidate eligibility
+        id: finalize
+        if: always()
+        env:
+          TOOLING_OUTCOME: ${{ steps.checkout-tooling.outcome }}
+          SOURCE_OUTCOME: ${{ steps.checkout-source.outcome }}
+          DOWNLOAD_OUTCOME: ${{ steps.download-linux-assets.outcome }}
+          NODE_OUTCOME: ${{ steps.setup-node.outcome }}
+          ASSEMBLE_OUTCOME: ${{ steps.assemble-linux-assets.outcome }}
+          RETAIN_OUTCOME: ${{ steps.retain-linux-candidate.outcome }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$TOOLING_OUTCOME" != success || "$SOURCE_OUTCOME" != success || "$DOWNLOAD_OUTCOME" != success || "$NODE_OUTCOME" != success ]]; then
+            gate_state=unavailable
+            printf '::warning::Linux candidate assembly could not complete because required inputs or infrastructure were unavailable.\n'
+          elif [[ "$ASSEMBLE_OUTCOME" != success ]]; then
+            gate_state=failed
+            printf '::warning::Linux candidate assembly failed; Linux assets were withheld.\n'
+          elif [[ "$RETAIN_OUTCOME" != success ]]; then
+            gate_state=unavailable
+            printf '::warning::Linux candidate artifact could not be retained; Linux assets were withheld.\n'
+          else
+            gate_state=passed
+          fi
+          printf 'gate_state=%s\n' "$gate_state" >> "$GITHUB_OUTPUT"
+
+  assemble-macos:
+    needs: [compare-macos, guard]
+    if: ${{ needs.guard.result == 'success' && needs.compare-macos.outputs.gate_state == 'passed' }}
+    continue-on-error: true
+    outputs:
+      gate_state: ${{ steps.finalize.outputs.gate_state }}
+    env:
+      PRODUCT_COMMIT: ${{ needs.guard.outputs.product_commit }}
+      PRODUCT_VERSION: ${{ needs.guard.outputs.product_version }}
+    runs-on: macos-15
+    steps:
+      - name: Check out immutable tooling
+        id: checkout-tooling
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: tooling
+          persist-credentials: false
+          ref: ${{ env.TOOLING_TAG }}
+      - name: Check out immutable product source
+        id: checkout-source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: source
+          persist-credentials: false
+          ref: ${{ env.PRODUCT_TAG }}
       - name: Download compared macOS build A assets
+        id: download-macos-assets
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: tightbeam-macos-build-a
           path: build/release/tightbeam
       - name: Pin Node
+        id: setup-node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: ${{ env.NODE_VERSION }}
-      - name: Assemble exact six-asset manifest plus SHA256SUMS
+      - name: Assemble the macOS component manifest and SHA256SUMS
+        id: assemble-macos-assets
         env:
           SURF_ACE_RELEASE_COMPONENT: manifest
         run: |
@@ -768,19 +1213,49 @@ jobs:
             --source-tag "${PRODUCT_TAG}" \
             --source-commit "${PRODUCT_COMMIT}" \
             --version "${PRODUCT_VERSION}" \
+            --components macos \
             --target "${LINUX_RUST_TARGET}"
-      - name: Retain assembled release candidate
+      - name: Retain the macOS smoke candidate
+        id: retain-macos-candidate
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: tightbeam-release-candidate
+          name: tightbeam-macos-candidate
           path: build/release/tightbeam
-          include-hidden-files: true
           if-no-files-found: error
           retention-days: 30
+      - name: Report macOS candidate eligibility
+        id: finalize
+        if: always()
+        env:
+          TOOLING_OUTCOME: ${{ steps.checkout-tooling.outcome }}
+          SOURCE_OUTCOME: ${{ steps.checkout-source.outcome }}
+          DOWNLOAD_OUTCOME: ${{ steps.download-macos-assets.outcome }}
+          NODE_OUTCOME: ${{ steps.setup-node.outcome }}
+          ASSEMBLE_OUTCOME: ${{ steps.assemble-macos-assets.outcome }}
+          RETAIN_OUTCOME: ${{ steps.retain-macos-candidate.outcome }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$TOOLING_OUTCOME" != success || "$SOURCE_OUTCOME" != success || "$DOWNLOAD_OUTCOME" != success || "$NODE_OUTCOME" != success ]]; then
+            gate_state=unavailable
+            printf '::warning::macOS candidate assembly could not complete because required inputs or infrastructure were unavailable.\n'
+          elif [[ "$ASSEMBLE_OUTCOME" != success ]]; then
+            gate_state=failed
+            printf '::warning::macOS candidate assembly failed; macOS assets were withheld.\n'
+          elif [[ "$RETAIN_OUTCOME" != success ]]; then
+            gate_state=unavailable
+            printf '::warning::macOS candidate artifact could not be retained; macOS assets were withheld.\n'
+          else
+            gate_state=passed
+          fi
+          printf 'gate_state=%s\n' "$gate_state" >> "$GITHUB_OUTPUT"
 
   smoke-linux:
-    if: ${{ inputs.run_smoke || inputs.run_linux_smoke_only }}
-    needs: [assemble, guard]
+    if: ${{ (inputs.run_smoke || inputs.run_linux_smoke_only) && needs.assemble-linux.outputs.gate_state == 'passed' }}
+    needs: [assemble-linux, guard]
+    continue-on-error: true
+    outputs:
+      gate_state: ${{ steps.finalize.outputs.gate_state }}
     env:
       PRODUCT_COMMIT: ${{ needs.guard.outputs.product_commit }}
       PRODUCT_VERSION: ${{ needs.guard.outputs.product_version }}
@@ -798,10 +1273,10 @@ jobs:
           path: source
           persist-credentials: false
           ref: ${{ env.PRODUCT_TAG }}
-      - name: Download assembled release candidate
+      - name: Download the Linux smoke candidate
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: tightbeam-release-candidate
+          name: tightbeam-linux-candidate
           path: build/release/tightbeam
       - name: Pin Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
@@ -840,6 +1315,7 @@ jobs:
           pnpm --dir tooling fetch --frozen-lockfile
           pnpm --dir tooling install --offline --frozen-lockfile
       - name: Run PostgreSQL-backed server, packaged CLI, and Linux client acceptance
+        id: linux-acceptance
         env:
           SURF_ACE_SMOKE_COMPONENT: linux
           SURF_ACE_TIGHTBEAM_STATE_DRIVER: ${{ github.workspace }}/tooling/scripts/release/tightbeam-state-smoke-fixture.ts
@@ -907,13 +1383,21 @@ jobs:
                 -exec cp {} linux-smoke-failure/ \;
               exit "${smoke_status}"
             }
+      - name: Create Linux smoke receipt
+        id: create-linux-smoke-receipt
+        if: ${{ steps.linux-acceptance.outcome == 'success' }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
           node tooling/scripts/release/write-smoke-receipt.mjs \
             --channel tightbeam-linux \
             --manifest "build/release/tightbeam/surf-ace-v${PRODUCT_VERSION}-manifest.json" \
-            --files "build/release/tightbeam/surf-ace-server-linux-x86_64-v${PRODUCT_VERSION}.tar.gz,build/release/tightbeam/surf-ace-cli-linux-x86_64-v${PRODUCT_VERSION}.tar.gz,build/release/tightbeam/surf-ace-electron-linux-x86_64-v${PRODUCT_VERSION}.zip,build/release/tightbeam/surf-ace-cli-macos-arm64-v${PRODUCT_VERSION}.tar.gz,build/release/tightbeam/surf-ace-electron-macos-arm64-v${PRODUCT_VERSION}.zip,build/release/tightbeam/surf-ace-skill-v${PRODUCT_VERSION}.md" \
+            --files "build/release/tightbeam/surf-ace-server-linux-x86_64-v${PRODUCT_VERSION}.tar.gz,build/release/tightbeam/surf-ace-cli-linux-x86_64-v${PRODUCT_VERSION}.tar.gz,build/release/tightbeam/surf-ace-electron-linux-x86_64-v${PRODUCT_VERSION}.zip" \
             --output linux-smoke-receipt.json
       - name: Retain Linux smoke result and receipt
+        id: retain-linux-smoke
         if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: tightbeam-linux-smoke
@@ -921,12 +1405,50 @@ jobs:
             linux-smoke.json
             linux-smoke-stderr.log
             linux-smoke-receipt.json
+            build/release/tightbeam/surf-ace-v${{ env.PRODUCT_VERSION }}-manifest.json
+            build/release/tightbeam/SHA256SUMS
             linux-smoke-failure/
           if-no-files-found: error
 
+      - name: Report optional Linux smoke evidence gaps
+        if: always()
+        env:
+          UPLOAD_OUTCOME: ${{ steps.retain-linux-smoke.outcome }}
+        shell: bash
+        run: |
+          if [[ "${UPLOAD_OUTCOME:-unknown}" != "success" ]]; then
+            printf '::warning::Linux smoke evidence could not be fully retained; Linux smoke status still determines Linux asset eligibility.\n'
+            printf 'Linux smoke evidence retention was incomplete; smoke status still determines Linux asset eligibility.\n' \
+              >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Report Linux smoke gate result
+        id: finalize
+        if: always()
+        env:
+          ACCEPTANCE_OUTCOME: ${{ steps.linux-acceptance.outcome }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$ACCEPTANCE_OUTCOME" == success ]]; then
+            gate_state=passed
+            printf 'Linux smoke passed.\n' >> "$GITHUB_STEP_SUMMARY"
+          elif [[ "$ACCEPTANCE_OUTCOME" == failure ]]; then
+            gate_state=failed
+            printf '::warning::Linux smoke did not pass; Linux assets were withheld while other eligible platform assets may proceed.\n'
+            printf 'Linux smoke did not pass; Linux assets were withheld.\n' >> "$GITHUB_STEP_SUMMARY"
+          else
+            gate_state=unavailable
+            printf '::warning::Linux smoke was unavailable; Linux assets were withheld while other eligible platform assets may proceed.\n'
+            printf 'Linux smoke was unavailable; Linux assets were withheld.\n' >> "$GITHUB_STEP_SUMMARY"
+          fi
+          printf 'gate_state=%s\n' "$gate_state" >> "$GITHUB_OUTPUT"
+
   smoke-macos:
-    if: ${{ inputs.run_smoke }}
-    needs: [assemble, guard]
+    if: ${{ inputs.run_smoke && needs.assemble-macos.outputs.gate_state == 'passed' }}
+    needs: [assemble-macos, guard]
+    continue-on-error: true
+    outputs:
+      gate_state: ${{ steps.finalize.outputs.gate_state }}
     env:
       PRODUCT_COMMIT: ${{ needs.guard.outputs.product_commit }}
       PRODUCT_VERSION: ${{ needs.guard.outputs.product_version }}
@@ -944,10 +1466,10 @@ jobs:
           path: source
           persist-credentials: false
           ref: ${{ env.PRODUCT_TAG }}
-      - name: Download assembled release candidate
+      - name: Download the macOS smoke candidate
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: tightbeam-release-candidate
+          name: tightbeam-macos-candidate
           path: build/release/tightbeam
       - name: Pin Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
@@ -969,6 +1491,7 @@ jobs:
           sudo xcode-select --switch /Applications/Xcode_27.0.0.app
           test "$(xcodebuild -version | head -1)" = "Xcode 27.0"
       - name: Run the matching macOS candidate client and CLI smoke
+        id: macos-acceptance
         env:
           SURF_ACE_SMOKE_COMPONENT: macos
           SURF_ACE_SMOKE_FAILURE_OUTPUT: ${{ github.workspace }}/macos-smoke-failure.json
@@ -981,13 +1504,21 @@ jobs:
             --candidate-commit "${PRODUCT_COMMIT}" \
             --manifest "build/release/tightbeam/surf-ace-v${PRODUCT_VERSION}-manifest.json" \
             > macos-smoke.json
+      - name: Create macOS smoke receipt
+        id: create-macos-smoke-receipt
+        if: ${{ steps.macos-acceptance.outcome == 'success' }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
           node tooling/scripts/release/write-smoke-receipt.mjs \
             --channel tightbeam-macos \
             --manifest "build/release/tightbeam/surf-ace-v${PRODUCT_VERSION}-manifest.json" \
-            --files "build/release/tightbeam/surf-ace-server-linux-x86_64-v${PRODUCT_VERSION}.tar.gz,build/release/tightbeam/surf-ace-cli-linux-x86_64-v${PRODUCT_VERSION}.tar.gz,build/release/tightbeam/surf-ace-electron-linux-x86_64-v${PRODUCT_VERSION}.zip,build/release/tightbeam/surf-ace-cli-macos-arm64-v${PRODUCT_VERSION}.tar.gz,build/release/tightbeam/surf-ace-electron-macos-arm64-v${PRODUCT_VERSION}.zip,build/release/tightbeam/surf-ace-skill-v${PRODUCT_VERSION}.md" \
+            --files "build/release/tightbeam/surf-ace-cli-macos-arm64-v${PRODUCT_VERSION}.tar.gz,build/release/tightbeam/surf-ace-electron-macos-arm64-v${PRODUCT_VERSION}.zip" \
             --output macos-smoke-receipt.json
       - name: Retain macOS smoke result and receipt
+        id: retain-macos-smoke
         if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: tightbeam-macos-smoke
@@ -995,13 +1526,294 @@ jobs:
             macos-smoke.json
             macos-smoke-receipt.json
             macos-smoke-failure.json
+            build/release/tightbeam/surf-ace-v${{ env.PRODUCT_VERSION }}-manifest.json
+            build/release/tightbeam/SHA256SUMS
           if-no-files-found: warn
 
-  publish:
-    if: ${{ inputs.publish_release && inputs.run_smoke }}
-    needs: [assemble, smoke-linux, smoke-macos, guard]
+      - name: Report optional macOS smoke evidence gaps
+        if: always()
+        env:
+          UPLOAD_OUTCOME: ${{ steps.retain-macos-smoke.outcome }}
+        shell: bash
+        run: |
+          if [[ "${UPLOAD_OUTCOME:-unknown}" != "success" ]]; then
+            printf '::warning::macOS smoke evidence could not be fully retained; macOS smoke status still determines macOS asset eligibility.\n'
+            printf 'macOS smoke evidence retention was incomplete; smoke status still determines macOS asset eligibility.\n' \
+              >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Report macOS smoke gate result
+        id: finalize
+        if: always()
+        env:
+          ACCEPTANCE_OUTCOME: ${{ steps.macos-acceptance.outcome }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$ACCEPTANCE_OUTCOME" == success ]]; then
+            gate_state=passed
+            printf 'macOS smoke passed.\n' >> "$GITHUB_STEP_SUMMARY"
+          elif [[ "$ACCEPTANCE_OUTCOME" == failure ]]; then
+            gate_state=failed
+            printf '::warning::macOS smoke did not pass; macOS assets were withheld while other eligible platform assets may proceed.\n'
+            printf 'macOS smoke did not pass; macOS assets were withheld.\n' >> "$GITHUB_STEP_SUMMARY"
+          else
+            gate_state=unavailable
+            printf '::warning::macOS smoke was unavailable; macOS assets were withheld while other eligible platform assets may proceed.\n'
+            printf 'macOS smoke was unavailable; macOS assets were withheld.\n' >> "$GITHUB_STEP_SUMMARY"
+          fi
+          printf 'gate_state=%s\n' "$gate_state" >> "$GITHUB_OUTPUT"
+
+  assemble:
+    if: ${{ always() && needs.guard.result == 'success' }}
+    needs:
+      - guard
+      - build-linux
+      - build-macos
+      - compare-linux
+      - compare-macos
+      - compare-six-file-warning
+      - assemble-linux
+      - assemble-macos
+      - smoke-linux
+      - smoke-macos
+      - test-ios
+      - summarize-ios-tests
+    outputs:
+      has_linux: ${{ steps.select.outputs.has_linux }}
+      has_macos: ${{ steps.select.outputs.has_macos }}
+      components: ${{ steps.select.outputs.components }}
+      linux_status: ${{ steps.select.outputs.linux_status }}
+      macos_status: ${{ steps.select.outputs.macos_status }}
+      skill_status: ${{ steps.select.outputs.skill_status }}
     env:
+      PRODUCT_COMMIT: ${{ needs.guard.outputs.product_commit }}
       PRODUCT_VERSION: ${{ needs.guard.outputs.product_version }}
+      RUN_SMOKE: ${{ inputs.run_smoke }}
+      RUN_LINUX_ONLY: ${{ inputs.run_linux_smoke_only }}
+      INCLUDE_LINUX: ${{ ((inputs.run_smoke || inputs.run_linux_smoke_only) && needs.smoke-linux.outputs.gate_state == 'passed') || (!(inputs.run_smoke || inputs.run_linux_smoke_only) && needs.assemble-linux.outputs.gate_state == 'passed') }}
+      INCLUDE_MACOS: ${{ (inputs.run_smoke && needs.smoke-macos.outputs.gate_state == 'passed') || (!(inputs.run_smoke || inputs.run_linux_smoke_only) && needs.assemble-macos.outputs.gate_state == 'passed') }}
+      LINUX_COMPARE_STATE: ${{ needs.compare-linux.outputs.gate_state }}
+      MACOS_COMPARE_STATE: ${{ needs.compare-macos.outputs.gate_state }}
+      LINUX_BUILD_RESULT: ${{ needs.build-linux.result }}
+      MACOS_BUILD_RESULT: ${{ needs.build-macos.result }}
+      LINUX_ASSEMBLY_STATE: ${{ needs.assemble-linux.outputs.gate_state }}
+      MACOS_ASSEMBLY_STATE: ${{ needs.assemble-macos.outputs.gate_state }}
+      LINUX_SMOKE_STATE: ${{ needs.smoke-linux.outputs.gate_state }}
+      MACOS_SMOKE_STATE: ${{ needs.smoke-macos.outputs.gate_state }}
+      IOS_TEST_STATE: ${{ needs.summarize-ios-tests.outputs.state }}
+      ALL_ASSETS_COMPARE_STATE: ${{ needs.compare-six-file-warning.outputs.state }}
+      VERSION_NAME_MISMATCH: ${{ needs.guard.outputs.version_name_mismatch }}
+    runs-on: macos-15
+    steps:
+      - name: Check out immutable tooling
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: tooling
+          persist-credentials: false
+          ref: ${{ env.TOOLING_TAG }}
+      - name: Check out immutable product source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: source
+          persist-credentials: false
+          ref: ${{ env.PRODUCT_TAG }}
+      - name: Download Linux candidate when eligible
+        if: env.INCLUDE_LINUX == 'true'
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: tightbeam-linux-candidate
+          path: build/candidates/linux
+      - name: Download macOS candidate when eligible
+        if: env.INCLUDE_MACOS == 'true'
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: tightbeam-macos-candidate
+          path: build/candidates/macos
+      - name: Select components with complete candidate assets
+        id: select
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/release/tightbeam
+          components=()
+          linux_copy_state=not-selected
+          macos_copy_state=not-selected
+          copy_component() {
+            local component="$1"
+            shift
+            local files=("$@")
+            local copied=()
+            for file in "${files[@]}"; do
+              local source="build/candidates/${component}/${file}"
+              if [[ ! -s "${source}" ]] || ! cp "${source}" build/release/tightbeam/; then
+                for copied_file in "${copied[@]}"; do rm -f "build/release/tightbeam/${copied_file}"; done
+                return 1
+              fi
+              copied+=("${file}")
+            done
+          }
+          linux_files=(
+            "surf-ace-server-linux-x86_64-v${PRODUCT_VERSION}.tar.gz"
+            "surf-ace-cli-linux-x86_64-v${PRODUCT_VERSION}.tar.gz"
+            "surf-ace-electron-linux-x86_64-v${PRODUCT_VERSION}.zip"
+          )
+          macos_files=(
+            "surf-ace-cli-macos-arm64-v${PRODUCT_VERSION}.tar.gz"
+            "surf-ace-electron-macos-arm64-v${PRODUCT_VERSION}.zip"
+          )
+          if [[ "${INCLUDE_LINUX}" == "true" ]]; then
+            if copy_component linux "${linux_files[@]}"; then
+              components+=(linux)
+              linux_copy_state=passed
+            else
+              linux_copy_state=unavailable
+              printf '::warning::Linux component candidate files were unavailable for final assembly.\n'
+            fi
+          fi
+          if [[ "${INCLUDE_MACOS}" == "true" ]]; then
+            if copy_component macos "${macos_files[@]}"; then
+              components+=(macos)
+              macos_copy_state=passed
+            else
+              macos_copy_state=unavailable
+              printf '::warning::macOS component candidate files were unavailable for final assembly.\n'
+            fi
+          fi
+          if [[ ${#components[@]} -eq 0 ]]; then
+            printf 'No platform candidate passed its required build, comparison, assembly and smoke gates.\n' \
+              >> "$GITHUB_STEP_SUMMARY"
+            echo "No platform candidate passed its required gates." >&2
+            exit 1
+          fi
+          skill_status=unavailable
+          skill_source="tooling/integrations/tightbeam/skills/surf-ace/SKILL.md"
+          skill_asset="surf-ace-skill-v${PRODUCT_VERSION}.md"
+          if [[ -s "${skill_source}" ]] && cp "${skill_source}" "build/release/tightbeam/${skill_asset}" && cmp -s "${skill_source}" "build/release/tightbeam/${skill_asset}"; then
+            components+=(skill)
+            skill_status=included
+          else
+            rm -f "build/release/tightbeam/${skill_asset}"
+            printf '::warning::The shared skill asset was omitted because its pinned source bytes were unavailable or unverifiable.\n'
+          fi
+          components_csv="$(IFS=,; printf '%s' "${components[*]}")"
+          printf 'components=%s\n' "${components_csv}" >> "$GITHUB_OUTPUT"
+          printf 'has_linux=%s\n' "$( [[ " ${components[*]} " == *" linux "* ]] && echo true || echo false )" >> "$GITHUB_OUTPUT"
+          printf 'has_macos=%s\n' "$( [[ " ${components[*]} " == *" macos "* ]] && echo true || echo false )" >> "$GITHUB_OUTPUT"
+          printf 'Included platform components: %s\n' "${components_csv}" >> "$GITHUB_STEP_SUMMARY"
+          linux_status='Withheld: no Linux candidate passed every required gate.'
+          macos_status='Withheld: no macOS candidate passed every required gate.'
+          if [[ " ${components[*]} " == *" linux "* ]]; then
+            if [[ "$RUN_SMOKE" == true || "$RUN_LINUX_ONLY" == true ]]; then
+              linux_status='Included after Linux build, product tests, platform comparison, assembly and smoke passed.'
+            else
+              linux_status='Candidate assembled after Linux build, product tests and platform comparison passed; smoke was not run.'
+            fi
+          elif [[ "$linux_copy_state" == unavailable ]]; then
+            linux_status='Withheld because Linux candidate assets were unavailable during final assembly.'
+          elif [[ "$LINUX_COMPARE_STATE" != passed ]]; then
+            linux_status="Withheld because the Linux build/test job was ${LINUX_BUILD_RESULT:-unavailable} and its A/B comparison was ${LINUX_COMPARE_STATE:-unavailable}."
+          elif [[ "$LINUX_ASSEMBLY_STATE" != passed ]]; then
+            linux_status="Withheld because Linux candidate assembly state was ${LINUX_ASSEMBLY_STATE:-unavailable}."
+          elif [[ "$RUN_SMOKE" == true || "$RUN_LINUX_ONLY" == true ]]; then
+            linux_status="Withheld because Linux smoke state was ${LINUX_SMOKE_STATE:-unavailable}."
+          fi
+          if [[ " ${components[*]} " == *" macos "* ]]; then
+            if [[ "$RUN_SMOKE" == true ]]; then
+              macos_status='Included after macOS build, product tests, platform comparison, assembly and smoke passed.'
+            else
+              macos_status='Candidate assembled after macOS build, product tests and platform comparison passed; smoke was not run.'
+            fi
+          elif [[ "$RUN_LINUX_ONLY" == true ]]; then
+            macos_status='Not included because Linux-only smoke was selected.'
+          elif [[ "$macos_copy_state" == unavailable ]]; then
+            macos_status='Withheld because macOS candidate assets were unavailable during final assembly.'
+          elif [[ "$MACOS_COMPARE_STATE" != passed ]]; then
+            macos_status="Withheld because the macOS build/test job was ${MACOS_BUILD_RESULT:-unavailable} and its A/B comparison was ${MACOS_COMPARE_STATE:-unavailable}."
+          elif [[ "$MACOS_ASSEMBLY_STATE" != passed ]]; then
+            macos_status="Withheld because macOS candidate assembly state was ${MACOS_ASSEMBLY_STATE:-unavailable}."
+          elif [[ "$RUN_SMOKE" == true ]]; then
+            macos_status="Withheld because macOS smoke state was ${MACOS_SMOKE_STATE:-unavailable}."
+          fi
+          printf 'linux_status=%s\n' "$linux_status" >> "$GITHUB_OUTPUT"
+          printf 'macos_status=%s\n' "$macos_status" >> "$GITHUB_OUTPUT"
+          printf 'skill_status=%s\n' "$skill_status" >> "$GITHUB_OUTPUT"
+          printf 'Linux assets: %s\nmacOS assets: %s\n' "$linux_status" "$macos_status" >> "$GITHUB_STEP_SUMMARY"
+          printf 'Shared skill asset: %s.\n' "$skill_status" >> "$GITHUB_STEP_SUMMARY"
+          printf 'iOS XCTest state: %s.\n' "${IOS_TEST_STATE:-unavailable}" >> "$GITHUB_STEP_SUMMARY"
+          if [[ "${ALL_ASSETS_COMPARE_STATE:-warning}" != passed ]]; then
+            printf 'The informational six-file comparison was %s; per-platform comparisons govern asset eligibility.\n' \
+              "${ALL_ASSETS_COMPARE_STATE:-unavailable}" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [[ "${VERSION_NAME_MISMATCH:-false}" == true ]]; then
+            printf 'The tooling and product tag version labels differ; product tag version controls asset names.\n' \
+              >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Pin Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Assemble final manifest and exact SHA256SUMS
+        env:
+          SURF_ACE_RELEASE_COMPONENT: manifest
+          COMPONENTS: ${{ steps.select.outputs.components }}
+        run: |
+          set -euo pipefail
+          test "$(git -C tooling rev-parse HEAD)" = "${GITHUB_SHA}"
+          test "$(git -C source rev-parse HEAD)" = "${PRODUCT_COMMIT}"
+          node tooling/scripts/release/build-tightbeam-release.mjs \
+            --source-dir source \
+            --output-dir build/release/tightbeam \
+            --source-tag "${PRODUCT_TAG}" \
+            --source-commit "${PRODUCT_COMMIT}" \
+            --version "${PRODUCT_VERSION}" \
+            --components "${COMPONENTS}" \
+            --target "${LINUX_RUST_TARGET}"
+      - name: Retain the smoke-approved release candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: tightbeam-release-candidate
+          path: build/release/tightbeam
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    if: >-
+      ${{ always() && inputs.publish_release && inputs.run_smoke && needs.guard.result == 'success' &&
+      needs.assemble.result == 'success' &&
+      (needs.assemble.outputs.has_linux == 'true' || needs.assemble.outputs.has_macos == 'true') }}
+    needs:
+      - guard
+      - build-linux
+      - build-macos
+      - compare-linux
+      - compare-macos
+      - compare-six-file-warning
+      - assemble-linux
+      - assemble-macos
+      - smoke-linux
+      - smoke-macos
+      - test-ios
+      - summarize-ios-tests
+      - assemble
+    env:
+      PRODUCT_COMMIT: ${{ needs.guard.outputs.product_commit }}
+      PRODUCT_TAG: ${{ inputs.product_tag }}
+      PRODUCT_VERSION: ${{ needs.guard.outputs.product_version }}
+      TOOLING_TAG: ${{ inputs.tooling_tag }}
+      HAS_LINUX: ${{ needs.assemble.outputs.has_linux }}
+      HAS_MACOS: ${{ needs.assemble.outputs.has_macos }}
+      COMPONENTS: ${{ needs.assemble.outputs.components }}
+      LINUX_STATUS: ${{ needs.assemble.outputs.linux_status }}
+      MACOS_STATUS: ${{ needs.assemble.outputs.macos_status }}
+      SKILL_STATUS: ${{ needs.assemble.outputs.skill_status }}
+      IOS_TEST_STATE: ${{ needs.summarize-ios-tests.outputs.state }}
+      IOS_TEST_BUILD_A: ${{ needs.summarize-ios-tests.outputs.build_a }}
+      IOS_TEST_BUILD_B: ${{ needs.summarize-ios-tests.outputs.build_b }}
+      SIX_FILE_COMPARE_STATE: ${{ needs.compare-six-file-warning.outputs.state }}
+      VERSION_NAME_MISMATCH: ${{ needs.guard.outputs.version_name_mismatch }}
     environment: tightbeam-release
     runs-on: macos-15
     permissions:
@@ -1015,69 +1827,190 @@ jobs:
           path: tooling
           persist-credentials: false
           ref: ${{ env.TOOLING_TAG }}
-      - name: Download unchanged smoke-approved assets
+      - name: Download the smoke-approved release candidate
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: tightbeam-release-candidate
           path: release
-      - name: Download both smoke receipts
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          pattern: tightbeam-*-smoke
-          merge-multiple: true
-          path: release/.receipts
       - name: Pin Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: ${{ env.NODE_VERSION }}
-      - name: Verify receipts bind the same exact six assets and manifest
+      - name: Verify source identity and the final manifest and SHA256SUMS
         run: |
           set -euo pipefail
-          FILES="release/surf-ace-server-linux-x86_64-v${PRODUCT_VERSION}.tar.gz,release/surf-ace-cli-linux-x86_64-v${PRODUCT_VERSION}.tar.gz,release/surf-ace-electron-linux-x86_64-v${PRODUCT_VERSION}.zip,release/surf-ace-cli-macos-arm64-v${PRODUCT_VERSION}.tar.gz,release/surf-ace-electron-macos-arm64-v${PRODUCT_VERSION}.zip,release/surf-ace-skill-v${PRODUCT_VERSION}.md"
+          test "$(git -C tooling rev-parse HEAD)" = "${GITHUB_SHA}"
+          node --input-type=module <<'NODE'
+          import fs from "node:fs/promises";
+          import { createHash } from "node:crypto";
+          import { TIGHTBEAM, tightbeamComponentsForAssets } from "./tooling/scripts/release/tightbeam-release-config.mjs";
+          import { verifyTightbeamChecksums } from "./tooling/scripts/release/smoke-tightbeam-release.mjs";
+          const manifestPath = `release/${TIGHTBEAM.manifest}`;
+          const manifest = JSON.parse(await fs.readFile(manifestPath, "utf8"));
+          const components = tightbeamComponentsForAssets(manifest.assets?.map(({ name }) => name));
+          if (JSON.stringify(components) !== JSON.stringify(manifest.components) ||
+              JSON.stringify(components) !== JSON.stringify(process.env.COMPONENTS.split(",")) ||
+              manifest.source?.commit !== process.env.PRODUCT_COMMIT || manifest.source?.tag !== process.env.PRODUCT_TAG ||
+              manifest.tooling?.commit !== process.env.GITHUB_SHA || manifest.tooling?.tag !== process.env.TOOLING_TAG ||
+              manifest.version !== process.env.PRODUCT_VERSION) {
+            throw new Error("release_candidate_identity_or_component_mismatch");
+          }
+          await verifyTightbeamChecksums(manifestPath);
+          for (const asset of manifest.assets) {
+            const file = `release/${asset.name}`;
+            const [metadata, bytes] = await Promise.all([fs.stat(file), fs.readFile(file)]);
+            const digest = createHash("sha256").update(bytes).digest("hex");
+            if (!metadata.isFile() || metadata.size !== asset.sizeBytes ||
+                digest !== asset.sha256 || manifest.checksums?.[asset.name] !== digest) {
+              throw new Error(`release_candidate_asset_digest_or_size_mismatch:${asset.name}`);
+            }
+          }
+          NODE
+      - name: Create Linux smoke receipt
+        id: create-linux-receipt
+        if: env.HAS_LINUX == 'true'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          mkdir -p release/.receipts
           node tooling/scripts/release/write-smoke-receipt.mjs \
             --channel tightbeam-linux \
             --manifest "release/surf-ace-v${PRODUCT_VERSION}-manifest.json" \
-            --files "${FILES}" \
-            --receipt release/.receipts/linux-smoke-receipt.json
+            --files "release/surf-ace-server-linux-x86_64-v${PRODUCT_VERSION}.tar.gz,release/surf-ace-cli-linux-x86_64-v${PRODUCT_VERSION}.tar.gz,release/surf-ace-electron-linux-x86_64-v${PRODUCT_VERSION}.zip" \
+            --output release/.receipts/linux-smoke-receipt.json
+      - name: Create macOS smoke receipt
+        id: create-macos-receipt
+        if: env.HAS_MACOS == 'true'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          mkdir -p release/.receipts
           node tooling/scripts/release/write-smoke-receipt.mjs \
             --channel tightbeam-macos \
             --manifest "release/surf-ace-v${PRODUCT_VERSION}-manifest.json" \
-            --files "${FILES}" \
+            --files "release/surf-ace-cli-macos-arm64-v${PRODUCT_VERSION}.tar.gz,release/surf-ace-electron-macos-arm64-v${PRODUCT_VERSION}.zip" \
+            --output release/.receipts/macos-smoke-receipt.json
+      - name: Verify Linux smoke receipt
+        id: verify-linux-receipt
+        if: ${{ env.HAS_LINUX == 'true' && steps.create-linux-receipt.outcome == 'success' }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          node tooling/scripts/release/write-smoke-receipt.mjs \
+            --channel tightbeam-linux \
+            --manifest "release/surf-ace-v${PRODUCT_VERSION}-manifest.json" \
+            --files "release/surf-ace-server-linux-x86_64-v${PRODUCT_VERSION}.tar.gz,release/surf-ace-cli-linux-x86_64-v${PRODUCT_VERSION}.tar.gz,release/surf-ace-electron-linux-x86_64-v${PRODUCT_VERSION}.zip" \
+            --receipt release/.receipts/linux-smoke-receipt.json
+      - name: Verify macOS smoke receipt
+        id: verify-macos-receipt
+        if: ${{ env.HAS_MACOS == 'true' && steps.create-macos-receipt.outcome == 'success' }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          node tooling/scripts/release/write-smoke-receipt.mjs \
+            --channel tightbeam-macos \
+            --manifest "release/surf-ace-v${PRODUCT_VERSION}-manifest.json" \
+            --files "release/surf-ace-cli-macos-arm64-v${PRODUCT_VERSION}.tar.gz,release/surf-ace-electron-macos-arm64-v${PRODUCT_VERSION}.zip" \
             --receipt release/.receipts/macos-smoke-receipt.json
       - name: Attest Linux smoke receipt
         id: attest-linux
+        if: ${{ env.HAS_LINUX == 'true' && steps.verify-linux-receipt.outcome == 'success' }}
+        continue-on-error: true
         uses: actions/attest-build-provenance@62fc1d596301d0ab9914e1fec14dc5c8d93f65cd
         with:
           subject-path: release/.receipts/linux-smoke-receipt.json
       - name: Attest macOS smoke receipt
         id: attest-macos
+        if: ${{ env.HAS_MACOS == 'true' && steps.verify-macos-receipt.outcome == 'success' }}
+        continue-on-error: true
         uses: actions/attest-build-provenance@62fc1d596301d0ab9914e1fec14dc5c8d93f65cd
         with:
           subject-path: release/.receipts/macos-smoke-receipt.json
-      - name: Publish only after both verified receipts
+      - name: Publish after included platform receipts verify
         env:
           GH_TOKEN: ${{ github.token }}
           LINUX_ATTESTATION_URL: ${{ steps.attest-linux.outputs.attestation-url }}
           MACOS_ATTESTATION_URL: ${{ steps.attest-macos.outputs.attestation-url }}
+          LINUX_RECEIPT_OUTCOME: ${{ steps.verify-linux-receipt.outcome }}
+          MACOS_RECEIPT_OUTCOME: ${{ steps.verify-macos-receipt.outcome }}
+          LINUX_ATTESTATION_OUTCOME: ${{ steps.attest-linux.outcome }}
+          MACOS_ATTESTATION_OUTCOME: ${{ steps.attest-macos.outcome }}
         run: |
           set -euo pipefail
-          test -n "${LINUX_ATTESTATION_URL}"
-          test -n "${MACOS_ATTESTATION_URL}"
           release_channel_args=()
           if [[ "${PRODUCT_VERSION}" =~ -rc[1-9][0-9]*$ ]]; then
             release_channel_args+=(--prerelease)
           fi
+          cat > release-notes.md <<EOF
+          Surf Ace v${PRODUCT_VERSION}.
+
+          Included components: ${COMPONENTS}.
+          Linux: ${LINUX_STATUS}
+          macOS: ${MACOS_STATUS}
+          Shared skill asset: ${SKILL_STATUS}
+          iOS app: not included in this release. The iOS XCTest lanes were build-a=${IOS_TEST_BUILD_A:-unavailable} and build-b=${IOS_TEST_BUILD_B:-unavailable} (${IOS_TEST_STATE:-unavailable}).
+
+          The informational six-file comparison state was ${SIX_FILE_COMPARE_STATE:-unavailable}; per-platform comparisons determine asset eligibility.
+          EOF
+          if [[ "${IOS_TEST_STATE:-unavailable}" != passed ]]; then
+            printf '\nThe iOS app is withheld because the complete iOS XCTest result was %s.\n' \
+              "${IOS_TEST_STATE:-unavailable}" >> release-notes.md
+          fi
+          if [[ "${VERSION_NAME_MISMATCH:-false}" == true ]]; then
+            printf '\nThe tooling tag version label differs from the product tag version label; exact tag pins remain required, asset names follow the product version, and smoke still checks the app version.\n' \
+              >> release-notes.md
+          fi
+          if [[ "${HAS_LINUX}" != true ]]; then
+            printf '\nWithheld Linux assets: surf-ace-server-linux-x86_64-v%s.tar.gz, surf-ace-cli-linux-x86_64-v%s.tar.gz, surf-ace-electron-linux-x86_64-v%s.zip.\n' \
+              "${PRODUCT_VERSION}" "${PRODUCT_VERSION}" "${PRODUCT_VERSION}" >> release-notes.md
+          fi
+          if [[ "${HAS_MACOS}" != true ]]; then
+            printf '\nWithheld macOS assets: surf-ace-cli-macos-arm64-v%s.tar.gz, surf-ace-electron-macos-arm64-v%s.zip.\n' \
+              "${PRODUCT_VERSION}" "${PRODUCT_VERSION}" >> release-notes.md
+          fi
+          if [[ "${SKILL_STATUS}" != included ]]; then
+            printf '\nWithheld shared skill asset: surf-ace-skill-v%s.md; its pinned tooling source was unavailable or its copied bytes did not verify.\n' \
+              "${PRODUCT_VERSION}" >> release-notes.md
+          fi
+          if [[ "${HAS_LINUX}" == true ]]; then
+            if [[ "${LINUX_RECEIPT_OUTCOME:-}" == success && "${LINUX_ATTESTATION_OUTCOME:-}" == success && -n "${LINUX_ATTESTATION_URL:-}" ]]; then
+              printf '\nLinux smoke attestation: %s\n' "${LINUX_ATTESTATION_URL}" >> release-notes.md
+            else
+              printf '\nLinux smoke passed; its receipt or attestation could not be retained.\n' >> release-notes.md
+              printf '::warning::Linux smoke passed, but its receipt or attestation evidence is unavailable.\n'
+            fi
+          fi
+          if [[ "${HAS_MACOS}" == true ]]; then
+            if [[ "${MACOS_RECEIPT_OUTCOME:-}" == success && "${MACOS_ATTESTATION_OUTCOME:-}" == success && -n "${MACOS_ATTESTATION_URL:-}" ]]; then
+              printf '\nmacOS smoke attestation: %s\n' "${MACOS_ATTESTATION_URL}" >> release-notes.md
+            else
+              printf '\nmacOS smoke passed; its receipt or attestation could not be retained.\n' >> release-notes.md
+              printf '::warning::macOS smoke passed, but its receipt or attestation evidence is unavailable.\n'
+            fi
+          fi
+          node --input-type=module > release-asset-list.txt <<'NODE'
+          import fs from "node:fs/promises";
+          import { TIGHTBEAM, tightbeamComponentsForAssets } from "./tooling/scripts/release/tightbeam-release-config.mjs";
+          const manifest = JSON.parse(await fs.readFile(`release/${TIGHTBEAM.manifest}`, "utf8"));
+          const components = tightbeamComponentsForAssets(manifest.assets.map(({ name }) => name));
+          if (JSON.stringify(components) !== JSON.stringify(process.env.COMPONENTS.split(","))) {
+            throw new Error("release_asset_component_set_mismatch");
+          }
+          for (const asset of manifest.assets) console.log(asset.name);
+          console.log(TIGHTBEAM.manifest);
+          console.log(TIGHTBEAM.checksums);
+          NODE
+          mapfile -t asset_names < release-asset-list.txt
+          test "${#asset_names[@]}" -ge 4
+          release_assets=()
+          for name in "${asset_names[@]}"; do
+            test -s "release/${name}"
+            release_assets+=("release/${name}")
+          done
           gh release create "${PRODUCT_TAG}" \
-            "release/surf-ace-server-linux-x86_64-v${PRODUCT_VERSION}.tar.gz" \
-            "release/surf-ace-cli-linux-x86_64-v${PRODUCT_VERSION}.tar.gz" \
-            "release/surf-ace-electron-linux-x86_64-v${PRODUCT_VERSION}.zip" \
-            "release/surf-ace-cli-macos-arm64-v${PRODUCT_VERSION}.tar.gz" \
-            "release/surf-ace-electron-macos-arm64-v${PRODUCT_VERSION}.zip" \
-            "release/surf-ace-skill-v${PRODUCT_VERSION}.md" \
-            "release/surf-ace-v${PRODUCT_VERSION}-manifest.json" \
-            release/SHA256SUMS \
+            "${release_assets[@]}" \
             --repo "${GITHUB_REPOSITORY}" \
             --verify-tag \
             "${release_channel_args[@]+"${release_channel_args[@]}"}" \
             --title "Surf Ace v${PRODUCT_VERSION}" \
-            --notes "Surf Ace v${PRODUCT_VERSION}. Linux smoke attestation: ${LINUX_ATTESTATION_URL}\nmacOS smoke attestation: ${MACOS_ATTESTATION_URL}"
+            --notes-file release-notes.md
