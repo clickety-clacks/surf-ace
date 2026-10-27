@@ -337,10 +337,15 @@ function describePayload(fixture: ReturnType<typeof describeFixture>, overrides:
   };
 }
 
-function describeServer(core: SurfaceCore, isApplicationStateReady: () => boolean = () => true) {
+function describeServer(
+  core: SurfaceCore,
+  isApplicationStateReady: () => boolean = () => true,
+  clientId: string | null = core.registryBinding()?.clientId ?? null,
+) {
   return new SurfaceWsServer({
     bindAddress: "127.0.0.1",
     capturePaneImage: async () => null,
+    clientId,
     compositorSocketPath: null,
     core,
     endpointName: "Surf Ace fixture",
@@ -404,10 +409,60 @@ test("surface.describe returns revision-bound topology before pairing without ad
   }
 });
 
-test("surface.describe fails closed for wrong identity, stale surface, invalid nonce, and application guard", async () => {
+test("surface.describe preserves restored pane ID zero in its layout and pane list", async () => {
   const fixture = describeFixture();
-  let appReady = true;
-  const server = describeServer(fixture.core, () => appReady);
+  const persistentState = fixture.core.getPersistentState();
+  const persistedSurface = persistentState.surfaces?.find(
+    (surface) => surface.surfaceId === fixture.surface.surfaceId,
+  );
+  assert.ok(persistedSurface);
+  const firstPane = structuredClone(persistedSurface.panes[0]!);
+  const secondPane = structuredClone(firstPane);
+  firstPane.paneId = 0;
+  firstPane.paneLabel = 0;
+  firstPane.paneLineageId = "pl_describe_zero";
+  secondPane.paneId = 3;
+  secondPane.paneLabel = 0;
+  secondPane.paneLineageId = "pl_describe_three";
+  persistedSurface.panes = [firstPane, secondPane];
+  persistedSurface.paneOrder = [0, 3];
+  persistedSurface.activeKeyboardPaneId = 0;
+  persistedSurface.layout = {
+    children: [{ paneId: 3, type: "pane" }, { paneId: 0, type: "pane" }],
+    direction: "vertical",
+    type: "split",
+  };
+
+  const core = new SurfaceCore({ persistentState });
+  core.restorePersistedSurfaces("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  const persistedBeforeDescribe = core.getPersistentState();
+  const server = describeServer(core);
+  let socket: WebSocket | null = null;
+  try {
+    await server.start();
+    socket = await connect(`ws://127.0.0.1:${server.port}/ws`);
+    const response = await request(socket, "surface.describe", describePayload(fixture));
+
+    assert.equal(response.ok, true, JSON.stringify(response));
+    assert.deepEqual(response.payload.layout, {
+      children: [{ paneId: 3, type: "pane" }, { paneId: 0, type: "pane" }],
+      direction: "vertical",
+      type: "split",
+    });
+    assert.deepEqual(response.payload.panes.map((pane: { paneId: number }) => pane.paneId), [0, 3]);
+    assert.deepEqual(response.payload.panes.map((pane: { paneLabel: number | null }) => pane.paneLabel), [null, null]);
+    assert.deepEqual(core.getPersistentState(), persistedBeforeDescribe,
+      "describe must leave saved topology and identity unchanged");
+  } finally {
+    socket?.close();
+    await server.stop();
+  }
+});
+
+test("surface.describe refuses a different client identity but reports a different saved registry binding", async () => {
+  const fixture = describeFixture();
+  let checkApplicationReadiness = () => true;
+  const server = describeServer(fixture.core, () => checkApplicationReadiness());
   let socket: WebSocket | null = null;
   try {
     await server.start();
@@ -418,7 +473,18 @@ test("surface.describe fails closed for wrong identity, stale surface, invalid n
     }));
     assert.equal(wrongIdentity.ok, false);
     assert.equal(wrongIdentity.error.code, "identity_mismatch");
-    assert.equal(wrongIdentity.payload, undefined);
+
+    const oldBinding = await request(socket, "surface.describe", describePayload(fixture, {
+      registryIdentity: { allocatorId: "alloc_old_fixture", fleetId: "fleet_old_fixture" },
+    }));
+    assert.equal(oldBinding.ok, true, JSON.stringify(oldBinding));
+    assert.equal(oldBinding.payload.clientId, fixture.binding.clientId);
+    assert.deepEqual(oldBinding.payload.registryIdentity, {
+      allocatorId: fixture.binding.allocatorId,
+      fleetId: fixture.binding.fleetId,
+    });
+    assert.equal(oldBinding.payload.applicationReadiness.status, "degraded");
+    assert.deepEqual(oldBinding.payload.applicationReadiness.limitationCodes, ["registry_binding_stale"]);
 
     const staleSurface = await request(socket, "surface.describe", describePayload(fixture, {
       surfaceId: "sf_missing_fixture",
@@ -440,22 +506,169 @@ test("surface.describe fails closed for wrong identity, stale surface, invalid n
     assert.equal(unsupportedVersion.error.code, "unsupported_protocol_version");
     assert.equal(unsupportedVersion.payload, undefined);
 
-    appReady = false;
+    checkApplicationReadiness = () => false;
     const notReady = await request(socket, "surface.describe", describePayload(fixture));
-    assert.equal(notReady.ok, false);
-    assert.equal(notReady.error.code, "not_ready");
-    assert.equal(notReady.payload, undefined);
+    assert.equal(notReady.ok, true, JSON.stringify(notReady));
+    assert.equal(notReady.payload.applicationReadiness.status, "degraded");
+    assert.deepEqual(notReady.payload.applicationReadiness.limitationCodes, [
+      "application_state_unverified",
+    ]);
+    assert.equal(notReady.payload.surfaceId, fixture.surface.surfaceId);
+
+    checkApplicationReadiness = () => { throw new Error("readiness unavailable"); };
+    const unreadableReadiness = await request(socket, "surface.describe", describePayload(fixture));
+    assert.equal(unreadableReadiness.ok, true, JSON.stringify(unreadableReadiness));
+    assert.equal(unreadableReadiness.payload.applicationReadiness.status, "degraded");
+    assert.deepEqual(unreadableReadiness.payload.applicationReadiness.limitationCodes, [
+      "application_state_unverified",
+    ]);
+    assert.equal(unreadableReadiness.payload.surfaceId, fixture.surface.surfaceId);
   } finally {
     socket?.close();
     await server.stop();
   }
 });
 
-test("surface.describe withholds a changed lease until durable persistence commits", async () => {
+test("surface.describe keeps saved windows observable and readable during uncertain persistence", async () => {
+  const core = new SurfaceCore();
+  const viewport = { height: 800, scale: 2, width: 1200 };
+  const surfaces = [
+    core.ensurePrimarySurface("aa", viewport),
+    core.createAdditionalSurface("z", viewport),
+  ];
+  surfaces.forEach((surface, index) => {
+    core.resetProviderBootstrapTopology(surface.surfaceId, {
+      initialPaneId: 1,
+      initialPaneLabel: 11 + index,
+      windowLabel: surface.name,
+    });
+  });
+  const binding = {
+    clientId: "c".repeat(64),
+    allocatorId: "alloc_uncertain_read_fixture",
+    fleetId: "fleet_uncertain_read_fixture",
+  };
+  core.bindRegistryIdentity(binding);
+  core.setRegistryEndpointLease({
+    leaseGeneration: 17,
+    registrationObservedAtMs: Date.now() - 1_000,
+    leaseExpiresAtMs: Date.now() + 14_000,
+  });
+  let durableState = core.getPersistentState();
+  const port = nextPort++;
+  const server = new SurfaceWsServer({
+    bindAddress: "127.0.0.1",
+    capturePaneImage: async () => "cG5n",
+    compositorSocketPath: null,
+    clientId: binding.clientId,
+    core,
+    endpointName: "Surf Ace fixture",
+    hostName: "localhost",
+    persistLocklessState: async () => {
+      durableState = core.getPersistentState();
+    },
+    port,
+    viewport: () => viewport,
+  });
+  const pairedSockets: WebSocket[] = [];
+  const describeSockets: WebSocket[] = [];
+  const warnings: string[] = [];
+  const originalWarn = console.warn;
+  console.warn = (...args: unknown[]) => warnings.push(args.map(String).join(" "));
+  try {
+    await server.start();
+    for (const [index, surface] of surfaces.entries()) {
+      const pairedSocket = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+      pairedSockets.push(pairedSocket);
+      const admitted = await pair(pairedSocket, `saved-window-reader-${index}`, surface.surfaceId);
+      assert.equal(admitted.ok, true, JSON.stringify(admitted));
+      const paneId = Number(core.panesList(surface.surfaceId).panes[0]!.paneId);
+      const contentId = `saved-content-${surface.name}`;
+      const saved = await request(pairedSocket, "content.set", {
+        content: { markdown: `# ${contentId}` },
+        contentId,
+        contentType: "markdown",
+        paneId,
+        surfaceId: surface.surfaceId,
+      });
+      assert.equal(saved.ok, true, JSON.stringify(saved));
+    }
+
+    const savedContent = surfaces.map((surface) =>
+      core.getRendererWindowState(surface.surfaceId).panes.map((pane) => pane.content),
+    );
+    const durableBeforeUncertainty = structuredClone(durableState);
+    server.failStopPersistence(new PersistentStateOutcomeUnknownError(new Error("fixture uncertainty")));
+
+    const listSocket = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+    describeSockets.push(listSocket);
+    const listed = await request(listSocket, "surfaces.list", {});
+    assert.equal(listed.ok, true, JSON.stringify(listed));
+    assert.deepEqual(listed.payload.surfaces.map((surface: { name: string }) => surface.name), ["aa", "z"]);
+
+    for (const [index, surface] of surfaces.entries()) {
+      const observationSocket = index === 0
+        ? listSocket
+        : await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+      if (index > 0) describeSockets.push(observationSocket);
+      const observation = await request(observationSocket, "surface.describe", {
+        clientId: binding.clientId,
+        endpointLeaseGeneration: 17,
+        nonce: `${index + 1}`.repeat(32),
+        registryIdentity: { allocatorId: binding.allocatorId, fleetId: binding.fleetId },
+        surfaceId: surface.surfaceId,
+      });
+      assert.equal(observation.ok, true, JSON.stringify(observation));
+      assert.equal(observation.payload.clientId, binding.clientId);
+      assert.deepEqual(observation.payload.registryIdentity, {
+        allocatorId: binding.allocatorId,
+        fleetId: binding.fleetId,
+      });
+      assert.equal(observation.payload.surfaceId, surface.surfaceId);
+      assert.equal(observation.payload.endpointLeaseGeneration, 17);
+      assert.equal(observation.payload.applicationReadiness.status, "degraded");
+      assert.deepEqual(observation.payload.applicationReadiness.limitationCodes, [
+        "persistence_outcome_unknown",
+        "application_state_unverified",
+      ]);
+      assert.equal(observation.payload.panes[0].paneLabel, null,
+        "bootstrap labels remain hidden until the registry confirms them");
+
+      const panes = await request(pairedSockets[index]!, "panes.list", { surfaceId: surface.surfaceId });
+      assert.equal(panes.ok, true, JSON.stringify(panes));
+      const paneId = Number(panes.payload.panes[0].paneId);
+      const snapshot = await request(pairedSockets[index]!, "snapshot.get", {
+        paneId,
+        surfaceId: surface.surfaceId,
+      });
+      assert.equal(snapshot.ok, true, JSON.stringify(snapshot));
+      assert.equal(snapshot.payload.contentId, `saved-content-${surface.name}`);
+      assert.equal(snapshot.payload.image, "cG5n");
+      assert.deepEqual(
+        core.getRendererWindowState(surface.surfaceId).panes.map((pane) => pane.content),
+        savedContent[index],
+      );
+
+      assert(warnings.some((line) =>
+        line.includes("event=prepair_surface_observation_degraded") &&
+        line.includes(`surface_id=${surface.surfaceId}`) &&
+        line.includes("limitation_codes=persistence_outcome_unknown,application_state_unverified"),
+      ), `expected a readiness warning for ${surface.name}`);
+    }
+    assert.deepEqual(durableState, durableBeforeUncertainty,
+      "read-only observations must not change the last durable content or identity");
+  } finally {
+    console.warn = originalWarn;
+    pairedSockets.forEach((socket) => socket.close());
+    describeSockets.forEach((socket) => socket.close());
+    await server.stop();
+  }
+});
+
+test("surface.describe reports readiness degradation until durable persistence commits", async () => {
   const fixture = describeFixture();
   const readiness = new PersistenceWriteReadiness();
-  let persistenceOutcomeUnknown = false;
-  const server = describeServer(fixture.core, () => readiness.isReady && !persistenceOutcomeUnknown);
+  const server = describeServer(fixture.core, () => readiness.isReady);
   let socket: WebSocket | null = null;
   try {
     await server.start();
@@ -480,9 +693,11 @@ test("surface.describe withholds a changed lease until durable persistence commi
     const duringSuccessfulWrite = await request(socket, "surface.describe", describePayload(fixture, {
       endpointLeaseGeneration: 18,
     }));
-    assert.equal(duringSuccessfulWrite.ok, false);
-    assert.equal(duringSuccessfulWrite.error.code, "not_ready");
-    assert.equal(duringSuccessfulWrite.payload, undefined);
+    assert.equal(duringSuccessfulWrite.ok, true, JSON.stringify(duringSuccessfulWrite));
+    assert.equal(duringSuccessfulWrite.payload.applicationReadiness.status, "degraded");
+    assert.deepEqual(duringSuccessfulWrite.payload.applicationReadiness.limitationCodes, [
+      "application_state_unverified",
+    ]);
     resolveDurableWrite();
     await successfulRegistration;
     const committed = await request(socket, "surface.describe", describePayload(fixture, {
@@ -510,8 +725,8 @@ test("surface.describe withholds a changed lease until durable persistence commi
     const duringFailedWrite = await request(socket, "surface.describe", describePayload(fixture, {
       endpointLeaseGeneration: 19,
     }));
-    assert.equal(duringFailedWrite.ok, false);
-    assert.equal(duringFailedWrite.error.code, "not_ready");
+    assert.equal(duringFailedWrite.ok, true, JSON.stringify(duringFailedWrite));
+    assert.equal(duringFailedWrite.payload.applicationReadiness.status, "degraded");
     rejectDurableWrite(new Error("durable write rejected"));
     await assert.rejects(failedRegistration, /durable write rejected/);
     assert.equal(fixture.core.registryEndpointLease()?.leaseGeneration, 18);
@@ -521,13 +736,16 @@ test("surface.describe withholds a changed lease until durable persistence commi
     assert.equal(rolledBack.ok, true, JSON.stringify(rolledBack));
     assert.equal(rolledBack.payload.endpointLeaseGeneration, 18);
 
-    persistenceOutcomeUnknown = true;
+    server.failStopPersistence(new PersistentStateOutcomeUnknownError(new Error("write outcome unknown")));
     const uncertain = await request(socket, "surface.describe", describePayload(fixture, {
       endpointLeaseGeneration: 18,
     }));
-    assert.equal(uncertain.ok, false);
-    assert.equal(uncertain.error.code, "not_ready");
-    assert.equal(uncertain.payload, undefined);
+    assert.equal(uncertain.ok, true, JSON.stringify(uncertain));
+    assert.equal(uncertain.payload.applicationReadiness.status, "degraded");
+    assert.deepEqual(uncertain.payload.applicationReadiness.limitationCodes, [
+      "persistence_outcome_unknown",
+      "application_state_unverified",
+    ]);
   } finally {
     socket?.close();
     await server.stop();
@@ -4420,6 +4638,155 @@ function seedFullTerminalLedger(core: SurfaceCore): number {
   }
   return core.listSurfaceAdmissionAttempts().length;
 }
+
+test("surface.describe returns topology when saved registry binding or lease is unavailable, unreadable, or stale", async () => {
+  const cases = [
+    {
+      name: "binding-unavailable",
+      prepare: (state: ReturnType<ReturnType<typeof describeFixture>["core"]["getPersistentState"]>) => {
+        delete state.registryBinding;
+      },
+      expectedClientId: "a".repeat(64),
+      expectedLeaseGeneration: 17,
+      expectedRegistryIdentityUnavailable: true,
+      expectedEndpointLeaseUnavailable: false,
+      expectedLimitations: ["registry_binding_unavailable"],
+    },
+    {
+      name: "binding-unreadable",
+      prepare: (state: ReturnType<ReturnType<typeof describeFixture>["core"]["getPersistentState"]>) => {
+        state.registryBinding = {
+          clientId: "",
+          allocatorId: "alloc_describe_fixture",
+          fleetId: "fleet_describe_fixture",
+        };
+      },
+      expectedClientId: "a".repeat(64),
+      expectedLeaseGeneration: 17,
+      expectedRegistryIdentityUnavailable: true,
+      expectedEndpointLeaseUnavailable: false,
+      expectedLimitations: ["registry_binding_unavailable"],
+    },
+    {
+      name: "lease-unavailable",
+      prepare: (state: ReturnType<ReturnType<typeof describeFixture>["core"]["getPersistentState"]>) => {
+        delete state.registryEndpointLease;
+      },
+      expectedClientId: "a".repeat(64),
+      expectedLeaseGeneration: null,
+      expectedRegistryIdentityUnavailable: false,
+      expectedEndpointLeaseUnavailable: true,
+      expectedLimitations: ["endpoint_lease_unavailable"],
+    },
+    {
+      name: "lease-unreadable",
+      prepare: (state: ReturnType<ReturnType<typeof describeFixture>["core"]["getPersistentState"]>) => {
+        state.registryEndpointLease = {
+          leaseGeneration: 0,
+          registrationObservedAtMs: Date.now() - 1_000,
+          leaseExpiresAtMs: Date.now() + 14_000,
+        };
+      },
+      expectedClientId: "a".repeat(64),
+      expectedLeaseGeneration: null,
+      expectedRegistryIdentityUnavailable: false,
+      expectedEndpointLeaseUnavailable: true,
+      expectedLimitations: ["endpoint_lease_unavailable"],
+    },
+    {
+      name: "stale",
+      prepare: (state: ReturnType<ReturnType<typeof describeFixture>["core"]["getPersistentState"]>) => {
+        state.registryBinding = {
+          allocatorId: "alloc_old_registry_fixture",
+          clientId: "d".repeat(64),
+          fleetId: "fleet_old_fixture",
+        };
+        state.registryEndpointLease = {
+          leaseGeneration: 16,
+          registrationObservedAtMs: Date.now() - 20_000,
+          leaseExpiresAtMs: Date.now() - 1_000,
+        };
+      },
+      expectedClientId: "a".repeat(64),
+      expectedLeaseGeneration: 16,
+      expectedRegistryIdentityUnavailable: false,
+      expectedEndpointLeaseUnavailable: false,
+      expectedLimitations: ["registry_binding_stale", "endpoint_lease_stale"],
+    },
+  ] as const;
+
+  for (const item of cases) {
+    const fixture = describeFixture();
+    const initialServer = describeServer(fixture.core);
+    let initialSocket: WebSocket | null = null;
+    try {
+      await initialServer.start();
+      initialSocket = await connect(`ws://127.0.0.1:${initialServer.port}/ws`);
+      const admitted = await pair(initialSocket, `saved-window-reader-${item.name}`, fixture.surface.surfaceId);
+      assert.equal(admitted.ok, true, `${item.name}: ${JSON.stringify(admitted)}`);
+      const paneId = Number(fixture.core.panesList(fixture.surface.surfaceId).panes[0]!.paneId);
+      const saved = await request(initialSocket, "content.set", {
+        content: { markdown: "# preserved content" },
+        contentId: `saved-content-${item.name}`,
+        contentType: "markdown",
+        paneId,
+        surfaceId: fixture.surface.surfaceId,
+      });
+      assert.equal(saved.ok, true, `${item.name}: ${JSON.stringify(saved)}`);
+    } finally {
+      initialSocket?.close();
+      await initialServer.stop();
+    }
+    const state = fixture.core.getPersistentState();
+    item.prepare(state);
+    const core = new SurfaceCore({ persistentState: state });
+    core.restorePersistedSurfaces("Surf Ace", { height: 800, scale: 2, width: 1200 });
+    const savedRegistryState = core.getPersistentState();
+    const savedBinding = savedRegistryState.registryBinding;
+    const savedLease = savedRegistryState.registryEndpointLease;
+    const server = describeServer(core, () => true, fixture.binding.clientId);
+    let socket: WebSocket | null = null;
+    try {
+      await server.start();
+      socket = await connect(`ws://127.0.0.1:${server.port}/ws`);
+      const response = await request(socket, "surface.describe", {
+        ...describePayload(fixture),
+      });
+
+      assert.equal(response.ok, true, `${item.name}: ${JSON.stringify(response)}`);
+      assert.equal(response.payload.surfaceId, fixture.surface.surfaceId);
+      assert.equal(response.payload.clientId, item.expectedClientId);
+      assert.equal(response.payload.endpointLeaseGeneration, item.expectedLeaseGeneration);
+      assert.equal(response.payload.registryIdentity === null, item.expectedRegistryIdentityUnavailable);
+      assert.equal(response.payload.endpointLeaseGeneration === null, item.expectedEndpointLeaseUnavailable);
+      assert.equal(response.payload.applicationReadiness.status, "degraded");
+      assert.deepEqual(response.payload.applicationReadiness.limitationCodes, item.expectedLimitations);
+      if (item.name === "stale") {
+        assert.deepEqual(response.payload.registryIdentity, {
+          allocatorId: "alloc_old_registry_fixture",
+          fleetId: "fleet_old_fixture",
+        });
+      }
+      assert.equal(response.payload.panes[0].paneLabel, null,
+        "restored labels remain hidden until the registry confirms them again");
+
+      const admitted = await pair(socket, `saved-window-reader-${item.name}-restored`, fixture.surface.surfaceId);
+      assert.equal(admitted.ok, true, `${item.name}: ${JSON.stringify(admitted)}`);
+      const panes = await request(socket, "panes.list", { surfaceId: fixture.surface.surfaceId });
+      assert.equal(panes.ok, true, `${item.name}: ${JSON.stringify(panes)}`);
+      const registryStateAfterDescribe = core.getPersistentState();
+      assert.deepEqual(registryStateAfterDescribe.registryBinding, savedBinding);
+      assert.deepEqual(registryStateAfterDescribe.registryEndpointLease, savedLease);
+      assert.deepEqual(
+        core.getRendererWindowState(fixture.surface.surfaceId).panes[0]!.content.content,
+        { markdown: "# preserved content" },
+      );
+    } finally {
+      socket?.close();
+      await server.stop();
+    }
+  }
+});
 
 test("a saturated terminal ledger still admits push, capture, close and cleanup", async () => {
   const core = new SurfaceCore();

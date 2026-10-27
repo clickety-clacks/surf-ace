@@ -88,6 +88,55 @@ test("surface.describe schema is a read-only pre-pair request and permits unknow
       applicationReadiness: { status: "ready", limitationCodes: [] },
       surfaceSetRevision: 2,
       topologyRevision: 3,
+      layout: { paneId: 0, type: "pane" },
+      panes: [{
+        paneId: 0,
+        paneLabel: null,
+        contentObservation: { revision: null, source: "client-authority", observedAtMs: Date.now() },
+      }],
+    },
+    sentAt: Date.now(),
+    type: "response",
+    v: 1,
+  });
+  assert.deepEqual(response, { ok: true });
+
+  const describeSchema = protocolSchemaDefs.SurfaceDescribeResponse as any;
+  const describePayloadSchema = describeSchema.properties.payload.properties;
+  assert.equal(describePayloadSchema.layout.$ref, "#/$defs/SurfaceDescribeLayoutNode");
+  assert.equal(
+    describePayloadSchema.panes.items.properties.paneId.$ref,
+    "#/$defs/SurfaceDescribePaneId",
+  );
+  assert.equal((protocolSchemaDefs.SurfaceDescribePaneId as any).minimum, 0);
+
+  const topologyChangedSchema = protocolSchemaDefs.TopologyChangedEvent as any;
+  const topologyPayloadSchema = topologyChangedSchema.properties.payload.properties;
+  assert.equal(topologyPayloadSchema.layout.$ref, "#/$defs/TopologyLayoutNode");
+  assert.equal(topologyPayloadSchema.panes.items.$ref, "#/$defs/TopologyPaneState");
+  assert.equal((protocolSchemaDefs.TopologyLayoutNode as any).oneOf[0].properties.paneId.$ref,
+    "#/$defs/PaneId");
+  assert.equal((protocolSchemaDefs.TopologyPaneState as any).properties.paneId.$ref,
+    "#/$defs/PaneId");
+  assert.equal((protocolSchemaDefs.PaneId as any).minimum, 1);
+
+  const unavailableSavedRegistryState = validateEnvelopeType("surface.describe", {
+    id: "rq_surface_describe_fixture",
+    op: "surface.describe",
+    ok: true,
+    payload: {
+      nonce: "b".repeat(32),
+      clientId: "a".repeat(64),
+      registryIdentity: null,
+      surfaceId: "sf_fixture",
+      endpointLeaseGeneration: null,
+      observedAtMs: Date.now(),
+      applicationReadiness: {
+        status: "degraded",
+        limitationCodes: ["registry_binding_unavailable", "endpoint_lease_unavailable"],
+      },
+      surfaceSetRevision: 2,
+      topologyRevision: 3,
       layout: { paneId: 1, type: "pane" },
       panes: [{
         paneId: 1,
@@ -99,7 +148,7 @@ test("surface.describe schema is a read-only pre-pair request and permits unknow
     type: "response",
     v: 1,
   });
-  assert.deepEqual(response, { ok: true });
+  assert.deepEqual(unavailableSavedRegistryState, { ok: true });
 
   const describePaneProperties = (protocolSchemaDefs.SurfaceDescribeResponse as any)
     .properties.payload.properties.panes.items.properties;

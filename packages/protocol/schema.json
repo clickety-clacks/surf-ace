@@ -194,6 +194,12 @@
       "type": "integer",
       "minimum": 1
     },
+    "SurfaceDescribePaneId": {
+      "description": "Saved pane identity reported by surface.describe, including a restored value of 0.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
     "Revision": {
       "type": "integer",
       "minimum": 0
@@ -1138,16 +1144,26 @@
             "nonce": { "type": "string", "pattern": "^[a-f0-9]{32,128}$" },
             "clientId": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
             "registryIdentity": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["allocatorId", "fleetId"],
-              "properties": {
-                "allocatorId": { "type": "string", "pattern": "^alloc_[A-Za-z0-9._:-]{3,64}$" },
-                "fleetId": { "type": "string", "pattern": "^[A-Za-z0-9._:-]{1,128}$" }
-              }
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["allocatorId", "fleetId"],
+                  "properties": {
+                    "allocatorId": { "type": "string", "pattern": "^alloc_[A-Za-z0-9._:-]{3,64}$" },
+                    "fleetId": { "type": "string", "pattern": "^[A-Za-z0-9._:-]{1,128}$" }
+                  }
+                },
+                { "type": "null" }
+              ]
             },
             "surfaceId": { "$ref": "#/$defs/SurfaceId" },
-            "endpointLeaseGeneration": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+            "endpointLeaseGeneration": {
+              "oneOf": [
+                { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+                { "type": "null" }
+              ]
+            },
             "observedAtMs": { "$ref": "#/$defs/EpochMs" },
             "applicationReadiness": {
               "type": "object",
@@ -1160,7 +1176,7 @@
             },
             "surfaceSetRevision": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
             "topologyRevision": { "$ref": "#/$defs/TopologyRevision" },
-            "layout": { "$ref": "#/$defs/TopologyLayoutNode" },
+            "layout": { "$ref": "#/$defs/SurfaceDescribeLayoutNode" },
             "panes": {
               "type": "array",
               "items": {
@@ -1168,7 +1184,7 @@
                 "additionalProperties": false,
                 "required": ["paneId", "paneLabel", "contentObservation"],
                 "properties": {
-                  "paneId": { "$ref": "#/$defs/PaneId" },
+                  "paneId": { "$ref": "#/$defs/SurfaceDescribePaneId" },
                   "paneLabel": {
                     "oneOf": [
                       { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
@@ -3929,6 +3945,35 @@
               "items": {
                 "$ref": "#/$defs/TopologyLayoutNode"
               }
+            }
+          }
+        }
+      ]
+    },
+    "SurfaceDescribeLayoutNode": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "paneId"],
+          "properties": {
+            "type": { "const": "pane" },
+            "paneId": { "$ref": "#/$defs/SurfaceDescribePaneId" },
+            "weight": { "type": "number", "exclusiveMinimum": 0 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "direction", "children"],
+          "properties": {
+            "type": { "const": "split" },
+            "direction": { "type": "string", "enum": ["horizontal", "vertical"] },
+            "weight": { "type": "number", "exclusiveMinimum": 0 },
+            "children": {
+              "type": "array",
+              "minItems": 1,
+              "items": { "$ref": "#/$defs/SurfaceDescribeLayoutNode" }
             }
           }
         }

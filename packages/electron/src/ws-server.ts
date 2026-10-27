@@ -140,6 +140,7 @@ export type SurfaceWsServerOptions = {
   capturePaneImage: (surfaceId: string, paneId: number) => Promise<string | null>;
   claimPaneLabel?: (surfaceId: string, paneId: number, paneLineageId: string) => Promise<number | PaneLabelAllocation>;
   preparePaneLabelClaim?: () => Promise<void>;
+  clientId?: string;
   core: SurfaceCore;
   endpointName: string;
   hostName: string;
@@ -247,6 +248,7 @@ function pairStateDiagnosticSummary(state: ReturnType<SurfaceCore["pairState"]>)
 
 export class SurfaceWsServer {
   private readonly bindAddress: string;
+  private readonly clientId: string | null;
   private readonly compositorSocketPath: string | null;
   private readonly core: SurfaceCore;
   private readonly claimPaneLabel: (surfaceId: string, paneId: number, paneLineageId: string) => Promise<number | PaneLabelAllocation>;
@@ -296,6 +298,7 @@ export class SurfaceWsServer {
 
   constructor(options: SurfaceWsServerOptions) {
     this.bindAddress = options.bindAddress ?? "0.0.0.0";
+    this.clientId = options.clientId ?? null;
     this.capturePaneImage = options.capturePaneImage;
     this.compositorSocketPath = options.compositorSocketPath === undefined
       ? resolveCompositorControlSocketPath()
@@ -3355,29 +3358,29 @@ export class SurfaceWsServer {
       return errorResponse("surface.describe", request.id, "invalid_payload",
         validation.ok ? "surface.describe payload is invalid" : validation.reason);
     }
-    if (this.persistenceOutcomeUnknown || !this.isApplicationStateReady()) {
-      return errorResponse("surface.describe", request.id, "not_ready",
-        "Client application state is not ready for an authoritative pre-pair observation");
+    const clientId = this.clientId;
+    if (!clientId || request.payload.clientId !== clientId) {
+      return errorResponse("surface.describe", request.id, "identity_mismatch",
+        "Requested client identity does not match this client");
     }
-    let binding: ReturnType<SurfaceCore["registryBinding"]>;
-    let lease: ReturnType<SurfaceCore["registryEndpointLease"]>;
+    const persistenceOutcomeUnknown = this.persistenceOutcomeUnknown !== null;
+    let applicationStateReady = false;
+    try {
+      applicationStateReady = !persistenceOutcomeUnknown && this.isApplicationStateReady();
+    } catch {
+      // A failed readiness check limits the observation; it does not make saved topology unreadable.
+    }
+    let binding: ReturnType<SurfaceCore["registryBinding"]> = null;
+    let lease: ReturnType<SurfaceCore["registryEndpointLease"]> = null;
     try {
       binding = this.core.registryBinding();
+    } catch {
+      // An unavailable saved binding limits consistency reporting, not the topology read.
+    }
+    try {
       lease = this.core.registryEndpointLease();
     } catch {
-      return errorResponse("surface.describe", request.id, "not_ready",
-        "Persisted registry authority is invalid or unavailable");
-    }
-    if (!binding || !lease) {
-      return errorResponse("surface.describe", request.id, "not_ready",
-        "A persisted registry identity and endpoint lease are required");
-    }
-    if (request.payload.clientId !== binding.clientId ||
-        request.payload.registryIdentity.allocatorId !== binding.allocatorId ||
-        request.payload.registryIdentity.fleetId !== binding.fleetId ||
-        request.payload.endpointLeaseGeneration !== lease.leaseGeneration) {
-      return errorResponse("surface.describe", request.id, "identity_mismatch",
-        "Requested registry identity or endpoint lease does not match the persisted client binding");
+      // An unavailable saved lease limits consistency reporting, not the topology read.
     }
     if (!this.core.listSurfaces().some((surface) => surface.surfaceId === request.payload.surfaceId)) {
       return errorResponse("surface.describe", request.id, "surface_not_found",
@@ -3410,6 +3413,29 @@ export class SurfaceWsServer {
       return errorResponse("surface.describe", request.id, "not_ready",
         "Client revision or observation clock is unavailable");
     }
+    const bindingMatchesRequest = binding !== null &&
+      binding.clientId === clientId &&
+      request.payload.registryIdentity.allocatorId === binding.allocatorId &&
+      request.payload.registryIdentity.fleetId === binding.fleetId;
+    const limitationCodes: string[] = [];
+    if (persistenceOutcomeUnknown) limitationCodes.push("persistence_outcome_unknown");
+    if (!applicationStateReady) limitationCodes.push("application_state_unverified");
+    if (!binding) {
+      limitationCodes.push("registry_binding_unavailable");
+    } else if (!bindingMatchesRequest) {
+      limitationCodes.push("registry_binding_stale");
+    }
+    if (!lease) {
+      limitationCodes.push("endpoint_lease_unavailable");
+    } else if (lease.leaseGeneration !== request.payload.endpointLeaseGeneration) {
+      limitationCodes.push("endpoint_lease_stale");
+    }
+    if (limitationCodes.length > 0) {
+      persistentServerDiagnostic("warn", "prepair_surface_observation_degraded", {
+        limitation_codes: limitationCodes.join(","),
+        surface_id: request.payload.surfaceId,
+      });
+    }
     const panes = snapshot.panes.map((pane) => ({
       paneId: Number(pane.paneId),
       paneLabel: pane.paneLabel,
@@ -3430,7 +3456,7 @@ export class SurfaceWsServer {
     };
     const paneIds = panes.map((pane) => pane.paneId);
     if (!visit(snapshot.layout) || panes.length === 0 ||
-        panes.some((pane) => !Number.isSafeInteger(pane.paneId) || pane.paneId < 1 ||
+        panes.some((pane) => !Number.isSafeInteger(pane.paneId) || pane.paneId < 0 ||
           (pane.paneLabel !== null && (!Number.isSafeInteger(pane.paneLabel) || pane.paneLabel < 1)) ||
           (pane.contentObservation.revision !== null &&
             (!Number.isSafeInteger(pane.contentObservation.revision) || pane.contentObservation.revision < 0))) ||
@@ -3447,12 +3473,16 @@ export class SurfaceWsServer {
       op: "surface.describe",
       payload: {
         nonce: request.payload.nonce,
-        clientId: binding.clientId,
-        registryIdentity: { allocatorId: binding.allocatorId, fleetId: binding.fleetId },
+        clientId,
+        registryIdentity: binding
+          ? { allocatorId: binding.allocatorId, fleetId: binding.fleetId }
+          : null,
         surfaceId: request.payload.surfaceId,
-        endpointLeaseGeneration: lease.leaseGeneration,
+        endpointLeaseGeneration: lease?.leaseGeneration ?? null,
         observedAtMs,
-        applicationReadiness: { status: "ready", limitationCodes: [] },
+        applicationReadiness: limitationCodes.length > 0
+          ? { status: "degraded", limitationCodes }
+          : { status: "ready", limitationCodes: [] },
         surfaceSetRevision: surfaceSetAfter,
         topologyRevision: snapshot.topologyRevision,
         layout: snapshot.layout,

@@ -186,7 +186,7 @@ function buildDescribeRequest(
 function layoutPaneIds(node: any): number[] | null {
   if (!node || typeof node !== "object") return null;
   if (node.type === "pane") {
-    return Number.isSafeInteger(node.paneId) && node.paneId > 0 ? [node.paneId] : null;
+    return Number.isSafeInteger(node.paneId) && node.paneId >= 0 ? [node.paneId] : null;
   }
   if (node.type !== "split" || !["horizontal", "vertical"].includes(node.direction)
       || !Array.isArray(node.children) || node.children.length < 2) {
@@ -279,17 +279,15 @@ function discover(input: {
   }
 
   const payload = response.payload;
-  if (!payload || typeof payload !== "object" || payload.nonce !== nonce) {
+  if (!payload || typeof payload !== "object" || payload.nonce !== nonce
+      || !hasExactKeys(payload, ["nonce", "clientId", "registryIdentity", "surfaceId", "endpointLeaseGeneration",
+        "observedAtMs", "applicationReadiness", "surfaceSetRevision", "topologyRevision", "layout", "panes"])) {
     return fail("stale_response", operations, "reachable");
   }
   const selectedRow = initial.row;
   const selectedIdentity = initial.registryIdentity;
   const selectedSurface = selectedRow.surfaces[0]!;
-  if (payload.clientId !== selectedRow.clientId
-      || payload.registryIdentity?.fleetId !== selectedIdentity.fleetId
-      || payload.registryIdentity?.allocatorId !== selectedIdentity.allocatorId
-      || payload.surfaceId !== selectedSurface.surfaceId
-      || payload.endpointLeaseGeneration !== selectedRow.endpointLease?.leaseGeneration) {
+  if (payload.clientId !== selectedRow.clientId || payload.surfaceId !== selectedSurface.surfaceId) {
     return fail("identity_mismatch", operations, "reachable", "unknown", "mismatch");
   }
 
@@ -300,6 +298,33 @@ function discover(input: {
       || (readiness.status === "degraded" && readiness.limitationCodes.length === 0)) {
     return fail("unsupported_protocol", operations, "reachable");
   }
+  const hasCode = (code: string) => readiness.limitationCodes.includes(code);
+  const registryIdentity = payload.registryIdentity === null
+    ? "absent"
+    : payload.registryIdentity.fleetId !== selectedIdentity.fleetId
+        || payload.registryIdentity.allocatorId !== selectedIdentity.allocatorId
+      ? "differs"
+      : hasCode("persistence_outcome_unknown")
+          || hasCode("registry_binding_unavailable")
+          || hasCode("registry_binding_stale")
+        ? "unverified"
+        : "matched";
+  const endpointLease = payload.endpointLeaseGeneration;
+  const endpointLeaseConsistency = endpointLease === null
+    ? "absent"
+    : endpointLease !== selectedRow.endpointLease?.leaseGeneration
+      ? "differs"
+      : hasCode("persistence_outcome_unknown")
+          || hasCode("endpoint_lease_unavailable")
+          || hasCode("endpoint_lease_stale")
+        ? "unverified"
+        : "matched";
+  const identityConsistency = {
+    clientId: "matched",
+    surfaceId: "matched",
+    registryIdentity,
+    endpointLease: endpointLeaseConsistency,
+  };
   if (hasForbiddenContent(payload)) {
     return fail("unsupported_protocol", operations, "reachable", "unknown", "matched");
   }
@@ -315,7 +340,7 @@ function discover(input: {
   const paneIdsValid = payload.panes.every((item: any) =>
     hasExactKeys(item, ["paneId", "paneLabel", "contentObservation"])
       && hasExactKeys(item.contentObservation, ["revision", "source", "observedAtMs"])
-      && Number.isSafeInteger(item.paneId) && item.paneId > 0
+      && Number.isSafeInteger(item.paneId) && item.paneId >= 0
       && (item.paneLabel === null || (Number.isSafeInteger(item.paneLabel) && item.paneLabel > 0))
       && item.contentObservation
       && (item.contentObservation.revision === null
@@ -352,7 +377,7 @@ function discover(input: {
     writes: [],
     transportReachability: "reachable",
     applicationReadiness: readiness.status,
-    identityConsistency: "matched",
+    identityConsistency,
     authenticated: false,
     registryServerTimeMs: input.after!.registryServerTimeMs,
     registrationAgeMs: input.after!.registryServerTimeMs
@@ -383,12 +408,33 @@ test("current unique lease plus nonce-bound pre-pair describe returns separate e
   assert.equal(output.status, "current");
   assert.equal(output.transportReachability, "reachable");
   assert.equal(output.applicationReadiness, "ready");
-  assert.equal(output.identityConsistency, "matched");
+  assert.deepEqual(output.identityConsistency, {
+    clientId: "matched",
+    surfaceId: "matched",
+    registryIdentity: "matched",
+    endpointLease: "matched",
+  });
   assert.equal(output.authenticated, false);
   assert.equal(output.registrationAgeMs, 1_000);
   assert.deepEqual(output.operations, ["fleet.topology", "surface.describe", "fleet.topology"]);
   assert.deepEqual(output.writes, []);
   assert.deepEqual(input, before);
+});
+
+test("a restored pane ID zero remains in the successful describe topology", () => {
+  const base = describeResponse();
+  const layout = {
+    type: "split",
+    direction: "vertical",
+    children: [{ type: "pane", paneId: 3 }, { type: "pane", paneId: 0 }],
+  };
+  const panes = [pane(0, null, null), pane(3, null, null)];
+  const response = describeResponse({ payload: { ...base.payload, layout, panes } });
+  const output = discover(validInput({ response }) as any);
+
+  assert.equal(output.status, "current");
+  assert.deepEqual(output.layout, layout);
+  assert.deepEqual(output.panes?.map((item: any) => item.paneId), [0, 3]);
 });
 
 test("request shape has no pair, controller admission, or registry mutation fields", () => {
@@ -519,23 +565,92 @@ test("unreachable transport and unresponsive application are distinct", () => {
   assert.equal(unresponsive.applicationReadiness, "unknown");
 });
 
-test("client, registry, surface, and lease mismatches are not authenticated or selected", () => {
+test("saved binding and lease mismatches remain readable and are reported separately", () => {
+  const base = describeResponse().payload;
   const cases = [
-    { clientId: "b".repeat(64) },
-    { registryIdentity: { fleetId: "foreign", allocatorId: identity.allocatorId } },
-    { registryIdentity: { fleetId: identity.fleetId, allocatorId: "foreign" } },
-    { surfaceId: "sf_other" },
-    { endpointLeaseGeneration: 5 },
+    {
+      fields: {
+        registryIdentity: { fleetId: "foreign", allocatorId: identity.allocatorId },
+        applicationReadiness: { status: "degraded", limitationCodes: ["registry_binding_stale"] },
+      },
+      registryIdentity: "differs",
+      endpointLease: "matched",
+    },
+    {
+      fields: {
+        registryIdentity: { fleetId: identity.fleetId, allocatorId: "alloc_foreign" },
+        applicationReadiness: { status: "degraded", limitationCodes: ["registry_binding_stale"] },
+      },
+      registryIdentity: "differs",
+      endpointLease: "matched",
+    },
+    {
+      fields: {
+        endpointLeaseGeneration: 5,
+        applicationReadiness: { status: "degraded", limitationCodes: ["endpoint_lease_stale"] },
+      },
+      registryIdentity: "matched",
+      endpointLease: "differs",
+    },
   ];
-  for (const fields of cases) {
+  for (const item of cases) {
     const response = describeResponse({
-      payload: { ...describeResponse().payload, ...fields },
+      payload: { ...base, ...item.fields },
     });
     const output = discover(validInput({ response }) as any);
-    assert.equal(output.status, "identity_mismatch");
-    assert.equal(output.identityConsistency, "mismatch");
-    assert.equal(output.authenticated, undefined);
+    assert.equal(output.status, "degraded");
+    assert.equal(output.identityConsistency.registryIdentity, item.registryIdentity);
+    assert.equal(output.identityConsistency.endpointLease, item.endpointLease);
+    assert.equal(output.authenticated, false);
   }
+
+  const wrongClient = describeResponse({ payload: { ...base, clientId: "b".repeat(64) } });
+  assert.equal(discover(validInput({ response: wrongClient }) as any).status, "identity_mismatch");
+  const wrongSurface = describeResponse({ payload: { ...base, surfaceId: "sf_other" } });
+  assert.equal(discover(validInput({ response: wrongSurface }) as any).status, "identity_mismatch");
+});
+
+test("unavailable saved registry data and uncertain verification do not suppress topology", () => {
+  const base = describeResponse().payload;
+  const unavailable = describeResponse({
+    payload: {
+      ...base,
+      registryIdentity: null,
+      endpointLeaseGeneration: null,
+      applicationReadiness: {
+        status: "degraded",
+        limitationCodes: ["registry_binding_unavailable", "endpoint_lease_unavailable"],
+      },
+    },
+  });
+  const unavailableOutput = discover(validInput({ response: unavailable }) as any);
+  assert.equal(unavailableOutput.status, "degraded");
+  assert.deepEqual(unavailableOutput.identityConsistency, {
+    clientId: "matched",
+    surfaceId: "matched",
+    registryIdentity: "absent",
+    endpointLease: "absent",
+  });
+  assert.equal(unavailableOutput.topologyRevision, 8);
+
+  const degraded = describeResponse({
+    payload: {
+      ...base,
+      applicationReadiness: {
+        status: "degraded",
+        limitationCodes: ["persistence_outcome_unknown", "application_state_unverified"],
+      },
+    },
+  });
+  const degradedOutput = discover(validInput({ response: degraded }) as any);
+  assert.equal(degradedOutput.status, "degraded");
+  assert.deepEqual(degradedOutput.identityConsistency, {
+    clientId: "matched",
+    surfaceId: "matched",
+    registryIdentity: "unverified",
+    endpointLease: "unverified",
+  });
+  assert.equal(degradedOutput.topologyRevision, 8);
 });
 
 test("request id and nonce bind one response and reject cached or cross-request replies", () => {

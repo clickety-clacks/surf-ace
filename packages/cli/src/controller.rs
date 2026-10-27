@@ -268,6 +268,7 @@ fn execute_window_describe(invocation: &Invocation) -> Result<CliOutput, CliErro
         ));
     }
     let surface_observation = probe?;
+    let identity_consistency = identity_consistency(&surface_observation, &rechecked);
     Ok(CliOutput {
         ok: true,
         command: crate::command::Command::WindowDescribe.name().into(),
@@ -284,6 +285,7 @@ fn execute_window_describe(invocation: &Invocation) -> Result<CliOutput, CliErro
             "registryBefore": selected.evidence(&before),
             "registryAfter": rechecked.evidence(&after),
             "applicationReadiness": surface_observation["applicationReadiness"].clone(),
+            "identityConsistency": identity_consistency,
             "surfaceObservation": surface_observation,
         }),
     })
@@ -883,26 +885,49 @@ fn validate_surface_observation(
         ],
     )
     .map_err(|message| discovery_error("describe_response_invalid", message))?;
-    if object.get("nonce").and_then(Value::as_str) != Some(nonce)
-        || object.get("clientId").and_then(Value::as_str) != Some(candidate.client_id.as_str())
+    if object.get("nonce").and_then(Value::as_str) != Some(nonce) {
+        return Err(discovery_error(
+            "stale_response",
+            "Client observation did not match the request nonce",
+        ));
+    }
+    match object.get("clientId") {
+        Some(value) if value.as_str().is_some_and(valid_client_id) => {}
+        _ => return Err(discovery_error(
+            "describe_response_invalid",
+            "Client observation has an invalid client id",
+        )),
+    }
+    if object.get("clientId").and_then(Value::as_str) != Some(candidate.client_id.as_str())
         || object.get("surfaceId").and_then(Value::as_str) != Some(candidate.surface_id.as_str())
-        || object
-            .get("endpointLeaseGeneration")
-            .and_then(safe_positive_u64)
-            != Some(candidate.lease_generation)
     {
         return Err(discovery_error(
             "identity_mismatch",
-            "Client observation does not match the selected registry row",
+            "Client observation identifies a different client or surface",
         ));
     }
-    let identity = parse_registry_identity(object.get("registryIdentity"))
-        .map_err(|message| discovery_error("describe_response_invalid", message))?;
-    if identity != candidate.identity {
-        return Err(discovery_error(
-            "identity_mismatch",
-            "Client observation reports a different registry identity",
-        ));
+    match object.get("registryIdentity") {
+        Some(value) if value.is_null() => {}
+        Some(_) => {
+            parse_registry_identity(object.get("registryIdentity"))
+                .map_err(|message| discovery_error("describe_response_invalid", message))?;
+        }
+        None => return Err(discovery_error(
+            "describe_response_invalid",
+            "Client observation is missing its saved registry identity",
+        )),
+    }
+    match object.get("endpointLeaseGeneration") {
+        Some(value) if value.is_null() => {}
+        Some(value) if safe_positive_u64(value).is_some() => {}
+        None => return Err(discovery_error(
+            "describe_response_invalid",
+            "Client observation is missing its saved endpoint lease",
+        )),
+        _ => return Err(discovery_error(
+            "describe_response_invalid",
+            "Saved endpoint lease generation is invalid",
+        )),
     }
     for key in ["observedAtMs", "surfaceSetRevision", "topologyRevision"] {
         if object.get(key).and_then(safe_nonnegative_u64).is_none() {
@@ -933,7 +958,7 @@ fn validate_surface_observation(
             .map_err(|message| discovery_error("describe_response_invalid", message))?;
         let pane_id = pane
             .get("paneId")
-            .and_then(safe_positive_u64)
+            .and_then(safe_nonnegative_u64)
             .ok_or_else(|| discovery_error("describe_response_invalid", "Pane id is invalid"))?;
         if !pane_ids.insert(pane_id) {
             return Err(discovery_error(
@@ -996,6 +1021,67 @@ fn validate_surface_observation(
     Ok(())
 }
 
+fn identity_consistency(
+    payload: &Value,
+    candidate: &EndpointCandidate,
+) -> Value {
+    let limitation_codes = payload
+        .get("applicationReadiness")
+        .and_then(|readiness| readiness.get("limitationCodes"))
+        .and_then(Value::as_array)
+        .expect("validated limitation codes");
+    let has_code = |code: &str| {
+        limitation_codes
+            .iter()
+            .any(|value| value.as_str() == Some(code))
+    };
+    let registry_identity = match payload.get("registryIdentity") {
+        Some(value) if value.is_null() => "absent",
+        Some(value) => {
+            let matches = value
+                .get("allocatorId")
+                .and_then(Value::as_str)
+                == Some(candidate.identity.allocator_id.as_str())
+                && value.get("fleetId").and_then(Value::as_str)
+                    == Some(candidate.identity.fleet_id.as_str());
+            if !matches {
+                "differs"
+            } else if has_code("persistence_outcome_unknown")
+                || has_code("registry_binding_unavailable")
+                || has_code("registry_binding_stale")
+            {
+                "unverified"
+            } else {
+                "matched"
+            }
+        }
+        None => "absent",
+    };
+    let endpoint_lease = match payload.get("endpointLeaseGeneration") {
+        Some(value) if value.is_null() => "absent",
+        Some(value) if safe_positive_u64(value) != Some(candidate.lease_generation) => "differs",
+        Some(_) if has_code("persistence_outcome_unknown")
+            || has_code("endpoint_lease_unavailable")
+            || has_code("endpoint_lease_stale") =>
+        {
+            "unverified"
+        }
+        Some(_) => "matched",
+        None => "absent",
+    };
+
+    json!({
+        "clientId": "matched",
+        "surfaceId": "matched",
+        "registryIdentity": registry_identity,
+        "endpointLease": endpoint_lease,
+    })
+}
+
+fn valid_client_id(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 fn validate_application_readiness(value: Option<&Value>) -> Result<(), String> {
     let object = value
         .and_then(Value::as_object)
@@ -1038,7 +1124,7 @@ fn validate_layout_node(
             require_exact_keys_with_optional(object, &["type", "paneId"], &["weight"])?;
             let pane_id = object
                 .get("paneId")
-                .and_then(safe_positive_u64)
+                .and_then(safe_nonnegative_u64)
                 .ok_or_else(|| "layout pane id is invalid".to_owned())?;
             validate_layout_weight(object.get("weight"))?;
             pane_ids.push(pane_id);

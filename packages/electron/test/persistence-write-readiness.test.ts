@@ -3,6 +3,7 @@ import test from "node:test";
 import WebSocket from "ws";
 
 import { PersistenceWriteReadiness } from "../src/persistence-write-readiness.js";
+import { PersistentStateOutcomeUnknownError } from "../src/persistent-state-file.js";
 import { SurfaceCore } from "../src/surface-core.js";
 import { SurfaceWsServer } from "../src/ws-server.js";
 
@@ -104,7 +105,7 @@ test("lockless mutation readiness spans dispatch and releases after failure", as
   assert.equal(readiness.isReady, true);
 });
 
-test("pre-pair describe hides candidate topology through held geometry and rollback", async () => {
+test("pre-pair describe keeps complete topology readable with a warning through held geometry and rollback", async () => {
   const core = new SurfaceCore();
   const surface = core.ensurePrimarySurface("readiness geometry fixture", {
     height: 800,
@@ -134,6 +135,7 @@ test("pre-pair describe hides candidate topology through held geometry and rollb
     capturePaneImage: async () => null,
     claimPaneLabel: async (_surfaceId, paneId) => ({ allocationGeneration: paneId, paneLabel: paneId }),
     compositorSocketPath: null,
+    clientId: binding.clientId,
     core,
     endpointName: "readiness geometry fixture",
     hostName: "localhost",
@@ -267,9 +269,15 @@ test("pre-pair describe hides candidate topology through held geometry and rollb
   assert.equal(core.panesList(surface.surfaceId).panes.length, 2,
     "SurfaceCore contains the candidate topology while geometry is held");
   const duringSuccessfulGeometry = describe("rq_describe_success_during_geometry");
-  assert.equal(duringSuccessfulGeometry.ok, false, JSON.stringify(duringSuccessfulGeometry));
-  assert.equal(duringSuccessfulGeometry.error.code, "not_ready");
-  assert.equal(duringSuccessfulGeometry.payload, undefined);
+  assert.equal(duringSuccessfulGeometry.ok, true, JSON.stringify(duringSuccessfulGeometry));
+  assert.equal(duringSuccessfulGeometry.payload.applicationReadiness.status, "degraded");
+  assert.deepEqual(duringSuccessfulGeometry.payload.applicationReadiness.limitationCodes,
+    ["application_state_unverified"]);
+  assert.deepEqual(duringSuccessfulGeometry.payload.layout, core.pairState(surface.surfaceId).layout);
+  assert.deepEqual(
+    duringSuccessfulGeometry.payload.panes.map((pane: { paneId: number }) => pane.paneId),
+    core.panesList(surface.surfaceId).panes.map((pane) => Number(pane.paneId)),
+  );
 
   successfulGeometry.release();
   const split = await successfulSplit;
@@ -294,9 +302,15 @@ test("pre-pair describe hides candidate topology through held geometry and rollb
   assert.equal(core.panesList(surface.surfaceId).panes.length, 3,
     "SurfaceCore contains the second candidate before its rollback");
   const duringFailedGeometry = describe("rq_describe_failure_during_geometry");
-  assert.equal(duringFailedGeometry.ok, false, JSON.stringify(duringFailedGeometry));
-  assert.equal(duringFailedGeometry.error.code, "not_ready");
-  assert.equal(duringFailedGeometry.payload, undefined);
+  assert.equal(duringFailedGeometry.ok, true, JSON.stringify(duringFailedGeometry));
+  assert.equal(duringFailedGeometry.payload.applicationReadiness.status, "degraded");
+  assert.deepEqual(duringFailedGeometry.payload.applicationReadiness.limitationCodes,
+    ["application_state_unverified"]);
+  assert.deepEqual(duringFailedGeometry.payload.layout, core.pairState(surface.surfaceId).layout);
+  assert.deepEqual(
+    duringFailedGeometry.payload.panes.map((pane: { paneId: number }) => pane.paneId),
+    core.panesList(surface.surfaceId).panes.map((pane) => Number(pane.paneId)),
+  );
 
   failedGeometry.release();
   const rejectedSplit = await failedSplit;

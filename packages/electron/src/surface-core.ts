@@ -5103,7 +5103,7 @@ function sanitizeLayoutNode(node: LayoutNode, knownPaneIds: Set<number>): Layout
 function isLayoutNode(value: unknown): value is LayoutNode {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const node = value as Record<string, unknown>;
-  if (node.type === "pane") return Number.isSafeInteger(node.paneId) && Number(node.paneId) > 0;
+  if (node.type === "pane") return Number.isSafeInteger(node.paneId) && Number(node.paneId) >= 0;
   return node.type === "split" && (node.direction === "horizontal" || node.direction === "vertical") &&
     Array.isArray(node.children) && node.children.length >= 2 && node.children.every(isLayoutNode);
 }
