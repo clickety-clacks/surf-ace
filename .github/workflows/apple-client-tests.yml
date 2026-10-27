@@ -19,13 +19,30 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
       - name: Record source and toolchain
         run: |
           git rev-parse HEAD HEAD^{tree}
           sudo xcode-select --switch /Applications/Xcode_27.0.0.app
           xcodebuild -version
           xcrun simctl list runtimes
-      - name: Test registration, lockless authority, and reclamation recovery
+      - name: Detect changes to iOS source
+        id: ios_source
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          merge_base="$(git merge-base "$BASE_SHA" "$HEAD_SHA")"
+          changed_files="$(git diff --name-only "$merge_base" "$HEAD_SHA" -- packages/ios/)"
+          if [[ -n "$changed_files" ]]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Recovery tests will run because this pull request changes iOS source."
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Recovery tests are skipped because this pull request does not change iOS source."
+          fi
+      - name: Test registration and saved-state adoption
         run: |
           xcodebuild test \
             -project packages/ios/SurfAce.xcodeproj \
@@ -35,13 +52,26 @@ jobs:
             -parallel-testing-enabled NO \
             -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M5),OS=27.0' \
             -only-testing:SurfAceTests/SurfAceCentralRegistrationTests \
+            -resultBundlePath "$RUNNER_TEMP/apple-registration-tests.xcresult"
+      - name: Test lockless authority and reclamation recovery
+        if: steps.ios_source.outputs.changed == 'true'
+        run: |
+          xcodebuild test \
+            -project packages/ios/SurfAce.xcodeproj \
+            -scheme SurfAce \
+            -configuration Release \
+            ENABLE_TESTABILITY=YES \
+            -parallel-testing-enabled NO \
+            -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M5),OS=27.0' \
             -only-testing:SurfAceTests/SurfAceLocklessAuthorityTests \
             -only-testing:SurfAceTests/SurfAceControllerReclamationAccountingTests \
-            -resultBundlePath "$RUNNER_TEMP/apple-focused-ios-tests.xcresult"
+            -resultBundlePath "$RUNNER_TEMP/apple-recovery-tests.xcresult"
       - name: Preserve test results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: apple-focused-ios-tests
-          path: ${{ runner.temp }}/apple-focused-ios-tests.xcresult
+          name: apple-ios-tests
+          path: |
+            ${{ runner.temp }}/apple-registration-tests.xcresult
+            ${{ runner.temp }}/apple-recovery-tests.xcresult
           if-no-files-found: warn
