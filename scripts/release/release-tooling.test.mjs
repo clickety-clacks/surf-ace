@@ -1,6 +1,6 @@
 import "./test-release-env.mjs";
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import fs from "node:fs/promises";
@@ -221,6 +221,18 @@ const exec = promisify(execFile);
 const workspaceRequire = createRequire(import.meta.url);
 const { WebSocketServer } = workspaceRequire("../../packages/electron/node_modules/ws");
 const repository = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../..");
+
+test("release smoke verifier can be imported from a Node stdin script", () => {
+  const moduleUrl = new URL("./smoke-tightbeam-release.mjs", import.meta.url).href;
+  const result = spawnSync(process.execPath, ["--input-type=module"], {
+    cwd: repository,
+    encoding: "utf8",
+    input: `await import(${JSON.stringify(moduleUrl)});\nprocess.stdout.write("import-ok");\n`,
+  });
+  assert.ifError(result.error);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, "import-ok");
+});
 
 function smokeParticipantIdentities(component, changes = {}) {
   const assetNames = component === "linux"
@@ -1152,7 +1164,11 @@ test("tagless Linux qualification smoke rejects a moving source HEAD after smoke
 
 test("tagless qualification leaves release build and manifest-smoke tag admission intact", async () => {
   const builder = await fs.readFile(path.join(repository, "scripts/release/build-tightbeam-release.mjs"), "utf8");
-  const builderRelease = builder.slice(builder.indexOf("export async function buildTightbeamRelease"), builder.indexOf("if (import.meta.url === pathToFileURL(process.argv[1]).href)"));
+  const builderEntryPointGuard = "if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href)";
+  const builderRelease = builder.slice(
+    builder.indexOf("export async function buildTightbeamRelease"),
+    builder.indexOf(builderEntryPointGuard),
+  );
   assert.match(builderRelease, /await assertSourceIdentity\(sourceDir, options\.sourceTag, options\.sourceCommit\)/);
   assert.match(builderRelease, /refs\/tags\/\$\{TIGHTBEAM_TOOLING_TAG\}\^\{commit\}/);
   assert.doesNotMatch(builderRelease, /qualificationOnly|buildTightbeamLinuxQualification/);

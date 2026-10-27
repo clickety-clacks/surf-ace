@@ -573,7 +573,7 @@ export async function buildTightbeamRelease(options) {
   return { ...manifest, outputDir, sourceCommit: options.sourceCommit, toolingCommit };
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const args = parseArgs(process.argv.slice(2), ["source-dir", "output-dir", "version"], ["qualification-only", "source-tag", "source-commit", "tooling-commit", "target", "components"]);
   let result;
   if (args["qualification-only"] !== undefined) {
