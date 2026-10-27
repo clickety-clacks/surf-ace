@@ -197,7 +197,6 @@ jobs:
       PRODUCT_VERSION: ${{ needs.guard.outputs.product_version }}
       EVIDENCE_DIR: ${{ github.workspace }}/release-evidence/${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.lane }}
       EVIDENCE_READBACK_DIR: ${{ github.workspace }}/release-evidence-readback/${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.lane }}
-      RESULT_BUNDLE: ${{ github.workspace }}/release-evidence/${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.lane }}/native-tests.xcresult
       EVIDENCE_ARTIFACT: surf-ace-macos-evidence-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.lane }}
     strategy:
       fail-fast: false
@@ -248,14 +247,12 @@ jobs:
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: ${{ env.NODE_VERSION }}
-      - name: Install frozen dependencies and run macOS/iPadOS tests
+      - name: Install frozen dependencies and run macOS product tests
         id: macos-tests
         run: |
           set -euo pipefail
           sudo xcode-select --switch /Applications/Xcode_27.0.0.app
           test "$(xcodebuild -version | head -1)" = "Xcode 27.0"
-          xcrun simctl list runtimes | grep -F 'iOS 27.0'
-          xcrun simctl list devices available | grep -F 'iPad Pro 13-inch (M5)'
           corepack enable
           corepack prepare "pnpm@${PNPM_VERSION}" --activate
           test "$(pnpm --version)" = "${PNPM_VERSION}"
@@ -280,35 +277,8 @@ jobs:
           export PATH="${RUNNER_TEMP}/surf-ace-test-python/bin:${PATH}"
           pnpm --dir source --filter @surf-ace/electron test
           guard
-          command=(
-            xcodebuild test \
-            -project source/packages/ios/SurfAce.xcodeproj \
-            -scheme SurfAce \
-            -configuration Release \
-            ENABLE_TESTABILITY=YES \
-            -parallel-testing-enabled NO \
-            -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M5),OS=27.0' \
-            -resultBundlePath "$RESULT_BUNDLE"
-          )
-          printf '%q ' "${command[@]}" > "$EVIDENCE_DIR/xcodebuild-command.txt"
-          printf '\n' >> "$EVIDENCE_DIR/xcodebuild-command.txt"
-          set +e
-          "${command[@]}" 2>&1 | tee "$EVIDENCE_DIR/xcodebuild.log"
-          pipeline_status=( "${PIPESTATUS[@]}" )
-          set -e
-          xcodebuild_exit_code="${pipeline_status[0]}"
-          tee_exit_code="${pipeline_status[1]}"
-          printf '%s\n' "$xcodebuild_exit_code" > "$EVIDENCE_DIR/xcodebuild-exit-code.txt"
-          printf '%s\n' "$tee_exit_code" > "$EVIDENCE_DIR/xcodebuild-tee-exit-code.txt"
-          if [[ "$xcodebuild_exit_code" != 0 ]]; then
-            exit "$xcodebuild_exit_code"
-          fi
-          if [[ "$tee_exit_code" != 0 ]]; then
-            exit "$tee_exit_code"
-          fi
-          guard
 
-      - name: Capture macOS native test evidence
+      - name: Capture macOS build and runner evidence
         if: always()
         shell: bash
         env:
@@ -316,7 +286,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$EVIDENCE_DIR"
-          printf 'macos_test_step_outcome=%s\n' "${MACOS_TEST_STEP_OUTCOME:-not-run}" \
+          printf 'macos_product_test_step_outcome=%s\n' "${MACOS_TEST_STEP_OUTCOME:-not-run}" \
             > "$EVIDENCE_DIR/test-step-outcome.txt"
 
           capture_tool() {
@@ -368,13 +338,8 @@ jobs:
               > "$EVIDENCE_DIR/tooling-identity.txt"
           fi
 
-          if [[ -d "$RESULT_BUNDLE" ]]; then
-            capture_tool xcresult-summary.json xcrun xcresulttool get test-results summary --path "$RESULT_BUNDLE"
-            capture_tool attachment-export.log xcrun xcresulttool export attachments \
-              --path "$RESULT_BUNDLE" --output-path "$EVIDENCE_DIR/attachments"
-          else
-            printf 'No .xcresult bundle was created.\n' > "$EVIDENCE_DIR/xcresult-unavailable.txt"
-          fi
+          printf 'The full iOS XCTest suite runs in the independent test-ios job.\n' \
+            > "$EVIDENCE_DIR/ios-test-job.txt"
 
           printf 'finished_at_utc=%s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
             > "$EVIDENCE_DIR/evidence-captured-at.txt"
@@ -514,6 +479,108 @@ jobs:
       - name: Remove job-owned checkout and build paths
         if: always()
         run: rm -rf "${GITHUB_WORKSPACE}/source" "${GITHUB_WORKSPACE}/tooling" "${GITHUB_WORKSPACE}/build"
+
+  # The desktop/Linux release graph is independent of the iOS test result.
+  test-ios:
+    name: iOS XCTest (${{ matrix.lane }})
+    needs: guard
+    env:
+      PRODUCT_COMMIT: ${{ needs.guard.outputs.product_commit }}
+      PRODUCT_VERSION: ${{ needs.guard.outputs.product_version }}
+      IOS_EVIDENCE_DIR: ${{ github.workspace }}/ios-test-evidence/${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.lane }}
+      RESULT_BUNDLE: ${{ github.workspace }}/ios-test-evidence/${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.lane }}/native-tests.xcresult
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [build-a, build-b]
+    runs-on: xcode-27
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Prepare run-isolated iOS test evidence
+        run: mkdir -p "$IOS_EVIDENCE_DIR"
+      - name: Check out immutable tooling
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: tooling
+          persist-credentials: false
+          ref: ${{ env.TOOLING_TAG }}
+      - name: Check out immutable product source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: source
+          persist-credentials: false
+          ref: ${{ env.PRODUCT_TAG }}
+      - name: Select Xcode and verify exact source and simulator
+        run: |
+          set -euo pipefail
+          sudo xcode-select --switch /Applications/Xcode_27.0.0.app
+          xcodebuild -version | tee "$IOS_EVIDENCE_DIR/xcode-version.txt"
+          test "$(xcodebuild -version | head -1)" = "Xcode 27.0"
+          xcrun simctl list runtimes | tee "$IOS_EVIDENCE_DIR/simulator-runtimes.txt" | grep -F 'iOS 27.0'
+          xcrun simctl list devices available | tee "$IOS_EVIDENCE_DIR/simulator-devices.txt" | grep -F 'iPad Pro 13-inch (M5)'
+          test "$(git -C tooling rev-parse HEAD)" = "${GITHUB_SHA}"
+          test "$(git -C source rev-parse HEAD)" = "${PRODUCT_COMMIT}"
+          {
+            printf 'tooling_commit=%s\n' "$(git -C tooling rev-parse HEAD)"
+            printf 'tooling_tree=%s\n' "$(git -C tooling rev-parse 'HEAD^{tree}')"
+            printf 'product_tag=%s\n' "${PRODUCT_TAG}"
+            printf 'product_commit=%s\n' "$(git -C source rev-parse HEAD)"
+            printf 'product_tree=%s\n' "$(git -C source rev-parse 'HEAD^{tree}')"
+          } > "$IOS_EVIDENCE_DIR/source-tooling-identity.txt"
+      - name: Run the complete iOS XCTest suite
+        id: ios-tests
+        run: |
+          set -euo pipefail
+          command=(
+            xcodebuild test \
+            -project source/packages/ios/SurfAce.xcodeproj \
+            -scheme SurfAce \
+            -configuration Release \
+            ENABLE_TESTABILITY=YES \
+            -parallel-testing-enabled NO \
+            -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M5),OS=27.0' \
+            -resultBundlePath "$RESULT_BUNDLE"
+          )
+          printf '%q ' "${command[@]}" > "$IOS_EVIDENCE_DIR/xcodebuild-command.txt"
+          printf '\n' >> "$IOS_EVIDENCE_DIR/xcodebuild-command.txt"
+          set +e
+          "${command[@]}" 2>&1 | tee "$IOS_EVIDENCE_DIR/xcodebuild.log"
+          pipeline_status=( "${PIPESTATUS[@]}" )
+          set -e
+          xcodebuild_exit_code="${pipeline_status[0]}"
+          tee_exit_code="${pipeline_status[1]}"
+          printf '%s\n' "$xcodebuild_exit_code" > "$IOS_EVIDENCE_DIR/xcodebuild-exit-code.txt"
+          printf '%s\n' "$tee_exit_code" > "$IOS_EVIDENCE_DIR/xcodebuild-tee-exit-code.txt"
+          if [[ "$xcodebuild_exit_code" != 0 ]]; then
+            exit "$xcodebuild_exit_code"
+          fi
+          if [[ "$tee_exit_code" != 0 ]]; then
+            exit "$tee_exit_code"
+          fi
+      - name: Verify checked-out source and tooling remain unchanged
+        if: always()
+        run: |
+          set -euo pipefail
+          test "$(git -C tooling rev-parse HEAD)" = "${GITHUB_SHA}"
+          test "$(git -C source rev-parse HEAD)" = "${PRODUCT_COMMIT}"
+          git -C tooling diff --exit-code HEAD -- .
+          git -C tooling diff --cached --exit-code HEAD -- .
+          git -C source diff --exit-code HEAD -- .
+          git -C source diff --cached --exit-code HEAD -- .
+      - name: Retain iOS XCTest evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: surf-ace-ios-xctest-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.lane }}
+          path: ${{ env.IOS_EVIDENCE_DIR }}/
+          if-no-files-found: warn
+          include-hidden-files: true
+          retention-days: 30
+      - name: Remove job-owned checkout paths
+        if: always()
+        run: rm -rf "${GITHUB_WORKSPACE}/source" "${GITHUB_WORKSPACE}/tooling"
 
   retain-macos-job-logs:
     if: always()
@@ -1067,6 +1134,14 @@ jobs:
           if [[ "${PRODUCT_VERSION}" =~ -rc[1-9][0-9]*$ ]]; then
             release_channel_args+=(--prerelease)
           fi
+          cat > release-notes.md <<EOF
+          Surf Ace v${PRODUCT_VERSION}.
+
+          This release contains desktop and Linux assets only; it does not include an iOS app. The iOS XCTest suite runs independently.
+
+          Linux smoke attestation: ${LINUX_ATTESTATION_URL}
+          macOS smoke attestation: ${MACOS_ATTESTATION_URL}
+          EOF
           gh release create "${PRODUCT_TAG}" \
             "release/surf-ace-server-linux-x86_64-v${PRODUCT_VERSION}.tar.gz" \
             "release/surf-ace-cli-linux-x86_64-v${PRODUCT_VERSION}.tar.gz" \
@@ -1080,4 +1155,4 @@ jobs:
             --verify-tag \
             "${release_channel_args[@]+"${release_channel_args[@]}"}" \
             --title "Surf Ace v${PRODUCT_VERSION}" \
-            --notes "Surf Ace v${PRODUCT_VERSION}. Linux smoke attestation: ${LINUX_ATTESTATION_URL}\nmacOS smoke attestation: ${MACOS_ATTESTATION_URL}"
+            --notes-file release-notes.md
