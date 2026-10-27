@@ -2000,7 +2000,10 @@ jobs:
           console.log(TIGHTBEAM.manifest);
           console.log(TIGHTBEAM.checksums);
           NODE
-          mapfile -t asset_names < release-asset-list.txt
+          asset_names=()
+          while IFS= read -r asset_name || [[ -n "${asset_name:-}" ]]; do
+            asset_names+=("${asset_name}")
+          done < release-asset-list.txt
           test "${#asset_names[@]}" -ge 4
           release_assets=()
           for name in "${asset_names[@]}"; do
