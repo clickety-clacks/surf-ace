@@ -49,6 +49,7 @@ import {
 import {
   TIGHTBEAM,
   TIGHTBEAM_BUILD_COMMANDS,
+  TIGHTBEAM_PLATFORM_ASSETS,
   TIGHTBEAM_PUBLIC_FILES,
   TIGHTBEAM_ROUTING,
   TIGHTBEAM_SKILL_ASSET,
@@ -1397,6 +1398,36 @@ test("Tightbeam manifest assembles the six hosted assets including the exact ski
     skillSourceDir: toolingSkillDir,
     toolingCommit: "a".repeat(40),
   }), /public_file_set_mismatch/);
+});
+
+test("Tightbeam manifests and SHA256SUMS can contain one fully gated platform", async (t) => {
+  for (const component of ["linux", "macos"]) {
+    await t.test(component, async (subtest) => {
+      const outputDir = await temporary(subtest);
+      const toolingSkillDir = await temporary(subtest);
+      const selectedAssets = TIGHTBEAM_PLATFORM_ASSETS[component];
+      for (const name of selectedAssets) {
+        if (name !== TIGHTBEAM_SKILL_ASSET) await fs.writeFile(path.join(outputDir, name), `fixture:${name}\n`);
+      }
+      if (component === "linux") await copyTightbeamSkillAsset(toolingSkillDir, outputDir);
+
+      const result = await writeTightbeamManifest({
+        components: [component],
+        outputDir,
+        sourceDir: repository,
+        skillSourceDir: toolingSkillDir,
+        toolingCommit: "b".repeat(40),
+      });
+      const manifest = JSON.parse(await fs.readFile(result.manifestPath, "utf8"));
+      assert.deepEqual(manifest.components, [component]);
+      assert.deepEqual(manifest.assets.map(({ name }) => name), TIGHTBEAM.assets.filter((name) => selectedAssets.includes(name)));
+      assert.deepEqual(result.files, [...selectedAssets, TIGHTBEAM.manifest, TIGHTBEAM.checksums]);
+      assert.deepEqual((await verifyTightbeamChecksums(result.manifestPath)).files,
+        [...selectedAssets, TIGHTBEAM.manifest].sort());
+      assert.deepEqual((await fs.readdir(outputDir)).sort(), [...result.files].sort());
+      assert.equal(Object.hasOwn(manifest, "serverPackage"), component === "linux");
+    });
+  }
 });
 
 test("v0.2.8 packages the skill from the tooling identity, not the product checkout", async (t) => {
@@ -2956,13 +2987,42 @@ test("stable v0.2.8 documentation stays historical and release gates bind the se
   assert.match(workflow, /PRODUCT_COMMIT="\$product_commit" \\\s+PRODUCT_TAG="\$PRODUCT_TAG" \\\s+TOOLING_TAG="\$TOOLING_TAG" \\\s+SURF_ACE_SMOKE_COMPONENT=linux \\\s+SURF_ACE_TIGHTBEAM_STATE_DRIVER="\$state_driver"/);
   assert.match(workflow, /subject-path: release\/\.receipts\/linux-smoke-receipt\.json/);
   assert.match(workflow, /subject-path: release\/\.receipts\/macos-smoke-receipt\.json/);
-  const compareStart = workflow.indexOf("  compare:\n");
-  const assembleStart = workflow.indexOf("  assemble:\n", compareStart);
-  const compareJob = workflow.slice(compareStart, assembleStart);
-  for (const name of TIGHTBEAM.assets) {
-    assert.ok(compareJob.includes(name.replace(TIGHTBEAM.version, "${PRODUCT_VERSION}")));
+  const linuxCompareStart = workflow.indexOf("  compare-linux:\n");
+  const macosCompareStart = workflow.indexOf("  compare-macos:\n");
+  const aggregateCompareStart = workflow.indexOf("  compare-six-file-warning:\n");
+  const linuxCompareJob = workflow.slice(linuxCompareStart, macosCompareStart);
+  const macosCompareJob = workflow.slice(macosCompareStart, aggregateCompareStart);
+  for (const name of TIGHTBEAM_PLATFORM_ASSETS.linux) {
+    assert.ok(linuxCompareJob.includes(name.replace(TIGHTBEAM.version, "${PRODUCT_VERSION}")));
   }
-  assert.match(workflow, /needs: \[assemble, smoke-linux, smoke-macos, guard\]/);
+  for (const name of TIGHTBEAM_PLATFORM_ASSETS.macos) {
+    assert.ok(macosCompareJob.includes(name.replace(TIGHTBEAM.version, "${PRODUCT_VERSION}")));
+  }
+  const aggregateAssembleStart = workflow.indexOf("  assemble-linux:\n", aggregateCompareStart);
+  const aggregateCompareJob = workflow.slice(aggregateCompareStart, aggregateAssembleStart);
+  for (const name of TIGHTBEAM.assets) {
+    assert.ok(aggregateCompareJob.includes(name.replace(TIGHTBEAM.version, "${PRODUCT_VERSION}")));
+  }
+  assert.match(aggregateCompareJob, /continue-on-error: true/);
+  const assemblerStart = workflow.indexOf("  assemble:\n");
+  const publishStart = workflow.indexOf("  publish:\n", assemblerStart);
+  const assemblerJob = workflow.slice(assemblerStart, publishStart);
+  const publishJob = workflow.slice(publishStart);
+  for (const dependency of ["test-ios", "summarize-ios-tests", "compare-linux", "compare-macos", "compare-six-file-warning"]) {
+    assert.ok(assemblerJob.includes(`- ${dependency}\n`), `final assembly does not wait for ${dependency}`);
+  }
+  for (const dependency of ["test-ios", "summarize-ios-tests", "smoke-linux", "smoke-macos", "assemble"]) {
+    assert.ok(publishJob.includes(`- ${dependency}\n`), `publish does not wait for ${dependency}`);
+  }
+  assert.match(workflow, /needs\.smoke-linux\.outputs\.gate_state == 'passed'/);
+  assert.match(workflow, /needs\.smoke-macos\.outputs\.gate_state == 'passed'/);
+  assert.match(publishJob, /needs\.assemble\.outputs\.has_linux == 'true'/);
+  assert.match(publishJob, /needs\.assemble\.outputs\.has_macos == 'true'/);
+  assert.match(publishJob, /The iOS app is withheld because the complete iOS XCTest result was/);
+  assert.match(publishJob, /The tooling tag version label differs from the product tag version label/);
+  assert.match(publishJob, /release_assets\+=\("release\/\$\{name\}"\)/);
+  assert.match(workflow, /VERSION_NAME_MISMATCH/);
+  assert.doesNotMatch(workflow, /test "\$\{tooling_version\}" = "\$\{product_version\}"/);
   assert.doesNotMatch(TIGHTBEAM_BUILD_COMMANDS.join("\n"), /xcodebuild archive|-exportArchive|\.ipa\b/);
 });
 

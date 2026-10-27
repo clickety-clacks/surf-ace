@@ -40,15 +40,14 @@ export function publicReleaseNamesFromTags({ productTag, toolingTag }) {
   const productMatch = PRODUCT_TAG.exec(productTag ?? "");
   const toolingMatch = TOOLING_TAG.exec(toolingTag ?? "");
   if (!productMatch || !toolingMatch) throw new Error("release_tag_invalid");
-  if (productMatch[1] !== toolingMatch[1]) throw new Error("release_tag_version_mismatch");
 
   const names = publicReleaseNames({
     version: productMatch[1],
     sourceRevision: productMatch[2],
     toolingRevision: toolingMatch[2],
   });
-  if (names.sourceTag !== productTag || names.toolingTag !== toolingTag) {
+  if (names.sourceTag !== productTag) {
     throw new Error("release_tag_name_mismatch");
   }
-  return names;
+  return Object.freeze({ ...names, toolingTag });
 }

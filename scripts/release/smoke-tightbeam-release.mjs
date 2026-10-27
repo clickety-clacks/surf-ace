@@ -6,7 +6,13 @@ import path from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { assertTightbeamLinuxQualificationClaims, verifyTightbeamCliStage, verifyTightbeamLinuxStage } from "./build-tightbeam-release.mjs";
-import { TIGHTBEAM, TIGHTBEAM_TOOLING_TAG, TOOLCHAINS } from "./tightbeam-release-config.mjs";
+import {
+  TIGHTBEAM,
+  TIGHTBEAM_PLATFORM_ASSETS,
+  TIGHTBEAM_TOOLING_TAG,
+  TOOLCHAINS,
+  tightbeamComponentsForAssets,
+} from "./tightbeam-release-config.mjs";
 import { assertDisjointTrees, assertTrackedInputsUnchanged, capture, parseArgs, removeIfExists, run, sha256, verifyManifestFiles } from "./release-lib.mjs";
 import { electronLaunchConfig, launchElectron, stop as stopElectron, verifyClientAppVersion } from "./smoke-lib.mjs";
 import pngPixelEvidence from "./png-pixel-evidence.cjs";
@@ -790,8 +796,15 @@ export function formatSmokeFailure(error) {
 export async function verifyTightbeamChecksums(manifestPath) {
   const directory = path.dirname(path.resolve(manifestPath));
   const checksumPath = path.join(directory, TIGHTBEAM.checksums);
+  const manifest = JSON.parse(await fs.readFile(manifestPath, "utf8"));
+  const assetNames = manifest.assets?.map(({ name }) => name);
+  const components = tightbeamComponentsForAssets(assetNames);
+  if (JSON.stringify(manifest.components) !== JSON.stringify(components) ||
+      JSON.stringify(Object.keys(manifest.checksums ?? {}).sort()) !== JSON.stringify([...assetNames].sort())) {
+    throw new Error("tightbeam_manifest_asset_set_mismatch");
+  }
   const lines = (await fs.readFile(checksumPath, "utf8")).trimEnd().split("\n");
-  const expectedNames = [...TIGHTBEAM.assets, TIGHTBEAM.manifest].sort();
+  const expectedNames = [...assetNames, TIGHTBEAM.manifest].sort();
   const parsed = lines.map((line) => {
     const match = line.match(/^([a-f0-9]{64})  ([^/]+)$/);
     if (!match) throw new Error("tightbeam_checksum_line_invalid");
@@ -1307,16 +1320,22 @@ export async function smokeTightbeam(options) {
   }
   await assertTrackedInputsUnchanged(sourceDir);
   await assertTrackedInputsUnchanged(toolingRoot);
-  const assetFiles = Object.fromEntries(TIGHTBEAM.assets.map((name) => [name, path.join(path.dirname(options.manifest), name)]));
+  const component = process.env.SURF_ACE_SMOKE_COMPONENT;
+  if (!(component in TIGHTBEAM_PLATFORM_ASSETS)) throw new Error("SURF_ACE_SMOKE_COMPONENT_must_be_linux_or_macos");
+  const listedManifest = JSON.parse(await fs.readFile(options.manifest, "utf8"));
+  const manifestAssetNames = listedManifest.assets?.map(({ name }) => name);
+  const manifestComponents = tightbeamComponentsForAssets(manifestAssetNames);
+  if (!TIGHTBEAM_PLATFORM_ASSETS[component].every((name) => manifestAssetNames.includes(name))) {
+    throw new Error(`tightbeam_${component}_smoke_asset_set_mismatch`);
+  }
+  const assetFiles = Object.fromEntries(manifestAssetNames.map((name) => [name, path.join(path.dirname(options.manifest), name)]));
   const manifest = await verifyManifestFiles(options.manifest, assetFiles);
   await verifyTightbeamChecksums(options.manifest);
   if (manifest.source?.commit !== options.candidateCommit || manifest.source?.tag !== TIGHTBEAM.sourceTag ||
       manifest.tooling?.commit !== options.toolingCommit || manifest.tooling?.tag !== TIGHTBEAM_TOOLING_TAG ||
-      manifest.version !== TIGHTBEAM.version) {
+      manifest.version !== TIGHTBEAM.version || JSON.stringify(manifest.components) !== JSON.stringify(manifestComponents)) {
     throw new Error("tightbeam_smoke_manifest_identity_mismatch");
   }
-  const component = process.env.SURF_ACE_SMOKE_COMPONENT;
-  if (!(component in participantAssets)) throw new Error("SURF_ACE_SMOKE_COMPONENT_must_be_linux_or_macos");
   const participantIdentities = buildTightbeamSmokeParticipantIdentities({
     assetDetails: manifest.assets,
     component,
@@ -1326,7 +1345,7 @@ export async function smokeTightbeam(options) {
     version: manifest.version,
   });
   const names = TIGHTBEAM.assets;
-  options.backend = assetFiles[names[0]];
+  if (component === "linux") options.backend = assetFiles[names[0]];
   options.cli = assetFiles[component === "linux" ? names[1] : names[3]];
   options.electron = assetFiles[component === "linux" ? names[2] : names[4]];
   options.participantIdentities = participantIdentities;
