@@ -1596,6 +1596,8 @@ jobs:
       INCLUDE_MACOS: ${{ (inputs.run_smoke && needs.smoke-macos.outputs.gate_state == 'passed') || (!(inputs.run_smoke || inputs.run_linux_smoke_only) && needs.assemble-macos.outputs.gate_state == 'passed') }}
       LINUX_COMPARE_STATE: ${{ needs.compare-linux.outputs.gate_state }}
       MACOS_COMPARE_STATE: ${{ needs.compare-macos.outputs.gate_state }}
+      LINUX_BUILD_RESULT: ${{ needs.build-linux.result }}
+      MACOS_BUILD_RESULT: ${{ needs.build-macos.result }}
       LINUX_ASSEMBLY_STATE: ${{ needs.assemble-linux.outputs.gate_state }}
       MACOS_ASSEMBLY_STATE: ${{ needs.assemble-macos.outputs.gate_state }}
       LINUX_SMOKE_STATE: ${{ needs.smoke-linux.outputs.gate_state }}
@@ -1713,7 +1715,7 @@ jobs:
           elif [[ "$linux_copy_state" == unavailable ]]; then
             linux_status='Withheld because Linux candidate assets were unavailable during final assembly.'
           elif [[ "$LINUX_COMPARE_STATE" != passed ]]; then
-            linux_status="Withheld because Linux build/tests or its platform comparison state was ${LINUX_COMPARE_STATE:-unavailable}."
+            linux_status="Withheld because the Linux build/test job was ${LINUX_BUILD_RESULT:-unavailable} and its A/B comparison was ${LINUX_COMPARE_STATE:-unavailable}."
           elif [[ "$LINUX_ASSEMBLY_STATE" != passed ]]; then
             linux_status="Withheld because Linux candidate assembly state was ${LINUX_ASSEMBLY_STATE:-unavailable}."
           elif [[ "$RUN_SMOKE" == true || "$RUN_LINUX_ONLY" == true ]]; then
@@ -1730,7 +1732,7 @@ jobs:
           elif [[ "$macos_copy_state" == unavailable ]]; then
             macos_status='Withheld because macOS candidate assets were unavailable during final assembly.'
           elif [[ "$MACOS_COMPARE_STATE" != passed ]]; then
-            macos_status="Withheld because macOS build/tests or its platform comparison state was ${MACOS_COMPARE_STATE:-unavailable}."
+            macos_status="Withheld because the macOS build/test job was ${MACOS_BUILD_RESULT:-unavailable} and its A/B comparison was ${MACOS_COMPARE_STATE:-unavailable}."
           elif [[ "$MACOS_ASSEMBLY_STATE" != passed ]]; then
             macos_status="Withheld because macOS candidate assembly state was ${MACOS_ASSEMBLY_STATE:-unavailable}."
           elif [[ "$RUN_SMOKE" == true ]]; then
@@ -1959,6 +1961,18 @@ jobs:
           if [[ "${VERSION_NAME_MISMATCH:-false}" == true ]]; then
             printf '\nThe tooling tag version label differs from the product tag version label; exact tag pins remain required, asset names follow the product version, and smoke still checks the app version.\n' \
               >> release-notes.md
+          fi
+          if [[ "${HAS_LINUX}" != true ]]; then
+            printf '\nWithheld Linux assets: surf-ace-server-linux-x86_64-v%s.tar.gz, surf-ace-cli-linux-x86_64-v%s.tar.gz, surf-ace-electron-linux-x86_64-v%s.zip.\n' \
+              "${PRODUCT_VERSION}" "${PRODUCT_VERSION}" "${PRODUCT_VERSION}" >> release-notes.md
+          fi
+          if [[ "${HAS_MACOS}" != true ]]; then
+            printf '\nWithheld macOS assets: surf-ace-cli-macos-arm64-v%s.tar.gz, surf-ace-electron-macos-arm64-v%s.zip.\n' \
+              "${PRODUCT_VERSION}" "${PRODUCT_VERSION}" >> release-notes.md
+          fi
+          if [[ "${SKILL_STATUS}" != included ]]; then
+            printf '\nWithheld shared skill asset: surf-ace-skill-v%s.md; its pinned tooling source was unavailable or its copied bytes did not verify.\n' \
+              "${PRODUCT_VERSION}" >> release-notes.md
           fi
           if [[ "${HAS_LINUX}" == true ]]; then
             if [[ "${LINUX_RECEIPT_OUTCOME:-}" == success && "${LINUX_ATTESTATION_OUTCOME:-}" == success && -n "${LINUX_ATTESTATION_URL:-}" ]]; then
