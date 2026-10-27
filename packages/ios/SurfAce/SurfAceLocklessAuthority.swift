@@ -1400,13 +1400,23 @@ struct SurfAceLocklessGenerationStore: Sendable {
             state.sequences.nextClosedSequence, beyond: closedSequenceHighWater
         )
 
-        let commitSequenceHighWater = (
-            state.controllers.values.flatMap { $0.pendingOperationReceipts.values.compactMap(\.commitSequence) }
-                + (state.pendingControllerRetentionReclamations ?? []).map(\.commitSequence)
-                + (state.pendingTombstoneReclamations ?? []).map(\.commitSequence)
-                + state.targetApplyWorkItems.values.map(\.intentCommitSequence)
-                + state.targetApplyResults.values.map(\.intentCommitSequence)
-        ).max() ?? 0
+        var retainedCommitSequences: [Int64] = []
+        for controller in state.controllers.values {
+            for receipt in controller.pendingOperationReceipts.values {
+                if let sequence = receipt.commitSequence {
+                    retainedCommitSequences.append(sequence)
+                }
+            }
+        }
+        retainedCommitSequences.append(
+            contentsOf: (state.pendingControllerRetentionReclamations ?? []).map(\.commitSequence)
+        )
+        retainedCommitSequences.append(
+            contentsOf: (state.pendingTombstoneReclamations ?? []).map(\.commitSequence)
+        )
+        retainedCommitSequences.append(contentsOf: state.targetApplyWorkItems.values.map(\.intentCommitSequence))
+        retainedCommitSequences.append(contentsOf: state.targetApplyResults.values.map(\.intentCommitSequence))
+        let commitSequenceHighWater = retainedCommitSequences.max() ?? 0
         state.sequences.nextCommitSequence = try nextSequence(
             state.sequences.nextCommitSequence, beyond: commitSequenceHighWater
         )
