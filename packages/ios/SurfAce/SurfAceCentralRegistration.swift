@@ -1132,8 +1132,10 @@ enum SurfAceRegistrationWire {
         if let identity, let expectedIdentity, identity != expectedIdentity {
             warnings.append("registration_registry_identity_changed")
         }
-        if payload.clientIdWasMalformed
-            || payload.clientId?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+        let clientIdIsMissingOrBlank = payload.clientId.map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        } ?? true
+        if payload.clientIdWasMalformed || clientIdIsMissingOrBlank {
             warnings.append("registration_client_identity_missing_or_unrecognized")
         } else if payload.clientId != clientId {
             warnings.append("registration_client_identity_mismatch")
@@ -2101,7 +2103,8 @@ final class SurfAceCentralRegistration {
 
         let routeURLs = candidateURLs(discovered: discovered)
         var scanURLs = routeURLs
-        if let previousSelected, !scanURLs.contains(where: { $0.0 == previousSelected.url }) {
+        if !selectedRegistrationFailed, let previousSelected,
+           !scanURLs.contains(where: { $0.0 == previousSelected.url }) {
             scanURLs.append((previousSelected.url, "reconnect"))
         }
         var candidates: [Candidate] = []
@@ -2166,8 +2169,8 @@ final class SurfAceCentralRegistration {
 
         for identifiedCandidate in identified where identifiedCandidate.identity == selectedIdentity {
             let candidate = identifiedCandidate.candidate
-            if selectedRegistrationFailed, let selected, selected.url == candidate.url,
-               input.registryIdentity == identifiedCandidate.identity { continue }
+            if selectedRegistrationFailed, let previousSelected,
+               previousSelected.url == candidate.url { continue }
             do {
                 if let identity = identifiedCandidate.identity {
                     try await bindCandidateRegistry(identity)
@@ -2313,10 +2316,8 @@ final class SurfAceCentralRegistration {
                             let reply = try await transport.register(
                                 clientId: clientId, input: noReleases, expectedIdentity: currentIdentity
                             )
-                            if try await applyRegistrationReply(reply, input: current, request: noReleases) {
-                                current = try await currentInputSnapshot()
-                                continue
-                            }
+                            _ = try await applyRegistrationReply(reply, input: current, request: noReleases)
+                            onWarning("registration_release_outcome_unknown; retry_deferred")
                             return
                         } catch {
                             throw error
@@ -2342,10 +2343,8 @@ final class SurfAceCentralRegistration {
                     let reply = try await transport.register(
                         clientId: clientId, input: noReleases, expectedIdentity: currentIdentity
                     )
-                    if try await applyRegistrationReply(reply, input: current, request: noReleases) {
-                        current = try await currentInputSnapshot()
-                        continue
-                    }
+                    _ = try await applyRegistrationReply(reply, input: current, request: noReleases)
+                    onWarning("registration_release_outcome_unknown; retry_deferred")
                     return
                 }
                 throw error

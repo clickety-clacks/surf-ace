@@ -227,6 +227,7 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
         let before = await fixture.adapter.snapshot()
         let request = try SurfAceRegistrationInput(state: before, clientId: clientId)
         let content = try XCTUnwrap(before.liveSurfaces["sf_1"]?.panes["1"]?.history.visible.content)
+        let firstPaneLineage = try XCTUnwrap(before.liveSurfaces["sf_1"]?.panes["1"]?.paneLineageId)
 
         _ = try await fixture.adapter.commitLocalMutation(operation: "local.topology.split") { state, sequence in
             _ = try SurfAceLocklessTopologyOperations.paneSplit(
@@ -239,7 +240,7 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
         let reply = SurfAceRegistrationReply(
             assignments: [SurfAceRegistrationAssignment(
                 surfaceId: "sf_1", windowLabel: "z", panes: [
-                    .init(paneId: "1", paneLineageId: "pl_sf_1_1", paneLabel: 1201),
+                    .init(paneId: "1", paneLineageId: firstPaneLineage, paneLabel: 1201),
                     .init(paneId: "2", paneLineageId: "pl_sf_1_2", paneLabel: 1202),
                 ]
             )],
@@ -294,10 +295,11 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
         )
         let rebound = await fixture.adapter.snapshot()
         let input = try SurfAceRegistrationInput(state: rebound, clientId: clientId)
+        let paneLineage = try XCTUnwrap(rebound.liveSurfaces["sf_1"]?.panes["1"]?.paneLineageId)
         let reply = SurfAceRegistrationReply(
             assignments: [SurfAceRegistrationAssignment(
                 surfaceId: "sf_1", windowLabel: "z",
-                panes: [.init(paneId: "1", paneLineageId: "pl_sf_1_1", paneLabel: 1201)]
+                panes: [.init(paneId: "1", paneLineageId: paneLineage, paneLabel: 1201)]
             )],
             projection: SurfAceRegistrationProjection(
                 directEndpoint: nil, prePairDescribeV1: false, allocationGenerationV1: true,
