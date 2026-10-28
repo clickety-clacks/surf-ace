@@ -238,10 +238,11 @@ Example markdown push:
 ```
 
 Supported commands include `fleet-list`, `window-describe`, `list`,
-`pane-describe`, `push`, `read`, `topology-intent`, `topology-realize`,
-`clear`, `annotations-remove`, `capture-pane`, `surface-intent`,
-`target-register`, and `target-apply`; availability depends on the installed
-CLI's verified schema. Bind mutations and paired reads to the exact
+`pane-describe`, `push`, `read`, `sync`, `topology-intent`,
+`topology-realize`, `clear`, `annotations-remove`, `annotations watch`,
+`annotations resume`, `annotations ack`, `annotations retire`, `capture-pane`,
+`surface-intent`, `target-register`, and `target-apply`; availability depends
+on the installed CLI's verified schema. Bind mutations and paired reads to the exact
 `surfaceId` and numeric `paneId` required by each command.
 
 To replace a root with three vertical panes, first inspect the current
