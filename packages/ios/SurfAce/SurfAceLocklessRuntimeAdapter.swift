@@ -908,20 +908,22 @@ actor SurfAceLocklessRuntimeAdapter {
             }
             let currentPaneReleases = Dictionary(grouping: currentInput.pendingPaneReleases, by: \.releaseId)
             let requestedPaneReleaseById = Dictionary(grouping: requested.pendingPaneReleases, by: \.releaseId)
-            let allowedPaneReleaseIds = Set(requestedPaneReleaseById.compactMap { releaseId, requestedGroup in
+            var allowedPaneReleaseIds = Set<String>()
+            for (releaseId, requestedGroup) in requestedPaneReleaseById {
                 guard requestedGroup.count == 1,
                       let currentGroup = currentPaneReleases[releaseId], currentGroup.count == 1,
-                      currentGroup.first == requestedGroup.first else { return nil }
-                return releaseId
-            })
+                      currentGroup.first == requestedGroup.first else { continue }
+                allowedPaneReleaseIds.insert(releaseId)
+            }
             let currentWindowReleases = Dictionary(grouping: currentInput.pendingWindowReleases, by: \.releaseId)
             let requestedWindowReleaseById = Dictionary(grouping: requested.pendingWindowReleases, by: \.releaseId)
-            let allowedWindowReleaseIds = Set(requestedWindowReleaseById.compactMap { releaseId, requestedGroup in
+            var allowedWindowReleaseIds = Set<String>()
+            for (releaseId, requestedGroup) in requestedWindowReleaseById {
                 guard requestedGroup.count == 1,
                       let currentGroup = currentWindowReleases[releaseId], currentGroup.count == 1,
-                      currentGroup.first == requestedGroup.first else { return nil }
-                return releaseId
-            })
+                      currentGroup.first == requestedGroup.first else { continue }
+                allowedWindowReleaseIds.insert(releaseId)
+            }
             if allowedPaneReleaseIds.count != requestedPaneReleaseById.count
                 || allowedWindowReleaseIds.count != requestedWindowReleaseById.count {
                 warn("registration_release_request_set_changed")
