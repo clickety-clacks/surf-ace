@@ -98,6 +98,12 @@ export class AllocatorServer {
   private registrationTail: Promise<unknown> = Promise.resolve();
 
   private async registerClient(payload: unknown): Promise<unknown> {
+    const registrationResultsV1 = isRecord(payload) ? payload.registrationResultsV1 : undefined;
+    if (registrationResultsV1 !== undefined && typeof registrationResultsV1 !== "boolean") {
+      throw new Error("invalid_registration");
+    }
+    if (registrationResultsV1 === true) return await this.registerClientWithResults(payload);
+
     const value = payload as {
       clientId?: unknown;
       directEndpoint?: unknown;
@@ -264,6 +270,310 @@ export class AllocatorServer {
     };
     this.registeredClients.set(clientId, result);
     return { ...result, completedPaneReleaseIds, completedWindowReleaseIds };
+  }
+
+  private async registerClientWithResults(payload: unknown): Promise<unknown> {
+    const value = payload as {
+      clientId?: unknown;
+      directEndpoint?: unknown;
+      allocationGenerationV1?: unknown;
+      windowGenerationV1?: unknown;
+      prePairDescribeV1?: unknown;
+      pendingPaneReleases?: unknown;
+      pendingWindowReleases?: unknown;
+      surfaces?: unknown;
+    };
+    if (!value || typeof value.clientId !== "string" || !/^[a-f0-9]{64}$/.test(value.clientId) ||
+        !Array.isArray(value.surfaces)) throw new Error("invalid_registration");
+    if (value.prePairDescribeV1 !== undefined && typeof value.prePairDescribeV1 !== "boolean") {
+      throw new Error("invalid_registration");
+    }
+    if (value.allocationGenerationV1 !== undefined && typeof value.allocationGenerationV1 !== "boolean") {
+      throw new Error("invalid_registration");
+    }
+    if (value.windowGenerationV1 !== undefined && typeof value.windowGenerationV1 !== "boolean") {
+      throw new Error("invalid_registration");
+    }
+    const directEndpoint = validateDirectEndpoint(value.directEndpoint);
+    const allocationGenerationV1 = value.allocationGenerationV1 === true;
+    const windowGenerationV1 = value.windowGenerationV1 === true;
+    const prePairDescribeV1 = value.prePairDescribeV1 === true;
+    const clientId = value.clientId;
+    const surfaces = value.surfaces as unknown[];
+    const pendingPaneReleases = value.pendingPaneReleases ?? [];
+    const pendingWindowReleases = value.pendingWindowReleases ?? [];
+    if (!Array.isArray(pendingPaneReleases)) throw new Error("invalid_pane_release");
+    if (!Array.isArray(pendingWindowReleases)) throw new Error("invalid_window_release");
+
+    const surfaceIdCounts = new Map<string, number>();
+    for (const surface of surfaces) {
+      const surfaceId = isRecord(surface) && isValidSurfaceId(surface.surfaceId) ? surface.surfaceId : null;
+      if (surfaceId) surfaceIdCounts.set(surfaceId, (surfaceIdCounts.get(surfaceId) ?? 0) + 1);
+    }
+
+    const state = await this.custody.readAcceptedState();
+    const hash = (text: string) => createHash("sha256").update(text).digest("hex");
+    const identity = {
+      authorityId: "auth_" + hash(state.allocatorId),
+      ownerAnchorId: "owner_" + hash(state.fleetId),
+      fleetId: state.fleetId,
+      expectedAllocatorId: state.allocatorId,
+      protocolVersion: 1 as const,
+    };
+    await this.authority.bind(identity);
+
+    const windowReleases = await this.processWindowReleasesWithResults(
+      clientId, pendingWindowReleases as unknown[], windowGenerationV1,
+    );
+    const paneReleases = await this.processPaneReleasesWithResults(
+      clientId, pendingPaneReleases as unknown[], allocationGenerationV1,
+    );
+
+    const registered: RegisteredClientProjection["surfaces"] = [];
+    const surfaceResults: Array<Record<string, unknown>> = [];
+    for (let surfaceIndex = 0; surfaceIndex < surfaces.length; surfaceIndex += 1) {
+      const rawSurface = surfaces[surfaceIndex];
+      const requestedSurfaceId = isRecord(rawSurface) && isValidSurfaceId(rawSurface.surfaceId)
+        ? rawSurface.surfaceId
+        : undefined;
+      const base = {
+        index: surfaceIndex,
+        ...(requestedSurfaceId ? { surfaceId: requestedSurfaceId } : {}),
+      };
+      const validationError = registrationSurfaceError(
+        rawSurface,
+        requestedSurfaceId ? (surfaceIdCounts.get(requestedSurfaceId) ?? 0) > 1 : false,
+      );
+      if (validationError) {
+        surfaceResults.push({ ...base, ok: false, error: registrationFailure(validationError) });
+        continue;
+      }
+
+      const surface = rawSurface as {
+        surfaceId: string;
+        windowGeneration?: number | null;
+        panes: unknown[];
+      };
+      let assignment;
+      try {
+        assignment = await this.authority.claim({
+          ...identity, surfaceId: allocatorSurfaceId(clientId, surface.surfaceId),
+        }, windowGenerationV1);
+      } catch (error) {
+        const refusal = knownRegistrationRefusal(error);
+        if (!refusal) throw error;
+        surfaceResults.push({ ...base, ok: false, error: refusal });
+        continue;
+      }
+      if (surface.windowGeneration !== undefined && surface.windowGeneration !== null &&
+          surface.windowGeneration !== assignment.windowGeneration) {
+        surfaceResults.push({
+          ...base, ok: false, error: registrationFailure("stale_window_allocation_reference"),
+        });
+        continue;
+      }
+
+      const paneIdCounts = new Map<string, number>();
+      for (const pane of surface.panes) {
+        const paneId = isRecord(pane) && isValidPaneId(pane.paneId) ? pane.paneId : null;
+        if (paneId) paneIdCounts.set(paneId, (paneIdCounts.get(paneId) ?? 0) + 1);
+      }
+      const panes: RegisteredClientProjection["surfaces"][number]["panes"] = [];
+      const paneResults: Array<Record<string, unknown>> = [];
+      for (let paneIndex = 0; paneIndex < surface.panes.length; paneIndex += 1) {
+        const rawPane = surface.panes[paneIndex];
+        const requestedPaneId = isRecord(rawPane) && isValidPaneId(rawPane.paneId)
+          ? rawPane.paneId
+          : undefined;
+        const requestedLineageId = isRecord(rawPane) && isValidPaneLineageId(rawPane.paneLineageId)
+          ? rawPane.paneLineageId
+          : undefined;
+        const paneBase = {
+          index: paneIndex,
+          ...(requestedPaneId ? { paneId: requestedPaneId } : {}),
+          ...(requestedLineageId ? { paneLineageId: requestedLineageId } : {}),
+        };
+        const paneValidationError = registrationPaneError(
+          rawPane,
+          requestedPaneId ? (paneIdCounts.get(requestedPaneId) ?? 0) > 1 : false,
+        );
+        if (paneValidationError) {
+          paneResults.push({ ...paneBase, ok: false, error: registrationFailure(paneValidationError) });
+          continue;
+        }
+
+        const pane = rawPane as {
+          allocationGeneration?: number | null;
+          paneId: string;
+          paneLabel: number;
+          paneLineageId: string;
+        };
+        try {
+          if (allocationGenerationV1) {
+            const allocated = await this.custody.claimPaneWithGeneration(
+              clientId, surface.surfaceId, pane.paneId, pane.paneLineageId,
+            );
+            if ((pane.paneLabel > 0 && pane.paneLabel !== allocated.paneLabel) ||
+                (pane.allocationGeneration !== undefined && pane.allocationGeneration !== null &&
+                  pane.allocationGeneration !== allocated.allocationGeneration)) {
+              paneResults.push({
+                ...paneBase, ok: false, error: registrationFailure("stale_pane_allocation_reference"),
+              });
+              continue;
+            }
+            const projection = {
+              ...allocated,
+              paneId: pane.paneId,
+              paneLineageId: pane.paneLineageId,
+              paneAddress: assignment.windowLabel + allocated.paneLabel,
+            };
+            panes.push(projection);
+            paneResults.push({ ...paneBase, ok: true, ...projection });
+          } else {
+            const paneLabel = await this.custody.claimPane(
+              clientId, surface.surfaceId, pane.paneId, pane.paneLineageId,
+            );
+            if (pane.paneLabel > 0 && pane.paneLabel !== paneLabel) {
+              paneResults.push({
+                ...paneBase, ok: false, error: registrationFailure("stale_pane_allocation_reference"),
+              });
+              continue;
+            }
+            const projection = {
+              paneId: pane.paneId,
+              paneLineageId: pane.paneLineageId,
+              paneLabel,
+              paneAddress: assignment.windowLabel + paneLabel,
+            };
+            panes.push(projection);
+            paneResults.push({ ...paneBase, ok: true, ...projection });
+          }
+        } catch (error) {
+          const refusal = knownRegistrationRefusal(error);
+          if (!refusal) throw error;
+          paneResults.push({ ...paneBase, ok: false, error: refusal });
+        }
+      }
+
+      const projection = {
+        surfaceId: surface.surfaceId,
+        windowLabel: assignment.windowLabel,
+        windowGeneration: assignment.windowGeneration,
+        panes,
+      };
+      registered.push(projection);
+      surfaceResults.push({
+        ...base,
+        ok: true,
+        windowLabel: assignment.windowLabel,
+        windowGeneration: assignment.windowGeneration,
+        paneResults,
+      });
+    }
+
+    const surfaceIds = registered.map((surface) => surface.surfaceId).sort();
+    const leaseSignature = JSON.stringify({
+      allocatorId: state.allocatorId,
+      clientId,
+      directEndpoint,
+      fleetId: state.fleetId,
+      prePairDescribeV1,
+      windowGenerationV1,
+      surfaceIds,
+    });
+    if (directEndpoint !== null && prePairDescribeV1 &&
+        (!this.custody.registrationReady || this.authority.serveStatus !== "serving")) {
+      throw new AllocatorError("writer_fence_unavailable", "endpoint lease requires a validated serving writer");
+    }
+    const endpointLease = this.endpointLeases.renew(
+      clientId,
+      leaseSignature,
+      directEndpoint !== null && prePairDescribeV1,
+    );
+    const result: RegisteredClientProjection = {
+      clientId,
+      directEndpoint,
+      endpointLease,
+      allocationGenerationV1,
+      windowGenerationV1,
+      prePairDescribeV1,
+      registryIdentity: { allocatorId: state.allocatorId, fleetId: state.fleetId },
+      surfaces: registered,
+    };
+    this.registeredClients.set(clientId, result);
+    return {
+      ...result,
+      completedPaneReleaseIds: paneReleases.completedReleaseIds,
+      completedWindowReleaseIds: windowReleases.completedReleaseIds,
+      registrationResultsV1: true,
+      paneReleaseResults: paneReleases.results,
+      surfaceResults,
+      windowReleaseResults: windowReleases.results,
+    };
+  }
+
+  private async processPaneReleasesWithResults(
+    clientId: string,
+    pendingPaneReleases: unknown[],
+    allocationGenerationV1: boolean,
+  ): Promise<{ completedReleaseIds: string[]; results: Array<Record<string, unknown>> }> {
+    const completedReleaseIds: string[] = [];
+    const results: Array<Record<string, unknown>> = [];
+    const releaseIdCounts = countReleaseIds(pendingPaneReleases);
+    for (let index = 0; index < pendingPaneReleases.length; index += 1) {
+      const rawRelease = pendingPaneReleases[index];
+      const releaseId = isRecord(rawRelease) && isValidReleaseId(rawRelease.releaseId)
+        ? rawRelease.releaseId
+        : undefined;
+      const base = { index, ...(releaseId ? { releaseId } : {}) };
+      try {
+        if (!allocationGenerationV1 || (releaseId && (releaseIdCounts.get(releaseId) ?? 0) > 1)) {
+          throw new Error("invalid_pane_release");
+        }
+        const evidence = paneRetirementEvidence(rawRelease, clientId);
+        if (evidence.releaseId !== paneReleaseIntentId(evidence)) throw new Error("invalid_pane_release");
+        await this.custody.releasePaneGeneration(evidence);
+        completedReleaseIds.push(evidence.releaseId);
+        results.push({ ...base, ok: true });
+      } catch (error) {
+        const refusal = knownRegistrationRefusal(error);
+        if (!refusal) throw error;
+        results.push({ ...base, ok: false, error: refusal });
+      }
+    }
+    return { completedReleaseIds, results };
+  }
+
+  private async processWindowReleasesWithResults(
+    clientId: string,
+    pendingWindowReleases: unknown[],
+    windowGenerationV1: boolean,
+  ): Promise<{ completedReleaseIds: string[]; results: Array<Record<string, unknown>> }> {
+    const completedReleaseIds: string[] = [];
+    const results: Array<Record<string, unknown>> = [];
+    const releaseIdCounts = countReleaseIds(pendingWindowReleases);
+    for (let index = 0; index < pendingWindowReleases.length; index += 1) {
+      const rawRelease = pendingWindowReleases[index];
+      const releaseId = isRecord(rawRelease) && isValidReleaseId(rawRelease.releaseId)
+        ? rawRelease.releaseId
+        : undefined;
+      const base = { index, ...(releaseId ? { releaseId } : {}) };
+      try {
+        if (!windowGenerationV1 || (releaseId && (releaseIdCounts.get(releaseId) ?? 0) > 1)) {
+          throw new Error("invalid_window_release");
+        }
+        const evidence = windowRetirementEvidence(rawRelease, clientId);
+        if (evidence.releaseId !== windowReleaseIntentId(evidence)) throw new Error("invalid_window_release");
+        await this.custody.releaseWindowGeneration(evidence);
+        completedReleaseIds.push(evidence.releaseId);
+        results.push({ ...base, ok: true });
+      } catch (error) {
+        const refusal = knownRegistrationRefusal(error);
+        if (!refusal) throw error;
+        results.push({ ...base, ok: false, error: refusal });
+      }
+    }
+    return { completedReleaseIds, results };
   }
 
   private async processPaneReleases(clientId: string, pendingPaneReleases: unknown[]): Promise<string[]> {
@@ -917,6 +1227,150 @@ function paneReleaseIntentId(evidence: PaneRetirementEvidence): string {
     tombstoneId: evidence.tombstoneId,
     tombstoneKind: evidence.tombstoneKind,
   })).digest("hex");
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isValidSurfaceId(value: unknown): value is string {
+  return typeof value === "string" && /^sf_[A-Za-z0-9._:-]{3,64}$/.test(value);
+}
+
+function isValidPaneId(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z0-9._:-]{1,64}$/.test(value);
+}
+
+function isValidPaneLineageId(value: unknown): value is string {
+  return typeof value === "string" && /^pl_[A-Za-z0-9._:-]{3,128}$/.test(value);
+}
+
+function isValidReleaseId(value: unknown): value is string {
+  return typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
+}
+
+function registrationSurfaceError(value: unknown, duplicateSurfaceId: boolean): string | null {
+  if (!isRecord(value) || !isValidSurfaceId(value.surfaceId) || duplicateSurfaceId ||
+      !Array.isArray(value.panes) ||
+      (value.windowGeneration !== undefined && value.windowGeneration !== null &&
+        (!Number.isSafeInteger(value.windowGeneration) || Number(value.windowGeneration) < 1))) {
+    return "invalid_surface";
+  }
+  return null;
+}
+
+function registrationPaneError(value: unknown, duplicatePaneId: boolean): string | null {
+  if (!isRecord(value) || !isValidPaneId(value.paneId) ||
+      !isValidPaneLineageId(value.paneLineageId) || !Number.isSafeInteger(value.paneLabel) ||
+      Number(value.paneLabel) < 0 ||
+      (value.allocationGeneration !== undefined && value.allocationGeneration !== null &&
+        (!Number.isSafeInteger(value.allocationGeneration) || Number(value.allocationGeneration) < 1)) ||
+      duplicatePaneId) {
+    return "invalid_pane";
+  }
+  return null;
+}
+
+function registrationFailure(code: string): { code: string; message: string } {
+  return { code, message: code };
+}
+
+function knownRegistrationRefusal(error: unknown): { code: string; message: string } | null {
+  const inputRefusals = new Set([
+    "invalid_surface",
+    "invalid_pane",
+    "invalid_pane_release",
+    "invalid_window_release",
+    "stale_pane_allocation_reference",
+    "stale_window_allocation_reference",
+  ]);
+  if (error instanceof Error && inputRefusals.has(error.message)) {
+    return registrationFailure(error.message);
+  }
+
+  if (error instanceof AllocatorError &&
+      (error.code === "assignment_conflict" || error.code === "authority_ownership_conflict")) {
+    const itemConflictMessages = [
+      "allocation transaction was terminally retired",
+      "window identity is retired or lacks its active mapping",
+      "terminally retired pane identity cannot be claimed",
+      "pane identity conflicts with allocator history",
+      "pane lineage is bound to another pane ID",
+      "pane release does not match the active allocation",
+      "window release does not match the active allocation",
+      "pane allocation is not in allocator history",
+    ];
+    if (itemConflictMessages.some((message) => error.message.includes(message))) {
+      return { code: "assignment_conflict", message: "item conflicts with registry allocation history" };
+    }
+  }
+  return null;
+}
+
+function countReleaseIds(values: unknown[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const value of values) {
+    const releaseId = isRecord(value) && isValidReleaseId(value.releaseId) ? value.releaseId : null;
+    if (releaseId) counts.set(releaseId, (counts.get(releaseId) ?? 0) + 1);
+  }
+  return counts;
+}
+
+function paneRetirementEvidence(
+  value: unknown,
+  clientId: string,
+): PaneRetirementEvidence & { releaseId: string } {
+  if (!isRecord(value) || !isValidReleaseId(value.releaseId) || value.clientId !== clientId ||
+      typeof value.surfaceId !== "string" || typeof value.paneId !== "string" ||
+      typeof value.lineageId !== "string" || !Number.isSafeInteger(value.paneLabel) ||
+      Number(value.paneLabel) < 1 || !Number.isSafeInteger(value.allocationGeneration) ||
+      Number(value.allocationGeneration) < 1 ||
+      (value.tombstoneKind !== "pane" && value.tombstoneKind !== "surface") ||
+      typeof value.tombstoneId !== "string" || !Number.isSafeInteger(value.closeRevision) ||
+      Number(value.closeRevision) < 1 || !Number.isSafeInteger(value.terminalRetirementRevision) ||
+      Number(value.terminalRetirementRevision) < 1) {
+    throw new Error("invalid_pane_release");
+  }
+  return {
+    allocationGeneration: Number(value.allocationGeneration),
+    clientId,
+    closeRevision: Number(value.closeRevision),
+    lineageId: value.lineageId,
+    paneId: value.paneId,
+    paneLabel: Number(value.paneLabel),
+    releaseId: value.releaseId,
+    surfaceId: value.surfaceId,
+    terminalRetirementRevision: Number(value.terminalRetirementRevision),
+    tombstoneId: value.tombstoneId,
+    tombstoneKind: value.tombstoneKind,
+  };
+}
+
+function windowRetirementEvidence(
+  value: unknown,
+  clientId: string,
+): WindowRetirementEvidence & { releaseId: string } {
+  if (!isRecord(value) || !isValidReleaseId(value.releaseId) || value.clientId !== clientId ||
+      !isValidSurfaceId(value.surfaceId) || typeof value.windowLabel !== "string" ||
+      !/^[a-z]+$/.test(value.windowLabel) || !Number.isSafeInteger(value.windowGeneration) ||
+      Number(value.windowGeneration) < 1 || value.tombstoneKind !== "surface" ||
+      typeof value.tombstoneId !== "string" || !/^[A-Za-z0-9._:-]{1,128}$/.test(value.tombstoneId) ||
+      !Number.isSafeInteger(value.closeRevision) || Number(value.closeRevision) < 1 ||
+      !Number.isSafeInteger(value.terminalRetirementRevision) ||
+      Number(value.terminalRetirementRevision) < 1) {
+    throw new Error("invalid_window_release");
+  }
+  return {
+    clientId,
+    closeRevision: Number(value.closeRevision),
+    releaseId: value.releaseId,
+    surfaceId: value.surfaceId,
+    terminalRetirementRevision: Number(value.terminalRetirementRevision),
+    tombstoneId: value.tombstoneId,
+    tombstoneKind: "surface",
+    windowGeneration: Number(value.windowGeneration),
+    windowLabel: value.windowLabel,
+  };
 }
 
 function windowReleaseIntentId(evidence: WindowRetirementEvidence): string {

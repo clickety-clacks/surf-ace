@@ -1525,6 +1525,265 @@ function assertRc11ConfiguredRegistration(
   }
 }
 
+test("client.register returns negotiated per-item results and leases only accepted surfaces", { timeout: 90_000 }, async () => {
+  const cluster = await startCluster();
+  let allocator: AllocatorServer | null = null;
+  let wire: WireClient | null = null;
+  try {
+    const recovery = await PostgresCustodyAdapter.initializeAbsentFleet(cluster.config, "alloc_partial-registration");
+    await recovery.release();
+    allocator = await AllocatorServer.start(serverConfig(cluster));
+    wire = await WireClient.connect(allocator.address.url);
+
+    const clientId = createHash("sha256").update("partial-registration-client").digest("hex");
+    const directEndpoint = "wss://client.example:19001/ws";
+    const register = async (
+      surfaces: Array<Record<string, unknown>>,
+      pendingWindowReleases: unknown[] = [],
+      negotiated = true,
+      pendingPaneReleases: unknown[] = [],
+    ) => await wire!.request("client.register", {
+      ...(negotiated ? { registrationResultsV1: true } : {}),
+      allocationGenerationV1: true,
+      clientId,
+      directEndpoint,
+      pendingPaneReleases,
+      pendingWindowReleases,
+      prePairDescribeV1: true,
+      surfaces,
+      windowGenerationV1: true,
+    });
+    const payload = (response: Record<string, unknown>) => response.payload as Record<string, any>;
+    const originalSurfaces = [
+      {
+        surfaceId: "sf_partial_a",
+        panes: [
+          { paneId: "pane-matched", paneLineageId: "pl_partial_matched", paneLabel: 0 },
+          { paneId: "pane-release", paneLineageId: "pl_partial_release", paneLabel: 0 },
+        ],
+      },
+      { surfaceId: "sf_partial_b", panes: [{ paneId: "pane-keeper", paneLineageId: "pl_partial_keeper", paneLabel: 0 }] },
+      { surfaceId: "sf_partial_c", panes: [] },
+      { surfaceId: "sf_partial_d", panes: [] },
+    ];
+    const initial = await register(originalSurfaces);
+    assert.equal(initial.ok, true, JSON.stringify(initial));
+    const initialPayload = payload(initial);
+    assert.equal(initialPayload.registrationResultsV1, true);
+    assert.deepEqual(initialPayload.surfaceResults.map((result: any) => result.ok), [true, true, true, true]);
+    const firstLease = initialPayload.endpointLease as {
+      leaseGeneration: number;
+      registrationObservedAtMs: number;
+      leaseExpiresAtMs: number;
+    };
+    assert.ok(firstLease.leaseGeneration > 0);
+
+    const originalA = initialPayload.surfaces.find((surface: any) => surface.surfaceId === "sf_partial_a");
+    const originalB = initialPayload.surfaces.find((surface: any) => surface.surfaceId === "sf_partial_b");
+    const originalC = initialPayload.surfaces.find((surface: any) => surface.surfaceId === "sf_partial_c");
+    const originalD = initialPayload.surfaces.find((surface: any) => surface.surfaceId === "sf_partial_d");
+    assert.ok(originalA && originalB && originalC && originalD);
+    const originalPane = originalA.panes[0];
+    const windowReleaseEvidence = {
+      clientId,
+      closeRevision: 1,
+      surfaceId: originalC.surfaceId,
+      terminalRetirementRevision: 2,
+      tombstoneId: "st_partial_c",
+      tombstoneKind: "surface" as const,
+      windowGeneration: originalC.windowGeneration,
+      windowLabel: originalC.windowLabel,
+    };
+    const retiredWindow = {
+      ...windowReleaseEvidence,
+      releaseId: createHash("sha256").update(JSON.stringify(windowReleaseEvidence)).digest("hex"),
+    };
+    const rejectedWindowEvidence = {
+      clientId,
+      closeRevision: 1,
+      surfaceId: originalD.surfaceId,
+      terminalRetirementRevision: 2,
+      tombstoneId: "st_partial_d_wrong_generation",
+      tombstoneKind: "surface" as const,
+      windowGeneration: originalD.windowGeneration + 1,
+      windowLabel: originalD.windowLabel,
+    };
+    const rejectedWindow = {
+      ...rejectedWindowEvidence,
+      releaseId: createHash("sha256").update(JSON.stringify(rejectedWindowEvidence)).digest("hex"),
+    };
+    const releasePane = originalA.panes[1];
+    const keeperPane = originalB.panes[0];
+    const paneReleaseEvidence = {
+      allocationGeneration: releasePane.allocationGeneration,
+      clientId,
+      closeRevision: 1,
+      lineageId: releasePane.paneLineageId,
+      paneId: releasePane.paneId,
+      paneLabel: releasePane.paneLabel,
+      surfaceId: originalA.surfaceId,
+      terminalRetirementRevision: 2,
+      tombstoneId: "pt_partial_release",
+      tombstoneKind: "pane" as const,
+    };
+    const acceptedPaneRelease = {
+      ...paneReleaseEvidence,
+      releaseId: createHash("sha256").update(JSON.stringify(paneReleaseEvidence)).digest("hex"),
+    };
+    const rejectedPaneEvidence = {
+      allocationGeneration: keeperPane.allocationGeneration,
+      clientId,
+      closeRevision: 1,
+      lineageId: keeperPane.paneLineageId,
+      paneId: keeperPane.paneId,
+      paneLabel: keeperPane.paneLabel + 1,
+      surfaceId: originalB.surfaceId,
+      terminalRetirementRevision: 2,
+      tombstoneId: "pt_partial_keeper_wrong_label",
+      tombstoneKind: "pane" as const,
+    };
+    const rejectedPaneRelease = {
+      ...rejectedPaneEvidence,
+      releaseId: createHash("sha256").update(JSON.stringify(rejectedPaneEvidence)).digest("hex"),
+    };
+
+    const partial = await register([
+      {
+        surfaceId: originalA.surfaceId,
+        windowGeneration: originalA.windowGeneration,
+        panes: [
+          {
+            allocationGeneration: originalPane.allocationGeneration,
+            paneId: originalPane.paneId,
+            paneLabel: originalPane.paneLabel + 1,
+            paneLineageId: originalPane.paneLineageId,
+          },
+          { allocationGeneration: null, paneId: "pane-new", paneLabel: 0, paneLineageId: "pl_partial_new" },
+        ],
+      },
+      {
+        surfaceId: originalB.surfaceId,
+        windowGeneration: originalB.windowGeneration,
+        panes: originalB.panes,
+      },
+      {
+        surfaceId: originalC.surfaceId,
+        windowGeneration: originalC.windowGeneration,
+        panes: [],
+      },
+      {
+        surfaceId: originalD.surfaceId,
+        windowGeneration: originalD.windowGeneration,
+        panes: [],
+      },
+    ], [retiredWindow, rejectedWindow], true, [acceptedPaneRelease, rejectedPaneRelease]);
+    assert.equal(partial.ok, true, JSON.stringify(partial));
+    const partialPayload = payload(partial);
+    assert.equal(partialPayload.registrationResultsV1, true);
+    assert.deepEqual(
+      partialPayload.windowReleaseResults.map(({ index, releaseId, ok }: any) => ({ index, releaseId, ok })),
+      [
+        { index: 0, releaseId: retiredWindow.releaseId, ok: true },
+        { index: 1, releaseId: rejectedWindow.releaseId, ok: false },
+      ],
+    );
+    assert.equal(partialPayload.windowReleaseResults[1].error.code, "assignment_conflict");
+    assert.deepEqual(partialPayload.completedWindowReleaseIds, [retiredWindow.releaseId]);
+    assert.deepEqual(
+      partialPayload.paneReleaseResults.map(({ index, releaseId, ok }: any) => ({ index, releaseId, ok })),
+      [
+        { index: 0, releaseId: acceptedPaneRelease.releaseId, ok: true },
+        { index: 1, releaseId: rejectedPaneRelease.releaseId, ok: false },
+      ],
+    );
+    assert.equal(partialPayload.paneReleaseResults[1].error.code, "assignment_conflict");
+    assert.deepEqual(partialPayload.completedPaneReleaseIds, [acceptedPaneRelease.releaseId]);
+    assert.deepEqual(partialPayload.surfaceResults.map((result: any) => result.ok), [true, true, false, true]);
+
+    const resultA = partialPayload.surfaceResults[0];
+    assert.deepEqual(resultA.paneResults.map((result: any) => result.ok), [false, true]);
+    assert.equal(resultA.paneResults[0].error.code, "stale_pane_allocation_reference");
+    assert.equal(resultA.paneResults[1].paneId, "pane-new");
+    assert.equal(resultA.paneResults[1].paneLabel > 0, true,
+      "the successful sibling pane receives the allocator's actual label");
+    assert.equal(partialPayload.surfaceResults[2].error.code, "assignment_conflict");
+    assert.deepEqual(
+      partialPayload.surfaces.map((surface: any) => surface.surfaceId),
+      [originalA.surfaceId, originalB.surfaceId, originalD.surfaceId],
+      "the legacy surface projection contains only confirmed surfaces",
+    );
+    assert.deepEqual(
+      partialPayload.surfaces[0].panes.map((pane: any) => pane.paneId),
+      ["pane-new"],
+      "a refused pane is omitted while its matching sibling remains registered",
+    );
+
+    const partialLease = partialPayload.endpointLease as typeof firstLease;
+    assert.ok(partialLease.leaseGeneration > firstLease.leaseGeneration,
+      "the lease generation advances when the accepted surface set changes");
+    assert.ok(partialLease.registrationObservedAtMs > firstLease.registrationObservedAtMs);
+
+    const paneClaim = await wire.request("pane.claim", {
+      clientId,
+      paneId: "pane-after-partial",
+      paneLineageId: "pl_partial_after",
+      surfaceId: originalA.surfaceId,
+    });
+    assert.equal(paneClaim.ok, true, JSON.stringify(paneClaim),
+      "a separate pane claim remains available after partial registration");
+    assert.ok(Number((paneClaim.payload as { paneLabel: number }).paneLabel) > 0);
+
+    const repeated = await register([
+      {
+        surfaceId: originalA.surfaceId,
+        windowGeneration: originalA.windowGeneration,
+        panes: [
+          originalA.panes[0],
+          {
+            allocationGeneration: resultA.paneResults[1].allocationGeneration,
+            paneId: resultA.paneResults[1].paneId,
+            paneLabel: resultA.paneResults[1].paneLabel,
+            paneLineageId: resultA.paneResults[1].paneLineageId,
+          },
+        ],
+      },
+      {
+        surfaceId: originalB.surfaceId,
+        windowGeneration: originalB.windowGeneration,
+        panes: originalB.panes,
+      },
+      {
+        surfaceId: originalD.surfaceId,
+        windowGeneration: originalD.windowGeneration,
+        panes: [],
+      },
+    ]);
+    assert.equal(repeated.ok, true, JSON.stringify(repeated));
+    const renewedLease = payload(repeated).endpointLease as typeof firstLease;
+    assert.equal(renewedLease.leaseGeneration, partialLease.leaseGeneration,
+      "renewing the same accepted set keeps the registry-issued generation");
+    assert.equal(renewedLease.registrationObservedAtMs, partialLease.registrationObservedAtMs);
+    assert.ok(renewedLease.leaseExpiresAtMs >= partialLease.leaseExpiresAtMs);
+
+    const legacyClientId = createHash("sha256").update("legacy-registration-client").digest("hex");
+    const legacy = await wire.request("client.register", {
+      clientId: legacyClientId,
+      surfaces: [{ surfaceId: "sf_legacy_client", panes: [] }],
+    });
+    assert.equal(legacy.ok, true, JSON.stringify(legacy));
+    const legacyPayload = payload(legacy);
+    assert.equal(legacyPayload.registrationResultsV1, undefined,
+      "clients that do not opt in continue to receive the legacy reply shape");
+    assert.equal(legacyPayload.surfaceResults, undefined);
+    assert.equal(legacyPayload.surfaces[0].windowLabel, "e",
+      "legacy clients still receive the authoritative window label");
+  } finally {
+    await wire?.close();
+    if (allocator) await allocator.close();
+    await cluster.stop();
+  }
+});
+
 test("configured-first server in-process discovery fallback registers and persists clients", { timeout: 90_000 }, async () => {
   const cluster = await startCluster();
   let allocator: AllocatorServer | null = null;

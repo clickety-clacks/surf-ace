@@ -281,6 +281,11 @@ export class WindowLabelAuthority {
       this.failClosedReason = `unknown-persistence:${error.operation}`;
     } else if (error instanceof AllocatorError
       && (error.code === "assignment_conflict" || error.code === "allocator_state_corrupt")) {
+      if (error.code === "assignment_conflict" &&
+          error.message === "window identity is retired or lacks its active mapping") {
+        // A terminally retired surface is a known item refusal, not an allocator-wide failure.
+        return;
+      }
       this.failClosedReason = error.message;
     }
   }
