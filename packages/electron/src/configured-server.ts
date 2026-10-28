@@ -29,12 +29,12 @@ function validateConfiguredDirectEndpoint(address: string | null): string | null
 function registrationEndpointLease(payload: unknown): PersistentRegistryEndpointLease | null {
   const lease = (payload as { endpointLease?: unknown } | null)?.endpointLease;
   if (lease === null || lease === undefined) return null;
-  if (typeof lease !== "object" || Array.isArray(lease)) throw new Error("invalid_registration_response");
+  if (!isRecord(lease)) return null;
   const value = lease as Record<string, unknown>;
   if (!Number.isSafeInteger(value.leaseGeneration) || Number(value.leaseGeneration) < 1 ||
       !Number.isSafeInteger(value.registrationObservedAtMs) || Number(value.registrationObservedAtMs) < 0 ||
       !Number.isSafeInteger(value.leaseExpiresAtMs) || Number(value.leaseExpiresAtMs) <= Number(value.registrationObservedAtMs)) {
-    throw new Error("invalid_registration_response");
+    return null;
   }
   return {
     leaseGeneration: Number(value.leaseGeneration),
@@ -76,6 +76,7 @@ type RegistrationRefusal = {
 };
 
 type ParsedRegistrationResponse = {
+  allocationGenerationV1: boolean;
   endpointLease: PersistentRegistryEndpointLease | null;
   partial: boolean;
   refusedPanes: RegistrationRefusal[];
@@ -84,7 +85,7 @@ type ParsedRegistrationResponse = {
     surfaceId: string;
     windowLabel: string;
     windowGeneration: number | null;
-    panes: Array<{ allocationGeneration: number; paneId: string; paneLineageId: string; paneLabel: number }>;
+    panes: Array<{ allocationGeneration: number | null; paneId: string; paneLineageId: string; paneLabel: number }>;
   }>;
   windowGenerationV1: boolean;
 };
@@ -112,6 +113,7 @@ export class ConfiguredServerRegistration {
   private pending: Promise<void> = Promise.resolve();
   private reportedPendingWindowReleaseIds = new Set<string>();
   private readonly retrySuppressedClaimKeys = new Set<string>();
+  private readonly reportedCompatibilityWarnings = new Set<string>();
   private registryIdentity: RegistryIdentity | null = null;
 
   constructor(
@@ -154,11 +156,17 @@ export class ConfiguredServerRegistration {
     if (!response.ok) throw new Error(response.error?.message ?? "pane_allocation_failed");
     const payload = response.payload as { allocationGeneration?: unknown; paneLabel?: unknown };
     if (!Number.isSafeInteger(payload?.paneLabel) || Number(payload.paneLabel) < 1 ||
-        !Number.isSafeInteger(payload?.allocationGeneration) || Number(payload.allocationGeneration) < 1) {
+        (payload?.allocationGeneration !== undefined && payload.allocationGeneration !== null &&
+          (!Number.isSafeInteger(payload.allocationGeneration) || Number(payload.allocationGeneration) < 1))) {
       throw new Error("invalid_pane_assignment");
     }
+    if (payload.allocationGeneration === undefined || payload.allocationGeneration === null) {
+      this.reportCompatibilityWarning("pane-claim-generation", "Registry pane claim did not include an allocation generation; the label is usable, but generation-dependent operations remain unavailable");
+    }
     return {
-      allocationGeneration: Number(payload.allocationGeneration),
+      allocationGeneration: Number.isSafeInteger(payload.allocationGeneration) && Number(payload.allocationGeneration) > 0
+        ? Number(payload.allocationGeneration)
+        : null,
       paneLabel: Number(payload.paneLabel),
     };
   }
@@ -205,6 +213,12 @@ export class ConfiguredServerRegistration {
 
   private reportWarning(error: unknown): void {
     try { this.onError(error); } catch { /* warning delivery cannot cancel neighboring claims */ }
+  }
+
+  private reportCompatibilityWarning(key: string, message: string): void {
+    if (this.reportedCompatibilityWarnings.has(key)) return;
+    this.reportedCompatibilityWarnings.add(key);
+    this.reportWarning(new Error(message));
   }
 
   private async confirmRegistryIdentity(identity: RegistryIdentity, allowRebind: boolean): Promise<void> {
@@ -275,17 +289,18 @@ export class ConfiguredServerRegistration {
     if (!this.registryIdentity || !sameRegistry(identity, this.registryIdentity)) {
       throw new Error("foreign_registry_identity");
     }
-    const result = response.payload as { clientId?: unknown; registrationResultsV1?: unknown; surfaces?: unknown };
-    if (result.clientId !== this.clientId) throw new Error("invalid_registration_response");
-    if (result.registrationResultsV1 === true) return response;
-    const expected = new Set(payload.surfaces.map((surface) => surface.surfaceId));
-    if (!Array.isArray(result.surfaces) ||
-        result.surfaces.length !== expected.size ||
-        result.surfaces.some((surface) => !surface || typeof surface !== "object" ||
-          !expected.delete((surface as { surfaceId?: string }).surfaceId ?? "")) || expected.size !== 0) {
-      throw new Error("invalid_registration_response");
-    }
+    const result = response.payload as { clientId?: unknown; registrationResultsV1?: unknown };
+    this.validateClientEcho(result.clientId);
     return response;
+  }
+
+  private validateClientEcho(value: unknown): void {
+    if (typeof value === "string" && value.length > 0 && value !== this.clientId) {
+      throw new Error("foreign_client_identity");
+    }
+    if (value !== this.clientId) {
+      this.reportCompatibilityWarning("missing-client-id", "Registry registration reply omitted a client identity echo; assuming the identity from the correlated request");
+    }
   }
 
   private async registerLiveClaims(initial: RegistrationPayload): Promise<{
@@ -367,211 +382,429 @@ export class ConfiguredServerRegistration {
     identity: RegistryIdentity,
   ): ParsedRegistrationResponse {
     if (!response.ok) throw responseError(response);
-    const responseIdentity = parseRegistryIdentity(response.payload);
-    if (!sameRegistry(responseIdentity, identity)) throw new Error("foreign_registry_identity");
     if (!isRecord(response.payload)) throw new Error("invalid_registration_response");
     const responsePayload = response.payload;
-    const endpointLease = registrationEndpointLease(response.payload);
-    if (this.directEndpoint !== null &&
-        (responsePayload.directEndpoint !== this.directEndpoint ||
-         responsePayload.prePairDescribeV1 !== true || endpointLease === null)) {
-      throw new Error("invalid_registration_response");
+    const responseIdentity = parseRegistryIdentity(responsePayload);
+    if (!sameRegistry(responseIdentity, identity)) throw new Error("foreign_registry_identity");
+    this.validateClientEcho(responsePayload.clientId);
+
+    const windowGenerationV1 = this.readCapabilityFlag(
+      responsePayload.windowGenerationV1, "window-generation", "window allocation generations",
+    );
+    const allocationGenerationV1 = this.readCapabilityFlag(
+      responsePayload.allocationGenerationV1, "pane-generation", "pane allocation generations",
+    );
+    if (!windowGenerationV1 || !allocationGenerationV1) {
+      this.reportCompatibilityWarning("allocation-generations-unavailable",
+        "Registry reply omits allocation generations; labels remain available, while operations needing a generation stay unavailable");
     }
-    if (this.directEndpoint === null &&
-        ((responsePayload.directEndpoint !== undefined && responsePayload.directEndpoint !== null) || endpointLease !== null)) {
-      throw new Error("invalid_registration_response");
-    }
-    if (responsePayload.clientId !== this.clientId ||
-        (responsePayload.windowGenerationV1 !== undefined && typeof responsePayload.windowGenerationV1 !== "boolean") ||
-        (responsePayload.registrationResultsV1 !== undefined &&
-          typeof responsePayload.registrationResultsV1 !== "boolean")) {
-      throw new Error("invalid_registration_response");
-    }
-    const windowGenerationV1 = responsePayload.windowGenerationV1 === true;
+    const endpointLease = this.registrationEndpointLease(responsePayload);
     if (!Array.isArray(responsePayload.completedPaneReleaseIds) ||
-        responsePayload.completedPaneReleaseIds.length !== 0 ||
-        (responsePayload.completedWindowReleaseIds !== undefined &&
-          (!Array.isArray(responsePayload.completedWindowReleaseIds) || responsePayload.completedWindowReleaseIds.length !== 0)) ||
-        (windowGenerationV1 && !Array.isArray(responsePayload.completedWindowReleaseIds))) {
-      throw new Error("invalid_registration_response");
+        !Array.isArray(responsePayload.completedWindowReleaseIds) ||
+        !Array.isArray(responsePayload.paneReleaseResults) ||
+        !Array.isArray(responsePayload.windowReleaseResults)) {
+      this.reportCompatibilityWarning("release-confirmations-unavailable",
+        "Registry reply does not include release confirmations; unconfirmed release items remain pending");
     }
 
-    const requestedBySurfaceId = new Map(registrationPayload.surfaces.map((surface) => [surface.surfaceId, surface]));
-    if (requestedBySurfaceId.size !== registrationPayload.surfaces.length) {
-      throw new Error("invalid_registration_response");
+    if (responsePayload.registrationResultsV1 !== undefined &&
+        typeof responsePayload.registrationResultsV1 !== "boolean") {
+      this.reportCompatibilityWarning("registration-results-flag",
+        "Registry reply has an invalid per-item results flag; using the reply fields that can be correlated safely");
+    }
+    const hasPartialRows = Array.isArray(responsePayload.surfaceResults);
+    const partial = responsePayload.registrationResultsV1 === true || hasPartialRows;
+    if (partial && hasPartialRows) {
+      return this.parsePartialRegistrationResponse(
+        responsePayload, registrationPayload, endpointLease, allocationGenerationV1, windowGenerationV1,
+      );
+    }
+    if (partial) {
+      this.reportCompatibilityWarning("partial-results-missing",
+        "Registry reply omitted its per-item results; trying the legacy projection and retrying claims that cannot be matched");
+    }
+    return this.parseLegacyRegistrationResponse(
+      responsePayload, registrationPayload, endpointLease, allocationGenerationV1, windowGenerationV1,
+    );
+  }
+
+  private readCapabilityFlag(value: unknown, key: string, label: string): boolean {
+    if (value === true) return true;
+    if (value !== undefined && value !== false) {
+      this.reportCompatibilityWarning(`${key}-flag`, `Registry reply has an invalid ${label} flag; treating that capability as unavailable`);
+    }
+    return false;
+  }
+
+  private registrationEndpointLease(payload: Record<string, unknown>): PersistentRegistryEndpointLease | null {
+    const rawLease = payload.endpointLease;
+    const lease = registrationEndpointLease(payload);
+    if (rawLease !== undefined && rawLease !== null && lease === null) {
+      this.reportCompatibilityWarning("endpoint-lease-invalid", "Registry endpoint lease is unavailable or malformed; registration labels remain usable");
     }
 
-    if (responsePayload.registrationResultsV1 === true) {
-      const rawResults = responsePayload.surfaceResults;
-      if (!Array.isArray(rawResults) || rawResults.length !== registrationPayload.surfaces.length ||
-          !Array.isArray(responsePayload.surfaces)) {
+    if (this.directEndpoint !== null) {
+      if (payload.directEndpoint === this.directEndpoint && payload.prePairDescribeV1 === true && lease !== null) {
+        return lease;
+      }
+      this.reportCompatibilityWarning("endpoint-lease-unavailable",
+        "Registry endpoint metadata could not be confirmed; using registration labels without a direct endpoint lease");
+      return null;
+    }
+
+    if ((payload.directEndpoint !== undefined && payload.directEndpoint !== null) || lease !== null) {
+      this.reportCompatibilityWarning("endpoint-lease-unrequested",
+        "Registry returned endpoint metadata that was not requested; ignoring that optional metadata");
+    }
+    return null;
+  }
+
+  private parsePartialRegistrationResponse(
+    payload: Record<string, unknown>,
+    registrationPayload: RegistrationPayload,
+    endpointLease: PersistentRegistryEndpointLease | null,
+    allocationGenerationV1: boolean,
+    windowGenerationV1: boolean,
+  ): ParsedRegistrationResponse {
+    const rawResults = payload.surfaceResults as unknown[];
+    const surfaces: ParsedRegistrationResponse["surfaces"] = [];
+    const refusedSurfaces: RegistrationRefusal[] = [];
+    const refusedPanes: RegistrationRefusal[] = [];
+    const refuseSurface = (requested: RegistrationSurface, errorCode: string) => {
+      refusedSurfaces.push({ surfaceId: requested.surfaceId, errorCode });
+    };
+    const refusePane = (requested: RegistrationSurface, pane: RegistrationPane, errorCode: string) => {
+      refusedPanes.push({
+        surfaceId: requested.surfaceId,
+        paneId: pane.paneId,
+        paneLineageId: pane.paneLineageId,
+        errorCode,
+      });
+    };
+
+    if (rawResults.length > registrationPayload.surfaces.length) {
+      this.reportCompatibilityWarning("partial-results-extra", "Registry returned extra surface results; ignoring unrequested rows");
+    }
+    for (let index = 0; index < registrationPayload.surfaces.length; index += 1) {
+      const requested = registrationPayload.surfaces[index]!;
+      const result = rawResults[index];
+      if (!isRecord(result)) {
+        refuseSurface(requested, "missing_surface_result");
+        this.reportCompatibilityWarning("partial-surface-row", "Registry omitted or malformed a surface result; retrying that claim");
+        continue;
+      }
+      if (result.index !== undefined && result.index !== index) throw new Error("invalid_registration_response");
+      if (result.index === undefined) {
+        this.reportCompatibilityWarning("partial-surface-index", "Registry omitted a result index; correlating by its ordered request slot");
+      }
+      if (result.surfaceId !== undefined && result.surfaceId !== requested.surfaceId) {
         throw new Error("invalid_registration_response");
       }
-      const surfaces: ParsedRegistrationResponse["surfaces"] = [];
-      const refusedSurfaces: RegistrationRefusal[] = [];
-      const refusedPanes: RegistrationRefusal[] = [];
-      for (let index = 0; index < registrationPayload.surfaces.length; index += 1) {
-        const requested = registrationPayload.surfaces[index]!;
-        const result = rawResults[index];
-        if (!isRecord(result) || result.index !== index || result.surfaceId !== requested.surfaceId ||
-            typeof result.ok !== "boolean") {
-          throw new Error("invalid_registration_response");
-        }
-        if (!result.ok) {
-          refusedSurfaces.push({ surfaceId: requested.surfaceId, errorCode: refusalCode(result) });
+      if (result.surfaceId === undefined) {
+        this.reportCompatibilityWarning("partial-surface-identity", "Registry omitted a surface identity; assuming the identity from its matching request index");
+      }
+      if (typeof result.ok !== "boolean") {
+        refuseSurface(requested, "invalid_surface_result");
+        this.reportCompatibilityWarning("partial-surface-row", "Registry returned a malformed surface result; retrying that claim");
+        continue;
+      }
+      if (!result.ok) {
+        refuseSurface(requested, refusalCode(result));
+        continue;
+      }
+      if (typeof result.windowLabel !== "string" || !/^[a-z]+$/.test(result.windowLabel)) {
+        refuseSurface(requested, "invalid_window_label");
+        this.reportCompatibilityWarning("partial-surface-row", "Registry returned an invalid window label; retrying that surface claim");
+        continue;
+      }
+
+      let windowGeneration: number | null = null;
+      if (result.windowGeneration !== undefined && result.windowGeneration !== null) {
+        if (!Number.isSafeInteger(result.windowGeneration) || Number(result.windowGeneration) < 1) {
+          refuseSurface(requested, "invalid_window_generation");
+          this.reportCompatibilityWarning("partial-surface-row", "Registry returned an invalid window generation; retrying that surface claim");
           continue;
         }
-        if (typeof result.windowLabel !== "string" || !/^[a-z]+$/.test(result.windowLabel) ||
-            (windowGenerationV1 && (!Number.isSafeInteger(result.windowGeneration) || Number(result.windowGeneration) < 1))) {
-          throw new Error("invalid_registration_response");
+        if (windowGenerationV1) windowGeneration = Number(result.windowGeneration);
+      } else if (windowGenerationV1) {
+        refuseSurface(requested, "missing_window_generation");
+        this.reportCompatibilityWarning("partial-surface-row", "Registry omitted a required window generation; retrying that surface claim");
+        continue;
+      }
+
+      const panes: ParsedRegistrationResponse["surfaces"][number]["panes"] = [];
+      if (!Array.isArray(result.paneResults)) {
+        for (const pane of requested.panes) refusePane(requested, pane, "missing_pane_results");
+        this.reportCompatibilityWarning("partial-pane-row", "Registry omitted pane results; retrying those pane claims while keeping the window label");
+      } else {
+        if (result.paneResults.length > requested.panes.length) {
+          this.reportCompatibilityWarning("partial-pane-extra", "Registry returned extra pane results; ignoring unrequested rows");
         }
-        if (!Array.isArray(result.paneResults) || result.paneResults.length !== requested.panes.length) {
-          throw new Error("invalid_registration_response");
-        }
-        const panes: ParsedRegistrationResponse["surfaces"][number]["panes"] = [];
         for (let paneIndex = 0; paneIndex < requested.panes.length; paneIndex += 1) {
           const requestedPane = requested.panes[paneIndex]!;
           const paneResult = result.paneResults[paneIndex];
-          if (!isRecord(paneResult) || paneResult.index !== paneIndex ||
-              paneResult.paneId !== requestedPane.paneId ||
-              paneResult.paneLineageId !== requestedPane.paneLineageId ||
-              typeof paneResult.ok !== "boolean") {
-            throw new Error("invalid_registration_response");
-          }
-          if (!paneResult.ok) {
-            refusedPanes.push({
-              surfaceId: requested.surfaceId,
-              paneId: requestedPane.paneId,
-              paneLineageId: requestedPane.paneLineageId,
-              errorCode: refusalCode(paneResult),
-            });
+          if (!isRecord(paneResult)) {
+            refusePane(requested, requestedPane, "missing_pane_result");
+            this.reportCompatibilityWarning("partial-pane-row", "Registry omitted or malformed a pane result; retrying that pane claim");
             continue;
           }
-          if (paneResult.paneId !== requestedPane.paneId ||
-              paneResult.paneLineageId !== requestedPane.paneLineageId ||
-              !Number.isSafeInteger(paneResult.paneLabel) || Number(paneResult.paneLabel) < 1 ||
-              !Number.isSafeInteger(paneResult.allocationGeneration) || Number(paneResult.allocationGeneration) < 1) {
-            throw new Error("invalid_registration_response");
+          if (paneResult.index !== undefined && paneResult.index !== paneIndex) throw new Error("invalid_registration_response");
+          if (paneResult.index === undefined) {
+            this.reportCompatibilityWarning("partial-pane-index", "Registry omitted a pane result index; correlating by its ordered request slot");
+          }
+          if ((paneResult.paneId !== undefined && paneResult.paneId !== requestedPane.paneId) ||
+              (paneResult.paneLineageId !== undefined && paneResult.paneLineageId !== requestedPane.paneLineageId)) {
+            refusePane(requested, requestedPane, "pane_identity_mismatch");
+            this.reportCompatibilityWarning("partial-pane-row", "Registry pane identity did not match its request slot; retrying that pane claim");
+            continue;
+          }
+          if (paneResult.paneId === undefined || paneResult.paneLineageId === undefined) {
+            this.reportCompatibilityWarning("partial-pane-identity", "Registry omitted a pane identity; assuming the identity from its matching request index");
+          }
+          if (typeof paneResult.ok !== "boolean") {
+            refusePane(requested, requestedPane, "invalid_pane_result");
+            this.reportCompatibilityWarning("partial-pane-row", "Registry returned a malformed pane result; retrying that pane claim");
+            continue;
+          }
+          if (!paneResult.ok) {
+            refusePane(requested, requestedPane, refusalCode(paneResult));
+            continue;
+          }
+          if (!Number.isSafeInteger(paneResult.paneLabel) || Number(paneResult.paneLabel) < 1) {
+            refusePane(requested, requestedPane, "invalid_pane_label");
+            this.reportCompatibilityWarning("partial-pane-row", "Registry returned an invalid pane label; retrying that pane claim");
+            continue;
+          }
+          const hasGeneration = paneResult.allocationGeneration !== undefined && paneResult.allocationGeneration !== null;
+          if (hasGeneration && (!Number.isSafeInteger(paneResult.allocationGeneration) ||
+              Number(paneResult.allocationGeneration) < 1)) {
+            refusePane(requested, requestedPane, "invalid_pane_generation");
+            this.reportCompatibilityWarning("partial-pane-row", "Registry returned an invalid pane generation; retrying that pane claim");
+            continue;
+          }
+          if (!hasGeneration && allocationGenerationV1) {
+            refusePane(requested, requestedPane, "missing_pane_generation");
+            this.reportCompatibilityWarning("partial-pane-row", "Registry omitted a required pane generation; retrying that pane claim");
+            continue;
+          }
+          const allocationGeneration = hasGeneration ? Number(paneResult.allocationGeneration) : null;
+          if (allocationGeneration === null) {
+            this.reportCompatibilityWarning("allocation-generations-unavailable",
+              "Registry reply omits allocation generations; labels remain available, while operations needing a generation stay unavailable");
           }
           panes.push({
-            allocationGeneration: Number(paneResult.allocationGeneration),
+            allocationGeneration,
             paneId: requestedPane.paneId,
             paneLineageId: requestedPane.paneLineageId,
             paneLabel: Number(paneResult.paneLabel),
           });
         }
-        surfaces.push({
-          surfaceId: requested.surfaceId,
-          windowLabel: result.windowLabel,
-          windowGeneration: windowGenerationV1 ? Number(result.windowGeneration) : null,
-          panes,
-        });
       }
-      this.validateRegistrationProjection(responsePayload.surfaces, surfaces, windowGenerationV1);
-      return {
-        endpointLease,
-        partial: true,
-        refusedPanes,
-        refusedSurfaces,
-        surfaces,
-        windowGenerationV1,
-      };
-    }
-
-    const rawSurfaces = responsePayload.surfaces;
-    if (!Array.isArray(rawSurfaces) || rawSurfaces.length !== requestedBySurfaceId.size) {
-      throw new Error("invalid_registration_response");
-    }
-    const expectedSurfaceIds = new Set(requestedBySurfaceId.keys());
-    const surfaces: ParsedRegistrationResponse["surfaces"] = [];
-    for (const rawSurface of rawSurfaces) {
-      if (!isRecord(rawSurface) || typeof rawSurface.surfaceId !== "string" ||
-          !expectedSurfaceIds.delete(rawSurface.surfaceId) || typeof rawSurface.windowLabel !== "string" ||
-          !/^[a-z]+$/.test(rawSurface.windowLabel) || !Array.isArray(rawSurface.panes)) {
-        throw new Error("invalid_registration_response");
-      }
-      const requested = requestedBySurfaceId.get(rawSurface.surfaceId)!;
-      if (rawSurface.panes.length !== requested.panes.length ||
-          (windowGenerationV1 && (!Number.isSafeInteger(rawSurface.windowGeneration) || Number(rawSurface.windowGeneration) < 1))) {
-        throw new Error("invalid_registration_response");
-      }
-      const requestedPanes = new Map(requested.panes.map((pane) => [pane.paneId, pane]));
-      const panes: ParsedRegistrationResponse["surfaces"][number]["panes"] = [];
-      for (const rawPane of rawSurface.panes) {
-        if (!isRecord(rawPane) || typeof rawPane.paneId !== "string" ||
-            typeof rawPane.paneLineageId !== "string" || !Number.isSafeInteger(rawPane.paneLabel) ||
-            Number(rawPane.paneLabel) < 1 || !Number.isSafeInteger(rawPane.allocationGeneration) ||
-            Number(rawPane.allocationGeneration) < 1) {
-          throw new Error("invalid_registration_response");
-        }
-        const requestedPane = requestedPanes.get(rawPane.paneId);
-        if (!requestedPane || requestedPane.paneLineageId !== rawPane.paneLineageId) {
-          throw new Error("invalid_registration_response");
-        }
-        requestedPanes.delete(rawPane.paneId);
-        panes.push({
-          allocationGeneration: Number(rawPane.allocationGeneration),
-          paneId: rawPane.paneId,
-          paneLineageId: rawPane.paneLineageId,
-          paneLabel: Number(rawPane.paneLabel),
-        });
-      }
-      if (requestedPanes.size !== 0) throw new Error("invalid_registration_response");
       surfaces.push({
-        surfaceId: rawSurface.surfaceId,
-        windowLabel: rawSurface.windowLabel,
-        windowGeneration: windowGenerationV1 ? Number(rawSurface.windowGeneration) : null,
+        surfaceId: requested.surfaceId,
+        windowLabel: result.windowLabel,
+        windowGeneration,
         panes,
       });
     }
-    if (expectedSurfaceIds.size !== 0) throw new Error("invalid_registration_response");
+
     return {
+      allocationGenerationV1,
       endpointLease,
-      partial: false,
-      refusedPanes: [],
-      refusedSurfaces: [],
+      partial: true,
+      refusedPanes,
+      refusedSurfaces,
       surfaces,
       windowGenerationV1,
     };
   }
 
-  private validateRegistrationProjection(
-    value: unknown,
-    results: ParsedRegistrationResponse["surfaces"],
+  private parseLegacyRegistrationResponse(
+    payload: Record<string, unknown>,
+    registrationPayload: RegistrationPayload,
+    endpointLease: PersistentRegistryEndpointLease | null,
+    allocationGenerationV1: boolean,
     windowGenerationV1: boolean,
-  ): void {
-    if (!Array.isArray(value)) throw new Error("invalid_registration_response");
-    const expected = new Map(results.map((surface) => [surface.surfaceId, surface]));
-    if (expected.size !== results.length || value.length !== results.length) {
-      throw new Error("invalid_registration_response");
-    }
-    for (const projection of value) {
-      if (!isRecord(projection) || typeof projection.surfaceId !== "string" ||
-          !Array.isArray(projection.panes)) throw new Error("invalid_registration_response");
-      const result = expected.get(projection.surfaceId);
-      if (!result || expected.delete(projection.surfaceId) === false ||
-          projection.windowLabel !== result.windowLabel ||
-          (windowGenerationV1 && projection.windowGeneration !== result.windowGeneration) ||
-          projection.panes.length !== result.panes.length) {
-        throw new Error("invalid_registration_response");
+  ): ParsedRegistrationResponse {
+    const requestedBySurfaceId = new Map(registrationPayload.surfaces.map((surface) => [surface.surfaceId, surface]));
+    if (requestedBySurfaceId.size !== registrationPayload.surfaces.length) throw new Error("invalid_registration_response");
+    const refusedSurfaces: RegistrationRefusal[] = [];
+    const refusedPanes: RegistrationRefusal[] = [];
+    const surfaces: ParsedRegistrationResponse["surfaces"] = [];
+    const rawSurfaces = payload.surfaces;
+    if (!Array.isArray(rawSurfaces)) {
+      for (const requested of registrationPayload.surfaces) {
+        refusedSurfaces.push({ surfaceId: requested.surfaceId, errorCode: "missing_surface_projection" });
       }
-      const panes = new Map(result.panes.map((pane) => [pane.paneId, pane]));
-      for (const pane of projection.panes) {
-        if (!isRecord(pane) || typeof pane.paneId !== "string" || typeof pane.paneLineageId !== "string" ||
-            !Number.isSafeInteger(pane.paneLabel) || !Number.isSafeInteger(pane.allocationGeneration)) {
-          throw new Error("invalid_registration_response");
+      this.reportCompatibilityWarning("legacy-surface-projection", "Registry omitted its surface projection; retrying window claims");
+      return { allocationGenerationV1, endpointLease, partial: false, refusedPanes, refusedSurfaces, surfaces, windowGenerationV1 };
+    }
+
+    const rowsBySurface = new Map<string, Record<string, unknown>[]>();
+    for (let index = 0; index < rawSurfaces.length; index += 1) {
+      const raw = rawSurfaces[index];
+      let surfaceId: string | null = null;
+      if (isRecord(raw) && typeof raw.surfaceId === "string") {
+        if (!requestedBySurfaceId.has(raw.surfaceId)) throw new Error("invalid_registration_response");
+        surfaceId = raw.surfaceId;
+      } else if ((!isRecord(raw) || raw.surfaceId === undefined) && rawSurfaces.length === registrationPayload.surfaces.length) {
+        surfaceId = registrationPayload.surfaces[index]?.surfaceId ?? null;
+        this.reportCompatibilityWarning("legacy-surface-identity", "Registry omitted a surface identity; assuming the identity from its ordered request slot");
+      }
+      if (surfaceId === null || !isRecord(raw)) {
+        this.reportCompatibilityWarning("legacy-surface-row", "Registry returned a malformed surface row; retrying the unmatched window claim");
+        continue;
+      }
+      const rows = rowsBySurface.get(surfaceId) ?? [];
+      rows.push(raw);
+      rowsBySurface.set(surfaceId, rows);
+    }
+
+    for (const requested of registrationPayload.surfaces) {
+      const matchingRows = rowsBySurface.get(requested.surfaceId) ?? [];
+      if (matchingRows.length !== 1) {
+        refusedSurfaces.push({
+          surfaceId: requested.surfaceId,
+          errorCode: matchingRows.length === 0 ? "missing_surface_projection" : "duplicate_surface_projection",
+        });
+        this.reportCompatibilityWarning("legacy-surface-row", "Registry omitted or duplicated a surface row; retrying that window claim");
+        continue;
+      }
+      const rawSurface = matchingRows[0]!;
+      if (typeof rawSurface.windowLabel !== "string" || !/^[a-z]+$/.test(rawSurface.windowLabel)) {
+        refusedSurfaces.push({ surfaceId: requested.surfaceId, errorCode: "invalid_window_label" });
+        this.reportCompatibilityWarning("legacy-surface-row", "Registry returned an invalid window label; retrying that surface claim");
+        continue;
+      }
+      let windowGeneration: number | null = null;
+      if (rawSurface.windowGeneration !== undefined && rawSurface.windowGeneration !== null) {
+        if (!Number.isSafeInteger(rawSurface.windowGeneration) || Number(rawSurface.windowGeneration) < 1) {
+          refusedSurfaces.push({ surfaceId: requested.surfaceId, errorCode: "invalid_window_generation" });
+          this.reportCompatibilityWarning("legacy-surface-row", "Registry returned an invalid window generation; retrying that surface claim");
+          continue;
         }
-        const expectedPane = panes.get(pane.paneId);
-        if (!expectedPane || panes.delete(pane.paneId) === false ||
-            pane.paneLineageId !== expectedPane.paneLineageId ||
-            pane.paneLabel !== expectedPane.paneLabel ||
-            pane.allocationGeneration !== expectedPane.allocationGeneration) {
-          throw new Error("invalid_registration_response");
+        if (windowGenerationV1) windowGeneration = Number(rawSurface.windowGeneration);
+      } else if (windowGenerationV1) {
+        refusedSurfaces.push({ surfaceId: requested.surfaceId, errorCode: "missing_window_generation" });
+        this.reportCompatibilityWarning("legacy-surface-row", "Registry omitted a required window generation; retrying that surface claim");
+        continue;
+      }
+
+      const panes: ParsedRegistrationResponse["surfaces"][number]["panes"] = [];
+      const rawPanes = rawSurface.panes;
+      const refusedPaneIds = new Set<string>();
+      if (!Array.isArray(rawPanes)) {
+        for (const pane of requested.panes) {
+          refusedPanes.push({ surfaceId: requested.surfaceId, paneId: pane.paneId, paneLineageId: pane.paneLineageId, errorCode: "missing_pane_projection" });
+          refusedPaneIds.add(pane.paneId);
+        }
+        this.reportCompatibilityWarning("legacy-pane-projection", "Registry omitted pane projections; keeping the window label and retrying pane claims");
+      } else {
+        const requestedPanes = new Map(requested.panes.map((pane) => [pane.paneId, pane]));
+        const seenPaneIds = new Set<string>();
+        for (let index = 0; index < rawPanes.length; index += 1) {
+          const rawPane = rawPanes[index];
+          if (!isRecord(rawPane)) {
+            const positional = rawPanes.length === requested.panes.length ? requested.panes[index] : undefined;
+            if (positional) {
+              refusedPanes.push({ surfaceId: requested.surfaceId, paneId: positional.paneId, paneLineageId: positional.paneLineageId, errorCode: "invalid_pane_projection" });
+              refusedPaneIds.add(positional.paneId);
+            }
+            this.reportCompatibilityWarning("legacy-pane-row", "Registry returned a malformed pane row; retrying the affected pane claim");
+            continue;
+          }
+          const paneIdValue = rawPane.paneId;
+          const lineageValue = rawPane.paneLineageId;
+          let requestedPane = typeof paneIdValue === "string" ? requestedPanes.get(paneIdValue) : undefined;
+          if (!requestedPane && typeof lineageValue === "string") {
+            requestedPane = requested.panes.find((pane) => pane.paneLineageId === lineageValue);
+          }
+          if (!requestedPane && (paneIdValue === undefined || typeof paneIdValue !== "string") &&
+              (lineageValue === undefined || typeof lineageValue !== "string") &&
+              rawPanes.length === requested.panes.length) {
+            requestedPane = requested.panes[index];
+          }
+          if (!requestedPane) {
+            this.reportCompatibilityWarning("legacy-pane-row", "Registry returned an unrequested pane row; ignoring it and retrying unmatched claims");
+            continue;
+          }
+          if (seenPaneIds.has(requestedPane.paneId)) throw new Error("invalid_registration_response");
+          seenPaneIds.add(requestedPane.paneId);
+          const refuse = (errorCode: string) => {
+            refusedPanes.push({
+              surfaceId: requested.surfaceId,
+              paneId: requestedPane!.paneId,
+              paneLineageId: requestedPane!.paneLineageId,
+              errorCode,
+            });
+            refusedPaneIds.add(requestedPane!.paneId);
+          };
+          if (typeof paneIdValue !== "string" || typeof lineageValue !== "string") {
+            this.reportCompatibilityWarning("legacy-pane-identity", "Registry omitted a pane identity; assuming the identity from its matching projection slot");
+          }
+          if ((typeof paneIdValue === "string" && paneIdValue !== requestedPane.paneId) ||
+              (typeof lineageValue === "string" && lineageValue !== requestedPane.paneLineageId)) {
+            refuse("pane_identity_mismatch");
+            this.reportCompatibilityWarning("legacy-pane-row", "Registry pane identity did not match a requested pane; retrying that pane claim");
+            continue;
+          }
+          if (!Number.isSafeInteger(rawPane.paneLabel) || Number(rawPane.paneLabel) < 1) {
+            refuse("invalid_pane_label");
+            this.reportCompatibilityWarning("legacy-pane-row", "Registry returned an invalid pane label; retrying that pane claim");
+            continue;
+          }
+          const generationPresent = rawPane.allocationGeneration !== undefined && rawPane.allocationGeneration !== null;
+          if (generationPresent && (!Number.isSafeInteger(rawPane.allocationGeneration) || Number(rawPane.allocationGeneration) < 1)) {
+            refuse("invalid_pane_generation");
+            this.reportCompatibilityWarning("legacy-pane-row", "Registry returned an invalid pane generation; retrying that pane claim");
+            continue;
+          }
+          if (!generationPresent && allocationGenerationV1) {
+            refuse("missing_pane_generation");
+            this.reportCompatibilityWarning("legacy-pane-row", "Registry omitted a required pane generation; retrying that pane claim");
+            continue;
+          }
+          const allocationGeneration = generationPresent ? Number(rawPane.allocationGeneration) : null;
+          if (allocationGeneration === null) {
+            this.reportCompatibilityWarning("allocation-generations-unavailable",
+              "Registry reply omits allocation generations; labels remain available, while operations needing a generation stay unavailable");
+          }
+          panes.push({
+            allocationGeneration,
+            paneId: requestedPane.paneId,
+            paneLineageId: requestedPane.paneLineageId,
+            paneLabel: Number(rawPane.paneLabel),
+          });
+        }
+        for (const pane of requested.panes) {
+          if (!seenPaneIds.has(pane.paneId)) {
+            refusedPanes.push({
+              surfaceId: requested.surfaceId,
+              paneId: pane.paneId,
+              paneLineageId: pane.paneLineageId,
+              errorCode: "missing_pane_projection",
+            });
+            refusedPaneIds.add(pane.paneId);
+          }
         }
       }
-      if (panes.size !== 0) throw new Error("invalid_registration_response");
+      surfaces.push({
+        surfaceId: requested.surfaceId,
+        windowLabel: rawSurface.windowLabel,
+        windowGeneration,
+        panes: panes.filter((pane) => !refusedPaneIds.has(pane.paneId)),
+      });
     }
-    if (expected.size !== 0) throw new Error("invalid_registration_response");
+
+    return {
+      allocationGenerationV1,
+      endpointLease,
+      partial: false,
+      refusedPanes,
+      refusedSurfaces,
+      surfaces,
+      windowGenerationV1,
+    };
   }
 
   private async applyRegistrationResponse(
@@ -586,7 +819,7 @@ export class ConfiguredServerRegistration {
     let reidentifiedCount = 0;
     const paneAssignments: Array<{
       surfaceId: string;
-      panes: Array<{ allocationGeneration: number; paneId: string; paneLineageId: string; paneLabel: number }>;
+      panes: Array<{ allocationGeneration: number | null; paneId: string; paneLineageId: string; paneLabel: number }>;
     }> = [];
     await this.core.locklessAuthority.transactionAsync(() => this.core.transactionAsync(async () => {
       for (const refused of parsed.refusedSurfaces) {
@@ -679,7 +912,7 @@ export class ConfiguredServerRegistration {
           const current = this.core.getSurface(surfaceId);
           return assignedWindowIds.has(surfaceId) && [...current.panes.values()].every((pane) =>
             acceptedPaneKeys.has(this.paneClaimKey(surfaceId, String(pane.paneId), pane.paneLineageId)) &&
-            pane.allocationGeneration !== null && pane.paneLabel > 0);
+            pane.paneLabel > 0 && (!parsed.allocationGenerationV1 || pane.allocationGeneration !== null));
         });
       if (parsed.refusedPanes.length === 0 && parsed.refusedSurfaces.length === 0 && requestCoversCurrentSurfaces) {
         this.core.completeRegistryBinding();

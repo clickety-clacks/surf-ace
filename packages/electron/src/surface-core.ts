@@ -712,7 +712,12 @@ export class SurfaceCore {
    */
   private readonly inFlightAdmissionSequences = new Set<number>();
   private readonly surfaces = new Map<string, SurfaceState>();
-  private readonly confirmedPaneLabels = new Map<string, { allocationGeneration: number; pane: PaneState; label: number }>();
+  private readonly confirmedPaneLabels = new Map<string, {
+    allocationGeneration: number | null;
+    pane: PaneState;
+    paneLineageId: string;
+    label: number;
+  }>();
   private readonly listeners = new Set<(event: CoreEvent) => void>();
   private pendingEvents: CoreEvent[] | null = null;
   private deferredVerifiedEvents: { state: string; events: CoreEvent[] } | null = null;
@@ -2854,9 +2859,9 @@ export class SurfaceCore {
 
   applyRegistryPaneLabels(assignments: Array<{
     surfaceId: string;
-    panes: Array<{ allocationGeneration: number; paneId: string; paneLineageId: string; paneLabel: number }>;
+    panes: Array<{ allocationGeneration: number | null; paneId: string; paneLineageId: string; paneLabel: number }>;
   }>, options: { allowUnassigned?: boolean } = {}): void {
-    const proposed = new Map<string, { allocationGeneration: number; paneLabel: number }>();
+    const proposed = new Map<string, { allocationGeneration: number | null; paneLabel: number }>();
     const labels = new Set<number>();
     for (const assignment of assignments) {
       const surface = this.getSurface(assignment.surfaceId);
@@ -2869,11 +2874,12 @@ export class SurfaceCore {
         if (!Number.isSafeInteger(paneId) || !surface.panes.has(paneId) ||
             surface.panes.get(paneId)?.paneLineageId !== pane.paneLineageId ||
             !Number.isSafeInteger(pane.paneLabel) || pane.paneLabel < 1 ||
-            !Number.isSafeInteger(pane.allocationGeneration) || pane.allocationGeneration < 1 ||
+            (pane.allocationGeneration !== null &&
+              (!Number.isSafeInteger(pane.allocationGeneration) || pane.allocationGeneration < 1)) ||
             (surface.panes.get(paneId)?.paneLabel !== undefined &&
               surface.panes.get(paneId)!.paneLabel > 0 &&
               surface.panes.get(paneId)!.paneLabel !== pane.paneLabel) ||
-            (surface.panes.get(paneId)?.allocationGeneration !== null &&
+            (pane.allocationGeneration !== null && surface.panes.get(paneId)?.allocationGeneration !== null &&
               surface.panes.get(paneId)?.allocationGeneration !== undefined &&
               surface.panes.get(paneId)?.allocationGeneration !== pane.allocationGeneration) ||
             proposed.has(key) || labels.has(pane.paneLabel)) {
@@ -2915,19 +2921,21 @@ export class SurfaceCore {
     }
     for (const assignment of assignments) {
       for (const pane of assignment.panes) {
-        if (!Number.isSafeInteger(pane.allocationGeneration) || Number(pane.allocationGeneration) < 1) {
+        const allocationGeneration = pane.allocationGeneration ?? null;
+        if (allocationGeneration !== null &&
+            (!Number.isSafeInteger(allocationGeneration) || allocationGeneration < 1)) {
           continue;
         }
         const paneId = Number(pane.paneId);
         const material = this.getSurface(assignment.surfaceId).panes.get(paneId);
         if (!material || !Number.isSafeInteger(pane.paneLabel) || pane.paneLabel < 1 ||
             material.paneLabel !== pane.paneLabel ||
-            material.allocationGeneration !== pane.allocationGeneration ||
+            material.allocationGeneration !== allocationGeneration ||
             (pane.paneLineageId && material.paneLineageId !== pane.paneLineageId)) {
           throw new SurfaceCoreError("invalid_payload", "Registry pane confirmation changed before projection");
         }
         this.confirmedPaneLabels.set(`${assignment.surfaceId}\0${paneId}`, {
-          allocationGeneration: Number(pane.allocationGeneration), pane: material, label: pane.paneLabel,
+          allocationGeneration, pane: material, paneLineageId: material.paneLineageId, label: pane.paneLabel,
         });
       }
       this.emit({ surfaceId: assignment.surfaceId, type: "surface-changed" });
@@ -2945,6 +2953,7 @@ export class SurfaceCore {
   private isRegistryPaneConfirmed(surfaceId: string, paneId: number, pane: PaneState): boolean {
     const confirmed = this.confirmedPaneLabels.get(`${surfaceId}\0${paneId}`);
     return confirmed?.pane === pane && confirmed.label === pane.paneLabel &&
+      confirmed.paneLineageId === pane.paneLineageId &&
       confirmed.allocationGeneration === pane.allocationGeneration;
   }
 

@@ -4092,6 +4092,30 @@ test("pane number projections require exact registry confirmation", () => {
   assert.equal(core.publicTopologyState(surface.surfaceId).windowLabel, "a");
 });
 
+test("pane number projections can use an exact registry label without a generation", () => {
+  const core = new SurfaceCore({ persistentState: { primarySurfaceId: null, version: 1 } });
+  const surface = core.ensurePrimarySurface("Surf Ace", { height: 800, scale: 2, width: 1200 });
+  const pane = [...surface.panes.values()][0]!;
+  const assignment = { surfaceId: surface.surfaceId, panes: [{
+    allocationGeneration: null, paneId: String(pane.paneId), paneLineageId: pane.paneLineageId, paneLabel: 97,
+  }] };
+
+  core.applyWindowLabelOnly(surface.surfaceId, "a");
+  core.applyRegistryPaneLabels([assignment]);
+  assert.equal(core.getSurface(surface.surfaceId).panes.get(pane.paneId)?.allocationGeneration, null);
+  assert.equal(core.panesList(surface.surfaceId).panes[0]?.paneLabel, null);
+
+  core.confirmRegistryPaneLabels([assignment]);
+  assert.equal(core.getSurface(surface.surfaceId).panes.get(pane.paneId)?.allocationGeneration, null);
+  assert.equal(core.panesList(surface.surfaceId).panes[0]?.paneLabel, 97);
+  assert.equal(core.getRendererWindowState(surface.surfaceId).panes[0]?.label, "97");
+  assert.equal(core.getRendererWindowState(surface.surfaceId).panes[0]?.visibleAddress, "a97");
+
+  core.clearRegistryPaneConfirmations();
+  assert.equal(core.panesList(surface.surfaceId).panes[0]?.paneLabel, null);
+  assert.equal(core.getSurface(surface.surfaceId).panes.get(pane.paneId)?.allocationGeneration, null);
+});
+
 test("a locally opened surface keeps its provisional letter out of public topology", () => {
   const core = new SurfaceCore({ persistentState: { primarySurfaceId: null, version: 1 } });
   const surface = core.createLocklessSurface("Surf Ace", { height: 800, scale: 2, width: 1200 });

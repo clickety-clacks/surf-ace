@@ -2539,7 +2539,9 @@ test("new panes stay unnumbered when the registry rejects a pane claim and recov
     await synchronize;
     const recovered = core.panesList(surface.surfaceId).panes;
     for (const pane of recovered) {
-      assert.equal(pane.paneLabel, allocationsByLineage.get(pane.paneLineageId)?.paneLabel);
+      assert.equal(pane.paneLabel, pane.paneLineageId
+        ? allocationsByLineage.get(pane.paneLineageId)?.paneLabel
+        : undefined);
     }
     assert.equal(new Set(recovered.map((pane) => pane.paneLabel)).size, recovered.length);
   } finally {
@@ -2547,6 +2549,55 @@ test("new panes stay unnumbered when the registry rejects a pane claim and recov
     controller.close();
     for (const socket of registry.clients) socket.terminate();
     await new Promise<void>((resolve) => registry.close(() => resolve()));
+    await server.stop();
+  }
+});
+
+test("pane labels from a registry claim without a generation remain visible", async () => {
+  const core = new SurfaceCore();
+  core.bindRegistryIdentity({
+    clientId: "generationless-claim-client",
+    allocatorId: "alloc_fixture",
+    fleetId: "fixture-fleet",
+  });
+  const surface = core.ensurePrimarySurface("Surf Ace", {
+    height: 800,
+    scale: 2,
+    width: 1200,
+  });
+  initializeRegistryBootstrapPanes(core);
+  const port = nextPort++;
+  const server = new SurfaceWsServer({
+    capturePaneImage: async () => null,
+    claimPaneLabel: async () => ({ allocationGeneration: null, paneLabel: 987 }),
+    compositorSocketPath: null,
+    core,
+    endpointName: "Surf Ace",
+    hostName: "localhost",
+    port,
+    viewport: () => ({ height: 800, scale: 2, width: 1200 }),
+  });
+  await server.start();
+  const controller = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+  try {
+    assert.equal((await pair(controller, "generationless-claim-controller", surface.surfaceId)).ok, true);
+    const base = (await request(controller, "panes.list", { surfaceId: surface.surfaceId })).payload;
+    const split = await request(controller, "pane.split", {
+      count: 2,
+      direction: "horizontal",
+      expectedTopologyRevision: base.topology.topologyRevision,
+      paneId: Number(base.panes[0].paneId),
+      surfaceId: surface.surfaceId,
+    });
+    assert.equal(split.ok, true, JSON.stringify(split));
+    const projected = (await request(controller, "panes.list", { surfaceId: surface.surfaceId })).payload.panes;
+    const created = projected.find((pane: any) => pane.paneId !== base.panes[0].paneId);
+    assert.ok(created);
+    assert.equal(created?.paneLabel, 987);
+    assert.equal(core.getSurface(surface.surfaceId).panes.get(Number(created.paneId))?.allocationGeneration, null);
+    assert.equal(core.getRendererWindowState(surface.surfaceId).panes.find((pane) => pane.paneId === created.paneId)?.label, "987");
+  } finally {
+    controller.close();
     await server.stop();
   }
 });

@@ -2792,7 +2792,7 @@ export class SurfaceWsServer {
           const numberedPanes = newPaneIds.flatMap((paneId, index) => {
             const paneLabel = newPaneLabels[index]!;
             const allocationGeneration = newPaneAllocationGenerations[index];
-            return paneLabel > 0 && allocationGeneration !== null
+            return paneLabel > 0
               ? [{ allocationGeneration, paneId: String(paneId),
                   paneLineageId: newPaneLineageIds[index]!, paneLabel }]
               : [];
@@ -2977,7 +2977,7 @@ export class SurfaceWsServer {
               request.payload.anchorPaneId,
               request.payload.direction,
             );
-            if (pane.paneLabel > 0 && pane.allocationGeneration !== null) {
+            if (pane.paneLabel > 0) {
               this.core.confirmRegistryPaneLabels([{ surfaceId, panes: [{
                 paneId: String(pane.paneId), paneLineageId: pane.paneLineageId,
                 allocationGeneration: pane.allocationGeneration, paneLabel: pane.paneLabel,
@@ -3216,7 +3216,7 @@ export class SurfaceWsServer {
             new Map([...created].map(([paneId, entry]) => [paneId, entry.allocationGeneration])));
           this.assertLocklessRecoverableCapacity(surfaceId, beforeRecord);
           const numberedPanes = [...created].flatMap(([paneId, entry]) =>
-            entry.paneLabel > 0 && entry.allocationGeneration !== null
+            entry.paneLabel > 0
               ? [{ allocationGeneration: entry.allocationGeneration,
                   paneId: String(paneId), paneLineageId: entry.paneLineageId,
                   paneLabel: entry.paneLabel }]
@@ -4185,7 +4185,7 @@ export class SurfaceWsServer {
         );
         const numberedPanes = [...newPaneAllocationGenerations].flatMap(([paneId, allocationGeneration]) => {
           const pane = this.core.getSurface(surfaceId).panes.get(paneId);
-          return pane && pane.paneLabel > 0 && allocationGeneration !== null
+          return pane && pane.paneLabel > 0
             ? [{ allocationGeneration, paneId: String(paneId), paneLineageId: pane.paneLineageId,
                 paneLabel: pane.paneLabel }]
             : [];
@@ -5377,7 +5377,7 @@ export class SurfaceWsServer {
       try {
         const result = this.core.paneSplit(surfaceId, splitPayload);
         const numberedPanes = allocations.flatMap((allocation, index) =>
-          allocation.paneLabel > 0 && allocation.allocationGeneration !== null
+          allocation.paneLabel > 0
             ? [{ allocationGeneration: allocation.allocationGeneration,
                 paneId: String(paneIds[index]!), paneLineageId: newPaneLineageIds[index]!,
                 paneLabel: allocation.paneLabel }]
