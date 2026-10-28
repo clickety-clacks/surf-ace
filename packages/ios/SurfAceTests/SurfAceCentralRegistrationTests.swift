@@ -2138,6 +2138,58 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         })
     }
 
+    func testMalformedSavedReleaseDoesNotBlockOtherRegistrationClaims() throws {
+        var state = try SurfAceLocklessAuthorityState.empty()
+        let malformedPaneSurfaceId = try addSavedSurface(to: &state, windowLabel: "b", paneLabel: 1)
+        let malformedWindowSurfaceId = try addSavedSurface(to: &state, windowLabel: "c", paneLabel: 2)
+        let liveSurfaceId = try addSavedSurface(to: &state, windowLabel: "d", paneLabel: 3)
+        let clientId = String(repeating: "f", count: 64)
+        let identity = SurfAceRegistryIdentity(allocatorId: "alloc_home", fleetId: "home-fleet")
+        state.registryBinding = .init(
+            allocatorId: identity.allocatorId, clientId: clientId, fleetId: identity.fleetId
+        )
+        let closedPaneSurface = try XCTUnwrap(state.liveSurfaces[malformedPaneSurfaceId])
+        _ = try SurfAceLocklessTopologyOperations.surfaceWindowFinalClose(
+            state: &state, surfaceId: malformedPaneSurfaceId,
+            expectedSurfaceSetRevision: state.surfaceSetRevision,
+            expectedTopologyRevision: closedPaneSurface.topologyRevision
+        )
+        let closedWindowSurface = try XCTUnwrap(state.liveSurfaces[malformedWindowSurfaceId])
+        _ = try SurfAceLocklessTopologyOperations.surfaceWindowFinalClose(
+            state: &state, surfaceId: malformedWindowSurfaceId,
+            expectedSurfaceSetRevision: state.surfaceSetRevision,
+            expectedTopologyRevision: closedWindowSurface.topologyRevision
+        )
+        var intents = try XCTUnwrap(state.allocationReleaseIntents)
+        let paneReleaseIndex = try XCTUnwrap(intents.firstIndex {
+            $0.allocationKind == .pane && $0.surfaceId == malformedPaneSurfaceId
+        })
+        let malformedPaneReleaseId = intents[paneReleaseIndex].releaseId
+        intents[paneReleaseIndex].paneLabel = nil
+        let windowReleaseIndex = try XCTUnwrap(intents.firstIndex {
+            $0.allocationKind == .surface && $0.surfaceId == malformedWindowSurfaceId
+        })
+        let malformedWindowReleaseId = intents[windowReleaseIndex].releaseId
+        intents[windowReleaseIndex].windowLabel = nil
+        state.allocationReleaseIntents = intents
+
+        let input = try SurfAceRegistrationInput(state: state, clientId: clientId)
+
+        XCTAssertTrue(input.warnings.contains(
+            "registration_saved_pane_release_unusable release=\(malformedPaneReleaseId)"
+        ))
+        XCTAssertTrue(input.warnings.contains(
+            "registration_saved_window_release_unusable release=\(malformedWindowReleaseId)"
+        ))
+        XCTAssertEqual(input.pendingPaneReleases.count, 1)
+        XCTAssertFalse(input.pendingPaneReleases.contains { $0.surfaceId == malformedPaneSurfaceId })
+        XCTAssertTrue(input.pendingPaneReleases.contains { $0.surfaceId == malformedWindowSurfaceId })
+        XCTAssertEqual(input.pendingWindowReleases.count, 1)
+        XCTAssertTrue(input.pendingWindowReleases.contains { $0.surfaceId == malformedPaneSurfaceId })
+        XCTAssertFalse(input.pendingWindowReleases.contains { $0.surfaceId == malformedWindowSurfaceId })
+        XCTAssertEqual(input.surfaces.map(\.surfaceId), [liveSurfaceId])
+    }
+
     func testPartiallyUnreadableSavedStateKeepsEveryOtherReadableSurface() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("registry-partial-state-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

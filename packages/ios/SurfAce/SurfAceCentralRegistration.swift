@@ -290,19 +290,22 @@ struct SurfAceRegistrationInput: Equatable, Sendable {
     let surfaces: [SurfAceRegistrationSurface]
     let pendingPaneReleases: [SurfAcePaneReleaseRequest]
     let pendingWindowReleases: [SurfAceWindowReleaseRequest]
+    let warnings: [String]
 
     init(
         clientId: String? = nil,
         registryIdentity: SurfAceRegistryIdentity? = nil,
         surfaces: [SurfAceRegistrationSurface],
         pendingPaneReleases: [SurfAcePaneReleaseRequest],
-        pendingWindowReleases: [SurfAceWindowReleaseRequest]
+        pendingWindowReleases: [SurfAceWindowReleaseRequest],
+        warnings: [String] = []
     ) {
         self.clientId = clientId
         self.registryIdentity = registryIdentity
         self.surfaces = surfaces
         self.pendingPaneReleases = pendingPaneReleases
         self.pendingWindowReleases = pendingWindowReleases
+        self.warnings = warnings
     }
 
     init(state: SurfAceLocklessAuthorityState, clientId: String? = nil) throws {
@@ -325,10 +328,9 @@ struct SurfAceRegistrationInput: Equatable, Sendable {
         }
         var panes: [SurfAcePaneReleaseRequest] = []
         var windows: [SurfAceWindowReleaseRequest] = []
+        var warnings: [String] = []
         for intent in (state.allocationReleaseIntents ?? []).filter({ $0.status == .pending }) {
             guard let binding,
-                  SurfAceLocklessAllocationReleaseIdentity.matches(intent),
-                  let allocationGeneration = intent.allocationGeneration,
                   let intentClientId = intent.clientId,
                   binding.clientId == intentClientId,
                   binding.allocatorId == intent.allocatorId,
@@ -337,12 +339,26 @@ struct SurfAceRegistrationInput: Equatable, Sendable {
                 // another registry remains durable but is never sent here.
                 continue
             }
+            guard let allocationGeneration = intent.allocationGeneration,
+                  allocationGeneration > 0,
+                  allocationGeneration <= 9_007_199_254_740_991 else {
+                warnings.append("registration_saved_release_generation_unusable release=\(intent.releaseId)")
+                continue
+            }
             switch intent.allocationKind {
             case .pane:
                 guard let paneId = intent.paneId,
+                      paneId > 0,
                       let paneLabel = intent.paneLabel,
-                      let lineageId = intent.paneLineageId else {
-                    throw SurfAceRegistrationError.invalidResponse
+                      paneLabel > 0,
+                      let lineageId = intent.paneLineageId,
+                      !lineageId.isEmpty else {
+                    warnings.append("registration_saved_pane_release_unusable release=\(intent.releaseId)")
+                    continue
+                }
+                guard SurfAceLocklessAllocationReleaseIdentity.matches(intent) else {
+                    warnings.append("registration_saved_release_identity_unrecognized release=\(intent.releaseId)")
+                    continue
                 }
                 panes.append(.init(
                     allocationGeneration: allocationGeneration,
@@ -359,8 +375,14 @@ struct SurfAceRegistrationInput: Equatable, Sendable {
                 ))
             case .surface:
                 guard let windowLabel = intent.windowLabel,
+                      !windowLabel.isEmpty,
                       intent.sourceTombstoneKind == .surface else {
-                    throw SurfAceRegistrationError.invalidResponse
+                    warnings.append("registration_saved_window_release_unusable release=\(intent.releaseId)")
+                    continue
+                }
+                guard SurfAceLocklessAllocationReleaseIdentity.matches(intent) else {
+                    warnings.append("registration_saved_release_identity_unrecognized release=\(intent.releaseId)")
+                    continue
                 }
                 windows.append(.init(
                     allocationGeneration: allocationGeneration,
@@ -377,6 +399,7 @@ struct SurfAceRegistrationInput: Equatable, Sendable {
         }
         self.pendingPaneReleases = panes
         self.pendingWindowReleases = windows
+        self.warnings = warnings
     }
 
     init(state: SurfAceLocklessAuthorityState) throws {
@@ -393,7 +416,8 @@ struct SurfAceRegistrationInput: Equatable, Sendable {
             registryIdentity: registryIdentity,
             surfaces: surfaces ?? self.surfaces,
             pendingPaneReleases: pendingPaneReleases ?? self.pendingPaneReleases,
-            pendingWindowReleases: pendingWindowReleases ?? self.pendingWindowReleases
+            pendingWindowReleases: pendingWindowReleases ?? self.pendingWindowReleases,
+            warnings: warnings
         )
     }
 
@@ -1875,6 +1899,7 @@ final class SurfAceCentralRegistration {
     private var synchronizationTask: Task<Void, Error>?
     private var synchronizationTaskId: UUID?
     private var stopped = false
+    private var warnedInputDiagnostics = Set<String>()
     private let onStatusChange: @MainActor (SurfAceCentralRegistrationStatus) -> Void
     private let onConnectionError: @MainActor (String?) -> Void
     private(set) var lastError: String?
@@ -1975,10 +2000,18 @@ final class SurfAceCentralRegistration {
     }
 
     private func currentInputSnapshot() async throws -> SurfAceRegistrationInput {
-        if let inputSnapshot { return try await inputSnapshot() }
-        return SurfAceRegistrationInput(
-            surfaces: try await snapshot(), pendingPaneReleases: [], pendingWindowReleases: []
-        )
+        let input: SurfAceRegistrationInput
+        if let inputSnapshot {
+            input = try await inputSnapshot()
+        } else {
+            input = SurfAceRegistrationInput(
+                surfaces: try await snapshot(), pendingPaneReleases: [], pendingWindowReleases: []
+            )
+        }
+        for warning in input.warnings where warnedInputDiagnostics.insert(warning).inserted {
+            onWarning(warning)
+        }
+        return input
     }
 
     private func applyRegistrationReply(
