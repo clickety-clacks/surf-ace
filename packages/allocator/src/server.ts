@@ -249,14 +249,14 @@ export class AllocatorServer {
       windowGenerationV1,
       surfaceIds,
     });
-    if (directEndpoint !== null && prePairDescribeV1 &&
+    if (directEndpoint !== null &&
         (!this.custody.registrationReady || this.authority.serveStatus !== "serving")) {
       throw new AllocatorError("writer_fence_unavailable", "endpoint lease requires a validated serving writer");
     }
     const endpointLease = this.endpointLeases.renew(
       clientId,
       leaseSignature,
-      directEndpoint !== null && prePairDescribeV1,
+      directEndpoint !== null,
     );
     const result: RegisteredClientProjection = {
       clientId,
@@ -481,14 +481,14 @@ export class AllocatorServer {
       windowGenerationV1,
       surfaceIds,
     });
-    if (directEndpoint !== null && prePairDescribeV1 &&
+    if (directEndpoint !== null &&
         (!this.custody.registrationReady || this.authority.serveStatus !== "serving")) {
       throw new AllocatorError("writer_fence_unavailable", "endpoint lease requires a validated serving writer");
     }
     const endpointLease = this.endpointLeases.renew(
       clientId,
       leaseSignature,
-      directEndpoint !== null && prePairDescribeV1,
+      directEndpoint !== null,
     );
     const result: RegisteredClientProjection = {
       clientId,

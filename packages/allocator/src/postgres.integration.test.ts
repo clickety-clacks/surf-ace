@@ -1302,7 +1302,7 @@ test("configured server registers two stable clients and deduplicates reconnect"
   }
 });
 
-test("registration negotiates rc11 endpoint leases only behind the writer fence", { timeout: 90_000 }, async () => {
+test("registration leases valid direct endpoints only behind the writer fence", { timeout: 90_000 }, async () => {
   const cluster = await startCluster();
   let allocator: AllocatorServer | null = null;
   let wire: WireClient | null = null;
@@ -1447,13 +1447,34 @@ test("registration negotiates rc11 endpoint leases only behind the writer fence"
       allocationGenerationV1: true,
       prePairDescribeV1: false,
       pendingPaneReleases: [],
-      surfaces: [],
+      surfaces: [{ surfaceId: "sf_rc11-no-prepair", panes: [] }],
     });
     assert.equal(partial.ok, true);
-    const partialPayload = partial.payload as Record<string, unknown>;
+    const partialPayload = partial.payload as {
+      directEndpoint: string | null;
+      endpointLease: { leaseGeneration: number } | null;
+      prePairDescribeV1: boolean;
+      surfaces: Array<{ windowLabel: string }>;
+    };
+    const partialLease = partialPayload.endpointLease;
     assert.equal(partialPayload.directEndpoint, directEndpoint, "the endpoint is the supplied configuration");
     assert.equal(partialPayload.prePairDescribeV1, false);
-    assert.equal(partialPayload.endpointLease, null, "lease issuance requires negotiated pre-pair support");
+    assert.ok(partialLease && partialLease.leaseGeneration > 0,
+      "a valid endpoint receives a lease even without pre-pair describe support");
+    assert.equal(partialPayload.surfaces[0].windowLabel.length > 0, true,
+      "the registry still resolves a window label when pre-pair describe is unsupported");
+    const partialTopology = await wire.request("fleet.topology", {});
+    assert.equal(partialTopology.ok, true);
+    const partialRow = (partialTopology.payload?.clients as Array<{
+      clientId: string;
+      endpointLease: { leaseGeneration: number } | null;
+      prePairDescribeV1: boolean;
+      surfaces: Array<{ windowLabel: string }>;
+    }>).find((candidate) => candidate.clientId === partialClientId);
+    assert.equal(partialRow?.prePairDescribeV1, false,
+      "the lease does not claim describe capability that the client lacks");
+    assert.equal(partialRow?.endpointLease?.leaseGeneration, partialLease?.leaseGeneration);
+    assert.equal(partialRow?.surfaces[0]?.windowLabel, partialPayload.surfaces[0].windowLabel);
 
     const invalidClientId = createHash("sha256").update("invalid-direct-endpoint").digest("hex");
     const invalid = await wire.request("client.register", {
@@ -1777,6 +1798,25 @@ test("client.register returns negotiated per-item results and leases only accept
     assert.equal(legacyPayload.surfaceResults, undefined);
     assert.equal(legacyPayload.surfaces[0].windowLabel, "e",
       "legacy clients still receive the authoritative window label");
+
+    const noDescribeClientId = createHash("sha256").update("negotiated-client-without-prepair").digest("hex");
+    const noDescribe = await wire.request("client.register", {
+      registrationResultsV1: true,
+      clientId: noDescribeClientId,
+      directEndpoint,
+      allocationGenerationV1: true,
+      windowGenerationV1: true,
+      prePairDescribeV1: false,
+      surfaces: [{ surfaceId: "sf_partial_no_describe", panes: [] }],
+    });
+    assert.equal(noDescribe.ok, true, JSON.stringify(noDescribe));
+    const noDescribePayload = payload(noDescribe);
+    assert.equal(noDescribePayload.registrationResultsV1, true);
+    assert.equal(noDescribePayload.prePairDescribeV1, false);
+    assert.ok(noDescribePayload.endpointLease.leaseGeneration > 0,
+      "the negotiated response path also leases a valid endpoint without describe support");
+    assert.equal(noDescribePayload.surfaceResults[0].ok, true);
+    assert.equal(noDescribePayload.surfaces[0].windowLabel, noDescribePayload.surfaceResults[0].windowLabel);
   } finally {
     await wire?.close();
     if (allocator) await allocator.close();
