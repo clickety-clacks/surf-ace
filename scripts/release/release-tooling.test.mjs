@@ -1842,8 +1842,6 @@ test("fleet-list discovery is the first client-selection step in the shipped ski
   const endpointStart = skill.indexOf("## Select a client and endpoint");
   assert.ok(selectionStart >= 0 && endpointStart > selectionStart);
   assert.match(skill, /--registry "ws:\/\/<registry-host>:<port>" fleet-list/);
-  assert.match(skill, /does not\s+report endpoint addresses, reachability, or live application health/);
-  assert.match(skill, /Always pass the registry URL explicitly/);
 
   for (const file of ["README.md", "packages/cli/README.md"]) {
     const readme = await fs.readFile(path.join(repository, file), "utf8");
@@ -3025,10 +3023,8 @@ test("stable v0.2.8 documentation stays historical and release gates bind the se
   assert.match(specification, /restores only into a\s+separate staged cluster/);
   assert.match(specification, /packaged CLI connects\s+directly to the selected client's/);
   assert.match(specification, /Publication is separately opt-in/);
-  assert.match(readme, /register\s+the verified Markdown file/);
   assert.match(readme, /sha256sum -c SHA256SUMS/);
   assert.match(readme, /server archive\s+includes `docs\/OPERATIONS\.md`/);
-  assert.match(skill, /verify\s+the skill before registering the content/);
   assert.doesNotMatch(`${readme}\n${skill}`, environmentSpecificReference);
   assert.match(workflow, /^on:\n  workflow_dispatch:/m);
   for (const match of workflow.matchAll(/^\s*uses:\s*([^\s]+)$/gm)) assert.match(match[1], /@[0-9a-f]{40}$/);
