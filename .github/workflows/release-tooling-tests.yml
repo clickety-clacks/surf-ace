@@ -67,4 +67,4 @@ jobs:
       - name: Build the native Surf Ace CLI
         run: rustup run 1.89.0 cargo build --manifest-path packages/cli/Cargo.toml --release --locked
       - name: Compare built CLI commands with the canonical skill
-        run: node scripts/release/verify-surf-ace-skill-coverage.mjs packages/cli/target/release/surf-ace
+        run: node --import ./scripts/release/test-release-env.mjs scripts/release/verify-surf-ace-skill-coverage.mjs packages/cli/target/release/surf-ace
