@@ -1824,7 +1824,15 @@ fn window_describe_rejects_a_different_client_or_surface_but_keeps_registry_mism
     assert_eq!(endpoint_server.join().unwrap()["op"], "surface.describe");
 
     let (registry, server) = spawn_registry_server(fleet_inventory_fixture(), "fleet.topology", true);
-    let output = run_native_cli(&["--registry", &registry, "fleet-list"]);
+    let temp = TempDir::new().unwrap();
+    let state_root = temp.path().join("state-must-remain-absent");
+    let output = run_native_cli(&[
+        "--state-root",
+        state_root.to_str().unwrap(),
+        "--registry",
+        &registry,
+        "fleet-list",
+    ]);
     assert!(
         output.status.success(),
         "{}",
@@ -1833,6 +1841,7 @@ fn window_describe_rejects_a_different_client_or_surface_but_keeps_registry_mism
     let inventory: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(inventory["result"]["clients"].as_array().unwrap().len(), 2);
     assert_eq!(server.join().unwrap()["op"], "fleet.topology");
+    assert!(!state_root.exists(), "fleet-list must remain state-free");
 
     let mut mismatched_binding = describe_observation(&client_id, surface_id, 7);
     mismatched_binding["registryIdentity"] = json!({
