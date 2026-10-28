@@ -2855,12 +2855,12 @@ export class SurfaceCore {
   applyRegistryPaneLabels(assignments: Array<{
     surfaceId: string;
     panes: Array<{ allocationGeneration: number; paneId: string; paneLineageId: string; paneLabel: number }>;
-  }>): void {
+  }>, options: { allowUnassigned?: boolean } = {}): void {
     const proposed = new Map<string, { allocationGeneration: number; paneLabel: number }>();
     const labels = new Set<number>();
     for (const assignment of assignments) {
       const surface = this.getSurface(assignment.surfaceId);
-      if (assignment.panes.length !== surface.panes.size) {
+      if (!options.allowUnassigned && assignment.panes.length !== surface.panes.size) {
         throw new SurfaceCoreError("invalid_payload", "Registry omitted a live pane");
       }
       for (const pane of assignment.panes) {
@@ -2881,6 +2881,15 @@ export class SurfaceCore {
         }
         proposed.set(key, { allocationGeneration: pane.allocationGeneration, paneLabel: pane.paneLabel });
         labels.add(pane.paneLabel);
+      }
+      if (options.allowUnassigned) {
+        const assignedPaneIds = new Set(assignment.panes.map((pane) => Number(pane.paneId)));
+        for (const pane of surface.panes.values()) {
+          if (assignedPaneIds.has(pane.paneId)) continue;
+          if (pane.paneLabel !== 0 || pane.allocationGeneration !== null) {
+            throw new SurfaceCoreError("invalid_payload", "Unassigned registry pane must have a fresh identity");
+          }
+        }
       }
     }
     this.transaction(() => {

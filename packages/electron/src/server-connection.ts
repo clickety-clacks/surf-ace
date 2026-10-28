@@ -37,7 +37,10 @@ function endpointAddresses(endpoint: SurfAceDiscoveryEndpoint): string[] {
 }
 
 function isServerContract(endpoint: SurfAceDiscoveryEndpoint): boolean {
-  return endpoint.role === "server" && endpoint.protocolVersion === 1 && endpoint.wsPath === "/ws";
+  // Role and route identify a usable registry endpoint. A newer or missing
+  // topology version may still speak the fields this client understands, so
+  // let the request path establish compatibility instead of filtering it out.
+  return endpoint.role === "server" && endpoint.wsPath === "/ws";
 }
 
 function isUnspecifiedAddress(host: string): boolean {
@@ -167,6 +170,13 @@ export class ServerConnection {
             failures,
           );
           continue;
+        }
+        if (endpoint.protocolVersion !== 1) {
+          this.reportFailure(
+            `DNS-SD service ${endpoint.instanceName} advertises topology version ${endpoint.protocolVersion ?? "unknown"}; trying the understood server fields`,
+            false,
+            failures,
+          );
         }
         if (isUnspecifiedAddress(endpoint.host)) {
           this.reportFailure(
@@ -336,7 +346,7 @@ export class ServerConnection {
 
       const message = failures.length > 0
         ? `no_surf_ace_server: ${failures.join("; ")}`
-        : "no_surf_ace_server: no valid _surf-ace._tcp role=server v=1 ws=/ws advertisement";
+        : "no_surf_ace_server: no valid _surf-ace._tcp role=server ws=/ws advertisement";
       this.lastFailure = message;
       this.setStatus("disconnected");
       if (this.lastReportedFailure !== message) {

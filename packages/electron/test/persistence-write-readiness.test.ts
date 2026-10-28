@@ -152,7 +152,7 @@ test("pre-pair describe keeps complete topology readable with a warning through 
       socketId: string;
     }>;
     handlePaneSplit: (socket: WebSocket, request: Record<string, unknown>) => Promise<Record<string, any>>;
-    handleSurfaceDescribe: (request: Record<string, unknown>) => Record<string, any>;
+      handleSurfaceDescribe: (request: Record<string, unknown>) => Promise<Record<string, any>>;
     waitForResolvedPaneGeometry: (...args: unknown[]) => Promise<void>;
   };
   direct.socketMeta.set(fakeSocket, {
@@ -201,7 +201,7 @@ test("pre-pair describe keeps complete topology readable with a warning through 
     nextGeometryGate = gate;
     return gate;
   };
-  const describe = (id: string) => direct.handleSurfaceDescribe({
+  const describe = async (id: string) => await direct.handleSurfaceDescribe({
     id,
     op: "surface.describe",
     payload: {
@@ -268,7 +268,7 @@ test("pre-pair describe keeps complete topology readable with a warning through 
   assert.equal(readiness.isReady, false);
   assert.equal(core.panesList(surface.surfaceId).panes.length, 2,
     "SurfaceCore contains the candidate topology while geometry is held");
-  const duringSuccessfulGeometry = describe("rq_describe_success_during_geometry");
+  const duringSuccessfulGeometry = await describe("rq_describe_success_during_geometry");
   assert.equal(duringSuccessfulGeometry.ok, true, JSON.stringify(duringSuccessfulGeometry));
   assert.equal(duringSuccessfulGeometry.payload.applicationReadiness.status, "degraded");
   assert.deepEqual(duringSuccessfulGeometry.payload.applicationReadiness.limitationCodes,
@@ -283,7 +283,7 @@ test("pre-pair describe keeps complete topology readable with a warning through 
   const split = await successfulSplit;
   assert.equal(split.ok, true, JSON.stringify(split));
   assert.equal(readiness.isReady, true);
-  const committed = describe("rq_describe_success_after_commit");
+  const committed = await describe("rq_describe_success_after_commit");
   assert.equal(committed.ok, true, JSON.stringify(committed));
   assert.equal(committed.payload.applicationReadiness.status, "ready");
   assert.equal(committed.payload.topologyRevision, core.pairState(surface.surfaceId).topologyRevision);
@@ -301,7 +301,7 @@ test("pre-pair describe keeps complete topology readable with a warning through 
   assert.equal(readiness.isReady, false);
   assert.equal(core.panesList(surface.surfaceId).panes.length, 3,
     "SurfaceCore contains the second candidate before its rollback");
-  const duringFailedGeometry = describe("rq_describe_failure_during_geometry");
+  const duringFailedGeometry = await describe("rq_describe_failure_during_geometry");
   assert.equal(duringFailedGeometry.ok, true, JSON.stringify(duringFailedGeometry));
   assert.equal(duringFailedGeometry.payload.applicationReadiness.status, "degraded");
   assert.deepEqual(duringFailedGeometry.payload.applicationReadiness.limitationCodes,
@@ -322,7 +322,7 @@ test("pre-pair describe keeps complete topology readable with a warning through 
     afterRollback.panes.map((pane) => Number(pane.paneId)),
     beforeFailedSplit.panes.map((pane) => Number(pane.paneId)),
   );
-  const restoredObservation = describe("rq_describe_after_rollback");
+  const restoredObservation = await describe("rq_describe_after_rollback");
   assert.equal(restoredObservation.ok, true, JSON.stringify(restoredObservation));
   assert.equal(restoredObservation.payload.applicationReadiness.status, "ready");
   assert.equal(restoredObservation.payload.topologyRevision, beforeFailedSplit.topologyRevision);

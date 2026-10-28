@@ -38,6 +38,7 @@ import {
   loadPersistentStateFile,
   PersistentStateOutcomeUnknownError,
   PersistentStateWriteGuardError,
+  persistentStateHasArtifacts,
   writePersistentStateFile,
   type PersistentStateLoadResult,
 } from "./persistent-state-file.js";
@@ -269,11 +270,11 @@ function candidatePorts(preferredPort: number): number[] {
   return ports;
 }
 
-function createServer(coreValue: SurfaceCore, clientId: string): SurfaceWsServer {
+function createServer(coreValue: SurfaceCore, clientId: string | null): SurfaceWsServer {
   return new SurfaceWsServer({
       bindAddress: BIND_ADDRESS,
       capturePaneImage,
-      clientId,
+      clientId: clientId ?? undefined,
       claimPaneLabel: async (surfaceId, paneId, paneLineageId) => {
         if (!configuredRegistration) throw new Error("allocator_unavailable");
         return await configuredRegistration.claimPaneLabel(surfaceId, paneId, paneLineageId);
@@ -484,9 +485,6 @@ async function loadPersistentState(): Promise<PersistentSurfaceState | undefined
   const statePath = path.join(stateDir, STATE_FILE_NAME);
   const result = await loadPersistentStateFile(stateDir, STATE_FILE_NAME);
   persistentStateWriteGuard = result.writeGuard;
-  if (result.writeGuard === "ambiguous-persistence") {
-    throw new PersistentStateOutcomeUnknownError(result.error);
-  }
   if (result.state) {
     clientInfo("state_restore_read_ok", {
       path: statePath,
@@ -495,7 +493,15 @@ async function loadPersistentState(): Promise<PersistentSurfaceState | undefined
       primary_surface_id: result.state.primarySurfaceId,
       surface_count: result.state.surfaces?.length ?? 0,
     });
-    if (!result.writeGuard) confirmedAnnotationLocalSaves.confirm(result.state);
+    if (result.writeGuard) {
+      clientWarn("state_restore_readable_write_guarded", {
+        path: statePath,
+        write_guard: result.writeGuard,
+        ...("error" in result ? errorDiagnosticFields(result.error) : {}),
+      });
+    } else {
+      confirmedAnnotationLocalSaves.confirm(result.state);
+    }
     return result.state;
   }
   clientInfo("state_restore_read_miss", {
@@ -503,11 +509,23 @@ async function loadPersistentState(): Promise<PersistentSurfaceState | undefined
     write_guard: result.writeGuard || "none",
     ...errorDiagnosticFields(result.error),
   });
+  if (result.writeGuard) {
+    clientWarn("state_restore_unresolved_write_guarded", {
+      path: statePath,
+      write_guard: result.writeGuard,
+      ...("error" in result ? errorDiagnosticFields(result.error) : {}),
+    });
+  }
   return undefined;
 }
 
 async function persistState(): Promise<void> {
-  if (persistentStateOutcomeUnknown) throw new Error("Local persistence is paused pending reconciliation");
+  if (persistentStateOutcomeUnknown) {
+    await reconcilePersistence();
+    if (persistentStateOutcomeUnknown) {
+      throw new PersistentStateWriteGuardError("ambiguous-persistence");
+    }
+  }
   if (persistentStateWriteGuard && persistentStateWriteGuard !== "corrupt-primary") {
     clientWarn("state_persist_skipped_corrupt_restore", {
       path: path.join(stateDir, STATE_FILE_NAME),
@@ -550,6 +568,12 @@ async function persistState(): Promise<void> {
 }
 
 async function persistRegistryState(): Promise<void> {
+  if (persistentStateOutcomeUnknown) {
+    await reconcilePersistence();
+    if (persistentStateOutcomeUnknown) {
+      throw new PersistentStateWriteGuardError("ambiguous-persistence");
+    }
+  }
   if (persistentStateWriteGuard && persistentStateWriteGuard !== "corrupt-primary") {
     throw new Error("registry_binding_persistence_pending");
   }
@@ -2200,20 +2224,39 @@ async function boot(): Promise<void> {
   });
 
   const persistentState = await loadPersistentState();
-  const identity = await loadOrCreateIdentity(stateDir);
+  const savedStateArtifactsExist = await persistentStateHasArtifacts(stateDir, STATE_FILE_NAME);
+  const identity = await loadOrCreateIdentity(stateDir, { allowCreate: !savedStateArtifactsExist });
+  const identityClientId = identity ? registrationClientId(identity.publicKeyPem) : null;
   const configuredAddress = process.env.SURF_ACE_SERVER?.trim();
   const configuredDirectEndpoint = process.env.SURF_ACE_DIRECT_ENDPOINT?.trim() || null;
-  identityFingerprint = identity.fingerprintPrefix;
-  clientInfo("identity_loaded", {
-    fingerprint: identityFingerprint,
-    state_dir: stateDir,
-  });
+  identityFingerprint = identity?.fingerprintPrefix ?? "";
+  if (identity) {
+    clientInfo("identity_loaded", {
+      fingerprint: identityFingerprint,
+      state_dir: stateDir,
+    });
+  } else {
+    clientWarn("client_identity_unavailable", {
+      saved_state_present: savedStateArtifactsExist,
+      state_dir: stateDir,
+    });
+    if (savedStateArtifactsExist) {
+      // Pane content remains readable, but saved registry and annotation state
+      // cannot be safely attributed to a replacement client identity.
+      persistentStateWriteGuard = "ambiguous-persistence";
+    }
+  }
+
+  const corePersistentState = !identity && persistentState?.annotationPublisher
+    ? { ...persistentState, annotationPublisher: undefined }
+    : persistentState;
 
   core = new SurfaceCore({
-    annotationClientId: configuredAddress || persistentState?.annotationPublisher
-      ? registrationClientId(identity.publicKeyPem) : undefined,
-    clientIdentity: identityFingerprint,
-    persistentState,
+    annotationClientId: identityClientId && (configuredAddress || corePersistentState?.annotationPublisher)
+      ? identityClientId
+      : undefined,
+    clientIdentity: identity?.fingerprintPrefix,
+    persistentState: corePersistentState,
   });
   const restoredSurfaces = core.restorePersistedSurfaces(endpointName(), displayViewport());
   const primarySurface =
@@ -2229,7 +2272,7 @@ async function boot(): Promise<void> {
     restored_surface_count: restoredSurfaces.length,
   });
 
-  server = createServer(core, registrationClientId(identity.publicKeyPem));
+  server = createServer(core, identityClientId);
 
   annotationSourceCoordinator = new AnnotationSourceCoordinator(
     core, persistState, () => annotationRegistryPublisher?.sourceSaved(),
@@ -2243,17 +2286,20 @@ async function boot(): Promise<void> {
 
   core.subscribe((coreEvent) => {
     if (coreEvent.type === "lockless-authority-changed") {
-      void persistState().catch(() => {});
+      void persistState().catch((error) =>
+        clientWarn("state_persist_after_authority_change_failed", errorDiagnosticFields(error)));
       return;
     }
     if (coreEvent.type === "surface-changed") {
       broadcastSurfaceState(coreEvent.surfaceId);
-      void persistState().catch(() => {});
+      void persistState().catch((error) =>
+        clientWarn("state_persist_after_surface_change_failed", errorDiagnosticFields(error)));
       return;
     }
     if (coreEvent.type === "surface-created") {
       void createWindowForSurface(coreEvent.surfaceId);
-      void persistState().catch(() => {});
+      void persistState().catch((error) =>
+        clientWarn("state_persist_after_surface_create_failed", errorDiagnosticFields(error)));
       return;
     }
     if (coreEvent.type === "surface-removed") {
@@ -2263,7 +2309,8 @@ async function boot(): Promise<void> {
         programmaticSurfaceCloses.add(coreEvent.surfaceId);
         window.close();
       }
-      void persistState().catch(() => {});
+      void persistState().catch((error) =>
+        clientWarn("state_persist_after_surface_remove_failed", errorDiagnosticFields(error)));
     }
   });
 
@@ -2272,16 +2319,16 @@ async function boot(): Promise<void> {
   installWebAuthnAccountSelection();
   await acknowledgeCompositorMainAppBinding();
 
-  configuredRegistration = new ServerConnection({
+  configuredRegistration = identityClientId ? new ServerConnection({
     configuredAddress,
     directEndpoint: configuredDirectEndpoint,
-    clientId: registrationClientId(identity.publicKeyPem),
+    clientId: identityClientId,
     core,
     persist: persistRegistryState,
     onError: (error) => clientWarn("server_registration_failed", errorDiagnosticFields(error)),
-  });
-  configuredRegistration.start();
-  if (configuredAddress && core.annotationPublisher) {
+  }) : null;
+  configuredRegistration?.start();
+  if (configuredAddress && core.annotationPublisher && identityClientId) {
     annotationRegistryPublisher = new AnnotationRegistryPublisher(
       configuredAddress, core, persistState,
       (error) => clientWarn("annotation_publisher_failed", errorDiagnosticFields(error)),
