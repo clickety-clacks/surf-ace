@@ -74,6 +74,7 @@ function desktopCandidate(overrides = {}) {
       releaseAssetNames: [asset, manifestAssetName, "SHA256SUMS"],
       assetSha256ByName: { [asset]: candidateSkillSha256 },
       artifactSha256: sha256(checksumBytes),
+      eventKey: sha256(Buffer.from(`desktop-event:${identityOverrides.sourceCommit ?? sourceCommit}:${candidateSkillSha256}`)),
       ...identityOverrides,
     },
     manifestBytes,
@@ -86,7 +87,7 @@ function desktopCandidate(overrides = {}) {
 function iphoneCandidate() {
   const manifest = {
     appVersion: "0.1.0",
-    appBuildNumber: "30",
+    appBuildNumber: "17",
     operatingSkill: {
       asset: "SurfAceOperatingSkill/SKILL.md",
       clientPlatforms: ["ios"],
@@ -111,12 +112,19 @@ function iphoneCandidate() {
     channel: "iphone-build",
     identity: {
       releaseOrBuildId: "build-123",
+      eventKey: sha256(Buffer.from("iphone-event:build-123")),
       sourceCommit,
       appVersion: "0.1.0",
       appBuildNumber: "30",
+      manifestAppBuildNumber: "17",
       buildId: "build-123",
       buildNumber: "30",
       workflowId: "workflow-123",
+      appStoreBuildId: "app-build-30",
+      appStoreAppVersion: "0.1.0",
+      appStoreBuildNumber: "30",
+      deliveryRoute: "xcode-cloud-archive",
+      artifactSha256: "e".repeat(64),
       completionStatus: "SUCCEEDED",
       isPullRequestBuild: false,
       startCondition: "push",
@@ -146,13 +154,20 @@ function makeJournal() {
         .filter(([, entry]) => entry.status === "publishing")
         .map(([envelopeId, entry]) => ({ envelopeId, ...entry }));
     },
+    async listTerminalEventKeys() {
+      return [...new Set([...entries.values()]
+        .filter((entry) => ["complete", "no_change", "unresolved", "rolled_back"].includes(entry.status) ||
+          (entry.status === "blocked" && entry.terminal === true))
+        .map((entry) => entry.terminalEventKey ?? entry.envelope?.eventKey ?? entry.plan?.envelope?.eventKey)
+        .filter((key) => typeof key === "string"))];
+    },
     async readBackup(_envelopeId, _targetId, ref) { return backups.get(ref); },
     async saveBackup(envelopeId, targetId, value, { key }) {
       const ref = `backup-${sha256(Buffer.from(key)).slice(0, 16)}`;
       backups.set(ref, value === null ? null : Buffer.from(value));
       return ref;
     },
-    async recordBlocked(envelopeId, detail) { entries.set(envelopeId, { status: "blocked", ...detail }); },
+    async recordBlocked(envelopeId, detail) { entries.set(envelopeId, { ...entries.get(envelopeId), status: "blocked", ...detail }); },
     async recordPending(envelopeId, detail) { entries.set(envelopeId, { status: "pending", ...detail }); },
     async recordPublishing(envelopeId, detail) { entries.set(envelopeId, { status: "publishing", envelopeId, ...detail }); },
     async recordTargetReceipt(envelopeId, receipt) {
@@ -165,37 +180,49 @@ function makeJournal() {
       entries.set(envelopeId, { ...entries.get(envelopeId), rollbackReceipts: receipts, ...detail });
     },
     async recordNoChange(envelopeId, detail) {
-      entries.set(envelopeId, { status: "no_change", envelopeId, ...detail });
+      entries.set(envelopeId, { status: "no_change", terminal: true, envelopeId, ...detail });
       highWater = detail.highWater;
     },
-    async recordFailure(envelopeId, detail) { entries.set(envelopeId, { ...entries.get(envelopeId), status: "failed", ...detail }); },
+    async recordFailure(envelopeId, detail) { entries.set(envelopeId, { ...entries.get(envelopeId), ...detail }); },
     async recordComplete(envelopeId, detail) {
-      entries.set(envelopeId, { status: "complete", ...detail });
+      entries.set(envelopeId, { status: "complete", terminal: true, ...detail });
       highWater = detail.highWater;
     },
   };
 }
 
-function makeTargets(initialValues = {}, targetIds = destinations) {
+function makeTargets(initialValues = {}, targetIds = destinations, initialModes = {}) {
   const values = new Map(targetIds.map((id) => [id, Buffer.from(initialValues[id] ?? `old:${id}`)]));
+  const sharedIds = new Set(destinationRecords.filter(({ kind }) => kind === "shared-identity").map(({ id }) => id));
+  const modes = new Map(targetIds.map((id) => [id, sharedIds.has(id) ? null : (initialModes[id] ?? 0o644)]));
   const stages = new Map();
   const targetStore = {
     values,
-    async read(id) { return { available: true, bytes: values.has(id) ? Buffer.from(values.get(id)) : null }; },
-    async stage(id, value, envelopeId) {
+    modes,
+    async read(id) { return { available: true, bytes: values.has(id) ? Buffer.from(values.get(id)) : null, mode: values.has(id) ? modes.get(id) : null }; },
+    async stage(id, value, envelopeId, { mode } = {}) {
       const stageId = `${envelopeId}:${id}`;
-      stages.set(stageId, Buffer.from(value));
+      stages.set(stageId, { bytes: Buffer.from(value), mode });
       return { id: stageId, sha256: sha256(value) };
     },
     async discardStage(_id, stage) { stages.delete(stage.id); },
-    async commit(id, stage, { expectedPriorSha256 } = {}) {
+    async commit(id, stage, { expectedPriorSha256, expectedPriorMode, targetMode } = {}) {
       const actualPriorSha256 = values.has(id) ? sha256(values.get(id)) : null;
-      if (actualPriorSha256 !== expectedPriorSha256) throw new Error("target_prior_state_changed");
-      values.set(id, Buffer.from(stages.get(stage.id)));
+      if (actualPriorSha256 !== expectedPriorSha256 || modes.get(id) !== expectedPriorMode) throw new Error("target_prior_state_changed");
+      values.set(id, Buffer.from(stages.get(stage.id).bytes));
+      modes.set(id, sharedIds.has(id) ? null : targetMode);
     },
-    async restore(id, previousBytes) {
-      if (previousBytes === null) values.delete(id);
-      else values.set(id, Buffer.from(previousBytes));
+    async restore(id, previousBytes, { expectedCurrentSha256, expectedCurrentMode, priorMode } = {}) {
+      if ((values.has(id) ? sha256(values.get(id)) : null) !== expectedCurrentSha256 || modes.get(id) !== expectedCurrentMode) {
+        throw new Error("target_restore_state_changed");
+      }
+      if (previousBytes === null) {
+        values.delete(id);
+        modes.set(id, null);
+      } else {
+        values.set(id, Buffer.from(previousBytes));
+        modes.set(id, sharedIds.has(id) ? null : priorMode);
+      }
     },
   };
   return targetStore;
@@ -217,8 +244,8 @@ function sourceReader() {
   };
 }
 
-function sourceFor(candidate) {
-  return { async listCandidates() { return [candidate]; } };
+function sourceFor(candidate, onList = () => {}) {
+  return { async listCandidates(options) { onList(options); return [candidate]; } };
 }
 
 test("disabled consumer does not poll sources or read destinations", async () => {
@@ -240,6 +267,10 @@ test("iPhone build is bound to canonical skill bytes and embedded build identity
   assert.equal(result.envelope.sourceCommit, sourceCommit);
   assert.equal(result.envelope.skillSha256, skillSha256);
   assert.equal(result.envelope.skillAssetName, "SurfAceOperatingSkill/SKILL.md");
+  assert.equal(result.envelope.appBuildNumber, "30");
+  assert.equal(result.envelope.buildIdentity.manifestAppBuildNumber, "17");
+  assert.equal(result.envelope.buildIdentity.appStoreBuildNumber, "30");
+  assert.equal(result.envelope.buildIdentity.deliveryRoute, "xcode-cloud-archive");
 });
 
 test("desktop release tags must resolve to the commits named by its manifest", async () => {
@@ -275,10 +306,51 @@ test("a source or manifest mismatch is rejected before any target read or write"
   assert.equal([...journal.entries.values()][0].reason, "delivery_skill_source_mismatch");
 });
 
+test("a rejected immutable event is journaled once and skipped on later polls", async () => {
+  const candidate = desktopCandidate({ skillBytes: Buffer.from("different skill\n") });
+  const journal = makeJournal();
+  const sourceOptions = [];
+  let blockedRecords = 0;
+  let canonicalReads = 0;
+  const recordBlocked = journal.recordBlocked.bind(journal);
+  journal.recordBlocked = async (...args) => { blockedRecords += 1; return recordBlocked(...args); };
+  const reader = {
+    ...sourceReader(),
+    async readFileAtCommit(...args) {
+      canonicalReads += 1;
+      return sourceReader().readFileAtCommit(...args);
+    },
+  };
+  const args = {
+    enabled: true,
+    sources: [sourceFor(candidate, (options) => sourceOptions.push(options))],
+    sourceReader: reader,
+    destinations: destinationRecords,
+    targets: makeTargets(),
+    approvals: { async read() { return null; }, async request() { assert.fail("rejected event must not request approval"); } },
+    journal,
+  };
+
+  const first = await runSkillDeliveryConsumer(args);
+  const second = await runSkillDeliveryConsumer(args);
+
+  assert.equal(first.results[0].code, "delivery_skill_source_mismatch");
+  assert.equal(second.processed, 0);
+  assert.equal(blockedRecords, 1);
+  assert.equal(canonicalReads, 1);
+  assert.ok(sourceOptions[1].terminalEventKeys.includes(candidate.identity.eventKey));
+});
+
 test("exact matching approval is required before all five future-load copies", async () => {
   const candidate = desktopCandidate();
   const targetStore = makeTargets();
   const journal = makeJournal();
+  let targetReads = 0;
+  let backupSaves = 0;
+  const targetRead = targetStore.read.bind(targetStore);
+  const backupSave = journal.saveBackup.bind(journal);
+  targetStore.read = async (...args) => { targetReads += 1; return targetRead(...args); };
+  journal.saveBackup = async (...args) => { backupSaves += 1; return backupSave(...args); };
   let ruling = null;
   let requestedPlan;
   const approvals = {
@@ -298,6 +370,8 @@ test("exact matching approval is required before all five future-load copies", a
   const pending = await runSkillDeliveryConsumer(args);
   assert.equal(pending.results[0].status, "awaiting_approval");
   assert.ok(requestedPlan);
+  assert.equal(targetReads, destinations.length);
+  assert.equal(backupSaves, destinations.length);
   assert.deepEqual([...targetStore.values.values()].map((value) => value.toString()), destinations.map((id) => `old:${id}`));
 
   ruling = {
@@ -309,6 +383,8 @@ test("exact matching approval is required before all five future-load copies", a
   };
   const stillPending = await runSkillDeliveryConsumer(args);
   assert.equal(stillPending.results[0].status, "awaiting_approval");
+  assert.equal(targetReads, destinations.length);
+  assert.equal(backupSaves, destinations.length);
   assert.deepEqual([...targetStore.values.values()].map((value) => value.toString()), destinations.map((id) => `old:${id}`));
 
   ruling = {
@@ -349,6 +425,20 @@ test("matching hashes produce a no-change receipt without asking for approval", 
   assert.equal(approvalsRequested, 0);
   assert.equal(journal.entries.get(result.results[0].envelopeId).status, "no_change");
   assert.equal(targetStore.values.size, destinations.length);
+
+  const repeated = await runSkillDeliveryConsumer({
+    enabled: true,
+    sources: [sourceFor(candidate)],
+    sourceReader: sourceReader(),
+    destinations: destinationRecords,
+    targets: targetStore,
+    approvals: {
+      async read() { assert.fail("terminal no-change events do not reread approval"); },
+      async request() { assert.fail("terminal no-change events do not request approval"); },
+    },
+    journal,
+  });
+  assert.equal(repeated.processed, 0);
 });
 
 test("an out-of-order older source commit is recorded and never reaches targets", async () => {
@@ -555,13 +645,14 @@ test("uncertain write with a third-state readback stops and never overwrites it"
   const receipts = journal.entries.get(requestedPlan.envelopeId).targetReceipts;
   assert.equal(receipts.find((receipt) => receipt.targetId === destinations[1]).state, "conflict");
   const retry = await runSkillDeliveryConsumer(args);
-  assert.equal(retry.results[0].code, "delivery_previous_attempt_unresolved");
+  assert.equal(retry.processed, 0);
   assert.equal(targetStore.values.get(destinations[1]).toString(), "third-state");
 });
 
 test("a restart reads back and rolls back an interrupted publication before retry", async () => {
   const candidate = desktopCandidate();
-  const targetStore = makeTargets();
+  const initialModes = Object.fromEntries(destinations.slice(1).map((id, index) => [id, index % 2 === 0 ? 0o640 : 0o600]));
+  const targetStore = makeTargets({}, destinations, initialModes);
   const journal = makeJournal();
   let requestedPlan;
   const approvals = {
@@ -585,6 +676,7 @@ test("a restart reads back and rolls back an interrupted publication before retr
   const result = await runSkillDeliveryConsumer(args);
   assert.equal(result.results[0].status, "rolled_back");
   assert.deepEqual([...targetStore.values.values()].map((value) => value.toString()), destinations.map((id) => `old:${id}`));
+  assert.deepEqual([...targetStore.modes.values()], destinations.map((id) => id === destinations[0] ? null : initialModes[id]));
   assert.equal(requestedPlan.envelopeId, envelopeId);
 });
 
@@ -660,7 +752,8 @@ test("a ruling without direct user confirmation cannot authorize target writes",
 
 test("partial commit failure restores prior bytes in reverse order", async () => {
   const candidate = desktopCandidate();
-  const targetStore = makeTargets();
+  const initialModes = Object.fromEntries(destinations.slice(1).map((id, index) => [id, index % 2 === 0 ? 0o640 : 0o600]));
+  const targetStore = makeTargets({}, destinations, initialModes);
   const journal = makeJournal();
   let requestedPlan;
   const approvals = {
@@ -688,5 +781,6 @@ test("partial commit failure restores prior bytes in reverse order", async () =>
   const result = await runSkillDeliveryConsumer(args);
   assert.equal(result.results[0].status, "rolled_back");
   assert.deepEqual([...targetStore.values.values()].map((value) => value.toString()), destinations.map((id) => `old:${id}`));
+  assert.deepEqual([...targetStore.modes.values()], destinations.map((id) => id === destinations[0] ? null : initialModes[id]));
   assert.equal(journal.entries.get(requestedPlan.envelopeId).rollbackReceipts[0].state, "restored");
 });

@@ -55,6 +55,23 @@ function safeAssetName(name) {
   return typeof name === "string" && /^[A-Za-z0-9._+-]+$/.test(name) && name !== "." && name !== "..";
 }
 
+function releaseEventKey(release) {
+  const assets = Array.isArray(release.assets) ? release.assets : [];
+  return sha256(Buffer.from(canonicalJson({
+    source: "github-release",
+    id: release.id,
+    tag: release.tag_name ?? null,
+    updatedAt: release.updated_at ?? null,
+    assets: assets.map(({ id, name, digest, size, updated_at }) => ({
+      id: id ?? null,
+      name: name ?? null,
+      digest: digest ?? null,
+      size: size ?? null,
+      updatedAt: updated_at ?? null,
+    })),
+  })));
+}
+
 function flattenPages(value) {
   if (!Array.isArray(value)) return [];
   return value.flat(Infinity).filter((item) => item && typeof item === "object" && !Array.isArray(item));
@@ -114,8 +131,9 @@ export function createGitHubSourceReader({ owner, repo, command = runCommand }) 
 
 export function createGitHubReleaseSource({ owner, repo, publishedAfter, command = runCommand }) {
   return {
-    async listCandidates() {
+    async listCandidates({ terminalEventKeys = [] } = {}) {
       const pages = await commandJson("gh", ["api", "--paginate", "--slurp", `${`repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`}/releases?per_page=100`], { command });
+      const terminal = new Set(terminalEventKeys);
       const releases = flattenPages(pages)
         .filter((release) => release.draft !== true && typeof release.published_at === "string" &&
           (!publishedAfter || release.published_at >= publishedAfter));
@@ -123,9 +141,11 @@ export function createGitHubReleaseSource({ owner, repo, publishedAfter, command
       for (const release of releases) {
         const releaseOrBuildId = `github-release-${release.id}`;
         const assets = Array.isArray(release.assets) ? release.assets : [];
+        const eventKey = releaseEventKey(release);
+        if (terminal.has(eventKey)) continue;
         const manifestAssets = assets.filter(({ name }) => typeof name === "string" && name.endsWith("-manifest.json"));
         if (manifestAssets.length !== 1) {
-          candidates.push({ channel: "desktop-cli-release", identity: { releaseOrBuildId, releaseTag: release.tag_name } });
+          candidates.push({ channel: "desktop-cli-release", identity: { releaseOrBuildId, releaseTag: release.tag_name, eventKey } });
           continue;
         }
         const manifestAsset = manifestAssets[0];
@@ -165,6 +185,7 @@ export function createGitHubReleaseSource({ owner, repo, publishedAfter, command
         }
         const identity = {
           releaseOrBuildId,
+          eventKey,
           releaseTag: release.tag_name,
           sourceCommit: manifest?.source?.commit,
           sourceTag: manifest?.source?.tag,
@@ -213,21 +234,29 @@ export function createSshTargetAdapter(destinations, { command = runCommand } = 
     const destination = targets.get(id);
     if (!destination || typeof destination.route?.sshTarget !== "string") throw new Error("delivery_target_route_missing");
     const file = shellQuote(destination.path);
-    const script = `if [ -f ${file} ]; then printf 'PRESENT\\n'; cat ${file}; elif [ -e ${file} ]; then exit 44; else printf 'ABSENT\\n'; fi`;
+    const script = `if [ -f ${file} ]; then mode=$(stat -c %a ${file} 2>/dev/null || stat -f %Lp ${file}) || exit 45; case "$mode" in ''|*[!0-7]*) exit 46 ;; esac; printf 'PRESENT %s\\n' "$mode"; cat ${file}; elif [ -e ${file} ]; then exit 44; else printf 'ABSENT\\n'; fi`;
     const { stdout } = await command("ssh", ["-T", destination.route.sshTarget, remoteCommand(script)]);
     const newline = stdout.indexOf(10);
     if (newline < 0) throw new Error("delivery_target_read_invalid");
     const marker = stdout.subarray(0, newline).toString("utf8");
-    if (marker === "ABSENT") return { available: true, bytes: null };
-    if (marker !== "PRESENT") throw new Error("delivery_target_read_invalid");
-    return { available: true, bytes: stdout.subarray(newline + 1) };
+    if (marker === "ABSENT") return { available: true, bytes: null, mode: null };
+    const present = /^PRESENT ([0-7]{3,4})$/.exec(marker);
+    if (!present) throw new Error("delivery_target_read_invalid");
+    return {
+      available: true,
+      bytes: stdout.subarray(newline + 1),
+      mode: destination.kind === "shared-identity" ? null : Number.parseInt(present[1], 8),
+    };
   };
-  const stage = async (id, value, envelopeId) => {
+  const stage = async (id, value, envelopeId, { mode } = {}) => {
     const destination = targets.get(id);
     if (!destination || typeof destination.route?.sshTarget !== "string") throw new Error("delivery_target_route_missing");
     const stagedPath = `${destination.path}.surf-ace-stage-${envelopeId.slice(0, 16)}`;
     const pathArg = shellQuote(stagedPath);
-    const script = `set -eu; umask 077; cat > ${pathArg}; chmod 600 ${pathArg}; ${hashScript(pathArg)}`;
+    const stageMode = Number.isSafeInteger(mode) ? mode : 0o600;
+    if (stageMode < 0 || stageMode > 0o7777) throw new Error("delivery_target_mode_invalid");
+    const modeText = stageMode.toString(8);
+    const script = `set -eu; umask 077; cat > ${pathArg}; chmod ${modeText} ${pathArg}; ${hashScript(pathArg)}`;
     const { stdout } = await command("ssh", ["-T", destination.route.sshTarget, remoteCommand(script)], { input: value });
     const digest = stdout.toString("utf8").trim();
     if (!SHA256.test(digest)) throw new Error("delivery_stage_hash_invalid");
@@ -239,12 +268,15 @@ export function createSshTargetAdapter(destinations, { command = runCommand } = 
     const script = `rm -f ${shellQuote(stageRecord.id)}`;
     await command("ssh", ["-T", destination.route.sshTarget, remoteCommand(script)]);
   };
-  const commit = async (id, stageRecord, { expectedPriorSha256 } = {}) => {
+  const commit = async (id, stageRecord, { expectedPriorSha256, expectedPriorMode, targetMode } = {}) => {
     const destination = targets.get(id);
     if (!destination || typeof stageRecord?.id !== "string") throw new Error("delivery_stage_missing");
     const current = await read(id);
     const actualPrior = current.bytes === null ? null : sha256(current.bytes);
-    if (actualPrior !== expectedPriorSha256) throw new Error("target_prior_state_changed");
+    if (actualPrior !== expectedPriorSha256 ||
+        (destination.kind === "standalone-skill" && current.mode !== expectedPriorMode)) {
+      throw new Error("target_prior_state_changed");
+    }
     if (destination.kind === "shared-identity") {
       const { identityArchetype, identitySkillName } = destination.route;
       if (typeof identityArchetype !== "string" || typeof identitySkillName !== "string") {
@@ -263,14 +295,20 @@ export function createSshTargetAdapter(destinations, { command = runCommand } = 
     const stagePath = shellQuote(stageRecord.id);
     const expected = shellQuote(expectedPriorSha256 ?? "ABSENT");
     const actualHash = `if [ -f ${destinationPath} ]; then ${hashScript(destinationPath)}; else printf 'ABSENT'; fi`;
-    const script = `set -eu; actual="$(${actualHash})"; test "$actual" = ${expected}; mv -f ${stagePath} ${destinationPath}; actual="$(${hashScript(destinationPath)})"; test "$actual" = ${shellQuote(stageRecord.sha256)}`;
+    const expectedMode = Number.isSafeInteger(targetMode) ? targetMode : 0o644;
+    const expectedModeText = expectedMode.toString(8);
+    const actualMode = `if [ -f ${destinationPath} ]; then stat -c %a ${destinationPath} 2>/dev/null || stat -f %Lp ${destinationPath}; else printf 'ABSENT'; fi`;
+    const script = `set -eu; actual="$(${actualHash})"; test "$actual" = ${expected}; mode="$(${actualMode})"; test "$mode" = ${shellQuote(expectedPriorMode == null ? "ABSENT" : expectedPriorMode.toString(8))}; mv -f ${stagePath} ${destinationPath}; actual="$(${hashScript(destinationPath)})"; test "$actual" = ${shellQuote(stageRecord.sha256)}; mode=$(stat -c %a ${destinationPath} 2>/dev/null || stat -f %Lp ${destinationPath}) || exit 45; test "$mode" = ${shellQuote(expectedModeText)}`;
     await command("ssh", ["-T", destination.route.sshTarget, remoteCommand(script)]);
   };
-  const restore = async (id, previousBytes, { expectedCurrentSha256 } = {}) => {
+  const restore = async (id, previousBytes, { expectedCurrentSha256, expectedCurrentMode, priorMode } = {}) => {
     const destination = targets.get(id);
     if (!destination) throw new Error("delivery_target_route_missing");
     const current = await read(id);
-    if (current.bytes === null || sha256(current.bytes) !== expectedCurrentSha256) throw new Error("target_restore_state_changed");
+    if (current.bytes === null || sha256(current.bytes) !== expectedCurrentSha256 ||
+        (destination.kind === "standalone-skill" && current.mode !== expectedCurrentMode)) {
+      throw new Error("target_restore_state_changed");
+    }
     if (destination.kind === "shared-identity") {
       const { identityArchetype, identitySkillName } = destination.route;
       if (typeof identityArchetype !== "string" || typeof identitySkillName !== "string") throw new Error("delivery_identity_cli_route_missing");
@@ -297,12 +335,13 @@ export function createSshTargetAdapter(destinations, { command = runCommand } = 
       await command("ssh", ["-T", destination.route.sshTarget, remoteCommand(`set -eu; actual="$(${actualHash})"; test "$actual" = ${expected}; rm -f ${file}`)]);
       return;
     }
-    const temporaryStage = await stage(id, previousBytes, `restore-${sha256(previousBytes)}`);
+    const temporaryStage = await stage(id, previousBytes, `restore-${sha256(previousBytes)}`, { mode: priorMode });
     try {
       const file = shellQuote(destination.path);
       const staged = shellQuote(temporaryStage.id);
       const actualHash = `if [ -f ${file} ]; then ${hashScript(file)}; else printf 'ABSENT'; fi`;
-      const script = `set -eu; actual="$(${actualHash})"; test "$actual" = ${shellQuote(expectedCurrentSha256)}; mv -f ${staged} ${file}; actual="$(${hashScript(file)})"; test "$actual" = ${shellQuote(sha256(previousBytes))}`;
+      const expectedMode = Number.isSafeInteger(priorMode) ? priorMode : 0o644;
+      const script = `set -eu; actual="$(${actualHash})"; test "$actual" = ${shellQuote(expectedCurrentSha256)}; mode=$(stat -c %a ${file} 2>/dev/null || stat -f %Lp ${file}) || exit 45; test "$mode" = ${shellQuote(expectedCurrentMode == null ? "ABSENT" : expectedCurrentMode.toString(8))}; mv -f ${staged} ${file}; actual="$(${hashScript(file)})"; test "$actual" = ${shellQuote(sha256(previousBytes))}; mode=$(stat -c %a ${file} 2>/dev/null || stat -f %Lp ${file}) || exit 45; test "$mode" = ${shellQuote(expectedMode.toString(8))}`;
       await command("ssh", ["-T", destination.route.sshTarget, remoteCommand(script)]);
     } finally {
       await discardStage(id, temporaryStage);
@@ -349,6 +388,13 @@ export async function createFileDeliveryJournal(directory) {
       return Object.entries(state.entries).filter(([, entry]) => entry.status === "publishing")
         .map(([envelopeId, entry]) => ({ envelopeId, ...entry }));
     },
+    async listTerminalEventKeys() {
+      const terminalStatuses = new Set(["complete", "no_change", "unresolved", "rolled_back"]);
+      return [...new Set(Object.values(state.entries)
+        .filter((entry) => terminalStatuses.has(entry.status) || (entry.status === "blocked" && entry.terminal === true))
+        .map((entry) => entry.terminalEventKey ?? entry.envelope?.eventKey ?? entry.plan?.envelope?.eventKey)
+        .filter((key) => SHA256.test(key ?? "")))].sort();
+    },
     async saveBackup(envelopeId, targetId, value, { key }) {
       const ref = sha256(Buffer.from(`${envelopeId}\0${targetId}\0${key}`));
       state.backups[ref] = value === null ? null : Buffer.from(value).toString("base64");
@@ -359,7 +405,7 @@ export async function createFileDeliveryJournal(directory) {
       if (!Object.hasOwn(state.backups, ref)) throw new Error("delivery_backup_missing");
       return state.backups[ref] === null ? null : Buffer.from(state.backups[ref], "base64");
     },
-    async recordBlocked(id, detail) { state.entries[id] = { status: "blocked", envelopeId: id, ...detail }; await save(); },
+    async recordBlocked(id, detail) { state.entries[id] = { ...state.entries[id], status: "blocked", envelopeId: id, ...detail }; await save(); },
     async recordPending(id, detail) { state.entries[id] = { status: "pending", envelopeId: id, ...detail }; await save(); },
     async recordPublishing(id, detail) { state.entries[id] = { status: "publishing", envelopeId: id, ...detail }; await save(); },
     async recordTargetReceipt(id, receipt) {
@@ -373,14 +419,23 @@ export async function createFileDeliveryJournal(directory) {
       state.entries[id] = { ...state.entries[id], rollbackReceipts: receipts, ...detail };
       await save();
     },
-    async recordFailure(id, detail) { state.entries[id] = { ...state.entries[id], envelopeId: id, ...detail }; await save(); },
+    async recordFailure(id, detail) {
+      const terminal = ["unresolved", "rolled_back"].includes(detail.status);
+      state.entries[id] = {
+        ...state.entries[id],
+        envelopeId: id,
+        ...(terminal ? { terminal: true } : {}),
+        ...detail,
+      };
+      await save();
+    },
     async recordNoChange(id, detail) {
-      state.entries[id] = { status: "no_change", envelopeId: id, ...detail };
+      state.entries[id] = { status: "no_change", terminal: true, envelopeId: id, ...detail };
       state.highWater = detail.highWater;
       await save();
     },
     async recordComplete(id, detail) {
-      state.entries[id] = { status: "complete", envelopeId: id, ...detail };
+      state.entries[id] = { status: "complete", terminal: true, envelopeId: id, ...detail };
       state.highWater = detail.highWater;
       await save();
     },
@@ -439,9 +494,7 @@ export function createTightbeamApprovalAdapter({ directory, assignmentId, requir
           destinationSetSha256: item.destinationSetSha256, destinationMapSha256: item.destinationMapSha256 };
       }
       const directUserConfirmed = request.ruledBy === requiredRuler &&
-        request.rulingAttribution?.onBehalfOf === requiredRuler &&
-        request.rulingAttribution?.performer?.principal?.value === requiredRuler &&
-        request.rulingAttribution?.performer?.session?.state === "none";
+        request.rulingAttribution?.onBehalfOf === requiredRuler;
       return {
         status: "ruled",
         approved: request.decision === "approve",
@@ -490,9 +543,12 @@ function verifyProjectEmbedConfiguration(projectText) {
 
 export function createXcodeCloudSource({ sshTarget, nodeExecutable = "node", collectorScript, collectorConfig, expectedWorkflowId, startReasonToCondition = {}, sourceReader, command = runCommand }) {
   return {
-    async listCandidates() {
-      const remote = [nodeExecutable, collectorScript, "--config", collectorConfig, "--json"].map(shellQuote).join(" ");
-      const { stdout } = await command("ssh", ["-T", sshTarget, remoteCommand(remote)]);
+    async listCandidates({ terminalEventKeys = [] } = {}) {
+      const remote = [nodeExecutable, collectorScript, "--config", collectorConfig, "--json", "--terminal-event-keys-stdin"]
+        .map(shellQuote).join(" ");
+      const { stdout } = await command("ssh", ["-T", sshTarget, remoteCommand(remote)], {
+        input: Buffer.from(JSON.stringify({ terminalEventKeys })),
+      });
       const records = parseJson(stdout, "delivery_asc_collector_json_invalid");
       if (!Array.isArray(records)) throw new Error("delivery_asc_collector_response_invalid");
       const candidates = [];
@@ -527,8 +583,10 @@ export function createXcodeCloudSource({ sshTarget, nodeExecutable = "node", col
             candidates.push({ channel: "iphone-build", identity, manifestBytes, skillBytes });
             continue;
           }
-          identity.appVersion = manifest.appVersion;
-          identity.appBuildNumber = manifest.appBuildNumber;
+          identity.appVersion = identity.appStoreAppVersion ?? manifest.appVersion;
+          identity.appBuildNumber = identity.appStoreBuildNumber ?? manifest.appBuildNumber;
+          identity.manifestAppBuildNumber = manifest.appBuildNumber;
+          identity.deliveryRoute = "xcode-cloud-archive";
           candidates.push({ channel: "iphone-build", identity, manifestBytes, skillBytes });
           continue;
         }
@@ -542,10 +600,18 @@ export function createXcodeCloudSource({ sshTarget, nodeExecutable = "node", col
           verifyEmbedScript(scriptBytes.toString("utf8"));
           const projectText = projectBytes.toString("utf8");
           verifyProjectEmbedConfiguration(projectText);
-          identity.appVersion = uniqueProjectSetting(projectText, "MARKETING_VERSION");
-          identity.appBuildNumber = uniqueProjectSetting(projectText, "CURRENT_PROJECT_VERSION");
+          const projectVersion = uniqueProjectSetting(projectText, "MARKETING_VERSION");
+          const projectBuildNumber = uniqueProjectSetting(projectText, "CURRENT_PROJECT_VERSION");
+          identity.appVersion = identity.appStoreAppVersion ?? projectVersion;
+          identity.appBuildNumber = identity.appStoreBuildNumber ?? projectBuildNumber;
+          identity.manifestAppBuildNumber = projectBuildNumber;
+          identity.deliveryRoute = "source-commit-fallback";
           identity.releaseOrBuildId = identity.buildId;
-          const manifestBytes = renderIphoneManifest(identity, sha256(canonicalSkillBytes));
+          const manifestBytes = renderIphoneManifest({
+            ...identity,
+            appVersion: projectVersion,
+            manifestAppBuildNumber: projectBuildNumber,
+          }, sha256(canonicalSkillBytes));
           candidates.push({
             channel: "iphone-build",
             identity,

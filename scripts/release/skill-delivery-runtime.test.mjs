@@ -6,7 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { collectXcodeCloudBuilds, createAscReadOnlyClient } from "./asc-build-collector.mjs";
-import { canonicalJson, sha256 } from "./skill-delivery-consumer.mjs";
+import { canonicalJson, sha256, verifyDeliveryCandidate } from "./skill-delivery-consumer.mjs";
 import {
   createFileDeliveryJournal,
   createGitHubSourceReader,
@@ -120,6 +120,8 @@ test("GitHub collection reads the published release manifest, checksums and cano
   assert.equal(candidate.identity.artifactSha256, sha256(checksumBytes));
   assert.deepEqual(candidate.skillBytes, skillBytes);
   assert.deepEqual(candidate.checksumBytes, checksumBytes);
+  assert.deepEqual(await source.listCandidates({ terminalEventKeys: [candidate.identity.eventKey] }), []);
+  assert.deepEqual(requested, [1, 2, 3]);
 });
 
 test("the ASC API client sends read-only GET requests and rejects other origins", async () => {
@@ -206,9 +208,23 @@ test("ASC collection binds successful main builds to the configured app and hash
     assert.equal(records[0].identity.appStoreBuildId, "app-build-30");
     assert.equal(records[0].identity.appStoreBuildNumber, "30");
     assert.equal(records[0].identity.appStoreAppVersion, "0.1.0");
+    assert.equal(records[0].identity.appBuildNumber, "30");
+    assert.equal(records[0].identity.appVersion, "0.1.0");
     assert.match(records[0].identity.buildRecordSha256, /^[a-f0-9]{64}$/);
+    assert.match(records[0].identity.eventKey, /^[a-f0-9]{64}$/);
     assert.equal(records[0].manifestBase64, null);
     assert.ok(requests.every(({ options }) => options.method === "GET"));
+    const beforeSkip = requests.length;
+    assert.deepEqual(await collectXcodeCloudBuilds({
+      issuerId: "issuer-fixture",
+      keyId: "key-fixture",
+      privateKeyPath,
+      workflowId: "workflow-fixture",
+      bundleId: "co.example.surf",
+      startReasonToCondition: { SCM_PUSH: "push" },
+    }, { fetchImpl, now: 1_800_000_000_000, terminalEventKeys: [records[0].identity.eventKey] }), []);
+    assert.equal(requests.length, beforeSkip + 1);
+    assert.equal(requests.at(-1).url.pathname, "/v1/ciWorkflows/workflow-fixture/buildRuns");
   });
 });
 
@@ -236,9 +252,9 @@ test("ASC fallback reconstructs only the configured build-time skill contract at
       isPullRequestBuild: false,
       startReason: "SCM_PUSH",
       buildRecordSha256: "c".repeat(64),
-      appStoreBuildId: "app-build-17",
+      appStoreBuildId: "app-build-30",
       appStoreAppVersion: "0.1.0",
-      appStoreBuildNumber: "17",
+      appStoreBuildNumber: "30",
     },
     manifestBase64: null,
     skillBase64: null,
@@ -264,10 +280,94 @@ test("ASC fallback reconstructs only the configured build-time skill contract at
   const [candidate] = await source.listCandidates();
   const manifest = JSON.parse(candidate.manifestBytes.toString("utf8"));
   assert.equal(candidate.identity.sourceCommit, sourceCommit);
-  assert.equal(candidate.identity.appBuildNumber, "17");
-  assert.equal(candidate.identity.appStoreBuildNumber, "17");
+  assert.equal(candidate.identity.appBuildNumber, "30");
+  assert.equal(candidate.identity.appStoreBuildNumber, "30");
+  assert.equal(candidate.identity.manifestAppBuildNumber, "17");
+  assert.equal(candidate.identity.deliveryRoute, "source-commit-fallback");
+  assert.equal(manifest.appBuildNumber, "17");
   assert.equal(manifest.operatingSkill.sha256, sha256(skillBytes));
   assert.equal(manifest.xcodeCloudBuildId, "xcode-run-43");
+});
+
+test("Xcode Cloud archive keeps ASC build 30 distinct from embedded manifest build 17", async () => {
+  const skillBytes = Buffer.from("# build 30 skill\n");
+  const sourceCommit = "a".repeat(40);
+  const manifestBytes = Buffer.from(JSON.stringify({
+    appVersion: "0.1.0",
+    appBuildNumber: "17",
+    operatingSkill: {
+      asset: "SurfAceOperatingSkill/SKILL.md",
+      clientPlatforms: ["ios"],
+      publication: "app-bundle",
+      sha256: sha256(skillBytes),
+      sourcePath: "integrations/tightbeam/skills/surf-ace/SKILL.md",
+      version: "0.1.0",
+    },
+    xcodeCloudBuildId: "xcode-run-30",
+    xcodeCloudBuildNumber: "30",
+    xcodeCloudCommit: sourceCommit,
+    xcodeCloudWorkflowId: "workflow-fixture",
+    xcodeCloudStartCondition: "push",
+    xcodeCloudBranch: "main",
+    xcodeCloudGitRef: "refs/heads/main",
+    xcodeCloudScheme: "SurfAce",
+    xcodeCloudPlatform: "iOS",
+    xcodeCloudAction: "archive",
+  }));
+  const record = {
+    identity: {
+      releaseOrBuildId: "xcode-run-30",
+      buildId: "xcode-run-30",
+      buildNumber: "30",
+      workflowId: "workflow-fixture",
+      sourceCommit,
+      eventKey: "f".repeat(64),
+      sourceBranch: "main",
+      gitRef: "refs/heads/main",
+      completionStatus: "SUCCEEDED",
+      isPullRequestBuild: false,
+      startReason: "SCM_PUSH",
+      buildRecordSha256: "c".repeat(64),
+      appStoreBuildId: "app-build-30",
+      appStoreAppVersion: "0.1.0",
+      appStoreBuildNumber: "30",
+      archiveEvidence: "available",
+      artifactSha256: "d".repeat(64),
+    },
+    manifestBase64: manifestBytes.toString("base64"),
+    skillBase64: skillBytes.toString("base64"),
+  };
+  const source = createXcodeCloudSource({
+    sshTarget: "collector-fixture",
+    collectorScript: "/private/collector.mjs",
+    collectorConfig: "/private/asc.json",
+    expectedWorkflowId: "workflow-fixture",
+    startReasonToCondition: { SCM_PUSH: "push" },
+    sourceReader: {},
+    command: async (_file, _args, options) => {
+      assert.deepEqual(JSON.parse(options.input.toString("utf8")), { terminalEventKeys: [] });
+      return { stdout: Buffer.from(JSON.stringify([record])), stderr: Buffer.alloc(0) };
+    },
+  });
+  const [candidate] = await source.listCandidates();
+  const verified = await verifyDeliveryCandidate(candidate, {
+    destinations: [{
+      id: "shared", kind: "shared-identity", host: "fixture", path: "/fixture/SKILL.md",
+      writer: "supported-identity-cli", route: {},
+      effects: { service: "future loads", database: "publication record", downtime: "none" },
+    }],
+    sourceReader: {
+      async readFileAtCommit() { return skillBytes; },
+    },
+  });
+
+  assert.equal(candidate.identity.appBuildNumber, "30");
+  assert.equal(candidate.identity.manifestAppBuildNumber, "17");
+  assert.equal(candidate.identity.deliveryRoute, "xcode-cloud-archive");
+  assert.equal(verified.envelope.appBuildNumber, "30");
+  assert.equal(verified.envelope.buildIdentity.manifestAppBuildNumber, "17");
+  assert.equal(verified.envelope.buildIdentity.appStoreBuildNumber, "30");
+  assert.equal(verified.envelope.buildIdentity.deliveryRoute, "xcode-cloud-archive");
 });
 
 test("ASC fallback accepts the repository's actual iOS target and canonical skill source", async () => {
@@ -341,7 +441,7 @@ test("shared skill writes use the supported identity command and configured rout
       calls.push({ file, args, options });
       const remote = args[2];
       if (remote.includes("PRESENT")) {
-        return { stdout: Buffer.concat([Buffer.from("PRESENT\n"), priorBytes]), stderr: Buffer.alloc(0) };
+        return { stdout: Buffer.concat([Buffer.from("PRESENT 600\n"), priorBytes]), stderr: Buffer.alloc(0) };
       }
       if (remote.includes("cat >")) {
         return { stdout: Buffer.from(`${sha256(options.input)}\n`), stderr: Buffer.alloc(0) };
@@ -350,7 +450,7 @@ test("shared skill writes use the supported identity command and configured rout
     },
   });
 
-  assert.deepEqual(await targets.read(destination.id), { available: true, bytes: priorBytes });
+  assert.deepEqual(await targets.read(destination.id), { available: true, bytes: priorBytes, mode: null });
   const stage = await targets.stage(destination.id, nextBytes, "f".repeat(64));
   assert.equal(stage.sha256, sha256(nextBytes));
   await targets.commit(destination.id, stage, { expectedPriorSha256: sha256(priorBytes) });
@@ -358,6 +458,44 @@ test("shared skill writes use the supported identity command and configured rout
     args[2].includes("tightbeam") && args[2].includes("identity") && args[2].includes("edit")));
   assert.ok(calls.some(({ file, args }) => file === "ssh" && args[1] === "configured-alias" &&
     args[2].includes("rm -f") && args[2].includes("surf-ace-stage")));
+});
+
+test("standalone SSH copies stage and commit with the existing file mode", async () => {
+  const priorBytes = Buffer.from("prior skill\n");
+  const nextBytes = Buffer.from("next skill\n");
+  const calls = [];
+  const destination = {
+    id: "standalone-skill",
+    kind: "standalone-skill",
+    host: "configured-host",
+    path: "/configured/codex/skills/surf-ace/SKILL.md",
+    writer: "existing-ssh",
+    route: { sshTarget: "configured-alias" },
+    effects: { service: "future loads", database: "none", downtime: "none" },
+  };
+  const targets = createSshTargetAdapter([destination], {
+    command: async (file, args, options = {}) => {
+      calls.push({ file, args, options });
+      if (args[2].includes("PRESENT")) {
+        return { stdout: Buffer.concat([Buffer.from("PRESENT 640\n"), priorBytes]), stderr: Buffer.alloc(0) };
+      }
+      if (args[2].includes("cat >")) {
+        return { stdout: Buffer.from(`${sha256(options.input)}\n`), stderr: Buffer.alloc(0) };
+      }
+      return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+    },
+  });
+
+  assert.deepEqual(await targets.read(destination.id), { available: true, bytes: priorBytes, mode: 0o640 });
+  const stage = await targets.stage(destination.id, nextBytes, "f".repeat(64), { mode: 0o640 });
+  assert.equal(stage.sha256, sha256(nextBytes));
+  await targets.commit(destination.id, stage, {
+    expectedPriorSha256: sha256(priorBytes),
+    expectedPriorMode: 0o640,
+    targetMode: 0o640,
+  });
+  assert.ok(calls.some(({ args }) => args[2].includes("chmod 640")));
+  assert.ok(calls.some(({ args }) => args[2].includes("mode") && args[2].includes("640") && args[2].includes("mv -f")));
 });
 
 test("decision approval accepts only the direct configured user ruling for the exact plan", async () => {
@@ -380,8 +518,8 @@ test("decision approval accepts only the direct configured user ruling for the e
       rulingAttribution: {
         onBehalfOf: "user:operator",
         performer: {
-          principal: { state: "known", value: "user:operator" },
-          session: { state: "none" },
+          principal: { state: "known", value: "agent-session:owner" },
+          session: { state: "known", value: "owner-session" },
         },
       },
     };
@@ -399,7 +537,7 @@ test("decision approval accepts only the direct configured user ruling for the e
 
     await adapter.request(plan);
     assert.equal((await adapter.read(plan.envelopeId, plan.planSha256)).directUserConfirmed, true);
-    request.rulingAttribution.performer.session.state = "known";
+    request.ruledBy = "user:other";
     assert.equal((await adapter.read(plan.envelopeId, plan.planSha256)).directUserConfirmed, false);
   } finally {
     await fs.rm(directory, { recursive: true, force: true });
@@ -417,12 +555,14 @@ test("file journal retains no-change state, high-water and exact backup bytes", 
     await journal.recordNoChange("event-2", {
       targetReceipts: [{ targetId: "destination-1", finalSha256: sha256(backup) }],
       highWater,
+      terminalEventKey: "f".repeat(64),
     });
 
     const reloaded = await createFileDeliveryJournal(directory);
     assert.deepEqual(await reloaded.readHighWater(), highWater);
     assert.deepEqual(await reloaded.readBackup("event-1", "destination-1", ref), backup);
     assert.equal((await reloaded.read("event-2")).status, "no_change");
+    assert.deepEqual(await reloaded.listTerminalEventKeys(), ["f".repeat(64)]);
   } finally {
     await fs.rm(directory, { recursive: true, force: true });
   }

@@ -174,7 +174,7 @@ async function downloadArchive(client, metadata, { command = runCommand } = {}) 
   }
 }
 
-export async function collectXcodeCloudBuilds(config, { fetchImpl = fetch, command = runCommand, now } = {}) {
+export async function collectXcodeCloudBuilds(config, { fetchImpl = fetch, command = runCommand, now, terminalEventKeys = [] } = {}) {
   if (typeof config.workflowId !== "string" || config.workflowId.length === 0 ||
       typeof config.bundleId !== "string" || config.bundleId.length === 0) {
     throw new Error("delivery_asc_app_identity_required");
@@ -194,6 +194,7 @@ export async function collectXcodeCloudBuilds(config, { fetchImpl = fetch, comma
   const workflowUrl = `${API_ORIGIN}/v1/ciWorkflows/${encodeURIComponent(config.workflowId)}/buildRuns?${query}`;
   const result = await client.getPaged(workflowUrl);
   const records = [];
+  const terminal = new Set(terminalEventKeys);
   for (const run of result.data) {
     const attrs = run.attributes ?? {};
     const workflow = run.relationships?.workflow?.data;
@@ -230,12 +231,24 @@ export async function collectXcodeCloudBuilds(config, { fetchImpl = fetch, comma
       isPullRequestBuild: attrs.isPullRequestBuild,
       startReason: attrs.startReason,
       buildRecordSha256,
+      eventKey: sha256(Buffer.from(canonicalJson({
+        source: "xcode-cloud-build",
+        buildId: run.id,
+        buildNumber: String(attrs.number),
+        workflowId: workflow.id,
+        sourceCommit,
+        buildRecordSha256,
+      }))),
+      appVersion: connectedBuild?.appVersion ?? null,
+      appBuildNumber: connectedBuild?.appBuildNumber ?? null,
       ...(connectedBuild ? {
         appStoreBuildId: connectedBuild.id,
         appStoreAppVersion: connectedBuild.appVersion,
         appStoreBuildNumber: connectedBuild.appBuildNumber,
       } : {}),
     };
+
+    if (terminal.has(identity.eventKey)) continue;
 
     let artifacts;
     try {
@@ -283,7 +296,19 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     const configIndex = process.argv.indexOf("--config");
     if (configIndex < 0 || !process.argv[configIndex + 1]) throw new Error("asc_collector_config_required");
     const config = JSON.parse(await fs.readFile(process.argv[configIndex + 1], "utf8"));
-    const records = await collectXcodeCloudBuilds(config);
+    const terminalIndex = process.argv.indexOf("--terminal-event-keys-stdin");
+    let terminalEventKeys = [];
+    if (terminalIndex >= 0) {
+      const chunks = [];
+      for await (const chunk of process.stdin) chunks.push(chunk);
+      const input = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      if (!Array.isArray(input?.terminalEventKeys) ||
+          input.terminalEventKeys.some((key) => typeof key !== "string" || !/^[a-f0-9]{64}$/.test(key))) {
+        throw new Error("asc_terminal_event_keys_invalid");
+      }
+      terminalEventKeys = input.terminalEventKeys;
+    }
+    const records = await collectXcodeCloudBuilds(config, { terminalEventKeys });
     process.stdout.write(`${JSON.stringify(records)}\n`);
   } catch (error) {
     process.stderr.write(`${error.message}\n`);
