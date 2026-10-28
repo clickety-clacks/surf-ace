@@ -5175,6 +5175,10 @@ fn unknown_saved_state_version_and_correlation_phase_preserve_reads_and_guard_mu
         .any(|warning| warning == "saved_state_correlation_unreadable"));
 
     let mut list_wire = FakeWire::ordinary();
+    list_wire.resolutions = vec![json!({
+        "outcome": "still_pending",
+        "requestId": "rq_future"
+    })];
     let listing =
         execute_with_wire(invocation(&temp, Command::List, json!({})), &mut list_wire).unwrap();
     assert!(listing.ok);
