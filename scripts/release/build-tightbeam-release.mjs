@@ -203,10 +203,15 @@ const cliReadme = (platform) => [
   './bin/surf-ace --state-root /path/to/controller-state --registry "ws://<registry-host>:<port>" fleet-list',
   "```",
   "",
-  "This is registered inventory only; it does not report client endpoints,",
-  "reachability, or live health. Empty inventory is a successful empty `clients`",
-  "array; invalid or unavailable registry input is an error. Do not combine",
-  "`--registry` and `--endpoint`; `fleet-list` never pairs with or mutates clients.",
+  "This is registered inventory only; the registry snapshot includes",
+  "configured direct endpoints and leases when present. Absent values do not",
+  "provide a route, and present values do not prove reachability or live health.",
+  "If a client has no direct endpoint, use",
+  "the matching Surf Ace skill's Bonjour/DNS-SD steps to discover and resolve",
+  "its WebSocket endpoint before client-directed commands. Empty inventory is a",
+  "successful empty `clients` array; invalid or unavailable registry input is",
+  "an error. Do not combine `--registry` and `--endpoint`; `fleet-list` never",
+  "pairs with or mutates clients.",
   "Always pass the registry URL explicitly; the CLI does not infer one from",
   "configuration or environment variables.",
   "",
@@ -304,6 +309,49 @@ export async function verifyTightbeamSkillAsset(sourceDir, outputDir) {
   return { filename: TIGHTBEAM_SKILL_ASSET, sha256: await sha256(output) };
 }
 
+export function verifyTightbeamOperatingSkillManifest(manifest) {
+  const asset = Array.isArray(manifest?.assets)
+    ? manifest.assets.find(({ name }) => name === TIGHTBEAM_SKILL_ASSET)
+    : null;
+  const operatingSkill = manifest?.operatingSkill;
+  if (!asset ||
+      operatingSkill?.asset !== TIGHTBEAM_SKILL_ASSET ||
+      operatingSkill?.clientPlatforms?.join(",") !== "desktop,cli" ||
+      operatingSkill?.publication !== "github-release-asset" ||
+      operatingSkill?.sha256 !== asset.sha256 ||
+      operatingSkill?.sha256 !== manifest.checksums?.[TIGHTBEAM_SKILL_ASSET] ||
+      operatingSkill?.sourcePath !== TIGHTBEAM_SKILL_SOURCE ||
+      operatingSkill?.version !== manifest.version) {
+    throw new Error("tightbeam_operating_skill_manifest_mismatch");
+  }
+  return operatingSkill;
+}
+
+export async function verifyTightbeamSkillDescribesCli(binaryPath, skillSourceDir = toolingRoot) {
+  let help;
+  try {
+    help = JSON.parse(await capture(path.resolve(binaryPath), ["--help"]));
+  } catch {
+    throw new Error("tightbeam_cli_help_invalid");
+  }
+  const commands = help?.result?.commands;
+  if (help?.ok !== true || !Array.isArray(commands) || commands.length === 0 ||
+      commands.some((command) => typeof command?.name !== "string" || !command.name.trim())) {
+    throw new Error("tightbeam_cli_help_command_list_missing");
+  }
+
+  const skill = await fs.readFile(path.resolve(skillSourceDir, TIGHTBEAM_SKILL_SOURCE), "utf8");
+  const catalogStart = skill.indexOf("Supported commands include ");
+  const catalogEnd = catalogStart >= 0 ? skill.indexOf("\n\n", catalogStart) : -1;
+  const catalog = catalogStart < 0 ? "" : skill.slice(catalogStart, catalogEnd < 0 ? skill.length : catalogEnd);
+  const documentedCommands = new Set([...catalog.matchAll(/`([^`]+)`/g)].map((match) => match[1]));
+  const missing = commands.map(({ name }) => name).filter((name) => !documentedCommands.has(name));
+  if (missing.length > 0) {
+    throw new Error(`tightbeam_skill_cli_command_coverage_mismatch:${missing.join(",")}`);
+  }
+  return commands.map(({ name }) => name);
+}
+
 export async function buildTightbeamLinuxPackages({ sourceDir, outputDir, target = TOOLCHAINS.linuxRustTarget, includeSkillAsset = true, skillSourceDir = toolingRoot }) {
   const source = path.resolve(sourceDir);
   const output = path.resolve(outputDir);
@@ -319,6 +367,7 @@ export async function buildTightbeamLinuxPackages({ sourceDir, outputDir, target
   const electronArchive = path.join(output, TIGHTBEAM.assets[2]);
   await createDirectoryTarGz(serverStage, "surf-ace-server", serverArchive, epoch);
   await assembleTightbeamCliStage({ binary, stageDir: cliStage, platform: "Linux x86_64" });
+  await verifyTightbeamSkillDescribesCli(path.join(cliStage, "bin/surf-ace"), skillSourceDir);
   await createDirectoryTarGz(cliStage, "surf-ace-cli", cliArchive, epoch);
   await removeIfExists(serverStage);
   await removeIfExists(cliStage);
@@ -337,7 +386,7 @@ export async function buildTightbeamLinuxPackages({ sourceDir, outputDir, target
   };
 }
 
-export async function buildTightbeamMacosPackages({ sourceDir, outputDir }) {
+export async function buildTightbeamMacosPackages({ sourceDir, outputDir, skillSourceDir = toolingRoot }) {
   const source = path.resolve(sourceDir);
   const output = path.resolve(outputDir);
   const epoch = await sourceDateEpoch(source);
@@ -358,6 +407,7 @@ export async function buildTightbeamMacosPackages({ sourceDir, outputDir }) {
     stageDir: cliStage,
     platform: "macOS arm64",
   });
+  await verifyTightbeamSkillDescribesCli(path.join(cliStage, "bin/surf-ace"), skillSourceDir);
   await createDirectoryTarGz(cliStage, "surf-ace-cli", cliArchive, epoch);
   await removeIfExists(cliStage);
   await removeIfExists(path.join(source, "packages/electron/dist/package"));
@@ -423,6 +473,8 @@ export async function writeTightbeamManifest({
     if (!info.isFile() || info.size === 0) throw new Error(`tightbeam_asset_missing_or_empty:${name}`);
     assetDetails.push({ name, sha256: await sha256(file), sizeBytes: info.size });
   }
+  const skillAsset = assetDetails.find(({ name }) => name === TIGHTBEAM_SKILL_ASSET);
+  if (!skillAsset) throw new Error("tightbeam_skill_asset_missing_from_manifest");
   const nodeDependencies = await workspaceProductionInventory(path.join(source, "pnpm-lock.yaml"), "packages/electron");
   const cargoDependencies = await cargoLockedPackages(path.join(source, "packages/cli/Cargo.lock"));
   const windowLabelMigrationPath = "schemas/allocator/005_window_label_reuse.sql";
@@ -448,6 +500,14 @@ export async function writeTightbeamManifest({
     lockfiles: {
       cargoSha256: await sha256(path.join(source, "packages/cli/Cargo.lock")),
       pnpmSha256: await sha256(path.join(source, "pnpm-lock.yaml")),
+    },
+    operatingSkill: {
+      asset: skillAsset.name,
+      clientPlatforms: ["desktop", "cli"],
+      publication: "github-release-asset",
+      sha256: skillAsset.sha256,
+      sourcePath: TIGHTBEAM_SKILL_SOURCE,
+      version: TIGHTBEAM.version,
     },
     source: { commit: TIGHTBEAM.candidateCommit, tag: TIGHTBEAM.sourceTag },
     ...(assetNames.includes(TIGHTBEAM.assets[0]) ? { serverPackage: {

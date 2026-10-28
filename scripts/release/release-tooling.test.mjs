@@ -41,6 +41,8 @@ import {
   TIGHTBEAM_LINUX_RUNTIME_FILES,
   copyTightbeamSkillAsset,
   verifyTightbeamSkillAsset,
+  verifyTightbeamOperatingSkillManifest,
+  verifyTightbeamSkillDescribesCli,
   verifyStandaloneElectronSource,
   writeTightbeamManifest,
   verifyTightbeamCliStage,
@@ -1401,7 +1403,25 @@ test("Tightbeam manifest assembles the six hosted assets including the exact ski
     sizeBytes: migrationBytes.length,
   }]);
   const skillRecord = manifest.assets.find(({ name }) => name === TIGHTBEAM_SKILL_ASSET);
-  assert.equal(skillRecord.sha256, createHash("sha256").update(toolingSkillBytes).digest("hex"));
+  const skillDigest = createHash("sha256").update(toolingSkillBytes).digest("hex");
+  assert.equal(skillRecord.sha256, skillDigest);
+  assert.deepEqual(manifest.operatingSkill, {
+    asset: TIGHTBEAM_SKILL_ASSET,
+    clientPlatforms: ["desktop", "cli"],
+    publication: "github-release-asset",
+    sha256: skillDigest,
+    sourcePath: "integrations/tightbeam/skills/surf-ace/SKILL.md",
+    version: manifest.version,
+  });
+  assert.deepEqual(verifyTightbeamOperatingSkillManifest(manifest), manifest.operatingSkill);
+  assert.throws(() => verifyTightbeamOperatingSkillManifest({
+    ...manifest,
+    operatingSkill: { ...manifest.operatingSkill, sha256: "0".repeat(64) },
+  }), /tightbeam_operating_skill_manifest_mismatch/);
+  assert.throws(() => verifyTightbeamOperatingSkillManifest({
+    ...manifest,
+    operatingSkill: { ...manifest.operatingSkill, clientPlatforms: ["desktop", "cli", "ios"] },
+  }), /tightbeam_operating_skill_manifest_mismatch/);
   assert.deepEqual(await fs.readFile(path.join(outputDir, TIGHTBEAM_SKILL_ASSET)), toolingSkillBytes);
   assert.equal(Object.hasOwn(manifest, "iosSigning"), false);
   assert.deepEqual((await verifyTightbeamChecksums(result.manifestPath)).files,
@@ -1426,15 +1446,22 @@ test("Tightbeam manifest assembles the six hosted assets including the exact ski
   }), /public_file_set_mismatch/);
 });
 
-test("Tightbeam manifests and SHA256SUMS can contain one fully gated platform without the shared skill", async (t) => {
+test("each single-platform manifest includes and hashes the shared skill asset", async (t) => {
   for (const component of ["linux", "macos"]) {
     await t.test(component, async (subtest) => {
       const outputDir = await temporary(subtest);
       const toolingSkillDir = await temporary(subtest);
+      const toolingSkillPath = path.join(toolingSkillDir, "integrations/tightbeam/skills/surf-ace/SKILL.md");
+      const toolingSkillBytes = await fs.readFile(path.join(repository, "integrations/tightbeam/skills/surf-ace/SKILL.md"));
+      await fs.mkdir(path.dirname(toolingSkillPath), { recursive: true });
+      await fs.writeFile(toolingSkillPath, toolingSkillBytes);
       const selectedAssets = TIGHTBEAM_PLATFORM_ASSETS[component];
+      const manifestAssets = TIGHTBEAM.assets.filter((name) =>
+        selectedAssets.includes(name) || name === TIGHTBEAM_SKILL_ASSET);
       for (const name of selectedAssets) {
-        if (name !== TIGHTBEAM_SKILL_ASSET) await fs.writeFile(path.join(outputDir, name), `fixture:${name}\n`);
+        await fs.writeFile(path.join(outputDir, name), `fixture:${name}\n`);
       }
+      await copyTightbeamSkillAsset(toolingSkillDir, outputDir);
       const result = await writeTightbeamManifest({
         components: [component],
         outputDir,
@@ -1443,15 +1470,138 @@ test("Tightbeam manifests and SHA256SUMS can contain one fully gated platform wi
         toolingCommit: "b".repeat(40),
       });
       const manifest = JSON.parse(await fs.readFile(result.manifestPath, "utf8"));
-      assert.deepEqual(manifest.components, [component]);
-      assert.deepEqual(manifest.assets.map(({ name }) => name), TIGHTBEAM.assets.filter((name) => selectedAssets.includes(name)));
-      assert.deepEqual(result.files, [...selectedAssets, TIGHTBEAM.manifest, TIGHTBEAM.checksums]);
+      assert.deepEqual(manifest.components, [component, "skill"]);
+      assert.deepEqual(manifest.assets.map(({ name }) => name), manifestAssets);
+      assert.deepEqual(result.files, [...manifestAssets, TIGHTBEAM.manifest, TIGHTBEAM.checksums]);
+      const skillRecord = manifest.assets.find(({ name }) => name === TIGHTBEAM_SKILL_ASSET);
+      assert.equal(skillRecord.sha256, createHash("sha256").update(toolingSkillBytes).digest("hex"));
+      assert.deepEqual(verifyTightbeamOperatingSkillManifest(manifest), manifest.operatingSkill);
+      assert.deepEqual(manifest.operatingSkill.clientPlatforms, ["desktop", "cli"]);
+      assert.equal(manifest.operatingSkill.version, manifest.version);
       assert.deepEqual((await verifyTightbeamChecksums(result.manifestPath)).files,
-        [...selectedAssets, TIGHTBEAM.manifest].sort());
+        [...manifestAssets, TIGHTBEAM.manifest].sort());
       assert.deepEqual((await fs.readdir(outputDir)).sort(), [...result.files].sort());
       assert.equal(Object.hasOwn(manifest, "serverPackage"), component === "linux");
     });
   }
+});
+
+test("the iOS app bundle binds the exact skill bytes to its Xcode Cloud build", async (t) => {
+  const root = await temporary(t);
+  const scriptPath = path.join(repository, "packages/ios/scripts/embed-operating-skill.sh");
+  const appBuildDir = path.join(root, "Build/Products/Release-iphoneos");
+  const env = {
+    ...process.env,
+    PROJECT_DIR: path.join(repository, "packages/ios"),
+    TARGET_BUILD_DIR: appBuildDir,
+    UNLOCALIZED_RESOURCES_FOLDER_PATH: "SurfAce.app",
+    MARKETING_VERSION: "0.1.0",
+    CURRENT_PROJECT_VERSION: "17",
+    CI_XCODE_CLOUD: "TRUE",
+    CI_BUILD_ID: "12345678-ABCD-DEFG-1234-012345ABCDEF",
+    CI_BUILD_NUMBER: "42",
+    CI_COMMIT: "d".repeat(40),
+    CI_WORKFLOW_ID: "87654321-ABCD-DEFG-1234-012345ABCDEF",
+    CI_START_CONDITION: "push",
+    CI_BRANCH: "main",
+    CI_GIT_REF: "refs/heads/main",
+    CI_XCODE_SCHEME: "SurfAce",
+    CI_PRODUCT_PLATFORM: "iOS",
+    CI_XCODEBUILD_ACTION: "archive",
+  };
+  const result = spawnSync("/bin/sh", [scriptPath], {
+    cwd: repository,
+    encoding: "utf8",
+    env,
+  });
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+
+  const operatingSkillDir = path.join(appBuildDir, "SurfAce.app/SurfAceOperatingSkill");
+  const sourceSkill = await fs.readFile(path.join(repository, "integrations/tightbeam/skills/surf-ace/SKILL.md"));
+  const embeddedSkill = await fs.readFile(path.join(operatingSkillDir, "SKILL.md"));
+  const manifest = JSON.parse(await fs.readFile(path.join(operatingSkillDir, "manifest.json"), "utf8"));
+  const skillDigest = createHash("sha256").update(sourceSkill).digest("hex");
+  assert.deepEqual(embeddedSkill, sourceSkill);
+  assert.deepEqual(manifest.operatingSkill, {
+    asset: "SurfAceOperatingSkill/SKILL.md",
+    clientPlatforms: ["ios"],
+    publication: "app-bundle",
+    sha256: skillDigest,
+    sourcePath: "integrations/tightbeam/skills/surf-ace/SKILL.md",
+    version: "0.1.0",
+  });
+  assert.equal(manifest.appVersion, "0.1.0");
+  assert.equal(manifest.appBuildNumber, "17");
+  assert.equal(manifest.xcodeCloudBuildId, env.CI_BUILD_ID);
+  assert.equal(manifest.xcodeCloudBuildNumber, env.CI_BUILD_NUMBER);
+  assert.equal(manifest.xcodeCloudCommit, env.CI_COMMIT);
+  assert.equal(manifest.xcodeCloudWorkflowId, env.CI_WORKFLOW_ID);
+  assert.equal(manifest.xcodeCloudStartCondition, "push");
+  assert.equal(manifest.xcodeCloudBranch, "main");
+  assert.equal(manifest.xcodeCloudGitRef, "refs/heads/main");
+  assert.equal(manifest.xcodeCloudScheme, "SurfAce");
+  assert.equal(manifest.xcodeCloudPlatform, "iOS");
+  assert.equal(manifest.xcodeCloudAction, "archive");
+
+  const projectSpec = await fs.readFile(path.join(repository, "packages/ios/project.yml"), "utf8");
+  const projectFile = await fs.readFile(path.join(repository, "packages/ios/SurfAce.xcodeproj/project.pbxproj"), "utf8");
+  const iosTargetStart = projectFile.indexOf("E78D6E7B48D8F200079A1C31 /* SurfAce */ = {");
+  const iosTarget = projectFile.slice(iosTargetStart, iosTargetStart + 900);
+  assert.match(projectSpec, /postBuildScripts:[\s\S]*?path: scripts\/embed-operating-skill\.sh/);
+  assert.match(iosTarget, /A90100000000000000000001 \/\* Embed Surf Ace operating skill \*\//);
+  assert.match(projectFile, /SurfAceOperatingSkill\/manifest\.json/);
+
+  const missingBuildId = spawnSync("/bin/sh", [scriptPath], {
+    cwd: repository,
+    encoding: "utf8",
+    env: { ...env, TARGET_BUILD_DIR: path.join(root, "MissingBuildIdentity"), CI_BUILD_ID: "" },
+  });
+  assert.notEqual(missingBuildId.status, 0);
+  assert.match(missingBuildId.stderr, /invalid or missing iOS skill build field: CI_BUILD_ID/);
+
+  const wrongScheme = spawnSync("/bin/sh", [scriptPath], {
+    cwd: repository,
+    encoding: "utf8",
+    env: { ...env, TARGET_BUILD_DIR: path.join(root, "WrongScheme"), CI_XCODE_SCHEME: "SurfAceSpatial" },
+  });
+  assert.notEqual(wrongScheme.status, 0);
+  assert.match(wrongScheme.stderr, /requires the SurfAce scheme/);
+});
+
+test("a platform manifest cannot be written without the canonical skill asset", async (t) => {
+  const outputDir = await temporary(t);
+  const toolingSkillDir = await temporary(t);
+  for (const name of TIGHTBEAM_PLATFORM_ASSETS.linux) {
+    if (name !== TIGHTBEAM_SKILL_ASSET) await fs.writeFile(path.join(outputDir, name), `fixture:${name}\n`);
+  }
+  await assert.rejects(writeTightbeamManifest({
+    components: ["linux"],
+    outputDir,
+    sourceDir: repository,
+    skillSourceDir: toolingSkillDir,
+    toolingCommit: "c".repeat(40),
+  }), /ENOENT/);
+  await assert.rejects(fs.access(path.join(outputDir, TIGHTBEAM.manifest)));
+});
+
+test("the packaged CLI help command inventory must be covered by the skill", async (t) => {
+  const root = await temporary(t);
+  const cliBinary = path.join(root, "surf-ace");
+  const skillSourceDir = path.join(root, "tooling");
+  const skillPath = path.join(skillSourceDir, "integrations/tightbeam/skills/surf-ace/SKILL.md");
+  const commandNames = ["fleet-list", "sync", "annotations watch"];
+  const help = { ok: true, result: { commands: commandNames.map((name) => ({ name })) } };
+  await fs.mkdir(path.dirname(skillPath), { recursive: true });
+  await fs.writeFile(cliBinary, `#!/bin/sh\ncat <<'HELP'\n${JSON.stringify(help)}\nHELP\n`);
+  await fs.chmod(cliBinary, 0o755);
+  await fs.writeFile(skillPath, "Supported commands include `fleet-list`, `sync`, and `annotations watch`; availability follows the installed CLI schema.\n");
+
+  assert.deepEqual(await verifyTightbeamSkillDescribesCli(cliBinary, skillSourceDir), commandNames);
+  await fs.writeFile(skillPath, "Supported commands include `fleet-list` and `annotations watch`; availability follows the installed CLI schema.\n");
+  await assert.rejects(
+    verifyTightbeamSkillDescribesCli(cliBinary, skillSourceDir),
+    /tightbeam_skill_cli_command_coverage_mismatch:sync/,
+  );
 });
 
 test("v0.2.8 packages the skill from the tooling identity, not the product checkout", async (t) => {
@@ -1777,7 +1927,9 @@ test("Tightbeam Linux and macOS CLI packages carry the same fleet discovery guid
     assert.match(guide, /--state-root/);
     assert.match(guide, /--registry .*fleet-list/);
     assert.match(guide, /registered inventory only/);
-    assert.match(guide, /does not report client endpoints/);
+    assert.match(guide, /the registry snapshot includes\s+configured direct endpoints and leases/);
+    assert.match(guide, /do not\s+prove reachability or live health/);
+    assert.match(guide, /Bonjour\/DNS-SD steps to discover and resolve/);
     assert.match(guide, /directly to that client/);
     assert.match(guide, /does not infer one from\s+configuration or environment variables/);
     guides.push(guide.replace(`# Surf Ace standalone ${platform} CLI`, "# Surf Ace standalone PLATFORM CLI"));
@@ -1796,8 +1948,6 @@ test("fleet-list discovery is the first client-selection step in the shipped ski
   const endpointStart = skill.indexOf("## Select a client and endpoint");
   assert.ok(selectionStart >= 0 && endpointStart > selectionStart);
   assert.match(skill, /--registry "ws:\/\/<registry-host>:<port>" fleet-list/);
-  assert.match(skill, /does not\s+report endpoint addresses, reachability, or live application health/);
-  assert.match(skill, /Always pass the registry URL explicitly/);
 
   for (const file of ["README.md", "packages/cli/README.md"]) {
     const readme = await fs.readFile(path.join(repository, file), "utf8");
@@ -2973,16 +3123,15 @@ test("stable v0.2.8 documentation stays historical and release gates bind the se
   assert.match(specification, /No old-version participant/);
   assert.match(specification, /surf-ace-release-tooling-v0\.2\.8/);
   assert.match(specification, /surf-ace-v0\.2\.8/);
+  assert.match(specification, /optional Surf Ace skill for Tightbeam agents/);
   assert.match(specification, /copied byte-for-byte from the pinned tooling checkout/);
   for (const name of [...stableNames.assets, stableNames.manifest]) assert.ok(specification.includes(name));
   assert.match(specification, /custom-format backup/);
   assert.match(specification, /restores only into a\s+separate staged cluster/);
   assert.match(specification, /packaged CLI connects\s+directly to the selected client's/);
   assert.match(specification, /Publication is separately opt-in/);
-  assert.match(readme, /register\s+the verified Markdown file/);
   assert.match(readme, /sha256sum -c SHA256SUMS/);
   assert.match(readme, /server archive\s+includes `docs\/OPERATIONS\.md`/);
-  assert.match(skill, /verify\s+the skill before registering the content/);
   assert.doesNotMatch(`${readme}\n${skill}`, environmentSpecificReference);
   assert.match(workflow, /^on:\n  workflow_dispatch:/m);
   for (const match of workflow.matchAll(/^\s*uses:\s*([^\s]+)$/gm)) assert.match(match[1], /@[0-9a-f]{40}$/);
@@ -3043,6 +3192,10 @@ test("stable v0.2.8 documentation stays historical and release gates bind the se
   assert.match(publishJob, /needs\.assemble\.outputs\.has_linux == 'true'/);
   assert.match(publishJob, /needs\.assemble\.outputs\.has_macos == 'true'/);
   assert.match(publishJob, /if:\s*>-\s*\n\s*\$\{\{\s*always\(\)\s*&&/);
+  assert.match(publishJob, /verifyTightbeamOperatingSkillManifest\(manifest\)/);
+  assert.match(publishJob, /OPERATING_SKILL_SHA256/);
+  assert.match(publishJob, /Surf Ace operating skill asset:/);
+  assert.match(publishJob, /iPhone builds carry their own operating skill copy and build manifest/);
   assert.match(publishJob, /The iOS app is withheld because the complete iOS XCTest result was/);
   assert.match(publishJob, /The tooling tag version label differs from the product tag version label/);
   assert.match(publishJob, /release_assets\+=\("release\/\$\{name\}"\)/);
