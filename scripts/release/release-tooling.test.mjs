@@ -1823,7 +1823,9 @@ test("Tightbeam Linux and macOS CLI packages carry the same fleet discovery guid
     assert.match(guide, /--state-root/);
     assert.match(guide, /--registry .*fleet-list/);
     assert.match(guide, /registered inventory only/);
-    assert.match(guide, /does not report client endpoints/);
+    assert.match(guide, /registry snapshot includes configured direct endpoints and leases/);
+    assert.match(guide, /do not\s+prove reachability or live health/);
+    assert.match(guide, /Bonjour\/DNS-SD steps to discover and resolve/);
     assert.match(guide, /directly to that client/);
     assert.match(guide, /does not infer one from\s+configuration or environment variables/);
     guides.push(guide.replace(`# Surf Ace standalone ${platform} CLI`, "# Surf Ace standalone PLATFORM CLI"));
@@ -3017,6 +3019,7 @@ test("stable v0.2.8 documentation stays historical and release gates bind the se
   assert.match(specification, /No old-version participant/);
   assert.match(specification, /surf-ace-release-tooling-v0\.2\.8/);
   assert.match(specification, /surf-ace-v0\.2\.8/);
+  assert.match(specification, /optional Surf Ace skill for Tightbeam agents/);
   assert.match(specification, /copied byte-for-byte from the pinned tooling checkout/);
   for (const name of [...stableNames.assets, stableNames.manifest]) assert.ok(specification.includes(name));
   assert.match(specification, /custom-format backup/);
