@@ -285,7 +285,7 @@ enum SurfAceLocklessAllocationReleaseIdentity {
             ) == intent.releaseId
         case .surface:
             guard let windowLabel = intent.windowLabel else { return false }
-            return window(
+            let canonical = window(
                 allocationGeneration: allocationGeneration,
                 clientId: clientId,
                 closeRevision: intent.closeTopologyRevision,
@@ -294,7 +294,18 @@ enum SurfAceLocklessAllocationReleaseIdentity {
                 tombstoneId: intent.sourceTombstoneId,
                 tombstoneKind: intent.sourceTombstoneKind,
                 windowLabel: windowLabel
-            ) == intent.releaseId
+            )
+            let legacy = legacyWindow(
+                allocationGeneration: allocationGeneration,
+                clientId: clientId,
+                closeRevision: intent.closeTopologyRevision,
+                surfaceId: intent.surfaceId,
+                terminalRetirementRevision: intent.terminalRetirementRevision,
+                tombstoneId: intent.sourceTombstoneId,
+                tombstoneKind: intent.sourceTombstoneKind,
+                windowLabel: windowLabel
+            )
+            return canonical == intent.releaseId || legacy == intent.releaseId
         }
     }
 
@@ -334,6 +345,45 @@ enum SurfAceLocklessAllocationReleaseIdentity {
         tombstoneKind: SurfAceLocklessTombstoneReclamation.Kind,
         windowLabel: String
     ) -> String? {
+        windowWithGenerationKey(
+            allocationGeneration: allocationGeneration, clientId: clientId,
+            closeRevision: closeRevision, surfaceId: surfaceId,
+            terminalRetirementRevision: terminalRetirementRevision,
+            tombstoneId: tombstoneId, tombstoneKind: tombstoneKind,
+            windowLabel: windowLabel, generationKey: "windowGeneration"
+        )
+    }
+
+    static func legacyWindow(
+        allocationGeneration: Int64,
+        clientId: String,
+        closeRevision: Int64,
+        surfaceId: String,
+        terminalRetirementRevision: Int64,
+        tombstoneId: String,
+        tombstoneKind: SurfAceLocklessTombstoneReclamation.Kind,
+        windowLabel: String
+    ) -> String? {
+        windowWithGenerationKey(
+            allocationGeneration: allocationGeneration, clientId: clientId,
+            closeRevision: closeRevision, surfaceId: surfaceId,
+            terminalRetirementRevision: terminalRetirementRevision,
+            tombstoneId: tombstoneId, tombstoneKind: tombstoneKind,
+            windowLabel: windowLabel, generationKey: "allocationGeneration"
+        )
+    }
+
+    private static func windowWithGenerationKey(
+        allocationGeneration: Int64,
+        clientId: String,
+        closeRevision: Int64,
+        surfaceId: String,
+        terminalRetirementRevision: Int64,
+        tombstoneId: String,
+        tombstoneKind: SurfAceLocklessTombstoneReclamation.Kind,
+        windowLabel: String,
+        generationKey: String
+    ) -> String? {
         guard allocationGeneration > 0,
               safeInteger(closeRevision),
               terminalRetirementRevision > 0,
@@ -342,7 +392,7 @@ enum SurfAceLocklessAllocationReleaseIdentity {
               validTombstoneId(tombstoneId),
               tombstoneKind == .surface,
               windowLabel.range(of: #"^[a-z]{1,32}$"#, options: .regularExpression) != nil else { return nil }
-        let json = "{\"allocationGeneration\":\(allocationGeneration),\"clientId\":\"\(clientId)\",\"closeRevision\":\(closeRevision),\"surfaceId\":\"\(surfaceId)\",\"terminalRetirementRevision\":\(terminalRetirementRevision),\"tombstoneId\":\"\(tombstoneId)\",\"tombstoneKind\":\"surface\",\"windowLabel\":\"\(windowLabel)\"}"
+        let json = "{\"\(generationKey)\":\(allocationGeneration),\"clientId\":\"\(clientId)\",\"closeRevision\":\(closeRevision),\"surfaceId\":\"\(surfaceId)\",\"terminalRetirementRevision\":\(terminalRetirementRevision),\"tombstoneId\":\"\(tombstoneId)\",\"tombstoneKind\":\"surface\",\"windowLabel\":\"\(windowLabel)\"}"
         return digest(json)
     }
 

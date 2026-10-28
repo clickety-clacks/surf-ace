@@ -649,12 +649,19 @@ final class SurfAceRuntime {
             applyReplySubset: { [weak self] reply, input, request in
                 guard let self else { throw SurfAceRegistrationError.stopped }
                 let adapter = try self.ensureLocklessAdapter()
-                let state = try await adapter.applyRegistration(
+                let application = try await adapter.applyRegistration(
                     reply, expectedInput: input, requestInput: request, clientId: identity.clientId
                 )
-                self.confirmedPaneLabels = Dictionary(uniqueKeysWithValues: reply.assignments.flatMap { assignment in
-                    assignment.panes.map { pane in
-                        ("\(assignment.surfaceId):\(pane.paneLineageId)", pane.paneLabel)
+                for warning in application.warnings {
+                    surfAceServerRuntimeLog(
+                        "event=central_registration_warning \(surfAceDiagnosticFields([("warning", warning)]))"
+                    )
+                }
+                let state = application.state
+                self.confirmedPaneLabels = Dictionary(uniqueKeysWithValues: state.liveSurfaces.values.flatMap { surface in
+                    guard state.registryBinding != nil, surface.windowLabelConfirmed != false else { return [] }
+                    return surface.panes.values.filter { $0.paneLabel > 0 }.map { pane in
+                        ("\(surface.surfaceId):\(pane.paneLineageId)", pane.paneLabel)
                     }
                 })
                 try self.projectLocklessAuthorityState(state)
@@ -673,6 +680,11 @@ final class SurfAceRuntime {
                 let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
                 surfAceServerRuntimeLog(
                     "event=central_registration_failed \(surfAceDiagnosticFields([("error", message)]))"
+                )
+            },
+            onWarning: { warning in
+                surfAceServerRuntimeLog(
+                    "event=central_registration_warning \(surfAceDiagnosticFields([("warning", warning)]))"
                 )
             },
             onStatusChange: { [weak self] status in

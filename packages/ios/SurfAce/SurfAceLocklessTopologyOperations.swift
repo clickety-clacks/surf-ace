@@ -111,6 +111,10 @@ enum SurfAceLocklessTopologyOperations {
     static func clearPreBindingPaneAllocations(
         from surface: inout SurfAceLocklessSurfaceMaterial
     ) throws {
+        for paneId in Array(surface.panes.keys) {
+            surface.panes[paneId]?.paneLabel = 0
+            surface.panes[paneId]?.allocationGeneration = nil
+        }
         for index in surface.paneTombstones.indices {
             surface.paneTombstones[index].pane.paneLabel = 0
             surface.paneTombstones[index].pane.allocationGeneration = nil
@@ -130,6 +134,9 @@ enum SurfAceLocklessTopologyOperations {
         try atomically(&state) { candidate in
             var labels: [String: String] = [:]
             for assignment in assignments {
+                // A label is a fleet coordinate. Refuse malformed or duplicate
+                // surface assignments rather than making two windows addressable
+                // by the same spoken label.
                 guard !assignment.windowLabel.isEmpty,
                       assignment.windowLabel.utf8.allSatisfy({ $0 >= 97 && $0 <= 122 }),
                       labels[assignment.surfaceId] == nil else {
@@ -141,7 +148,7 @@ enum SurfAceLocklessTopologyOperations {
             var used = Set<String>()
             for surface in candidate.liveSurfaces.values {
                 let label = labels[surface.surfaceId] ?? surface.windowLabel
-                guard used.insert(label).inserted else {
+                guard label.isEmpty || used.insert(label).inserted else {
                     throw Error.invalidTopology("duplicate_window_label")
                 }
             }
