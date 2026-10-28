@@ -5027,6 +5027,194 @@ fn native_cli_read_returns_current_content_when_unread_delta_is_empty() {
 }
 
 #[test]
+fn native_cli_read_salvages_valid_scope_and_preserves_unreadable_sibling() {
+    let temp = TempDir::new().unwrap();
+    let readable_scope = "pane:sf_partial:1";
+    let unreadable_scope = "pane:sf_partial:2";
+    let current_content = pane_content_record("sf_partial", 1, 5, Some("saved-content"), None);
+    let unreadable_row = json!({
+        "clientCursor": "unknown-cursor-format",
+        "records": [{
+            "recordClass": "content",
+            "recordId": "retained-unreadable-content",
+            "payload": { "content": { "text": "preserve this saved content" } }
+        }]
+    });
+    let unreadable_ack = json!({
+        "scopeId": unreadable_scope,
+        "cursor": "unknown-cursor-format",
+        "idempotencyKey": "ack-unreadable"
+    });
+    fs::write(
+        temp.path().join("controller-state.json"),
+        serde_json::to_vec_pretty(&json!({
+            "version": 1,
+            "controllerInstanceId": "ctl_partial_saved_state",
+            "scopes": {
+                readable_scope: {
+                    "clientCursor": 6,
+                    "projectedCursor": 6,
+                    "firstRetainedSequence": 1,
+                    "lastRetainedSequence": 5,
+                    "records": [current_content],
+                    "gap": null,
+                    "synchronized": true,
+                    "synchronizationCutoff": "cutoff-partial"
+                },
+                unreadable_scope: unreadable_row
+            },
+            "acknowledgementOutbox": [unreadable_ack],
+            "unresolved": {},
+            "resumeMetadata": {}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let output = native_cli_read(&temp, readable_scope);
+    assert_eq!(output["ok"], true);
+    assert_eq!(output["result"]["cacheStatus"], "current");
+    assert_eq!(
+        output["result"]["currentContentRecord"]["payload"]["contentId"],
+        "saved-content"
+    );
+    assert!(output["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|warning| warning == "saved_state_scope_unreadable"));
+    assert!(output["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|warning| warning == "saved_state_acknowledgement_unreadable"));
+
+    let root = LockedStateRoot::open(temp.path(), 1024 * 1024).unwrap();
+    assert!(root.acknowledgement_is_guarded(unreadable_scope));
+    assert!(!root.acknowledgement_is_guarded(readable_scope));
+    drop(root);
+
+    let persisted: Value = serde_json::from_slice(
+        &fs::read(temp.path().join("controller-state.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(persisted["scopes"][unreadable_scope], unreadable_row);
+    assert_eq!(persisted["acknowledgementOutbox"][0], unreadable_ack);
+    assert_eq!(
+        persisted["scopes"][readable_scope]["records"][0],
+        current_content
+    );
+}
+
+#[test]
+fn unknown_saved_state_version_and_correlation_phase_preserve_reads_and_guard_mutations() {
+    let temp = TempDir::new().unwrap();
+    let scope_id = "pane:sf_future:1";
+    let current_content = pane_content_record("sf_future", 1, 3, Some("future-content"), None);
+    let correlation = json!({
+        "operation": "content.set",
+        "payloadDigest": "digest-future",
+        "phase": "queued_by_newer_cli",
+        "terminalResponse": null,
+        "futureCorrelationField": { "keep": true }
+    });
+    let unreadable_correlation = json!({
+        "operation": "content.clear",
+        "phase": "sent",
+        "unknownPayload": { "keep": true }
+    });
+    fs::write(
+        temp.path().join("controller-state.json"),
+        serde_json::to_vec_pretty(&json!({
+            "version": 2,
+            "controllerInstanceId": "ctl_future_state",
+            "futureStateField": { "keep": true },
+            "scopes": {
+                scope_id: {
+                    "clientCursor": 4,
+                    "projectedCursor": 4,
+                    "firstRetainedSequence": 1,
+                    "lastRetainedSequence": 3,
+                    "records": [current_content],
+                    "gap": null,
+                    "synchronized": true,
+                    "synchronizationCutoff": "cutoff-future"
+                }
+            },
+            "acknowledgementOutbox": [],
+            "unresolved": {
+                "rq_future": correlation,
+                "rq_unreadable": unreadable_correlation
+            },
+            "resumeMetadata": {}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let read = native_cli_read(&temp, scope_id);
+    assert_eq!(read["ok"], true);
+    assert_eq!(
+        read["result"]["currentContentRecord"]["payload"]["contentId"],
+        "future-content"
+    );
+    assert!(read["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|warning| warning == "saved_state_version_unrecognized"));
+    assert!(read["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|warning| warning == "saved_state_correlation_phase_unrecognized"));
+    assert!(read["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|warning| warning == "saved_state_correlation_unreadable"));
+
+    let mut list_wire = FakeWire::ordinary();
+    let listing =
+        execute_with_wire(invocation(&temp, Command::List, json!({})), &mut list_wire).unwrap();
+    assert!(listing.ok);
+    assert!(list_wire.operations.contains(&"surfaces.list".into()));
+
+    let mut wire = FakeWire::ordinary();
+    wire.resolutions = vec![json!({
+        "outcome": "still_pending",
+        "requestId": "rq_future"
+    })];
+    let error = execute_with_wire(
+        invocation(
+            &temp,
+            Command::Clear,
+            json!({ "surfaceId": "sf_future", "paneId": 1, "expectedRevision": 3 }),
+        ),
+        &mut wire,
+    )
+    .unwrap_err();
+    assert!(matches!(error, CliError::StillPending));
+    assert!(!wire.operations.contains(&"content.clear".into()));
+
+    let persisted: Value = serde_json::from_slice(
+        &fs::read(temp.path().join("controller-state.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(persisted["version"], 2);
+    assert_eq!(persisted["futureStateField"]["keep"], true);
+    assert_eq!(
+        persisted["unresolved"]["rq_future"]["phase"],
+        "queued_by_newer_cli"
+    );
+    assert_eq!(
+        persisted["unresolved"]["rq_future"]["futureCorrelationField"]["keep"],
+        true
+    );
+    assert_eq!(persisted["unresolved"]["rq_unreadable"], unreadable_correlation);
+}
+
+#[test]
 fn current_content_survives_acknowledgement_scroll_only_resume_and_process_restart() {
     let temp = TempDir::new().unwrap();
     let scope_id = "pane:sf_1:1";

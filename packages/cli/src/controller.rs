@@ -30,6 +30,8 @@ pub struct CliOutput {
     pub controller_instance_id: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub reconciliations: Vec<Value>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
     pub result: Value,
 }
 
@@ -274,6 +276,7 @@ fn execute_window_describe(invocation: &Invocation) -> Result<CliOutput, CliErro
         command: crate::command::Command::WindowDescribe.name().into(),
         controller_instance_id: None,
         reconciliations: vec![],
+        warnings: vec![],
         result: json!({
             "windowLabel": window_label,
             "identitySemantics": "consistency_only_not_authentication",
@@ -1446,6 +1449,7 @@ fn execute_fleet_list_with_wire(wire: &mut dyn DirectWire) -> Result<CliOutput, 
         command: crate::command::Command::FleetList.name().into(),
         controller_instance_id: None,
         reconciliations: vec![],
+        warnings: vec![],
         result,
     })
 }
@@ -1647,11 +1651,7 @@ fn execute_locked(
         .ok_or_else(|| CliError::Protocol("invalid_pair_receipt_resolutions".into()))?;
     let mut reconciliations = resolve_uncertain(root, wire, resolutions)?;
 
-    let has_pending = root
-        .state()
-        .unresolved
-        .values()
-        .any(|correlation| correlation.phase != CorrelationPhase::ReceiptPersisted);
+    let has_pending = root.has_unresolved_mutation_guard();
     if has_pending && invocation.command.is_mutation() {
         mark_all_unsynchronized(root)?;
         let _ = wire.close();
@@ -1750,6 +1750,7 @@ fn execute_locked(
         command: invocation.command.name().into(),
         controller_instance_id: Some(controller_id),
         reconciliations,
+        warnings: root.warnings().to_vec(),
         result,
     })
 }
@@ -1919,6 +1920,7 @@ fn execute_local(invocation: Invocation) -> Result<CliOutput, CliError> {
         command: invocation.command.name().into(),
         controller_instance_id: Some(controller_id),
         reconciliations: vec![],
+        warnings: root.warnings().to_vec(),
         result,
     })
 }
@@ -2381,6 +2383,9 @@ fn flush_acknowledgements(
     eligible_scopes: &[Value],
 ) -> Result<(), CliError> {
     for intent in root.state().acknowledgement_outbox.clone() {
+        if root.acknowledgement_is_guarded(&intent.scope_id) {
+            continue;
+        }
         // A pair summary may identify an owned scope, but only a pre-existing
         // durable intent plus an accepted explicit ACK advances its cursor.
         if !eligible_scopes.iter().any(|scope| {

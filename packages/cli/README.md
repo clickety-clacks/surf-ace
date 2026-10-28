@@ -104,6 +104,10 @@ The existing public command set is `fleet-list`, `window-describe`, `list`,
 `target-register`, and `target-apply`. Each command accepts one JSON object via
 `--input-json` or standard input and writes exactly one JSON result to standard
 output. `read` is strictly local and rejects `--endpoint`.
+Successful stateful results may include warning codes when some saved state
+cannot be read. Readable scopes remain available; unreadable rows are retained,
+unresolved operations continue to guard mutations, and unreadable acknowledgement
+intents are not sent.
 Every successful `capture-pane` call includes its PNG screenshot; the command
 has no option to suppress it.
 
