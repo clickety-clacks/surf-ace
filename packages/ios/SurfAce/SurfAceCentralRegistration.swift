@@ -1108,7 +1108,8 @@ enum SurfAceRegistrationWire {
         if let identity, let expectedIdentity, identity != expectedIdentity {
             warnings.append("registration_registry_identity_changed")
         }
-        if payload.clientIdWasMalformed || payload.clientId == nil {
+        if payload.clientIdWasMalformed
+            || payload.clientId?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
             warnings.append("registration_client_identity_missing_or_unrecognized")
         } else if payload.clientId != clientId {
             warnings.append("registration_client_identity_mismatch")
@@ -1987,6 +1988,10 @@ final class SurfAceCentralRegistration {
     ) async throws -> Bool {
         for warning in reply.warnings { onWarning(warning) }
         guard !reply.discarded else { return true }
+        if let replyIdentity = reply.registryIdentity, replyIdentity != input.registryIdentity {
+            onWarning("registration_reply_identity_not_bound; claims_left_unapplied")
+            return true
+        }
         if let applyReplySubset {
             return try await applyReplySubset(reply, input, request) || reply.needsRetry
         } else if let applyReply {
@@ -2006,6 +2011,7 @@ final class SurfAceCentralRegistration {
 
         let failures = FailureCollector()
         var selectedRegistrationFailed = false
+        let previousSelected = selected
 
         // A healthy selected route is the steady-state path. Reuse its socket
         // and avoid a Bonjour scan and identity connections to other addresses
@@ -2038,6 +2044,8 @@ final class SurfAceCentralRegistration {
                 return
             } catch {
                 if stopped { throw SurfAceRegistrationError.stopped }
+                selected.transport.close()
+                self.selected = nil
                 failures.values.append(reportFailure(
                     phase: "reconnect",
                     endpoint: selected.url,
@@ -2060,16 +2068,16 @@ final class SurfAceCentralRegistration {
 
         let routeURLs = candidateURLs(discovered: discovered)
         var scanURLs = routeURLs
-        if let selected, !scanURLs.contains(where: { $0.0 == selected.url }) {
-            scanURLs.append((selected.url, "reconnect"))
+        if let previousSelected, !scanURLs.contains(where: { $0.0 == previousSelected.url }) {
+            scanURLs.append((previousSelected.url, "reconnect"))
         }
         var candidates: [Candidate] = []
         var seen = Set<String>()
         for (url, phase) in scanURLs where (url.scheme == "ws" || url.scheme == "wss") {
             guard seen.insert(url.absoluteString).inserted else { continue }
             let transport: any SurfAceRegistrationTransport
-            if let selected, selected.url == url {
-                transport = selected.transport
+            if let active = self.selected, active.url == url {
+                transport = active.transport
             } else {
                 transport = makeTransport(url)
             }
@@ -2242,11 +2250,17 @@ final class SurfAceCentralRegistration {
                 let reply = try await transport.register(
                     clientId: clientId, input: request, expectedIdentity: currentIdentity
                 )
-                if let replyIdentity = reply.registryIdentity, replyIdentity != currentIdentity {
+                if let replyIdentity = reply.registryIdentity, replyIdentity != current.registryIdentity {
                     onWarning("registration_registry_identity_changed; rebinding and retrying")
-                    try await bindRegistry(replyIdentity, try await snapshot())
+                    try await bindCandidateRegistry(replyIdentity)
+                    let reboundInput = try await currentInputSnapshot()
+                    guard reboundInput.registryIdentity == replyIdentity else {
+                        onWarning("registration_binding_not_persisted; claims_left_unapplied")
+                        current = reboundInput
+                        continue
+                    }
                     currentIdentity = replyIdentity
-                    current = try await currentInputSnapshot()
+                    current = reboundInput
                     continue
                 }
                 if !reply.discarded, currentIdentity != nil,
@@ -2313,10 +2327,16 @@ final class SurfAceCentralRegistration {
         request: SurfAceRegistrationInput,
         identity: SurfAceRegistryIdentity?
     ) async throws -> RecoveryResult {
-        if let replyIdentity = reply.registryIdentity, replyIdentity != identity {
+        if let replyIdentity = reply.registryIdentity,
+           replyIdentity != identity || replyIdentity != input.registryIdentity {
             onWarning("registration_registry_identity_changed; rebinding and retrying")
-            try await bindRegistry(replyIdentity, try await snapshot())
-            return .rebind(replyIdentity, try await currentInputSnapshot())
+            try await bindCandidateRegistry(replyIdentity)
+            let reboundInput = try await currentInputSnapshot()
+            guard reboundInput.registryIdentity == replyIdentity else {
+                onWarning("registration_binding_not_persisted; claims_left_unapplied")
+                return .retry(reboundInput)
+            }
+            return .rebind(replyIdentity, reboundInput)
         }
         if try await applyRegistrationReply(reply, input: input, request: request) {
             return .retry(try await currentInputSnapshot())
