@@ -309,6 +309,24 @@ export async function verifyTightbeamSkillAsset(sourceDir, outputDir) {
   return { filename: TIGHTBEAM_SKILL_ASSET, sha256: await sha256(output) };
 }
 
+export function verifyTightbeamOperatingSkillManifest(manifest) {
+  const asset = Array.isArray(manifest?.assets)
+    ? manifest.assets.find(({ name }) => name === TIGHTBEAM_SKILL_ASSET)
+    : null;
+  const operatingSkill = manifest?.operatingSkill;
+  if (!asset ||
+      operatingSkill?.asset !== TIGHTBEAM_SKILL_ASSET ||
+      operatingSkill?.clientPlatforms?.join(",") !== "desktop,cli,ios" ||
+      operatingSkill?.publication !== "github-release-asset" ||
+      operatingSkill?.sha256 !== asset.sha256 ||
+      operatingSkill?.sha256 !== manifest.checksums?.[TIGHTBEAM_SKILL_ASSET] ||
+      operatingSkill?.sourcePath !== TIGHTBEAM_SKILL_SOURCE ||
+      operatingSkill?.version !== manifest.version) {
+    throw new Error("tightbeam_operating_skill_manifest_mismatch");
+  }
+  return operatingSkill;
+}
+
 export async function verifyTightbeamSkillDescribesCli(binaryPath, skillSourceDir = toolingRoot) {
   let help;
   try {
@@ -455,6 +473,8 @@ export async function writeTightbeamManifest({
     if (!info.isFile() || info.size === 0) throw new Error(`tightbeam_asset_missing_or_empty:${name}`);
     assetDetails.push({ name, sha256: await sha256(file), sizeBytes: info.size });
   }
+  const skillAsset = assetDetails.find(({ name }) => name === TIGHTBEAM_SKILL_ASSET);
+  if (!skillAsset) throw new Error("tightbeam_skill_asset_missing_from_manifest");
   const nodeDependencies = await workspaceProductionInventory(path.join(source, "pnpm-lock.yaml"), "packages/electron");
   const cargoDependencies = await cargoLockedPackages(path.join(source, "packages/cli/Cargo.lock"));
   const windowLabelMigrationPath = "schemas/allocator/005_window_label_reuse.sql";
@@ -480,6 +500,14 @@ export async function writeTightbeamManifest({
     lockfiles: {
       cargoSha256: await sha256(path.join(source, "packages/cli/Cargo.lock")),
       pnpmSha256: await sha256(path.join(source, "pnpm-lock.yaml")),
+    },
+    operatingSkill: {
+      asset: skillAsset.name,
+      clientPlatforms: ["desktop", "cli", "ios"],
+      publication: "github-release-asset",
+      sha256: skillAsset.sha256,
+      sourcePath: TIGHTBEAM_SKILL_SOURCE,
+      version: TIGHTBEAM.version,
     },
     source: { commit: TIGHTBEAM.candidateCommit, tag: TIGHTBEAM.sourceTag },
     ...(assetNames.includes(TIGHTBEAM.assets[0]) ? { serverPackage: {

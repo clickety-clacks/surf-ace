@@ -1837,16 +1837,19 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
       - name: Verify source identity and the final manifest and SHA256SUMS
+        id: verify-release-manifest
         run: |
           set -euo pipefail
           test "$(git -C tooling rev-parse HEAD)" = "${GITHUB_SHA}"
           node --input-type=module <<'NODE'
           import fs from "node:fs/promises";
           import { createHash } from "node:crypto";
-          import { TIGHTBEAM, tightbeamComponentsForAssets } from "./tooling/scripts/release/tightbeam-release-config.mjs";
+          import { TIGHTBEAM, TIGHTBEAM_SKILL_ASSET, tightbeamComponentsForAssets } from "./tooling/scripts/release/tightbeam-release-config.mjs";
+          import { verifyTightbeamOperatingSkillManifest } from "./tooling/scripts/release/build-tightbeam-release.mjs";
           import { verifyTightbeamChecksums } from "./tooling/scripts/release/smoke-tightbeam-release.mjs";
           const manifestPath = `release/${TIGHTBEAM.manifest}`;
           const manifest = JSON.parse(await fs.readFile(manifestPath, "utf8"));
+          const operatingSkill = verifyTightbeamOperatingSkillManifest(manifest);
           const components = tightbeamComponentsForAssets(manifest.assets?.map(({ name }) => name));
           if (JSON.stringify(components) !== JSON.stringify(manifest.components) ||
               JSON.stringify(components) !== JSON.stringify(process.env.COMPONENTS.split(",")) ||
@@ -1865,6 +1868,11 @@ jobs:
               throw new Error(`release_candidate_asset_digest_or_size_mismatch:${asset.name}`);
             }
           }
+          await fs.appendFile(process.env.GITHUB_OUTPUT, [
+            `ios_skill_asset=${TIGHTBEAM_SKILL_ASSET}`,
+            `ios_skill_version=${operatingSkill.version}`,
+            `ios_skill_sha256=${operatingSkill.sha256}`,
+          ].join("\n") + "\n");
           NODE
       - name: Create Linux smoke receipt
         id: create-linux-receipt
@@ -1935,6 +1943,9 @@ jobs:
           MACOS_RECEIPT_OUTCOME: ${{ steps.verify-macos-receipt.outcome }}
           LINUX_ATTESTATION_OUTCOME: ${{ steps.attest-linux.outcome }}
           MACOS_ATTESTATION_OUTCOME: ${{ steps.attest-macos.outcome }}
+          IOS_SKILL_ASSET: ${{ steps.verify-release-manifest.outputs.ios_skill_asset }}
+          IOS_SKILL_VERSION: ${{ steps.verify-release-manifest.outputs.ios_skill_version }}
+          IOS_SKILL_SHA256: ${{ steps.verify-release-manifest.outputs.ios_skill_sha256 }}
         run: |
           set -euo pipefail
           release_channel_args=()
@@ -1949,6 +1960,7 @@ jobs:
           macOS: ${MACOS_STATUS}
           Shared skill asset: ${SKILL_STATUS}
           iOS app: not included in this release. The iOS XCTest lanes were build-a=${IOS_TEST_BUILD_A:-unavailable} and build-b=${IOS_TEST_BUILD_B:-unavailable} (${IOS_TEST_STATE:-unavailable}).
+          iOS agent skill: ${IOS_SKILL_ASSET} (version ${IOS_SKILL_VERSION}, SHA-256 ${IOS_SKILL_SHA256}); published with this release for agents operating Surf Ace clients.
 
           The informational six-file comparison state was ${SIX_FILE_COMPARE_STATE:-unavailable}; per-platform comparisons determine asset eligibility.
           EOF

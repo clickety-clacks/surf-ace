@@ -41,6 +41,7 @@ import {
   TIGHTBEAM_LINUX_RUNTIME_FILES,
   copyTightbeamSkillAsset,
   verifyTightbeamSkillAsset,
+  verifyTightbeamOperatingSkillManifest,
   verifyTightbeamSkillDescribesCli,
   verifyStandaloneElectronSource,
   writeTightbeamManifest,
@@ -1402,7 +1403,25 @@ test("Tightbeam manifest assembles the six hosted assets including the exact ski
     sizeBytes: migrationBytes.length,
   }]);
   const skillRecord = manifest.assets.find(({ name }) => name === TIGHTBEAM_SKILL_ASSET);
-  assert.equal(skillRecord.sha256, createHash("sha256").update(toolingSkillBytes).digest("hex"));
+  const skillDigest = createHash("sha256").update(toolingSkillBytes).digest("hex");
+  assert.equal(skillRecord.sha256, skillDigest);
+  assert.deepEqual(manifest.operatingSkill, {
+    asset: TIGHTBEAM_SKILL_ASSET,
+    clientPlatforms: ["desktop", "cli", "ios"],
+    publication: "github-release-asset",
+    sha256: skillDigest,
+    sourcePath: "integrations/tightbeam/skills/surf-ace/SKILL.md",
+    version: manifest.version,
+  });
+  assert.deepEqual(verifyTightbeamOperatingSkillManifest(manifest), manifest.operatingSkill);
+  assert.throws(() => verifyTightbeamOperatingSkillManifest({
+    ...manifest,
+    operatingSkill: { ...manifest.operatingSkill, sha256: "0".repeat(64) },
+  }), /tightbeam_operating_skill_manifest_mismatch/);
+  assert.throws(() => verifyTightbeamOperatingSkillManifest({
+    ...manifest,
+    operatingSkill: { ...manifest.operatingSkill, clientPlatforms: ["desktop", "cli"] },
+  }), /tightbeam_operating_skill_manifest_mismatch/);
   assert.deepEqual(await fs.readFile(path.join(outputDir, TIGHTBEAM_SKILL_ASSET)), toolingSkillBytes);
   assert.equal(Object.hasOwn(manifest, "iosSigning"), false);
   assert.deepEqual((await verifyTightbeamChecksums(result.manifestPath)).files,
@@ -1456,6 +1475,9 @@ test("each single-platform manifest includes and hashes the shared skill asset",
       assert.deepEqual(result.files, [...manifestAssets, TIGHTBEAM.manifest, TIGHTBEAM.checksums]);
       const skillRecord = manifest.assets.find(({ name }) => name === TIGHTBEAM_SKILL_ASSET);
       assert.equal(skillRecord.sha256, createHash("sha256").update(toolingSkillBytes).digest("hex"));
+      assert.deepEqual(verifyTightbeamOperatingSkillManifest(manifest), manifest.operatingSkill);
+      assert.deepEqual(manifest.operatingSkill.clientPlatforms, ["desktop", "cli", "ios"]);
+      assert.equal(manifest.operatingSkill.version, manifest.version);
       assert.deepEqual((await verifyTightbeamChecksums(result.manifestPath)).files,
         [...manifestAssets, TIGHTBEAM.manifest].sort());
       assert.deepEqual((await fs.readdir(outputDir)).sort(), [...result.files].sort());
@@ -3088,6 +3110,9 @@ test("stable v0.2.8 documentation stays historical and release gates bind the se
   assert.match(publishJob, /needs\.assemble\.outputs\.has_linux == 'true'/);
   assert.match(publishJob, /needs\.assemble\.outputs\.has_macos == 'true'/);
   assert.match(publishJob, /if:\s*>-\s*\n\s*\$\{\{\s*always\(\)\s*&&/);
+  assert.match(publishJob, /verifyTightbeamOperatingSkillManifest\(manifest\)/);
+  assert.match(publishJob, /IOS_SKILL_SHA256/);
+  assert.match(publishJob, /iOS agent skill:/);
   assert.match(publishJob, /The iOS app is withheld because the complete iOS XCTest result was/);
   assert.match(publishJob, /The tooling tag version label differs from the product tag version label/);
   assert.match(publishJob, /release_assets\+=\("release\/\$\{name\}"\)/);
