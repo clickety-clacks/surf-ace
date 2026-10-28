@@ -74,6 +74,8 @@
 		EA2E76A17200000000000002 /* SurfAceCentralRegistration.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA2E76A17200000000000001 /* SurfAceCentralRegistration.swift */; };
 		EA2E76A17200000000000003 /* SurfAceCentralRegistration.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA2E76A17200000000000001 /* SurfAceCentralRegistration.swift */; };
 		EA2E76A17200000000000005 /* SurfAceCentralRegistrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA2E76A17200000000000004 /* SurfAceCentralRegistrationTests.swift */; };
+		2B7B87C2B74641C5BE219811 /* SurfAceDirectEndpoint.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1B92CEB203645C3A837E9DD /* SurfAceDirectEndpoint.swift */; };
+		489926F08B8F437F8B1DC658 /* SurfAceDirectEndpoint.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1B92CEB203645C3A837E9DD /* SurfAceDirectEndpoint.swift */; };
 		E5CF003991B7000000000002 /* SurfAceCentralDiscoveryLifecycle.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5CF003991B7000000000001 /* SurfAceCentralDiscoveryLifecycle.swift */; };
 		E5CF003991B7000000000003 /* SurfAceCentralDiscoveryLifecycle.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5CF003991B7000000000001 /* SurfAceCentralDiscoveryLifecycle.swift */; };
 /* End PBXBuildFile section */
@@ -138,6 +140,7 @@
 		EA2E76A17200000000000001 /* SurfAceCentralRegistration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceCentralRegistration.swift; sourceTree = "<group>"; };
 		EA2E76A17200000000000004 /* SurfAceCentralRegistrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceCentralRegistrationTests.swift; sourceTree = "<group>"; };
 		E5CF003991B7000000000001 /* SurfAceCentralDiscoveryLifecycle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceCentralDiscoveryLifecycle.swift; sourceTree = "<group>"; };
+		B1B92CEB203645C3A837E9DD /* SurfAceDirectEndpoint.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceDirectEndpoint.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -174,6 +177,7 @@
 				AAE8EE944BF4E02E52D2FF6A /* SurfAceHTTPServer.swift */,
 				314635F00EEBB824B28F7975 /* SurfAceIdentityStore.swift */,
 				EA2E76A17200000000000001 /* SurfAceCentralRegistration.swift */,
+				B1B92CEB203645C3A837E9DD /* SurfAceDirectEndpoint.swift */,
 				E5CF003991B7000000000001 /* SurfAceCentralDiscoveryLifecycle.swift */,
 				B5609886F75FAB71C041A10D /* SurfAceLocklessAuthority.swift */,
 				A2080FB152251AC9629AEB21 /* SurfAceLocklessConsumableOperations.swift */,
@@ -461,6 +465,7 @@
 				3B4E416E4A2D67F538AE5933 /* SurfAceHTTPServer.swift in Sources */,
 				69E4A6C95D32B537DECECA46 /* SurfAceIdentityStore.swift in Sources */,
 				EA2E76A17200000000000002 /* SurfAceCentralRegistration.swift in Sources */,
+				2B7B87C2B74641C5BE219811 /* SurfAceDirectEndpoint.swift in Sources */,
 				E5CF003991B7000000000002 /* SurfAceCentralDiscoveryLifecycle.swift in Sources */,
 				171C713C4D716E94543EF082 /* SurfAceLocklessAuthority.swift in Sources */,
 				2890A01F42CD06AA9A198372 /* SurfAceLocklessConsumableOperations.swift in Sources */,
@@ -487,6 +492,7 @@
 				E2B2E9631F0835BD39E2B839 /* SurfAceHTTPServer.swift in Sources */,
 				D615F803FC49278657471A62 /* SurfAceIdentityStore.swift in Sources */,
 				EA2E76A17200000000000003 /* SurfAceCentralRegistration.swift in Sources */,
+				489926F08B8F437F8B1DC658 /* SurfAceDirectEndpoint.swift in Sources */,
 				E5CF003991B7000000000003 /* SurfAceCentralDiscoveryLifecycle.swift in Sources */,
 				E884F344902AAA152AAEB5CF /* SurfAceLocklessAuthority.swift in Sources */,
 				4A0DCC90F47C261706FA946E /* SurfAceLocklessConsumableOperations.swift in Sources */,
