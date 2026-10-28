@@ -1437,8 +1437,10 @@ test("each single-platform manifest includes and hashes the shared skill asset",
       await fs.mkdir(path.dirname(toolingSkillPath), { recursive: true });
       await fs.writeFile(toolingSkillPath, toolingSkillBytes);
       const selectedAssets = TIGHTBEAM_PLATFORM_ASSETS[component];
+      const manifestAssets = TIGHTBEAM.assets.filter((name) =>
+        selectedAssets.includes(name) || name === TIGHTBEAM_SKILL_ASSET);
       for (const name of selectedAssets) {
-        if (name !== TIGHTBEAM_SKILL_ASSET) await fs.writeFile(path.join(outputDir, name), `fixture:${name}\n`);
+        await fs.writeFile(path.join(outputDir, name), `fixture:${name}\n`);
       }
       await copyTightbeamSkillAsset(toolingSkillDir, outputDir);
       const result = await writeTightbeamManifest({
@@ -1450,12 +1452,12 @@ test("each single-platform manifest includes and hashes the shared skill asset",
       });
       const manifest = JSON.parse(await fs.readFile(result.manifestPath, "utf8"));
       assert.deepEqual(manifest.components, [component, "skill"]);
-      assert.deepEqual(manifest.assets.map(({ name }) => name), TIGHTBEAM.assets.filter((name) => selectedAssets.includes(name)));
-      assert.deepEqual(result.files, [...selectedAssets, TIGHTBEAM.manifest, TIGHTBEAM.checksums]);
+      assert.deepEqual(manifest.assets.map(({ name }) => name), manifestAssets);
+      assert.deepEqual(result.files, [...manifestAssets, TIGHTBEAM.manifest, TIGHTBEAM.checksums]);
       const skillRecord = manifest.assets.find(({ name }) => name === TIGHTBEAM_SKILL_ASSET);
       assert.equal(skillRecord.sha256, createHash("sha256").update(toolingSkillBytes).digest("hex"));
       assert.deepEqual((await verifyTightbeamChecksums(result.manifestPath)).files,
-        [...selectedAssets, TIGHTBEAM.manifest].sort());
+        [...manifestAssets, TIGHTBEAM.manifest].sort());
       assert.deepEqual((await fs.readdir(outputDir)).sort(), [...result.files].sort());
       assert.equal(Object.hasOwn(manifest, "serverPackage"), component === "linux");
     });

@@ -56,8 +56,8 @@ export const TIGHTBEAM_PUBLIC_FILES = Object.freeze([
 ]);
 
 export const TIGHTBEAM_PLATFORM_ASSETS = Object.freeze({
-  linux: Object.freeze([...TIGHTBEAM.assets.slice(0, 3), TIGHTBEAM_SKILL_ASSET]),
-  macos: Object.freeze([...TIGHTBEAM.assets.slice(3, 5), TIGHTBEAM_SKILL_ASSET]),
+  linux: Object.freeze(TIGHTBEAM.assets.slice(0, 3)),
+  macos: Object.freeze(TIGHTBEAM.assets.slice(3, 5)),
   skill: Object.freeze([TIGHTBEAM_SKILL_ASSET]),
 });
 
@@ -67,7 +67,9 @@ export function tightbeamAssetsForComponents(components) {
       components.some((component) => !Object.hasOwn(TIGHTBEAM_PLATFORM_ASSETS, component))) {
     throw new Error("tightbeam_release_components_invalid");
   }
-  const included = new Set(components.flatMap((component) => TIGHTBEAM_PLATFORM_ASSETS[component]));
+  const selected = new Set(components);
+  if ([...selected].some((component) => component !== "skill")) selected.add("skill");
+  const included = new Set([...selected].flatMap((component) => TIGHTBEAM_PLATFORM_ASSETS[component]));
   return TIGHTBEAM.assets.filter((name) => included.has(name));
 }
 
