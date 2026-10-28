@@ -287,6 +287,8 @@ struct SurfAceWindowReleaseRequest: Codable, Equatable, Sendable {
 struct SurfAceRegistrationInput: Equatable, Sendable {
     let clientId: String?
     let registryIdentity: SurfAceRegistryIdentity?
+    let directEndpoint: String?
+    let directEndpointConfirmed: Bool
     let surfaces: [SurfAceRegistrationSurface]
     let pendingPaneReleases: [SurfAcePaneReleaseRequest]
     let pendingWindowReleases: [SurfAceWindowReleaseRequest]
@@ -295,6 +297,8 @@ struct SurfAceRegistrationInput: Equatable, Sendable {
     init(
         clientId: String? = nil,
         registryIdentity: SurfAceRegistryIdentity? = nil,
+        directEndpoint: String? = nil,
+        directEndpointConfirmed: Bool = false,
         surfaces: [SurfAceRegistrationSurface],
         pendingPaneReleases: [SurfAcePaneReleaseRequest],
         pendingWindowReleases: [SurfAceWindowReleaseRequest],
@@ -302,18 +306,28 @@ struct SurfAceRegistrationInput: Equatable, Sendable {
     ) {
         self.clientId = clientId
         self.registryIdentity = registryIdentity
+        self.directEndpoint = directEndpoint
+        self.directEndpointConfirmed = directEndpointConfirmed
         self.surfaces = surfaces
         self.pendingPaneReleases = pendingPaneReleases
         self.pendingWindowReleases = pendingWindowReleases
         self.warnings = warnings
     }
 
-    init(state: SurfAceLocklessAuthorityState, clientId: String? = nil) throws {
+    init(
+        state: SurfAceLocklessAuthorityState,
+        clientId: String? = nil,
+        directEndpoint: String? = nil,
+        directEndpointConfirmed: Bool = false,
+        additionalWarnings: [String] = []
+    ) throws {
         let currentClientId = clientId ?? state.registryBinding?.clientId
         let binding = state.registryBinding.flatMap { $0.clientId == currentClientId ? $0 : nil }
         let identity = binding.map { SurfAceRegistryIdentity(allocatorId: $0.allocatorId, fleetId: $0.fleetId) }
         self.clientId = currentClientId
         registryIdentity = identity
+        self.directEndpoint = directEndpoint
+        self.directEndpointConfirmed = directEndpointConfirmed
         surfaces = SurfAceRegistrationSurface.snapshot(state).map { surface in
             guard binding != nil,
                   state.liveSurfaces[surface.surfaceId]?.windowLabelConfirmed != false else {
@@ -328,7 +342,7 @@ struct SurfAceRegistrationInput: Equatable, Sendable {
         }
         var panes: [SurfAcePaneReleaseRequest] = []
         var windows: [SurfAceWindowReleaseRequest] = []
-        var warnings: [String] = []
+        var warnings = additionalWarnings
         for intent in (state.allocationReleaseIntents ?? []).filter({ $0.status == .pending }) {
             guard let binding,
                   let intentClientId = intent.clientId,
@@ -414,6 +428,8 @@ struct SurfAceRegistrationInput: Equatable, Sendable {
         Self(
             clientId: clientId,
             registryIdentity: registryIdentity,
+            directEndpoint: directEndpoint,
+            directEndpointConfirmed: directEndpointConfirmed,
             surfaces: surfaces ?? self.surfaces,
             pendingPaneReleases: pendingPaneReleases ?? self.pendingPaneReleases,
             pendingWindowReleases: pendingWindowReleases ?? self.pendingWindowReleases,
@@ -451,6 +467,7 @@ struct SurfAceEndpointLease: Decodable, Equatable, Sendable {
 
 struct SurfAceRegistrationProjection: Equatable, Sendable {
     let directEndpoint: String?
+    let directEndpointConfirmed: Bool?
     let prePairDescribeV1: Bool
     let allocationGenerationV1: Bool
     let endpointLease: SurfAceEndpointLease?
@@ -460,6 +477,7 @@ struct SurfAceRegistrationProjection: Equatable, Sendable {
 
     init(
         directEndpoint: String?,
+        directEndpointConfirmed: Bool? = nil,
         prePairDescribeV1: Bool,
         allocationGenerationV1: Bool,
         endpointLease: SurfAceEndpointLease?,
@@ -468,6 +486,7 @@ struct SurfAceRegistrationProjection: Equatable, Sendable {
         windowGenerationV1: Bool = false
     ) {
         self.directEndpoint = directEndpoint
+        self.directEndpointConfirmed = directEndpointConfirmed
         self.prePairDescribeV1 = prePairDescribeV1
         self.allocationGenerationV1 = allocationGenerationV1
         self.endpointLease = endpointLease
@@ -844,6 +863,9 @@ enum SurfAceRegistrationWire {
         let clientId: String
         let allocationGenerationV1: Bool
         let windowGenerationV1: Bool
+        let directEndpoint: String?
+        let directEndpointConfirmed: Bool?
+        let prePairDescribeV1: Bool?
         let pendingPaneReleases: [SurfAcePaneReleaseRequest]
         let pendingWindowReleases: [SurfAceWindowReleaseRequest]
         let surfaces: [SurfAceRegistrationSurface]
@@ -870,6 +892,8 @@ enum SurfAceRegistrationWire {
             let discardedSurfaceCount: Int
             let directEndpoint: String?
             let directEndpointWasMalformed: Bool
+            let directEndpointConfirmed: Bool?
+            let directEndpointConfirmedWasMalformed: Bool
             let prePairDescribeV1: Bool?
             let prePairDescribeV1WasMalformed: Bool
             let allocationGenerationV1: Bool?
@@ -886,7 +910,7 @@ enum SurfAceRegistrationWire {
             let discardedWindowReleaseIdCount: Int
 
             private enum CodingKeys: String, CodingKey {
-                case clientId, registryIdentity, surfaces, directEndpoint, prePairDescribeV1
+                case clientId, registryIdentity, surfaces, directEndpoint, directEndpointConfirmed, prePairDescribeV1
                 case allocationGenerationV1, windowGenerationV1, endpointLease
                 case completedPaneReleaseIds, completedWindowReleaseIds
             }
@@ -926,6 +950,11 @@ enum SurfAceRegistrationWire {
                 let endpoint = decodeTolerantly(String.self, from: container, forKey: .directEndpoint)
                 directEndpoint = endpoint.value
                 directEndpointWasMalformed = endpoint.malformed
+                let endpointConfirmed = decodeTolerantly(
+                    Bool.self, from: container, forKey: .directEndpointConfirmed
+                )
+                directEndpointConfirmed = endpointConfirmed.value
+                directEndpointConfirmedWasMalformed = endpointConfirmed.malformed
                 let prePair = decodeTolerantly(Bool.self, from: container, forKey: .prePairDescribeV1)
                 prePairDescribeV1 = prePair.value
                 prePairDescribeV1WasMalformed = prePair.malformed
@@ -984,6 +1013,7 @@ enum SurfAceRegistrationWire {
     static func requestData(clientId: String, surfaces: [SurfAceRegistrationSurface], id: String) throws -> Data {
         try JSONEncoder().encode(Request(id: id, payload: Payload(
             clientId: clientId, allocationGenerationV1: false, windowGenerationV1: false,
+            directEndpoint: nil, directEndpointConfirmed: nil, prePairDescribeV1: nil,
             pendingPaneReleases: [], pendingWindowReleases: [], surfaces: surfaces
         )))
     }
@@ -991,6 +1021,9 @@ enum SurfAceRegistrationWire {
     static func requestData(clientId: String, input: SurfAceRegistrationInput, id: String) throws -> Data {
         try JSONEncoder().encode(Request(id: id, payload: Payload(
             clientId: clientId, allocationGenerationV1: true, windowGenerationV1: true,
+            directEndpoint: input.directEndpoint,
+            directEndpointConfirmed: input.directEndpoint == nil ? nil : input.directEndpointConfirmed,
+            prePairDescribeV1: false,
             pendingPaneReleases: input.pendingPaneReleases,
             pendingWindowReleases: input.pendingWindowReleases,
             surfaces: input.surfaces
@@ -1081,6 +1114,7 @@ enum SurfAceRegistrationWire {
         surfaces: [SurfAceRegistrationSurface],
         expectedIdentity: SurfAceRegistryIdentity?,
         expectedDirectEndpoint: String? = nil,
+        expectedDirectEndpointConfirmed: Bool = false,
         expectedPrePairDescribeV1: Bool = false,
         expectedAllocationGenerationV1: Bool = false,
         expectedWindowGenerationV1: Bool = false,
@@ -1234,13 +1268,15 @@ enum SurfAceRegistrationWire {
         let allocationGenerationV1 = payload.allocationGenerationV1 ?? false
         let endpointLease = payload.endpointLease
         if payload.directEndpointWasMalformed { warnings.append("registration_endpoint_unrecognized") }
+        if payload.directEndpointConfirmedWasMalformed {
+            warnings.append("registration_endpoint_confirmation_unrecognized")
+        }
         if payload.prePairDescribeV1WasMalformed { warnings.append("registration_pre_pair_capability_unrecognized") }
         if payload.endpointLeaseWasMalformed { warnings.append("registration_endpoint_lease_unrecognized") }
-        if directEndpoint != expectedDirectEndpoint || prePairDescribeV1 != expectedPrePairDescribeV1 {
+        if directEndpoint != expectedDirectEndpoint
+            || prePairDescribeV1 != expectedPrePairDescribeV1
+            || payload.directEndpointConfirmed.map({ $0 != expectedDirectEndpointConfirmed }) == true {
             warnings.append("registration_endpoint_capability_mismatch")
-        }
-        if (endpointLease != nil) != (expectedDirectEndpoint != nil && expectedPrePairDescribeV1) {
-            warnings.append("registration_endpoint_lease_missing_or_unexpected")
         }
         if expectedDirectEndpoint.map(isSupportedDirectEndpoint) == false {
             warnings.append("registration_expected_endpoint_unrecognized")
@@ -1249,14 +1285,26 @@ enum SurfAceRegistrationWire {
             warnings.append("registration_endpoint_unrecognized")
         }
         if let endpointLease, !endpointLease.isValid { warnings.append("registration_endpoint_lease_invalid") }
-        let endpointMatchesRequest = directEndpoint == expectedDirectEndpoint
-            && prePairDescribeV1 == expectedPrePairDescribeV1
-            && (expectedDirectEndpoint.map(isSupportedDirectEndpoint) ?? true)
-            && (endpointLease.map(\.isValid) ?? true)
-            && ((endpointLease != nil) == (expectedDirectEndpoint != nil && expectedPrePairDescribeV1))
+        if expectedDirectEndpoint != nil, endpointLease == nil {
+            warnings.append("registration_endpoint_lease_unavailable; continuing_registration")
+        } else if expectedDirectEndpoint == nil, endpointLease != nil {
+            warnings.append("registration_endpoint_lease_unexpected")
+        }
+        let expectedEndpointIsValid = expectedDirectEndpoint.map(isSupportedDirectEndpoint)
+            ?? (directEndpoint == nil)
+        let endpointMatchesRequest = directEndpoint == expectedDirectEndpoint && expectedEndpointIsValid
+        let confirmationMatchesRequest = payload.directEndpointConfirmed == nil
+            || payload.directEndpointConfirmed == expectedDirectEndpointConfirmed
         let usableEndpoint = endpointMatchesRequest ? directEndpoint : nil
-        let usablePrePairDescribe = endpointMatchesRequest ? prePairDescribeV1 : false
-        let usableEndpointLease = endpointMatchesRequest ? endpointLease : nil
+        let usableEndpointConfirmed = endpointMatchesRequest
+            ? (confirmationMatchesRequest
+                ? (payload.directEndpointConfirmed ?? expectedDirectEndpointConfirmed)
+                : expectedDirectEndpointConfirmed)
+            : nil
+        let usablePrePairDescribe = endpointMatchesRequest && prePairDescribeV1 == expectedPrePairDescribeV1
+            ? prePairDescribeV1 : false
+        let usableEndpointLease = endpointMatchesRequest && endpointLease?.isValid == true
+            ? endpointLease : nil
 
         func acceptedReleaseIds(_ received: [String]?, expected: [String]?, malformed: Bool, name: String) -> [String] {
             let expectedIds = expected ?? []
@@ -1290,6 +1338,7 @@ enum SurfAceRegistrationWire {
             assignments: payload.surfaces,
             projection: SurfAceRegistrationProjection(
                 directEndpoint: usableEndpoint,
+                directEndpointConfirmed: usableEndpointConfirmed,
                 prePairDescribeV1: usablePrePairDescribe,
                 allocationGenerationV1: allocationGenerationV1,
                 endpointLease: usableEndpointLease,
@@ -1316,15 +1365,7 @@ enum SurfAceRegistrationWire {
     }
 
     private static func isSupportedDirectEndpoint(_ value: String) -> Bool {
-        guard value.utf8.count <= 2_048,
-              let components = URLComponents(string: value),
-              let scheme = components.scheme?.lowercased(),
-              scheme == "ws" || scheme == "wss",
-              components.host?.isEmpty == false,
-              components.user == nil,
-              components.password == nil,
-              components.fragment == nil else { return false }
-        return true
+        SurfAceDirectEndpointSelection.isSupportedEndpoint(value)
     }
 }
 
@@ -1535,7 +1576,11 @@ final class SurfAceRegistrationWebSocket: SurfAceRegistrationTransport {
         }
         return try SurfAceRegistrationWire.registration(
             from: received.data, requestId: id, clientId: clientId, surfaces: input.surfaces,
-            expectedIdentity: expectedIdentity, expectedAllocationGenerationV1: true,
+            expectedIdentity: expectedIdentity,
+            expectedDirectEndpoint: input.directEndpoint,
+            expectedDirectEndpointConfirmed: input.directEndpointConfirmed,
+            expectedPrePairDescribeV1: false,
+            expectedAllocationGenerationV1: true,
             expectedWindowGenerationV1: true,
             expectedPaneReleaseIds: input.pendingPaneReleases.map(\.releaseId),
             expectedWindowReleaseIds: input.pendingWindowReleases.map(\.wireReleaseId),
