@@ -214,6 +214,10 @@ impl LockedStateRoot {
         &self.recovery.warnings
     }
 
+    pub fn must_preserve_unreadable_scope(&self, scope_id: &str) -> bool {
+        self.recovery.opaque_scope_root || self.recovery.opaque_scope_ids.contains(scope_id)
+    }
+
     pub fn has_unresolved_mutation_guard(&self) -> bool {
         self.recovery.opaque_unresolved_root
             || !self.recovery.opaque_unresolved_ids.is_empty()

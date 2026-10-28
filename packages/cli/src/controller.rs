@@ -2896,6 +2896,9 @@ fn apply_snapshot(root: &mut LockedStateRoot, snapshot: &Value) -> Result<(), Cl
         .and_then(Value::as_str)
         .ok_or_else(|| CliError::Protocol("invalid_scope_snapshot".into()))?
         .to_owned();
+    if root.must_preserve_unreadable_scope(&scope_id) {
+        return Ok(());
+    }
     let cursor = snapshot
         .get("cursor")
         .and_then(|cursor| cursor.get("cursor"))

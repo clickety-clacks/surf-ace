@@ -5107,6 +5107,90 @@ fn native_cli_read_salvages_valid_scope_and_preserves_unreadable_sibling() {
 }
 
 #[test]
+fn surface_pair_skips_unreadable_saved_scope_snapshot_and_describes_readable_pane() {
+    let temp = TempDir::new().unwrap();
+    let readable_scope = "pane:sf_1:1";
+    let unreadable_scope = "pane:sf_1:2";
+    let saved_content = pane_content_record("sf_1", 1, 1, Some("saved-readable"), None);
+    let unreadable_row = json!({
+        "clientCursor": "unknown-cursor-format",
+        "records": [{
+            "recordClass": "content",
+            "recordId": "retained-unreadable-content",
+            "payload": { "content": { "text": "preserve this saved content" } }
+        }]
+    });
+    fs::write(
+        temp.path().join("controller-state.json"),
+        serde_json::to_vec_pretty(&json!({
+            "version": 1,
+            "controllerInstanceId": "ctl_unreadable_sibling_snapshot",
+            "scopes": {
+                readable_scope: {
+                    "clientCursor": 1,
+                    "projectedCursor": 1,
+                    "firstRetainedSequence": 1,
+                    "lastRetainedSequence": 1,
+                    "currentContentRecord": saved_content,
+                    "currentContentSequence": 1,
+                    "records": [saved_content],
+                    "gap": null,
+                    "synchronized": false,
+                    "synchronizationCutoff": null
+                },
+                unreadable_scope: unreadable_row
+            },
+            "acknowledgementOutbox": [],
+            "unresolved": {},
+            "resumeMetadata": {}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let readable_snapshot = pane_scope_snapshot(
+        readable_scope,
+        2,
+        vec![pane_content_record("sf_1", 1, 2, Some("fresh-readable"), None)],
+    );
+    let unreadable_snapshot = pane_scope_snapshot(
+        unreadable_scope,
+        2,
+        vec![pane_content_record("sf_1", 2, 2, Some("fresh-sibling"), None)],
+    );
+    let mut wire = FakeWire::ordinary();
+    wire.scopes = vec![readable_snapshot, unreadable_snapshot];
+
+    let output = execute_with_wire(
+        invocation(
+            &temp,
+            Command::PaneDescribe,
+            pane_describe_input("ctl_unreadable_sibling_snapshot", "sf_1", 1),
+        ),
+        &mut wire,
+    )
+    .unwrap();
+
+    assert_eq!(output.ok, true);
+    assert_eq!(output.result["paneId"], 1);
+    assert!(output
+        .warnings
+        .iter()
+        .any(|warning| warning == "saved_state_scope_unreadable"));
+    assert!(wire.operations.iter().any(|op| op == "panes.list"));
+
+    let persisted: Value =
+        serde_json::from_slice(&fs::read(temp.path().join("controller-state.json")).unwrap())
+            .unwrap();
+    assert_eq!(persisted["scopes"][readable_scope]["clientCursor"], 2);
+    assert_eq!(
+        persisted["scopes"][readable_scope]["records"][0]["payload"]["contentId"],
+        "fresh-readable"
+    );
+    assert_eq!(persisted["scopes"][unreadable_scope], unreadable_row);
+}
+
+#[test]
 fn unknown_saved_state_version_and_correlation_phase_preserve_reads_and_guard_mutations() {
     let temp = TempDir::new().unwrap();
     let scope_id = "pane:sf_future:1";
