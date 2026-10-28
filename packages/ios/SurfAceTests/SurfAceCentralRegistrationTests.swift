@@ -2716,6 +2716,56 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         ))
     }
 
+    func testLocalNumericRegistrationPathKeepsEndpointAndLeaseProjection() throws {
+        let endpoint = "ws://192.168.50.135:19001/ws"
+        let identity = SurfAceRegistryIdentity(allocatorId: "alloc_home", fleetId: "fleet-home")
+        let input = SurfAceRegistrationInput(
+            clientId: "stable-client",
+            registryIdentity: identity,
+            directEndpoint: endpoint,
+            directEndpointSource: .clientReported,
+            directEndpointListener: .init(scheme: "ws", port: 19_001, path: "/ws"),
+            surfaces: [],
+            pendingPaneReleases: [],
+            pendingWindowReleases: []
+        )
+        let response = Data("""
+        {"id":"local-register","op":"client.register","ok":true,"payload":{
+          "clientId":"stable-client",
+          "registryIdentity":{"allocatorId":"alloc_home","fleetId":"fleet-home"},
+          "surfaces":[],
+          "directEndpoint":"ws://192.168.50.135:19001/ws",
+          "directEndpointSource":"client-reported",
+          "prePairDescribeV1":false,
+          "allocationGenerationV1":true,
+          "windowGenerationV1":true,
+          "endpointLease":{"leaseGeneration":41,"registrationObservedAtMs":1000,"leaseExpiresAtMs":2000},
+          "completedPaneReleaseIds":[],
+          "completedWindowReleaseIds":[]
+        }}
+        """.utf8)
+
+        let reply = try SurfAceLocalNumericRegistrationWebSocket.registrationReply(
+            from: response,
+            requestId: "local-register",
+            clientId: "stable-client",
+            input: input,
+            expectedIdentity: identity
+        )
+
+        XCTAssertEqual(reply.projection.directEndpoint, endpoint)
+        XCTAssertEqual(reply.projection.directEndpointSource, .clientReported)
+        XCTAssertEqual(reply.projection.endpointLease, .init(
+            leaseGeneration: 41, registrationObservedAtMs: 1000, leaseExpiresAtMs: 2000
+        ))
+        XCTAssertFalse(reply.warnings.contains("registration_endpoint_capability_mismatch"))
+        XCTAssertFalse(reply.warnings.contains("registration_endpoint_source_mismatch"))
+        XCTAssertFalse(reply.warnings.contains("registration_endpoint_lease_unexpected"))
+        XCTAssertFalse(reply.warnings.contains("registration_endpoint_lease_unavailable; continuing_registration"))
+        XCTAssertFalse(reply.discarded)
+        XCTAssertFalse(reply.needsRetry)
+    }
+
     func testRegistrationContinuesWhenOlderRegistryOmitsEndpointSourceAndLease() throws {
         let endpoint = "ws://192.168.50.135:19001/ws"
         let response = Data("""

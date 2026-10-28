@@ -477,7 +477,7 @@ private struct SurfAceCentralConnectionBanner: View {
     private var title: LocalizedStringResource {
         switch state {
         case .connecting: "Registry reconnecting"
-        case .connected: "Registry warning"
+        case .connected: "Registry connection recovered"
         case .disconnected: "Registry disconnected"
         }
     }

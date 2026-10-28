@@ -1698,6 +1698,32 @@ final class SurfAceLocalNumericRegistrationWebSocket: SurfAceRegistrationTranspo
         self.url = url
     }
 
+    static func registrationReply(
+        from data: Data,
+        requestId: String,
+        clientId: String,
+        input: SurfAceRegistrationInput,
+        expectedIdentity: SurfAceRegistryIdentity?,
+        correlationWarnings: [String] = []
+    ) throws -> SurfAceRegistrationReply {
+        try SurfAceRegistrationWire.registration(
+            from: data,
+            requestId: requestId,
+            clientId: clientId,
+            surfaces: input.surfaces,
+            expectedIdentity: expectedIdentity,
+            expectedDirectEndpoint: input.directEndpoint,
+            expectedDirectEndpointSource: input.directEndpointSource,
+            expectedDirectEndpointListener: input.directEndpointListener,
+            expectedPrePairDescribeV1: false,
+            expectedAllocationGenerationV1: true,
+            expectedWindowGenerationV1: true,
+            expectedPaneReleaseIds: input.pendingPaneReleases.map(\.releaseId),
+            expectedWindowReleaseIds: input.pendingWindowReleases.map(\.wireReleaseId),
+            correlationWarnings: correlationWarnings
+        )
+    }
+
     func exchange(_ data: Data) async throws -> Data {
         let timeout = Task { @MainActor [weak self] in
             try? await Task.sleep(for: .seconds(5))
@@ -1795,12 +1821,12 @@ final class SurfAceLocalNumericRegistrationWebSocket: SurfAceRegistrationTranspo
             let received = try await surfAceReceiveCorrelated(operation: "client.register", requestId: id) {
                 try await self.receive()
             }
-            return try SurfAceRegistrationWire.registration(
-                from: received.data, requestId: id, clientId: clientId,
-                surfaces: input.surfaces, expectedIdentity: expectedIdentity,
-                expectedAllocationGenerationV1: true, expectedWindowGenerationV1: true,
-                expectedPaneReleaseIds: input.pendingPaneReleases.map(\.releaseId),
-                expectedWindowReleaseIds: input.pendingWindowReleases.map(\.wireReleaseId),
+            return try Self.registrationReply(
+                from: received.data,
+                requestId: id,
+                clientId: clientId,
+                input: input,
+                expectedIdentity: expectedIdentity,
                 correlationWarnings: received.warnings
             )
         } catch {

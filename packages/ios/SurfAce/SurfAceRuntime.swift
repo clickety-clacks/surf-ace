@@ -382,7 +382,6 @@ final class SurfAceRuntime {
     @ObservationIgnored private var annotationRecoveryTask: Task<Void, Never>?
     @ObservationIgnored private var annotationReentryRequested: Set<String> = []
     @ObservationIgnored private var centralConnectionError: String?
-    @ObservationIgnored private var centralRegistrationWarning: String?
     @ObservationIgnored private var confirmedPaneLabels: [String: Int64] = [:]
     private var centralConnectionState: SurfAceConnectionBarState = .disconnected
 
@@ -390,7 +389,7 @@ final class SurfAceRuntime {
         switch status {
         case .connected:
             centralConnectionState = .connected
-            updateCentralRegistrationError(centralRegistrationWarning)
+            updateCentralRegistrationError(nil)
         case .connecting: centralConnectionState = .connecting
         case .disconnected: centralConnectionState = .disconnected
         }
@@ -409,19 +408,6 @@ final class SurfAceRuntime {
         }
     }
 
-    func updateCentralRegistrationWarning(_ warning: String?) {
-        if let warning {
-            let existing = centralRegistrationWarning?.components(separatedBy: "\n") ?? []
-            centralRegistrationWarning = (existing + [warning]).reduce(into: [String]()) { values, item in
-                if !values.contains(item) { values.append(item) }
-            }.joined(separator: "\n")
-        } else {
-            centralRegistrationWarning = nil
-        }
-        if centralConnectionState == .connected {
-            updateCentralRegistrationError(centralRegistrationWarning)
-        }
-    }
     @ObservationIgnored private var isStarted = false
     @ObservationIgnored private var isStarting = false
     @ObservationIgnored private var isolatedTestHostAtStart = false
@@ -717,23 +703,10 @@ final class SurfAceRuntime {
                     "event=central_registration_failed \(surfAceDiagnosticFields([("error", message)]))"
                 )
             },
-            onWarning: { [weak self] warning in
+            onWarning: { warning in
                 surfAceServerRuntimeLog(
                     "event=central_registration_warning \(surfAceDiagnosticFields([("warning", warning)]))"
                 )
-                if warning.hasPrefix("registration_direct_endpoint_unconfirmed") {
-                    self?.updateCentralRegistrationWarning(
-                        "The direct address is unconfirmed and may not be reachable from other devices."
-                    )
-                } else if warning == "registration_direct_endpoint_unavailable" {
-                    self?.updateCentralRegistrationWarning(
-                        "Surf Ace could not provide a direct address, but registration will continue."
-                    )
-                } else if warning == "registration_pre_pair_describe_unsupported; continuing_window_labels" {
-                    self?.updateCentralRegistrationWarning(
-                        "Window description is unsupported; registration and label resolution continue."
-                    )
-                }
             },
             onStatusChange: { [weak self] status in
                 self?.updateCentralRegistrationStatus(status)
