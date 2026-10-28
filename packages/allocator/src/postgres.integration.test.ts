@@ -1824,6 +1824,108 @@ test("client.register returns negotiated per-item results and leases only accept
   }
 });
 
+test("client.register derives listener endpoints from the accepted peer and preserves other operations", { timeout: 90_000 }, async () => {
+  const cluster = await startCluster();
+  let allocator: AllocatorServer | null = null;
+  let wire: WireClient | null = null;
+  try {
+    const recovery = await PostgresCustodyAdapter.initializeAbsentFleet(cluster.config, "alloc_listener-endpoint");
+    await recovery.release();
+    allocator = await AllocatorServer.start(serverConfig(cluster));
+    wire = await WireClient.connect(allocator.address.url);
+
+    const clientId = createHash("sha256").update("listener-endpoint-client").digest("hex");
+    const surfaceId = "sf_listener_endpoint";
+    const listener = { scheme: "ws", port: 19_001, path: "/ws" };
+    const legacy = await wire.request("client.register", {
+      clientId,
+      directEndpointListener: listener,
+      prePairDescribeV1: false,
+      surfaces: [{ surfaceId, panes: [] }],
+    });
+    assert.equal(legacy.ok, true, JSON.stringify(legacy));
+    const legacyPayload = legacy.payload as {
+      directEndpoint: string | null;
+      directEndpointSource: string | null;
+      endpointLease: { leaseGeneration: number } | null;
+      prePairDescribeV1: boolean;
+      surfaces: Array<{ windowLabel: string }>;
+    };
+    assert.equal(legacyPayload.directEndpoint, "ws://127.0.0.1:19001/ws",
+      "the registry uses the peer address on its accepted WebSocket connection");
+    assert.equal(legacyPayload.directEndpointSource, "registry-observed");
+    assert.equal(legacyPayload.prePairDescribeV1, false);
+    assert.ok(legacyPayload.endpointLease && legacyPayload.endpointLease.leaseGeneration > 0);
+    assert.ok(legacyPayload.surfaces[0]?.windowLabel);
+
+    const firstTopology = await wire.request("fleet.topology", {});
+    assert.equal(firstTopology.ok, true);
+    const firstRow = (firstTopology.payload?.clients as Array<{
+      clientId: string;
+      directEndpoint: string | null;
+      directEndpointSource: string | null;
+      endpointLease: { leaseGeneration: number } | null;
+    }>).find((row) => row.clientId === clientId);
+    assert.equal(firstRow?.directEndpoint, legacyPayload.directEndpoint);
+    assert.equal(firstRow?.directEndpointSource, "registry-observed");
+    assert.equal(firstRow?.endpointLease?.leaseGeneration, legacyPayload.endpointLease?.leaseGeneration);
+
+    const clientReportedEndpoint = "ws://127.0.0.1:19001/ws";
+    const report = {
+      registrationResultsV1: true,
+      clientId,
+      directEndpoint: clientReportedEndpoint,
+      directEndpointSource: "client-reported",
+      directEndpointListener: listener,
+      prePairDescribeV1: false,
+      surfaces: [{ surfaceId, panes: [] }],
+    };
+    const clientReported = await wire.request("client.register", report);
+    assert.equal(clientReported.ok, true, JSON.stringify(clientReported));
+    const clientReportedPayload = clientReported.payload as {
+      directEndpoint: string;
+      directEndpointSource: string;
+      endpointLease: { leaseGeneration: number };
+      registrationResultsV1: boolean;
+      surfaceResults: Array<{ ok: boolean }>;
+    };
+    assert.equal(clientReportedPayload.registrationResultsV1, true);
+    assert.equal(clientReportedPayload.surfaceResults[0]?.ok, true);
+    assert.equal(clientReportedPayload.directEndpoint, clientReportedEndpoint);
+    assert.equal(clientReportedPayload.directEndpointSource, "client-reported");
+    assert.ok(clientReportedPayload.endpointLease.leaseGeneration > legacyPayload.endpointLease!.leaseGeneration,
+      "the source is bound to the lease generation even when the endpoint string is unchanged");
+
+    const clientAssertion = await wire.request("client.register", {
+      ...report,
+      directEndpointSource: "registry-observed",
+    });
+    assert.equal(clientAssertion.ok, true, JSON.stringify(clientAssertion));
+    const assertedPayload = clientAssertion.payload as typeof clientReportedPayload;
+    assert.equal(assertedPayload.directEndpoint, clientReportedEndpoint);
+    assert.equal(assertedPayload.directEndpointSource, "client-reported",
+      "the registry never accepts a client assertion as registry-observed");
+    assert.equal(assertedPayload.endpointLease.leaseGeneration, clientReportedPayload.endpointLease.leaseGeneration,
+      "normalizing the same client-reported route does not churn its lease");
+
+    const topologyAfterAssertion = await wire.request("fleet.topology", {});
+    assert.equal(topologyAfterAssertion.ok, true,
+      "an unrelated inventory read remains available after the mismatched source claim");
+    const paneClaim = await wire.request("pane.claim", {
+      clientId,
+      paneId: "listener-pane",
+      paneLineageId: "pl_listener_pane",
+      surfaceId,
+    });
+    assert.equal(paneClaim.ok, true, JSON.stringify(paneClaim),
+      "an unrelated pane claim remains available after the mismatched source claim");
+  } finally {
+    await wire?.close();
+    if (allocator) await allocator.close();
+    await cluster.stop();
+  }
+});
+
 test("configured-first server in-process discovery fallback registers and persists clients", { timeout: 90_000 }, async () => {
   const cluster = await startCluster();
   let allocator: AllocatorServer | null = null;

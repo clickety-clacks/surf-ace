@@ -21,13 +21,19 @@ import {
 } from "./domain.js";
 import { PostgresCustodyAdapter, type AdapterTestHooks, type AnnotationInfo, type PaneRetirementEvidence, type PostgresCustodyConfig, type WindowRetirementEvidence } from "./custody.js";
 import { parseAllocatorRequest } from "./validation.js";
-import { EndpointLeaseBook, validateDirectEndpoint, type EndpointLease } from "./endpoint-leases.js";
+import {
+  EndpointLeaseBook,
+  resolveDirectEndpoint,
+  type DirectEndpointSource,
+  type EndpointLease,
+} from "./endpoint-leases.js";
 
 const DEFAULT_MAX_ENDPOINT_LEASE_MS = 15_000;
 
 type RegisteredClientProjection = {
   clientId: string;
   directEndpoint: string | null;
+  directEndpointSource: DirectEndpointSource | null;
   endpointLease: EndpointLease | null;
   allocationGenerationV1: boolean;
   windowGenerationV1: boolean;
@@ -97,16 +103,18 @@ export class AllocatorServer {
   private readonly registeredClients = new Map<string, RegisteredClientProjection>();
   private registrationTail: Promise<unknown> = Promise.resolve();
 
-  private async registerClient(payload: unknown): Promise<unknown> {
+  private async registerClient(payload: unknown, acceptedPeerAddress: string | null): Promise<unknown> {
     const registrationResultsV1 = isRecord(payload) ? payload.registrationResultsV1 : undefined;
     if (registrationResultsV1 !== undefined && typeof registrationResultsV1 !== "boolean") {
       throw new Error("invalid_registration");
     }
-    if (registrationResultsV1 === true) return await this.registerClientWithResults(payload);
+    if (registrationResultsV1 === true) return await this.registerClientWithResults(payload, acceptedPeerAddress);
 
     const value = payload as {
       clientId?: unknown;
       directEndpoint?: unknown;
+      directEndpointSource?: unknown;
+      directEndpointListener?: unknown;
       allocationGenerationV1?: unknown;
       windowGenerationV1?: unknown;
       prePairDescribeV1?: unknown;
@@ -125,7 +133,12 @@ export class AllocatorServer {
     if (value.windowGenerationV1 !== undefined && typeof value.windowGenerationV1 !== "boolean") {
       throw new Error("invalid_registration");
     }
-    const directEndpoint = validateDirectEndpoint(value.directEndpoint);
+    const { directEndpoint, directEndpointSource } = resolveDirectEndpoint(
+      value.directEndpoint,
+      value.directEndpointSource,
+      value.directEndpointListener,
+      acceptedPeerAddress,
+    );
     const allocationGenerationV1 = value.allocationGenerationV1 === true;
     const windowGenerationV1 = value.windowGenerationV1 === true;
     const prePairDescribeV1 = value.prePairDescribeV1 === true;
@@ -244,6 +257,7 @@ export class AllocatorServer {
       allocatorId: state.allocatorId,
       clientId,
       directEndpoint,
+      directEndpointSource,
       fleetId: state.fleetId,
       prePairDescribeV1,
       windowGenerationV1,
@@ -261,6 +275,7 @@ export class AllocatorServer {
     const result: RegisteredClientProjection = {
       clientId,
       directEndpoint,
+      directEndpointSource,
       endpointLease,
       allocationGenerationV1,
       windowGenerationV1,
@@ -272,10 +287,12 @@ export class AllocatorServer {
     return { ...result, completedPaneReleaseIds, completedWindowReleaseIds };
   }
 
-  private async registerClientWithResults(payload: unknown): Promise<unknown> {
+  private async registerClientWithResults(payload: unknown, acceptedPeerAddress: string | null): Promise<unknown> {
     const value = payload as {
       clientId?: unknown;
       directEndpoint?: unknown;
+      directEndpointSource?: unknown;
+      directEndpointListener?: unknown;
       allocationGenerationV1?: unknown;
       windowGenerationV1?: unknown;
       prePairDescribeV1?: unknown;
@@ -294,7 +311,12 @@ export class AllocatorServer {
     if (value.windowGenerationV1 !== undefined && typeof value.windowGenerationV1 !== "boolean") {
       throw new Error("invalid_registration");
     }
-    const directEndpoint = validateDirectEndpoint(value.directEndpoint);
+    const { directEndpoint, directEndpointSource } = resolveDirectEndpoint(
+      value.directEndpoint,
+      value.directEndpointSource,
+      value.directEndpointListener,
+      acceptedPeerAddress,
+    );
     const allocationGenerationV1 = value.allocationGenerationV1 === true;
     const windowGenerationV1 = value.windowGenerationV1 === true;
     const prePairDescribeV1 = value.prePairDescribeV1 === true;
@@ -476,6 +498,7 @@ export class AllocatorServer {
       allocatorId: state.allocatorId,
       clientId,
       directEndpoint,
+      directEndpointSource,
       fleetId: state.fleetId,
       prePairDescribeV1,
       windowGenerationV1,
@@ -493,6 +516,7 @@ export class AllocatorServer {
     const result: RegisteredClientProjection = {
       clientId,
       directEndpoint,
+      directEndpointSource,
       endpointLease,
       allocationGenerationV1,
       windowGenerationV1,
@@ -717,7 +741,9 @@ export class AllocatorServer {
             config.maxEndpointLeaseMs ?? DEFAULT_MAX_ENDPOINT_LEASE_MS,
           ),
         );
-        webSocketServer.on("connection", (socket) => server.accept(socket));
+        webSocketServer.on("connection", (socket, request) => {
+          server.accept(socket, request.socket.remoteAddress ?? null);
+        });
         return server;
       } catch (error) {
         await custody.terminate();
@@ -798,17 +824,17 @@ export class AllocatorServer {
     }
   }
 
-  private accept(socket: WebSocket): void {
+  private accept(socket: WebSocket, acceptedPeerAddress: string | null): void {
     const replay = new Map<string, { fingerprint: string; response: string }>();
     let annotationTail: Promise<unknown> = Promise.resolve();
     socket.on("message", (data) => {
       // Annotation role and append order are connection state; process their
       // messages serially so hello cannot race an immediately following ingest.
       if (toText(data).includes('"annotation.')) {
-        annotationTail = annotationTail.then(() => this.handle(socket, data, replay));
+        annotationTail = annotationTail.then(() => this.handle(socket, data, replay, acceptedPeerAddress));
         void annotationTail.catch(() => socket.close(1011, "annotation_handler_failed"));
       } else {
-        void this.handle(socket, data, replay);
+        void this.handle(socket, data, replay, acceptedPeerAddress);
       }
     });
     socket.on("close", () => {
@@ -825,6 +851,7 @@ export class AllocatorServer {
     socket: WebSocket,
     data: RawData,
     replay: Map<string, { fingerprint: string; response: string }>,
+    acceptedPeerAddress: string | null,
   ): Promise<void> {
     let raw: unknown;
     try {
@@ -851,7 +878,7 @@ export class AllocatorServer {
             await this.authority.refreshReadiness();
           }
           const payload = registration.op === "client.register"
-            ? await this.registerClient(registration.payload)
+            ? await this.registerClient(registration.payload, acceptedPeerAddress)
             : registration.op === "pane.claim"
               ? await this.claimPane(registration.payload)
               : await this.fleetTopology();
