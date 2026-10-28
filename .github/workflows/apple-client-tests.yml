@@ -53,6 +53,7 @@ jobs:
             -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M5),OS=27.0' \
             -only-testing:SurfAceTests/SurfAceCentralRegistrationTests \
             -only-testing:SurfAceTests/SurfAceLocklessRuntimeAdapterTests/testRegistrationKeepsFinalCloseReleasesPendingUntilExactAcknowledgementsCommit \
+            -only-testing:SurfAceTests/SurfAceLocklessRuntimeAdapterTests/testRegistrationAppliesMatchingClaimsAfterLocalSnapshotChangesAndRetriesRemainder \
             -only-testing:SurfAceTests/SurfAceLocklessRuntimeAdapterTests/testRegistrationUsesLabelClaimsWithoutGenerationAndPreservesSavedContent \
             -only-testing:SurfAceTests/SurfAceLocklessRuntimeAdapterTests/testRegistrationPreservesConfirmedLabelsWhenReplyWouldRewriteIdentity \
             -resultBundlePath "$RUNNER_TEMP/apple-registration-tests.xcresult"

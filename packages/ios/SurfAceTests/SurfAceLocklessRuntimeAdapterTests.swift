@@ -192,6 +192,7 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
             )
         )
         let pendingApplication = try await fixture.adapter.applyRegistration(unacknowledged, expectedInput: input)
+        XCTAssertTrue(pendingApplication.needsRetry)
         XCTAssertTrue(pendingApplication.warnings.contains("registration_pane_release_acknowledgements_incomplete"))
         XCTAssertTrue(pendingApplication.warnings.contains("registration_window_release_acknowledgements_incomplete"))
         XCTAssertEqual(pendingApplication.state, before)
@@ -210,6 +211,55 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
         XCTAssertEqual(after.state.allocationReleaseIntents?.map(\.status), [.accepted, .accepted])
         XCTAssertTrue(after.state.liveSurfaces.isEmpty)
         try after.state.validate()
+    }
+
+    func testRegistrationAppliesMatchingClaimsAfterLocalSnapshotChangesAndRetriesRemainder() async throws {
+        let clientId = String(repeating: "a", count: 64)
+        let fixture = try makeFixture(configure: { state in
+            var surface = try XCTUnwrap(state.liveSurfaces["sf_1"])
+            var pane = try XCTUnwrap(surface.panes["1"])
+            pane.history.visible.contentId = "retained-entry"
+            pane.history.visible.contentType = "html"
+            pane.history.visible.content = .object(["html": .string("<h1>Still here</h1>")])
+            surface.panes["1"] = pane
+            state.liveSurfaces["sf_1"] = surface
+        })
+        let before = await fixture.adapter.snapshot()
+        let request = try SurfAceRegistrationInput(state: before, clientId: clientId)
+        let content = try XCTUnwrap(before.liveSurfaces["sf_1"]?.panes["1"]?.history.visible.content)
+
+        _ = try await fixture.adapter.commitLocalMutation(operation: "local.topology.split") { state, sequence in
+            _ = try SurfAceLocklessTopologyOperations.paneSplit(
+                state: &state, surfaceId: "sf_1", paneId: 1, count: 2,
+                direction: "horizontal", expectedTopologyRevision: 0,
+                assignedPaneLabels: [:], assignedPaneLineages: [2: "pl_sf_1_2"]
+            )
+            return .integer(sequence)
+        }
+        let reply = SurfAceRegistrationReply(
+            assignments: [SurfAceRegistrationAssignment(
+                surfaceId: "sf_1", windowLabel: "z", panes: [
+                    .init(paneId: "1", paneLineageId: "pl_sf_1_1", paneLabel: 1201),
+                    .init(paneId: "2", paneLineageId: "pl_sf_1_2", paneLabel: 1202),
+                ]
+            )],
+            projection: SurfAceRegistrationProjection(
+                directEndpoint: nil, prePairDescribeV1: false, allocationGenerationV1: true,
+                endpointLease: nil, completedPaneReleaseIds: [], completedWindowReleaseIds: []
+            )
+        )
+
+        let application = try await fixture.adapter.applyRegistration(
+            reply, expectedInput: request, requestInput: request, clientId: clientId
+        )
+        let current = try XCTUnwrap(application.state.liveSurfaces["sf_1"])
+        XCTAssertTrue(application.needsRetry)
+        XCTAssertTrue(application.warnings.contains("registration_local_snapshot_changed"))
+        XCTAssertEqual(current.windowLabel, "z")
+        XCTAssertEqual(current.panes["1"]?.paneLabel, 1201)
+        XCTAssertEqual(current.panes["2"]?.paneLabel, 0)
+        XCTAssertEqual(current.panes["1"]?.history.visible.content, content)
+        XCTAssertEqual(current.panes["1"]?.history.visible.contentId, "retained-entry")
     }
 
     func testRegistrationUsesLabelClaimsWithoutGenerationAndPreservesSavedContent() async throws {

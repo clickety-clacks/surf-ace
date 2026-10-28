@@ -665,6 +665,7 @@ final class SurfAceRuntime {
                     }
                 })
                 try self.projectLocklessAuthorityState(state)
+                return application.needsRetry
             },
             recoverRefusedRelease: { [weak self] releaseId in
                 guard let self else { throw SurfAceRegistrationError.stopped }
@@ -3430,7 +3431,7 @@ final class SurfAceRuntime {
                 let allocation = try await registration.claimPaneLabel(
                     surfaceId: surfaceId, paneId: paneId, paneLineageId: lineageId
                 )
-                labels[paneId] = allocation.paneLabel
+                if allocation.paneLabel > 0 { labels[paneId] = allocation.paneLabel }
                 if let generation = allocation.allocationGeneration {
                     generations[paneId] = generation
                 }
@@ -3458,6 +3459,9 @@ final class SurfAceRuntime {
             let allocation = try await registration.claimPaneLabel(
                 surfaceId: surfaceId, paneId: pane.paneId, paneLineageId: pane.paneLineageId
             )
+            guard allocation.paneLabel > 0 else {
+                return (pane.paneId, pane.paneLineageId, nil, pane.allocationGeneration)
+            }
             guard (pane.paneLabel == 0 || pane.paneLabel == allocation.paneLabel),
                   (pane.allocationGeneration == nil
                       || pane.allocationGeneration == allocation.allocationGeneration) else {

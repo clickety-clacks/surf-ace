@@ -34,6 +34,8 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         var assignedWindowGenerations: [String: Int64] = [:]
         var assignedPaneLabels: [String: Int64] = [:]
         var assignedPaneGenerations: [String: Int64] = [:]
+        var queuedReplies: [SurfAceRegistrationReply] = []
+        var nextRegistryIdentityAfterQueuedReply: SurfAceRegistryIdentity?
         var onInputRegister: (@MainActor (SurfAceRegistrationInput) async -> Void)?
 
         private static func alphabeticLabel(_ value: Int) -> String {
@@ -95,6 +97,14 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
             }
             if rejectsEveryRegistration {
                 throw SurfAceRegistrationError.serverRejected(code: "registry_inactive", message: "retry")
+            }
+            if !queuedReplies.isEmpty {
+                let reply = queuedReplies.removeFirst()
+                if let nextRegistryIdentityAfterQueuedReply {
+                    registryIdentity = nextRegistryIdentityAfterQueuedReply
+                    self.nextRegistryIdentityAfterQueuedReply = nil
+                }
+                return reply
             }
             if let refusedClaim, claim(refusedClaim, appearsIn: input.surfaces) {
                 throw SurfAceRegistrationError.serverRejected(code: "claim_refused", message: "claim")
@@ -289,9 +299,10 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
             },
             inputSnapshot: { try SurfAceRegistrationInput(state: await adapter.snapshot(), clientId: clientId) },
             applyReplySubset: { reply, expected, request in
-                _ = try await adapter.applyRegistration(
+                let application = try await adapter.applyRegistration(
                     reply, expectedInput: expected, requestInput: request, clientId: clientId
                 )
+                return application.needsRetry
             },
             recoverRefusedRelease: { releaseId in
                 try await adapter.dropRefusedRelease(releaseId: releaseId)
@@ -822,9 +833,10 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
                 try SurfAceRegistrationInput(state: await adapter.snapshot(), clientId: clientId)
             },
             applyReplySubset: { reply, expected, request in
-                _ = try await adapter.applyRegistration(
+                let application = try await adapter.applyRegistration(
                     reply, expectedInput: expected, requestInput: request, clientId: clientId
                 )
+                return application.needsRetry
             },
             onStatusChange: { statuses.append($0) })
         try await registration.synchronize()
@@ -974,26 +986,28 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
     func testPaneClaimOkFalseIsDistinguishedAsAnUnconfirmedAssignment() throws {
         let response = Data(#"{"id":"claim-rejected","op":"pane.claim","ok":false,"payload":null}"#.utf8)
 
-        XCTAssertThrowsError(try SurfAceRegistrationWire.paneClaimLabel(
-            from: response, requestId: "claim-rejected"
-        )) { error in
-            guard case let SurfAceRegistrationError.paneClaimRejected(code, message) = error else {
-                XCTFail("server rejection was not retained")
-                return
-            }
-            XCTAssertNil(code)
-            XCTAssertNil(message)
-        }
+        let refused = try SurfAceRegistrationWire.paneClaimAllocation(
+            from: response, requestId: "claim-rejected", expectedAllocationGenerationV1: true
+        )
+        XCTAssertEqual(refused.paneLabel, 0)
+        XCTAssertTrue(refused.warnings.contains("pane_claim_refused code=missing"))
 
         XCTAssertFalse(isPaneAllocatorUnavailable(SurfAceRegistrationError.stopped))
         XCTAssertFalse(isPaneAllocatorUnavailable(SurfAceRegistrationError.topologyChanged))
 
         let malformedSuccess = Data(#"{"id":"claim-malformed","op":"pane.claim","ok":true,"payload":{}}"#.utf8)
-        XCTAssertThrowsError(try SurfAceRegistrationWire.paneClaimLabel(
-            from: malformedSuccess, requestId: "claim-malformed"
-        )) { error in
-        XCTAssertFalse(isPaneAllocatorUnavailable(error))
-        }
+        let unusable = try SurfAceRegistrationWire.paneClaimAllocation(
+            from: malformedSuccess, requestId: "claim-malformed", expectedAllocationGenerationV1: true
+        )
+        XCTAssertEqual(unusable.paneLabel, 0)
+        XCTAssertTrue(unusable.warnings.contains("pane_claim_label_missing_or_unrecognized"))
+
+        let unrelated = Data(#"{"id":"other-claim","op":"pane.claim","ok":true,"payload":{"paneLabel":44}}"#.utf8)
+        let discarded = try SurfAceRegistrationWire.paneClaimAllocation(
+            from: unrelated, requestId: "claim-malformed", expectedAllocationGenerationV1: true
+        )
+        XCTAssertEqual(discarded.paneLabel, 0)
+        XCTAssertTrue(discarded.warnings.contains("pane_claim_correlation_mismatch"))
 
         let missingGeneration = Data(#"{"id":"claim-generation","op":"pane.claim","ok":true,"payload":{"paneLabel":1201}}"#.utf8)
         let allocation = try SurfAceRegistrationWire.paneClaimAllocation(
@@ -1667,6 +1681,57 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         XCTAssertEqual(returned.registryBinding?.allocatorId, homeIdentity.allocatorId)
     }
 
+    func testRegistrationFromAnotherClientFollowsAnsweringRegistryAndRetriesAsThisClient() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("registry-reply-reset-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = SurfAceLocklessGenerationStore(stateURL: root.appendingPathComponent("state.json"))
+        var state = try SurfAceLocklessAuthorityState.empty()
+        let surfaceId = try addSavedSurface(to: &state, windowLabel: "b", paneLabel: 2)
+        let clientId = String(repeating: "c", count: 64)
+        let oldIdentity = SurfAceRegistryIdentity(allocatorId: "alloc_before_reset", fleetId: "fleet-before")
+        let newIdentity = SurfAceRegistryIdentity(allocatorId: "alloc_after_reset", fleetId: "fleet-after")
+        state.registryBinding = .init(
+            allocatorId: oldIdentity.allocatorId, clientId: clientId, fleetId: oldIdentity.fleetId
+        )
+        try store.save(state)
+
+        let adapter = try SurfAceLocklessRuntimeAdapter(store: store)
+        let endpoint = URL(string: "ws://127.0.0.1:24027/ws")!
+        let transport = Transport()
+        transport.registryIdentity = oldIdentity
+        transport.queuedReplies = [SurfAceRegistrationReply(
+            assignments: [],
+            projection: SurfAceRegistrationProjection(
+                directEndpoint: nil, prePairDescribeV1: false, allocationGenerationV1: false,
+                endpointLease: nil, completedPaneReleaseIds: [], completedWindowReleaseIds: []
+            ),
+            warnings: ["registration_client_identity_mismatch"],
+            registryIdentity: newIdentity, discarded: true, needsRetry: true
+        )]
+        transport.nextRegistryIdentityAfterQueuedReply = newIdentity
+        let registration = centralRegistration(
+            adapter: adapter, clientId: clientId, configured: endpoint,
+            discovered: [], transports: [endpoint: transport]
+        )
+
+        try await registration.synchronize()
+        XCTAssertEqual(registration.status, .connected)
+        registration.stop()
+
+        XCTAssertEqual(transport.clients, [clientId, clientId])
+        XCTAssertEqual(transport.registrationInputs.count, 2)
+        let rebound = await adapter.snapshot()
+        XCTAssertEqual(rebound.registryBinding?.allocatorId, newIdentity.allocatorId)
+        XCTAssertEqual(rebound.registryBinding?.clientId, clientId)
+        let restored = try XCTUnwrap(rebound.liveSurfaces[surfaceId])
+        XCTAssertEqual(restored.panes["1"]?.history.visible.contentId, "content-\(surfaceId)")
+        XCTAssertEqual(restored.panes["1"]?.history.visible.content,
+                       state.liveSurfaces[surfaceId]?.panes["1"]?.history.visible.content)
+        XCTAssertEqual(restored.windowLabel, "a")
+        XCTAssertEqual(restored.windowLabelConfirmed, true)
+    }
+
     func testRefusedPaneClaimRotatesOnlyThatIdentityAndPreservesReadableContentAndLayout() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("registry-refused-pane-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -1891,12 +1956,9 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
             adapter: adapter, clientId: clientId, configured: endpoint, discovered: [], transports: [endpoint: transport]
         )
 
-        do {
-            try await registration.synchronize()
-            XCTFail("registry-wide refusal unexpectedly registered the client")
-        } catch { }
+        try await registration.synchronize()
         let afterUnknown = await adapter.snapshot()
-        XCTAssertEqual(registration.status, .disconnected)
+        XCTAssertEqual(registration.status, .connected)
         XCTAssertTrue(afterUnknown.liveSurfaces[liveSurfaceId] != nil)
         XCTAssertTrue((afterUnknown.allocationReleaseIntents ?? []).allSatisfy { $0.status == .pending })
         XCTAssertTrue(transport.acceptedReleaseIds.isEmpty)
@@ -2102,21 +2164,54 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         XCTAssertThrowsError(try SurfAceRegistrationWire.registryIdentity(from: valid, requestId: "different"))
     }
 
-    func testRegistrationResponseIdentityMustMatchPreflightBeforeLabelsApply() throws {
+    func testRegistryIdentityWireUsesRequestedIdentityAndWarnsOnUnknownTopologyVersion() {
+        let expected = SurfAceRegistryIdentity(allocatorId: "alloc_home", fleetId: "fleet-home")
+        let response = Data(#"{"id":"identity-1","op":"fleet.topology","type":"response","v":9,"ok":true,"payload":{}}"#.utf8)
+        let read = SurfAceRegistrationWire.registryIdentityReply(
+            from: response, requestId: "identity-1", fallbackIdentity: expected
+        )
+        XCTAssertEqual(read.identity, expected)
+        XCTAssertTrue(read.warnings.contains("topology_version_unrecognized"))
+        XCTAssertTrue(read.warnings.contains("topology_registry_identity_missing_or_unrecognized"))
+    }
+
+    func testRegistrationResponseUsesRequestedIdentityWhenMissingAndRebindsToAnsweringRegistry() throws {
         let expected = SurfAceRegistryIdentity(allocatorId: "alloc_home", fleetId: "fleet-home")
         let matching = Data(#"{"id":"register-1","op":"client.register","ok":true,"payload":{"clientId":"stable-client","registryIdentity":{"allocatorId":"alloc_home","fleetId":"fleet-home"},"surfaces":[]}}"#.utf8)
-        XCTAssertEqual(try SurfAceRegistrationWire.assignments(
+        let matchingReply = try SurfAceRegistrationWire.registration(
             from: matching, requestId: "register-1", clientId: "stable-client",
             surfaces: [], expectedIdentity: expected
-        ), [])
+        )
+        XCTAssertEqual(matchingReply.registryIdentity, expected)
+        XCTAssertFalse(matchingReply.discarded)
         let foreign = Data(#"{"id":"register-1","op":"client.register","ok":true,"payload":{"clientId":"stable-client","registryIdentity":{"allocatorId":"alloc_foreign","fleetId":"fleet-foreign"},"surfaces":[]}}"#.utf8)
         let missing = Data(#"{"id":"register-1","op":"client.register","ok":true,"payload":{"clientId":"stable-client","surfaces":[]}}"#.utf8)
-        for response in [foreign, missing] {
-            XCTAssertThrowsError(try SurfAceRegistrationWire.assignments(
-                from: response, requestId: "register-1", clientId: "stable-client",
-                surfaces: [], expectedIdentity: expected
-            ))
-        }
+        let changed = try SurfAceRegistrationWire.registration(
+            from: foreign, requestId: "register-1", clientId: "stable-client",
+            surfaces: [], expectedIdentity: expected
+        )
+        XCTAssertEqual(changed.registryIdentity, .init(allocatorId: "alloc_foreign", fleetId: "fleet-foreign"))
+        XCTAssertTrue(changed.warnings.contains("registration_registry_identity_changed"))
+        XCTAssertFalse(changed.discarded)
+        let fallback = try SurfAceRegistrationWire.registration(
+            from: missing, requestId: "register-1", clientId: "stable-client",
+            surfaces: [], expectedIdentity: expected
+        )
+        XCTAssertEqual(fallback.registryIdentity, expected)
+        XCTAssertTrue(fallback.warnings.contains("registration_client_identity_missing_or_unrecognized"))
+        XCTAssertTrue(fallback.warnings.contains("registration_registry_identity_missing_or_unrecognized"))
+
+        let answeringIdentity = SurfAceRegistryIdentity(allocatorId: "alloc_answering", fleetId: "fleet-answering")
+        let anotherClient = Data(#"{"id":"register-1","op":"client.register","ok":true,"payload":{"clientId":"other-client","registryIdentity":{"allocatorId":"alloc_answering","fleetId":"fleet-answering"},"surfaces":[]}}"#.utf8)
+        let discarded = try SurfAceRegistrationWire.registration(
+            from: anotherClient, requestId: "register-1", clientId: "stable-client",
+            surfaces: [], expectedIdentity: expected
+        )
+        XCTAssertTrue(discarded.discarded)
+        XCTAssertTrue(discarded.needsRetry)
+        XCTAssertEqual(discarded.registryIdentity, answeringIdentity)
+        XCTAssertTrue(discarded.warnings.contains("registration_registry_identity_changed"))
+        XCTAssertTrue(discarded.warnings.contains("registration_client_identity_mismatch"))
     }
 
     func testFinalCloseRegistrationCarriesExactPaneAndWindowReleaseEvidence() throws {

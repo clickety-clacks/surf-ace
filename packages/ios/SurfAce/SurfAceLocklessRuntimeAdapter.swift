@@ -120,6 +120,7 @@ struct SurfAceLocklessAdmissionResult: Equatable, Sendable {
 struct SurfAceRegistrationApplication: Sendable {
     let state: SurfAceLocklessAuthorityState
     let warnings: [String]
+    let needsRetry: Bool
 }
 
 struct SurfAceLocklessCommittedMutation: Equatable, Sendable {
@@ -529,30 +530,46 @@ actor SurfAceLocklessRuntimeAdapter {
         expectedSurfaces: [SurfAceRegistrationSurface]
     ) async throws -> SurfAceLocklessAuthorityState {
         return try await coordinator.transact(trigger: "central_registration", skipUnchanged: true) { state in
-            guard SurfAceRegistrationSurface.snapshot(state) == expectedSurfaces,
-                  assignments.count == expectedSurfaces.count,
-                  Set(assignments.map(\.surfaceId)) == Set(expectedSurfaces.map(\.surfaceId)) else {
-                throw SurfAceRegistrationError.topologyChanged
+            let expectedGroups = Dictionary(grouping: expectedSurfaces, by: \.surfaceId)
+            let assignmentGroups = Dictionary(grouping: assignments, by: \.surfaceId)
+            func validWindowLabel(_ value: String) -> Bool {
+                !value.isEmpty && value.utf8.allSatisfy { $0 >= 97 && $0 <= 122 }
             }
-            try SurfAceLocklessTopologyOperations.applyWindowLabels(
-                state: &state, assignments: assignments.map { ($0.surfaceId, $0.windowLabel) }
-            )
-            var usedPaneLabels = Set<Int64>()
-            for assignment in assignments {
-                guard var surface = state.liveSurfaces[assignment.surfaceId],
-                      assignment.panes.count == surface.panes.count else {
-                    throw SurfAceRegistrationError.invalidResponse
+            var windowOwners: [String: String] = [:]
+            for (surfaceId, surface) in state.liveSurfaces where surface.windowLabelConfirmed != false {
+                if !surface.windowLabel.isEmpty { windowOwners[surface.windowLabel] = surfaceId }
+            }
+            let windowClaims = assignments.compactMap { assignment -> (String, String)? in
+                guard assignmentGroups[assignment.surfaceId]?.count == 1,
+                      expectedGroups[assignment.surfaceId]?.count == 1,
+                      state.liveSurfaces[assignment.surfaceId] != nil,
+                      validWindowLabel(assignment.windowLabel),
+                      windowOwners[assignment.windowLabel].map({ $0 == assignment.surfaceId }) ?? true else {
+                    return nil
                 }
-                var seenPaneIds = Set<String>()
+                windowOwners[assignment.windowLabel] = assignment.surfaceId
+                return (assignment.surfaceId, assignment.windowLabel)
+            }
+            try SurfAceLocklessTopologyOperations.applyWindowLabels(state: &state, assignments: windowClaims)
+            var usedPaneLabels = Set<Int64>()
+            for assignment in assignments where assignmentGroups[assignment.surfaceId]?.count == 1 {
+                guard let expected = expectedGroups[assignment.surfaceId]?.first,
+                      var surface = state.liveSurfaces[assignment.surfaceId] else { continue }
+                let expectedPanes = Dictionary(grouping: expected.panes, by: \.paneId)
+                let paneGroups = Dictionary(grouping: assignment.panes, by: \.paneId)
                 for paneAssignment in assignment.panes {
-                    guard let paneId = Int64(paneAssignment.paneId),
-                          seenPaneIds.insert(paneAssignment.paneId).inserted,
+                    guard paneGroups[paneAssignment.paneId]?.count == 1,
+                          expectedPanes[paneAssignment.paneId]?.count == 1,
+                          let expectedPane = expectedPanes[paneAssignment.paneId]?.first,
+                          expectedPane.paneLineageId == paneAssignment.paneLineageId,
+                          let paneId = Int64(paneAssignment.paneId),
                           paneAssignment.paneLabel > 0,
                           !usedPaneLabels.contains(paneAssignment.paneLabel),
                           var pane = surface.panes[paneAssignment.paneId],
                           pane.paneId == paneId,
-                          pane.paneLineageId == paneAssignment.paneLineageId else {
-                        throw SurfAceRegistrationError.invalidResponse
+                          pane.paneLineageId == paneAssignment.paneLineageId,
+                          pane.paneLabel <= 0 || pane.paneLabel == paneAssignment.paneLabel else {
+                        continue
                     }
                     usedPaneLabels.insert(paneAssignment.paneLabel)
                     pane.paneLabel = paneAssignment.paneLabel
@@ -600,39 +617,52 @@ actor SurfAceLocklessRuntimeAdapter {
         clientId: String? = nil
     ) async throws -> SurfAceRegistrationApplication {
         let requested = requestInput ?? expectedInput
-        // Registration cannot be correlated to the durable client binding without
-        // its stable client ID; do not write any label or release evidence.
-        guard let expectedClientId = clientId ?? expectedInput.clientId else {
-            throw SurfAceRegistrationError.registryIdentityMissing
-        }
         return try await coordinator.transact(trigger: "central_registration", skipUnchanged: true) { state in
-            // A response may update labels only for the exact local snapshot sent
-            // to this registry. Refuse the whole write if topology changed while
-            // the request was in flight; otherwise a partial reply could commit
-            // labels against a different pane identity.
-            guard try SurfAceRegistrationInput(state: state, clientId: expectedClientId) == expectedInput else {
-                throw SurfAceRegistrationError.topologyChanged
-            }
-            let expectedWindowReleases = Set(expectedInput.pendingWindowReleases.map(\.releaseId))
-            let expectedPaneReleases = Set(expectedInput.pendingPaneReleases.map(\.releaseId))
-            // These fields describe the request that was sent, not registry
-            // capabilities. Refuse an internally inconsistent retry so a reply
-            // cannot apply to a different identity or release payload.
-            guard requested.clientId == expectedInput.clientId,
-                  requested.registryIdentity == expectedInput.registryIdentity,
-                  requested.surfaces == expectedInput.surfaces,
-                  Set(requested.pendingPaneReleases.map(\.releaseId)).isSubset(of: expectedPaneReleases),
-                  Set(requested.pendingWindowReleases.map(\.releaseId)).isSubset(of: expectedWindowReleases),
-                  Set(requested.pendingPaneReleases.map(\.releaseId)).count == requested.pendingPaneReleases.count,
-                  Set(requested.pendingWindowReleases.map(\.releaseId)).count == requested.pendingWindowReleases.count else {
-                throw SurfAceRegistrationError.invalidResponse
-            }
-
             var warnings: [String] = []
+            var needsRetry = false
             var warned = Set<String>()
             func warn(_ value: String) {
                 guard warned.insert(value).inserted else { return }
                 warnings.append(value)
+            }
+
+            guard let expectedClientId = clientId ?? expectedInput.clientId ?? state.registryBinding?.clientId else {
+                warn("registration_client_identity_unavailable")
+                return SurfAceRegistrationApplication(state: state, warnings: warnings, needsRetry: true)
+            }
+            let currentInput = try SurfAceRegistrationInput(state: state, clientId: expectedClientId)
+            if currentInput.surfaces != expectedInput.surfaces {
+                warn("registration_local_snapshot_changed")
+                needsRetry = true
+            }
+            if requested.surfaces != expectedInput.surfaces {
+                warn("registration_request_surface_set_changed")
+                needsRetry = true
+            }
+            let requestedPaneReleaseIds = requested.pendingPaneReleases.map(\.releaseId)
+            let expectedPaneReleaseIds = expectedInput.pendingPaneReleases.map(\.releaseId)
+            let requestedWindowReleaseIds = requested.pendingWindowReleases.map(\.releaseId)
+            let expectedWindowReleaseIds = expectedInput.pendingWindowReleases.map(\.releaseId)
+            if requested.clientId != expectedClientId
+                || requested.registryIdentity != expectedInput.registryIdentity
+                || requestedPaneReleaseIds.contains(where: { !expectedPaneReleaseIds.contains($0) })
+                || requestedWindowReleaseIds.contains(where: { !expectedWindowReleaseIds.contains($0) }) {
+                warn("registration_request_identity_or_release_set_unusable")
+                return SurfAceRegistrationApplication(state: state, warnings: warnings, needsRetry: true)
+            }
+            if requestedPaneReleaseIds.count != Set(requestedPaneReleaseIds).count
+                || requestedWindowReleaseIds.count != Set(requestedWindowReleaseIds).count {
+                warn("registration_request_release_set_duplicated")
+                needsRetry = true
+            }
+            if Set(requestedPaneReleaseIds) != Set(expectedPaneReleaseIds)
+                || Set(requestedWindowReleaseIds) != Set(expectedWindowReleaseIds) {
+                warn("registration_request_release_set_incomplete")
+                needsRetry = true
+            }
+            if requested.registryIdentity != currentInput.registryIdentity {
+                warn("registration_local_registry_identity_changed")
+                return SurfAceRegistrationApplication(state: state, warnings: warnings, needsRetry: true)
             }
 
             let labelsWereConfirmed = Dictionary(uniqueKeysWithValues: state.liveSurfaces.values.map {
@@ -655,11 +685,17 @@ actor SurfAceLocklessRuntimeAdapter {
                 state.liveSurfaces[surfaceId] = surface
             }
 
-            let requestedById = Dictionary(uniqueKeysWithValues: requested.surfaces.map { ($0.surfaceId, $0) })
+            let requestedGroups = Dictionary(grouping: requested.surfaces, by: \.surfaceId)
+            let requestedById = requestedGroups.compactMapValues { $0.count == 1 ? $0.first : nil }
+            if requestedById.count != requestedGroups.count {
+                warn("registration_request_surface_identity_ambiguous")
+                needsRetry = true
+            }
             let replyGroups = Dictionary(grouping: reply.assignments, by: \.surfaceId)
             if reply.assignments.count != requested.surfaces.count
                 || Set(replyGroups.keys) != Set(requestedById.keys) {
                 warn("registration_surface_claim_set_incomplete")
+                needsRetry = true
             }
 
             func validGeneration(_ value: Int64?) -> Int64? {
@@ -858,32 +894,64 @@ actor SurfAceLocklessRuntimeAdapter {
                 existingPaneOwners[candidate.paneLabel] = owner
             }
 
-            let requestedPaneIds = Set(requested.pendingPaneReleases.map(\.releaseId))
-            let requestedWindowWireIds = Set(requested.pendingWindowReleases.map(\.wireReleaseId))
-            let expectedPaneIdSet = Set(expectedInput.pendingPaneReleases.map(\.releaseId))
-            let expectedWindowWireIdSet = Set(expectedInput.pendingWindowReleases.map(\.wireReleaseId))
             func acceptedAcknowledgements(_ received: [String], allowed: Set<String>, name: String) -> Set<String> {
                 let unique = Set(received)
                 if unique.count != received.count { warn("registration_\(name)_acknowledgements_duplicated") }
                 if received.count != allowed.count || unique != allowed {
                     warn("registration_\(name)_acknowledgements_incomplete")
+                    if !allowed.isEmpty { needsRetry = true }
                 }
                 if unique.contains(where: { !allowed.contains($0) }) {
                     warn("registration_\(name)_acknowledgements_unrecognized")
                 }
                 return unique.intersection(allowed)
             }
+            let currentPaneReleases = Dictionary(grouping: currentInput.pendingPaneReleases, by: \.releaseId)
+            let requestedPaneReleaseById = Dictionary(grouping: requested.pendingPaneReleases, by: \.releaseId)
+            let allowedPaneReleaseIds = Set(requestedPaneReleaseById.compactMap { releaseId, requestedGroup in
+                guard requestedGroup.count == 1,
+                      let currentGroup = currentPaneReleases[releaseId], currentGroup.count == 1,
+                      currentGroup.first == requestedGroup.first else { return nil }
+                return releaseId
+            })
+            let currentWindowReleases = Dictionary(grouping: currentInput.pendingWindowReleases, by: \.releaseId)
+            let requestedWindowReleaseById = Dictionary(grouping: requested.pendingWindowReleases, by: \.releaseId)
+            let allowedWindowReleaseIds = Set(requestedWindowReleaseById.compactMap { releaseId, requestedGroup in
+                guard requestedGroup.count == 1,
+                      let currentGroup = currentWindowReleases[releaseId], currentGroup.count == 1,
+                      currentGroup.first == requestedGroup.first else { return nil }
+                return releaseId
+            })
+            if allowedPaneReleaseIds.count != requestedPaneReleaseById.count
+                || allowedWindowReleaseIds.count != requestedWindowReleaseById.count {
+                warn("registration_release_request_set_changed")
+                needsRetry = true
+            }
+            let requestedWindowWireIds = Set(requested.pendingWindowReleases
+                .filter { allowedWindowReleaseIds.contains($0.releaseId) }
+                .map(\.wireReleaseId))
+            var windowIntentByWireId: [String: String] = [:]
+            var ambiguousWindowWireIds = Set<String>()
+            for release in requested.pendingWindowReleases where allowedWindowReleaseIds.contains(release.releaseId) {
+                if let previous = windowIntentByWireId.updateValue(release.releaseId, forKey: release.wireReleaseId),
+                   previous != release.releaseId {
+                    windowIntentByWireId.removeValue(forKey: release.wireReleaseId)
+                    ambiguousWindowWireIds.insert(release.wireReleaseId)
+                }
+            }
+            if !ambiguousWindowWireIds.isEmpty {
+                warn("registration_window_release_wire_identity_ambiguous")
+                needsRetry = true
+            }
+            let allowedWindowWireIds = requestedWindowWireIds.subtracting(ambiguousWindowWireIds)
             let acknowledgedPaneIds = acceptedAcknowledgements(
                 reply.projection.completedPaneReleaseIds,
-                allowed: requestedPaneIds.intersection(expectedPaneIdSet), name: "pane_release"
+                allowed: allowedPaneReleaseIds, name: "pane_release"
             )
             let acknowledgedWindowWireIds = acceptedAcknowledgements(
                 reply.projection.completedWindowReleaseIds,
-                allowed: requestedWindowWireIds.intersection(expectedWindowWireIdSet), name: "window_release"
+                allowed: allowedWindowWireIds, name: "window_release"
             )
-            let windowIntentByWireId = Dictionary(uniqueKeysWithValues: requested.pendingWindowReleases.map {
-                ($0.wireReleaseId, $0.releaseId)
-            })
             let acknowledgedWindowIds = Set(acknowledgedWindowWireIds.compactMap { windowIntentByWireId[$0] })
             let completed = acknowledgedPaneIds.union(acknowledgedWindowIds)
             if !completed.isEmpty {
@@ -898,7 +966,9 @@ actor SurfAceLocklessRuntimeAdapter {
                 }
                 state.allocationReleaseIntents = intents
             }
-            return SurfAceRegistrationApplication(state: state, warnings: warnings.sorted())
+            return SurfAceRegistrationApplication(
+                state: state, warnings: warnings.sorted(), needsRetry: needsRetry
+            )
         }
     }
 
