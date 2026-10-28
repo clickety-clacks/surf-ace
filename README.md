@@ -110,23 +110,14 @@ checked before CLI operations. Server and CLI archives do not expose a separate
 version command, so their identity comes from the versioned asset name, manifest
 and checksum rather than inferred command output.
 
-## Optional Tightbeam agent integration
+## Agent operating guide
 
-This repository includes an optional Surf Ace skill for Tightbeam at
-[`integrations/tightbeam/skills/surf-ace/SKILL.md`](./integrations/tightbeam/skills/surf-ace/SKILL.md).
-The same file is published separately as
-`surf-ace-skill-v0.2.7.md` and is covered by the release manifest and
-`SHA256SUMS`. It teaches an agent to use the standalone `surf-ace` CLI; it is
-guidance, not a plugin, a separate executable, or a resident service.
-
-After downloading the release asset set, verify it with `SHA256SUMS` before
-using any file. To enable the skill, ask a workspace administrator to register
-the verified Markdown file in the served Tightbeam identity under the name
-`surf-ace`, add `surf-ace` to the selected archetype's `skills` list, and apply
-the updated identity to existing sessions or provision new sessions. Ask an
-enabled agent to use its Surf Ace skill for these CLI operations. The skill
-does not install the standalone executable; install that separately from the
-platform-specific CLI asset below.
+The canonical operating reference for the standalone CLI is the
+[Surf Ace skill](./integrations/tightbeam/skills/surf-ace/SKILL.md). Every CLI
+release includes a versioned copy alongside the executable. Choose the guide
+from the same release as the CLI and verify both against the release manifest
+and `SHA256SUMS` before use. The guide describes CLI operation; it is not a
+separate executable or resident service.
 
 ## Install and run
 
