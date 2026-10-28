@@ -768,10 +768,36 @@ fn help_and_schema_are_json_and_do_not_require_operational_arguments() {
         .any(|limit| limit.as_str().is_some_and(
             |text| text.contains("window-describe") && text.contains("does not authenticate")
         )));
+    assert!(discovery_limits.iter().any(|limit| limit.as_str().is_some_and(|text| {
+        text.contains("endpoint_unconfigured")
+            && text.contains("Bonjour/DNS-SD")
+            && text.contains("_surf-ace._tcp")
+    })));
+
+    let mutation_rules = help_json["result"]["mutationRules"].as_array().unwrap();
+    assert!(mutation_rules.iter().any(|rule| rule.as_str().is_some_and(|text| {
+        text.contains("command-specific")
+            && text.contains("content.set")
+            && text.contains("controller-supplied revision")
+    })));
+    assert!(mutation_rules.iter().any(|rule| rule.as_str().is_some_and(|text| {
+        text.contains("correlated operationReceipt")
+    })));
+    assert!(mutation_rules.iter().any(|rule| rule.as_str().is_some_and(|text| {
+        text.contains("outcome_unknown") && text.contains("Never retry")
+    })));
+    assert!(!mutation_rules.iter().any(|rule| rule.as_str().is_some_and(|text| {
+        text == "Mutations require the current expected revision and a correlated operationReceipt."
+    })));
 
     let list_help = run_native_cli(&["help", "list"]);
     assert!(list_help.status.success());
     let list_help_json: Value = serde_json::from_slice(&list_help.stdout).unwrap();
+    let list_summary = list_help_json["result"]["command"]["summary"]
+        .as_str()
+        .unwrap();
+    assert!(list_summary.contains("stable surfaceId and paneId"));
+    assert!(list_summary.contains("human confirmation"));
     assert!(list_help_json["result"]["command"]["effect"]
         .as_str()
         .unwrap()
@@ -782,6 +808,39 @@ fn help_and_schema_are_json_and_do_not_require_operational_arguments() {
             .unwrap()
             .contains("pair.request")
     );
+
+    let push_help = run_native_cli(&["help", "push"]);
+    assert!(push_help.status.success());
+    let push_help_json: Value = serde_json::from_slice(&push_help.stdout).unwrap();
+    assert_eq!(push_help_json["result"]["command"]["wireOperation"], "content.set");
+    assert!(push_help_json["result"]["command"]["summary"]
+        .as_str()
+        .unwrap()
+        .contains("Back/Forward history entry"));
+
+    let push_schema = run_native_cli(&["schema", "push"]);
+    assert!(push_schema.status.success());
+    let push_schema_json: Value = serde_json::from_slice(&push_schema.stdout).unwrap();
+    let push_command = &push_schema_json["result"]["command"];
+    assert!(push_command["inputSchema"]["description"]
+        .as_str()
+        .unwrap()
+        .contains("do not supply a controller revision"));
+    assert!(!serde_json::to_string(&push_command["inputSchema"])
+        .unwrap()
+        .contains("expectedRevision"));
+
+    let clear_schema = run_native_cli(&["schema", "clear"]);
+    assert!(clear_schema.status.success());
+    let clear_schema_json: Value = serde_json::from_slice(&clear_schema.stdout).unwrap();
+    let clear_input_schema = &clear_schema_json["result"]["command"]["inputSchema"];
+    assert!(clear_input_schema["description"]
+        .as_str()
+        .unwrap()
+        .contains("expectedRevision"));
+    assert!(serde_json::to_string(clear_input_schema)
+        .unwrap()
+        .contains("expectedRevision"));
 
     let window_help = run_native_cli(&["help", "window-describe"]);
     assert!(window_help.status.success());

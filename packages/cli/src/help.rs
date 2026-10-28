@@ -105,11 +105,7 @@ pub fn document(target: Option<&str>) -> Result<Value, String> {
                 "command": command_spec(command),
                 "errorSchema": error_schema(),
                 "errorBehavior": "Success and error records are one JSON object on stdout; nonzero exit indicates failure.",
-                "mutationRules": [
-                    "Mutations require the current expected revision and a correlated operationReceipt.",
-                    "Never retry outcome_unknown; a later invocation resolves its durable correlation.",
-                    "still_pending forbids another mutation until the outstanding request is resolved."
-                ]
+                "mutationRules": mutation_rules()
             }
         }));
     }
@@ -154,19 +150,25 @@ pub fn document(target: Option<&str>) -> Result<Value, String> {
             "discoveryLimits": [
                 "fleet-list reads registry inventory and configured endpoint leases; it does not prove endpoint reachability.",
                 "window-describe reads fleet.topology, sends one nonce-correlated surface.describe to the leased direct endpoint before pairing, then rechecks fleet.topology; identity matching is consistency only and does not authenticate either peer.",
+                "If window-describe reports endpoint_unconfigured and no direct endpoint is otherwise available, continue with Bonjour/DNS-SD browse and resolve for _surf-ace._tcp; use the resolved WebSocket endpoint for direct-client commands.",
                 "For a readable client and surface match, missing or unreadable saved registry values and pane details do not suppress the topology; unavailable values stay null, different readable registry values are retained, and scoped limitations are reported separately.",
                 "For client_not_ready, window-describe includes the direct client's existing message as applicationReadiness.readinessReason, limited to 512 characters.",
                 "list and capture-pane pair a controller before their direct request; they are not no-pair discovery probes.",
                 "window-describe does not pair, create controller state, or authorize later mutations; writes still need their own explicit endpoint and revision guards."
             ],
-            "mutationRules": [
-                "Mutations require the current expected revision and a correlated operationReceipt.",
-                "topology-realize requires an explicit allowDestroyPaneIds list for pane removal.",
-                "Never retry outcome_unknown; a later invocation resolves its durable correlation.",
-                "still_pending forbids another mutation until the outstanding request is resolved."
-            ]
+            "mutationRules": mutation_rules()
         }
     }))
+}
+
+fn mutation_rules() -> Value {
+    json!([
+        "Revision guards are command-specific: push sends content.set without a controller-supplied revision, while clear requires expectedRevision for the selected pane.",
+        "Use each command's result schema to check its correlated operationReceipt when that command returns one.",
+        "Never retry outcome_unknown; the request may have committed, and a later networked invocation resolves its durable correlation.",
+        "still_pending forbids another mutation until the outstanding request is resolved.",
+        "topology-realize requires an explicit allowDestroyPaneIds list for pane removal."
+    ])
 }
 
 fn annotation_actions() -> &'static [&'static str] {
@@ -511,7 +513,7 @@ fn command_spec(command: Command) -> Value {
         Command::List => (
             "direct-client",
             "paired_direct_read",
-            "List the selected endpoint's live surfaces.",
+            "List the selected endpoint's live surfaces; target panes by stable surfaceId and paneId, with labels for human confirmation.",
             "surfaces.list payload. This command sends pair.request first, which admits the controller and may persist client state.",
             vec!["missing_endpoint", "missing_product_label", "lifecycle_pair_mismatch"],
         ),
@@ -534,7 +536,7 @@ fn command_spec(command: Command) -> Value {
         Command::Push => (
             "direct-client",
             "client_mutation",
-            "Set typed content in one explicit pane.",
+            "Set typed content in one explicit pane as a new visible Back/Forward history entry.",
             "Correlated content.set result and operationReceipt.",
             vec!["missing_endpoint", "missing_product_label", "outcome_unknown", "still_pending"],
         ),
@@ -642,6 +644,15 @@ fn published_input_schema(command: Command) -> Value {
     });
     if command == Command::TopologyRealize {
         schema["$defs"] = json!({ "topology": topology_node_schema() });
+    }
+    match command {
+        Command::Push => {
+            schema["description"] = json!("Creates a new visible content.set history entry; the replaced visible entry remains in Back/Forward history under the normal history limit. The client assigns the revision; do not supply a controller revision.");
+        }
+        Command::Clear => {
+            schema["description"] = json!("Requires expectedRevision for the selected pane's current content state.");
+        }
+        _ => {}
     }
     schema
 }
