@@ -392,7 +392,14 @@ enum SurfAceLocklessAllocationReleaseIdentity {
               validTombstoneId(tombstoneId),
               tombstoneKind == .surface,
               windowLabel.range(of: #"^[a-z]{1,32}$"#, options: .regularExpression) != nil else { return nil }
-        let json = "{\"\(generationKey)\":\(allocationGeneration),\"clientId\":\"\(clientId)\",\"closeRevision\":\(closeRevision),\"surfaceId\":\"\(surfaceId)\",\"terminalRetirementRevision\":\(terminalRetirementRevision),\"tombstoneId\":\"\(tombstoneId)\",\"tombstoneKind\":\"surface\",\"windowLabel\":\"\(windowLabel)\"}"
+        let identityFields = "\"clientId\":\"\(clientId)\",\"closeRevision\":\(closeRevision),\"surfaceId\":\"\(surfaceId)\",\"terminalRetirementRevision\":\(terminalRetirementRevision),\"tombstoneId\":\"\(tombstoneId)\",\"tombstoneKind\":\"surface\""
+        let generationField = "\"\(generationKey)\":\(allocationGeneration)"
+        // The registry hashes windowGeneration after tombstoneKind. Keep the
+        // former allocationGeneration-first order only for durable legacy IDs.
+        let fields = generationKey == "windowGeneration"
+            ? "\(identityFields),\(generationField),\"windowLabel\":\"\(windowLabel)\""
+            : "\(generationField),\(identityFields),\"windowLabel\":\"\(windowLabel)\""
+        let json = "{\(fields)}"
         return digest(json)
     }
 

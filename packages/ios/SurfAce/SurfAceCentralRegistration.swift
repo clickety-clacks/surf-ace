@@ -2045,7 +2045,7 @@ final class SurfAceCentralRegistration {
         guard !stopped else { throw SurfAceRegistrationError.stopped }
 
         let failures = FailureCollector()
-        var selectedRegistrationFailed = false
+        var selectedRouteFailed = false
         let previousSelected = selected
 
         // A healthy selected route is the steady-state path. Reuse its socket
@@ -2069,7 +2069,6 @@ final class SurfAceCentralRegistration {
                 if identity != nil, inputSnapshot != nil, boundInput.registryIdentity != identity {
                     onWarning("registration_binding_not_yet_persisted; continuing with current claims")
                 }
-                selectedRegistrationFailed = true
                 try await registerAndApply(using: selected.transport, identity: identity, input: boundInput)
                 guard !stopped else { throw SurfAceRegistrationError.stopped }
                 setLastError(nil)
@@ -2079,6 +2078,7 @@ final class SurfAceCentralRegistration {
                 return
             } catch {
                 if stopped { throw SurfAceRegistrationError.stopped }
+                selectedRouteFailed = true
                 selected.transport.close()
                 self.selected = nil
                 failures.values.append(reportFailure(
@@ -2103,8 +2103,12 @@ final class SurfAceCentralRegistration {
 
         let routeURLs = candidateURLs(discovered: discovered)
         var scanURLs = routeURLs
-        if !selectedRegistrationFailed, let previousSelected,
-           !scanURLs.contains(where: { $0.0 == previousSelected.url }) {
+        if selectedRouteFailed, let previousSelected {
+            // A failed route has already had its attempt this tick. Keep other
+            // addresses from the same registry available for failover.
+            scanURLs.removeAll { $0.0 == previousSelected.url }
+        } else if let previousSelected,
+                  !scanURLs.contains(where: { $0.0 == previousSelected.url }) {
             scanURLs.append((previousSelected.url, "reconnect"))
         }
         var candidates: [Candidate] = []
@@ -2169,8 +2173,6 @@ final class SurfAceCentralRegistration {
 
         for identifiedCandidate in identified where identifiedCandidate.identity == selectedIdentity {
             let candidate = identifiedCandidate.candidate
-            if selectedRegistrationFailed, let previousSelected,
-               previousSelected.url == candidate.url { continue }
             do {
                 if let identity = identifiedCandidate.identity {
                     try await bindCandidateRegistry(identity)

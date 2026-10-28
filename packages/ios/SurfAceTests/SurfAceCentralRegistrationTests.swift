@@ -2344,6 +2344,36 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         XCTAssertTrue(unrelatedReply.warnings.contains("registration_reply_correlation_mismatch"))
     }
 
+    func testWindowReleaseIntentIdMatchesRegistryFixedVector() throws {
+        let clientId = String(repeating: "a", count: 64)
+        // Pins the registry's clientId, closeRevision, surfaceId,
+        // terminalRetirementRevision, tombstoneId, tombstoneKind,
+        // windowGeneration, windowLabel JSON field order.
+        let windowReleaseId = try XCTUnwrap(SurfAceLocklessAllocationReleaseIdentity.window(
+            allocationGeneration: 30,
+            clientId: clientId,
+            closeRevision: 1,
+            surfaceId: "sf_vector001",
+            terminalRetirementRevision: 2,
+            tombstoneId: "tombstone-vector-1",
+            tombstoneKind: .surface,
+            windowLabel: "b"
+        ))
+        XCTAssertEqual(windowReleaseId, "0b1022de07befe2eb8f519a54bfbe1ed6a7c1b00ee22eb6ae4c9b6acb2fcccc4")
+
+        let legacyWindowReleaseId = try XCTUnwrap(SurfAceLocklessAllocationReleaseIdentity.legacyWindow(
+            allocationGeneration: 30,
+            clientId: clientId,
+            closeRevision: 1,
+            surfaceId: "sf_vector001",
+            terminalRetirementRevision: 2,
+            tombstoneId: "tombstone-vector-1",
+            tombstoneKind: .surface,
+            windowLabel: "b"
+        ))
+        XCTAssertEqual(legacyWindowReleaseId, "86d50ec15e4550d4bfe83db8d192d70b98102cd771996a8ab5a3b5880623e157")
+    }
+
     func testFinalCloseRegistrationCarriesExactPaneAndWindowReleaseEvidence() throws {
         let clientId = String(repeating: "a", count: 64)
         let expectedIdentity = SurfAceRegistryIdentity(allocatorId: "alloc_home", fleetId: "fleet-home")
@@ -2390,7 +2420,7 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         let expectedPaneReleaseId = SHA256.hash(data: Data(paneEvidence.utf8))
             .map { String(format: "%02x", $0) }.joined()
         XCTAssertEqual(paneRelease.releaseId, expectedPaneReleaseId)
-        let windowEvidence = "{\"windowGeneration\":30,\"clientId\":\"\(clientId)\",\"closeRevision\":\(committedCloseTopologyRevision),\"surfaceId\":\"\(surfaceId)\",\"terminalRetirementRevision\":\(close.surfaceSetRevision),\"tombstoneId\":\"\(close.tombstoneId)\",\"tombstoneKind\":\"surface\",\"windowLabel\":\"b\"}"
+        let windowEvidence = "{\"clientId\":\"\(clientId)\",\"closeRevision\":\(committedCloseTopologyRevision),\"surfaceId\":\"\(surfaceId)\",\"terminalRetirementRevision\":\(close.surfaceSetRevision),\"tombstoneId\":\"\(close.tombstoneId)\",\"tombstoneKind\":\"surface\",\"windowGeneration\":30,\"windowLabel\":\"b\"}"
         let expectedWindowReleaseId = SHA256.hash(data: Data(windowEvidence.utf8))
             .map { String(format: "%02x", $0) }.joined()
         XCTAssertEqual(windowRelease.releaseId, expectedWindowReleaseId)
