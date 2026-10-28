@@ -2146,7 +2146,15 @@ fn window_describe_salvages_unreadable_saved_fields_and_keeps_fleet_list_availab
 
     // An unrelated inventory request remains usable after a partial describe.
     let (registry, server) = spawn_registry_server(fleet_inventory_fixture(), "fleet.topology", true);
-    let output = run_native_cli(&["--registry", &registry, "fleet-list"]);
+    let temp = TempDir::new().unwrap();
+    let state_root = temp.path().join("state-must-remain-absent");
+    let output = run_native_cli(&[
+        "--state-root",
+        state_root.to_str().unwrap(),
+        "--registry",
+        &registry,
+        "fleet-list",
+    ]);
     assert!(
         output.status.success(),
         "{}",
@@ -2155,6 +2163,7 @@ fn window_describe_salvages_unreadable_saved_fields_and_keeps_fleet_list_availab
     let inventory: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(inventory["result"]["clients"].as_array().unwrap().len(), 2);
     assert_eq!(server.join().unwrap()["op"], "fleet.topology");
+    assert!(!state_root.exists(), "fleet-list must remain state-free");
 }
 
 #[test]
