@@ -304,6 +304,31 @@ export async function verifyTightbeamSkillAsset(sourceDir, outputDir) {
   return { filename: TIGHTBEAM_SKILL_ASSET, sha256: await sha256(output) };
 }
 
+export async function verifyTightbeamSkillDescribesCli(binaryPath, skillSourceDir = toolingRoot) {
+  let help;
+  try {
+    help = JSON.parse(await capture(path.resolve(binaryPath), ["--help"]));
+  } catch {
+    throw new Error("tightbeam_cli_help_invalid");
+  }
+  const commands = help?.result?.commands;
+  if (help?.ok !== true || !Array.isArray(commands) || commands.length === 0 ||
+      commands.some((command) => typeof command?.name !== "string" || !command.name.trim())) {
+    throw new Error("tightbeam_cli_help_command_list_missing");
+  }
+
+  const skill = await fs.readFile(path.resolve(skillSourceDir, TIGHTBEAM_SKILL_SOURCE), "utf8");
+  const catalogStart = skill.indexOf("Supported commands include ");
+  const catalogEnd = catalogStart >= 0 ? skill.indexOf("\n\n", catalogStart) : -1;
+  const catalog = catalogStart < 0 ? "" : skill.slice(catalogStart, catalogEnd < 0 ? skill.length : catalogEnd);
+  const documentedCommands = new Set([...catalog.matchAll(/`([^`]+)`/g)].map((match) => match[1]));
+  const missing = commands.map(({ name }) => name).filter((name) => !documentedCommands.has(name));
+  if (missing.length > 0) {
+    throw new Error(`tightbeam_skill_cli_command_coverage_mismatch:${missing.join(",")}`);
+  }
+  return commands.map(({ name }) => name);
+}
+
 export async function buildTightbeamLinuxPackages({ sourceDir, outputDir, target = TOOLCHAINS.linuxRustTarget, includeSkillAsset = true, skillSourceDir = toolingRoot }) {
   const source = path.resolve(sourceDir);
   const output = path.resolve(outputDir);
@@ -319,6 +344,7 @@ export async function buildTightbeamLinuxPackages({ sourceDir, outputDir, target
   const electronArchive = path.join(output, TIGHTBEAM.assets[2]);
   await createDirectoryTarGz(serverStage, "surf-ace-server", serverArchive, epoch);
   await assembleTightbeamCliStage({ binary, stageDir: cliStage, platform: "Linux x86_64" });
+  await verifyTightbeamSkillDescribesCli(path.join(cliStage, "bin/surf-ace"), skillSourceDir);
   await createDirectoryTarGz(cliStage, "surf-ace-cli", cliArchive, epoch);
   await removeIfExists(serverStage);
   await removeIfExists(cliStage);
@@ -337,7 +363,7 @@ export async function buildTightbeamLinuxPackages({ sourceDir, outputDir, target
   };
 }
 
-export async function buildTightbeamMacosPackages({ sourceDir, outputDir }) {
+export async function buildTightbeamMacosPackages({ sourceDir, outputDir, skillSourceDir = toolingRoot }) {
   const source = path.resolve(sourceDir);
   const output = path.resolve(outputDir);
   const epoch = await sourceDateEpoch(source);
@@ -358,6 +384,7 @@ export async function buildTightbeamMacosPackages({ sourceDir, outputDir }) {
     stageDir: cliStage,
     platform: "macOS arm64",
   });
+  await verifyTightbeamSkillDescribesCli(path.join(cliStage, "bin/surf-ace"), skillSourceDir);
   await createDirectoryTarGz(cliStage, "surf-ace-cli", cliArchive, epoch);
   await removeIfExists(cliStage);
   await removeIfExists(path.join(source, "packages/electron/dist/package"));

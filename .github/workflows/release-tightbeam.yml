@@ -1687,7 +1687,6 @@ jobs:
             echo "No platform candidate passed its required gates." >&2
             exit 1
           fi
-          skill_status=unavailable
           skill_source="tooling/integrations/tightbeam/skills/surf-ace/SKILL.md"
           skill_asset="surf-ace-skill-v${PRODUCT_VERSION}.md"
           if [[ -s "${skill_source}" ]] && cp "${skill_source}" "build/release/tightbeam/${skill_asset}" && cmp -s "${skill_source}" "build/release/tightbeam/${skill_asset}"; then
@@ -1695,7 +1694,8 @@ jobs:
             skill_status=included
           else
             rm -f "build/release/tightbeam/${skill_asset}"
-            printf '::warning::The shared skill asset was omitted because its pinned source bytes were unavailable or unverifiable.\n'
+            printf '::error::The shared Surf Ace skill asset is required and must match its pinned source bytes.\n'
+            exit 1
           fi
           components_csv="$(IFS=,; printf '%s' "${components[*]}")"
           printf 'components=%s\n' "${components_csv}" >> "$GITHUB_OUTPUT"
@@ -1967,10 +1967,6 @@ jobs:
           if [[ "${HAS_MACOS}" != true ]]; then
             printf '\nWithheld macOS assets: surf-ace-cli-macos-arm64-v%s.tar.gz, surf-ace-electron-macos-arm64-v%s.zip.\n' \
               "${PRODUCT_VERSION}" "${PRODUCT_VERSION}" >> release-notes.md
-          fi
-          if [[ "${SKILL_STATUS}" != included ]]; then
-            printf '\nWithheld shared skill asset: surf-ace-skill-v%s.md; its pinned tooling source was unavailable or its copied bytes did not verify.\n' \
-              "${PRODUCT_VERSION}" >> release-notes.md
           fi
           if [[ "${HAS_LINUX}" == true ]]; then
             if [[ "${LINUX_RECEIPT_OUTCOME:-}" == success && "${LINUX_ATTESTATION_OUTCOME:-}" == success && -n "${LINUX_ATTESTATION_URL:-}" ]]; then

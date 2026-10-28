@@ -41,6 +41,7 @@ import {
   TIGHTBEAM_LINUX_RUNTIME_FILES,
   copyTightbeamSkillAsset,
   verifyTightbeamSkillAsset,
+  verifyTightbeamSkillDescribesCli,
   verifyStandaloneElectronSource,
   writeTightbeamManifest,
   verifyTightbeamCliStage,
@@ -1426,15 +1427,20 @@ test("Tightbeam manifest assembles the six hosted assets including the exact ski
   }), /public_file_set_mismatch/);
 });
 
-test("Tightbeam manifests and SHA256SUMS can contain one fully gated platform without the shared skill", async (t) => {
+test("each single-platform manifest includes and hashes the shared skill asset", async (t) => {
   for (const component of ["linux", "macos"]) {
     await t.test(component, async (subtest) => {
       const outputDir = await temporary(subtest);
       const toolingSkillDir = await temporary(subtest);
+      const toolingSkillPath = path.join(toolingSkillDir, "integrations/tightbeam/skills/surf-ace/SKILL.md");
+      const toolingSkillBytes = await fs.readFile(path.join(repository, "integrations/tightbeam/skills/surf-ace/SKILL.md"));
+      await fs.mkdir(path.dirname(toolingSkillPath), { recursive: true });
+      await fs.writeFile(toolingSkillPath, toolingSkillBytes);
       const selectedAssets = TIGHTBEAM_PLATFORM_ASSETS[component];
       for (const name of selectedAssets) {
         if (name !== TIGHTBEAM_SKILL_ASSET) await fs.writeFile(path.join(outputDir, name), `fixture:${name}\n`);
       }
+      await copyTightbeamSkillAsset(toolingSkillDir, outputDir);
       const result = await writeTightbeamManifest({
         components: [component],
         outputDir,
@@ -1443,15 +1449,53 @@ test("Tightbeam manifests and SHA256SUMS can contain one fully gated platform wi
         toolingCommit: "b".repeat(40),
       });
       const manifest = JSON.parse(await fs.readFile(result.manifestPath, "utf8"));
-      assert.deepEqual(manifest.components, [component]);
+      assert.deepEqual(manifest.components, [component, "skill"]);
       assert.deepEqual(manifest.assets.map(({ name }) => name), TIGHTBEAM.assets.filter((name) => selectedAssets.includes(name)));
       assert.deepEqual(result.files, [...selectedAssets, TIGHTBEAM.manifest, TIGHTBEAM.checksums]);
+      const skillRecord = manifest.assets.find(({ name }) => name === TIGHTBEAM_SKILL_ASSET);
+      assert.equal(skillRecord.sha256, createHash("sha256").update(toolingSkillBytes).digest("hex"));
       assert.deepEqual((await verifyTightbeamChecksums(result.manifestPath)).files,
         [...selectedAssets, TIGHTBEAM.manifest].sort());
       assert.deepEqual((await fs.readdir(outputDir)).sort(), [...result.files].sort());
       assert.equal(Object.hasOwn(manifest, "serverPackage"), component === "linux");
     });
   }
+});
+
+test("a platform manifest cannot be written without the canonical skill asset", async (t) => {
+  const outputDir = await temporary(t);
+  const toolingSkillDir = await temporary(t);
+  for (const name of TIGHTBEAM_PLATFORM_ASSETS.linux) {
+    if (name !== TIGHTBEAM_SKILL_ASSET) await fs.writeFile(path.join(outputDir, name), `fixture:${name}\n`);
+  }
+  await assert.rejects(writeTightbeamManifest({
+    components: ["linux"],
+    outputDir,
+    sourceDir: repository,
+    skillSourceDir: toolingSkillDir,
+    toolingCommit: "c".repeat(40),
+  }), /ENOENT/);
+  await assert.rejects(fs.access(path.join(outputDir, TIGHTBEAM.manifest)));
+});
+
+test("the packaged CLI help command inventory must be covered by the skill", async (t) => {
+  const root = await temporary(t);
+  const cliBinary = path.join(root, "surf-ace");
+  const skillSourceDir = path.join(root, "tooling");
+  const skillPath = path.join(skillSourceDir, "integrations/tightbeam/skills/surf-ace/SKILL.md");
+  const commandNames = ["fleet-list", "sync", "annotations watch"];
+  const help = { ok: true, result: { commands: commandNames.map((name) => ({ name })) } };
+  await fs.mkdir(path.dirname(skillPath), { recursive: true });
+  await fs.writeFile(cliBinary, `#!/bin/sh\ncat <<'HELP'\n${JSON.stringify(help)}\nHELP\n`);
+  await fs.chmod(cliBinary, 0o755);
+  await fs.writeFile(skillPath, "Supported commands include `fleet-list`, `sync`, and `annotations watch`; availability follows the installed CLI schema.\n");
+
+  assert.deepEqual(await verifyTightbeamSkillDescribesCli(cliBinary, skillSourceDir), commandNames);
+  await fs.writeFile(skillPath, "Supported commands include `fleet-list` and `annotations watch`; availability follows the installed CLI schema.\n");
+  await assert.rejects(
+    verifyTightbeamSkillDescribesCli(cliBinary, skillSourceDir),
+    /tightbeam_skill_cli_command_coverage_mismatch:sync/,
+  );
 });
 
 test("v0.2.8 packages the skill from the tooling identity, not the product checkout", async (t) => {
