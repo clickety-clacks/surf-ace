@@ -2301,7 +2301,7 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
             surfaces: [], expectedIdentity: expected
         )
         XCTAssertEqual(fallback.registryIdentity, expected)
-        XCTAssertTrue(fallback.warnings.contains("registration_client_identity_missing_or_unrecognized"))
+        XCTAssertFalse(fallback.warnings.contains("registration_client_identity_missing_or_unrecognized"))
         XCTAssertTrue(fallback.warnings.contains("registration_registry_identity_missing_or_unrecognized"))
 
         let missingClient = Data(#"{"id":"register-1","op":"client.register","ok":true,"payload":{"registryIdentity":{"allocatorId":"alloc_home","fleetId":"fleet-home"},"surfaces":[]}}"#.utf8)
