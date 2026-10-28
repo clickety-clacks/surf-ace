@@ -12,6 +12,7 @@ import {
   backupStateFileName,
   loadPersistentStateFile,
   PersistentStateOutcomeUnknownError,
+  persistentStateHasArtifacts,
   persistentStateSelectorFileName,
   writePersistentStateFile,
 } from "../src/persistent-state-file.js";
@@ -31,6 +32,17 @@ type RollbackFault =
 async function temporaryStateDir(): Promise<string> {
   return fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-persistent-state-"));
 }
+
+test("persistent state artifacts distinguish fresh installs from saved clients", async () => {
+  const stateDir = await temporaryStateDir();
+  assert.equal(await persistentStateHasArtifacts(stateDir, STATE_FILE_NAME), false);
+  await fs.mkdir(path.join(stateDir, backupStateFileName(STATE_FILE_NAME)));
+  assert.equal(await persistentStateHasArtifacts(stateDir, STATE_FILE_NAME), true,
+    "an unexpected saved-state path must not be treated as a fresh install");
+  await fs.rmdir(path.join(stateDir, backupStateFileName(STATE_FILE_NAME)));
+  await writePersistentStateFile(stateDir, STATE_FILE_NAME, multiWindowState());
+  assert.equal(await persistentStateHasArtifacts(stateDir, STATE_FILE_NAME), true);
+});
 
 function multiWindowState(): PersistentSurfaceState {
   return {
@@ -328,6 +340,35 @@ test("persistent state recovers last-good backup when primary JSON is truncated"
   assert.equal(result.recoveredFromBackup, true);
   assert.deepEqual(result.state, state);
   assert.deepEqual(JSON.parse(await fs.readFile(path.join(stateDir, STATE_FILE_NAME), "utf8")), state);
+});
+
+test("a readable accepted generation remains available when primary repair is refused", async () => {
+  const stateDir = await temporaryStateDir();
+  const state = multiWindowState();
+  const primaryPath = path.join(stateDir, STATE_FILE_NAME);
+  await writePersistentStateFile(stateDir, STATE_FILE_NAME, state);
+  await fs.writeFile(primaryPath, "{truncated primary");
+
+  const originalRename = fs.rename;
+  fs.rename = (async (...args: Parameters<typeof fs.rename>) => {
+    if (args[1] === primaryPath) {
+      throw Object.assign(new Error("injected state repair refusal"), { code: "EIO" });
+    }
+    return await originalRename(...args);
+  }) as typeof fs.rename;
+  let result: Awaited<ReturnType<typeof loadPersistentStateFile>>;
+  try {
+    result = await loadPersistentStateFile(stateDir, STATE_FILE_NAME);
+  } finally {
+    fs.rename = originalRename;
+  }
+
+  assert.equal(result.writeGuard, "ambiguous-persistence");
+  assert.deepEqual(result.state, state,
+    "the selector-matched backup remains readable while persistence is guarded");
+  assert.equal(result.recoverySource, "backup");
+  assert.equal(await fs.readFile(primaryPath, "utf8"), "{truncated primary",
+    "failed repair must preserve the unverified primary bytes");
 });
 
 test("an unreadable primary recovers from its readable backup", async () => {

@@ -473,6 +473,10 @@ test("surface.describe refuses a different client identity but reports a differe
     }));
     assert.equal(wrongIdentity.ok, false);
     assert.equal(wrongIdentity.error.code, "identity_mismatch");
+    assert.equal(wrongIdentity.payload, undefined,
+      "a request for another client must not receive this client's surface data");
+    assert.equal((await request(socket, "surfaces.list", {})).ok, true,
+      "rejecting a mismatched identity leaves the independent inventory read available");
 
     const oldBinding = await request(socket, "surface.describe", describePayload(fixture, {
       registryIdentity: { allocatorId: "alloc_old_fixture", fleetId: "fleet_old_fixture" },
@@ -499,8 +503,24 @@ test("surface.describe refuses a different client identity but reports a differe
     assert.equal(badNonce.ok, false);
     assert.equal(badNonce.error.code, "invalid_payload");
 
-    const unsupportedVersion = await request(socket, "surface.describe", describePayload(fixture), {
+    const forwardVersion = await request(socket, "surface.describe", describePayload(fixture, {
+      futureTopologyHint: { canRead: true },
+      registryIdentity: {
+        allocatorId: fixture.binding.allocatorId,
+        fleetId: fixture.binding.fleetId,
+        futureRegistryField: "ignored",
+      },
+    }), {
       version: 2,
+    });
+    assert.equal(forwardVersion.ok, true, JSON.stringify(forwardVersion));
+    assert.equal(forwardVersion.payload.clientId, fixture.binding.clientId);
+    assert.equal(forwardVersion.payload.surfaceId, fixture.surface.surfaceId);
+    assert.equal(forwardVersion.payload.applicationReadiness.status, "degraded");
+    assert(forwardVersion.payload.applicationReadiness.limitationCodes.includes("unknown_protocol_version"));
+
+    const unsupportedVersion = await request(socket, "surface.describe", describePayload(fixture), {
+      version: 0,
     });
     assert.equal(unsupportedVersion.ok, false);
     assert.equal(unsupportedVersion.error.code, "unsupported_protocol_version");
@@ -752,7 +772,7 @@ test("surface.describe reports readiness degradation until durable persistence c
   }
 });
 
-test("surface.describe omits topology when a revision changes during collection", async () => {
+test("surface.describe retries once after topology churn and returns the matching surface", async () => {
   const fixture = describeFixture();
   const originalPairState = fixture.core.pairState.bind(fixture.core);
   let calls = 0;
@@ -770,9 +790,121 @@ test("surface.describe omits topology when a revision changes during collection"
     await server.start();
     socket = await connect(`ws://127.0.0.1:${server.port}/ws`);
     const response = await request(socket, "surface.describe", describePayload(fixture));
+    assert.equal(response.ok, true, JSON.stringify(response));
+    assert.equal(calls, 4);
+    assert.equal(response.payload.surfaceId, fixture.surface.surfaceId);
+    assert.equal((await request(socket, "surfaces.list", {})).ok, true);
+  } finally {
+    socket?.close();
+    await server.stop();
+  }
+});
+
+test("surface.describe reports a continuously changing surface without blocking inventory reads", async () => {
+  const fixture = describeFixture();
+  const originalPairState = fixture.core.pairState.bind(fixture.core);
+  let calls = 0;
+  fixture.core.pairState = ((surfaceId: string) => {
+    const state = originalPairState(surfaceId);
+    calls += 1;
+    return { ...state, topologyRevision: Number(state.topologyRevision) + calls };
+  }) as SurfaceCore["pairState"];
+  const server = describeServer(fixture.core);
+  let socket: WebSocket | null = null;
+  try {
+    await server.start();
+    socket = await connect(`ws://127.0.0.1:${server.port}/ws`);
+    const response = await request(socket, "surface.describe", describePayload(fixture));
     assert.equal(response.ok, false);
     assert.equal(response.error.code, "revision_churn");
-    assert.equal(response.payload, undefined);
+    assert.equal(calls, 6);
+    assert.equal((await request(socket, "surfaces.list", {})).ok, true);
+  } finally {
+    socket?.close();
+    await server.stop();
+  }
+});
+
+test("surface.describe omits only a malformed pane and keeps independent reads available", async () => {
+  const fixture = describeFixture();
+  const originalPairState = fixture.core.pairState.bind(fixture.core);
+  fixture.core.pairState = ((surfaceId: string) => {
+    const state = originalPairState(surfaceId);
+    if (surfaceId !== fixture.surface.surfaceId) return state;
+    const firstPane = state.panes[0]!;
+    const secondPaneId = Number(firstPane.paneId) + 1;
+    return {
+      ...state,
+      layout: {
+        children: [
+          { paneId: Number(firstPane.paneId), type: "pane" },
+          { paneId: secondPaneId, type: "pane" },
+        ],
+        direction: "horizontal",
+        type: "split",
+      },
+      panes: [
+        firstPane,
+        { ...firstPane, paneId: Number.NaN },
+      ],
+    } as ReturnType<SurfaceCore["pairState"]>;
+  }) as SurfaceCore["pairState"];
+  const server = describeServer(fixture.core);
+  let socket: WebSocket | null = null;
+  try {
+    await server.start();
+    socket = await connect(`ws://127.0.0.1:${server.port}/ws`);
+    const response = await request(socket, "surface.describe", describePayload(fixture));
+    assert.equal(response.ok, true, JSON.stringify(response));
+    assert.deepEqual(response.payload.panes.map((pane: { paneId: number }) => pane.paneId), [1]);
+    assert.deepEqual(response.payload.layout, { paneId: 1, type: "pane" });
+    assert.equal(response.payload.applicationReadiness.status, "degraded");
+    assert(response.payload.applicationReadiness.limitationCodes.includes("partial_topology"));
+    assert.equal((await request(socket, "surfaces.list", {})).ok, true);
+  } finally {
+    socket?.close();
+    await server.stop();
+  }
+});
+
+test("surface.describe bounds a large observation by omitting trailing pane rows", async () => {
+  const fixture = describeFixture();
+  const originalPairState = fixture.core.pairState.bind(fixture.core);
+  const paneCount = 1_200;
+  fixture.core.pairState = ((surfaceId: string) => {
+    const state = originalPairState(surfaceId);
+    if (surfaceId !== fixture.surface.surfaceId) return state;
+    const panes = Array.from({ length: paneCount }, (_, paneId) => ({
+      ...state.panes[0]!, paneId, paneLabel: null,
+    }));
+    return {
+      ...state,
+      layout: {
+        children: panes.map((pane) => ({ paneId: pane.paneId, type: "pane" })),
+        direction: "horizontal",
+        type: "split",
+      },
+      panes,
+    } as ReturnType<SurfaceCore["pairState"]>;
+  }) as SurfaceCore["pairState"];
+  const server = describeServer(fixture.core);
+  let socket: WebSocket | null = null;
+  try {
+    await server.start();
+    socket = await connect(`ws://127.0.0.1:${server.port}/ws`);
+    const response = await request(socket, "surface.describe", describePayload(fixture));
+    assert.equal(response.ok, true, JSON.stringify(response));
+    assert(response.payload.panes.length > 0 && response.payload.panes.length < paneCount);
+    assert.equal(response.payload.applicationReadiness.status, "degraded");
+    assert(response.payload.applicationReadiness.limitationCodes.includes("partial_topology"));
+    const layoutPaneIds: number[] = [];
+    const visit = (node: any): void => {
+      if (node.type === "pane") layoutPaneIds.push(node.paneId);
+      else for (const child of node.children) visit(child);
+    };
+    visit(response.payload.layout);
+    assert.deepEqual(layoutPaneIds, response.payload.panes.map((pane: { paneId: number }) => pane.paneId));
+    assert.equal((await request(socket, "surfaces.list", {})).ok, true);
   } finally {
     socket?.close();
     await server.stop();
@@ -2407,7 +2539,9 @@ test("new panes stay unnumbered when the registry rejects a pane claim and recov
     await synchronize;
     const recovered = core.panesList(surface.surfaceId).panes;
     for (const pane of recovered) {
-      assert.equal(pane.paneLabel, allocationsByLineage.get(pane.paneLineageId)?.paneLabel);
+      assert.equal(pane.paneLabel, pane.paneLineageId
+        ? allocationsByLineage.get(pane.paneLineageId)?.paneLabel
+        : undefined);
     }
     assert.equal(new Set(recovered.map((pane) => pane.paneLabel)).size, recovered.length);
   } finally {
@@ -2415,6 +2549,55 @@ test("new panes stay unnumbered when the registry rejects a pane claim and recov
     controller.close();
     for (const socket of registry.clients) socket.terminate();
     await new Promise<void>((resolve) => registry.close(() => resolve()));
+    await server.stop();
+  }
+});
+
+test("pane labels from a registry claim without a generation remain visible", async () => {
+  const core = new SurfaceCore();
+  core.bindRegistryIdentity({
+    clientId: "generationless-claim-client",
+    allocatorId: "alloc_fixture",
+    fleetId: "fixture-fleet",
+  });
+  const surface = core.ensurePrimarySurface("Surf Ace", {
+    height: 800,
+    scale: 2,
+    width: 1200,
+  });
+  initializeRegistryBootstrapPanes(core);
+  const port = nextPort++;
+  const server = new SurfaceWsServer({
+    capturePaneImage: async () => null,
+    claimPaneLabel: async () => ({ allocationGeneration: null, paneLabel: 987 }),
+    compositorSocketPath: null,
+    core,
+    endpointName: "Surf Ace",
+    hostName: "localhost",
+    port,
+    viewport: () => ({ height: 800, scale: 2, width: 1200 }),
+  });
+  await server.start();
+  const controller = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+  try {
+    assert.equal((await pair(controller, "generationless-claim-controller", surface.surfaceId)).ok, true);
+    const base = (await request(controller, "panes.list", { surfaceId: surface.surfaceId })).payload;
+    const split = await request(controller, "pane.split", {
+      count: 2,
+      direction: "horizontal",
+      expectedTopologyRevision: base.topology.topologyRevision,
+      paneId: Number(base.panes[0].paneId),
+      surfaceId: surface.surfaceId,
+    });
+    assert.equal(split.ok, true, JSON.stringify(split));
+    const projected = (await request(controller, "panes.list", { surfaceId: surface.surfaceId })).payload.panes;
+    const created = projected.find((pane: any) => pane.paneId !== base.panes[0].paneId);
+    assert.ok(created);
+    assert.equal(created?.paneLabel, 987);
+    assert.equal(core.getSurface(surface.surfaceId).panes.get(Number(created.paneId))?.allocationGeneration, null);
+    assert.equal(core.getRendererWindowState(surface.surfaceId).panes.find((pane) => pane.paneId === created.paneId)?.label, "987");
+  } finally {
+    controller.close();
     await server.stop();
   }
 });
@@ -2899,7 +3082,7 @@ test("target intent persistence completes before response and materialization ca
   }
 });
 
-test("unknown persistence outcome preserves direct reads while fencing dependent mutation", async () => {
+test("unknown persistence outcome retries each requested write without blocking direct reads", async () => {
   const core = new SurfaceCore();
   const surface = core.ensurePrimarySurface("Surf Ace", {
     height: 800,
@@ -2921,7 +3104,8 @@ test("unknown persistence outcome preserves direct reads while fencing dependent
   let failPersistence = false;
   let persistenceCalls = 0;
   const port = nextPort++;
-  const server = new SurfaceWsServer({
+  let server: SurfaceWsServer;
+  server = new SurfaceWsServer({
     capturePaneImage: async () => null,
     compositorSocketPath: null,
     core,
@@ -2932,6 +3116,8 @@ test("unknown persistence outcome preserves direct reads while fencing dependent
       if (failPersistence) {
         throw new PersistentStateOutcomeUnknownError(new Error("injected selector ambiguity"));
       }
+      server.resumeAfterVerifiedPersistence();
+      core.resumeAdmissionAfterVerifiedPersistence();
     },
     port,
     viewport: () => ({ height: 800, scale: 2, width: 1200 }),
@@ -2953,12 +3139,25 @@ test("unknown persistence outcome preserves direct reads while fencing dependent
     assert.equal((await request(socket, "panes.list", { surfaceId: surface.surfaceId })).ok, true);
     const stillPaused = await request(socket, "operation.receipt.ack", { requestId: "another-receipt" });
     assert.equal(stillPaused.ok, false);
-    assert.equal(persistenceCalls, beforeFaultCalls + 1);
+    assert.equal(persistenceCalls, beforeFaultCalls + 2,
+      "a later write gets its own persistence attempt instead of being rejected by a global fence");
+    const consumablePaused = await request(socket, "consumable.ack", {
+      cursor: 1,
+      scopeId: `pane:${surface.surfaceId}:1`,
+    }, { id: "consumable-ack-waits-for-persistence" });
+    assert.equal(consumablePaused.ok, false);
+    assert.match(consumablePaused.error.message, /reconcil|persistence/i);
+    assert.equal(persistenceCalls, beforeFaultCalls + 3,
+      "durable acknowledgements also reconcile before changing saved state");
     failPersistence = false;
-    server.resumeAfterVerifiedPersistence();
     const resumed = await request(socket, "operation.receipt.ack", { requestId: "another-receipt" });
     assert.doesNotMatch(String(resumed.error?.message ?? ""), /persistence is paused/i);
     assert(persistenceCalls > beforeFaultCalls + 1);
+    const consumableResumed = await request(socket, "consumable.ack", {
+      cursor: 1,
+      scopeId: `pane:${surface.surfaceId}:1`,
+    }, { id: "consumable-ack-after-reconciliation" });
+    assert.doesNotMatch(String(consumableResumed.error?.message ?? ""), /persistence is paused|still being reconciled/i);
     assert.deepEqual([surface, other].map(({ surfaceId }) => core.getRendererWindowState(surfaceId).panes[0]!.content), visibleBefore);
     const second = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
     try {
@@ -5886,7 +6085,7 @@ test("real-import unknown-outcome: pair.request gets a bounded envelope and read
       assert.equal(listed.ok, true);
       const paused = await pair(second, "tight-beam", surface.surfaceId);
       assert.equal(paused.ok, false);
-      assert.match(paused.error.message, /paused/i);
+      assert.match(paused.error.message, /reconcil|paused|fail-stopped/i);
     } finally {
       second.close();
     }

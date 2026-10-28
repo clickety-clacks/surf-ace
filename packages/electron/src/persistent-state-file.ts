@@ -35,10 +35,11 @@ export class PersistentStateWriteGuardError extends Error {
 
 export type PersistentStateLoadResult =
   | {
+      error?: unknown;
       recoveredFromBackup: boolean;
       recoverySource: PersistentStateRecoverySource;
       state: PersistentSurfaceState;
-      writeGuard: false;
+      writeGuard: false | "ambiguous-persistence";
     }
   | {
       error: unknown;
@@ -109,6 +110,23 @@ function parseSelector(contents: string): PersistentStateSelector {
 
 function temporaryStateFilePattern(fileName: string): RegExp {
   return new RegExp(`^${fileName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\.\\d+\\.\\d+\\.[0-9a-f]+\\.tmp$`);
+}
+
+export async function persistentStateHasArtifacts(stateDir: string, fileName: string): Promise<boolean> {
+  let entries: import("node:fs").Dirent[];
+  try {
+    entries = await fs.readdir(stateDir, { withFileTypes: true });
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ENOENT";
+  }
+  const knownNames = new Set([
+    fileName,
+    backupStateFileName(fileName),
+    persistentStateSelectorFileName(fileName),
+    persistentStateManagedFileName(fileName),
+  ]);
+  const temporaryPattern = temporaryStateFilePattern(fileName);
+  return entries.some((entry) => knownNames.has(entry.name) || temporaryPattern.test(entry.name));
 }
 
 async function loadNewestTemporaryState(
@@ -281,8 +299,14 @@ async function loadExplicitlyAcceptedState(
     }
   } catch (error) {
     // If the accepted generation cannot be repaired durably, keep writes
-    // guarded so a later candidate cannot replace the only readable copy.
-    return { error, state: undefined, writeGuard: "ambiguous-persistence" };
+    // guarded while still letting the app display the exact accepted snapshot.
+    return {
+      error,
+      recoveredFromBackup: recoverySource === "backup",
+      recoverySource,
+      state,
+      writeGuard: "ambiguous-persistence",
+    };
   }
   return {
     recoveredFromBackup: recoverySource === "backup",

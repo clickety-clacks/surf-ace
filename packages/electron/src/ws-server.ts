@@ -28,6 +28,7 @@ import type {
   Request,
   Response,
   SurfaceDescribeRequest,
+  SurfaceDescribeLayoutNode,
   Selection,
   SnapshotGetRequest,
   SurfaceViewport,
@@ -317,9 +318,6 @@ export class SurfaceWsServer {
     this.port = options.port;
     const persistLocklessState = options.persistLocklessState ?? (async () => {});
     this.persistLocklessState = async () => {
-      if (this.persistenceOutcomeUnknown) {
-        throw new LocklessAuthorityError("internal_error", "Local persistence is paused pending reconciliation");
-      }
       try {
         await persistLocklessState();
       } catch (error) {
@@ -512,8 +510,8 @@ export class SurfaceWsServer {
 
   failStopPersistence(error: PersistentStateOutcomeUnknownError): void {
     if (this.persistenceOutcomeUnknown) return;
-    // Keep transport and read-only commands available. The uncertain selector
-    // still fences every operation that could require durable state.
+    // Keep transport and independent commands available. A later write may
+    // first reconcile this selector, then commit its own current snapshot.
     this.persistenceOutcomeUnknown = error;
     persistentServerDiagnostic("error", "persistence_outcome_unknown_fail_stop", {
       ...errorDiagnosticFields(error.cause),
@@ -523,6 +521,13 @@ export class SurfaceWsServer {
   resumeAfterVerifiedPersistence(): void {
     this.persistenceOutcomeUnknown = null;
     persistentServerDiagnostic("info", "persistence_reconciled");
+  }
+
+  private async ensurePersistenceReconciledForWrite(): Promise<void> {
+    if (!this.persistenceOutcomeUnknown) return;
+    await this.persistLocklessState();
+    this.core.resumeAdmissionAfterVerifiedPersistence();
+    this.resumeAfterVerifiedPersistence();
   }
 
   advertisedTxt(fingerprintPrefix: string): Record<string, string> {
@@ -838,7 +843,7 @@ export class SurfaceWsServer {
     surfaceSetRevision: number;
     tombstoneId: string;
   }> {
-    if (this.persistenceOutcomeUnknown) throw this.persistenceOutcomeUnknown;
+    await this.ensurePersistenceReconciledForWrite();
     const result = await this.runLifecycleTransactionAsync(async () => {
       const surface = this.core.captureSurfaceTombstonePayload(surfaceId);
       const closeRevision = this.core.advanceFinalCloseTopologyRevision(surfaceId);
@@ -860,7 +865,7 @@ export class SurfaceWsServer {
     surfaceId: string;
     surfaceSetRevision: number;
   }> {
-    if (this.persistenceOutcomeUnknown) throw this.persistenceOutcomeUnknown;
+    await this.ensurePersistenceReconciledForWrite();
     const result = await this.core.locklessAuthority.transactionAsync(
       async () => {
         const committed = await this.runLifecycleTransaction(() => {
@@ -1101,7 +1106,7 @@ export class SurfaceWsServer {
       return;
     }
     if (parsedRequest.op === "surface.describe") {
-      await this.reply(socket, this.handleSurfaceDescribe(parsedRequest as SurfaceDescribeRequest));
+      await this.reply(socket, await this.handleSurfaceDescribe(parsedRequest as SurfaceDescribeRequest));
       return;
     }
     if (
@@ -1209,6 +1214,27 @@ export class SurfaceWsServer {
   ): Promise<void> {
     const meta = this.socketMeta.get(socket);
     if (!meta) return;
+    const initialSession = this.locklessSessions.get(socket);
+    const requiresPersistenceReadiness = request.op === "pair.request" ||
+      (initialSession !== undefined && (locklessOperationMutates(request.op) ||
+        request.op === "consumable.ack" || request.op === "operation.receipt.ack"));
+    if (this.persistenceOutcomeUnknown && requiresPersistenceReadiness) {
+      try {
+        await this.ensurePersistenceReconciledForWrite();
+      } catch (error) {
+        persistentServerDiagnostic("warn", "lockless_write_waiting_for_persistence", {
+          op: request.op,
+          ...errorDiagnosticFields(error),
+        });
+        await this.send(socket, JSON.stringify(errorResponse(
+          request.op,
+          request.id as never,
+          "internal_error",
+          "Saved state is still being reconciled; retry this operation after recovery",
+        )));
+        return;
+      }
+    }
     const validation = validateLocklessEnvelope(request);
     if (!validation.ok) {
       persistentServerDiagnostic("warn", "lockless_invalid_envelope", {
@@ -1217,11 +1243,6 @@ export class SurfaceWsServer {
         request_id: request.id,
       });
       const session = this.locklessSessions.get(socket);
-      if (this.persistenceOutcomeUnknown && session && locklessOperationMutates(request.op)) {
-        await this.send(socket, JSON.stringify(errorResponse(request.op, request.id as never,
-          "internal_error", "Local persistence is paused pending reconciliation")));
-        return;
-      }
       if (session && locklessOperationMutates(request.op)) {
         try {
           await this.core.locklessAuthority.transactionAsync(async () => {
@@ -1265,11 +1286,6 @@ export class SurfaceWsServer {
     if (cached) {
       if (cached.payloadHash !== payloadHash) {
         const session = this.locklessSessions.get(socket);
-        if (this.persistenceOutcomeUnknown && session && locklessOperationMutates(request.op)) {
-          await this.send(socket, JSON.stringify(errorResponse(request.op, request.id as never,
-            "internal_error", "Local persistence is paused pending reconciliation")));
-          return;
-        }
         if (session && locklessOperationMutates(request.op)) {
           try {
             await this.core.locklessAuthority.transactionAsync(async () => {
@@ -1306,21 +1322,6 @@ export class SurfaceWsServer {
         return;
       }
       await this.send(socket, JSON.stringify(cached.response));
-      return;
-    }
-
-    if (this.persistenceOutcomeUnknown && (
-      request.op === "pair.request" ||
-      request.op === "consumable.ack" ||
-      request.op === "operation.receipt.ack" ||
-      locklessOperationMutates(request.op)
-    )) {
-      await this.send(socket, JSON.stringify(errorResponse(
-        request.op,
-        request.id as never,
-        "internal_error",
-        "Local persistence is uncertain; this operation is paused pending reconciliation",
-      )));
       return;
     }
 
@@ -2791,7 +2792,7 @@ export class SurfaceWsServer {
           const numberedPanes = newPaneIds.flatMap((paneId, index) => {
             const paneLabel = newPaneLabels[index]!;
             const allocationGeneration = newPaneAllocationGenerations[index];
-            return paneLabel > 0 && allocationGeneration !== null
+            return paneLabel > 0
               ? [{ allocationGeneration, paneId: String(paneId),
                   paneLineageId: newPaneLineageIds[index]!, paneLabel }]
               : [];
@@ -2976,7 +2977,7 @@ export class SurfaceWsServer {
               request.payload.anchorPaneId,
               request.payload.direction,
             );
-            if (pane.paneLabel > 0 && pane.allocationGeneration !== null) {
+            if (pane.paneLabel > 0) {
               this.core.confirmRegistryPaneLabels([{ surfaceId, panes: [{
                 paneId: String(pane.paneId), paneLineageId: pane.paneLineageId,
                 allocationGeneration: pane.allocationGeneration, paneLabel: pane.paneLabel,
@@ -3215,7 +3216,7 @@ export class SurfaceWsServer {
             new Map([...created].map(([paneId, entry]) => [paneId, entry.allocationGeneration])));
           this.assertLocklessRecoverableCapacity(surfaceId, beforeRecord);
           const numberedPanes = [...created].flatMap(([paneId, entry]) =>
-            entry.paneLabel > 0 && entry.allocationGeneration !== null
+            entry.paneLabel > 0
               ? [{ allocationGeneration: entry.allocationGeneration,
                   paneId: String(paneId), paneLineageId: entry.paneLineageId,
                   paneLabel: entry.paneLabel }]
@@ -3347,12 +3348,31 @@ export class SurfaceWsServer {
     } as unknown as Response;
   }
 
-  private handleSurfaceDescribe(request: SurfaceDescribeRequest): Response {
-    if (request.v !== 1) {
+  private async handleSurfaceDescribe(request: SurfaceDescribeRequest): Promise<Response> {
+    if (!Number.isSafeInteger(request.v) || request.v < 1) {
       return errorResponse("surface.describe", request.id, "unsupported_protocol_version",
-        "surface.describe requires protocol version 1");
+        "surface.describe requires a supported positive protocol version");
     }
-    const validation = validateEnvelopeType("surface.describe", request);
+    // The request payload is additive across protocol versions. Validate its
+    // known fields against v1 while preserving correlation and identity checks.
+    const validationRequest = request.v === 1 ? request : {
+      id: request.id,
+      op: "surface.describe",
+      payload: {
+        clientId: request.payload?.clientId,
+        endpointLeaseGeneration: request.payload?.endpointLeaseGeneration,
+        nonce: request.payload?.nonce,
+        registryIdentity: {
+          allocatorId: request.payload?.registryIdentity?.allocatorId,
+          fleetId: request.payload?.registryIdentity?.fleetId,
+        },
+        surfaceId: request.payload?.surfaceId,
+      },
+      sentAt: request.sentAt,
+      type: "request",
+      v: 1,
+    };
+    const validation = validateEnvelopeType("surface.describe", validationRequest);
     if (!validation.ok || !Number.isSafeInteger(request.sentAt) || request.sentAt < 0 ||
         !/^[a-f0-9]{32,128}$/.test(request.payload?.nonce ?? "")) {
       return errorResponse("surface.describe", request.id, "invalid_payload",
@@ -3362,6 +3382,14 @@ export class SurfaceWsServer {
     if (!clientId || request.payload.clientId !== clientId) {
       return errorResponse("surface.describe", request.id, "identity_mismatch",
         "Requested client identity does not match this client");
+    }
+    const unknownProtocolVersion = request.v !== 1;
+    if (unknownProtocolVersion) {
+      persistentServerDiagnostic("warn", "surface_describe_unknown_protocol_version", {
+        client_id: clientId,
+        received_version: request.v,
+        surface_id: request.payload.surfaceId,
+      });
     }
     const persistenceOutcomeUnknown = this.persistenceOutcomeUnknown !== null;
     let applicationStateReady = false;
@@ -3382,29 +3410,42 @@ export class SurfaceWsServer {
     } catch {
       // An unavailable saved lease limits consistency reporting, not the topology read.
     }
-    if (!this.core.listSurfaces().some((surface) => surface.surfaceId === request.payload.surfaceId)) {
-      return errorResponse("surface.describe", request.id, "surface_not_found",
-        "Requested surface is not live on this endpoint");
-    }
-    const surfaceSetBefore = this.core.locklessAuthority.surfaceSetRevision;
-    let before: ReturnType<SurfaceCore["pairState"]>;
-    let snapshot: ReturnType<SurfaceCore["pairState"]>;
-    let surfaceSetAfter: number;
-    try {
-      before = this.core.pairState(request.payload.surfaceId);
-      snapshot = this.core.pairState(request.payload.surfaceId);
-      surfaceSetAfter = this.core.locklessAuthority.surfaceSetRevision;
-    } catch (error) {
-      if (error instanceof SurfaceCoreError && error.code === "invalid_payload") {
+    let snapshot: ReturnType<SurfaceCore["pairState"]> | null = null;
+    let surfaceSetAfter = 0;
+    let stableSnapshot = false;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      if (!this.core.listSurfaces().some((surface) => surface.surfaceId === request.payload.surfaceId)) {
         return errorResponse("surface.describe", request.id, "surface_not_found",
           "Requested surface is not live on this endpoint");
       }
-      return errorResponse("surface.describe", request.id, "internal_error",
-        "Client could not read authoritative surface state");
+      const surfaceSetBefore = this.core.locklessAuthority.surfaceSetRevision;
+      try {
+        const before = this.core.pairState(request.payload.surfaceId);
+        const collected = this.core.pairState(request.payload.surfaceId);
+        surfaceSetAfter = this.core.locklessAuthority.surfaceSetRevision;
+        if (surfaceSetBefore === surfaceSetAfter && before.topologyRevision === collected.topologyRevision) {
+          snapshot = collected;
+          stableSnapshot = true;
+          break;
+        }
+      } catch (error) {
+        if (error instanceof SurfaceCoreError && error.code === "invalid_payload") {
+          return errorResponse("surface.describe", request.id, "surface_not_found",
+            "Requested surface is not live on this endpoint");
+        }
+        return errorResponse("surface.describe", request.id, "internal_error",
+          "Client could not read the requested surface state");
+      }
+      persistentServerDiagnostic("warn", "surface_describe_retry_after_churn", {
+        attempt: attempt + 1,
+        client_id: clientId,
+        surface_id: request.payload.surfaceId,
+      });
+      if (attempt < 2) await new Promise<void>((resolve) => setImmediate(resolve));
     }
-    if (surfaceSetBefore !== surfaceSetAfter || before.topologyRevision !== snapshot.topologyRevision) {
+    if (!stableSnapshot || !snapshot) {
       return errorResponse("surface.describe", request.id, "revision_churn",
-        "Surface set or topology changed while the observation was collected");
+        "Requested surface kept changing while its observation was collected");
     }
     const observedAtMs = Date.now();
     if (!Number.isSafeInteger(observedAtMs) || observedAtMs < 0 ||
@@ -3430,71 +3471,161 @@ export class SurfaceWsServer {
     } else if (lease.leaseGeneration !== request.payload.endpointLeaseGeneration) {
       limitationCodes.push("endpoint_lease_stale");
     }
-    if (limitationCodes.length > 0) {
-      persistentServerDiagnostic("warn", "prepair_surface_observation_degraded", {
-        limitation_codes: limitationCodes.join(","),
-        surface_id: request.payload.surfaceId,
-      });
-    }
-    const panes = snapshot.panes.map((pane) => ({
-      paneId: Number(pane.paneId),
-      paneLabel: pane.paneLabel,
-      contentObservation: {
-        revision: Number.isSafeInteger(pane.currentRevision) && pane.currentRevision >= 0
-          ? Number(pane.currentRevision) : null,
-        source: "client-authority" as const,
-        observedAtMs,
-      },
-    }));
-    const layoutPaneIds: number[] = [];
-    const visit = (node: typeof snapshot.layout): boolean => {
-      if (node.type === "pane") {
-        layoutPaneIds.push(Number(node.paneId));
-        return true;
-      }
-      return node.type === "split" && node.children.length > 0 && node.children.every(visit);
+    type DescribePane = {
+      paneId: number;
+      paneLabel: number | null;
+      contentObservation: { revision: number | null; source: "client-authority"; observedAtMs: number };
     };
-    const paneIds = panes.map((pane) => pane.paneId);
-    if (!visit(snapshot.layout) || panes.length === 0 ||
-        panes.some((pane) => !Number.isSafeInteger(pane.paneId) || pane.paneId < 0 ||
-          (pane.paneLabel !== null && (!Number.isSafeInteger(pane.paneLabel) || pane.paneLabel < 1)) ||
-          (pane.contentObservation.revision !== null &&
-            (!Number.isSafeInteger(pane.contentObservation.revision) || pane.contentObservation.revision < 0))) ||
-        new Set(paneIds).size !== paneIds.length ||
-        layoutPaneIds.length !== paneIds.length ||
-        new Set(layoutPaneIds).size !== layoutPaneIds.length ||
-        layoutPaneIds.some((paneId) => !paneIds.includes(paneId))) {
-      return errorResponse("surface.describe", request.id, "not_ready",
-        "Client cannot produce a complete authoritative topology observation");
+    let partialTopology = false;
+    const paneRows: DescribePane[] = [];
+    const panesById = new Map<number, DescribePane>();
+    for (const value of snapshot.panes as unknown[]) {
+      if (!value || typeof value !== "object" || Array.isArray(value)) {
+        partialTopology = true;
+        continue;
+      }
+      const pane = value as Record<string, unknown>;
+      const paneId = pane.paneId;
+      if (typeof paneId !== "number" || !Number.isSafeInteger(paneId) || paneId < 0 || panesById.has(paneId)) {
+        partialTopology = true;
+        continue;
+      }
+      const paneLabel = pane.paneLabel === null
+        ? null
+        : typeof pane.paneLabel === "number" && Number.isSafeInteger(pane.paneLabel) && pane.paneLabel >= 1
+          ? pane.paneLabel
+          : null;
+      if (paneLabel !== pane.paneLabel) partialTopology = true;
+      const revision = typeof pane.currentRevision === "number" &&
+        Number.isSafeInteger(pane.currentRevision) && pane.currentRevision >= 0
+        ? pane.currentRevision
+        : null;
+      if (revision !== pane.currentRevision) partialTopology = true;
+      const row: DescribePane = {
+        paneId,
+        paneLabel,
+        contentObservation: { revision, source: "client-authority", observedAtMs },
+      };
+      paneRows.push(row);
+      panesById.set(paneId, row);
     }
-    const response: Response = {
-      id: request.id as Request["id"],
-      ok: true,
-      op: "surface.describe",
-      payload: {
-        nonce: request.payload.nonce,
-        clientId,
-        registryIdentity: binding
-          ? { allocatorId: binding.allocatorId, fleetId: binding.fleetId }
-          : null,
-        surfaceId: request.payload.surfaceId,
-        endpointLeaseGeneration: lease?.leaseGeneration ?? null,
-        observedAtMs,
-        applicationReadiness: limitationCodes.length > 0
-          ? { status: "degraded", limitationCodes }
-          : { status: "ready", limitationCodes: [] },
-        surfaceSetRevision: surfaceSetAfter,
-        topologyRevision: snapshot.topologyRevision,
-        layout: snapshot.layout,
-        panes,
-      },
-      sentAt: Date.now(),
-      type: "response",
-      v: 1,
-    } as Response;
+
+    const readWeight = (node: Record<string, unknown>): number | undefined => {
+      if (!("weight" in node)) return undefined;
+      if (typeof node.weight === "number" && Number.isFinite(node.weight) && node.weight > 0) {
+        return node.weight;
+      }
+      partialTopology = true;
+      return undefined;
+    };
+    const sanitizeLayout = (
+      value: unknown,
+      allowedPaneIds: ReadonlySet<number>,
+      placedPaneIds: Set<number>,
+    ): SurfaceDescribeLayoutNode | null => {
+      if (!value || typeof value !== "object" || Array.isArray(value)) {
+        partialTopology = true;
+        return null;
+      }
+      const node = value as Record<string, unknown>;
+      const weight = readWeight(node);
+      if (node.type === "pane") {
+        const paneId = node.paneId;
+        if (typeof paneId !== "number" || !Number.isSafeInteger(paneId) || paneId < 0 ||
+            !allowedPaneIds.has(paneId) || placedPaneIds.has(paneId) || !panesById.has(paneId)) {
+          partialTopology = true;
+          return null;
+        }
+        placedPaneIds.add(paneId);
+        return { type: "pane", paneId: paneId as never, ...(weight === undefined ? {} : { weight }) };
+      }
+      if (node.type !== "split" ||
+          (node.direction !== "horizontal" && node.direction !== "vertical") ||
+          !Array.isArray(node.children)) {
+        partialTopology = true;
+        return null;
+      }
+      const children = node.children
+        .map((child) => sanitizeLayout(child, allowedPaneIds, placedPaneIds))
+        .filter((child): child is SurfaceDescribeLayoutNode => child !== null);
+      if (children.length !== node.children.length) partialTopology = true;
+      if (children.length === 0) return null;
+      if (children.length === 1) {
+        partialTopology = true;
+        return weight === undefined ? children[0]! : { ...children[0]!, weight };
+      }
+      return {
+        type: "split",
+        direction: node.direction,
+        children,
+        ...(weight === undefined ? {} : { weight }),
+      };
+    };
+    let includedPaneIds = new Set(paneRows.map((pane) => pane.paneId));
+    let placedPaneIds = new Set<number>();
+    let layout = sanitizeLayout(snapshot.layout, includedPaneIds, placedPaneIds);
+    let panes = paneRows.filter((pane) => placedPaneIds.has(pane.paneId));
+    if (panes.length !== paneRows.length) partialTopology = true;
+    if (!layout || panes.length === 0) {
+      return errorResponse("surface.describe", request.id, "not_ready",
+        "Client could not read a usable pane layout for the requested surface");
+    }
+    const layoutSource = snapshot.layout;
+    let responseLimitations: string[] = [];
+    const buildResponse = (): Response => {
+      responseLimitations = [...limitationCodes];
+      if (partialTopology && !responseLimitations.includes("partial_topology")) {
+        responseLimitations.push("partial_topology");
+      }
+      if (unknownProtocolVersion && !responseLimitations.includes("unknown_protocol_version")) {
+        responseLimitations.push("unknown_protocol_version");
+      }
+      return {
+        id: request.id as Request["id"],
+        ok: true,
+        op: "surface.describe",
+        payload: {
+          nonce: request.payload.nonce,
+          clientId,
+          registryIdentity: binding
+            ? { allocatorId: binding.allocatorId, fleetId: binding.fleetId }
+            : null,
+          surfaceId: request.payload.surfaceId,
+          endpointLeaseGeneration: lease?.leaseGeneration ?? null,
+          observedAtMs,
+          applicationReadiness: responseLimitations.length > 0
+            ? { status: "degraded", limitationCodes: responseLimitations }
+            : { status: "ready", limitationCodes: [] },
+          surfaceSetRevision: surfaceSetAfter,
+          topologyRevision: snapshot!.topologyRevision,
+          layout: layout!,
+          panes,
+        },
+        sentAt: Date.now(),
+        type: "response",
+        v: 1,
+      } as Response;
+    };
+    let response = buildResponse();
+    while (Buffer.byteLength(JSON.stringify(response), "utf8") > 65_536 && panes.length > 1) {
+      partialTopology = true;
+      const removed = panes.pop()!;
+      includedPaneIds.delete(removed.paneId);
+      placedPaneIds = new Set<number>();
+      layout = sanitizeLayout(layoutSource, includedPaneIds, placedPaneIds);
+      panes = panes.filter((pane) => placedPaneIds.has(pane.paneId));
+      if (!layout || panes.length === 0) break;
+      response = buildResponse();
+    }
     if (Buffer.byteLength(JSON.stringify(response), "utf8") > 65_536) {
       return errorResponse("surface.describe", request.id, "not_ready",
-        "Authoritative surface observation exceeds the response bound");
+        "The requested surface observation could not fit the response bound");
+    }
+    if (responseLimitations.length > 0) {
+      persistentServerDiagnostic("warn", "prepair_surface_observation_degraded", {
+        limitation_codes: responseLimitations.join(","),
+        surface_id: request.payload.surfaceId,
+      });
     }
     return response;
   }
@@ -3860,6 +3991,15 @@ export class SurfaceWsServer {
   }
 
   async resizeSplit(surfaceId: string, path: number[], weights: number[], expected?: SplitResizeExpectation, geometry?: SplitResizeGeometry[]): Promise<boolean> {
+    try {
+      await this.ensurePersistenceReconciledForWrite();
+    } catch (error) {
+      persistentServerDiagnostic("warn", "pane_resize_waiting_for_persistence", {
+        surface_id: surfaceId,
+        ...errorDiagnosticFields(error),
+      });
+      return false;
+    }
     if (!expected) return await this.runSurfaceMutation(surfaceId, async () => {
       const nativePaneIds = this.core.panesList(surfaceId).panes
         .filter((pane) => pane.externalNative)
@@ -3891,7 +4031,6 @@ export class SurfaceWsServer {
       // Authority -> core -> surface matches paired network and local-close paths.
       return await this.core.locklessAuthority.transactionAsync(() => this.core.transactionAsync(() =>
         this.runSurfaceMutation(surfaceId, async () => {
-          if (this.persistenceOutcomeUnknown) return false;
           const current = this.core.getRendererWindowState(surfaceId);
           if (!splitResizeMatches(current, expected)) return false;
           if (splitResizeIsNoOp(current.layout, path, weights)) return true;
@@ -4046,7 +4185,7 @@ export class SurfaceWsServer {
         );
         const numberedPanes = [...newPaneAllocationGenerations].flatMap(([paneId, allocationGeneration]) => {
           const pane = this.core.getSurface(surfaceId).panes.get(paneId);
-          return pane && pane.paneLabel > 0 && allocationGeneration !== null
+          return pane && pane.paneLabel > 0
             ? [{ allocationGeneration, paneId: String(paneId), paneLineageId: pane.paneLineageId,
                 paneLabel: pane.paneLabel }]
             : [];
@@ -5238,7 +5377,7 @@ export class SurfaceWsServer {
       try {
         const result = this.core.paneSplit(surfaceId, splitPayload);
         const numberedPanes = allocations.flatMap((allocation, index) =>
-          allocation.paneLabel > 0 && allocation.allocationGeneration !== null
+          allocation.paneLabel > 0
             ? [{ allocationGeneration: allocation.allocationGeneration,
                 paneId: String(paneIds[index]!), paneLineageId: newPaneLineageIds[index]!,
                 paneLabel: allocation.paneLabel }]

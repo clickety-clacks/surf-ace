@@ -5,6 +5,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { WebSocketServer, WebSocket } from "ws";
+import type { Revision } from "../../protocol/src/index.js";
 import { ServerConnection } from "../src/server-connection.js";
 import { ConfiguredServerRegistration } from "../src/configured-server.js";
 import { SurfaceCore } from "../src/surface-core.js";
@@ -219,6 +220,15 @@ async function automaticRegistryFixture(options: {
   rejectClaim?: (payload: any) => boolean;
   rejectReleaseIds?: Set<string>;
   rejectRegistration?: () => boolean;
+  registrationResultsV1?: boolean;
+  shippedLegacyShape?: boolean;
+  ignorePendingReleases?: boolean;
+  transformRegistrationReply?: (reply: Record<string, any>, requestPayload: any) => Record<string, any>;
+  paneClaimReply?: (requestPayload: any) => Record<string, unknown>;
+  rejectPartialSurfaceIds?: Set<string>;
+  rejectPartialPaneKeys?: Set<string>;
+  mismatchRegistrationCorrelation?: boolean;
+  mismatchRegistrationSurfaceId?: boolean;
   seed?: Array<{ surfaceId: string; windowLabel: string; windowGeneration: number;
     panes: Array<{ paneId: string; paneLineageId: string; paneLabel: number; allocationGeneration: number }> }>;
 } = {}) {
@@ -228,6 +238,7 @@ async function automaticRegistryFixture(options: {
   await new Promise<void>((resolve) => server.once("listening", resolve));
   const port = (server.address() as AddressInfo).port;
   const requests: Array<{ socket: WebSocket; message: any }> = [];
+  const responses: Array<Record<string, any>> = [];
   const identityRequests: Array<{ socket: WebSocket; message: any }> = [];
   const windows = new Map<string, { windowGeneration: number; windowLabel: string }>();
   const panes = new Map<string, { allocationGeneration: number; paneLabel: number }>();
@@ -248,6 +259,7 @@ async function automaticRegistryFixture(options: {
   const completedWindowReleaseIds = new Set<string>();
   const releasedWindowLabels: string[] = [];
   const releasedPaneLabels: number[] = [];
+  let mismatchedCorrelationSent = false;
   server.on("connection", (socket) => {
     socket.on("message", (raw) => {
       const message = JSON.parse(String(raw));
@@ -261,6 +273,14 @@ async function automaticRegistryFixture(options: {
       }
       requests.push({ socket, message });
       const payload = message.payload;
+      if (message.op === "pane.claim") {
+        socket.send(JSON.stringify({
+          type: "response", v: 1, id: message.id, op: message.op, ok: true,
+          payload: options.paneClaimReply?.(payload) ?? { paneLabel: 701 },
+        }));
+        return;
+      }
+      const partialMode = options.registrationResultsV1 === true && payload.registrationResultsV1 === true;
       if (options.rejectRegistration?.()) {
         socket.send(JSON.stringify({
           type: "response", v: 1, id: message.id, op: message.op, ok: false,
@@ -269,13 +289,21 @@ async function automaticRegistryFixture(options: {
         return;
       }
       const rejectedReleaseIds = options.rejectReleaseIds ?? new Set<string>();
-      for (const release of payload.pendingPaneReleases ?? []) {
+      const paneReleaseResults: Array<Record<string, unknown>> = [];
+      const pendingPaneReleases = options.ignorePendingReleases ? [] : (payload.pendingPaneReleases ?? []);
+      const pendingWindowReleases = options.ignorePendingReleases ? [] : (payload.pendingWindowReleases ?? []);
+      for (const [index, release] of pendingPaneReleases.entries()) {
         if (rejectedReleaseIds.has(release.releaseId)) {
-          socket.send(JSON.stringify({
-            type: "response", v: 1, id: message.id, op: message.op, ok: false,
-            error: { code: "registration_failed", message: "release_refused" },
-          }));
-          return;
+          if (!partialMode) {
+            socket.send(JSON.stringify({
+              type: "response", v: 1, id: message.id, op: message.op, ok: false,
+              error: { code: "registration_failed", message: "release_refused" },
+            }));
+            return;
+          }
+          paneReleaseResults.push({ index, releaseId: release.releaseId, ok: false,
+            error: { code: "assignment_conflict", message: "release_refused" } });
+          continue;
         }
         const key = `${release.surfaceId}\0${release.paneId}\0${release.lineageId}`;
         const allocated = panes.get(key);
@@ -285,14 +313,21 @@ async function automaticRegistryFixture(options: {
           releasedPaneLabels.push(allocated.paneLabel);
         }
         completedPaneReleaseIds.add(release.releaseId);
+        paneReleaseResults.push({ index, releaseId: release.releaseId, ok: true });
       }
-      for (const release of payload.pendingWindowReleases ?? []) {
+      const windowReleaseResults: Array<Record<string, unknown>> = [];
+      for (const [index, release] of pendingWindowReleases.entries()) {
         if (rejectedReleaseIds.has(release.releaseId)) {
-          socket.send(JSON.stringify({
-            type: "response", v: 1, id: message.id, op: message.op, ok: false,
-            error: { code: "registration_failed", message: "release_refused" },
-          }));
-          return;
+          if (!partialMode) {
+            socket.send(JSON.stringify({
+              type: "response", v: 1, id: message.id, op: message.op, ok: false,
+              error: { code: "registration_failed", message: "release_refused" },
+            }));
+            return;
+          }
+          windowReleaseResults.push({ index, releaseId: release.releaseId, ok: false,
+            error: { code: "assignment_conflict", message: "release_refused" } });
+          continue;
         }
         const allocated = windows.get(release.surfaceId);
         if (allocated && allocated.windowLabel === release.windowLabel &&
@@ -301,6 +336,7 @@ async function automaticRegistryFixture(options: {
           releasedWindowLabels.push(allocated.windowLabel);
         }
         completedWindowReleaseIds.add(release.releaseId);
+        windowReleaseResults.push({ index, releaseId: release.releaseId, ok: true });
       }
       if (options.rejectClaim?.(payload)) {
         socket.send(JSON.stringify({
@@ -309,7 +345,14 @@ async function automaticRegistryFixture(options: {
         }));
         return;
       }
-      const surfaces = payload.surfaces.map((surface: any) => {
+      const surfaces: Array<Record<string, unknown>> = [];
+      const surfaceResults: Array<Record<string, unknown>> = [];
+      for (const [index, surface] of payload.surfaces.entries()) {
+        if (partialMode && options.rejectPartialSurfaceIds?.has(surface.surfaceId)) {
+          surfaceResults.push({ index, surfaceId: surface.surfaceId, ok: false,
+            error: { code: "assignment_conflict", message: "window_claim_refused" } });
+          continue;
+        }
         let window = windows.get(surface.surfaceId);
         if (!window) {
           let windowLabel = releasedWindowLabels.shift();
@@ -327,46 +370,96 @@ async function automaticRegistryFixture(options: {
           };
           windows.set(surface.surfaceId, window);
         }
-        return {
+        const registeredPanes: Array<Record<string, unknown>> = [];
+        const paneResults: Array<Record<string, unknown>> = [];
+        for (const [paneIndex, pane] of (surface.panes ?? []).entries()) {
+          const key = `${surface.surfaceId}\0${pane.paneId}\0${pane.paneLineageId}`;
+          if (partialMode && options.rejectPartialPaneKeys?.has(key)) {
+            paneResults.push({ index: paneIndex, paneId: pane.paneId, paneLineageId: pane.paneLineageId,
+              ok: false, error: { code: "assignment_conflict", message: "pane_claim_refused" } });
+            continue;
+          }
+          let allocation = panes.get(key);
+          if (!allocation) {
+            allocation = {
+              allocationGeneration: Number.isSafeInteger(pane.allocationGeneration) && pane.allocationGeneration > 0
+                ? pane.allocationGeneration : nextGeneration++,
+              paneLabel: Number.isSafeInteger(pane.paneLabel) && pane.paneLabel > 0
+                ? pane.paneLabel : releasedPaneLabels.shift() ?? nextPaneLabel++,
+            };
+            panes.set(key, allocation);
+          }
+          const projection = { ...pane, ...allocation };
+          registeredPanes.push(projection);
+          paneResults.push({ index: paneIndex, paneId: pane.paneId, paneLineageId: pane.paneLineageId,
+            ok: true, ...projection });
+        }
+        surfaces.push({
           surfaceId: surface.surfaceId,
           windowLabel: window.windowLabel,
           windowGeneration: window.windowGeneration,
-          panes: surface.panes.map((pane: any) => {
-            const key = `${surface.surfaceId}\0${pane.paneId}\0${pane.paneLineageId}`;
-            let allocation = panes.get(key);
-            if (!allocation) {
-              allocation = {
-                allocationGeneration: Number.isSafeInteger(pane.allocationGeneration) && pane.allocationGeneration > 0
-                  ? pane.allocationGeneration : nextGeneration++,
-                paneLabel: Number.isSafeInteger(pane.paneLabel) && pane.paneLabel > 0
-                  ? pane.paneLabel : releasedPaneLabels.shift() ?? nextPaneLabel++,
-              };
-              panes.set(key, allocation);
-            }
-            return { ...pane, ...allocation };
-          }),
-        };
-      });
-      socket.send(JSON.stringify({
-        type: "response", v: 1, id: message.id, op: message.op, ok: true,
-        payload: {
+          panes: registeredPanes,
+        });
+        if (partialMode) {
+          surfaceResults.push({ index, surfaceId: surface.surfaceId, ok: true,
+            windowLabel: window.windowLabel, windowGeneration: window.windowGeneration, paneResults });
+        }
+      }
+      if (partialMode && options.mismatchRegistrationCorrelation && !mismatchedCorrelationSent && surfaceResults.length > 0) {
+        surfaceResults[0] = { ...surfaceResults[0], index: Number(surfaceResults[0]!.index) + 1 };
+        mismatchedCorrelationSent = true;
+      }
+      if (partialMode && options.mismatchRegistrationSurfaceId && !mismatchedCorrelationSent && surfaceResults.length > 0) {
+        surfaceResults[0] = { ...surfaceResults[0], surfaceId: "sf_unrequested_reply" };
+        mismatchedCorrelationSent = true;
+      }
+      const responsePayload: Record<string, any> = {
+        clientId: payload.clientId,
+        registryIdentity,
+        directEndpoint: null,
+        endpointLease: null,
+        prePairDescribeV1: true,
+        allocationGenerationV1: true,
+        windowGenerationV1: true,
+        completedPaneReleaseIds: pendingPaneReleases.map((release: any) => release.releaseId)
+          .filter((releaseId: string) => completedPaneReleaseIds.has(releaseId)),
+        completedWindowReleaseIds: pendingWindowReleases.map((release: any) => release.releaseId)
+          .filter((releaseId: string) => completedWindowReleaseIds.has(releaseId)),
+        ...(partialMode ? {
+          registrationResultsV1: true,
+          paneReleaseResults,
+          windowReleaseResults,
+          surfaceResults,
+        } : {}),
+        surfaces,
+      };
+      let reply = responsePayload;
+      if (options.shippedLegacyShape) {
+        reply = {
           clientId: payload.clientId,
           registryIdentity,
-          directEndpoint: null,
-          endpointLease: null,
-          prePairDescribeV1: true,
-          windowGenerationV1: true,
-          completedPaneReleaseIds: (payload.pendingPaneReleases ?? []).map((release: any) => release.releaseId)
-            .filter((releaseId: string) => completedPaneReleaseIds.has(releaseId)),
-          completedWindowReleaseIds: (payload.pendingWindowReleases ?? []).map((release: any) => release.releaseId)
-            .filter((releaseId: string) => completedWindowReleaseIds.has(releaseId)),
-          surfaces,
-        },
+          surfaces: surfaces.map((surface) => ({
+            surfaceId: surface.surfaceId,
+            windowLabel: surface.windowLabel,
+            panes: (surface.panes as any[]).map((pane: any) => ({
+              paneId: pane.paneId,
+              paneLineageId: pane.paneLineageId,
+              paneLabel: pane.paneLabel,
+              paneAddress: `${surface.windowLabel}${pane.paneLabel}`,
+            })),
+          })),
+        };
+      }
+      reply = options.transformRegistrationReply?.(reply, payload) ?? reply;
+      responses.push(reply);
+      socket.send(JSON.stringify({
+        type: "response", v: 1, id: message.id, op: message.op, ok: true,
+        payload: reply,
       }));
     });
   });
   return {
-    server, requests, identityRequests, port, address: `ws://127.0.0.1:${port}/`,
+    server, requests, responses, identityRequests, port, address: `ws://127.0.0.1:${port}/`,
     endpoint: {
       host: "127.0.0.1", port, wsPath: "/ws", protocolVersion: 1, role: "server", instanceName: "fixture",
     } as any,
@@ -443,7 +536,8 @@ test("pending window releases reach the registry before replacement claims", asy
     assert.equal(core.getRendererWindowState(claimSurface.surfaceId).windowLabel, "a");
     assert.equal(core.getRendererWindowState(claimSurface.surfaceId).panes[0]?.label, "7");
     assert.equal(core.getRendererWindowState(claimSurface.surfaceId).panes[0]?.content.contentId, "ct_replacement_surface");
-    assert.equal(core.getRendererWindowState(claimSurface.surfaceId).panes[0]?.content.content.markdown, "Replacement content");
+    assert.equal((core.getRendererWindowState(claimSurface.surfaceId).panes[0]?.content.content as any)?.markdown,
+      "Replacement content");
     assert.ok(Number(core.listSurfaces()[0]!.windowAllocationGeneration) > 8);
   } finally {
     await registration.stop();
@@ -757,7 +851,7 @@ test("a configured endpoint without a valid identity falls back through Bonjour"
   }
 });
 
-test("discovery rejects an advertisement outside the v1 /ws contract", async () => {
+test("discovery rejects an invalid WebSocket route and wildcard target", async () => {
   const original = ConfiguredServerRegistration.prototype.synchronize;
   const originalStop = ConfiguredServerRegistration.prototype.stop;
   const attempted: string[] = [];
@@ -776,10 +870,6 @@ test("discovery rejects an advertisement outside the v1 /ws contract", async () 
         role: "server", instanceName: "wrong-path",
       },
       {
-        host: "server.local", port: 19002, wsPath: "/ws", protocolVersion: 0,
-        role: "server", instanceName: "wrong-version",
-      },
-      {
         host: "0.0.0.0", port: 19003, wsPath: "/ws", protocolVersion: 1,
         role: "server", instanceName: "wildcard-target",
       },
@@ -788,16 +878,60 @@ test("discovery rejects an advertisement outside the v1 /ws contract", async () 
       clientId: "stable-client", core, discovery, persist: async () => {},
     });
 
-    await assert.rejects(connection.synchronize(), /expected role=server v=1 ws=\/ws/);
+    await assert.rejects(connection.synchronize(), /no_surf_ace_server/);
     const state = core.getRendererWindowState(surface.surfaceId);
     assert.equal(state.connectionBar, "disconnected");
     assert.match(state.connectionError ?? "", /ws=\//);
-    assert.match(state.connectionError ?? "", /v=0/);
     assert.match(state.connectionError ?? "", /wildcard address/);
     assert.deepEqual(attempted, []);
     await connection.stop();
   } finally {
     ConfiguredServerRegistration.prototype.synchronize = original;
+    ConfiguredServerRegistration.prototype.stop = originalStop;
+  }
+});
+
+test("discovery warns on an unknown topology version and still tries the understood server route", async () => {
+  const originalIdentity = ConfiguredServerRegistration.prototype.readRegistryIdentity;
+  const originalSynchronize = ConfiguredServerRegistration.prototype.synchronize;
+  const originalStop = ConfiguredServerRegistration.prototype.stop;
+  const attempted: string[] = [];
+  const warnings: string[] = [];
+  try {
+    ConfiguredServerRegistration.prototype.readRegistryIdentity = async function () {
+      attempted.push((this as any).wire.url as string);
+      return { allocatorId: "alloc_forward_fixture", fleetId: "fleet_forward_fixture" };
+    };
+    ConfiguredServerRegistration.prototype.synchronize = async function () {};
+    ConfiguredServerRegistration.prototype.stop = async function () {};
+    const surfaceCore = new SurfaceCore();
+    const surface = surfaceCore.ensurePrimarySurface("Forward-compatible discovery", {
+      width: 800, height: 600, scale: 1,
+    });
+    const endpoint = {
+      host: "registry.example.test", port: 19004, wsPath: "/ws",
+      protocolVersion: 7, role: "server", instanceName: "Forward-compatible registry",
+    } as any;
+    const connection = new ServerConnection({
+      clientId: "forward-compatible-client",
+      core: surfaceCore,
+      discovery: {
+        start: async () => {}, stop: async () => {}, refreshNow: async () => {},
+        subscribe: () => () => {}, getSnapshot: () => [endpoint],
+      },
+      onError: (error) => warnings.push(error instanceof Error ? error.message : String(error)),
+      persist: async () => {},
+    });
+
+    await connection.synchronize();
+
+    assert.deepEqual(attempted, ["ws://registry.example.test:19004/ws"]);
+    assert.equal(surfaceCore.getRendererWindowState(surface.surfaceId).connectionBar, "connected");
+    assert(warnings.some((message) => /topology version 7.*trying the understood server fields/.test(message)));
+    await connection.stop();
+  } finally {
+    ConfiguredServerRegistration.prototype.readRegistryIdentity = originalIdentity;
+    ConfiguredServerRegistration.prototype.synchronize = originalSynchronize;
     ConfiguredServerRegistration.prototype.stop = originalStop;
   }
 });
@@ -1025,6 +1159,484 @@ test("saved labels are omitted during first binding and retained when the regist
     assert.equal(state.panes[0]?.label, "703");
     assert.equal(state.panes[0]?.content.contentId, "ct_saved_binding");
     assert.equal(core.getPersistentState().registryBindingPending, false);
+  } finally {
+    await registration.stop();
+    await registry.close();
+  }
+});
+
+test("per-item claim refusals retry only rejected identities and preserve successful panes and content", async () => {
+  const clientId = "e".repeat(64);
+  const core = new SurfaceCore({ clientIdentity: clientId });
+  const primary = core.ensurePrimarySurface("Primary display", { width: 900, height: 700, scale: 1 });
+  const primaryPane = [...primary.panes.values()][0]!;
+  core.paneSplit(primary.surfaceId, {
+    count: 2,
+    direction: "horizontal",
+    newPaneIds: [2],
+    newPaneLabels: [701],
+    paneId: primaryPane.paneId,
+  });
+  const refusedPane = primary.panes.get(2)!;
+  const secondary = core.createAdditionalSurface("Secondary display", { width: 700, height: 500, scale: 1 });
+  const secondaryPane = [...secondary.panes.values()][0]!;
+  const contentByPane = new Map([
+    [`${primary.surfaceId}:${primaryPane.paneId}`, "ct_partial_kept_primary"],
+    [`${primary.surfaceId}:${refusedPane.paneId}`, "ct_partial_retried_pane"],
+    [`${secondary.surfaceId}:${secondaryPane.paneId}`, "ct_partial_retried_surface"],
+  ]);
+  for (const [key, contentId] of contentByPane) {
+    const [surfaceId, paneId] = key.split(":");
+    core.contentSet(surfaceId!, {
+      content: { markdown: `Content ${contentId}` }, contentId: contentId as never,
+      contentType: "markdown", historyOwnerToken: `hot_${contentId}`,
+      paneId: Number(paneId) as never, revision: 1 as never,
+    });
+  }
+  const primarySurfaceId = primary.surfaceId;
+  const primaryPaneId = primaryPane.paneId;
+  const primaryLineageId = primaryPane.paneLineageId;
+  const refusedPaneId = refusedPane.paneId;
+  const refusedPaneLineageId = refusedPane.paneLineageId;
+  const refusedSurfaceId = secondary.surfaceId;
+  const refusedSurfacePaneId = secondaryPane.paneId;
+  const refusedSurfacePaneLineageId = secondaryPane.paneLineageId;
+  const registry = await automaticRegistryFixture({
+    registrationResultsV1: true,
+    rejectPartialSurfaceIds: new Set([refusedSurfaceId]),
+    rejectPartialPaneKeys: new Set([`${primarySurfaceId}\0${refusedPane.paneId}\0${refusedPaneLineageId}`]),
+  });
+  const warnings: string[] = [];
+  const registration = new ConfiguredServerRegistration(
+    registry.address, clientId, core, async () => {}, (error) => warnings.push(String(error)), 500,
+  );
+  try {
+    await registration.synchronize();
+
+    assert.ok(registry.requests.length >= 2);
+    assert.ok(registry.requests.every((request) => request.message.payload.registrationResultsV1 === true));
+    assert.equal(registry.requests[0]!.message.payload.surfaces.length, 2);
+    const retriedClaims = registry.requests.at(-1)!.message.payload.surfaces;
+    assert.equal(retriedClaims.length, 2);
+    const retriedPrimary = retriedClaims.find((surface: any) => surface.surfaceId === primarySurfaceId)!;
+    const retriedSecondary = retriedClaims.find((surface: any) => surface.surfaceId !== primarySurfaceId)!;
+    assert.equal(retriedPrimary.panes.find((pane: any) => pane.paneLineageId === refusedPaneLineageId), undefined);
+    assert.notEqual(retriedPrimary.panes.find((pane: any) => pane.paneId !== String(primaryPaneId))?.paneId,
+      String(refusedPaneId));
+    assert.notEqual(retriedSecondary.surfaceId, refusedSurfaceId);
+
+    const primaryState = core.getRendererWindowState(primarySurfaceId);
+    assert.equal(primaryState.windowLabel, "a");
+    assert.equal(primaryState.panes.length, 2);
+    assert.equal(primaryState.panes[0]?.paneId, primaryPaneId);
+    assert.equal(primaryState.panes[0]?.paneLineageId, primaryLineageId);
+    assert.equal(primaryState.panes[0]?.content.contentId, "ct_partial_kept_primary");
+    assert.notEqual(primaryState.panes[1]?.paneId, refusedPaneId);
+    assert.notEqual(primaryState.panes[1]?.paneLineageId, refusedPaneLineageId);
+    assert.equal(primaryState.panes[1]?.content.contentId, "ct_partial_retried_pane");
+    assert.deepEqual(core.getSurface(primarySurfaceId).paneOrder, primaryState.panes.map((pane) => pane.paneId));
+
+    const restoredSecondary = core.listSurfaces().find((surface) => surface.surfaceId !== primarySurfaceId)!;
+    assert.notEqual(restoredSecondary.surfaceId, refusedSurfaceId);
+    const secondaryState = core.getRendererWindowState(restoredSecondary.surfaceId);
+    assert.equal(secondaryState.windowLabel, "b");
+    assert.equal(secondaryState.panes.length, 1);
+    assert.equal(secondaryState.panes[0]?.paneId, refusedSurfacePaneId);
+    assert.notEqual(secondaryState.panes[0]?.paneLineageId, refusedSurfacePaneLineageId);
+    assert.equal(secondaryState.panes[0]?.content.contentId, "ct_partial_retried_surface");
+    assert.equal(core.registryBindingPending(), false);
+    assert.ok(warnings.some((warning) => warning.includes("window claim")));
+    assert.ok(warnings.some((warning) => warning.includes("pane claim")));
+  } finally {
+    await registration.stop();
+    await registry.close();
+  }
+});
+
+test("a mismatched per-item surface reply changes no local identity and a later matching reply remains usable", async () => {
+  const clientId = "f".repeat(64);
+  const core = new SurfaceCore({ clientIdentity: clientId });
+  const surface = core.ensurePrimarySurface("Mismatch display", { width: 800, height: 600, scale: 1 });
+  const pane = [...surface.panes.values()][0]!;
+  core.contentSet(surface.surfaceId, {
+    content: { markdown: "Keep this content" }, contentId: "ct_mismatch_kept" as never,
+    contentType: "markdown", historyOwnerToken: "hot_mismatch_kept",
+    paneId: pane.paneId as never, revision: 1 as never,
+  });
+  const oldSurfaceId = surface.surfaceId;
+  const oldPaneId = pane.paneId;
+  const oldPaneLineageId = pane.paneLineageId;
+  const registry = await automaticRegistryFixture({
+    registrationResultsV1: true,
+    mismatchRegistrationSurfaceId: true,
+  });
+  const registration = new ConfiguredServerRegistration(registry.address, clientId, core, async () => {}, () => {}, 500);
+  try {
+    await assert.rejects(registration.synchronize(), /invalid_registration_response/);
+    assert.equal(core.getRendererWindowState(oldSurfaceId).surfaceId, oldSurfaceId);
+    assert.equal(core.getRendererWindowState(oldSurfaceId).panes[0]?.paneId, oldPaneId);
+    assert.equal(core.getRendererWindowState(oldSurfaceId).panes[0]?.paneLineageId, oldPaneLineageId);
+    assert.equal(core.getRendererWindowState(oldSurfaceId).panes[0]?.content.contentId, "ct_mismatch_kept");
+    assert.equal(core.registryBindingPending(), true);
+    assert.deepEqual(core.listSurfaces().map((entry) => entry.surfaceId), [oldSurfaceId]);
+
+    await registration.synchronize();
+    assert.equal(core.getRendererWindowState(oldSurfaceId).surfaceId, oldSurfaceId);
+    assert.equal(core.getRendererWindowState(oldSurfaceId).panes[0]?.paneId, oldPaneId);
+    assert.equal(core.getRendererWindowState(oldSurfaceId).panes[0]?.paneLineageId, oldPaneLineageId);
+    assert.equal(core.getRendererWindowState(oldSurfaceId).panes[0]?.content.contentId, "ct_mismatch_kept");
+    assert.ok(core.getRendererWindowState(oldSurfaceId).panes[0]?.label);
+    assert.equal(core.registryBindingPending(), false);
+  } finally {
+    await registration.stop();
+    await registry.close();
+  }
+});
+
+test("new client requests remain compatible with registries that return the legacy full projection", async () => {
+  const clientId = "a".repeat(64);
+  const core = new SurfaceCore({ clientIdentity: clientId });
+  const surface = core.ensurePrimarySurface("Legacy registry display", { width: 800, height: 600, scale: 1 });
+  const pane = [...surface.panes.values()][0]!;
+  core.contentSet(surface.surfaceId, {
+    content: { markdown: "Legacy reply content" }, contentId: "ct_legacy_reply" as never,
+    contentType: "markdown", historyOwnerToken: "hot_legacy_reply",
+    paneId: pane.paneId as never, revision: 1 as never,
+  });
+  const registry = await automaticRegistryFixture({ registrationResultsV1: false });
+  const registration = new ConfiguredServerRegistration(registry.address, clientId, core, async () => {}, () => {}, 500);
+  try {
+    await registration.synchronize();
+    assert.equal(registry.requests[0]!.message.payload.registrationResultsV1, true);
+    assert.equal("registrationResultsV1" in registry.requests[0]!.message.payload, true);
+    const state = core.getRendererWindowState(surface.surfaceId);
+    assert.equal(state.panes[0]?.content.contentId, "ct_legacy_reply");
+    assert.ok(state.windowLabel);
+    assert.ok(state.panes[0]?.label);
+    assert.equal(core.registryBindingPending(), false);
+  } finally {
+    await registration.stop();
+    await registry.close();
+  }
+});
+
+test("shipped legacy registry replies label panes without generations and keep unconfirmed releases pending", async () => {
+  const clientId = "5".repeat(64);
+  const core = new SurfaceCore({ clientIdentity: clientId });
+  const closed = core.ensurePrimarySurface("Closed while offline", { width: 800, height: 600, scale: 1 });
+  const oldClaim = closeSurfaceWithAllocatedLabels(core, closed.surfaceId, "a", 8, 7, 9);
+  const live = core.ensurePrimarySurface("Still open", { width: 800, height: 600, scale: 1 });
+  const pane = [...live.panes.values()][0]!;
+  core.contentSet(live.surfaceId, {
+    content: { markdown: "Readable on an older registry" }, contentId: "ct_shipped_legacy" as never,
+    contentType: "markdown", historyOwnerToken: "hot_shipped_legacy",
+    paneId: pane.paneId as never, revision: 1 as Revision,
+  });
+  const expectedPaneRelease = core.locklessAuthority.listPendingPaneReleases()[0]!.releaseId;
+  const expectedWindowRelease = core.locklessAuthority.listPendingWindowReleases()[0]!.releaseId;
+  const registry = await automaticRegistryFixture({
+    shippedLegacyShape: true,
+    ignorePendingReleases: true,
+    seed: [{
+      surfaceId: oldClaim.surfaceId,
+      windowLabel: "a",
+      windowGeneration: 8,
+      panes: [{ paneId: String(oldClaim.paneId), paneLineageId: oldClaim.paneLineageId,
+        paneLabel: 7, allocationGeneration: 9 }],
+    }],
+  });
+  const warnings: string[] = [];
+  const registration = new ConfiguredServerRegistration(
+    registry.address, clientId, core, async () => {}, (error) => warnings.push(String(error)), 500,
+  );
+  try {
+    await registration.synchronize();
+    const state = core.getRendererWindowState(live.surfaceId);
+    assert.ok(state.windowLabel);
+    assert.ok(Number(state.panes[0]?.label) > 0,
+      JSON.stringify({ state, warnings, requests: registry.requests.map((request) => request.message.payload.surfaces), responses: registry.responses }));
+    assert.equal(state.panes[0]?.content.contentId, "ct_shipped_legacy");
+    assert.equal(core.getSurface(live.surfaceId).panes.get(pane.paneId)?.allocationGeneration, null);
+    assert.equal(core.registryBindingPending(), false);
+    assert.deepEqual(core.locklessAuthority.listPendingPaneReleases().map((release) => release.releaseId), [expectedPaneRelease]);
+    assert.deepEqual(core.locklessAuthority.listPendingWindowReleases().map((release) => release.releaseId), [expectedWindowRelease]);
+    assert.ok(warnings.some((warning) => warning.includes("allocation generations")));
+    assert.ok(warnings.some((warning) => warning.includes("release")));
+    assert.ok(registry.requests.some((request) => request.message.payload.pendingPaneReleases.length > 0));
+  } finally {
+    await registration.stop();
+    await registry.close();
+  }
+});
+
+test("pane claim replies without an allocation generation still provide a usable label", async () => {
+  const clientId = "6".repeat(64);
+  const core = new SurfaceCore({ clientIdentity: clientId });
+  const registry = await automaticRegistryFixture({ paneClaimReply: () => ({ paneLabel: 44 }) });
+  const warnings: string[] = [];
+  const registration = new ConfiguredServerRegistration(
+    registry.address, clientId, core, async () => {}, (error) => warnings.push(String(error)), 500,
+  );
+  try {
+    await registration.synchronize();
+    assert.deepEqual(await registration.claimPaneLabel("sf_old_registry", 2, "pl_old_registry"), {
+      allocationGeneration: null,
+      paneLabel: 44,
+    });
+    assert.ok(warnings.some((warning) => warning.includes("allocation generation")));
+  } finally {
+    await registration.stop();
+    await registry.close();
+  }
+});
+
+test("missing or malformed optional endpoint echoes do not discard registration labels", async () => {
+  const endpoint = "ws://client.example.test:4801/ws";
+  const lease = { leaseGeneration: 1, registrationObservedAtMs: 10, leaseExpiresAtMs: 20 };
+  const shapes = [
+    "missing-client-id",
+    "missing-endpoint-lease",
+    "missing-direct-endpoint",
+    "malformed-endpoint-lease",
+    "malformed-direct-endpoint",
+  ] as const;
+  for (const [index, shape] of shapes.entries()) {
+    const clientId = String(index + 1).repeat(64);
+    const core = new SurfaceCore({ clientIdentity: clientId });
+    const surface = core.ensurePrimarySurface("Optional endpoint echo", { width: 800, height: 600, scale: 1 });
+    const pane = [...surface.panes.values()][0]!;
+    core.contentSet(surface.surfaceId, {
+      content: { markdown: "Keep content when endpoint metadata is unavailable" },
+      contentId: `ct_optional_endpoint_${shape}` as never,
+      contentType: "markdown", historyOwnerToken: `hot_optional_endpoint_${shape}`,
+      paneId: pane.paneId as never, revision: 1 as Revision,
+    });
+    const registry = await automaticRegistryFixture({
+      registrationResultsV1: true,
+      transformRegistrationReply(reply) {
+        const result: Record<string, any> = {
+          ...reply,
+          directEndpoint: endpoint,
+          endpointLease: lease,
+          prePairDescribeV1: true,
+        };
+        if (shape === "missing-client-id") delete result.clientId;
+        if (shape === "missing-endpoint-lease") delete result.endpointLease;
+        if (shape === "missing-direct-endpoint") delete result.directEndpoint;
+        if (shape === "malformed-endpoint-lease") {
+          delete result.endpointLease;
+          result.endpointLease = { leaseGeneration: 0 };
+        }
+        if (shape === "malformed-direct-endpoint") result.directEndpoint = 42;
+        return result;
+      },
+    });
+    const warnings: string[] = [];
+    const registration = new ConfiguredServerRegistration(
+      registry.address, clientId, core, async () => {}, (error) => warnings.push(String(error)), 500,
+      endpoint,
+    );
+    try {
+      await registration.synchronize();
+      const state = core.getRendererWindowState(surface.surfaceId);
+      assert.ok(state.windowLabel);
+      assert.ok(state.panes[0]?.label);
+      assert.equal(state.panes[0]?.content.contentId, `ct_optional_endpoint_${shape}`);
+      assert.equal(core.registryEndpointLease() !== null, shape === "missing-client-id");
+      if (shape === "missing-client-id") {
+        assert.ok(warnings.some((warning) => warning.includes("client identity")));
+      }
+      if (shape !== "missing-client-id") {
+        assert.ok(warnings.some((warning) => warning.includes("endpoint")));
+      }
+    } finally {
+      await registration.stop();
+      await registry.close();
+    }
+  }
+});
+
+test("mismatched client identity discards the registration reply but keeps local content readable", async () => {
+  const clientId = "9".repeat(64);
+  const core = new SurfaceCore({ clientIdentity: clientId });
+  const surface = core.ensurePrimarySurface("Mismatched client identity", { width: 800, height: 600, scale: 1 });
+  const pane = [...surface.panes.values()][0]!;
+  core.contentSet(surface.surfaceId, {
+    content: { markdown: "Keep content on a mismatched reply" }, contentId: "ct_wrong_client" as never,
+    contentType: "markdown", historyOwnerToken: "hot_wrong_client",
+    paneId: pane.paneId as never, revision: 1 as Revision,
+  });
+  const registry = await automaticRegistryFixture({
+    registrationResultsV1: true,
+    transformRegistrationReply(reply) { return { ...reply, clientId: "other-client" }; },
+  });
+  const registration = new ConfiguredServerRegistration(registry.address, clientId, core, async () => {}, () => {}, 500);
+  try {
+    await assert.rejects(registration.synchronize(), /foreign_client_identity/);
+    const state = core.getRendererWindowState(surface.surfaceId);
+    assert.equal(state.windowLabel, "");
+    assert.equal(state.panes[0]?.label, "");
+    assert.equal(state.panes[0]?.content.contentId, "ct_wrong_client");
+  } finally {
+    await registration.stop();
+    await registry.close();
+  }
+});
+
+test("a malformed surface result retries that surface while applying matching sibling rows", async () => {
+  const clientId = "a".repeat(64);
+  const core = new SurfaceCore({ clientIdentity: clientId });
+  const primary = core.ensurePrimarySurface("Matching surface", { width: 900, height: 700, scale: 1 });
+  const primaryPane = [...primary.panes.values()][0]!;
+  const secondary = core.createAdditionalSurface("Malformed surface", { width: 700, height: 500, scale: 1 });
+  const secondaryPane = [...secondary.panes.values()][0]!;
+  for (const [surfaceId, pane, contentId] of [
+    [primary.surfaceId, primaryPane, "ct_matching_surface"],
+    [secondary.surfaceId, secondaryPane, "ct_retry_surface"],
+  ] as const) {
+    core.contentSet(surfaceId, {
+      content: { markdown: contentId }, contentId: contentId as never,
+      contentType: "markdown", historyOwnerToken: `hot_${contentId}`,
+      paneId: pane.paneId as never, revision: 1 as Revision,
+    });
+  }
+  let malformedOnce = false;
+  const registry = await automaticRegistryFixture({
+    registrationResultsV1: true,
+    transformRegistrationReply(reply, requestPayload) {
+      if (malformedOnce || requestPayload.surfaces.length !== 2 || !Array.isArray(reply.surfaceResults)) return reply;
+      malformedOnce = true;
+      const results = [...reply.surfaceResults];
+      results[1] = { ...results[1], windowLabel: "not-a-label" };
+      return { ...reply, surfaceResults: results };
+    },
+  });
+  const warnings: string[] = [];
+  const registration = new ConfiguredServerRegistration(
+    registry.address, clientId, core, async () => {}, (error) => warnings.push(String(error)), 500,
+  );
+  try {
+    await registration.synchronize();
+    const currentPrimary = core.getRendererWindowState(primary.surfaceId);
+    const retrySurface = core.listSurfaces().map((surface) => core.getRendererWindowState(surface.surfaceId))
+      .find((state) => state.panes.some((pane) => pane.content.contentId === "ct_retry_surface"));
+    assert.ok(registry.requests.length >= 2);
+    assert.ok(currentPrimary.windowLabel);
+    assert.equal(currentPrimary.panes[0]?.content.contentId, "ct_matching_surface");
+    assert.ok(retrySurface);
+    assert.ok(retrySurface.windowLabel);
+    assert.ok(retrySurface.panes.some((pane) => pane.content.contentId === "ct_retry_surface"));
+    assert.ok(warnings.some((warning) => warning.includes("window label")));
+  } finally {
+    await registration.stop();
+    await registry.close();
+  }
+});
+
+test("a malformed pane result retries only that pane and preserves its matching sibling", async () => {
+  const clientId = "b".repeat(64);
+  const core = new SurfaceCore({ clientIdentity: clientId });
+  const surface = core.ensurePrimarySurface("Malformed pane", { width: 900, height: 700, scale: 1 });
+  const originalPane = [...surface.panes.values()][0]!;
+  core.paneSplit(surface.surfaceId, {
+    count: 2, direction: "horizontal", newPaneIds: [2], newPaneLabels: [702], paneId: originalPane.paneId,
+  });
+  const refusedPane = surface.panes.get(2)!;
+  for (const pane of [originalPane, refusedPane]) {
+    core.contentSet(surface.surfaceId, {
+      content: { markdown: `Pane ${pane.paneId}` }, contentId: `ct_malformed_pane_${pane.paneId}` as never,
+      contentType: "markdown", historyOwnerToken: `hot_malformed_pane_${pane.paneId}`,
+      paneId: pane.paneId as never, revision: 1 as Revision,
+    });
+  }
+  const refusedPaneId = refusedPane.paneId;
+  let malformedOnce = false;
+  const registry = await automaticRegistryFixture({
+    registrationResultsV1: true,
+    transformRegistrationReply(reply) {
+      if (malformedOnce || !Array.isArray(reply.surfaceResults)) return reply;
+      malformedOnce = true;
+      const results = [...reply.surfaceResults];
+      const surfaceResult = { ...results[0] };
+      const paneResults = [...surfaceResult.paneResults];
+      paneResults[1] = { ...paneResults[1], allocationGeneration: 0 };
+      surfaceResult.paneResults = paneResults;
+      results[0] = surfaceResult;
+      return { ...reply, surfaceResults: results };
+    },
+  });
+  const warnings: string[] = [];
+  const registration = new ConfiguredServerRegistration(
+    registry.address, clientId, core, async () => {}, (error) => warnings.push(String(error)), 500,
+  );
+  try {
+    await registration.synchronize();
+    const state = core.getRendererWindowState(surface.surfaceId);
+    assert.ok(registry.requests.length >= 2);
+    assert.ok(state.panes.find((pane) => pane.paneId === originalPane.paneId)?.label,
+      JSON.stringify({ state, warnings, replies: registry.requests.map((request) => request.message.payload.surfaces) }));
+    assert.equal(state.panes.find((pane) => pane.paneId === originalPane.paneId)?.content.contentId,
+      `ct_malformed_pane_${originalPane.paneId}`);
+    const retried = state.panes.find((pane) => pane.content.contentId === `ct_malformed_pane_${refusedPaneId}`);
+    assert.ok(retried);
+    assert.notEqual(retried.paneId, refusedPaneId);
+    assert.ok(retried.label);
+    assert.ok(warnings.some((warning) => warning.includes("pane generation")));
+  } finally {
+    await registration.stop();
+    await registry.close();
+  }
+});
+
+test("a malformed pane in a legacy projection retries only that pane", async () => {
+  const clientId = "c".repeat(64);
+  const core = new SurfaceCore({ clientIdentity: clientId });
+  const surface = core.ensurePrimarySurface("Malformed legacy pane", { width: 900, height: 700, scale: 1 });
+  const originalPane = [...surface.panes.values()][0]!;
+  core.paneSplit(surface.surfaceId, {
+    count: 2, direction: "horizontal", newPaneIds: [2], newPaneLabels: [702], paneId: originalPane.paneId,
+  });
+  const refusedPane = surface.panes.get(2)!;
+  for (const pane of [originalPane, refusedPane]) {
+    core.contentSet(surface.surfaceId, {
+      content: { markdown: `Legacy pane ${pane.paneId}` }, contentId: `ct_bad_legacy_pane_${pane.paneId}` as never,
+      contentType: "markdown", historyOwnerToken: `hot_bad_legacy_pane_${pane.paneId}`,
+      paneId: pane.paneId as never, revision: 1 as Revision,
+    });
+  }
+  const refusedPaneId = refusedPane.paneId;
+  let malformedOnce = false;
+  const registry = await automaticRegistryFixture({
+    shippedLegacyShape: true,
+    transformRegistrationReply(reply) {
+      if (malformedOnce) return reply;
+      malformedOnce = true;
+      const surfaces = [...reply.surfaces];
+      const surfaceReply = { ...surfaces[0] };
+      const panes = [...surfaceReply.panes];
+      panes[1] = { ...panes[1], paneLabel: -1 };
+      surfaceReply.panes = panes;
+      surfaces[0] = surfaceReply;
+      return { ...reply, surfaces };
+    },
+  });
+  const warnings: string[] = [];
+  const registration = new ConfiguredServerRegistration(
+    registry.address, clientId, core, async () => {}, (error) => warnings.push(String(error)), 500,
+  );
+  try {
+    await registration.synchronize();
+    const state = core.getRendererWindowState(surface.surfaceId);
+    assert.ok(registry.requests.length >= 2);
+    assert.ok(state.panes.find((pane) => pane.paneId === originalPane.paneId)?.label,
+      JSON.stringify({ state, warnings, responses: registry.responses }));
+    assert.equal(state.panes.find((pane) => pane.paneId === originalPane.paneId)?.content.contentId,
+      `ct_bad_legacy_pane_${originalPane.paneId}`);
+    const retried = state.panes.find((pane) => pane.content.contentId === `ct_bad_legacy_pane_${refusedPaneId}`);
+    assert.ok(retried);
+    assert.notEqual(retried.paneId, refusedPaneId);
+    assert.ok(retried.label);
+    assert.ok(warnings.some((warning) => warning.includes("invalid pane label")));
   } finally {
     await registration.stop();
     await registry.close();
@@ -1625,7 +2237,7 @@ test("a mixed release request completes its accepted release and drops only the 
   }
 });
 
-test("a registry-wide rejection keeps a release pending until the condition clears", async () => {
+test("a registry-wide rejection warns and waits with the release pending until the condition clears", async () => {
   const clientId = "0".repeat(64);
   const core = new SurfaceCore({ clientIdentity: clientId });
   core.bindRegistryIdentity({ clientId, allocatorId: "alloc_fixture", fleetId: "fixture-fleet" });
@@ -1642,9 +2254,12 @@ test("a registry-wide rejection keeps a release pending until the condition clea
   });
   const registration = new ConfiguredServerRegistration(registry.address, clientId, core, async () => {}, () => {}, 500);
   try {
-    await assert.rejects(registration.synchronize(), /registration_condition/);
+    await registration.synchronize();
     assert.deepEqual(core.locklessAuthority.listPendingWindowReleases().map((item) => item.releaseId), [release.releaseId]);
     assert.equal(core.registryBindingPending(), false);
+    assert.equal(registry.requests.some((request) => request.message.payload.surfaces.length > 0), false,
+      "live claims wait while the registry refuses even an empty registration");
+    assert.equal(core.getRendererWindowState(replacement.surfaceId).windowLabel, "");
 
     rejects = false;
     await registration.synchronize();

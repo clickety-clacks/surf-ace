@@ -20,12 +20,14 @@ test("identity fingerprint prefix is derived from the persisted public key", asy
   }
 });
 
-test("an unreadable identity starts fresh without retrying the failed read", async () => {
+test("an unreadable identity is left untouched and does not create a replacement key", async () => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-electron-identity-"));
   const identityPath = path.join(stateDir, "surface-identity.json");
   try {
     const original = await loadOrCreateIdentity(stateDir);
+    assert(original);
     const originalReadFile = fs.readFile;
+    const originalContents = await originalReadFile(identityPath, "utf8");
     let attempts = 0;
     fs.readFile = (async (...args: Parameters<typeof fs.readFile>) => {
       if (args[0] === identityPath && attempts++ === 0) {
@@ -41,8 +43,33 @@ test("an unreadable identity starts fresh without retrying the failed read", asy
     }
 
     assert.equal(attempts, 1);
-    assert.notEqual(restored.publicKeyPem, original.publicKeyPem);
-    assert.deepEqual(await loadOrCreateIdentity(stateDir), restored);
+    assert.equal(restored, null);
+    assert.equal(await originalReadFile(identityPath, "utf8"), originalContents);
+    assert.deepEqual(await loadOrCreateIdentity(stateDir), original);
+  } finally {
+    await fs.rm(stateDir, { force: true, recursive: true });
+  }
+});
+
+test("malformed saved identity bytes remain untouched", async () => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-electron-identity-"));
+  const identityPath = path.join(stateDir, "surface-identity.json");
+  const malformed = "{saved key cannot be decoded";
+  try {
+    await fs.writeFile(identityPath, malformed);
+    assert.equal(await loadOrCreateIdentity(stateDir), null);
+    assert.equal(await fs.readFile(identityPath, "utf8"), malformed);
+  } finally {
+    await fs.rm(stateDir, { force: true, recursive: true });
+  }
+});
+
+test("a missing identity is not created when saved state exists", async () => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-electron-identity-"));
+  const identityPath = path.join(stateDir, "surface-identity.json");
+  try {
+    assert.equal(await loadOrCreateIdentity(stateDir, { allowCreate: false }), null);
+    await assert.rejects(fs.access(identityPath));
   } finally {
     await fs.rm(stateDir, { force: true, recursive: true });
   }
