@@ -658,7 +658,7 @@ final class SurfAceRuntime {
                     )
                 }
                 let state = application.state
-                self.confirmedPaneLabels = Dictionary(uniqueKeysWithValues: state.liveSurfaces.values.flatMap { surface in
+                self.confirmedPaneLabels = Dictionary(uniqueKeysWithValues: state.liveSurfaces.values.flatMap { surface -> [(String, Int64)] in
                     guard state.registryBinding != nil, surface.windowLabelConfirmed != false else { return [] }
                     return surface.panes.values.filter { $0.paneLabel > 0 }.map { pane in
                         ("\(surface.surfaceId):\(pane.paneLineageId)", pane.paneLabel)

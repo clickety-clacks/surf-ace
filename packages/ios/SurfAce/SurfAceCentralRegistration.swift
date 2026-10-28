@@ -42,7 +42,7 @@ struct SurfAceRegistrationSurface: Codable, Equatable, Sendable {
         let paneLineageId: String
         let paneLabel: Int64
         let allocationGeneration: Int64?
-        fileprivate let allocationGenerationWasMalformed: Bool
+        let allocationGenerationWasMalformed: Bool
 
         private enum CodingKeys: String, CodingKey {
             case paneId, paneLineageId, paneLabel, allocationGeneration
@@ -121,11 +121,11 @@ struct SurfAceRegistrationAssignment: Codable, Equatable, Sendable {
     let windowLabel: String
     let windowAllocationGeneration: Int64?
     let panes: [SurfAceRegistrationSurface.Pane]
-    fileprivate let windowGenerationFieldsConflict: Bool
-    fileprivate let windowGenerationWasMalformed: Bool
-    fileprivate let panesWereMissing: Bool
-    fileprivate let panesWereMalformed: Bool
-    fileprivate let discardedPaneCount: Int
+    let windowGenerationFieldsConflict: Bool
+    let windowGenerationWasMalformed: Bool
+    let panesWereMissing: Bool
+    let panesWereMalformed: Bool
+    let discardedPaneCount: Int
 
     private enum CodingKeys: String, CodingKey {
         case surfaceId, windowLabel, windowAllocationGeneration, windowGeneration, panes
