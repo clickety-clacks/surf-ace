@@ -316,7 +316,7 @@ export function verifyTightbeamOperatingSkillManifest(manifest) {
   const operatingSkill = manifest?.operatingSkill;
   if (!asset ||
       operatingSkill?.asset !== TIGHTBEAM_SKILL_ASSET ||
-      operatingSkill?.clientPlatforms?.join(",") !== "desktop,cli,ios" ||
+      operatingSkill?.clientPlatforms?.join(",") !== "desktop,cli" ||
       operatingSkill?.publication !== "github-release-asset" ||
       operatingSkill?.sha256 !== asset.sha256 ||
       operatingSkill?.sha256 !== manifest.checksums?.[TIGHTBEAM_SKILL_ASSET] ||
@@ -503,7 +503,7 @@ export async function writeTightbeamManifest({
     },
     operatingSkill: {
       asset: skillAsset.name,
-      clientPlatforms: ["desktop", "cli", "ios"],
+      clientPlatforms: ["desktop", "cli"],
       publication: "github-release-asset",
       sha256: skillAsset.sha256,
       sourcePath: TIGHTBEAM_SKILL_SOURCE,

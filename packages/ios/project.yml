@@ -31,6 +31,15 @@ targets:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         INFOPLIST_FILE: SurfAce/Info.plist
         GENERATE_INFOPLIST_FILE: NO
+    postBuildScripts:
+      - name: Embed Surf Ace operating skill
+        path: scripts/embed-operating-skill.sh
+        inputFiles:
+          - $(PROJECT_DIR)/../../integrations/tightbeam/skills/surf-ace/SKILL.md
+        outputFiles:
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/SurfAceOperatingSkill/SKILL.md
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/SurfAceOperatingSkill/manifest.json
+        basedOnDependencyAnalysis: false
   SurfAceSpatial:
     type: application
     platform: visionOS

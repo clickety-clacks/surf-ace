@@ -1407,7 +1407,7 @@ test("Tightbeam manifest assembles the six hosted assets including the exact ski
   assert.equal(skillRecord.sha256, skillDigest);
   assert.deepEqual(manifest.operatingSkill, {
     asset: TIGHTBEAM_SKILL_ASSET,
-    clientPlatforms: ["desktop", "cli", "ios"],
+    clientPlatforms: ["desktop", "cli"],
     publication: "github-release-asset",
     sha256: skillDigest,
     sourcePath: "integrations/tightbeam/skills/surf-ace/SKILL.md",
@@ -1420,7 +1420,7 @@ test("Tightbeam manifest assembles the six hosted assets including the exact ski
   }), /tightbeam_operating_skill_manifest_mismatch/);
   assert.throws(() => verifyTightbeamOperatingSkillManifest({
     ...manifest,
-    operatingSkill: { ...manifest.operatingSkill, clientPlatforms: ["desktop", "cli"] },
+    operatingSkill: { ...manifest.operatingSkill, clientPlatforms: ["desktop", "cli", "ios"] },
   }), /tightbeam_operating_skill_manifest_mismatch/);
   assert.deepEqual(await fs.readFile(path.join(outputDir, TIGHTBEAM_SKILL_ASSET)), toolingSkillBytes);
   assert.equal(Object.hasOwn(manifest, "iosSigning"), false);
@@ -1476,7 +1476,7 @@ test("each single-platform manifest includes and hashes the shared skill asset",
       const skillRecord = manifest.assets.find(({ name }) => name === TIGHTBEAM_SKILL_ASSET);
       assert.equal(skillRecord.sha256, createHash("sha256").update(toolingSkillBytes).digest("hex"));
       assert.deepEqual(verifyTightbeamOperatingSkillManifest(manifest), manifest.operatingSkill);
-      assert.deepEqual(manifest.operatingSkill.clientPlatforms, ["desktop", "cli", "ios"]);
+      assert.deepEqual(manifest.operatingSkill.clientPlatforms, ["desktop", "cli"]);
       assert.equal(manifest.operatingSkill.version, manifest.version);
       assert.deepEqual((await verifyTightbeamChecksums(result.manifestPath)).files,
         [...manifestAssets, TIGHTBEAM.manifest].sort());
@@ -1484,6 +1484,88 @@ test("each single-platform manifest includes and hashes the shared skill asset",
       assert.equal(Object.hasOwn(manifest, "serverPackage"), component === "linux");
     });
   }
+});
+
+test("the iOS app bundle binds the exact skill bytes to its Xcode Cloud build", async (t) => {
+  const root = await temporary(t);
+  const scriptPath = path.join(repository, "packages/ios/scripts/embed-operating-skill.sh");
+  const appBuildDir = path.join(root, "Build/Products/Release-iphoneos");
+  const env = {
+    ...process.env,
+    PROJECT_DIR: path.join(repository, "packages/ios"),
+    TARGET_BUILD_DIR: appBuildDir,
+    UNLOCALIZED_RESOURCES_FOLDER_PATH: "SurfAce.app",
+    MARKETING_VERSION: "0.1.0",
+    CURRENT_PROJECT_VERSION: "17",
+    CI_XCODE_CLOUD: "TRUE",
+    CI_BUILD_ID: "12345678-ABCD-DEFG-1234-012345ABCDEF",
+    CI_BUILD_NUMBER: "42",
+    CI_COMMIT: "d".repeat(40),
+    CI_WORKFLOW_ID: "87654321-ABCD-DEFG-1234-012345ABCDEF",
+    CI_START_CONDITION: "push",
+    CI_BRANCH: "main",
+    CI_GIT_REF: "refs/heads/main",
+    CI_XCODE_SCHEME: "SurfAce",
+    CI_PRODUCT_PLATFORM: "iOS",
+    CI_XCODEBUILD_ACTION: "archive",
+  };
+  const result = spawnSync("/bin/sh", [scriptPath], {
+    cwd: repository,
+    encoding: "utf8",
+    env,
+  });
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+
+  const operatingSkillDir = path.join(appBuildDir, "SurfAce.app/SurfAceOperatingSkill");
+  const sourceSkill = await fs.readFile(path.join(repository, "integrations/tightbeam/skills/surf-ace/SKILL.md"));
+  const embeddedSkill = await fs.readFile(path.join(operatingSkillDir, "SKILL.md"));
+  const manifest = JSON.parse(await fs.readFile(path.join(operatingSkillDir, "manifest.json"), "utf8"));
+  const skillDigest = createHash("sha256").update(sourceSkill).digest("hex");
+  assert.deepEqual(embeddedSkill, sourceSkill);
+  assert.deepEqual(manifest.operatingSkill, {
+    asset: "SurfAceOperatingSkill/SKILL.md",
+    clientPlatforms: ["ios"],
+    publication: "app-bundle",
+    sha256: skillDigest,
+    sourcePath: "integrations/tightbeam/skills/surf-ace/SKILL.md",
+    version: "0.1.0",
+  });
+  assert.equal(manifest.appVersion, "0.1.0");
+  assert.equal(manifest.appBuildNumber, "17");
+  assert.equal(manifest.xcodeCloudBuildId, env.CI_BUILD_ID);
+  assert.equal(manifest.xcodeCloudBuildNumber, env.CI_BUILD_NUMBER);
+  assert.equal(manifest.xcodeCloudCommit, env.CI_COMMIT);
+  assert.equal(manifest.xcodeCloudWorkflowId, env.CI_WORKFLOW_ID);
+  assert.equal(manifest.xcodeCloudStartCondition, "push");
+  assert.equal(manifest.xcodeCloudBranch, "main");
+  assert.equal(manifest.xcodeCloudGitRef, "refs/heads/main");
+  assert.equal(manifest.xcodeCloudScheme, "SurfAce");
+  assert.equal(manifest.xcodeCloudPlatform, "iOS");
+  assert.equal(manifest.xcodeCloudAction, "archive");
+
+  const projectSpec = await fs.readFile(path.join(repository, "packages/ios/project.yml"), "utf8");
+  const projectFile = await fs.readFile(path.join(repository, "packages/ios/SurfAce.xcodeproj/project.pbxproj"), "utf8");
+  const iosTargetStart = projectFile.indexOf("E78D6E7B48D8F200079A1C31 /* SurfAce */ = {");
+  const iosTarget = projectFile.slice(iosTargetStart, iosTargetStart + 900);
+  assert.match(projectSpec, /postBuildScripts:[\s\S]*?path: scripts\/embed-operating-skill\.sh/);
+  assert.match(iosTarget, /A90100000000000000000001 \/\* Embed Surf Ace operating skill \*\//);
+  assert.match(projectFile, /SurfAceOperatingSkill\/manifest\.json/);
+
+  const missingBuildId = spawnSync("/bin/sh", [scriptPath], {
+    cwd: repository,
+    encoding: "utf8",
+    env: { ...env, TARGET_BUILD_DIR: path.join(root, "MissingBuildIdentity"), CI_BUILD_ID: "" },
+  });
+  assert.notEqual(missingBuildId.status, 0);
+  assert.match(missingBuildId.stderr, /invalid or missing iOS skill build field: CI_BUILD_ID/);
+
+  const wrongScheme = spawnSync("/bin/sh", [scriptPath], {
+    cwd: repository,
+    encoding: "utf8",
+    env: { ...env, TARGET_BUILD_DIR: path.join(root, "WrongScheme"), CI_XCODE_SCHEME: "SurfAceSpatial" },
+  });
+  assert.notEqual(wrongScheme.status, 0);
+  assert.match(wrongScheme.stderr, /requires the SurfAce scheme/);
 });
 
 test("a platform manifest cannot be written without the canonical skill asset", async (t) => {
@@ -3111,8 +3193,9 @@ test("stable v0.2.8 documentation stays historical and release gates bind the se
   assert.match(publishJob, /needs\.assemble\.outputs\.has_macos == 'true'/);
   assert.match(publishJob, /if:\s*>-\s*\n\s*\$\{\{\s*always\(\)\s*&&/);
   assert.match(publishJob, /verifyTightbeamOperatingSkillManifest\(manifest\)/);
-  assert.match(publishJob, /IOS_SKILL_SHA256/);
-  assert.match(publishJob, /iOS agent skill:/);
+  assert.match(publishJob, /OPERATING_SKILL_SHA256/);
+  assert.match(publishJob, /Surf Ace operating skill asset:/);
+  assert.match(publishJob, /iPhone builds carry their own operating skill copy and build manifest/);
   assert.match(publishJob, /The iOS app is withheld because the complete iOS XCTest result was/);
   assert.match(publishJob, /The tooling tag version label differs from the product tag version label/);
   assert.match(publishJob, /release_assets\+=\("release\/\$\{name\}"\)/);

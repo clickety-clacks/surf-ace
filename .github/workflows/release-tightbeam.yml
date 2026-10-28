@@ -1869,9 +1869,9 @@ jobs:
             }
           }
           await fs.appendFile(process.env.GITHUB_OUTPUT, [
-            `ios_skill_asset=${TIGHTBEAM_SKILL_ASSET}`,
-            `ios_skill_version=${operatingSkill.version}`,
-            `ios_skill_sha256=${operatingSkill.sha256}`,
+            `operating_skill_asset=${TIGHTBEAM_SKILL_ASSET}`,
+            `operating_skill_version=${operatingSkill.version}`,
+            `operating_skill_sha256=${operatingSkill.sha256}`,
           ].join("\n") + "\n");
           NODE
       - name: Create Linux smoke receipt
@@ -1943,9 +1943,9 @@ jobs:
           MACOS_RECEIPT_OUTCOME: ${{ steps.verify-macos-receipt.outcome }}
           LINUX_ATTESTATION_OUTCOME: ${{ steps.attest-linux.outcome }}
           MACOS_ATTESTATION_OUTCOME: ${{ steps.attest-macos.outcome }}
-          IOS_SKILL_ASSET: ${{ steps.verify-release-manifest.outputs.ios_skill_asset }}
-          IOS_SKILL_VERSION: ${{ steps.verify-release-manifest.outputs.ios_skill_version }}
-          IOS_SKILL_SHA256: ${{ steps.verify-release-manifest.outputs.ios_skill_sha256 }}
+          OPERATING_SKILL_ASSET: ${{ steps.verify-release-manifest.outputs.operating_skill_asset }}
+          OPERATING_SKILL_VERSION: ${{ steps.verify-release-manifest.outputs.operating_skill_version }}
+          OPERATING_SKILL_SHA256: ${{ steps.verify-release-manifest.outputs.operating_skill_sha256 }}
         run: |
           set -euo pipefail
           release_channel_args=()
@@ -1960,7 +1960,8 @@ jobs:
           macOS: ${MACOS_STATUS}
           Shared skill asset: ${SKILL_STATUS}
           iOS app: not included in this release. The iOS XCTest lanes were build-a=${IOS_TEST_BUILD_A:-unavailable} and build-b=${IOS_TEST_BUILD_B:-unavailable} (${IOS_TEST_STATE:-unavailable}).
-          iOS agent skill: ${IOS_SKILL_ASSET} (version ${IOS_SKILL_VERSION}, SHA-256 ${IOS_SKILL_SHA256}); published with this release for agents operating Surf Ace clients.
+          Surf Ace operating skill asset: ${OPERATING_SKILL_ASSET} (version ${OPERATING_SKILL_VERSION}, SHA-256 ${OPERATING_SKILL_SHA256}); published with this desktop/CLI release for agents operating those clients.
+          iPhone builds carry their own operating skill copy and build manifest, which records the matching skill version and SHA-256 alongside the Xcode Cloud build identity.
 
           The informational six-file comparison state was ${SIX_FILE_COMPARE_STATE:-unavailable}; per-platform comparisons determine asset eligibility.
           EOF
