@@ -1845,7 +1845,7 @@ test("Tightbeam Linux and macOS CLI packages carry the same fleet discovery guid
     assert.match(guide, /--state-root/);
     assert.match(guide, /--registry .*fleet-list/);
     assert.match(guide, /registered inventory only/);
-    assert.match(guide, /registry snapshot includes configured direct endpoints and leases/);
+    assert.match(guide, /the registry snapshot includes configured direct endpoints and leases/);
     assert.match(guide, /do not\s+prove reachability or live health/);
     assert.match(guide, /Bonjour\/DNS-SD steps to discover and resolve/);
     assert.match(guide, /directly to that client/);
