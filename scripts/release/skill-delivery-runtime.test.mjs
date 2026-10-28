@@ -1,0 +1,429 @@
+import assert from "node:assert/strict";
+import { generateKeyPairSync } from "node:crypto";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import test from "node:test";
+import { collectXcodeCloudBuilds, createAscReadOnlyClient } from "./asc-build-collector.mjs";
+import { canonicalJson, sha256 } from "./skill-delivery-consumer.mjs";
+import {
+  createFileDeliveryJournal,
+  createGitHubSourceReader,
+  createGitHubReleaseSource,
+  createRuntime,
+  createSshTargetAdapter,
+  createTightbeamApprovalAdapter,
+  createXcodeCloudSource,
+} from "./skill-delivery-runtime.mjs";
+
+async function withPrivateKey(callback) {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-delivery-test-"));
+  const privateKeyPath = path.join(directory, "asc-key.p8");
+  const { privateKey } = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+  await fs.writeFile(privateKeyPath, privateKey.export({ format: "pem", type: "pkcs8" }), { mode: 0o600 });
+  try { return await callback({ directory, privateKeyPath }); }
+  finally { await fs.rm(directory, { recursive: true, force: true }); }
+}
+
+function jsonResponse(value, status = 200) {
+  return new Response(JSON.stringify(value), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+test("disabled runtime exits before invoking any source or target command", async () => {
+  let commands = 0;
+  const result = await createRuntime({ enabled: false }, {
+    command: async () => { commands += 1; throw new Error("command must not run"); },
+  });
+  assert.deepEqual(result, { status: "disabled", processed: 0 });
+  assert.equal(commands, 0);
+});
+
+test("a ruled source tag is dereferenced to the exact commit", async () => {
+  const calls = [];
+  const reader = createGitHubSourceReader({
+    owner: "example-owner",
+    repo: "example-repo",
+    command: async (_file, args) => {
+      calls.push(args);
+      const endpoint = args[1];
+      if (endpoint.endsWith("/git/ref/tags/release-1")) {
+        return { stdout: Buffer.from(JSON.stringify({ object: { type: "tag", sha: "a".repeat(40) } })) };
+      }
+      if (endpoint.endsWith(`/git/tags/${"a".repeat(40)}`)) {
+        return { stdout: Buffer.from(JSON.stringify({ object: { type: "commit", sha: "b".repeat(40) } })) };
+      }
+      throw new Error(`unexpected GitHub request: ${endpoint}`);
+    },
+  });
+
+  assert.equal(await reader.readTagCommit("release-1"), "b".repeat(40));
+  assert.equal(calls.length, 2);
+});
+
+test("GitHub collection reads the published release manifest, checksums and canonical skill asset", async () => {
+  const skillBytes = Buffer.from("# release skill\n");
+  const executableName = "surf-ace-cli-linux-x64.tar.gz";
+  const skillName = "surf-ace-SKILL.md";
+  const manifestAssetName = "surf-ace-v0.2.10-manifest.json";
+  const manifestBytes = Buffer.from(JSON.stringify({
+    version: "0.2.10",
+    source: { commit: "a".repeat(40), tag: "surf-ace-v0.2.10-r1" },
+    tooling: { commit: "b".repeat(40), tag: "surf-ace-tools-v0.2.10-r1" },
+    operatingSkill: { asset: skillName },
+    assets: [
+      { name: executableName, sha256: "c".repeat(64) },
+      { name: skillName, sha256: sha256(skillBytes) },
+    ],
+  }));
+  const checksumBytes = Buffer.from([
+    `${"c".repeat(64)}  ${executableName}`,
+    `${sha256(skillBytes)}  ${skillName}`,
+    `${sha256(manifestBytes)}  ${manifestAssetName}`,
+    "",
+  ].join("\n"));
+  const release = {
+    id: 42,
+    tag_name: "surf-ace-v0.2.10-r1",
+    published_at: "2026-10-28T12:00:00Z",
+    draft: false,
+    assets: [
+      { id: 1, name: manifestAssetName },
+      { id: 2, name: "SHA256SUMS" },
+      { id: 3, name: skillName, digest: `sha256:${sha256(skillBytes)}` },
+      { id: 4, name: executableName, digest: `sha256:${"c".repeat(64)}` },
+    ],
+  };
+  const requested = [];
+  const source = createGitHubReleaseSource({
+    owner: "example-owner",
+    repo: "surf-ace",
+    publishedAfter: "2026-10-01T00:00:00Z",
+    command: async (_file, args) => {
+      if (args.includes("--paginate")) return { stdout: Buffer.from(JSON.stringify([release])) };
+      const assetId = Number(/\/assets\/(\d+)$/.exec(args[1])?.[1]);
+      requested.push(assetId);
+      const assetBytes = new Map([[1, manifestBytes], [2, checksumBytes], [3, skillBytes]]).get(assetId);
+      if (!assetBytes) throw new Error("unexpected release asset read");
+      return { stdout: assetBytes };
+    },
+  });
+
+  const [candidate] = await source.listCandidates();
+  assert.deepEqual(requested, [1, 2, 3]);
+  assert.equal(candidate.identity.releaseOrBuildId, "github-release-42");
+  assert.equal(candidate.identity.sourceCommit, "a".repeat(40));
+  assert.equal(candidate.identity.manifestAssetSha256, sha256(manifestBytes));
+  assert.equal(candidate.identity.artifactSha256, sha256(checksumBytes));
+  assert.deepEqual(candidate.skillBytes, skillBytes);
+  assert.deepEqual(candidate.checksumBytes, checksumBytes);
+});
+
+test("the ASC API client sends read-only GET requests and rejects other origins", async () => {
+  await withPrivateKey(async ({ privateKeyPath }) => {
+    const requests = [];
+    const client = await createAscReadOnlyClient({
+      issuerId: "issuer-fixture",
+      keyId: "key-fixture",
+      privateKeyPath,
+      now: 1_800_000_000_000,
+      fetchImpl: async (url, options) => {
+        requests.push({ url: String(url), ...options });
+        return jsonResponse({ data: [] });
+      },
+    });
+    await client.getJson("https://api.appstoreconnect.apple.com/v1/apps");
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].method, "GET");
+    assert.match(requests[0].headers.authorization, /^Bearer [A-Za-z0-9_.-]+$/);
+    await assert.rejects(() => client.getJson("https://example.invalid/v1/apps"), /delivery_asc_url_invalid/);
+    assert.equal(requests.length, 1);
+  });
+});
+
+test("ASC collection binds successful main builds to the configured app and hashes the build record", async () => {
+  await withPrivateKey(async ({ privateKeyPath }) => {
+    const sourceCommit = "a".repeat(40);
+    const requests = [];
+    const fetchImpl = async (url, options) => {
+      const parsed = new URL(url);
+      requests.push({ url: parsed, options });
+      assert.equal(options.method, "GET");
+      if (parsed.pathname === "/v1/ciWorkflows/workflow-fixture/buildRuns") {
+        return jsonResponse({
+          data: [{
+            id: "xcode-run-42",
+            type: "ciBuildRuns",
+            attributes: {
+              number: 42,
+              createdDate: "2026-10-28T12:00:00Z",
+              sourceCommit: { commitSha: sourceCommit },
+              isPullRequestBuild: false,
+              completionStatus: "SUCCEEDED",
+              startReason: "SCM_PUSH",
+            },
+            relationships: {
+              workflow: { data: { type: "ciWorkflows", id: "workflow-fixture" } },
+              sourceBranchOrTag: { data: { type: "scmGitReferences", id: "main-ref" } },
+              builds: { data: [{ type: "builds", id: "app-build-30" }] },
+            },
+          }],
+          included: [
+            { id: "workflow-fixture", type: "ciWorkflows", attributes: { name: "Surf Ace build workflow" } },
+            { id: "main-ref", type: "scmGitReferences", attributes: { name: "main", canonicalName: "refs/heads/main" } },
+            {
+              id: "app-build-30",
+              type: "builds",
+              attributes: { version: "30" },
+              relationships: {
+                app: { data: { type: "apps", id: "app-fixture" } },
+                preReleaseVersion: { data: { type: "preReleaseVersions", id: "version-fixture" } },
+              },
+            },
+            { id: "app-fixture", type: "apps", attributes: { bundleId: "co.example.surf" } },
+            { id: "version-fixture", type: "preReleaseVersions", attributes: { version: "0.1.0" } },
+          ],
+        });
+      }
+      if (parsed.pathname === "/v1/ciBuildRuns/xcode-run-42/actions") return jsonResponse({ data: [] });
+      throw new Error(`unexpected ASC request: ${parsed.pathname}`);
+    };
+    const records = await collectXcodeCloudBuilds({
+      issuerId: "issuer-fixture",
+      keyId: "key-fixture",
+      privateKeyPath,
+      workflowId: "workflow-fixture",
+      bundleId: "co.example.surf",
+      startReasonToCondition: { SCM_PUSH: "push" },
+    }, { fetchImpl, now: 1_800_000_000_000 });
+
+    assert.equal(records.length, 1);
+    assert.equal(records[0].identity.buildId, "xcode-run-42");
+    assert.equal(records[0].identity.sourceCommit, sourceCommit);
+    assert.equal(records[0].identity.appStoreBuildId, "app-build-30");
+    assert.equal(records[0].identity.appStoreBuildNumber, "30");
+    assert.equal(records[0].identity.appStoreAppVersion, "0.1.0");
+    assert.match(records[0].identity.buildRecordSha256, /^[a-f0-9]{64}$/);
+    assert.equal(records[0].manifestBase64, null);
+    assert.ok(requests.every(({ options }) => options.method === "GET"));
+  });
+});
+
+test("ASC fallback reconstructs only the configured build-time skill contract at its source commit", async () => {
+  const skillBytes = Buffer.from("# exact canonical skill\n");
+  const scriptBytes = Buffer.from([
+    'source_sha=$(hash_file "$skill_source")',
+    'embedded_sha=$(hash_file "$skill_tmp")',
+    '[ "$source_sha" = "$embedded_sha" ]',
+    '"sha256": "$embedded_sha"',
+    '"xcodeCloudCommit": "$cloud_commit"',
+  ].join("\n"));
+  const projectBytes = Buffer.from(`  SurfAce:\n    postBuildScripts:\n      - name: Embed Surf Ace operating skill\n        path: scripts/embed-operating-skill.sh\n        basedOnDependencyAnalysis: false\n        settings:\n          MARKETING_VERSION: 0.1.0\n          CURRENT_PROJECT_VERSION: 17\n  SurfAceSpatial:\n    settings:\n      MARKETING_VERSION: 0.1.0\n      CURRENT_PROJECT_VERSION: 17\n`);
+  const sourceCommit = "b".repeat(40);
+  const record = {
+    identity: {
+      releaseOrBuildId: "xcode-run-43",
+      buildId: "xcode-run-43",
+      buildNumber: "43",
+      workflowId: "workflow-fixture",
+      sourceCommit,
+      sourceBranch: "main",
+      gitRef: "refs/heads/main",
+      completionStatus: "SUCCEEDED",
+      isPullRequestBuild: false,
+      startReason: "SCM_PUSH",
+      buildRecordSha256: "c".repeat(64),
+      appStoreBuildId: "app-build-17",
+      appStoreAppVersion: "0.1.0",
+      appStoreBuildNumber: "17",
+    },
+    manifestBase64: null,
+    skillBase64: null,
+  };
+  const sourceReader = {
+    async readFileAtCommit(_commit, filePath) {
+      if (filePath === "integrations/tightbeam/skills/surf-ace/SKILL.md") return skillBytes;
+      if (filePath === "packages/ios/scripts/embed-operating-skill.sh") return scriptBytes;
+      if (filePath === "packages/ios/project.yml") return projectBytes;
+      throw new Error(`unexpected source path: ${filePath}`);
+    },
+  };
+  const source = createXcodeCloudSource({
+    sshTarget: "collector-fixture",
+    collectorScript: "/private/collector.mjs",
+    collectorConfig: "/private/asc.json",
+    expectedWorkflowId: "workflow-fixture",
+    startReasonToCondition: { SCM_PUSH: "push" },
+    sourceReader,
+    command: async () => ({ stdout: Buffer.from(JSON.stringify([record])), stderr: Buffer.alloc(0) }),
+  });
+
+  const [candidate] = await source.listCandidates();
+  const manifest = JSON.parse(candidate.manifestBytes.toString("utf8"));
+  assert.equal(candidate.identity.sourceCommit, sourceCommit);
+  assert.equal(candidate.identity.appBuildNumber, "17");
+  assert.equal(candidate.identity.appStoreBuildNumber, "17");
+  assert.equal(manifest.operatingSkill.sha256, sha256(skillBytes));
+  assert.equal(manifest.xcodeCloudBuildId, "xcode-run-43");
+});
+
+test("ASC fallback accepts the repository's actual iOS target and canonical skill source", async () => {
+  const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+  const files = new Map([
+    ["integrations/tightbeam/skills/surf-ace/SKILL.md", await fs.readFile(path.join(repoRoot, "integrations/tightbeam/skills/surf-ace/SKILL.md"))],
+    ["packages/ios/scripts/embed-operating-skill.sh", await fs.readFile(path.join(repoRoot, "packages/ios/scripts/embed-operating-skill.sh"))],
+    ["packages/ios/project.yml", await fs.readFile(path.join(repoRoot, "packages/ios/project.yml"))],
+  ]);
+  const sourceCommit = "d".repeat(40);
+  const record = {
+    identity: {
+      releaseOrBuildId: "xcode-run-44",
+      buildId: "xcode-run-44",
+      buildNumber: "44",
+      workflowId: "workflow-fixture",
+      sourceCommit,
+      sourceBranch: "main",
+      gitRef: "refs/heads/main",
+      completionStatus: "SUCCEEDED",
+      isPullRequestBuild: false,
+      startReason: "SCM_PUSH",
+      buildRecordSha256: "f".repeat(64),
+      archiveEvidence: "unavailable",
+    },
+    manifestBase64: null,
+    skillBase64: null,
+  };
+  const source = createXcodeCloudSource({
+    sshTarget: "collector-fixture",
+    collectorScript: "/private/collector.mjs",
+    collectorConfig: "/private/asc.json",
+    expectedWorkflowId: "workflow-fixture",
+    startReasonToCondition: { SCM_PUSH: "push" },
+    sourceReader: {
+      async readFileAtCommit(_commit, filePath) {
+        assert.ok(files.has(filePath), `expected canonical source file ${filePath}`);
+        return files.get(filePath);
+      },
+    },
+    command: async () => ({ stdout: Buffer.from(JSON.stringify([record])), stderr: Buffer.alloc(0) }),
+  });
+
+  const [candidate] = await source.listCandidates();
+  const manifest = JSON.parse(candidate.manifestBytes.toString("utf8"));
+  assert.equal(manifest.operatingSkill.sha256, sha256(files.get("integrations/tightbeam/skills/surf-ace/SKILL.md")));
+  assert.equal(manifest.xcodeCloudCommit, sourceCommit);
+  assert.equal(manifest.xcodeCloudBuildId, "xcode-run-44");
+});
+
+test("shared skill writes use the supported identity command and configured route", async () => {
+  const priorBytes = Buffer.from("prior skill\n");
+  const nextBytes = Buffer.from("next skill\n");
+  const calls = [];
+  const destination = {
+    id: "shared-skill",
+    kind: "shared-identity",
+    host: "configured-host",
+    path: "/configured/identity/skills/surf-ace/SKILL.md",
+    writer: "supported-identity-cli",
+    route: {
+      sshTarget: "configured-alias",
+      tightbeamCommand: "tightbeam",
+      identityArchetype: "configured-archetype",
+      identitySkillName: "surf-ace",
+    },
+    effects: { service: "future loads", database: "publication record", downtime: "none" },
+  };
+  const targets = createSshTargetAdapter([destination], {
+    command: async (file, args, options = {}) => {
+      calls.push({ file, args, options });
+      const remote = args[2];
+      if (remote.includes("PRESENT")) {
+        return { stdout: Buffer.concat([Buffer.from("PRESENT\n"), priorBytes]), stderr: Buffer.alloc(0) };
+      }
+      if (remote.includes("cat >")) {
+        return { stdout: Buffer.from(`${sha256(options.input)}\n`), stderr: Buffer.alloc(0) };
+      }
+      return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+    },
+  });
+
+  assert.deepEqual(await targets.read(destination.id), { available: true, bytes: priorBytes });
+  const stage = await targets.stage(destination.id, nextBytes, "f".repeat(64));
+  assert.equal(stage.sha256, sha256(nextBytes));
+  await targets.commit(destination.id, stage, { expectedPriorSha256: sha256(priorBytes) });
+  assert.ok(calls.some(({ file, args }) => file === "ssh" && args[1] === "configured-alias" &&
+    args[2].includes("tightbeam") && args[2].includes("identity") && args[2].includes("edit")));
+  assert.ok(calls.some(({ file, args }) => file === "ssh" && args[1] === "configured-alias" &&
+    args[2].includes("rm -f") && args[2].includes("surf-ace-stage")));
+});
+
+test("decision approval accepts only the direct configured user ruling for the exact plan", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-approval-test-"));
+  try {
+    const plan = {
+      envelopeId: "event-1",
+      envelope: { releaseOrBuildId: "event-1", skillSha256: "d".repeat(64) },
+      planSha256: "e".repeat(64),
+      destinationSetSha256: "f".repeat(64),
+      destinationMapSha256: "f".repeat(64),
+    };
+    const note = canonicalJson(plan);
+    const request = {
+      id: "request-fixture",
+      context: { note },
+      status: "ruled",
+      decision: "approve",
+      ruledBy: "user:operator",
+      rulingAttribution: {
+        onBehalfOf: "user:operator",
+        performer: {
+          principal: { state: "known", value: "user:operator" },
+          session: { state: "none" },
+        },
+      },
+    };
+    const adapter = createTightbeamApprovalAdapter({
+      directory,
+      assignmentId: "private-assignment-reference",
+      requiredRuler: "user:operator",
+      command: async (_file, args) => {
+        if (args[0] === "decision-requests") return { stdout: Buffer.from(JSON.stringify({ decisionRequests: [] })) };
+        if (args[0] === "operator-ask") return { stdout: Buffer.from(JSON.stringify({ decisionRequest: { id: request.id } })) };
+        if (args[0] === "decision-request") return { stdout: Buffer.from(JSON.stringify({ decisionRequest: request })) };
+        throw new Error(`unexpected decision command: ${args[0]}`);
+      },
+    });
+
+    await adapter.request(plan);
+    assert.equal((await adapter.read(plan.envelopeId, plan.planSha256)).directUserConfirmed, true);
+    request.rulingAttribution.performer.session.state = "known";
+    assert.equal((await adapter.read(plan.envelopeId, plan.planSha256)).directUserConfirmed, false);
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("file journal retains no-change state, high-water and exact backup bytes", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-delivery-journal-test-"));
+  try {
+    const journal = await createFileDeliveryJournal(directory);
+    const highWater = { sourceCommit: "d".repeat(40), skillSha256: "e".repeat(64) };
+    await journal.initializeHighWater(highWater);
+    const backup = Buffer.from("previous skill bytes\n");
+    const ref = await journal.saveBackup("event-1", "destination-1", backup, { key: "fixed-key" });
+    await journal.recordNoChange("event-2", {
+      targetReceipts: [{ targetId: "destination-1", finalSha256: sha256(backup) }],
+      highWater,
+    });
+
+    const reloaded = await createFileDeliveryJournal(directory);
+    assert.deepEqual(await reloaded.readHighWater(), highWater);
+    assert.deepEqual(await reloaded.readBackup("event-1", "destination-1", ref), backup);
+    assert.equal((await reloaded.read("event-2")).status, "no_change");
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});

@@ -4,8 +4,10 @@ export const CANONICAL_SKILL_SOURCE = "integrations/tightbeam/skills/surf-ace/SK
 
 const COMMIT = /^[a-f0-9]{40}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
+const MANIFEST_TOKEN = /^[A-Za-z0-9._+/-]+$/;
 const CHANNELS = new Set(["desktop-cli-release", "iphone-build"]);
 const DESTINATION_KINDS = new Set(["shared-identity", "standalone-skill"]);
+const CHECKSUM_LINE = /^([a-f0-9]{64})[ \t]+[*]?(.+)$/;
 
 function bytes(value, field) {
   if (Buffer.isBuffer(value) || value instanceof Uint8Array) return Buffer.from(value);
@@ -20,8 +22,9 @@ function rejectedCandidateId(candidate) {
     releaseOrBuildId: identity.releaseOrBuildId ?? null,
     sourceCommit: identity.sourceCommit ?? null,
     manifestSha256: digestIfBytes(candidate?.manifestBytes),
+    checksumsSha256: digestIfBytes(candidate?.checksumBytes),
     skillSha256: digestIfBytes(candidate?.skillBytes),
-    artifactProofSha256: digestIfBytes(candidate?.artifactProofBytes),
+    artifactSha256: identity.artifactSha256 ?? null,
   })));
 }
 
@@ -44,18 +47,29 @@ export function canonicalJson(value) {
 }
 
 function normalizeDestinationRecords(destinations) {
-  if (!Array.isArray(destinations) || destinations.length !== 5) {
+  if (!Array.isArray(destinations) || destinations.length === 0) {
     throw new Error("delivery_destination_set_invalid");
   }
   const records = destinations.map((destination) => {
-    const { id, kind, host, path, writer, effects } = destination ?? {};
+    const { id, kind, host, path, writer, effects, route = {} } = destination ?? {};
     if (typeof id !== "string" || id.length === 0 ||
         !DESTINATION_KINDS.has(kind) ||
         typeof host !== "string" || host.length === 0 ||
         typeof path !== "string" || !path.startsWith("/") ||
         writer !== (kind === "shared-identity" ? "supported-identity-cli" : "existing-ssh") ||
         !effects || typeof effects !== "object" ||
-        [effects.service, effects.database, effects.downtime].some((value) => typeof value !== "string" || value.length === 0)) {
+        [effects.service, effects.database, effects.downtime].some((value) => typeof value !== "string" || value.length === 0) ||
+        !route || typeof route !== "object" || Array.isArray(route)) {
+      throw new Error("delivery_destination_set_invalid");
+    }
+    let normalizedRoute;
+    try {
+      normalizedRoute = JSON.parse(canonicalJson(route));
+    } catch {
+      throw new Error("delivery_destination_set_invalid");
+    }
+    if (Object.values(normalizedRoute).some((value) =>
+      value === null || typeof value === "object" || !["string", "number", "boolean"].includes(typeof value))) {
       throw new Error("delivery_destination_set_invalid");
     }
     return {
@@ -64,6 +78,7 @@ function normalizeDestinationRecords(destinations) {
       host,
       path,
       writer,
+      route: normalizedRoute,
       effects: {
         service: effects.service,
         database: effects.database,
@@ -74,10 +89,46 @@ function normalizeDestinationRecords(destinations) {
   const sharedCount = records.filter(({ kind }) => kind === "shared-identity").length;
   const uniqueIds = new Set(records.map(({ id }) => id)).size;
   const uniqueTargets = new Set(records.map(({ host, path }) => `${host}\u0000${path}`)).size;
-  if (uniqueIds !== 5 || uniqueTargets !== 5 || sharedCount !== 1) {
+  if (uniqueIds !== records.length || uniqueTargets !== records.length || sharedCount !== 1) {
     throw new Error("delivery_destination_set_invalid");
   }
   return records;
+}
+
+function parseChecksums(checksumBytes) {
+  const checksums = new Map();
+  for (const line of bytes(checksumBytes, "checksums").toString("utf8").split(/\r?\n/)) {
+    if (line.length === 0) continue;
+    const match = CHECKSUM_LINE.exec(line);
+    if (!match || match[2].startsWith("/") || match[2].split("/").includes("..") || checksums.has(match[2])) {
+      throw new Error("delivery_checksums_invalid");
+    }
+    checksums.set(match[2], match[1]);
+  }
+  if (checksums.size === 0) throw new Error("delivery_checksums_invalid");
+  return checksums;
+}
+
+export function renderIphoneManifest(identity, skillSha256) {
+  const fields = {
+    appVersion: identity?.appVersion,
+    appBuildNumber: identity?.appBuildNumber,
+    buildId: identity?.buildId,
+    buildNumber: identity?.buildNumber,
+    sourceCommit: identity?.sourceCommit,
+    workflowId: identity?.workflowId,
+    startCondition: identity?.startCondition,
+    branch: identity?.sourceBranch,
+    gitRef: identity?.gitRef,
+    scheme: identity?.scheme,
+    platform: identity?.platform,
+    action: identity?.action,
+  };
+  if (Object.values(fields).some((value) => typeof value !== "string" || !MANIFEST_TOKEN.test(value)) ||
+      !SHA256.test(skillSha256 ?? "")) {
+    throw new Error("delivery_iphone_identity_invalid");
+  }
+  return Buffer.from(`{\n  "appVersion": "${fields.appVersion}",\n  "appBuildNumber": "${fields.appBuildNumber}",\n  "operatingSkill": {\n    "asset": "SurfAceOperatingSkill/SKILL.md",\n    "clientPlatforms": ["ios"],\n    "publication": "app-bundle",\n    "sha256": "${skillSha256}",\n    "sourcePath": "${CANONICAL_SKILL_SOURCE}",\n    "version": "${fields.appVersion}"\n  },\n  "xcodeCloudBuildId": "${fields.buildId}",\n  "xcodeCloudBuildNumber": "${fields.buildNumber}",\n  "xcodeCloudCommit": "${fields.sourceCommit}",\n  "xcodeCloudWorkflowId": "${fields.workflowId}",\n  "xcodeCloudStartCondition": "${fields.startCondition}",\n  "xcodeCloudBranch": "${fields.branch}",\n  "xcodeCloudGitRef": "${fields.gitRef}",\n  "xcodeCloudScheme": "${fields.scheme}",\n  "xcodeCloudPlatform": "${fields.platform}",\n  "xcodeCloudAction": "${fields.action}"\n}\n`);
 }
 
 function parseManifest(manifestBytes) {
@@ -96,6 +147,7 @@ function verifyDesktopManifest(manifest, identity, skillSha256) {
   if (manifest?.version !== identity.version ||
       manifest?.source?.commit !== identity.sourceCommit ||
       manifest?.source?.tag !== identity.sourceTag ||
+      identity.releaseTag !== identity.sourceTag ||
       (identity.toolingCommit && manifest?.tooling?.commit !== identity.toolingCommit) ||
       (identity.toolingTag && manifest?.tooling?.tag !== identity.toolingTag) ||
       skill?.sourcePath !== CANONICAL_SKILL_SOURCE ||
@@ -108,6 +160,59 @@ function verifyDesktopManifest(manifest, identity, skillSha256) {
       manifest?.checksums?.[skill?.asset] !== skillSha256) {
     throw new Error("delivery_desktop_manifest_mismatch");
   }
+}
+
+function verifyDesktopChecksums(candidate, manifest, manifestBytes, skillSha256) {
+  const identity = candidate.identity ?? {};
+  const checksumBytes = bytes(candidate.checksumBytes, "checksums");
+  const checksums = parseChecksums(checksumBytes);
+  const manifestAssetName = requiredString(identity.manifestAssetName, "manifest_asset_name");
+  const checksumsAssetName = requiredString(identity.checksumsAssetName, "checksums_asset_name");
+  const releaseAssetNames = identity.releaseAssetNames;
+  if (checksumsAssetName !== "SHA256SUMS" ||
+      !/^[A-Za-z0-9._+-]+-manifest\.json$/.test(manifestAssetName) ||
+      !Array.isArray(releaseAssetNames) ||
+      releaseAssetNames.some((name) => typeof name !== "string" || name.length === 0 || name.includes("/") || name.includes("\\"))) {
+    throw new Error("delivery_release_asset_set_invalid");
+  }
+
+  const assetNames = manifest.assets?.map((asset) => asset?.name);
+  if (!Array.isArray(assetNames) || assetNames.length === 0 ||
+      assetNames.some((name) => typeof name !== "string" || name.length === 0 || name.includes("/") || name.includes("\\")) ||
+      new Set(assetNames).size !== assetNames.length || assetNames.includes(manifestAssetName) || assetNames.includes(checksumsAssetName)) {
+    throw new Error("delivery_manifest_asset_set_invalid");
+  }
+  const expectedReleaseAssets = [...assetNames, manifestAssetName, checksumsAssetName].sort();
+  if (canonicalJson([...releaseAssetNames].sort()) !== canonicalJson(expectedReleaseAssets)) {
+    throw new Error("delivery_release_asset_set_mismatch");
+  }
+  const expectedChecksumNames = [...assetNames, manifestAssetName].sort();
+  if (canonicalJson([...checksums.keys()].sort()) !== canonicalJson(expectedChecksumNames)) {
+    throw new Error("delivery_checksums_asset_set_mismatch");
+  }
+  const manifestChecksums = manifest.checksums;
+  if (!manifestChecksums || typeof manifestChecksums !== "object" || Array.isArray(manifestChecksums) ||
+      canonicalJson(Object.keys(manifestChecksums).sort()) !== canonicalJson([...assetNames].sort())) {
+    throw new Error("delivery_manifest_checksums_mismatch");
+  }
+  for (const asset of manifest.assets) {
+    if (!SHA256.test(asset.sha256 ?? "") ||
+        manifestChecksums[asset.name] !== asset.sha256 ||
+        checksums.get(asset.name) !== asset.sha256) {
+      throw new Error("delivery_checksums_manifest_mismatch");
+    }
+    const reportedAssetHash = identity.assetSha256ByName?.[asset.name];
+    if (reportedAssetHash !== undefined && reportedAssetHash !== asset.sha256) {
+      throw new Error("delivery_release_asset_digest_mismatch");
+    }
+  }
+  if (checksums.get(manifestAssetName) !== sha256(manifestBytes) ||
+      checksums.get(manifestAssetName) !== identity.manifestAssetSha256) {
+    throw new Error("delivery_manifest_checksum_mismatch");
+  }
+  const skill = manifest.operatingSkill;
+  if (checksums.get(skill?.asset) !== skillSha256) throw new Error("delivery_skill_checksum_mismatch");
+  return { checksumBytes, checksumSha256: sha256(checksumBytes), manifestAssetName, checksumsAssetName };
 }
 
 function verifyIphoneManifest(manifest, identity, skillSha256) {
@@ -127,12 +232,23 @@ function verifyIphoneManifest(manifest, identity, skillSha256) {
       manifest?.xcodeCloudBuildNumber !== identity.buildNumber ||
       manifest?.xcodeCloudWorkflowId !== identity.workflowId ||
       manifest?.xcodeCloudCommit !== identity.sourceCommit ||
-      manifest?.xcodeCloudBranch !== "main" ||
-      manifest?.xcodeCloudGitRef !== "refs/heads/main" ||
-      manifest?.xcodeCloudScheme !== "SurfAce" ||
-      manifest?.xcodeCloudPlatform !== "iOS" ||
-      manifest?.xcodeCloudAction !== "archive" ||
+      manifest?.xcodeCloudStartCondition !== identity.startCondition ||
+      manifest?.xcodeCloudBranch !== identity.sourceBranch ||
+      manifest?.xcodeCloudGitRef !== identity.gitRef ||
+      manifest?.xcodeCloudScheme !== identity.scheme ||
+      manifest?.xcodeCloudPlatform !== identity.platform ||
+      manifest?.xcodeCloudAction !== identity.action ||
       Object.values(expectedIdentity).some((value) => typeof value !== "string" || value.length === 0) ||
+      identity.completionStatus !== "SUCCEEDED" ||
+      identity.isPullRequestBuild !== false ||
+      identity.sourceBranch !== "main" ||
+      identity.scheme !== "SurfAce" ||
+      identity.platform !== "iOS" ||
+      identity.action !== "archive" ||
+      (identity.appStoreBuildId &&
+        (!identity.appStoreAppVersion || !identity.appStoreBuildNumber ||
+         identity.appStoreAppVersion !== identity.appVersion ||
+         identity.appStoreBuildNumber !== identity.appBuildNumber)) ||
       skill?.asset !== "SurfAceOperatingSkill/SKILL.md" ||
       skill?.sourcePath !== CANONICAL_SKILL_SOURCE ||
       skill?.version !== identity.appVersion ||
@@ -163,47 +279,47 @@ export async function verifyDeliveryCandidate(candidate, { destinations, sourceR
   if (channel === "iphone-build" && releaseOrBuildId !== identity.buildId) {
     throw new Error("delivery_build_identity_invalid");
   }
+  if (identity.evidenceFailure === "delivery_iphone_archive_evidence_invalid" ||
+      identity.evidenceFailure === "delivery_iphone_source_evidence_invalid") {
+    throw new Error(identity.evidenceFailure);
+  }
   const manifestBytes = bytes(candidate.manifestBytes, "manifest");
   const skillBytes = bytes(candidate.skillBytes, "skill");
-  const artifactProofBytes = bytes(candidate.artifactProofBytes, "artifact_proof");
   const manifest = parseManifest(manifestBytes);
-  const artifactProof = parseManifest(artifactProofBytes);
   const canonicalSkillBytes = bytes(
     await sourceReader.readFileAtCommit(sourceCommit, CANONICAL_SKILL_SOURCE),
     "canonical_skill",
   );
   const skillSha256 = sha256(skillBytes);
   const manifestSha256 = sha256(manifestBytes);
-  const artifactSha256 = requiredString(identity.artifactSha256, "artifact_sha256");
-  if (!SHA256.test(artifactSha256) ||
-      artifactProof?.channel !== channel ||
-      artifactProof?.releaseOrBuildId !== releaseOrBuildId ||
-      artifactProof?.sourceCommit !== sourceCommit ||
-      artifactProof?.manifestSha256 !== manifestSha256 ||
-      artifactProof?.skillSha256 !== skillSha256 ||
-      artifactProof?.artifactSha256 !== artifactSha256) {
-    throw new Error("delivery_artifact_proof_mismatch");
-  }
+  const artifactSha256 = identity.artifactSha256 ?? null;
+  if (artifactSha256 !== null && !SHA256.test(artifactSha256)) throw new Error("delivery_artifact_digest_invalid");
   if (skillSha256 !== sha256(canonicalSkillBytes)) throw new Error("delivery_skill_source_mismatch");
 
+  let checksumEvidence = null;
   if (channel === "desktop-cli-release") {
     const version = requiredString(identity.version, "version");
     verifyDesktopManifest(manifest, { ...identity, version, sourceCommit }, skillSha256);
-    if (artifactProof?.sourceTag !== identity.sourceTag ||
-        artifactProof?.toolingTag !== identity.toolingTag ||
-        artifactProof?.toolingCommit !== identity.toolingCommit ||
-        artifactProof?.version !== identity.version) {
-      throw new Error("delivery_artifact_proof_mismatch");
+    if (!COMMIT.test(identity.toolingCommit ?? "") ||
+        typeof identity.sourceTag !== "string" || typeof identity.toolingTag !== "string" ||
+        identity.sourceTag !== manifest.source.tag || identity.toolingTag !== manifest.tooling.tag) {
+      throw new Error("delivery_release_identity_mismatch");
+    }
+    if (typeof sourceReader.readTagCommit !== "function") throw new Error("delivery_tag_reader_missing");
+    const [sourceTagCommit, toolingTagCommit] = await Promise.all([
+      sourceReader.readTagCommit(identity.sourceTag),
+      sourceReader.readTagCommit(identity.toolingTag),
+    ]);
+    if (sourceTagCommit !== identity.sourceCommit || toolingTagCommit !== identity.toolingCommit) {
+      throw new Error("delivery_release_tag_target_mismatch");
+    }
+    checksumEvidence = verifyDesktopChecksums(candidate, manifest, manifestBytes, skillSha256);
+    if (identity.artifactSha256 !== checksumEvidence.checksumSha256) {
+      throw new Error("delivery_release_integrity_identity_mismatch");
     }
   } else {
     verifyIphoneManifest(manifest, { ...identity, sourceCommit }, skillSha256);
-    if (artifactProof?.buildId !== identity.buildId ||
-        artifactProof?.buildNumber !== identity.buildNumber ||
-        artifactProof?.workflowId !== identity.workflowId ||
-        artifactProof?.appVersion !== identity.appVersion ||
-        artifactProof?.appBuildNumber !== identity.appBuildNumber) {
-      throw new Error("delivery_artifact_proof_mismatch");
-    }
+    if (!SHA256.test(identity.buildRecordSha256 ?? "")) throw new Error("delivery_build_record_digest_invalid");
   }
 
   const destinationSetSha256 = sha256(canonicalJson(destinationRecords));
@@ -230,6 +346,9 @@ export async function verifyDeliveryCandidate(candidate, { destinations, sourceR
         buildId: identity.buildId,
         buildNumber: identity.buildNumber,
         workflowId: identity.workflowId,
+        ...(identity.appStoreBuildId ? { appStoreBuildId: identity.appStoreBuildId } : {}),
+        ...(identity.appStoreAppVersion ? { appStoreAppVersion: identity.appStoreAppVersion } : {}),
+        ...(identity.appStoreBuildNumber ? { appStoreBuildNumber: identity.appStoreBuildNumber } : {}),
         startCondition: manifest.xcodeCloudStartCondition,
         branch: manifest.xcodeCloudBranch,
         gitRef: manifest.xcodeCloudGitRef,
@@ -243,7 +362,8 @@ export async function verifyDeliveryCandidate(candidate, { destinations, sourceR
     skillSha256,
     manifestSha256: sha256(manifestBytes),
     artifactSha256,
-    artifactProofSha256: sha256(artifactProofBytes),
+    buildRecordSha256: identity.buildRecordSha256 ?? null,
+    integrityFileSha256: checksumEvidence?.checksumSha256 ?? null,
     destinationSetSha256,
     destinationMapSha256,
   };
@@ -254,7 +374,7 @@ export async function verifyDeliveryCandidate(candidate, { destinations, sourceR
     manifestBytes,
     skillBytes,
     skillSha256,
-    artifactProofBytes,
+    checksumBytes: checksumEvidence?.checksumBytes ?? null,
     destinations: destinationRecords,
   };
 }
@@ -268,6 +388,7 @@ function snapshotDigest(snapshot) {
 function approvalMatches(approval, plan) {
   return approval?.status === "ruled" &&
     approval?.approved === true &&
+    approval?.directUserConfirmed === true &&
     approval?.envelopeId === plan.envelopeId &&
     approval?.destinationSetSha256 === plan.destinationSetSha256 &&
     approval?.destinationMapSha256 === plan.destinationMapSha256 &&
@@ -294,7 +415,7 @@ async function rollbackCommitted({ targets, journal, envelopeId, committed, skil
         receipts.push({ targetId: item.targetId, state: "conflict", sha256: currentHash });
         continue;
       }
-      await targets.restore(item.targetId, item.backupBytes);
+      await targets.restore(item.targetId, item.backupBytes, { expectedCurrentSha256: skillSha256 });
       const restoredHash = await readCurrentHash(targets, item.targetId);
       if (restoredHash !== item.priorSha256) {
         unresolved = true;
@@ -353,7 +474,7 @@ async function recoverInterruptedTransaction(entry, { targets, journal }) {
         receipts.push({ targetId: snapshot.targetId, state: "backup_missing_or_mismatched" });
         continue;
       }
-      await targets.restore(snapshot.targetId, previousBytes);
+      await targets.restore(snapshot.targetId, previousBytes, { expectedCurrentSha256: skillSha256 });
       const restoredHash = await readCurrentHash(targets, snapshot.targetId);
       if (restoredHash !== snapshot.priorSha256) {
         unresolved = true;
@@ -392,6 +513,7 @@ export async function runSkillDeliveryConsumer({
   sources,
   sourceReader,
   destinations,
+  initialHighWater,
   targets,
   approvals,
   journal,
@@ -410,12 +532,30 @@ export async function runSkillDeliveryConsumer({
       typeof targets.restore !== "function" ||
       typeof approvals.read !== "function" ||
       typeof approvals.request !== "function" ||
-      ["read", "listPublishing", "readBackup", "saveBackup", "recordBlocked", "recordPending", "recordPublishing", "recordTargetReceipt", "recordRollback", "recordFailure", "recordComplete"]
+      ["read", "readHighWater", "initializeHighWater", "listPublishing", "readBackup", "saveBackup", "recordBlocked", "recordPending", "recordPublishing", "recordTargetReceipt", "recordRollback", "recordFailure", "recordNoChange", "recordComplete"]
         .some((method) => typeof journal[method] !== "function") ||
-      sources.some((source) => typeof source?.listCandidates !== "function")) {
+      sources.some((source) => typeof source?.listCandidates !== "function") ||
+      typeof sourceReader?.compareCommits !== "function") {
     throw new Error("delivery_adapters_missing");
   }
   const destinationRecords = normalizeDestinationRecords(destinations);
+
+  let highWater = await journal.readHighWater();
+  if (!highWater) {
+    if (!COMMIT.test(initialHighWater?.sourceCommit ?? "") || !SHA256.test(initialHighWater?.skillSha256 ?? "")) {
+      throw new Error("delivery_high_water_missing");
+    }
+    const baselineBytes = bytes(
+      await sourceReader.readFileAtCommit(initialHighWater.sourceCommit, CANONICAL_SKILL_SOURCE),
+      "high_water_skill",
+    );
+    if (sha256(baselineBytes) !== initialHighWater.skillSha256) throw new Error("delivery_high_water_mismatch");
+    await journal.initializeHighWater(initialHighWater);
+    highWater = initialHighWater;
+  }
+  if (!COMMIT.test(highWater?.sourceCommit ?? "") || !SHA256.test(highWater?.skillSha256 ?? "")) {
+    throw new Error("delivery_high_water_invalid");
+  }
 
   const results = [];
   const recoveredEnvelopeIds = new Set();
@@ -444,7 +584,7 @@ export async function runSkillDeliveryConsumer({
       const { envelope, envelopeId, destinations: resolvedTargets, skillBytes, skillSha256 } = verified;
       if (recoveredEnvelopeIds.has(envelopeId)) continue;
       const prior = await journal.read(envelopeId);
-      if (prior?.status === "complete") {
+      if (prior?.status === "complete" || prior?.status === "no_change") {
         results.push({ status: "already_complete", envelopeId });
         continue;
       }
@@ -453,18 +593,82 @@ export async function runSkillDeliveryConsumer({
         continue;
       }
 
+      let sourceOrder;
+      try {
+        sourceOrder = await sourceReader.compareCommits(highWater.sourceCommit, envelope.sourceCommit);
+      } catch (error) {
+        await journal.recordBlocked(envelopeId, {
+          reason: "delivery_source_order_unknown",
+          detail: error.message,
+          highWaterSourceCommit: highWater.sourceCommit,
+          candidateSourceCommit: envelope.sourceCommit,
+        });
+        results.push({ status: "blocked", envelopeId, code: "delivery_source_order_unknown" });
+        continue;
+      }
+      if (sourceOrder === "identical" && skillSha256 !== highWater.skillSha256) {
+        await journal.recordBlocked(envelopeId, {
+          reason: "delivery_source_commit_content_mismatch",
+          highWaterSourceCommit: highWater.sourceCommit,
+          candidateSourceCommit: envelope.sourceCommit,
+        });
+        results.push({ status: "blocked", envelopeId, code: "delivery_source_commit_content_mismatch" });
+        continue;
+      }
+      if (sourceOrder !== "identical" && sourceOrder !== "ahead") {
+        await journal.recordBlocked(envelopeId, {
+          reason: "delivery_older_skill_rollback",
+          highWaterSourceCommit: highWater.sourceCommit,
+          candidateSourceCommit: envelope.sourceCommit,
+          sourceOrder,
+        });
+        results.push({ status: "blocked", envelopeId, code: "delivery_older_skill_rollback" });
+        continue;
+      }
+
       const snapshots = [];
       try {
         for (const { id: targetId } of resolvedTargets) {
           const snapshot = await targets.read(targetId);
           const priorSha256 = snapshotDigest(snapshot);
-          const backupKey = `${envelopeId}:${targetId}:${priorSha256 ?? "absent"}`;
-          const backupRef = await journal.saveBackup(envelopeId, targetId, snapshot.bytes, { key: backupKey });
-          const backupBytes = await journal.readBackup(envelopeId, targetId, backupRef);
-          if (priorSha256 === null ? backupBytes !== null : sha256(bytes(backupBytes, "backup")) !== priorSha256) {
+          snapshots.push({ targetId, priorSha256, snapshotBytes: snapshot.bytes });
+        }
+      } catch (error) {
+        await journal.recordBlocked(envelopeId, { reason: error.message });
+        results.push({ status: "blocked", envelopeId, code: error.message });
+        continue;
+      }
+
+      if (snapshots.every(({ priorSha256 }) => priorSha256 === skillSha256)) {
+        const receipts = snapshots.map(({ targetId, priorSha256 }) => ({
+          envelopeId,
+          targetId,
+          priorSha256,
+          finalSha256: priorSha256,
+          state: "already_current",
+        }));
+        await journal.recordNoChange(envelopeId, {
+          envelope,
+          reason: "all_configured_destinations_already_match",
+          targetReceipts: receipts,
+          highWater: { sourceCommit: envelope.sourceCommit, skillSha256 },
+        });
+        highWater = { sourceCommit: envelope.sourceCommit, skillSha256 };
+        results.push({ status: "no_change", envelopeId, targetReceipts: receipts });
+        continue;
+      }
+
+      try {
+        for (const snapshot of snapshots) {
+          const backupKey = `${envelopeId}:${snapshot.targetId}:${snapshot.priorSha256 ?? "absent"}`;
+          snapshot.backupRef = await journal.saveBackup(envelopeId, snapshot.targetId, snapshot.snapshotBytes, { key: backupKey });
+          snapshot.backupBytes = await journal.readBackup(envelopeId, snapshot.targetId, snapshot.backupRef);
+          if (snapshot.priorSha256 === null
+              ? snapshot.backupBytes !== null
+              : sha256(bytes(snapshot.backupBytes, "backup")) !== snapshot.priorSha256) {
             throw new Error("delivery_backup_verification_failed");
           }
-          snapshots.push({ targetId, priorSha256, backupRef, backupBytes });
+          delete snapshot.snapshotBytes;
         }
       } catch (error) {
         await journal.recordBlocked(envelopeId, { reason: error.message });
@@ -484,7 +688,7 @@ export async function runSkillDeliveryConsumer({
       };
       const planSha256 = sha256(canonicalJson(planBody));
       const plan = { ...planBody, planSha256 };
-      let approval = await approvals.read(envelopeId);
+      let approval = await approvals.read(envelopeId, planSha256);
       if (!approval) {
         await approvals.request(plan, { idempotencyKey: `${envelopeId}:${planSha256}` });
         await journal.recordPending(envelopeId, { envelope, plan, planSha256 });
@@ -646,7 +850,9 @@ export async function runSkillDeliveryConsumer({
         await journal.recordComplete(envelopeId, {
           envelope,
           targetReceipts: committed.map(({ receipt }) => receipt),
+          highWater: { sourceCommit: envelope.sourceCommit, skillSha256 },
         });
+        highWater = { sourceCommit: envelope.sourceCommit, skillSha256 };
       } catch {
         const rollback = await rollbackCommitted({ targets, journal, envelopeId, committed, skillSha256 });
         await journal.recordFailure(envelopeId, {

@@ -16,6 +16,7 @@ const destinationRecords = destinations.map((id, index) => ({
   host: `fixture-machine-${index < 3 ? "a" : "b"}`,
   path: `/fixture/${id}/SKILL.md`,
   writer: index === 0 ? "supported-identity-cli" : "existing-ssh",
+  route: {},
   effects: index === 0
     ? {
       service: "publishes a shared identity revision for future loads",
@@ -30,15 +31,19 @@ const destinationRecords = destinations.map((id, index) => ({
 }));
 const skillBytes = Buffer.from("# Surf Ace operating skill\n");
 const skillSha256 = sha256(skillBytes);
-const artifactSha256 = "c".repeat(64);
 
 function desktopCandidate(overrides = {}) {
-  const { skillBytes: candidateSkillBytes = skillBytes, ...candidateOverrides } = overrides;
+  const {
+    skillBytes: candidateSkillBytes = skillBytes,
+    identity: identityOverrides = {},
+    ...candidateOverrides
+  } = overrides;
   const candidateSkillSha256 = sha256(candidateSkillBytes);
   const asset = "surf-ace-skill-v0.2.10.md";
+  const manifestAssetName = "surf-ace-v0.2.10-manifest.json";
   const manifest = {
     version: "0.2.10",
-    source: { commit: sourceCommit, tag: "surf-ace-v0.2.10-r1" },
+    source: { commit: identityOverrides.sourceCommit ?? sourceCommit, tag: "surf-ace-v0.2.10-r1" },
     tooling: { commit: toolingCommit, tag: "surf-ace-release-tooling-v0.2.10-r1" },
     assets: [{ name: asset, sha256: candidateSkillSha256 }],
     checksums: { [asset]: candidateSkillSha256 },
@@ -51,31 +56,29 @@ function desktopCandidate(overrides = {}) {
       version: "0.2.10",
     },
   };
+  const manifestBytes = Buffer.from(JSON.stringify(manifest));
+  const checksumBytes = Buffer.from(`${candidateSkillSha256}  ${asset}\n${sha256(manifestBytes)}  ${manifestAssetName}\n`);
   return {
     channel: "desktop-cli-release",
     identity: {
       releaseOrBuildId: "release-0.2.10-r1",
-      sourceCommit,
+      releaseTag: "surf-ace-v0.2.10-r1",
+      sourceCommit: identityOverrides.sourceCommit ?? sourceCommit,
       toolingCommit,
       sourceTag: "surf-ace-v0.2.10-r1",
       toolingTag: "surf-ace-release-tooling-v0.2.10-r1",
       version: "0.2.10",
-      artifactSha256,
+      manifestAssetName,
+      manifestAssetSha256: sha256(manifestBytes),
+      checksumsAssetName: "SHA256SUMS",
+      releaseAssetNames: [asset, manifestAssetName, "SHA256SUMS"],
+      assetSha256ByName: { [asset]: candidateSkillSha256 },
+      artifactSha256: sha256(checksumBytes),
+      ...identityOverrides,
     },
-    manifestBytes: Buffer.from(JSON.stringify(manifest)),
+    manifestBytes,
+    checksumBytes,
     skillBytes: candidateSkillBytes,
-    artifactProofBytes: Buffer.from(JSON.stringify({
-      channel: "desktop-cli-release",
-      releaseOrBuildId: "release-0.2.10-r1",
-      sourceCommit,
-      toolingCommit,
-      sourceTag: "surf-ace-v0.2.10-r1",
-      toolingTag: "surf-ace-release-tooling-v0.2.10-r1",
-      version: "0.2.10",
-      manifestSha256: sha256(Buffer.from(JSON.stringify(manifest))),
-      skillSha256: candidateSkillSha256,
-      artifactSha256,
-    })),
     ...candidateOverrides,
   };
 }
@@ -103,6 +106,7 @@ function iphoneCandidate() {
     xcodeCloudPlatform: "iOS",
     xcodeCloudAction: "archive",
   };
+  const manifestBytes = Buffer.from(JSON.stringify(manifest));
   return {
     channel: "iphone-build",
     identity: {
@@ -113,32 +117,30 @@ function iphoneCandidate() {
       buildId: "build-123",
       buildNumber: "30",
       workflowId: "workflow-123",
-      artifactSha256,
+      completionStatus: "SUCCEEDED",
+      isPullRequestBuild: false,
+      startCondition: "push",
+      sourceBranch: "main",
+      gitRef: "refs/heads/main",
+      scheme: "SurfAce",
+      platform: "iOS",
+      action: "archive",
+      buildRecordSha256: "d".repeat(64),
     },
-    manifestBytes: Buffer.from(JSON.stringify(manifest)),
+    manifestBytes,
     skillBytes,
-    artifactProofBytes: Buffer.from(JSON.stringify({
-      channel: "iphone-build",
-      releaseOrBuildId: "build-123",
-      sourceCommit,
-      buildId: "build-123",
-      buildNumber: "30",
-      workflowId: "workflow-123",
-      appVersion: "0.1.0",
-      appBuildNumber: "30",
-      manifestSha256: sha256(Buffer.from(JSON.stringify(manifest))),
-      skillSha256,
-      artifactSha256,
-    })),
   };
 }
 
 function makeJournal() {
   const entries = new Map();
   const backups = new Map();
+  let highWater = { sourceCommit, skillSha256 };
   return {
     entries,
     async read(envelopeId) { return entries.get(envelopeId); },
+    async readHighWater() { return highWater; },
+    async initializeHighWater(value) { highWater ??= value; },
     async listPublishing() {
       return [...entries.entries()]
         .filter(([, entry]) => entry.status === "publishing")
@@ -162,13 +164,20 @@ function makeJournal() {
     async recordRollback(envelopeId, receipts, detail) {
       entries.set(envelopeId, { ...entries.get(envelopeId), rollbackReceipts: receipts, ...detail });
     },
+    async recordNoChange(envelopeId, detail) {
+      entries.set(envelopeId, { status: "no_change", envelopeId, ...detail });
+      highWater = detail.highWater;
+    },
     async recordFailure(envelopeId, detail) { entries.set(envelopeId, { ...entries.get(envelopeId), status: "failed", ...detail }); },
-    async recordComplete(envelopeId, detail) { entries.set(envelopeId, { status: "complete", ...detail }); },
+    async recordComplete(envelopeId, detail) {
+      entries.set(envelopeId, { status: "complete", ...detail });
+      highWater = detail.highWater;
+    },
   };
 }
 
-function makeTargets(initialValues = {}) {
-  const values = new Map(destinations.map((id) => [id, Buffer.from(initialValues[id] ?? `old:${id}`)]));
+function makeTargets(initialValues = {}, targetIds = destinations) {
+  const values = new Map(targetIds.map((id) => [id, Buffer.from(initialValues[id] ?? `old:${id}`)]));
   const stages = new Map();
   const targetStore = {
     values,
@@ -193,11 +202,19 @@ function makeTargets(initialValues = {}) {
 }
 
 function sourceReader() {
-  return { async readFileAtCommit(commit, path) {
-    assert.equal(commit, sourceCommit);
-    assert.equal(path, CANONICAL_SKILL_SOURCE);
-    return skillBytes;
-  } };
+  return {
+    async readFileAtCommit(commit, path) {
+      assert.equal(path, CANONICAL_SKILL_SOURCE);
+      assert.match(commit, /^[a-f0-9]{40}$/);
+      return skillBytes;
+    },
+    async compareCommits(base, head) { return base === head ? "identical" : "ahead"; },
+    async readTagCommit(tag) {
+      if (tag === "surf-ace-v0.2.10-r1") return sourceCommit;
+      if (tag === "surf-ace-release-tooling-v0.2.10-r1") return toolingCommit;
+      throw new Error("unknown fixture tag");
+    },
+  };
 }
 
 function sourceFor(candidate) {
@@ -223,6 +240,19 @@ test("iPhone build is bound to canonical skill bytes and embedded build identity
   assert.equal(result.envelope.sourceCommit, sourceCommit);
   assert.equal(result.envelope.skillSha256, skillSha256);
   assert.equal(result.envelope.skillAssetName, "SurfAceOperatingSkill/SKILL.md");
+});
+
+test("desktop release tags must resolve to the commits named by its manifest", async () => {
+  const candidate = desktopCandidate();
+  await assert.rejects(() => verifyDeliveryCandidate(candidate, {
+    destinations: destinationRecords,
+    sourceReader: {
+      ...sourceReader(),
+      async readTagCommit(tag) {
+        return tag === "surf-ace-v0.2.10-r1" ? "c".repeat(40) : toolingCommit;
+      },
+    },
+  }), /delivery_release_tag_target_mismatch/);
 });
 
 test("a source or manifest mismatch is rejected before any target read or write", async () => {
@@ -284,6 +314,7 @@ test("exact matching approval is required before all five future-load copies", a
   ruling = {
     status: "ruled",
     approved: true,
+    directUserConfirmed: true,
     envelopeId: requestedPlan.envelopeId,
     destinationSetSha256: requestedPlan.destinationSetSha256,
     destinationMapSha256: requestedPlan.destinationMapSha256,
@@ -294,6 +325,109 @@ test("exact matching approval is required before all five future-load copies", a
   assert.deepEqual([...targetStore.values.values()].map((value) => sha256(value)), destinations.map(() => skillSha256));
   assert.equal(journal.entries.get(requestedPlan.envelopeId).targetReceipts.length, destinations.length);
   assert.deepEqual(requestedPlan.destinationRecords, destinationRecords);
+});
+
+test("matching hashes produce a no-change receipt without asking for approval", async () => {
+  const candidate = desktopCandidate();
+  const targetStore = makeTargets(Object.fromEntries(destinations.map((id) => [id, skillBytes])));
+  const journal = makeJournal();
+  let approvalsRequested = 0;
+  const result = await runSkillDeliveryConsumer({
+    enabled: true,
+    sources: [sourceFor(candidate)],
+    sourceReader: sourceReader(),
+    destinations: destinationRecords,
+    targets: targetStore,
+    approvals: {
+      async read() { return null; },
+      async request() { approvalsRequested += 1; },
+    },
+    journal,
+  });
+
+  assert.equal(result.results[0].status, "no_change");
+  assert.equal(approvalsRequested, 0);
+  assert.equal(journal.entries.get(result.results[0].envelopeId).status, "no_change");
+  assert.equal(targetStore.values.size, destinations.length);
+});
+
+test("an out-of-order older source commit is recorded and never reaches targets", async () => {
+  const candidate = desktopCandidate({ identity: { sourceCommit: "f".repeat(40) } });
+  const targetStore = makeTargets();
+  let targetReads = 0;
+  const read = targetStore.read.bind(targetStore);
+  targetStore.read = async (...args) => { targetReads += 1; return read(...args); };
+  let approvalRequests = 0;
+  const journal = makeJournal();
+  const result = await runSkillDeliveryConsumer({
+    enabled: true,
+    sources: [sourceFor(candidate)],
+    sourceReader: {
+      ...sourceReader(),
+      async compareCommits() { return "behind"; },
+      async readTagCommit(tag) {
+        return tag === "surf-ace-v0.2.10-r1" ? "f".repeat(40) : toolingCommit;
+      },
+    },
+    destinations: destinationRecords,
+    targets: targetStore,
+    approvals: {
+      async read() { return null; },
+      async request() { approvalRequests += 1; },
+    },
+    journal,
+  });
+
+  assert.equal(result.results[0].code, "delivery_older_skill_rollback");
+  assert.equal(targetReads, 0);
+  assert.equal(approvalRequests, 0);
+  assert.equal(journal.entries.get(result.results[0].envelopeId).reason, "delivery_older_skill_rollback");
+});
+
+test("destination count is driven by private configuration and included in the approval", async () => {
+  const candidate = desktopCandidate();
+  const expandedDestinations = [
+    ...destinationRecords,
+    {
+      id: "target-f",
+      kind: "standalone-skill",
+      host: "fixture-machine-c",
+      path: "/fixture/target-f/SKILL.md",
+      writer: "existing-ssh",
+      effects: { service: "replaces one skill file", database: "none", downtime: "none" },
+    },
+  ];
+  const allIds = expandedDestinations.map(({ id }) => id);
+  const targetStore = makeTargets({}, allIds);
+  const journal = makeJournal();
+  let requestedPlan;
+  const approvals = {
+    async read() { return requestedPlan && {
+      status: "ruled", approved: true, directUserConfirmed: true,
+      envelopeId: requestedPlan.envelopeId,
+      destinationSetSha256: requestedPlan.destinationSetSha256,
+      destinationMapSha256: requestedPlan.destinationMapSha256,
+      planSha256: requestedPlan.planSha256,
+    }; },
+    async request(plan) { requestedPlan = plan; },
+  };
+  const args = {
+    enabled: true,
+    sources: [sourceFor(candidate)],
+    sourceReader: sourceReader(),
+    destinations: expandedDestinations,
+    targets: targetStore,
+    approvals,
+    journal,
+  };
+
+  await runSkillDeliveryConsumer(args);
+  const result = await runSkillDeliveryConsumer(args);
+
+  assert.equal(result.results[0].status, "complete");
+  assert.equal(requestedPlan.destinationRecords.length, 6);
+  assert.equal(targetStore.values.size, 6);
+  assert.deepEqual([...targetStore.values.values()].map((value) => value.toString()), Array(6).fill(skillBytes.toString()));
 });
 
 test("approval binds exact resolved destination routes and effects", async () => {
@@ -322,6 +456,7 @@ test("approval binds exact resolved destination routes and effects", async () =>
   rulings.set(firstPlan.envelopeId, {
     status: "ruled",
     approved: true,
+    directUserConfirmed: true,
     envelopeId: firstPlan.envelopeId,
     destinationSetSha256: firstPlan.destinationSetSha256,
     destinationMapSha256: firstPlan.destinationMapSha256,
@@ -350,6 +485,7 @@ test("a target changed after preflight is preserved by the expected-prior commit
     async read() { return requestedPlan && {
       status: "ruled",
       approved: true,
+      directUserConfirmed: true,
       envelopeId: requestedPlan.envelopeId,
       destinationSetSha256: requestedPlan.destinationSetSha256,
       destinationMapSha256: requestedPlan.destinationMapSha256,
@@ -388,7 +524,7 @@ test("uncertain write with a third-state readback stops and never overwrites it"
   const journal = makeJournal();
   let requestedPlan;
   const approvals = {
-    async read() { return requestedPlan && { status: "ruled", approved: true, envelopeId: requestedPlan.envelopeId, destinationSetSha256: requestedPlan.destinationSetSha256, destinationMapSha256: requestedPlan.destinationMapSha256, planSha256: requestedPlan.planSha256 }; },
+    async read() { return requestedPlan && { status: "ruled", approved: true, directUserConfirmed: true, envelopeId: requestedPlan.envelopeId, destinationSetSha256: requestedPlan.destinationSetSha256, destinationMapSha256: requestedPlan.destinationMapSha256, planSha256: requestedPlan.planSha256 }; },
     async request(plan) { requestedPlan = plan; },
   };
   const args = {
@@ -473,7 +609,7 @@ test("approval from a different release cannot authorize a copy", async () => {
   const targetStore = makeTargets();
   const journal = makeJournal();
   const approvals = {
-    async read() { return { status: "ruled", approved: true, envelopeId: "other-envelope" }; },
+    async read() { return { status: "ruled", approved: true, directUserConfirmed: true, envelopeId: "other-envelope" }; },
     async request() { assert.fail("mismatched approval must not be replaced automatically"); },
   };
   const result = await runSkillDeliveryConsumer({
@@ -489,13 +625,46 @@ test("approval from a different release cannot authorize a copy", async () => {
   assert.deepEqual([...targetStore.values.values()].map((value) => value.toString()), destinations.map((id) => `old:${id}`));
 });
 
+test("a ruling without direct user confirmation cannot authorize target writes", async () => {
+  const candidate = desktopCandidate();
+  const targetStore = makeTargets();
+  const journal = makeJournal();
+  let requestedPlan;
+  const approvals = {
+    async read() { return requestedPlan && {
+      status: "ruled",
+      approved: true,
+      directUserConfirmed: false,
+      envelopeId: requestedPlan.envelopeId,
+      destinationSetSha256: requestedPlan.destinationSetSha256,
+      destinationMapSha256: requestedPlan.destinationMapSha256,
+      planSha256: requestedPlan.planSha256,
+    }; },
+    async request(plan) { requestedPlan = plan; },
+  };
+  const args = {
+    enabled: true,
+    sources: [sourceFor(candidate)],
+    sourceReader: sourceReader(),
+    destinations: destinationRecords,
+    targets: targetStore,
+    approvals,
+    journal,
+  };
+  await runSkillDeliveryConsumer(args);
+  const result = await runSkillDeliveryConsumer(args);
+  assert.equal(result.results[0].code, "approval_mismatch");
+  assert.deepEqual([...targetStore.values.values()].map((value) => value.toString()),
+    destinations.map((id) => `old:${id}`));
+});
+
 test("partial commit failure restores prior bytes in reverse order", async () => {
   const candidate = desktopCandidate();
   const targetStore = makeTargets();
   const journal = makeJournal();
   let requestedPlan;
   const approvals = {
-    async read() { return requestedPlan && { status: "ruled", approved: true, envelopeId: requestedPlan.envelopeId, destinationSetSha256: requestedPlan.destinationSetSha256, destinationMapSha256: requestedPlan.destinationMapSha256, planSha256: requestedPlan.planSha256 }; },
+    async read() { return requestedPlan && { status: "ruled", approved: true, directUserConfirmed: true, envelopeId: requestedPlan.envelopeId, destinationSetSha256: requestedPlan.destinationSetSha256, destinationMapSha256: requestedPlan.destinationMapSha256, planSha256: requestedPlan.planSha256 }; },
     async request(plan) { requestedPlan = plan; },
   };
   const args = {
