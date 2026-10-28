@@ -323,6 +323,7 @@
 			buildPhases = (
 				CFFA189DF77DAD2A89023AC6 /* Sources */,
 				344BB1E1E5914D9B8845BCF7 /* Resources */,
+				A90100000000000000000001 /* Embed Surf Ace operating skill */,
 			);
 			buildRules = (
 			);
@@ -378,6 +379,32 @@
 			);
 		};
 /* End PBXProject section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		A90100000000000000000001 /* Embed Surf Ace operating skill */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"$(PROJECT_DIR)/../../integrations/tightbeam/skills/surf-ace/SKILL.md",
+				"$(PROJECT_DIR)/scripts/embed-operating-skill.sh",
+			);
+			name = "Embed Surf Ace operating skill";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/SurfAceOperatingSkill/SKILL.md",
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/SurfAceOperatingSkill/manifest.json",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "\"$PROJECT_DIR/scripts/embed-operating-skill.sh\"\n";
+		};
+/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXResourcesBuildPhase section */
 		344BB1E1E5914D9B8845BCF7 /* Resources */ = {

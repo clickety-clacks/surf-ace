@@ -67,7 +67,9 @@ export function tightbeamAssetsForComponents(components) {
       components.some((component) => !Object.hasOwn(TIGHTBEAM_PLATFORM_ASSETS, component))) {
     throw new Error("tightbeam_release_components_invalid");
   }
-  const included = new Set(components.flatMap((component) => TIGHTBEAM_PLATFORM_ASSETS[component]));
+  const selected = new Set(components);
+  if ([...selected].some((component) => component !== "skill")) selected.add("skill");
+  const included = new Set([...selected].flatMap((component) => TIGHTBEAM_PLATFORM_ASSETS[component]));
   return TIGHTBEAM.assets.filter((name) => included.has(name));
 }
 

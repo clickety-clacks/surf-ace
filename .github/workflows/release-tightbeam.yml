@@ -1687,7 +1687,6 @@ jobs:
             echo "No platform candidate passed its required gates." >&2
             exit 1
           fi
-          skill_status=unavailable
           skill_source="tooling/integrations/tightbeam/skills/surf-ace/SKILL.md"
           skill_asset="surf-ace-skill-v${PRODUCT_VERSION}.md"
           if [[ -s "${skill_source}" ]] && cp "${skill_source}" "build/release/tightbeam/${skill_asset}" && cmp -s "${skill_source}" "build/release/tightbeam/${skill_asset}"; then
@@ -1695,7 +1694,8 @@ jobs:
             skill_status=included
           else
             rm -f "build/release/tightbeam/${skill_asset}"
-            printf '::warning::The shared skill asset was omitted because its pinned source bytes were unavailable or unverifiable.\n'
+            printf '::error::The shared Surf Ace skill asset is required and must match its pinned source bytes.\n'
+            exit 1
           fi
           components_csv="$(IFS=,; printf '%s' "${components[*]}")"
           printf 'components=%s\n' "${components_csv}" >> "$GITHUB_OUTPUT"
@@ -1837,16 +1837,19 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
       - name: Verify source identity and the final manifest and SHA256SUMS
+        id: verify-release-manifest
         run: |
           set -euo pipefail
           test "$(git -C tooling rev-parse HEAD)" = "${GITHUB_SHA}"
           node --input-type=module <<'NODE'
           import fs from "node:fs/promises";
           import { createHash } from "node:crypto";
-          import { TIGHTBEAM, tightbeamComponentsForAssets } from "./tooling/scripts/release/tightbeam-release-config.mjs";
+          import { TIGHTBEAM, TIGHTBEAM_SKILL_ASSET, tightbeamComponentsForAssets } from "./tooling/scripts/release/tightbeam-release-config.mjs";
+          import { verifyTightbeamOperatingSkillManifest } from "./tooling/scripts/release/build-tightbeam-release.mjs";
           import { verifyTightbeamChecksums } from "./tooling/scripts/release/smoke-tightbeam-release.mjs";
           const manifestPath = `release/${TIGHTBEAM.manifest}`;
           const manifest = JSON.parse(await fs.readFile(manifestPath, "utf8"));
+          const operatingSkill = verifyTightbeamOperatingSkillManifest(manifest);
           const components = tightbeamComponentsForAssets(manifest.assets?.map(({ name }) => name));
           if (JSON.stringify(components) !== JSON.stringify(manifest.components) ||
               JSON.stringify(components) !== JSON.stringify(process.env.COMPONENTS.split(",")) ||
@@ -1865,6 +1868,11 @@ jobs:
               throw new Error(`release_candidate_asset_digest_or_size_mismatch:${asset.name}`);
             }
           }
+          await fs.appendFile(process.env.GITHUB_OUTPUT, [
+            `operating_skill_asset=${TIGHTBEAM_SKILL_ASSET}`,
+            `operating_skill_version=${operatingSkill.version}`,
+            `operating_skill_sha256=${operatingSkill.sha256}`,
+          ].join("\n") + "\n");
           NODE
       - name: Create Linux smoke receipt
         id: create-linux-receipt
@@ -1935,6 +1943,9 @@ jobs:
           MACOS_RECEIPT_OUTCOME: ${{ steps.verify-macos-receipt.outcome }}
           LINUX_ATTESTATION_OUTCOME: ${{ steps.attest-linux.outcome }}
           MACOS_ATTESTATION_OUTCOME: ${{ steps.attest-macos.outcome }}
+          OPERATING_SKILL_ASSET: ${{ steps.verify-release-manifest.outputs.operating_skill_asset }}
+          OPERATING_SKILL_VERSION: ${{ steps.verify-release-manifest.outputs.operating_skill_version }}
+          OPERATING_SKILL_SHA256: ${{ steps.verify-release-manifest.outputs.operating_skill_sha256 }}
         run: |
           set -euo pipefail
           release_channel_args=()
@@ -1949,6 +1960,8 @@ jobs:
           macOS: ${MACOS_STATUS}
           Shared skill asset: ${SKILL_STATUS}
           iOS app: not included in this release. The iOS XCTest lanes were build-a=${IOS_TEST_BUILD_A:-unavailable} and build-b=${IOS_TEST_BUILD_B:-unavailable} (${IOS_TEST_STATE:-unavailable}).
+          Surf Ace operating skill asset: ${OPERATING_SKILL_ASSET} (version ${OPERATING_SKILL_VERSION}, SHA-256 ${OPERATING_SKILL_SHA256}); published with this desktop/CLI release for agents operating those clients.
+          iPhone builds carry their own operating skill copy and build manifest, which records the matching skill version and SHA-256 alongside the Xcode Cloud build identity.
 
           The informational six-file comparison state was ${SIX_FILE_COMPARE_STATE:-unavailable}; per-platform comparisons determine asset eligibility.
           EOF
@@ -1967,10 +1980,6 @@ jobs:
           if [[ "${HAS_MACOS}" != true ]]; then
             printf '\nWithheld macOS assets: surf-ace-cli-macos-arm64-v%s.tar.gz, surf-ace-electron-macos-arm64-v%s.zip.\n' \
               "${PRODUCT_VERSION}" "${PRODUCT_VERSION}" >> release-notes.md
-          fi
-          if [[ "${SKILL_STATUS}" != included ]]; then
-            printf '\nWithheld shared skill asset: surf-ace-skill-v%s.md; its pinned tooling source was unavailable or its copied bytes did not verify.\n' \
-              "${PRODUCT_VERSION}" >> release-notes.md
           fi
           if [[ "${HAS_LINUX}" == true ]]; then
             if [[ "${LINUX_RECEIPT_OUTCOME:-}" == success && "${LINUX_ATTESTATION_OUTCOME:-}" == success && -n "${LINUX_ATTESTATION_URL:-}" ]]; then

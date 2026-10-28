@@ -6,18 +6,16 @@ description: "Control Surf Ace through the installed standalone surf-ace CLI. Us
 # Surf Ace
 
 Use the installed `surf-ace` executable through ordinary command execution.
-This skill does not change agent identity, add an MCP server, or start a
+This guide documents CLI usage; it does not install the executable or start a
 resident service.
 
-The repository source for this skill is
-`integrations/tightbeam/skills/surf-ace/SKILL.md`. Install a release using the
-matching skill asset, supplement manifest, and versioned checksum file from
-that same published release. Read the manifest's top-level `version` field
-and use the corresponding `surf-ace-cli-v<VERSION>-SHA256SUMS` file to verify
-the skill before registering the content as `surf-ace` in a served identity.
-The standalone executable is a separate platform-specific release asset. Do
-not copy deployment URLs, hostnames, ports, or topology into this portable
-skill.
+The canonical source for this guide is
+`integrations/tightbeam/skills/surf-ace/SKILL.md`. Each Surf Ace CLI release
+includes a versioned copy of the guide alongside the standalone CLI. Use the
+CLI and guide from the same release, and verify both against that release's
+manifest and checksum file. Configure an agent to load the verified Markdown
+as its `surf-ace` skill. Do not copy deployment URLs, hostnames, ports, or
+topology into this portable guide.
 
 ## Install and verify the CLI
 
@@ -85,13 +83,11 @@ Use the installed CLI's help and schema before constructing an invocation:
 ```
 
 Command help reports route, side effects, input schema, success result shape,
-and error behavior. The currently published v0.2.9-rc3 CLI supports help and
-schema but predates `window-describe`; its schema will report that command as
-unsupported. Use named-window discovery only with a verified CLI release whose
-schema includes it. The examples below are fixtures; replace every identity,
-revision, endpoint, and destroy list with current values from the intended
-client. The CLI schema and validator tests cover the three-pane replacement
-and pane-specific clear inputs.
+and error behavior. Capabilities vary by CLI release; check the installed
+version's `--help` and schema output before using a command. The examples below
+are fixtures; replace every identity, revision, endpoint, and destroy list
+with current values from the intended client. The CLI schema and validator
+tests cover the three-pane replacement and pane-specific clear inputs.
 The separate registry annotation commands use the registry journal. `watch`
 requires an unused consumer ID and creates a durable registry consumer and
 lease before saving local listener state. Reusing an existing consumer ID is a
@@ -106,27 +102,24 @@ explicit expected acknowledgement and the discard flag.
 
 ## Discover registered clients, then select a client
 
-For registry-known inventory, query the registry explicitly before choosing a
-client:
+Start with registry inventory before choosing a client or window:
 
 ```sh
 "$CLI" --state-root "$STATE_ROOT" \
   --registry "ws://<registry-host>:<port>" fleet-list
 ```
 
-`fleet-list` reports only the registry's current registered-client and
-surface/pane identity snapshot, including the assigned labels. It does not
-report endpoint addresses, reachability, or live application health. An empty
-`clients` array means the registry returned an empty inventory; an invalid or
-unavailable registry is an error. Do not combine `--registry` and
-`--endpoint`, and do not treat a registered client as proof that it is online.
-Always pass the registry URL explicitly; the CLI does not infer one from
-configuration or environment variables.
+`fleet-list` reports the registry's current client, surface, and pane snapshot,
+including labels and any configured direct endpoint and lease. Endpoint and
+lease values may be absent; their presence does not prove reachability or live
+application health. An empty `clients` array means the registry returned an
+empty inventory; an invalid or unavailable registry is an error. Do not
+combine `--registry` and `--endpoint`, and do not treat a registered client as
+proof that it is online. Pass the registry URL explicitly; the CLI does not
+infer one from configuration or environment variables.
 
-Registry inventory alone does not resolve a window label to a direct endpoint
-or prove client reachability. Do not choose an endpoint from the registry URL
-or guess a host or port. If the installed CLI schema includes
-`window-describe`, use it for a read-only named-window observation:
+Use `window-describe` when the installed CLI schema includes it, to resolve a
+named window through the registry and make a read-only observation:
 
 ```sh
 "$CLI" --registry "$REGISTRY_WS" \
@@ -146,17 +139,26 @@ direct response proves cryptographic client identity.
 The response keeps registry identity and lease freshness, transport
 reachability, application readiness, topology/layout, and each pane's current
 content revision separate. `window_not_found` and `window_ambiguous` require a
-fresh explicit selection. `endpoint_unconfigured` means the matching client
-did not register a direct endpoint and pre-pair capability. `stale_registration`
-means the row or lease is absent, invalid, expired, or changed during the probe.
+fresh explicit selection. `endpoint_unconfigured` means the registry row has no
+configured direct endpoint with pre-pair describe support; it does not prove
+that the client cannot be reached on the local network. If no direct endpoint
+is otherwise available, continue with Bonjour/DNS-SD browse and resolve for
+the Surf Ace service (`_surf-ace._tcp`). Use the resolved service host, port,
+and advertised WebSocket path to form `--endpoint`; do not guess an address or
+derive one from the registry URL. A resolved iOS service may therefore remain
+usable even after `window-describe` reports `endpoint_unconfigured`. One
+resolved iOS example advertised port `19001` and path `/ws`; these are
+discovery results, not defaults.
+`stale_registration` means the row or lease is absent, invalid, expired, or
+changed during the probe.
 `endpoint_unreachable` reports a failed direct connection. If the WebSocket
 connects but does not return a valid describe response, `application_unresponsive`
 reports the reachable transport separately from unknown application readiness.
 `client_not_ready`, `revision_churn`, unsupported protocol, invalid response,
-and response-size errors are explicit outcomes; never guess another host or
-port as fallback. A content revision is observation evidence only and
-can become stale immediately. Before a later mutation, select the direct
-endpoint explicitly and fetch the exact current topology/content revisions.
+and response-size errors are explicit outcomes. A content revision from a
+read-only observation is evidence only and can become stale immediately.
+Before a later mutation, select the direct endpoint explicitly and fetch the
+current state required by that command's schema.
 
 `pane-describe` is different: it makes a normal `pair.request` before
 `panes.list` and may persist admission, synchronization, cursor, acknowledgement,
@@ -165,14 +167,10 @@ substitute. Use it only when that paired-controller admission is intended.
 
 ## Select a client and endpoint
 
-Electron clients register their surfaces with the standalone registry. They
-can discover that registry on the local network or use an explicit registry
-WebSocket URL in `SURF_ACE_SERVER`. Use `fleet-list` or your deployment's
-client inventory to identify the intended client and surface. Networked CLI
-operations still connect directly to that client's WebSocket `/ws` endpoint,
-not to the registry. If your inventory does not provide the client's direct
-address, use an explicit address supplied for that client; never guess a host
-or substitute the registry URL.
+Use the direct endpoint reported by the registry when available. Otherwise,
+resolve the client's Bonjour/DNS-SD service and use its advertised WebSocket
+endpoint. Networked CLI operations connect directly to that client, not to
+the registry. Never substitute the registry URL for a client endpoint.
 
 Supply runtime facts explicitly:
 
@@ -196,6 +194,18 @@ For example, list the selected client's surfaces:
   list
 ```
 
+Before an ordinary pane operation, use this live `list` result to match the
+stable `surfaceId` and `paneId`. Treat the surface name and `paneLabel` as
+human-facing confirmation only; never target by a label or pane number alone.
+If either stable ID does not match or is ambiguous, stop and re-identify. A
+lineage check is optional when comparing a durable prior reference with a
+possible reopened replacement: `list` does not return `paneLineageId`, so use
+`pane-describe` for the same stable IDs and compare its lineage with the prior
+reference. `pane-describe` sends `pair.request` before `panes.list` and may
+persist admission, synchronization, cursor, acknowledgement, or pending-receipt
+state; it is not a free read and is not required before ordinary content
+mutations.
+
 For `push`, use the protocol's typed JSON value; do not send a bare text string
 or use `contentType: "text"`. Accepted pairs include:
 
@@ -206,6 +216,16 @@ or use `contentType: "text"`. Accepted pairs include:
 - `markdown`: `"content":{"markdown":"..."}`
 - `video`: a string content value
 - `canvas`: `"content":""` or an object with optional `color` and `grid`
+
+`push` sends `content.set`. It takes no controller-supplied revision: the
+client allocates the revision and makes each accepted push a new visible
+history entry, retaining the replaced entry in Back/Forward history under the
+normal history limit. At the protocol level, `content.append` and
+`content.patch` use their required expected-state tokens; this CLI does not
+expose those operations. The CLI's `clear` command requires
+`expectedRevision` for the selected pane's current content. Other commands use
+the guards shown in their own schemas, such as topology or surface-set
+revisions where applicable.
 
 Example markdown push:
 
@@ -218,10 +238,11 @@ Example markdown push:
 ```
 
 Supported commands include `fleet-list`, `window-describe`, `list`,
-`pane-describe`, `push`, `read`, `topology-intent`, `topology-realize`,
-`clear`, `annotations-remove`, `capture-pane`, `surface-intent`,
-`target-register`, and `target-apply`; availability depends on the installed
-CLI's verified schema. Bind mutations and paired reads to the exact
+`pane-describe`, `push`, `read`, `sync`, `topology-intent`,
+`topology-realize`, `clear`, `annotations-remove`, `annotations watch`,
+`annotations resume`, `annotations ack`, `annotations retire`, `capture-pane`,
+`surface-intent`, `target-register`, and `target-apply`; availability depends
+on the installed CLI's verified schema. Bind mutations and paired reads to the exact
 `surfaceId` and numeric `paneId` required by each command.
 
 To replace a root with three vertical panes, first inspect the current
@@ -274,7 +295,8 @@ locked projection transaction and performs no network access. If it reports
 `cacheStatus: "unsynchronized"`, use a later explicit networked command to
 repair synchronization; do not replace the local read with a direct fetch.
 
-For mutations, require the correlated `operationReceipt` in the result.
+When a command's result schema specifies an `operationReceipt`, require the
+receipt correlated to that request before treating the mutation as confirmed.
 `outcome_unknown` means the request may have reached the client; do not retry
 the mutation. A later networked invocation resolves the durable request
 correlation. `still_pending` forbids another mutation. A
