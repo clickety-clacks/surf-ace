@@ -127,12 +127,9 @@ struct SurfAceDirectEndpointSelection: Equatable, Sendable {
               !address.isEmpty,
               !address.contains("/"),
               !address.contains("@") else { return nil }
-        var components = URLComponents()
-        components.scheme = "ws"
-        components.host = address
-        components.port = port
-        components.path = "/ws"
-        guard let value = components.string, isSupportedEndpoint(value) else { return nil }
+        let host = address.contains(":") ? "[\(address)]" : address
+        let value = "ws://\(host):\(port)/ws"
+        guard isSupportedEndpoint(value) else { return nil }
         return value
     }
 
