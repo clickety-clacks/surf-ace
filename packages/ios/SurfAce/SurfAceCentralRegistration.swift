@@ -2,31 +2,116 @@ import Foundation
 import Darwin
 import Network
 
+private struct SurfAceLossyArray<Element: Decodable>: Decodable {
+    let values: [Element]
+    let discardedCount: Int
+
+    init(from decoder: Decoder) throws {
+        var container = try decoder.unkeyedContainer()
+        var values: [Element] = []
+        var discardedCount = 0
+        while !container.isAtEnd {
+            let elementDecoder = try container.superDecoder()
+            if let value = try? Element(from: elementDecoder) {
+                values.append(value)
+            } else {
+                discardedCount += 1
+            }
+        }
+        self.values = values
+        self.discardedCount = discardedCount
+    }
+}
+
+private func decodeTolerantly<T: Decodable, Key: CodingKey>(
+    _ type: T.Type,
+    from container: KeyedDecodingContainer<Key>,
+    forKey key: Key
+) -> (value: T?, malformed: Bool) {
+    guard container.contains(key) else { return (nil, false) }
+    do {
+        return (try container.decodeIfPresent(T.self, forKey: key), false)
+    } catch {
+        return (nil, true)
+    }
+}
+
 struct SurfAceRegistrationSurface: Codable, Equatable, Sendable {
     struct Pane: Codable, Equatable, Sendable {
         let paneId: String
         let paneLineageId: String
         let paneLabel: Int64
         let allocationGeneration: Int64?
+        let allocationGenerationWasMalformed: Bool
 
-        init(paneId: String, paneLineageId: String, paneLabel: Int64, allocationGeneration: Int64? = nil) {
+        private enum CodingKeys: String, CodingKey {
+            case paneId, paneLineageId, paneLabel, allocationGeneration
+        }
+
+        init(
+            paneId: String,
+            paneLineageId: String,
+            paneLabel: Int64,
+            allocationGeneration: Int64? = nil,
+            allocationGenerationWasMalformed: Bool = false
+        ) {
             self.paneId = paneId
             self.paneLineageId = paneLineageId
             self.paneLabel = paneLabel
             self.allocationGeneration = allocationGeneration
+            self.allocationGenerationWasMalformed = allocationGenerationWasMalformed
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            paneId = try container.decode(String.self, forKey: .paneId)
+            paneLineageId = try container.decode(String.self, forKey: .paneLineageId)
+            paneLabel = try container.decode(Int64.self, forKey: .paneLabel)
+            if container.contains(.allocationGeneration) {
+                do {
+                    allocationGeneration = try container.decodeIfPresent(Int64.self, forKey: .allocationGeneration)
+                    allocationGenerationWasMalformed = false
+                } catch {
+                    allocationGeneration = nil
+                    allocationGenerationWasMalformed = true
+                }
+            } else {
+                allocationGeneration = nil
+                allocationGenerationWasMalformed = false
+            }
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(paneId, forKey: .paneId)
+            try container.encode(paneLineageId, forKey: .paneLineageId)
+            try container.encode(paneLabel, forKey: .paneLabel)
+            try container.encodeIfPresent(allocationGeneration, forKey: .allocationGeneration)
         }
     }
     let surfaceId: String
     let panes: [Pane]
+    let windowGeneration: Int64?
+
+    init(surfaceId: String, panes: [Pane], windowGeneration: Int64? = nil) {
+        self.surfaceId = surfaceId
+        self.panes = panes
+        self.windowGeneration = windowGeneration
+    }
 
     static func snapshot(_ state: SurfAceLocklessAuthorityState) -> [Self] {
         state.liveSurfaces.values.sorted { $0.surfaceId < $1.surfaceId }.map { surface in
-            Self(surfaceId: surface.surfaceId, panes: surface.panes.values.sorted { $0.paneId < $1.paneId }.map {
-                Pane(
-                    paneId: String($0.paneId), paneLineageId: $0.paneLineageId,
-                    paneLabel: $0.paneLabel, allocationGeneration: $0.allocationGeneration
-                )
-            })
+            Self(
+                surfaceId: surface.surfaceId,
+                panes: surface.panes.values.sorted { $0.paneId < $1.paneId }.map {
+                    Pane(
+                        paneId: String($0.paneId), paneLineageId: $0.paneLineageId,
+                        paneLabel: $0.paneLabel, allocationGeneration: $0.allocationGeneration
+                    )
+                },
+                windowGeneration: state.registryBinding != nil && surface.windowLabelConfirmed != false
+                    ? surface.allocationGeneration : nil
+            )
         }
     }
 }
@@ -36,17 +121,103 @@ struct SurfAceRegistrationAssignment: Codable, Equatable, Sendable {
     let windowLabel: String
     let windowAllocationGeneration: Int64?
     let panes: [SurfAceRegistrationSurface.Pane]
+    let windowGenerationFieldsConflict: Bool
+    let windowGenerationWasMalformed: Bool
+    let panesWereMissing: Bool
+    let panesWereMalformed: Bool
+    let discardedPaneCount: Int
+
+    private enum CodingKeys: String, CodingKey {
+        case surfaceId, windowLabel, windowAllocationGeneration, windowGeneration, panes
+    }
 
     init(
         surfaceId: String,
         windowLabel: String,
         windowAllocationGeneration: Int64? = nil,
-        panes: [SurfAceRegistrationSurface.Pane] = []
+        panes: [SurfAceRegistrationSurface.Pane] = [],
+        windowGenerationFieldsConflict: Bool = false,
+        windowGenerationWasMalformed: Bool = false,
+        panesWereMissing: Bool = false,
+        panesWereMalformed: Bool = false,
+        discardedPaneCount: Int = 0
     ) {
         self.surfaceId = surfaceId
         self.windowLabel = windowLabel
         self.windowAllocationGeneration = windowAllocationGeneration
         self.panes = panes
+        self.windowGenerationFieldsConflict = windowGenerationFieldsConflict
+        self.windowGenerationWasMalformed = windowGenerationWasMalformed
+        self.panesWereMissing = panesWereMissing
+        self.panesWereMalformed = panesWereMalformed
+        self.discardedPaneCount = discardedPaneCount
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        surfaceId = try container.decode(String.self, forKey: .surfaceId)
+        windowLabel = try container.decode(String.self, forKey: .windowLabel)
+
+        let hasWindowGeneration = container.contains(.windowGeneration)
+        let hasLegacyWindowGeneration = container.contains(.windowAllocationGeneration)
+        var decodedWindowGeneration: Int64?
+        var generationWasMalformed = false
+        if hasWindowGeneration {
+            do {
+                decodedWindowGeneration = try container.decodeIfPresent(Int64.self, forKey: .windowGeneration)
+            } catch {
+                decodedWindowGeneration = nil
+                generationWasMalformed = true
+            }
+        }
+        var decodedLegacyWindowGeneration: Int64?
+        if hasLegacyWindowGeneration {
+            do {
+                decodedLegacyWindowGeneration = try container.decodeIfPresent(
+                    Int64.self, forKey: .windowAllocationGeneration
+                )
+            } catch {
+                decodedLegacyWindowGeneration = nil
+                generationWasMalformed = true
+            }
+        }
+        if let decodedWindowGeneration, let decodedLegacyWindowGeneration,
+           decodedWindowGeneration != decodedLegacyWindowGeneration {
+            windowAllocationGeneration = nil
+            windowGenerationFieldsConflict = true
+        } else {
+            windowAllocationGeneration = decodedWindowGeneration ?? decodedLegacyWindowGeneration
+            windowGenerationFieldsConflict = false
+        }
+        windowGenerationWasMalformed = generationWasMalformed
+
+        panesWereMissing = !container.contains(.panes)
+        if container.contains(.panes) {
+            do {
+                let decoded = try container.decode(SurfAceLossyArray<SurfAceRegistrationSurface.Pane>.self, forKey: .panes)
+                panes = decoded.values
+                discardedPaneCount = decoded.discardedCount
+                panesWereMalformed = false
+            } catch {
+                panes = []
+                discardedPaneCount = 0
+                panesWereMalformed = true
+            }
+        } else {
+            panes = []
+            discardedPaneCount = 0
+            panesWereMalformed = false
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(surfaceId, forKey: .surfaceId)
+        try container.encode(windowLabel, forKey: .windowLabel)
+        // Keep the on-disk provisioned-claim spelling stable; both spellings are
+        // accepted only on registry replies.
+        try container.encodeIfPresent(windowAllocationGeneration, forKey: .windowAllocationGeneration)
+        try container.encode(panes, forKey: .panes)
     }
 }
 
@@ -74,6 +245,43 @@ struct SurfAceWindowReleaseRequest: Codable, Equatable, Sendable {
     let tombstoneKind: String
     let windowLabel: String
     let releaseId: String
+
+    var wireReleaseId: String {
+        guard let kind = SurfAceLocklessTombstoneReclamation.Kind(rawValue: tombstoneKind) else {
+            return releaseId
+        }
+        return SurfAceLocklessAllocationReleaseIdentity.window(
+            allocationGeneration: allocationGeneration,
+            clientId: clientId,
+            closeRevision: closeRevision,
+            surfaceId: surfaceId,
+            terminalRetirementRevision: terminalRetirementRevision,
+            tombstoneId: tombstoneId,
+            tombstoneKind: kind,
+            windowLabel: windowLabel
+        ) ?? releaseId
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case allocationGeneration = "windowGeneration"
+        case clientId, closeRevision, surfaceId, terminalRetirementRevision
+        case tombstoneId, tombstoneKind, windowLabel, releaseId
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(allocationGeneration, forKey: .allocationGeneration)
+        try container.encode(clientId, forKey: .clientId)
+        try container.encode(closeRevision, forKey: .closeRevision)
+        try container.encode(surfaceId, forKey: .surfaceId)
+        try container.encode(terminalRetirementRevision, forKey: .terminalRetirementRevision)
+        try container.encode(tombstoneId, forKey: .tombstoneId)
+        try container.encode(tombstoneKind, forKey: .tombstoneKind)
+        try container.encode(windowLabel, forKey: .windowLabel)
+        // Old durable intents hash the same evidence with the former field name.
+        // Re-encode the unchanged evidence using the registry's canonical key.
+        try container.encode(wireReleaseId, forKey: .releaseId)
+    }
 }
 
 struct SurfAceRegistrationInput: Equatable, Sendable {
@@ -82,19 +290,22 @@ struct SurfAceRegistrationInput: Equatable, Sendable {
     let surfaces: [SurfAceRegistrationSurface]
     let pendingPaneReleases: [SurfAcePaneReleaseRequest]
     let pendingWindowReleases: [SurfAceWindowReleaseRequest]
+    let warnings: [String]
 
     init(
         clientId: String? = nil,
         registryIdentity: SurfAceRegistryIdentity? = nil,
         surfaces: [SurfAceRegistrationSurface],
         pendingPaneReleases: [SurfAcePaneReleaseRequest],
-        pendingWindowReleases: [SurfAceWindowReleaseRequest]
+        pendingWindowReleases: [SurfAceWindowReleaseRequest],
+        warnings: [String] = []
     ) {
         self.clientId = clientId
         self.registryIdentity = registryIdentity
         self.surfaces = surfaces
         self.pendingPaneReleases = pendingPaneReleases
         self.pendingWindowReleases = pendingWindowReleases
+        self.warnings = warnings
     }
 
     init(state: SurfAceLocklessAuthorityState, clientId: String? = nil) throws {
@@ -117,10 +328,9 @@ struct SurfAceRegistrationInput: Equatable, Sendable {
         }
         var panes: [SurfAcePaneReleaseRequest] = []
         var windows: [SurfAceWindowReleaseRequest] = []
+        var warnings: [String] = []
         for intent in (state.allocationReleaseIntents ?? []).filter({ $0.status == .pending }) {
             guard let binding,
-                  SurfAceLocklessAllocationReleaseIdentity.matches(intent),
-                  let allocationGeneration = intent.allocationGeneration,
                   let intentClientId = intent.clientId,
                   binding.clientId == intentClientId,
                   binding.allocatorId == intent.allocatorId,
@@ -129,12 +339,26 @@ struct SurfAceRegistrationInput: Equatable, Sendable {
                 // another registry remains durable but is never sent here.
                 continue
             }
+            guard let allocationGeneration = intent.allocationGeneration,
+                  allocationGeneration > 0,
+                  allocationGeneration <= 9_007_199_254_740_991 else {
+                warnings.append("registration_saved_release_generation_unusable release=\(intent.releaseId)")
+                continue
+            }
             switch intent.allocationKind {
             case .pane:
                 guard let paneId = intent.paneId,
+                      paneId > 0,
                       let paneLabel = intent.paneLabel,
-                      let lineageId = intent.paneLineageId else {
-                    throw SurfAceRegistrationError.invalidResponse
+                      paneLabel > 0,
+                      let lineageId = intent.paneLineageId,
+                      !lineageId.isEmpty else {
+                    warnings.append("registration_saved_pane_release_unusable release=\(intent.releaseId)")
+                    continue
+                }
+                guard SurfAceLocklessAllocationReleaseIdentity.matches(intent) else {
+                    warnings.append("registration_saved_release_identity_unrecognized release=\(intent.releaseId)")
+                    continue
                 }
                 panes.append(.init(
                     allocationGeneration: allocationGeneration,
@@ -151,8 +375,14 @@ struct SurfAceRegistrationInput: Equatable, Sendable {
                 ))
             case .surface:
                 guard let windowLabel = intent.windowLabel,
+                      !windowLabel.isEmpty,
                       intent.sourceTombstoneKind == .surface else {
-                    throw SurfAceRegistrationError.invalidResponse
+                    warnings.append("registration_saved_window_release_unusable release=\(intent.releaseId)")
+                    continue
+                }
+                guard SurfAceLocklessAllocationReleaseIdentity.matches(intent) else {
+                    warnings.append("registration_saved_release_identity_unrecognized release=\(intent.releaseId)")
+                    continue
                 }
                 windows.append(.init(
                     allocationGeneration: allocationGeneration,
@@ -169,6 +399,7 @@ struct SurfAceRegistrationInput: Equatable, Sendable {
         }
         self.pendingPaneReleases = panes
         self.pendingWindowReleases = windows
+        self.warnings = warnings
     }
 
     init(state: SurfAceLocklessAuthorityState) throws {
@@ -185,7 +416,8 @@ struct SurfAceRegistrationInput: Equatable, Sendable {
             registryIdentity: registryIdentity,
             surfaces: surfaces ?? self.surfaces,
             pendingPaneReleases: pendingPaneReleases ?? self.pendingPaneReleases,
-            pendingWindowReleases: pendingWindowReleases ?? self.pendingWindowReleases
+            pendingWindowReleases: pendingWindowReleases ?? self.pendingWindowReleases,
+            warnings: warnings
         )
     }
 
@@ -224,16 +456,67 @@ struct SurfAceRegistrationProjection: Equatable, Sendable {
     let endpointLease: SurfAceEndpointLease?
     let completedPaneReleaseIds: [String]
     let completedWindowReleaseIds: [String]
+    let windowGenerationV1: Bool
+
+    init(
+        directEndpoint: String?,
+        prePairDescribeV1: Bool,
+        allocationGenerationV1: Bool,
+        endpointLease: SurfAceEndpointLease?,
+        completedPaneReleaseIds: [String],
+        completedWindowReleaseIds: [String],
+        windowGenerationV1: Bool = false
+    ) {
+        self.directEndpoint = directEndpoint
+        self.prePairDescribeV1 = prePairDescribeV1
+        self.allocationGenerationV1 = allocationGenerationV1
+        self.endpointLease = endpointLease
+        self.completedPaneReleaseIds = completedPaneReleaseIds
+        self.completedWindowReleaseIds = completedWindowReleaseIds
+        self.windowGenerationV1 = windowGenerationV1
+    }
 }
 
 struct SurfAceRegistrationReply: Equatable, Sendable {
     let assignments: [SurfAceRegistrationAssignment]
     let projection: SurfAceRegistrationProjection
+    let warnings: [String]
+    let registryIdentity: SurfAceRegistryIdentity?
+    let discarded: Bool
+    let needsRetry: Bool
+
+    init(
+        assignments: [SurfAceRegistrationAssignment],
+        projection: SurfAceRegistrationProjection,
+        warnings: [String] = [],
+        registryIdentity: SurfAceRegistryIdentity? = nil,
+        discarded: Bool = false,
+        needsRetry: Bool = false
+    ) {
+        self.assignments = assignments
+        self.projection = projection
+        self.warnings = warnings
+        self.registryIdentity = registryIdentity
+        self.discarded = discarded
+        self.needsRetry = needsRetry
+    }
 }
 
 struct SurfAcePaneAllocation: Equatable, Sendable {
     let paneLabel: Int64
     let allocationGeneration: Int64?
+    let warnings: [String]
+
+    init(paneLabel: Int64, allocationGeneration: Int64?, warnings: [String] = []) {
+        self.paneLabel = paneLabel
+        self.allocationGeneration = allocationGeneration
+        self.warnings = warnings
+    }
+}
+
+struct SurfAceRegistryIdentityRead: Equatable, Sendable {
+    let identity: SurfAceRegistryIdentity?
+    let warnings: [String]
 }
 
 struct SurfAceRegistryBinding: Codable, Equatable, Hashable, Sendable {
@@ -353,6 +636,7 @@ struct SurfAceUnconfirmedMigrationReceipt: Codable, Equatable, Sendable {
 
 enum SurfAceRegistrationError: Error {
     case invalidResponse
+    case unmatchedResponse
     case paneClaimRejected(code: String?, message: String?)
     case serverRejected(code: String?, message: String?)
     case noServer
@@ -380,6 +664,7 @@ private func surfAceRegistrationErrorDescription(_ error: Error) -> String {
     if let registrationError = error as? SurfAceRegistrationError {
         switch registrationError {
         case .invalidResponse: return "protocol_invalid_response"
+        case .unmatchedResponse: return "protocol_unmatched_reply_discarded"
         case .paneClaimRejected(let code, let message):
             return "pane_claim_rejected code=\(code ?? "missing") message=\(message ?? "missing")"
         case .serverRejected(let code, let message):
@@ -431,23 +716,76 @@ enum SurfAceRegistrationWire {
 
     struct TopologyResponse: Decodable {
         struct Payload: Decodable { let registryIdentity: SurfAceRegistryIdentity? }
-        let id: String
-        let op: String
-        let type: String
-        let v: Int
-        let ok: Bool
+        let id: String?
+        let op: String?
+        let type: String?
+        let v: Int?
+        let ok: Bool?
         let payload: Payload?
+        let payloadWasMalformed: Bool
+
+        private enum CodingKeys: String, CodingKey { case id, op, type, v, ok, payload }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            id = decodeTolerantly(String.self, from: container, forKey: .id).value
+            op = decodeTolerantly(String.self, from: container, forKey: .op).value
+            type = decodeTolerantly(String.self, from: container, forKey: .type).value
+            v = decodeTolerantly(Int.self, from: container, forKey: .v).value
+            ok = decodeTolerantly(Bool.self, from: container, forKey: .ok).value
+            let decodedPayload = decodeTolerantly(Payload.self, from: container, forKey: .payload)
+            payload = decodedPayload.value
+            payloadWasMalformed = decodedPayload.malformed
+        }
     }
 
     static func topologyData(id: String) throws -> Data {
         try JSONEncoder().encode(TopologyRequest(id: id))
     }
 
+    private struct CorrelationEnvelope: Decodable {
+        let id: String?
+        let op: String?
+    }
+
+    static func responseMatches(_ data: Data, requestId: String, operation: String) -> Bool {
+        guard let envelope = try? JSONDecoder().decode(CorrelationEnvelope.self, from: data) else { return false }
+        return envelope.id == requestId && envelope.op == operation
+    }
+
+    static func registryIdentityReply(
+        from data: Data,
+        requestId: String,
+        fallbackIdentity: SurfAceRegistryIdentity? = nil,
+        correlationWarnings: [String] = []
+    ) -> SurfAceRegistryIdentityRead {
+        var warnings = correlationWarnings
+        guard let response = try? JSONDecoder().decode(TopologyResponse.self, from: data) else {
+            warnings.append("topology_reply_unrecognized")
+            return SurfAceRegistryIdentityRead(identity: fallbackIdentity, warnings: Array(Set(warnings)).sorted())
+        }
+        guard response.id == requestId, response.op == "fleet.topology" else {
+            warnings.append("topology_reply_correlation_mismatch")
+            return SurfAceRegistryIdentityRead(identity: fallbackIdentity, warnings: Array(Set(warnings)).sorted())
+        }
+        if response.type != "response" { warnings.append("topology_reply_type_unrecognized") }
+        if response.v != 1 { warnings.append("topology_version_unrecognized") }
+        if response.ok == false { warnings.append("topology_request_rejected") }
+        if response.ok == nil { warnings.append("topology_ok_missing_or_unrecognized") }
+        if response.payloadWasMalformed { warnings.append("topology_payload_unrecognized") }
+
+        let reportedIdentity = response.payload?.registryIdentity
+        if let reportedIdentity, reportedIdentity.isValid {
+            return SurfAceRegistryIdentityRead(identity: reportedIdentity, warnings: Array(Set(warnings)).sorted())
+        }
+        warnings.append("topology_registry_identity_missing_or_unrecognized")
+        return SurfAceRegistryIdentityRead(identity: fallbackIdentity, warnings: Array(Set(warnings)).sorted())
+    }
+
     static func registryIdentity(from data: Data, requestId: String) throws -> SurfAceRegistryIdentity {
-        let response = try JSONDecoder().decode(TopologyResponse.self, from: data)
-        guard response.id == requestId, response.op == "fleet.topology", response.type == "response",
-              response.v == 1, response.ok, let identity = response.payload?.registryIdentity,
-              identity.isValid else { throw SurfAceRegistrationError.registryIdentityMissing }
+        guard let identity = registryIdentityReply(from: data, requestId: requestId).identity else {
+            throw SurfAceRegistrationError.registryIdentityMissing
+        }
         return identity
     }
 
@@ -468,18 +806,44 @@ enum SurfAceRegistrationWire {
 
     struct PaneClaimResponse: Decodable {
         struct Payload: Decodable {
-            let paneLabel: Int64
+            let paneLabel: Int64?
+            let paneLabelWasMalformed: Bool
             let allocationGeneration: Int64?
+            let allocationGenerationWasMalformed: Bool
+
+            private enum CodingKeys: String, CodingKey { case paneLabel, allocationGeneration }
+
+            init(from decoder: Decoder) throws {
+                let container = try decoder.container(keyedBy: CodingKeys.self)
+                let label = decodeTolerantly(Int64.self, from: container, forKey: .paneLabel)
+                paneLabel = label.value
+                paneLabelWasMalformed = label.malformed
+                let generation = decodeTolerantly(Int64.self, from: container, forKey: .allocationGeneration)
+                allocationGeneration = generation.value
+                allocationGenerationWasMalformed = generation.malformed
+            }
         }
-        let id: String
-        let op: String
-        let ok: Bool
+        let id: String?
+        let op: String?
+        let ok: Bool?
         let payload: Payload?
         let error: ErrorPayload?
+
+        private enum CodingKeys: String, CodingKey { case id, op, ok, payload, error }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            id = decodeTolerantly(String.self, from: container, forKey: .id).value
+            op = decodeTolerantly(String.self, from: container, forKey: .op).value
+            ok = decodeTolerantly(Bool.self, from: container, forKey: .ok).value
+            payload = decodeTolerantly(Payload.self, from: container, forKey: .payload).value
+            error = decodeTolerantly(ErrorPayload.self, from: container, forKey: .error).value
+        }
     }
     struct Payload: Codable {
         let clientId: String
         let allocationGenerationV1: Bool
+        let windowGenerationV1: Bool
         let pendingPaneReleases: [SurfAcePaneReleaseRequest]
         let pendingWindowReleases: [SurfAceWindowReleaseRequest]
         let surfaces: [SurfAceRegistrationSurface]
@@ -496,33 +860,137 @@ enum SurfAceRegistrationWire {
 
     struct Response: Decodable {
         struct Payload: Decodable {
-            let clientId: String
+            let clientId: String?
+            let clientIdWasMalformed: Bool
             let registryIdentity: SurfAceRegistryIdentity?
+            let registryIdentityWasMalformed: Bool
             let surfaces: [SurfAceRegistrationAssignment]
+            let surfacesWereMissing: Bool
+            let surfacesWereMalformed: Bool
+            let discardedSurfaceCount: Int
             let directEndpoint: String?
+            let directEndpointWasMalformed: Bool
             let prePairDescribeV1: Bool?
+            let prePairDescribeV1WasMalformed: Bool
             let allocationGenerationV1: Bool?
+            let allocationGenerationV1WasMalformed: Bool
+            let windowGenerationV1: Bool?
+            let windowGenerationV1WasMalformed: Bool
             let endpointLease: SurfAceEndpointLease?
+            let endpointLeaseWasMalformed: Bool
             let completedPaneReleaseIds: [String]?
+            let completedPaneReleaseIdsWereMalformed: Bool
+            let discardedPaneReleaseIdCount: Int
             let completedWindowReleaseIds: [String]?
+            let completedWindowReleaseIdsWereMalformed: Bool
+            let discardedWindowReleaseIdCount: Int
+
+            private enum CodingKeys: String, CodingKey {
+                case clientId, registryIdentity, surfaces, directEndpoint, prePairDescribeV1
+                case allocationGenerationV1, windowGenerationV1, endpointLease
+                case completedPaneReleaseIds, completedWindowReleaseIds
+            }
+
+            init(from decoder: Decoder) throws {
+                let container = try decoder.container(keyedBy: CodingKeys.self)
+                let decodedClientId = decodeTolerantly(String.self, from: container, forKey: .clientId)
+                clientId = decodedClientId.value
+                clientIdWasMalformed = decodedClientId.malformed
+
+                let identity = decodeTolerantly(
+                    SurfAceRegistryIdentity.self, from: container, forKey: .registryIdentity
+                )
+                registryIdentity = identity.value
+                registryIdentityWasMalformed = identity.malformed
+
+                surfacesWereMissing = !container.contains(.surfaces)
+                if container.contains(.surfaces) {
+                    do {
+                        let decoded = try container.decode(
+                            SurfAceLossyArray<SurfAceRegistrationAssignment>.self, forKey: .surfaces
+                        )
+                        surfaces = decoded.values
+                        discardedSurfaceCount = decoded.discardedCount
+                        surfacesWereMalformed = false
+                    } catch {
+                        surfaces = []
+                        discardedSurfaceCount = 0
+                        surfacesWereMalformed = true
+                    }
+                } else {
+                    surfaces = []
+                    discardedSurfaceCount = 0
+                    surfacesWereMalformed = false
+                }
+
+                let endpoint = decodeTolerantly(String.self, from: container, forKey: .directEndpoint)
+                directEndpoint = endpoint.value
+                directEndpointWasMalformed = endpoint.malformed
+                let prePair = decodeTolerantly(Bool.self, from: container, forKey: .prePairDescribeV1)
+                prePairDescribeV1 = prePair.value
+                prePairDescribeV1WasMalformed = prePair.malformed
+                let allocation = decodeTolerantly(Bool.self, from: container, forKey: .allocationGenerationV1)
+                allocationGenerationV1 = allocation.value
+                allocationGenerationV1WasMalformed = allocation.malformed
+                let window = decodeTolerantly(Bool.self, from: container, forKey: .windowGenerationV1)
+                windowGenerationV1 = window.value
+                windowGenerationV1WasMalformed = window.malformed
+                let lease = decodeTolerantly(SurfAceEndpointLease.self, from: container, forKey: .endpointLease)
+                endpointLease = lease.value
+                endpointLeaseWasMalformed = lease.malformed
+
+                let paneReleases = decodeTolerantly(
+                    SurfAceLossyArray<String>.self, from: container, forKey: .completedPaneReleaseIds
+                )
+                completedPaneReleaseIds = paneReleases.value?.values
+                discardedPaneReleaseIdCount = paneReleases.value?.discardedCount ?? 0
+                completedPaneReleaseIdsWereMalformed = paneReleases.malformed
+                let windowReleases = decodeTolerantly(
+                    SurfAceLossyArray<String>.self, from: container, forKey: .completedWindowReleaseIds
+                )
+                completedWindowReleaseIds = windowReleases.value?.values
+                discardedWindowReleaseIdCount = windowReleases.value?.discardedCount ?? 0
+                completedWindowReleaseIdsWereMalformed = windowReleases.malformed
+            }
         }
-        let id: String
-        let op: String
-        let ok: Bool
+        let id: String?
+        let op: String?
+        let type: String?
+        let version: Int?
+        let ok: Bool?
         let payload: Payload?
         let error: ErrorPayload?
+        let payloadWasMalformed: Bool
+        let errorWasMalformed: Bool
+
+        private enum CodingKeys: String, CodingKey { case id, op, type, v, ok, payload, error }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            id = decodeTolerantly(String.self, from: container, forKey: .id).value
+            op = decodeTolerantly(String.self, from: container, forKey: .op).value
+            type = decodeTolerantly(String.self, from: container, forKey: .type).value
+            version = decodeTolerantly(Int.self, from: container, forKey: .v).value
+            ok = decodeTolerantly(Bool.self, from: container, forKey: .ok).value
+            let decodedPayload = decodeTolerantly(Payload.self, from: container, forKey: .payload)
+            payload = decodedPayload.value
+            payloadWasMalformed = decodedPayload.malformed
+            let decodedError = decodeTolerantly(ErrorPayload.self, from: container, forKey: .error)
+            error = decodedError.value
+            errorWasMalformed = decodedError.malformed
+        }
     }
 
     static func requestData(clientId: String, surfaces: [SurfAceRegistrationSurface], id: String) throws -> Data {
         try JSONEncoder().encode(Request(id: id, payload: Payload(
-            clientId: clientId, allocationGenerationV1: false,
+            clientId: clientId, allocationGenerationV1: false, windowGenerationV1: false,
             pendingPaneReleases: [], pendingWindowReleases: [], surfaces: surfaces
         )))
     }
 
     static func requestData(clientId: String, input: SurfAceRegistrationInput, id: String) throws -> Data {
         try JSONEncoder().encode(Request(id: id, payload: Payload(
-            clientId: clientId, allocationGenerationV1: true,
+            clientId: clientId, allocationGenerationV1: true, windowGenerationV1: true,
             pendingPaneReleases: input.pendingPaneReleases,
             pendingWindowReleases: input.pendingWindowReleases,
             surfaces: input.surfaces
@@ -540,27 +1008,45 @@ enum SurfAceRegistrationWire {
     static func paneClaimAllocation(
         from data: Data,
         requestId: String,
-        expectedAllocationGenerationV1: Bool
+        expectedAllocationGenerationV1: Bool,
+        correlationWarnings: [String] = []
     ) throws -> SurfAcePaneAllocation {
-        let response = try JSONDecoder().decode(PaneClaimResponse.self, from: data)
-        guard response.id == requestId, response.op == "pane.claim" else {
-            throw SurfAceRegistrationError.invalidResponse
-        }
-        guard response.ok else {
-            throw SurfAceRegistrationError.paneClaimRejected(
-                code: response.error?.code,
-                message: response.error?.message
+        guard let response = try? JSONDecoder().decode(PaneClaimResponse.self, from: data) else {
+            return SurfAcePaneAllocation(
+                paneLabel: 0, allocationGeneration: nil,
+                warnings: correlationWarnings + ["pane_claim_reply_unrecognized"]
             )
         }
-        guard let payload = response.payload, payload.paneLabel > 0,
-              expectedAllocationGenerationV1
-                ? (payload.allocationGeneration.map { $0 > 0 && $0 <= 9_007_199_254_740_991 } == true)
-                : payload.allocationGeneration == nil else {
-            throw SurfAceRegistrationError.invalidResponse
+        guard response.id == requestId, response.op == "pane.claim" else {
+            return SurfAcePaneAllocation(
+                paneLabel: 0, allocationGeneration: nil,
+                warnings: correlationWarnings + ["pane_claim_correlation_mismatch"]
+            )
+        }
+        var warnings = correlationWarnings
+        if response.ok == false {
+            warnings.append("pane_claim_refused code=\(response.error?.code ?? "missing")")
+            return SurfAcePaneAllocation(paneLabel: 0, allocationGeneration: nil, warnings: warnings)
+        }
+        if response.ok == nil { warnings.append("pane_claim_ok_missing_or_unrecognized") }
+        guard let payload = response.payload, let paneLabel = payload.paneLabel, paneLabel > 0 else {
+            warnings.append("pane_claim_label_missing_or_unrecognized")
+            return SurfAcePaneAllocation(paneLabel: 0, allocationGeneration: nil, warnings: warnings)
+        }
+        let maximumSafeInteger: Int64 = 9_007_199_254_740_991
+        let generation = payload.allocationGeneration.flatMap { $0 > 0 && $0 <= maximumSafeInteger ? $0 : nil }
+        if payload.paneLabelWasMalformed { warnings.append("pane_claim_label_unrecognized") }
+        if payload.allocationGenerationWasMalformed || (payload.allocationGeneration != nil && generation == nil) {
+            warnings.append("pane_claim_generation_unrecognized")
+        } else if expectedAllocationGenerationV1 && generation == nil {
+            warnings.append("pane_claim_generation_missing")
+        } else if !expectedAllocationGenerationV1 && generation != nil {
+            warnings.append("pane_claim_generation_returned_without_negotiation")
         }
         return SurfAcePaneAllocation(
-            paneLabel: payload.paneLabel,
-            allocationGeneration: payload.allocationGeneration
+            paneLabel: paneLabel,
+            allocationGeneration: generation,
+            warnings: warnings
         )
     }
 
@@ -577,13 +1063,15 @@ enum SurfAceRegistrationWire {
         surfaces: [SurfAceRegistrationSurface],
         expectedIdentity: SurfAceRegistryIdentity
     ) throws -> [SurfAceRegistrationAssignment] {
-        try registration(
+        let reply = try registration(
             from: data,
             requestId: requestId,
             clientId: clientId,
             surfaces: surfaces,
             expectedIdentity: expectedIdentity
-        ).assignments
+        )
+        guard !reply.discarded, reply.registryIdentity == expectedIdentity else { return [] }
+        return reply.assignments
     }
 
     static func registration(
@@ -591,73 +1079,240 @@ enum SurfAceRegistrationWire {
         requestId: String,
         clientId: String,
         surfaces: [SurfAceRegistrationSurface],
-        expectedIdentity: SurfAceRegistryIdentity,
+        expectedIdentity: SurfAceRegistryIdentity?,
         expectedDirectEndpoint: String? = nil,
         expectedPrePairDescribeV1: Bool = false,
         expectedAllocationGenerationV1: Bool = false,
+        expectedWindowGenerationV1: Bool = false,
         expectedPaneReleaseIds: [String] = [],
-        expectedWindowReleaseIds: [String] = []
+        expectedWindowReleaseIds: [String] = [],
+        correlationWarnings: [String] = []
     ) throws -> SurfAceRegistrationReply {
-        let response = try JSONDecoder().decode(Response.self, from: data)
-        guard response.id == requestId, response.op == "client.register" else {
-            throw SurfAceRegistrationError.invalidResponse
+        guard let response = try? JSONDecoder().decode(Response.self, from: data) else {
+            return SurfAceRegistrationReply(
+                assignments: [], projection: emptyProjection,
+                warnings: correlationWarnings + ["registration_reply_unrecognized"],
+                registryIdentity: expectedIdentity, discarded: true, needsRetry: true
+            )
         }
-        guard response.ok else {
+        guard response.id == requestId, response.op == "client.register" else {
+            return SurfAceRegistrationReply(
+                assignments: [], projection: emptyProjection,
+                warnings: correlationWarnings + ["registration_reply_correlation_mismatch"],
+                registryIdentity: expectedIdentity, discarded: true, needsRetry: true
+            )
+        }
+        var warnings = correlationWarnings
+        if response.type != "response" { warnings.append("registration_reply_type_unrecognized") }
+        if response.version != 1 { warnings.append("registration_version_unrecognized") }
+        if response.payloadWasMalformed { warnings.append("registration_payload_unrecognized") }
+        if response.errorWasMalformed { warnings.append("registration_error_unrecognized") }
+        if response.ok == nil { warnings.append("registration_ok_missing_or_unrecognized") }
+        guard let payload = response.payload else {
+            if response.ok == false {
+                throw SurfAceRegistrationError.serverRejected(
+                    code: response.error?.code, message: response.error?.message
+                )
+            }
+            warnings.append("registration_payload_missing")
+            return SurfAceRegistrationReply(
+                assignments: [], projection: emptyProjection,
+                warnings: Array(Set(warnings)).sorted(), registryIdentity: expectedIdentity,
+                needsRetry: true
+            )
+        }
+
+        let identity: SurfAceRegistryIdentity?
+        if let reportedIdentity = payload.registryIdentity, reportedIdentity.isValid {
+            identity = reportedIdentity
+        } else {
+            identity = expectedIdentity
+            warnings.append("registration_registry_identity_missing_or_unrecognized")
+        }
+        if let identity, let expectedIdentity, identity != expectedIdentity {
+            warnings.append("registration_registry_identity_changed")
+        }
+        let clientIdIsMissingOrBlank = payload.clientId.map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        } ?? true
+        if payload.clientIdWasMalformed || clientIdIsMissingOrBlank {
+            warnings.append("registration_client_identity_missing_or_unrecognized")
+        } else if payload.clientId != clientId {
+            warnings.append("registration_client_identity_mismatch")
+            return SurfAceRegistrationReply(
+                assignments: [], projection: emptyProjection,
+                warnings: Array(Set(warnings)).sorted(), registryIdentity: identity,
+                discarded: true, needsRetry: true
+            )
+        }
+        // An explicit negative from a newly identified registry first replaces
+        // stale local claims; the retry then uses the registry's actual identity.
+        if response.ok == false, identity != expectedIdentity {
+            return SurfAceRegistrationReply(
+                assignments: [], projection: emptyProjection,
+                warnings: Array(Set(warnings)).sorted(), registryIdentity: identity,
+                discarded: true, needsRetry: true
+            )
+        }
+        // Matching-identity negative results use the existing per-claim and
+        // release recovery path.
+        if response.ok == false {
             throw SurfAceRegistrationError.serverRejected(
                 code: response.error?.code,
                 message: response.error?.message
             )
         }
-        guard let payload = response.payload, payload.clientId == clientId,
-              let identity = payload.registryIdentity, identity.isValid,
-              identity == expectedIdentity,
-              payload.surfaces.count == surfaces.count,
-              Set(payload.surfaces.map(\.surfaceId)) == Set(surfaces.map(\.surfaceId)) else {
-            throw SurfAceRegistrationError.invalidResponse
+        var needsRetry = expectedIdentity == nil && identity == nil
+        if payload.registryIdentityWasMalformed {
+            warnings.append("registration_identity_shape_unrecognized")
+        }
+        if payload.surfacesWereMissing { warnings.append("registration_surface_claims_missing") }
+        if payload.surfacesWereMalformed { warnings.append("registration_surface_claims_unrecognized") }
+        if payload.discardedSurfaceCount > 0 {
+            warnings.append("registration_surface_claims_dropped count=\(payload.discardedSurfaceCount)")
+        }
+        let expectedSurfaceIds = Set(surfaces.map(\.surfaceId))
+        let returnedSurfaceIds = payload.surfaces.map(\.surfaceId)
+        if returnedSurfaceIds.count != surfaces.count || Set(returnedSurfaceIds) != expectedSurfaceIds {
+            warnings.append("registration_surface_claim_set_incomplete")
+            needsRetry = needsRetry || !surfaces.isEmpty
+        }
+        if let allocationFlag = payload.allocationGenerationV1,
+           allocationFlag != expectedAllocationGenerationV1 {
+            warnings.append("registration_pane_generation_capability_mismatch")
+        } else if payload.allocationGenerationV1 == nil && expectedAllocationGenerationV1 {
+            warnings.append("registration_pane_generation_capability_missing")
+        }
+        if payload.allocationGenerationV1WasMalformed {
+            warnings.append("registration_pane_generation_capability_unrecognized")
+        }
+        if let windowFlag = payload.windowGenerationV1, windowFlag != expectedWindowGenerationV1 {
+            warnings.append("registration_window_generation_capability_mismatch")
+        } else if payload.windowGenerationV1 == nil && expectedWindowGenerationV1 {
+            warnings.append("registration_window_generation_capability_missing")
+        }
+        if payload.windowGenerationV1WasMalformed {
+            warnings.append("registration_window_generation_capability_unrecognized")
+        }
+
+        for assignment in payload.surfaces {
+            if assignment.windowGenerationFieldsConflict {
+                warnings.append("registration_window_generation_fields_conflict surface=\(assignment.surfaceId)")
+            }
+            let windowGeneration = assignment.windowAllocationGeneration
+            if assignment.windowGenerationWasMalformed || (windowGeneration != nil && !isValidGeneration(windowGeneration)) {
+                warnings.append("registration_window_generation_unrecognized surface=\(assignment.surfaceId)")
+            } else if expectedWindowGenerationV1 && windowGeneration == nil {
+                warnings.append("registration_window_generation_missing surface=\(assignment.surfaceId)")
+            }
+            if assignment.panesWereMissing || assignment.panesWereMalformed {
+                warnings.append("registration_pane_claims_unavailable surface=\(assignment.surfaceId)")
+            }
+            if assignment.discardedPaneCount > 0 {
+                warnings.append("registration_pane_claims_dropped surface=\(assignment.surfaceId) count=\(assignment.discardedPaneCount)")
+            }
+            for pane in assignment.panes {
+                if pane.allocationGenerationWasMalformed
+                    || (pane.allocationGeneration != nil && !isValidGeneration(pane.allocationGeneration)) {
+                    warnings.append("registration_pane_generation_unrecognized surface=\(assignment.surfaceId) pane=\(pane.paneId)")
+                } else if expectedAllocationGenerationV1 && pane.allocationGeneration == nil {
+                    warnings.append("registration_pane_generation_missing surface=\(assignment.surfaceId) pane=\(pane.paneId)")
+                }
+            }
+            if let expectedSurface = surfaces.first(where: { $0.surfaceId == assignment.surfaceId }) {
+                let expectedPaneIds = Set(expectedSurface.panes.map(\.paneId))
+                let returnedPaneIds = assignment.panes.map(\.paneId)
+                if returnedPaneIds.count != expectedSurface.panes.count
+                    || Set(returnedPaneIds) != expectedPaneIds {
+                    needsRetry = true
+                }
+            }
         }
 
         let directEndpoint = payload.directEndpoint
         let prePairDescribeV1 = payload.prePairDescribeV1 ?? false
         let allocationGenerationV1 = payload.allocationGenerationV1 ?? false
         let endpointLease = payload.endpointLease
-        let completedPaneReleaseIds = payload.completedPaneReleaseIds ?? []
-        let completedWindowReleaseIds = payload.completedWindowReleaseIds ?? []
-        guard !expectedPrePairDescribeV1 || expectedDirectEndpoint != nil,
-              directEndpoint == expectedDirectEndpoint,
-              prePairDescribeV1 == expectedPrePairDescribeV1,
-              allocationGenerationV1 == expectedAllocationGenerationV1,
-              completedPaneReleaseIds == expectedPaneReleaseIds,
-              completedWindowReleaseIds == expectedWindowReleaseIds,
-              Set(completedPaneReleaseIds).count == completedPaneReleaseIds.count,
-              Set(completedWindowReleaseIds).count == completedWindowReleaseIds.count,
-              Set(completedPaneReleaseIds + completedWindowReleaseIds).count
-                == completedPaneReleaseIds.count + completedWindowReleaseIds.count,
-              expectedDirectEndpoint.map(isSupportedDirectEndpoint) ?? true,
-              endpointLease.map(\.isValid) ?? true,
-              (endpointLease != nil) == (expectedDirectEndpoint != nil && expectedPrePairDescribeV1),
-              payload.surfaces.allSatisfy({ assignment in
-                  guard expectedAllocationGenerationV1 else {
-                      return assignment.windowAllocationGeneration == nil
-                          && assignment.panes.allSatisfy { $0.allocationGeneration == nil }
-                  }
-                  return assignment.windowAllocationGeneration.map { $0 > 0 && $0 <= 9_007_199_254_740_991 } == true
-                      && assignment.panes.allSatisfy {
-                          $0.allocationGeneration.map { $0 > 0 && $0 <= 9_007_199_254_740_991 } == true
-                      }
-              }) else {
-            throw SurfAceRegistrationError.invalidResponse
+        if payload.directEndpointWasMalformed { warnings.append("registration_endpoint_unrecognized") }
+        if payload.prePairDescribeV1WasMalformed { warnings.append("registration_pre_pair_capability_unrecognized") }
+        if payload.endpointLeaseWasMalformed { warnings.append("registration_endpoint_lease_unrecognized") }
+        if directEndpoint != expectedDirectEndpoint || prePairDescribeV1 != expectedPrePairDescribeV1 {
+            warnings.append("registration_endpoint_capability_mismatch")
         }
+        if (endpointLease != nil) != (expectedDirectEndpoint != nil && expectedPrePairDescribeV1) {
+            warnings.append("registration_endpoint_lease_missing_or_unexpected")
+        }
+        if expectedDirectEndpoint.map(isSupportedDirectEndpoint) == false {
+            warnings.append("registration_expected_endpoint_unrecognized")
+        }
+        if let directEndpoint, !isSupportedDirectEndpoint(directEndpoint) {
+            warnings.append("registration_endpoint_unrecognized")
+        }
+        if let endpointLease, !endpointLease.isValid { warnings.append("registration_endpoint_lease_invalid") }
+        let endpointMatchesRequest = directEndpoint == expectedDirectEndpoint
+            && prePairDescribeV1 == expectedPrePairDescribeV1
+            && (expectedDirectEndpoint.map(isSupportedDirectEndpoint) ?? true)
+            && (endpointLease.map(\.isValid) ?? true)
+            && ((endpointLease != nil) == (expectedDirectEndpoint != nil && expectedPrePairDescribeV1))
+        let usableEndpoint = endpointMatchesRequest ? directEndpoint : nil
+        let usablePrePairDescribe = endpointMatchesRequest ? prePairDescribeV1 : false
+        let usableEndpointLease = endpointMatchesRequest ? endpointLease : nil
+
+        func acceptedReleaseIds(_ received: [String]?, expected: [String]?, malformed: Bool, name: String) -> [String] {
+            let expectedIds = expected ?? []
+            let receivedIds = received ?? []
+            let receivedSet = Set(receivedIds)
+            if expectedIds.isEmpty, received == nil, !malformed { return [] }
+            if malformed || received == nil || receivedIds.count != expectedIds.count
+                || receivedSet.count != receivedIds.count || receivedSet != Set(expectedIds) {
+                warnings.append("registration_\(name)_acknowledgements_incomplete")
+                if !expectedIds.isEmpty { needsRetry = true }
+            }
+            let expectedSet = Set(expectedIds)
+            if receivedIds.contains(where: { !expectedSet.contains($0) }) {
+                warnings.append("registration_\(name)_acknowledgements_unrecognized")
+            }
+            return expectedIds.filter(receivedSet.contains)
+        }
+
+        let completedPaneReleaseIds = acceptedReleaseIds(
+            payload.completedPaneReleaseIds, expected: expectedPaneReleaseIds,
+            malformed: payload.completedPaneReleaseIdsWereMalformed || payload.discardedPaneReleaseIdCount > 0,
+            name: "pane_release"
+        )
+        let completedWindowReleaseIds = acceptedReleaseIds(
+            payload.completedWindowReleaseIds, expected: expectedWindowReleaseIds,
+            malformed: payload.completedWindowReleaseIdsWereMalformed || payload.discardedWindowReleaseIdCount > 0,
+            name: "window_release"
+        )
+
         return SurfAceRegistrationReply(
             assignments: payload.surfaces,
             projection: SurfAceRegistrationProjection(
-                directEndpoint: directEndpoint,
-                prePairDescribeV1: prePairDescribeV1,
+                directEndpoint: usableEndpoint,
+                prePairDescribeV1: usablePrePairDescribe,
                 allocationGenerationV1: allocationGenerationV1,
-                endpointLease: endpointLease,
+                endpointLease: usableEndpointLease,
                 completedPaneReleaseIds: completedPaneReleaseIds,
-                completedWindowReleaseIds: completedWindowReleaseIds
-            )
+                completedWindowReleaseIds: completedWindowReleaseIds,
+                windowGenerationV1: payload.windowGenerationV1 ?? false
+            ),
+            warnings: Array(Set(warnings)).sorted(),
+            registryIdentity: identity,
+            needsRetry: needsRetry
         )
+    }
+
+    private static var emptyProjection: SurfAceRegistrationProjection {
+        SurfAceRegistrationProjection(
+            directEndpoint: nil, prePairDescribeV1: false, allocationGenerationV1: false,
+            endpointLease: nil, completedPaneReleaseIds: [], completedWindowReleaseIds: []
+        )
+    }
+
+    private static func isValidGeneration(_ generation: Int64?) -> Bool {
+        guard let generation else { return false }
+        return generation > 0 && generation <= 9_007_199_254_740_991
     }
 
     private static func isSupportedDirectEndpoint(_ value: String) -> Bool {
@@ -709,16 +1364,38 @@ enum SurfAceRegistrationEndpoint {
 @MainActor
 protocol SurfAceRegistrationTransport: AnyObject {
     func readRegistryIdentity() async throws -> SurfAceRegistryIdentity
+    func readRegistryIdentity(fallbackIdentity: SurfAceRegistryIdentity?) async throws -> SurfAceRegistryIdentityRead
     func register(clientId: String, surfaces: [SurfAceRegistrationSurface],
                   expectedIdentity: SurfAceRegistryIdentity) async throws -> [SurfAceRegistrationAssignment]
     func register(clientId: String, input: SurfAceRegistrationInput,
                   expectedIdentity: SurfAceRegistryIdentity) async throws -> SurfAceRegistrationReply
+    func register(clientId: String, input: SurfAceRegistrationInput,
+                  expectedIdentity: SurfAceRegistryIdentity?) async throws -> SurfAceRegistrationReply
     func claimPaneLabel(clientId: String, surfaceId: String, paneId: Int64,
                         paneLineageId: String) async throws -> SurfAcePaneAllocation
     func close()
 }
 
 extension SurfAceRegistrationTransport {
+    func readRegistryIdentity(fallbackIdentity: SurfAceRegistryIdentity?) async throws -> SurfAceRegistryIdentityRead {
+        SurfAceRegistryIdentityRead(identity: try await readRegistryIdentity(), warnings: [])
+    }
+
+    func register(clientId: String, input: SurfAceRegistrationInput,
+                  expectedIdentity: SurfAceRegistryIdentity?) async throws -> SurfAceRegistrationReply {
+        guard let expectedIdentity else {
+            return SurfAceRegistrationReply(
+                assignments: [],
+                projection: SurfAceRegistrationProjection(
+                    directEndpoint: nil, prePairDescribeV1: false, allocationGenerationV1: false,
+                    endpointLease: nil, completedPaneReleaseIds: [], completedWindowReleaseIds: []
+                ),
+                warnings: ["registration_registry_identity_unavailable"], needsRetry: true
+            )
+        }
+        return try await register(clientId: clientId, input: input, expectedIdentity: expectedIdentity)
+    }
+
     func register(clientId: String, input: SurfAceRegistrationInput,
                   expectedIdentity: SurfAceRegistryIdentity) async throws -> SurfAceRegistrationReply {
         guard input.pendingPaneReleases.isEmpty, input.pendingWindowReleases.isEmpty else {
@@ -743,6 +1420,29 @@ extension SurfAceRegistrationTransport {
 }
 
 @MainActor
+private func surfAceReceiveCorrelated(
+    operation: String,
+    requestId: String,
+    receive: () async throws -> Data
+) async throws -> (data: Data, warnings: [String]) {
+    var warnings: [String] = []
+    var lastUnmatched: Data?
+    do {
+        while true {
+            let data = try await receive()
+            guard !SurfAceRegistrationWire.responseMatches(data, requestId: requestId, operation: operation) else {
+                return (data, warnings)
+            }
+            lastUnmatched = data
+            warnings.append("registration_unmatched_reply_dropped operation=\(operation)")
+        }
+    } catch {
+        if let lastUnmatched { return (lastUnmatched, warnings) }
+        throw error
+    }
+}
+
+@MainActor
 final class SurfAceRegistrationWebSocket: SurfAceRegistrationTransport {
     private let socket: URLSessionWebSocketTask
     private let session: URLSession
@@ -756,6 +1456,13 @@ final class SurfAceRegistrationWebSocket: SurfAceRegistrationTransport {
     }
 
     func readRegistryIdentity() async throws -> SurfAceRegistryIdentity {
+        guard let identity = try await readRegistryIdentity(fallbackIdentity: nil).identity else {
+            throw SurfAceRegistrationError.registryIdentityMissing
+        }
+        return identity
+    }
+
+    func readRegistryIdentity(fallbackIdentity: SurfAceRegistryIdentity?) async throws -> SurfAceRegistryIdentityRead {
         let id = "rq_" + UUID().uuidString.replacingOccurrences(of: "-", with: "")
         let timeout = Task { [socket] in
             do {
@@ -765,14 +1472,18 @@ final class SurfAceRegistrationWebSocket: SurfAceRegistrationTransport {
         }
         defer { timeout.cancel() }
         try await socket.send(.data(SurfAceRegistrationWire.topologyData(id: id)))
-        let message = try await socket.receive()
-        let data: Data
-        switch message {
-        case .data(let value): data = value
-        case .string(let value): data = Data(value.utf8)
-        @unknown default: throw SurfAceRegistrationError.invalidResponse
+        let received = try await surfAceReceiveCorrelated(operation: "fleet.topology", requestId: id) {
+            let message = try await socket.receive()
+            switch message {
+            case .data(let value): return value
+            case .string(let value): return Data(value.utf8)
+            @unknown default: throw SurfAceRegistrationError.invalidResponse
+            }
         }
-        return try SurfAceRegistrationWire.registryIdentity(from: data, requestId: id)
+        return SurfAceRegistrationWire.registryIdentityReply(
+            from: received.data, requestId: id, fallbackIdentity: fallbackIdentity,
+            correlationWarnings: received.warnings
+        )
     }
 
     func register(clientId: String, surfaces: [SurfAceRegistrationSurface],
@@ -786,19 +1497,25 @@ final class SurfAceRegistrationWebSocket: SurfAceRegistrationTransport {
         }
         defer { timeout.cancel() }
         try await socket.send(.data(SurfAceRegistrationWire.requestData(clientId: clientId, surfaces: surfaces, id: id)))
-        let message = try await socket.receive()
-        let data: Data
-        switch message {
-        case .data(let value): data = value
-        case .string(let value): data = Data(value.utf8)
-        @unknown default: throw SurfAceRegistrationError.invalidResponse
+        let received = try await surfAceReceiveCorrelated(operation: "client.register", requestId: id) {
+            let message = try await socket.receive()
+            switch message {
+            case .data(let value): return value
+            case .string(let value): return Data(value.utf8)
+            @unknown default: throw SurfAceRegistrationError.invalidResponse
+            }
         }
-        return try SurfAceRegistrationWire.assignments(from: data, requestId: id, clientId: clientId,
+        return try SurfAceRegistrationWire.assignments(from: received.data, requestId: id, clientId: clientId,
                                                         surfaces: surfaces, expectedIdentity: expectedIdentity)
     }
 
     func register(clientId: String, input: SurfAceRegistrationInput,
                   expectedIdentity: SurfAceRegistryIdentity) async throws -> SurfAceRegistrationReply {
+        try await register(clientId: clientId, input: input, expectedIdentity: Optional(expectedIdentity))
+    }
+
+    func register(clientId: String, input: SurfAceRegistrationInput,
+                  expectedIdentity: SurfAceRegistryIdentity?) async throws -> SurfAceRegistrationReply {
         let id = "rq_" + UUID().uuidString.replacingOccurrences(of: "-", with: "")
         let timeout = Task { [socket] in
             do {
@@ -808,37 +1525,49 @@ final class SurfAceRegistrationWebSocket: SurfAceRegistrationTransport {
         }
         defer { timeout.cancel() }
         try await socket.send(.data(SurfAceRegistrationWire.requestData(clientId: clientId, input: input, id: id)))
-        let message = try await socket.receive()
-        let data: Data
-        switch message {
-        case .data(let value): data = value
-        case .string(let value): data = Data(value.utf8)
-        @unknown default: throw SurfAceRegistrationError.invalidResponse
+        let received = try await surfAceReceiveCorrelated(operation: "client.register", requestId: id) {
+            let message = try await socket.receive()
+            switch message {
+            case .data(let value): return value
+            case .string(let value): return Data(value.utf8)
+            @unknown default: throw SurfAceRegistrationError.invalidResponse
+            }
         }
         return try SurfAceRegistrationWire.registration(
-            from: data, requestId: id, clientId: clientId, surfaces: input.surfaces,
+            from: received.data, requestId: id, clientId: clientId, surfaces: input.surfaces,
             expectedIdentity: expectedIdentity, expectedAllocationGenerationV1: true,
+            expectedWindowGenerationV1: true,
             expectedPaneReleaseIds: input.pendingPaneReleases.map(\.releaseId),
-            expectedWindowReleaseIds: input.pendingWindowReleases.map(\.releaseId)
+            expectedWindowReleaseIds: input.pendingWindowReleases.map(\.wireReleaseId),
+            correlationWarnings: received.warnings
         )
     }
 
     func claimPaneLabel(clientId: String, surfaceId: String, paneId: Int64,
                         paneLineageId: String) async throws -> SurfAcePaneAllocation {
         let id = "rq_" + UUID().uuidString.replacingOccurrences(of: "-", with: "")
+        let timeout = Task { [socket] in
+            do {
+                try await Task.sleep(for: .seconds(2))
+                socket.cancel(with: .goingAway, reason: nil)
+            } catch { }
+        }
+        defer { timeout.cancel() }
         try await socket.send(.data(SurfAceRegistrationWire.paneClaimData(
             clientId: clientId, surfaceId: surfaceId, paneId: paneId,
             paneLineageId: paneLineageId, id: id
         )))
-        let message = try await socket.receive()
-        let data: Data
-        switch message {
-        case .data(let value): data = value
-        case .string(let value): data = Data(value.utf8)
-        @unknown default: throw SurfAceRegistrationError.invalidResponse
+        let received = try await surfAceReceiveCorrelated(operation: "pane.claim", requestId: id) {
+            let message = try await socket.receive()
+            switch message {
+            case .data(let value): return value
+            case .string(let value): return Data(value.utf8)
+            @unknown default: throw SurfAceRegistrationError.invalidResponse
+            }
         }
         return try SurfAceRegistrationWire.paneClaimAllocation(
-            from: data, requestId: id, expectedAllocationGenerationV1: true
+            from: received.data, requestId: id, expectedAllocationGenerationV1: true,
+            correlationWarnings: received.warnings
         )
     }
 
@@ -901,6 +1630,13 @@ final class SurfAceLocalNumericRegistrationWebSocket: SurfAceRegistrationTranspo
     }
 
     func readRegistryIdentity() async throws -> SurfAceRegistryIdentity {
+        guard let identity = try await readRegistryIdentity(fallbackIdentity: nil).identity else {
+            throw SurfAceRegistrationError.registryIdentityMissing
+        }
+        return identity
+    }
+
+    func readRegistryIdentity(fallbackIdentity: SurfAceRegistryIdentity?) async throws -> SurfAceRegistryIdentityRead {
         let timeout = Task { @MainActor [weak self] in
             do {
                 try await Task.sleep(for: .seconds(2))
@@ -912,7 +1648,13 @@ final class SurfAceLocalNumericRegistrationWebSocket: SurfAceRegistrationTranspo
             try await connectIfNeeded()
             let id = "rq_" + UUID().uuidString.replacingOccurrences(of: "-", with: "")
             try await send(SurfAceRegistrationWire.topologyData(id: id))
-            return try SurfAceRegistrationWire.registryIdentity(from: await receive(), requestId: id)
+            let received = try await surfAceReceiveCorrelated(operation: "fleet.topology", requestId: id) {
+                try await self.receive()
+            }
+            return SurfAceRegistrationWire.registryIdentityReply(
+                from: received.data, requestId: id, fallbackIdentity: fallbackIdentity,
+                correlationWarnings: received.warnings
+            )
         } catch {
             close()
             throw error
@@ -934,8 +1676,10 @@ final class SurfAceLocalNumericRegistrationWebSocket: SurfAceRegistrationTranspo
             let id = "rq_" + UUID().uuidString.replacingOccurrences(of: "-", with: "")
             let data = try SurfAceRegistrationWire.requestData(clientId: clientId, surfaces: surfaces, id: id)
             try await send(data)
-            let response = try await receive()
-            return try SurfAceRegistrationWire.assignments(from: response, requestId: id, clientId: clientId,
+            let received = try await surfAceReceiveCorrelated(operation: "client.register", requestId: id) {
+                try await self.receive()
+            }
+            return try SurfAceRegistrationWire.assignments(from: received.data, requestId: id, clientId: clientId,
                                                             surfaces: surfaces, expectedIdentity: expectedIdentity)
         } catch {
             close()
@@ -945,6 +1689,11 @@ final class SurfAceLocalNumericRegistrationWebSocket: SurfAceRegistrationTranspo
 
     func register(clientId: String, input: SurfAceRegistrationInput,
                   expectedIdentity: SurfAceRegistryIdentity) async throws -> SurfAceRegistrationReply {
+        try await register(clientId: clientId, input: input, expectedIdentity: Optional(expectedIdentity))
+    }
+
+    func register(clientId: String, input: SurfAceRegistrationInput,
+                  expectedIdentity: SurfAceRegistryIdentity?) async throws -> SurfAceRegistrationReply {
         let timeout = Task { @MainActor [weak self] in
             do {
                 try await Task.sleep(for: .seconds(2))
@@ -958,12 +1707,16 @@ final class SurfAceLocalNumericRegistrationWebSocket: SurfAceRegistrationTranspo
             let id = "rq_" + UUID().uuidString.replacingOccurrences(of: "-", with: "")
             let data = try SurfAceRegistrationWire.requestData(clientId: clientId, input: input, id: id)
             try await send(data)
+            let received = try await surfAceReceiveCorrelated(operation: "client.register", requestId: id) {
+                try await self.receive()
+            }
             return try SurfAceRegistrationWire.registration(
-                from: try await receive(), requestId: id, clientId: clientId,
+                from: received.data, requestId: id, clientId: clientId,
                 surfaces: input.surfaces, expectedIdentity: expectedIdentity,
-                expectedAllocationGenerationV1: true,
+                expectedAllocationGenerationV1: true, expectedWindowGenerationV1: true,
                 expectedPaneReleaseIds: input.pendingPaneReleases.map(\.releaseId),
-                expectedWindowReleaseIds: input.pendingWindowReleases.map(\.releaseId)
+                expectedWindowReleaseIds: input.pendingWindowReleases.map(\.wireReleaseId),
+                correlationWarnings: received.warnings
             )
         } catch {
             close()
@@ -980,8 +1733,12 @@ final class SurfAceLocalNumericRegistrationWebSocket: SurfAceRegistrationTranspo
                 clientId: clientId, surfaceId: surfaceId, paneId: paneId,
                 paneLineageId: paneLineageId, id: id
             ))
+            let received = try await surfAceReceiveCorrelated(operation: "pane.claim", requestId: id) {
+                try await self.receive()
+            }
             return try SurfAceRegistrationWire.paneClaimAllocation(
-                from: await receive(), requestId: id, expectedAllocationGenerationV1: true
+                from: received.data, requestId: id, expectedAllocationGenerationV1: true,
+                correlationWarnings: received.warnings
             )
         } catch {
             close()
@@ -1100,7 +1857,7 @@ final class SurfAceCentralRegistration {
     typealias ApplyReply = @MainActor (SurfAceRegistrationReply, SurfAceRegistrationInput) async throws -> Void
     typealias ApplyReplySubset = @MainActor (
         SurfAceRegistrationReply, SurfAceRegistrationInput, SurfAceRegistrationInput
-    ) async throws -> Void
+    ) async throws -> Bool
     typealias VerifyRegistry = @MainActor (SurfAceRegistryIdentity, [SurfAceRegistrationSurface]) async throws -> Void
     typealias RecoverRefusedRelease = @MainActor (String) async throws -> Void
     typealias RecoverRefusedClaim = @MainActor (SurfAceRegistrationClaim) async throws -> Void
@@ -1108,6 +1865,7 @@ final class SurfAceCentralRegistration {
     private enum RecoveryResult {
         case applied
         case retry(SurfAceRegistrationInput)
+        case rebind(SurfAceRegistryIdentity, SurfAceRegistrationInput)
     }
 
     private struct Candidate {
@@ -1118,7 +1876,7 @@ final class SurfAceCentralRegistration {
 
     private struct IdentifiedCandidate {
         let candidate: Candidate
-        let identity: SurfAceRegistryIdentity
+        let identity: SurfAceRegistryIdentity?
     }
     private let clientId: String
     private let configured: URL?
@@ -1133,6 +1891,7 @@ final class SurfAceCentralRegistration {
     private let verifyRegistry: VerifyRegistry
     private let bindRegistry: VerifyRegistry
     private let onError: @MainActor (Error) -> Void
+    private let onWarning: @MainActor (String) -> Void
     private let applyReplySubset: ApplyReplySubset?
     private let recoverRefusedRelease: RecoverRefusedRelease?
     private let recoverRefusedClaim: RecoverRefusedClaim?
@@ -1142,6 +1901,7 @@ final class SurfAceCentralRegistration {
     private var synchronizationTask: Task<Void, Error>?
     private var synchronizationTaskId: UUID?
     private var stopped = false
+    private var warnedInputDiagnostics = Set<String>()
     private let onStatusChange: @MainActor (SurfAceCentralRegistrationStatus) -> Void
     private let onConnectionError: @MainActor (String?) -> Void
     private(set) var lastError: String?
@@ -1194,6 +1954,7 @@ final class SurfAceCentralRegistration {
          recoverRefusedRelease: RecoverRefusedRelease? = nil,
          recoverRefusedClaim: RecoverRefusedClaim? = nil,
          onError: @escaping @MainActor (Error) -> Void = { _ in },
+         onWarning: @escaping @MainActor (String) -> Void = { _ in },
          onStatusChange: @escaping @MainActor (SurfAceCentralRegistrationStatus) -> Void = { _ in },
          onConnectionError: @escaping @MainActor (String?) -> Void = { _ in },
          onVerifiedEndpoint: @escaping @MainActor (URL) -> Void = { _ in }) {
@@ -1213,6 +1974,7 @@ final class SurfAceCentralRegistration {
         self.recoverRefusedRelease = recoverRefusedRelease
         self.recoverRefusedClaim = recoverRefusedClaim
         self.onError = onError
+        self.onWarning = onWarning
         self.onStatusChange = onStatusChange
         self.onConnectionError = onConnectionError
         self.onVerifiedEndpoint = onVerifiedEndpoint
@@ -1240,24 +2002,39 @@ final class SurfAceCentralRegistration {
     }
 
     private func currentInputSnapshot() async throws -> SurfAceRegistrationInput {
-        if let inputSnapshot { return try await inputSnapshot() }
-        return SurfAceRegistrationInput(
-            surfaces: try await snapshot(), pendingPaneReleases: [], pendingWindowReleases: []
-        )
+        let input: SurfAceRegistrationInput
+        if let inputSnapshot {
+            input = try await inputSnapshot()
+        } else {
+            input = SurfAceRegistrationInput(
+                surfaces: try await snapshot(), pendingPaneReleases: [], pendingWindowReleases: []
+            )
+        }
+        for warning in input.warnings where warnedInputDiagnostics.insert(warning).inserted {
+            onWarning(warning)
+        }
+        return input
     }
 
     private func applyRegistrationReply(
         _ reply: SurfAceRegistrationReply,
         input: SurfAceRegistrationInput,
         request: SurfAceRegistrationInput
-    ) async throws {
+    ) async throws -> Bool {
+        for warning in reply.warnings { onWarning(warning) }
+        guard !reply.discarded else { return true }
+        if let replyIdentity = reply.registryIdentity, replyIdentity != input.registryIdentity {
+            onWarning("registration_reply_identity_not_bound; claims_left_unapplied")
+            return true
+        }
         if let applyReplySubset {
-            try await applyReplySubset(reply, input, request)
+            return try await applyReplySubset(reply, input, request) || reply.needsRetry
         } else if let applyReply {
             try await applyReply(reply, input)
         } else {
             try await apply(reply.assignments, input.surfaces)
         }
+        return reply.needsRetry
     }
 
     private func synchronizeOnce() async throws {
@@ -1268,24 +2045,30 @@ final class SurfAceCentralRegistration {
         guard !stopped else { throw SurfAceRegistrationError.stopped }
 
         let failures = FailureCollector()
-        var selectedRegistrationFailed = false
+        var selectedRouteFailed = false
+        let previousSelected = selected
 
         // A healthy selected route is the steady-state path. Reuse its socket
         // and avoid a Bonjour scan and identity connections to other addresses
         // on every timer tick.
         if let selected {
             do {
-                let identity = try await selected.transport.readRegistryIdentity()
-                guard identity.isValid else { throw SurfAceRegistrationError.registryIdentityMissing }
-                guard input.registryIdentity == nil || input.registryIdentity == identity else {
-                    throw SurfAceRegistrationError.foreignRegistryIdentity
+                let identityRead = try await selected.transport.readRegistryIdentity(
+                    fallbackIdentity: input.registryIdentity
+                )
+                for warning in identityRead.warnings { onWarning(warning) }
+                let identity = identityRead.identity
+                guard identity == nil || identity?.isValid == true else {
+                    onWarning("topology_registry_identity_unrecognized")
+                    throw SurfAceRegistrationError.registryIdentityMissing
                 }
-                try await bindCandidateRegistry(identity, input: input, surfaces: try await snapshot())
+                if let identity {
+                    try await bindCandidateRegistry(identity)
+                }
                 let boundInput = try await currentInputSnapshot()
-                guard inputSnapshot == nil || boundInput.registryIdentity == identity else {
-                    throw SurfAceRegistrationError.registryBindingPersistencePending
+                if identity != nil, inputSnapshot != nil, boundInput.registryIdentity != identity {
+                    onWarning("registration_binding_not_yet_persisted; continuing with current claims")
                 }
-                selectedRegistrationFailed = true
                 try await registerAndApply(using: selected.transport, identity: identity, input: boundInput)
                 guard !stopped else { throw SurfAceRegistrationError.stopped }
                 setLastError(nil)
@@ -1295,6 +2078,9 @@ final class SurfAceCentralRegistration {
                 return
             } catch {
                 if stopped { throw SurfAceRegistrationError.stopped }
+                selectedRouteFailed = true
+                selected.transport.close()
+                self.selected = nil
                 failures.values.append(reportFailure(
                     phase: "reconnect",
                     endpoint: selected.url,
@@ -1317,16 +2103,21 @@ final class SurfAceCentralRegistration {
 
         let routeURLs = candidateURLs(discovered: discovered)
         var scanURLs = routeURLs
-        if let selected, !scanURLs.contains(where: { $0.0 == selected.url }) {
-            scanURLs.append((selected.url, "reconnect"))
+        if selectedRouteFailed, let previousSelected {
+            // A failed route has already had its attempt this tick. Keep other
+            // addresses from the same registry available for failover.
+            scanURLs.removeAll { $0.0 == previousSelected.url }
+        } else if let previousSelected,
+                  !scanURLs.contains(where: { $0.0 == previousSelected.url }) {
+            scanURLs.append((previousSelected.url, "reconnect"))
         }
         var candidates: [Candidate] = []
         var seen = Set<String>()
         for (url, phase) in scanURLs where (url.scheme == "ws" || url.scheme == "wss") {
             guard seen.insert(url.absoluteString).inserted else { continue }
             let transport: any SurfAceRegistrationTransport
-            if let selected, selected.url == url {
-                transport = selected.transport
+            if let active = self.selected, active.url == url {
+                transport = active.transport
             } else {
                 transport = makeTransport(url)
             }
@@ -1336,8 +2127,14 @@ final class SurfAceCentralRegistration {
         var identified: [IdentifiedCandidate] = []
         for candidate in candidates {
             do {
-                let identity = try await candidate.transport.readRegistryIdentity()
-                guard identity.isValid else { throw SurfAceRegistrationError.registryIdentityMissing }
+                let identityRead = try await candidate.transport.readRegistryIdentity(
+                    fallbackIdentity: input.registryIdentity
+                )
+                for warning in identityRead.warnings { onWarning(warning) }
+                if identityRead.identity?.isValid == false {
+                    onWarning("topology_registry_identity_unrecognized")
+                }
+                let identity = identityRead.identity?.isValid == true ? identityRead.identity : nil
                 identified.append(.init(candidate: candidate, identity: identity))
             } catch {
                 failures.values.append(reportFailure(
@@ -1354,12 +2151,10 @@ final class SurfAceCentralRegistration {
         let matching = input.registryIdentity.flatMap { identity in
             identified.first(where: { $0.identity == identity })
         }
-        // Keep the current identity while any endpoint for it is discoverable.
-        // Otherwise endpoint order chooses the next valid registry, including
-        // a registry the client used before its current binding.
-        let selectedIdentity = matching?.identity ?? identified.first?.identity
-
-        guard let selectedIdentity else {
+        // Prefer the current registry while it is discoverable. Otherwise prefer
+        // an identified registry; if every topology reply is incomplete, still
+        // register with the discovered server and leave its claims unbound.
+        guard let preferredCandidate = matching ?? identified.first(where: { $0.identity != nil }) ?? identified.first else {
             let reason = failures.values.isEmpty
                 ? "Bonjour found no _surf-ace._tcp service with role=server v=1 ws=/ws"
                 : failures.values.joined(separator: "; ")
@@ -1374,17 +2169,18 @@ final class SurfAceCentralRegistration {
             selected = nil
             throw failure
         }
+        let selectedIdentity = preferredCandidate.identity
 
         for identifiedCandidate in identified where identifiedCandidate.identity == selectedIdentity {
             let candidate = identifiedCandidate.candidate
-            if selectedRegistrationFailed, let selected, selected.url == candidate.url { continue }
             do {
-                try await bindCandidateRegistry(
-                    identifiedCandidate.identity, input: try await currentInputSnapshot(), surfaces: try await snapshot()
-                )
+                if let identity = identifiedCandidate.identity {
+                    try await bindCandidateRegistry(identity)
+                }
                 let boundInput = try await currentInputSnapshot()
-                guard inputSnapshot == nil || boundInput.registryIdentity == identifiedCandidate.identity else {
-                    throw SurfAceRegistrationError.registryBindingPersistencePending
+                if identifiedCandidate.identity != nil, inputSnapshot != nil,
+                   boundInput.registryIdentity != identifiedCandidate.identity {
+                    onWarning("registration_binding_not_yet_persisted; continuing with current claims")
                 }
                 try await registerAndApply(
                     using: candidate.transport,
@@ -1426,7 +2222,7 @@ final class SurfAceCentralRegistration {
         self.selected = nil
         setStatus(.disconnected)
         let reason = failures.values.isEmpty
-            ? "registry registration failed for every endpoint with identity \(selectedIdentity.allocatorId)/\(selectedIdentity.fleetId)"
+            ? "registry registration failed for every endpoint with identity \(selectedIdentity.map { "\($0.allocatorId)/\($0.fleetId)" } ?? "unreported")"
             : failures.values.joined(separator: "; ")
         throw reportFailure(phase: "retry", endpoint: nil, underlying: reason, showInStatus: true)
     }
@@ -1448,35 +2244,71 @@ final class SurfAceCentralRegistration {
     }
 
     private func bindCandidateRegistry(
-        _ identity: SurfAceRegistryIdentity,
-        input: SurfAceRegistrationInput,
-        surfaces: [SurfAceRegistrationSurface]
+        _ identity: SurfAceRegistryIdentity
     ) async throws {
-        guard let bound = input.registryIdentity else {
-            try await bindRegistry(identity, surfaces)
+        guard identity.isValid else {
+            onWarning("topology_registry_identity_unrecognized")
             return
         }
-        if bound == identity {
-            try await verifyRegistry(identity, surfaces)
-        } else {
-            try await bindRegistry(identity, surfaces)
+        for _ in 0..<3 {
+            let currentSurfaces = try await snapshot()
+            let currentInput = try await currentInputSnapshot()
+            do {
+                if currentInput.registryIdentity == identity {
+                    try await verifyRegistry(identity, currentSurfaces)
+                } else {
+                    try await bindRegistry(identity, currentSurfaces)
+                }
+                return
+            } catch SurfAceRegistrationError.topologyChanged {
+                onWarning("registration_local_snapshot_changed_during_binding; retrying")
+                continue
+            }
         }
+        onWarning("registration_binding_snapshot_unstable; continuing with best available claims")
     }
 
     private func registerAndApply(
         using transport: any SurfAceRegistrationTransport,
-        identity: SurfAceRegistryIdentity,
+        identity: SurfAceRegistryIdentity?,
         input: SurfAceRegistrationInput
     ) async throws {
         var current = input
+        var currentIdentity = identity
+        var registryIdentityConfirmedForReleases = false
         let maximumRecoveryAttempts = 1 + input.pendingPaneReleases.count
             + input.pendingWindowReleases.count
             + input.surfaces.reduce(0) { $0 + 1 + $1.panes.count }
         for _ in 0..<maximumRecoveryAttempts {
             guard !stopped else { throw SurfAceRegistrationError.stopped }
             do {
-                let reply = try await transport.register(clientId: clientId, input: current, expectedIdentity: identity)
-                try await applyRegistrationReply(reply, input: current, request: current)
+                let request = !registryIdentityConfirmedForReleases
+                    && (!current.pendingPaneReleases.isEmpty || !current.pendingWindowReleases.isEmpty)
+                    ? current.withoutReleases : current
+                let reply = try await transport.register(
+                    clientId: clientId, input: request, expectedIdentity: currentIdentity
+                )
+                if let replyIdentity = reply.registryIdentity, replyIdentity != current.registryIdentity {
+                    onWarning("registration_registry_identity_changed; rebinding and retrying")
+                    try await bindCandidateRegistry(replyIdentity)
+                    let reboundInput = try await currentInputSnapshot()
+                    guard reboundInput.registryIdentity == replyIdentity else {
+                        onWarning("registration_binding_not_persisted; claims_left_unapplied")
+                        current = reboundInput
+                        continue
+                    }
+                    currentIdentity = replyIdentity
+                    current = reboundInput
+                    continue
+                }
+                if !reply.discarded, currentIdentity != nil,
+                   reply.registryIdentity == nil || reply.registryIdentity == currentIdentity {
+                    registryIdentityConfirmedForReleases = true
+                }
+                if try await applyRegistrationReply(reply, input: current, request: request) {
+                    current = try await currentInputSnapshot()
+                    continue
+                }
                 return
             } catch let error as SurfAceRegistrationError {
                 guard case .serverRejected = error else {
@@ -1484,9 +2316,10 @@ final class SurfAceCentralRegistration {
                         let noReleases = current.withoutReleases
                         do {
                             let reply = try await transport.register(
-                                clientId: clientId, input: noReleases, expectedIdentity: identity
+                                clientId: clientId, input: noReleases, expectedIdentity: currentIdentity
                             )
-                            try await applyRegistrationReply(reply, input: current, request: noReleases)
+                            _ = try await applyRegistrationReply(reply, input: current, request: noReleases)
+                            onWarning("registration_release_outcome_unknown; retry_deferred")
                             return
                         } catch {
                             throw error
@@ -1496,33 +2329,58 @@ final class SurfAceCentralRegistration {
                 }
 
                 switch try await recoverSemanticRejection(
-                    using: transport, identity: identity, input: current
+                    using: transport, identity: currentIdentity, input: current
                 ) {
                 case .applied:
                     return
                 case .retry(let updated):
+                    current = updated
+                case .rebind(let updatedIdentity, let updated):
+                    currentIdentity = updatedIdentity
                     current = updated
                 }
             } catch {
                 if !current.pendingPaneReleases.isEmpty || !current.pendingWindowReleases.isEmpty {
                     let noReleases = current.withoutReleases
                     let reply = try await transport.register(
-                        clientId: clientId, input: noReleases, expectedIdentity: identity
+                        clientId: clientId, input: noReleases, expectedIdentity: currentIdentity
                     )
-                    try await applyRegistrationReply(reply, input: current, request: noReleases)
+                    _ = try await applyRegistrationReply(reply, input: current, request: noReleases)
+                    onWarning("registration_release_outcome_unknown; retry_deferred")
                     return
                 }
                 throw error
             }
         }
-        throw SurfAceRegistrationError.serverRejected(
-            code: "registration_recovery_exhausted", message: "registration recovery did not converge"
-        )
+        onWarning("registration_recovery_attempts_exhausted; continuing with confirmed claims")
+    }
+
+    private func applyRecoveredReply(
+        _ reply: SurfAceRegistrationReply,
+        input: SurfAceRegistrationInput,
+        request: SurfAceRegistrationInput,
+        identity: SurfAceRegistryIdentity?
+    ) async throws -> RecoveryResult {
+        if let replyIdentity = reply.registryIdentity,
+           replyIdentity != identity || replyIdentity != input.registryIdentity {
+            onWarning("registration_registry_identity_changed; rebinding and retrying")
+            try await bindCandidateRegistry(replyIdentity)
+            let reboundInput = try await currentInputSnapshot()
+            guard reboundInput.registryIdentity == replyIdentity else {
+                onWarning("registration_binding_not_persisted; claims_left_unapplied")
+                return .retry(reboundInput)
+            }
+            return .rebind(replyIdentity, reboundInput)
+        }
+        if try await applyRegistrationReply(reply, input: input, request: request) {
+            return .retry(try await currentInputSnapshot())
+        }
+        return .applied
     }
 
     private func recoverSemanticRejection(
         using transport: any SurfAceRegistrationTransport,
-        identity: SurfAceRegistryIdentity,
+        identity: SurfAceRegistryIdentity?,
         input: SurfAceRegistrationInput
     ) async throws -> RecoveryResult {
         let withoutReleases = input.withoutReleases
@@ -1536,8 +2394,11 @@ final class SurfAceCentralRegistration {
             let empty = withoutReleases.request(surfaces: [])
             do {
                 _ = try await transport.register(clientId: clientId, input: empty, expectedIdentity: identity)
+            } catch let error as SurfAceRegistrationError {
+                guard case .serverRejected = error else { throw error }
+                onWarning("registration_claims_refused; preserving saved content and pending releases")
+                return .applied
             } catch {
-                // Nothing has proved that an individual saved claim is the cause.
                 throw error
             }
 
@@ -1552,8 +2413,11 @@ final class SurfAceCentralRegistration {
                         expectedIdentity: identity
                     )
                 } catch let probeError as SurfAceRegistrationError {
-                    guard case .serverRejected = probeError,
-                          let recoverRefusedClaim else { throw probeError }
+                    guard case .serverRejected = probeError else { throw probeError }
+                    guard let recoverRefusedClaim else {
+                        onWarning("registration_surface_claim_refused; keeping its saved state")
+                        return .applied
+                    }
                     try await recoverRefusedClaim(.surface(surfaceId: surface.surfaceId))
                     return .retry(try await currentInputSnapshot())
                 } catch {
@@ -1562,8 +2426,9 @@ final class SurfAceCentralRegistration {
                     let reply = try await transport.register(
                         clientId: clientId, input: withoutReleases, expectedIdentity: identity
                     )
-                    try await applyRegistrationReply(reply, input: input, request: withoutReleases)
-                    return .applied
+                    return try await applyRecoveredReply(
+                        reply, input: input, request: withoutReleases, identity: identity
+                    )
                 }
 
                 var panes = [SurfAceRegistrationSurface.Pane]()
@@ -1576,8 +2441,11 @@ final class SurfAceCentralRegistration {
                             expectedIdentity: identity
                         )
                     } catch let probeError as SurfAceRegistrationError {
-                        guard case .serverRejected = probeError,
-                              let recoverRefusedClaim else { throw probeError }
+                        guard case .serverRejected = probeError else { throw probeError }
+                        guard let recoverRefusedClaim else {
+                            onWarning("registration_pane_claim_refused; keeping the pane usable")
+                            return .applied
+                        }
                         try await recoverRefusedClaim(.pane(
                             surfaceId: surface.surfaceId, paneId: pane.paneId,
                             paneLineageId: pane.paneLineageId
@@ -1587,8 +2455,9 @@ final class SurfAceCentralRegistration {
                         let reply = try await transport.register(
                             clientId: clientId, input: withoutReleases, expectedIdentity: identity
                         )
-                        try await applyRegistrationReply(reply, input: input, request: withoutReleases)
-                        return .applied
+                        return try await applyRecoveredReply(
+                            reply, input: input, request: withoutReleases, identity: identity
+                        )
                     }
                     panes.append(pane)
                 }
@@ -1601,8 +2470,9 @@ final class SurfAceCentralRegistration {
 
         guard let acceptedSurfaceReply else { throw SurfAceRegistrationError.invalidResponse }
         guard !input.pendingPaneReleases.isEmpty || !input.pendingWindowReleases.isEmpty else {
-            try await applyRegistrationReply(acceptedSurfaceReply, input: input, request: withoutReleases)
-            return .applied
+            return try await applyRecoveredReply(
+                acceptedSurfaceReply, input: input, request: withoutReleases, identity: identity
+            )
         }
 
         var acceptedWindows: [SurfAceWindowReleaseRequest] = []
@@ -1618,13 +2488,19 @@ final class SurfAceCentralRegistration {
                     ), expectedIdentity: identity
                 )
             } catch let probeError as SurfAceRegistrationError {
-                guard case .serverRejected = probeError,
-                      let recoverRefusedRelease else { throw probeError }
+                guard case .serverRejected = probeError else { throw probeError }
+                guard let recoverRefusedRelease else {
+                    onWarning("registration_window_release_refused; keeping its evidence pending")
+                    return try await applyRecoveredReply(
+                        acceptedSurfaceReply, input: input, request: withoutReleases, identity: identity
+                    )
+                }
                 try await recoverRefusedRelease(release.releaseId)
                 return .retry(try await currentInputSnapshot())
             } catch {
-                try await applyRegistrationReply(acceptedSurfaceReply, input: input, request: withoutReleases)
-                return .applied
+                return try await applyRecoveredReply(
+                    acceptedSurfaceReply, input: input, request: withoutReleases, identity: identity
+                )
             }
             acceptedWindows.append(release)
         }
@@ -1638,18 +2514,23 @@ final class SurfAceCentralRegistration {
                     ), expectedIdentity: identity
                 )
             } catch let probeError as SurfAceRegistrationError {
-                guard case .serverRejected = probeError,
-                      let recoverRefusedRelease else { throw probeError }
+                guard case .serverRejected = probeError else { throw probeError }
+                guard let recoverRefusedRelease else {
+                    onWarning("registration_pane_release_refused; keeping its evidence pending")
+                    return try await applyRecoveredReply(
+                        acceptedSurfaceReply, input: input, request: withoutReleases, identity: identity
+                    )
+                }
                 try await recoverRefusedRelease(release.releaseId)
                 return .retry(try await currentInputSnapshot())
             } catch {
-                try await applyRegistrationReply(acceptedSurfaceReply, input: input, request: withoutReleases)
-                return .applied
+                return try await applyRecoveredReply(
+                    acceptedSurfaceReply, input: input, request: withoutReleases, identity: identity
+                )
             }
             acceptedPanes.append(release)
         }
-        try await applyRegistrationReply(lastReply, input: input, request: input)
-        return .applied
+        return try await applyRecoveredReply(lastReply, input: input, request: input, identity: identity)
     }
 
     func claimPaneLabel(surfaceId: String, paneId: Int64, paneLineageId: String) async throws -> SurfAcePaneAllocation {
@@ -1673,10 +2554,29 @@ final class SurfAceCentralRegistration {
         guard latest.pendingPaneReleases.isEmpty, latest.pendingWindowReleases.isEmpty else {
             throw SurfAceRegistrationError.noServer
         }
-        try await verifyRegistry(try await transport.readRegistryIdentity(), try await snapshot())
-        return try await transport.claimPaneLabel(
+        let identityRead = try await transport.readRegistryIdentity(fallbackIdentity: latest.registryIdentity)
+        for warning in identityRead.warnings { onWarning(warning) }
+        guard let identity = identityRead.identity, identity.isValid else {
+            onWarning("pane_claim_registry_identity_unavailable")
+            return SurfAcePaneAllocation(
+                paneLabel: 0, allocationGeneration: nil,
+                warnings: ["pane_claim_registry_identity_unavailable"]
+            )
+        }
+        try await bindCandidateRegistry(identity)
+        let boundInput = try await currentInputSnapshot()
+        guard boundInput.registryIdentity == identity else {
+            onWarning("pane_claim_binding_not_persisted; keeping the pane usable without a new label")
+            return SurfAcePaneAllocation(
+                paneLabel: 0, allocationGeneration: nil,
+                warnings: ["pane_claim_binding_not_persisted"]
+            )
+        }
+        let allocation = try await transport.claimPaneLabel(
             clientId: clientId, surfaceId: surfaceId, paneId: paneId, paneLineageId: paneLineageId
         )
+        for warning in allocation.warnings { onWarning(warning) }
+        return allocation
     }
 
     private func attempt(
@@ -1690,13 +2590,11 @@ final class SurfAceCentralRegistration {
         if selected == nil { setStatus(.connecting) }
         let candidate = makeTransport(url)
         do {
-            let identity = try await candidate.readRegistryIdentity()
-            try await verifyRegistry(identity, input.surfaces)
-            let reply = try await candidate.register(
-                clientId: clientId, input: input, expectedIdentity: identity
-            )
-            guard !stopped else { throw SurfAceRegistrationError.stopped }
-            try await applyRegistrationReply(reply, input: input, request: input)
+            let identityRead = try await candidate.readRegistryIdentity(fallbackIdentity: input.registryIdentity)
+            for warning in identityRead.warnings { onWarning(warning) }
+            if let identity = identityRead.identity { try await bindCandidateRegistry(identity) }
+            let latest = try await currentInputSnapshot()
+            try await registerAndApply(using: candidate, identity: identityRead.identity, input: latest)
             guard !stopped else { throw SurfAceRegistrationError.stopped }
             selected?.transport.close()
             selected = (url, candidate)

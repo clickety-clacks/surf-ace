@@ -191,13 +191,11 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
                 endpointLease: nil, completedPaneReleaseIds: [], completedWindowReleaseIds: []
             )
         )
-        await XCTAssertThrowsErrorAsync {
-            _ = try await fixture.adapter.applyRegistration(unacknowledged, expectedInput: input)
-        } verify: { error in
-            guard let error = error as? SurfAceRegistrationError, case .invalidResponse = error else {
-                return XCTFail("Expected malformed release acknowledgement to be rejected")
-            }
-        }
+        let pendingApplication = try await fixture.adapter.applyRegistration(unacknowledged, expectedInput: input)
+        XCTAssertTrue(pendingApplication.needsRetry)
+        XCTAssertTrue(pendingApplication.warnings.contains("registration_pane_release_acknowledgements_incomplete"))
+        XCTAssertTrue(pendingApplication.warnings.contains("registration_window_release_acknowledgements_incomplete"))
+        XCTAssertEqual(pendingApplication.state, before)
         XCTAssertEqual(try fixture.store.load(), before)
         XCTAssertEqual(try Data(contentsOf: fixture.store.stateURL), beforeBytes)
 
@@ -210,9 +208,185 @@ final class SurfAceLocklessRuntimeAdapterTests: XCTestCase {
         )
         let after = try await fixture.adapter.applyRegistration(acknowledged, expectedInput: input)
         XCTAssertNotEqual(try Data(contentsOf: fixture.store.stateURL), beforeBytes)
-        XCTAssertEqual(after.allocationReleaseIntents?.map(\.status), [.accepted, .accepted])
-        XCTAssertTrue(after.liveSurfaces.isEmpty)
-        try after.validate()
+        XCTAssertEqual(after.state.allocationReleaseIntents?.map(\.status), [.accepted, .accepted])
+        XCTAssertTrue(after.state.liveSurfaces.isEmpty)
+        try after.state.validate()
+    }
+
+    func testRegistrationAppliesMatchingClaimsAfterLocalSnapshotChangesAndRetriesRemainder() async throws {
+        let clientId = String(repeating: "a", count: 64)
+        let fixture = try makeFixture(configure: { state in
+            var surface = try XCTUnwrap(state.liveSurfaces["sf_1"])
+            var pane = try XCTUnwrap(surface.panes["1"])
+            pane.history.visible.contentId = "retained-entry"
+            pane.history.visible.contentType = "html"
+            pane.history.visible.content = .object(["html": .string("<h1>Still here</h1>")])
+            surface.panes["1"] = pane
+            state.liveSurfaces["sf_1"] = surface
+        })
+        let before = await fixture.adapter.snapshot()
+        let request = try SurfAceRegistrationInput(state: before, clientId: clientId)
+        let content = try XCTUnwrap(before.liveSurfaces["sf_1"]?.panes["1"]?.history.visible.content)
+        let firstPaneLineage = try XCTUnwrap(before.liveSurfaces["sf_1"]?.panes["1"]?.paneLineageId)
+
+        _ = try await fixture.adapter.commitLocalMutation(operation: "local.topology.split") { state, sequence in
+            _ = try SurfAceLocklessTopologyOperations.paneSplit(
+                state: &state, surfaceId: "sf_1", paneId: 1, count: 2,
+                direction: "horizontal", expectedTopologyRevision: 0,
+                assignedPaneLabels: [:], assignedPaneLineages: [2: "pl_sf_1_2"]
+            )
+            return .integer(sequence)
+        }
+        let reply = SurfAceRegistrationReply(
+            assignments: [SurfAceRegistrationAssignment(
+                surfaceId: "sf_1", windowLabel: "z", panes: [
+                    .init(paneId: "1", paneLineageId: firstPaneLineage, paneLabel: 1201),
+                    .init(paneId: "2", paneLineageId: "pl_sf_1_2", paneLabel: 1202),
+                ]
+            )],
+            projection: SurfAceRegistrationProjection(
+                directEndpoint: nil, prePairDescribeV1: false, allocationGenerationV1: true,
+                endpointLease: nil, completedPaneReleaseIds: [], completedWindowReleaseIds: []
+            )
+        )
+
+        let application = try await fixture.adapter.applyRegistration(
+            reply, expectedInput: request, requestInput: request, clientId: clientId
+        )
+        let current = try XCTUnwrap(application.state.liveSurfaces["sf_1"])
+        XCTAssertTrue(application.needsRetry)
+        XCTAssertTrue(application.warnings.contains("registration_local_snapshot_changed"))
+        XCTAssertEqual(current.windowLabel, "z")
+        XCTAssertEqual(current.panes["1"]?.paneLabel, 1201)
+        XCTAssertEqual(current.panes["2"]?.paneLabel, 0)
+        XCTAssertEqual(current.panes["1"]?.history.visible.content, content)
+        XCTAssertEqual(current.panes["1"]?.history.visible.contentId, "retained-entry")
+    }
+
+    func testRegistrationUsesLabelClaimsWithoutGenerationAndPreservesSavedContent() async throws {
+        let clientId = String(repeating: "a", count: 64)
+        let previous = SurfAceRegistryIdentity(allocatorId: "alloc_old", fleetId: "fleet-old")
+        let current = SurfAceRegistryIdentity(allocatorId: "alloc_home", fleetId: "fleet-home")
+        let fixture = try makeFixture(configure: { state in
+            state.registryBinding = .init(
+                allocatorId: previous.allocatorId, clientId: clientId, fleetId: previous.fleetId
+            )
+            try SurfAceLocklessTopologyOperations.applyWindowLabels(
+                state: &state, assignments: [(surfaceId: "sf_1", windowLabel: "b")]
+            )
+            var surface = try XCTUnwrap(state.liveSurfaces["sf_1"])
+            surface.allocationGeneration = 30
+            var pane = try XCTUnwrap(surface.panes["1"])
+            pane.paneLabel = 12
+            pane.allocationGeneration = 41
+            pane.history.visible.contentId = "retained-entry"
+            pane.history.visible.contentType = "html"
+            pane.history.visible.content = .object(["html": .string("<h1>Saved</h1>")])
+            pane.history.visible.revision = 4
+            surface.panes["1"] = pane
+            state.liveSurfaces["sf_1"] = surface
+        })
+
+        let original = await fixture.adapter.snapshot()
+        let originalContent = try XCTUnwrap(original.liveSurfaces["sf_1"]?.panes["1"]?.history.visible.content)
+        _ = try await fixture.adapter.bindRegistryIdentity(
+            current, clientId: clientId, expectedSurfaces: SurfAceRegistrationSurface.snapshot(original),
+            allowRebinding: true
+        )
+        let rebound = await fixture.adapter.snapshot()
+        let input = try SurfAceRegistrationInput(state: rebound, clientId: clientId)
+        let paneLineage = try XCTUnwrap(rebound.liveSurfaces["sf_1"]?.panes["1"]?.paneLineageId)
+        let reply = SurfAceRegistrationReply(
+            assignments: [SurfAceRegistrationAssignment(
+                surfaceId: "sf_1", windowLabel: "z",
+                panes: [.init(paneId: "1", paneLineageId: paneLineage, paneLabel: 1201)]
+            )],
+            projection: SurfAceRegistrationProjection(
+                directEndpoint: nil, prePairDescribeV1: false, allocationGenerationV1: true,
+                endpointLease: nil, completedPaneReleaseIds: [], completedWindowReleaseIds: [],
+                windowGenerationV1: true
+            ),
+            warnings: ["registration_window_generation_missing surface=sf_1", "registration_pane_generation_missing surface=sf_1 pane=1"]
+        )
+
+        let application = try await fixture.adapter.applyRegistration(reply, expectedInput: input)
+        let restoredSurface = try XCTUnwrap(application.state.liveSurfaces["sf_1"])
+        let restoredPane = try XCTUnwrap(restoredSurface.panes["1"])
+        XCTAssertEqual(application.state.registryBinding?.allocatorId, current.allocatorId)
+        XCTAssertEqual(restoredSurface.windowLabel, "z")
+        XCTAssertEqual(restoredSurface.allocationGeneration, nil)
+        XCTAssertEqual(restoredSurface.windowLabelConfirmed, true)
+        XCTAssertEqual(restoredPane.paneLabel, 1201)
+        XCTAssertNil(restoredPane.allocationGeneration)
+        XCTAssertEqual(restoredPane.history.visible.content, originalContent)
+        XCTAssertEqual(restoredPane.history.visible.contentId, "retained-entry")
+    }
+
+    func testRegistrationPreservesConfirmedLabelsWhenReplyWouldRewriteIdentity() async throws {
+        let clientId = String(repeating: "a", count: 64)
+        let identity = SurfAceRegistryIdentity(allocatorId: "alloc_home", fleetId: "fleet-home")
+        let fixture = try makeFixture(configure: { state in
+            state.registryBinding = .init(
+                allocatorId: identity.allocatorId, clientId: clientId, fleetId: identity.fleetId
+            )
+            try SurfAceLocklessTopologyOperations.applyWindowLabels(
+                state: &state, assignments: [(surfaceId: "sf_1", windowLabel: "b")]
+            )
+            var surface = try XCTUnwrap(state.liveSurfaces["sf_1"])
+            surface.allocationGeneration = 30
+            var pane = try XCTUnwrap(surface.panes["1"])
+            pane.paneLabel = 12
+            pane.allocationGeneration = 41
+            pane.history.visible.contentId = "retained-entry"
+            pane.history.visible.contentType = "html"
+            pane.history.visible.content = .object(["html": .string("<h1>Saved</h1>")])
+            surface.panes["1"] = pane
+            state.liveSurfaces["sf_1"] = surface
+        })
+        let before = await fixture.adapter.snapshot()
+        let beforeContent = try XCTUnwrap(before.liveSurfaces["sf_1"]?.panes["1"]?.history.visible.content)
+        let input = try SurfAceRegistrationInput(state: before, clientId: clientId)
+        let reply = SurfAceRegistrationReply(
+            assignments: [SurfAceRegistrationAssignment(
+                surfaceId: "sf_1", windowLabel: "c", windowAllocationGeneration: 31,
+                panes: [.init(paneId: "1", paneLineageId: "pl_sf_1_1", paneLabel: 13, allocationGeneration: 42)]
+            )],
+            projection: SurfAceRegistrationProjection(
+                directEndpoint: nil, prePairDescribeV1: false, allocationGenerationV1: true,
+                endpointLease: nil, completedPaneReleaseIds: [], completedWindowReleaseIds: [],
+                windowGenerationV1: true
+            )
+        )
+
+        let application = try await fixture.adapter.applyRegistration(reply, expectedInput: input)
+        let surface = try XCTUnwrap(application.state.liveSurfaces["sf_1"])
+        let pane = try XCTUnwrap(surface.panes["1"])
+        XCTAssertTrue(application.warnings.contains("registration_confirmed_window_label_mismatch surface=sf_1"))
+        XCTAssertEqual(surface.windowLabel, "b")
+        XCTAssertEqual(surface.allocationGeneration, 30)
+        XCTAssertEqual(pane.paneLabel, 12)
+        XCTAssertEqual(pane.allocationGeneration, 41)
+        XCTAssertEqual(pane.history.visible.content, beforeContent)
+
+        let missingGenerationReply = SurfAceRegistrationReply(
+            assignments: [SurfAceRegistrationAssignment(
+                surfaceId: "sf_1", windowLabel: "b",
+                panes: [.init(paneId: "1", paneLineageId: "pl_sf_1_1", paneLabel: 12)]
+            )],
+            projection: SurfAceRegistrationProjection(
+                directEndpoint: nil, prePairDescribeV1: false, allocationGenerationV1: true,
+                endpointLease: nil, completedPaneReleaseIds: [], completedWindowReleaseIds: [],
+                windowGenerationV1: true
+            )
+        )
+        let retained = try await fixture.adapter.applyRegistration(missingGenerationReply, expectedInput: input)
+        let retainedSurface = try XCTUnwrap(retained.state.liveSurfaces["sf_1"])
+        let retainedPane = try XCTUnwrap(retainedSurface.panes["1"])
+        XCTAssertEqual(retainedSurface.windowLabel, "b")
+        XCTAssertEqual(retainedSurface.allocationGeneration, 30)
+        XCTAssertEqual(retainedPane.paneLabel, 12)
+        XCTAssertEqual(retainedPane.allocationGeneration, 41)
+        XCTAssertEqual(retainedPane.history.visible.content, beforeContent)
     }
 
     func testRepeatedIdenticalRegistrationDoesNotWriteAnotherGeneration() async throws {

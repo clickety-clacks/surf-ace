@@ -649,15 +649,23 @@ final class SurfAceRuntime {
             applyReplySubset: { [weak self] reply, input, request in
                 guard let self else { throw SurfAceRegistrationError.stopped }
                 let adapter = try self.ensureLocklessAdapter()
-                let state = try await adapter.applyRegistration(
+                let application = try await adapter.applyRegistration(
                     reply, expectedInput: input, requestInput: request, clientId: identity.clientId
                 )
-                self.confirmedPaneLabels = Dictionary(uniqueKeysWithValues: reply.assignments.flatMap { assignment in
-                    assignment.panes.map { pane in
-                        ("\(assignment.surfaceId):\(pane.paneLineageId)", pane.paneLabel)
+                for warning in application.warnings {
+                    surfAceServerRuntimeLog(
+                        "event=central_registration_warning \(surfAceDiagnosticFields([("warning", warning)]))"
+                    )
+                }
+                let state = application.state
+                self.confirmedPaneLabels = Dictionary(uniqueKeysWithValues: state.liveSurfaces.values.flatMap { surface -> [(String, Int64)] in
+                    guard state.registryBinding != nil, surface.windowLabelConfirmed != false else { return [] }
+                    return surface.panes.values.filter { $0.paneLabel > 0 }.map { pane in
+                        ("\(surface.surfaceId):\(pane.paneLineageId)", pane.paneLabel)
                     }
                 })
                 try self.projectLocklessAuthorityState(state)
+                return application.needsRetry
             },
             recoverRefusedRelease: { [weak self] releaseId in
                 guard let self else { throw SurfAceRegistrationError.stopped }
@@ -673,6 +681,11 @@ final class SurfAceRuntime {
                 let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
                 surfAceServerRuntimeLog(
                     "event=central_registration_failed \(surfAceDiagnosticFields([("error", message)]))"
+                )
+            },
+            onWarning: { warning in
+                surfAceServerRuntimeLog(
+                    "event=central_registration_warning \(surfAceDiagnosticFields([("warning", warning)]))"
                 )
             },
             onStatusChange: { [weak self] status in
@@ -3418,7 +3431,7 @@ final class SurfAceRuntime {
                 let allocation = try await registration.claimPaneLabel(
                     surfaceId: surfaceId, paneId: paneId, paneLineageId: lineageId
                 )
-                labels[paneId] = allocation.paneLabel
+                if allocation.paneLabel > 0 { labels[paneId] = allocation.paneLabel }
                 if let generation = allocation.allocationGeneration {
                     generations[paneId] = generation
                 }
@@ -3446,6 +3459,9 @@ final class SurfAceRuntime {
             let allocation = try await registration.claimPaneLabel(
                 surfaceId: surfaceId, paneId: pane.paneId, paneLineageId: pane.paneLineageId
             )
+            guard allocation.paneLabel > 0 else {
+                return (pane.paneId, pane.paneLineageId, nil, pane.allocationGeneration)
+            }
             guard (pane.paneLabel == 0 || pane.paneLabel == allocation.paneLabel),
                   (pane.allocationGeneration == nil
                       || pane.allocationGeneration == allocation.allocationGeneration) else {
