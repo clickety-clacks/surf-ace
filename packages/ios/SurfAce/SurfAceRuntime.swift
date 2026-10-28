@@ -666,13 +666,15 @@ final class SurfAceRuntime {
                     configuredEndpoint: self.configuredDirectEndpoint,
                     observedAddress: self.isIsolatedTestHost
                         ? "127.0.0.1" : SurfAceDirectEndpointSelection.observedConnectionAddress(),
-                    listeningPort: self.serverPort > 0 ? self.serverPort : Int(self.fixedServerPort)
+                    listeningPort: self.serverPort > 0 ? self.serverPort : Int(self.fixedServerPort),
+                    allowLoopbackObservedAddress: self.isIsolatedTestHost
                 )
                 return try SurfAceRegistrationInput(
                     state: await adapter.snapshot(),
                     clientId: identity.clientId,
                     directEndpoint: selection.endpoint,
-                    directEndpointConfirmed: selection.isConfirmed,
+                    directEndpointSource: selection.source,
+                    directEndpointListener: selection.listener,
                     additionalWarnings: selection.warnings + [
                         "registration_pre_pair_describe_unsupported; continuing_window_labels"
                     ]
@@ -719,10 +721,13 @@ final class SurfAceRuntime {
                 surfAceServerRuntimeLog(
                     "event=central_registration_warning \(surfAceDiagnosticFields([("warning", warning)]))"
                 )
-                if warning == "registration_direct_endpoint_unconfirmed"
-                    || warning == "registration_direct_endpoint_unavailable_using_loopback" {
+                if warning.hasPrefix("registration_direct_endpoint_unconfirmed") {
                     self?.updateCentralRegistrationWarning(
-                        "The published direct address is unconfirmed and may not be reachable from other devices."
+                        "The direct address is unconfirmed and may not be reachable from other devices."
+                    )
+                } else if warning == "registration_direct_endpoint_unavailable" {
+                    self?.updateCentralRegistrationWarning(
+                        "Surf Ace could not provide a direct address, but registration will continue."
                     )
                 } else if warning == "registration_pre_pair_describe_unsupported; continuing_window_labels" {
                     self?.updateCentralRegistrationWarning(

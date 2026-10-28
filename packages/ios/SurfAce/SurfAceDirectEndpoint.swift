@@ -1,36 +1,72 @@
 import Darwin
 import Foundation
 
+enum SurfAceDirectEndpointSource: String, Codable, Equatable, Sendable {
+    case configured
+    case clientReported = "client-reported"
+    case registryObserved = "registry-observed"
+}
+
+// The client request type excludes registry-observed so only a registry can assert it.
+enum SurfAceRegistrationEndpointSource: String, Codable, Equatable, Sendable {
+    case configured
+    case clientReported = "client-reported"
+}
+
+struct SurfAceDirectEndpointListener: Codable, Equatable, Sendable {
+    let scheme: String
+    let port: Int
+    let path: String
+}
+
 struct SurfAceDirectEndpointSelection: Equatable, Sendable {
-    let endpoint: String
-    let isConfirmed: Bool
+    let endpoint: String?
+    let source: SurfAceRegistrationEndpointSource?
+    let listener: SurfAceDirectEndpointListener?
     let warnings: [String]
 
     static func select(
         configuredEndpoint: String?,
         observedAddress: String?,
-        listeningPort: Int
+        listeningPort: Int,
+        allowLoopbackObservedAddress: Bool = false
     ) -> Self {
         var warnings: [String] = []
+        let listener: SurfAceDirectEndpointListener?
+        if (1...65_535).contains(listeningPort) {
+            listener = SurfAceDirectEndpointListener(scheme: "ws", port: listeningPort, path: "/ws")
+        } else {
+            listener = nil
+            warnings.append("registration_listening_port_unrecognized")
+        }
+
         if let configuredEndpoint = configuredEndpoint?.trimmingCharacters(in: .whitespacesAndNewlines),
            !configuredEndpoint.isEmpty {
             if isSupportedEndpoint(configuredEndpoint) {
-                return Self(endpoint: configuredEndpoint, isConfirmed: true, warnings: [])
+                return Self(endpoint: configuredEndpoint, source: .configured, listener: nil, warnings: [])
             }
             warnings.append("registration_configured_endpoint_unrecognized")
         }
 
-        let port = (1...65_535).contains(listeningPort) ? listeningPort : 19_001
-        if port != listeningPort { warnings.append("registration_listening_port_unrecognized") }
-        if let observedAddress, let endpoint = endpoint(address: observedAddress, port: port) {
-            warnings.append("registration_direct_endpoint_unconfirmed")
-            return Self(endpoint: endpoint, isConfirmed: false, warnings: warnings)
+        if let observedAddress,
+           (isUsableObservedAddress(observedAddress)
+                || (allowLoopbackObservedAddress && isLoopbackAddress(observedAddress))),
+           let listener,
+           let endpoint = endpoint(address: observedAddress, port: listener.port) {
+            warnings.append("registration_direct_endpoint_unconfirmed source=client-reported")
+            return Self(endpoint: endpoint, source: .clientReported, listener: listener, warnings: warnings)
         }
 
-        warnings.append("registration_direct_endpoint_unavailable_using_loopback")
+        if let listener {
+            warnings.append("registration_direct_endpoint_unconfirmed source=registry-observed")
+            return Self(endpoint: nil, source: nil, listener: listener, warnings: warnings)
+        }
+
+        warnings.append("registration_direct_endpoint_unavailable")
         return Self(
-            endpoint: endpoint(address: "127.0.0.1", port: port)!,
-            isConfirmed: false,
+            endpoint: nil,
+            source: nil,
+            listener: nil,
             warnings: warnings
         )
     }
@@ -121,5 +157,10 @@ struct SurfAceDirectEndpointSelection: Equatable, Sendable {
         guard octets.count == 4 else { return false }
         return octets[0] != 0 && octets[0] != 127 && octets[0] < 224
             && !(octets[0] == 169 && octets[1] == 254)
+    }
+
+    private static func isLoopbackAddress(_ value: String) -> Bool {
+        if value.contains(":"), value.lowercased() == "::1" { return true }
+        return value.split(separator: ".").first == "127"
     }
 }
