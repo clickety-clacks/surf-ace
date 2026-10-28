@@ -154,7 +154,7 @@ pub fn document(target: Option<&str>) -> Result<Value, String> {
             "discoveryLimits": [
                 "fleet-list reads registry inventory and configured endpoint leases; it does not prove endpoint reachability.",
                 "window-describe reads fleet.topology, sends one nonce-correlated surface.describe to the leased direct endpoint before pairing, then rechecks fleet.topology; identity matching is consistency only and does not authenticate either peer.",
-                "When application readiness or saved registry metadata is uncertain, window-describe keeps a readable topology available and reports per-field identity consistency separately.",
+                "For a readable client and surface match, missing or unreadable saved registry values and pane details do not suppress the topology; unavailable values stay null, different readable registry values are retained, and scoped limitations are reported separately.",
                 "For client_not_ready, window-describe includes the direct client's existing message as applicationReadiness.readinessReason, limited to 512 characters.",
                 "list and capture-pane pair a controller before their direct request; they are not no-pair discovery probes.",
                 "window-describe does not pair, create controller state, or authorize later mutations; writes still need their own explicit endpoint and revision guards."
@@ -892,7 +892,7 @@ fn result_schema(command: Command, description: &str) -> Value {
                         "observedAtMs": nonnegative_integer_schema(), "applicationReadiness": { "type": "object" },
                         "surfaceSetRevision": nonnegative_integer_schema(), "topologyRevision": nonnegative_integer_schema(),
                         "layout": { "type": "object" },
-                        "panes": { "type": "array", "minItems": 1, "items": { "type": "object", "required": ["paneId", "paneLabel", "contentObservation"], "properties": { "paneId": nonnegative_integer_schema(), "paneLabel": { "type": ["integer", "null"], "minimum": 1, "maximum": SAFE_INTEGER_MAX }, "contentObservation": { "type": "object", "required": ["revision", "source", "observedAtMs"], "properties": { "revision": { "type": ["integer", "null"], "minimum": 0, "maximum": SAFE_INTEGER_MAX }, "source": { "const": "client-authority" }, "observedAtMs": nonnegative_integer_schema() }, "additionalProperties": false } }, "additionalProperties": false } }
+                        "panes": { "type": "array", "minItems": 1, "items": { "type": "object", "required": ["paneId", "paneLabel", "contentObservation"], "properties": { "paneId": nonnegative_integer_schema(), "paneLabel": { "type": ["integer", "null"], "minimum": 1, "maximum": SAFE_INTEGER_MAX }, "contentObservation": { "type": ["object", "null"], "required": ["revision", "source", "observedAtMs"], "properties": { "revision": { "type": ["integer", "null"], "minimum": 0, "maximum": SAFE_INTEGER_MAX }, "source": { "const": "client-authority" }, "observedAtMs": nonnegative_integer_schema() }, "additionalProperties": false } }, "additionalProperties": false } }
                     },
                     "additionalProperties": false
                 }

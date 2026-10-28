@@ -711,16 +711,15 @@ fn probe_surface(candidate: &EndpointCandidate, observed_at_ms: u64) -> Result<V
             ));
         }
     };
-    if let Err(error) = validate_surface_observation(&payload, candidate, &nonce) {
-        return Err(with_probe_evidence(
+    validate_surface_observation(&payload, candidate, &nonce).map_err(|error| {
+        with_probe_evidence(
             error,
             candidate,
             observed_at_ms,
             "reachable",
             "unknown",
-        ));
-    }
-    Ok(payload)
+        )
+    })
 }
 
 fn bounded_readiness_reason(message: &str) -> Option<String> {
@@ -861,30 +860,13 @@ fn validate_surface_observation(
     payload: &Value,
     candidate: &EndpointCandidate,
     nonce: &str,
-) -> Result<(), CliError> {
+) -> Result<Value, CliError> {
     let object = payload.as_object().ok_or_else(|| {
         discovery_error(
             "describe_response_invalid",
             "Client observation is not an object",
         )
     })?;
-    require_exact_keys(
-        object,
-        &[
-            "nonce",
-            "clientId",
-            "registryIdentity",
-            "surfaceId",
-            "endpointLeaseGeneration",
-            "observedAtMs",
-            "applicationReadiness",
-            "surfaceSetRevision",
-            "topologyRevision",
-            "layout",
-            "panes",
-        ],
-    )
-    .map_err(|message| discovery_error("describe_response_invalid", message))?;
     if object.get("nonce").and_then(Value::as_str) != Some(nonce) {
         return Err(discovery_error(
             "stale_response",
@@ -906,29 +888,6 @@ fn validate_surface_observation(
             "Client observation identifies a different client or surface",
         ));
     }
-    match object.get("registryIdentity") {
-        Some(value) if value.is_null() => {}
-        Some(_) => {
-            parse_registry_identity(object.get("registryIdentity"))
-                .map_err(|message| discovery_error("describe_response_invalid", message))?;
-        }
-        None => return Err(discovery_error(
-            "describe_response_invalid",
-            "Client observation is missing its saved registry identity",
-        )),
-    }
-    match object.get("endpointLeaseGeneration") {
-        Some(value) if value.is_null() => {}
-        Some(value) if safe_positive_u64(value).is_some() => {}
-        None => return Err(discovery_error(
-            "describe_response_invalid",
-            "Client observation is missing its saved endpoint lease",
-        )),
-        _ => return Err(discovery_error(
-            "describe_response_invalid",
-            "Saved endpoint lease generation is invalid",
-        )),
-    }
     for key in ["observedAtMs", "surfaceSetRevision", "topologyRevision"] {
         if object.get(key).and_then(safe_nonnegative_u64).is_none() {
             return Err(discovery_error(
@@ -937,8 +896,61 @@ fn validate_surface_observation(
             ));
         }
     }
-    validate_application_readiness(object.get("applicationReadiness"))
-        .map_err(|message| discovery_error("describe_response_invalid", message))?;
+    // Saved registry metadata is advisory for this read. Keep the complete,
+    // identity-matched topology when a client cannot read one of these fields;
+    // represent the unavailable value as null and report the limitation. A
+    // valid but different value remains visible and is reported as stale.
+    let mut normalized = Map::new();
+    for key in [
+        "nonce",
+        "clientId",
+        "surfaceId",
+        "observedAtMs",
+        "surfaceSetRevision",
+        "topologyRevision",
+        "layout",
+    ] {
+        if let Some(value) = object.get(key) {
+            normalized.insert(key.into(), value.clone());
+        }
+    }
+    let mut partial_codes = Vec::new();
+    let reported_identity = object
+        .get("registryIdentity")
+        .and_then(parse_reported_registry_identity);
+    match reported_identity {
+        Some(identity) => {
+            if identity != candidate.identity {
+                partial_codes.push("registry_binding_stale");
+            }
+            normalized.insert(
+                "registryIdentity".into(),
+                json!({
+                    "allocatorId": identity.allocator_id,
+                    "fleetId": identity.fleet_id,
+                }),
+            );
+        }
+        None => {
+            partial_codes.push("registry_binding_unavailable");
+            normalized.insert("registryIdentity".into(), Value::Null);
+        }
+    }
+    match object
+        .get("endpointLeaseGeneration")
+        .and_then(safe_positive_u64)
+    {
+        Some(generation) => {
+            if generation != candidate.lease_generation {
+                partial_codes.push("endpoint_lease_stale");
+            }
+            normalized.insert("endpointLeaseGeneration".into(), Value::from(generation));
+        }
+        None => {
+            partial_codes.push("endpoint_lease_unavailable");
+            normalized.insert("endpointLeaseGeneration".into(), Value::Null);
+        }
+    }
     let panes = object
         .get("panes")
         .and_then(Value::as_array)
@@ -950,12 +962,11 @@ fn validate_surface_observation(
             )
         })?;
     let mut pane_ids = BTreeSet::new();
+    let mut normalized_panes = Vec::with_capacity(panes.len());
     for pane in panes {
         let pane = pane.as_object().ok_or_else(|| {
             discovery_error("describe_response_invalid", "Pane record is not an object")
         })?;
-        require_exact_keys(pane, &["paneId", "paneLabel", "contentObservation"])
-            .map_err(|message| discovery_error("describe_response_invalid", message))?;
         let pane_id = pane
             .get("paneId")
             .and_then(safe_nonnegative_u64)
@@ -966,50 +977,59 @@ fn validate_surface_observation(
                 "Client observation contains duplicate pane ids",
             ));
         }
-        let label = pane
-            .get("paneLabel")
-            .ok_or_else(|| discovery_error("describe_response_invalid", "Pane label is missing"))?;
-        if !label.is_null() && safe_positive_u64(label).is_none() {
-            return Err(discovery_error(
-                "describe_response_invalid",
-                "Pane label is invalid",
-            ));
+        let label = pane.get("paneLabel");
+        let pane_label = label.and_then(|label| {
+            if label.is_null() {
+                Some(Value::Null)
+            } else {
+                safe_positive_u64(label).map(Value::from)
+            }
+        });
+        if pane_label.is_none() {
+            partial_codes.push("pane_label_unavailable");
         }
-        let observation = pane
-            .get("contentObservation")
-            .and_then(Value::as_object)
-            .ok_or_else(|| {
-                discovery_error(
-                    "describe_response_invalid",
-                    "Pane content observation is invalid",
-                )
-            })?;
-        require_exact_keys(observation, &["revision", "source", "observedAtMs"])
-            .map_err(|message| discovery_error("describe_response_invalid", message))?;
-        if observation.get("source").and_then(Value::as_str) != Some("client-authority")
-            || observation
-                .get("observedAtMs")
-                .and_then(safe_nonnegative_u64)
-                .is_none()
-            || (!observation.get("revision").is_some_and(Value::is_null)
-                && observation
-                    .get("revision")
-                    .and_then(safe_nonnegative_u64)
-                    .is_none())
-        {
-            return Err(discovery_error(
-                "describe_response_invalid",
-                "Pane content observation is invalid",
-            ));
-        }
+        let content_observation = pane.get("contentObservation").and_then(Value::as_object);
+        let normalized_content_observation = match content_observation {
+            Some(observation)
+                if observation.get("source").and_then(Value::as_str)
+                    == Some("client-authority")
+                    && observation
+                        .get("observedAtMs")
+                        .and_then(safe_nonnegative_u64)
+                        .is_some() =>
+            {
+                let revision = observation.get("revision");
+                let revision = if revision.is_none_or(|revision| {
+                    !revision.is_null() && safe_nonnegative_u64(revision).is_none()
+                }) {
+                    partial_codes.push("content_revision_unavailable");
+                    Value::Null
+                } else {
+                    revision.cloned().unwrap_or(Value::Null)
+                };
+                json!({
+                    "revision": revision,
+                    "source": "client-authority",
+                    "observedAtMs": observation.get("observedAtMs").cloned().unwrap_or(Value::Null),
+                })
+            }
+            _ => {
+                partial_codes.push("content_observation_unavailable");
+                Value::Null
+            }
+        };
+        normalized_panes.push(json!({
+            "paneId": pane_id,
+            "paneLabel": pane_label.unwrap_or(Value::Null),
+            "contentObservation": normalized_content_observation,
+        }));
     }
     let mut layout_ids = Vec::new();
-    validate_layout_node(
-        object.get("layout").expect("required layout"),
-        0,
-        &mut layout_ids,
-    )
-    .map_err(|message| discovery_error("describe_response_invalid", message))?;
+    let layout = object.get("layout").ok_or_else(|| {
+        discovery_error("describe_response_invalid", "Client observation omitted layout")
+    })?;
+    validate_layout_node(layout, 0, &mut layout_ids)
+        .map_err(|message| discovery_error("describe_response_invalid", message))?;
     let pane_id_set = pane_ids.into_iter().collect::<Vec<_>>();
     layout_ids.sort_unstable();
     if layout_ids != pane_id_set {
@@ -1018,7 +1038,85 @@ fn validate_surface_observation(
             "Layout leaves do not match the live pane list",
         ));
     }
-    Ok(())
+    normalized.insert("panes".into(), Value::Array(normalized_panes));
+    normalize_application_readiness(
+        &mut normalized,
+        object.get("applicationReadiness"),
+        &partial_codes,
+    );
+    Ok(Value::Object(normalized))
+}
+
+fn parse_reported_registry_identity(value: &Value) -> Option<RegistryIdentity> {
+    let object = value.as_object()?;
+    let allocator_id = object
+        .get("allocatorId")
+        .and_then(Value::as_str)
+        .filter(|value| valid_allocator_id(value))?;
+    let fleet_id = object
+        .get("fleetId")
+        .and_then(Value::as_str)
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 128
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte))
+        })?;
+    Some(RegistryIdentity {
+        allocator_id: allocator_id.to_owned(),
+        fleet_id: fleet_id.to_owned(),
+    })
+}
+
+fn normalize_application_readiness(
+    payload: &mut Map<String, Value>,
+    value: Option<&Value>,
+    partial_codes: &[&str],
+) {
+    let raw = value.and_then(Value::as_object);
+    let raw_status = raw
+        .and_then(|object| object.get("status"))
+        .and_then(Value::as_str);
+    let raw_codes = raw
+        .and_then(|object| object.get("limitationCodes"))
+        .and_then(Value::as_array);
+    let malformed = raw.is_none()
+        || !matches!(raw_status, Some("ready" | "degraded"))
+        || raw_codes.is_none()
+        || raw_codes.is_some_and(|codes| {
+            codes
+                .iter()
+                .any(|code| !code.as_str().is_some_and(valid_limitation_code))
+        })
+        || (raw_status == Some("ready") && raw_codes.is_some_and(|codes| !codes.is_empty()))
+        || (raw_status == Some("degraded") && raw_codes.is_some_and(|codes| codes.is_empty()));
+
+    let mut readiness = Map::new();
+    let mut codes = raw_codes
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|code| valid_limitation_code(code))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if malformed && !codes.iter().any(|code| code == "application_state_unverified") {
+        codes.push("application_state_unverified".into());
+    }
+    for code in partial_codes.iter().copied() {
+        if !codes.iter().any(|existing| existing == code) {
+            codes.push(code.to_owned());
+        }
+    }
+    readiness.insert(
+        "status".into(),
+        Value::String(if codes.is_empty() { "ready" } else { "degraded" }.into()),
+    );
+    readiness.insert(
+        "limitationCodes".into(),
+        Value::Array(codes.into_iter().map(Value::String).collect()),
+    );
+    payload.insert("applicationReadiness".into(), Value::Object(readiness));
 }
 
 fn identity_consistency(
@@ -1082,32 +1180,6 @@ fn valid_client_id(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-fn validate_application_readiness(value: Option<&Value>) -> Result<(), String> {
-    let object = value
-        .and_then(Value::as_object)
-        .ok_or_else(|| "applicationReadiness is missing".to_owned())?;
-    require_exact_keys(object, &["status", "limitationCodes"])?;
-    let status = object
-        .get("status")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "applicationReadiness.status is invalid".to_owned())?;
-    let codes = object
-        .get("limitationCodes")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "applicationReadiness.limitationCodes is invalid".to_owned())?;
-    if !codes
-        .iter()
-        .all(|code| code.as_str().is_some_and(valid_limitation_code))
-    {
-        return Err("applicationReadiness contains an invalid limitation code".into());
-    }
-    match status {
-        "ready" if codes.is_empty() => Ok(()),
-        "degraded" if !codes.is_empty() => Ok(()),
-        _ => Err("applicationReadiness status and limitation codes disagree".into()),
-    }
-}
-
 fn validate_layout_node(
     value: &Value,
     depth: usize,
@@ -1121,7 +1193,6 @@ fn validate_layout_node(
         .ok_or_else(|| "layout node is not an object".to_owned())?;
     match object.get("type").and_then(Value::as_str) {
         Some("pane") => {
-            require_exact_keys_with_optional(object, &["type", "paneId"], &["weight"])?;
             let pane_id = object
                 .get("paneId")
                 .and_then(safe_nonnegative_u64)
@@ -1131,11 +1202,6 @@ fn validate_layout_node(
             Ok(())
         }
         Some("split") => {
-            require_exact_keys_with_optional(
-                object,
-                &["type", "direction", "children"],
-                &["weight"],
-            )?;
             if !matches!(
                 object.get("direction").and_then(Value::as_str),
                 Some("horizontal" | "vertical")
@@ -1197,21 +1263,10 @@ fn parse_registry_identity(value: Option<&Value>) -> Result<RegistryIdentity, St
 }
 
 fn require_exact_keys(object: &Map<String, Value>, required: &[&str]) -> Result<(), String> {
-    require_exact_keys_with_optional(object, required, &[])
-}
-
-fn require_exact_keys_with_optional(
-    object: &Map<String, Value>,
-    required: &[&str],
-    optional: &[&str],
-) -> Result<(), String> {
     if required.iter().any(|key| !object.contains_key(*key)) {
         return Err("Required response field is missing".into());
     }
-    if object
-        .keys()
-        .any(|key| !required.contains(&key.as_str()) && !optional.contains(&key.as_str()))
-    {
+    if object.keys().any(|key| !required.contains(&key.as_str())) {
         return Err("Response object contains an unsupported field".into());
     }
     Ok(())
