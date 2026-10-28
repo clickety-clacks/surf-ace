@@ -814,6 +814,12 @@ fn help_and_schema_are_json_and_do_not_require_operational_arguments() {
             .as_array()
             .is_some_and(|types| types.contains(&json!("null")))
     );
+    assert!(
+        window_result_schema["properties"]["surfaceObservation"]["properties"]["panes"]["items"]
+            ["properties"]["contentObservation"]["type"]
+            .as_array()
+            .is_some_and(|types| types.contains(&json!("null")))
+    );
     assert_eq!(
         window_result_schema["properties"]["surfaceObservation"]["properties"]["panes"]["items"]
             ["properties"]["paneId"]["minimum"],
@@ -1763,7 +1769,7 @@ fn window_describe_exposes_a_bounded_server_not_ready_message() {
 }
 
 #[test]
-fn window_describe_rejects_a_different_client_but_keeps_registry_mismatch_readable() {
+fn window_describe_rejects_a_different_client_or_surface_but_keeps_registry_mismatch_readable() {
     let now = epoch_ms();
     let client_id = "d".repeat(64);
     let wrong_client_id = "e".repeat(64);
@@ -1789,6 +1795,53 @@ fn window_describe_rejects_a_different_client_but_keeps_registry_mismatch_readab
     assert_eq!(result["error"]["code"], "identity_mismatch");
     assert_eq!(server.join().unwrap().len(), 2);
     assert_eq!(endpoint_server.join().unwrap()["op"], "surface.describe");
+
+    let wrong_surface_id = "sf_another_live_surface";
+    let (endpoint, endpoint_server) = spawn_surface_describe_server(describe_observation(
+        &client_id,
+        wrong_surface_id,
+        7,
+    ));
+    let topology = discovery_topology(
+        vec![discovery_client(
+            &client_id,
+            Some(&endpoint),
+            vec![discovery_surface(surface_id, "a")],
+            7,
+            now - 10,
+            now + 10_000,
+            true,
+        )],
+        now,
+    );
+    let (registry, server) = spawn_registry_sequence(vec![topology.clone(), topology]);
+    let output = run_window_describe(&registry, "a");
+    assert!(!output.status.success());
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["error"]["code"], "identity_mismatch");
+    assert!(result["error"]["details"].get("surfaceObservation").is_none());
+    assert_eq!(server.join().unwrap().len(), 2);
+    assert_eq!(endpoint_server.join().unwrap()["op"], "surface.describe");
+
+    let (registry, server) = spawn_registry_server(fleet_inventory_fixture(), "fleet.topology", true);
+    let temp = TempDir::new().unwrap();
+    let state_root = temp.path().join("state-must-remain-absent");
+    let output = run_native_cli(&[
+        "--state-root",
+        state_root.to_str().unwrap(),
+        "--registry",
+        &registry,
+        "fleet-list",
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let inventory: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(inventory["result"]["clients"].as_array().unwrap().len(), 2);
+    assert_eq!(server.join().unwrap()["op"], "fleet.topology");
+    assert!(!state_root.exists(), "fleet-list must remain state-free");
 
     let mut mismatched_binding = describe_observation(&client_id, surface_id, 7);
     mismatched_binding["registryIdentity"] = json!({
@@ -1819,6 +1872,11 @@ fn window_describe_rejects_a_different_client_but_keeps_registry_mismatch_readab
     assert_eq!(result["result"]["identityConsistency"]["clientId"], "matched");
     assert_eq!(result["result"]["identityConsistency"]["registryIdentity"], "differs");
     assert_eq!(result["result"]["identityConsistency"]["endpointLease"], "matched");
+    assert_eq!(
+        result["result"]["surfaceObservation"]["registryIdentity"],
+        json!({"allocatorId": "alloc_other", "fleetId": "fleet_other"})
+    );
+    assert_eq!(result["result"]["surfaceObservation"]["endpointLeaseGeneration"], 7);
     assert_eq!(result["result"]["surfaceObservation"]["topologyRevision"], 8);
     assert_eq!(server.join().unwrap().len(), 2);
     assert_eq!(endpoint_server.join().unwrap()["op"], "surface.describe");
@@ -1924,6 +1982,197 @@ fn window_describe_keeps_topology_when_saved_registry_state_is_unavailable_stale
         assert_eq!(registry_server.join().unwrap().len(), 2);
         assert_eq!(endpoint_server.join().unwrap()["op"], "surface.describe");
     }
+}
+
+#[test]
+fn window_describe_salvages_unreadable_saved_fields_and_keeps_fleet_list_available() {
+    let now = epoch_ms();
+    let client_id = "f".repeat(64);
+    let surface_id = "sf_partial_saved_fields";
+    let mut observation = describe_observation(&client_id, surface_id, 8);
+    let observation_object = observation.as_object_mut().unwrap();
+    observation_object.remove("registryIdentity");
+    observation_object.remove("endpointLeaseGeneration");
+    observation_object.remove("applicationReadiness");
+    observation_object.insert("futureClientField".into(), json!({ "extension": true }));
+    observation_object["layout"]["futureLayoutField"] = json!({ "extension": true });
+    observation_object["panes"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("paneLabel");
+    observation_object["panes"][0]["contentObservation"]["revision"] = json!("unreadable");
+    observation_object["panes"][0]["futurePaneField"] = json!("ignored");
+
+    let (endpoint, endpoint_server) = spawn_surface_describe_server(observation);
+    let topology = discovery_topology(
+        vec![discovery_client(
+            &client_id,
+            Some(&endpoint),
+            vec![discovery_surface(surface_id, "a")],
+            8,
+            now - 10,
+            now + 10_000,
+            true,
+        )],
+        now,
+    );
+    let (registry, registry_server) = spawn_registry_sequence(vec![topology.clone(), topology]);
+    let output = run_window_describe(&registry, "a");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let schema_output = run_native_cli(&["schema", "window-describe"]);
+    assert!(schema_output.status.success());
+    let schema_response: Value = serde_json::from_slice(&schema_output.stdout).unwrap();
+    let result_schema = schema_response["result"]["command"]["resultSchema"].clone();
+    common::schema::validate(&result_schema, &result_schema, &result)
+        .expect("partial saved fields retain the published window-describe result shape");
+    assert_eq!(result["result"]["identityConsistency"]["clientId"], "matched");
+    assert_eq!(result["result"]["identityConsistency"]["surfaceId"], "matched");
+    assert_eq!(
+        result["result"]["identityConsistency"]["registryIdentity"],
+        "absent"
+    );
+    assert_eq!(
+        result["result"]["identityConsistency"]["endpointLease"],
+        "absent"
+    );
+    assert_eq!(result["result"]["applicationReadiness"]["status"], "degraded");
+    for code in [
+        "application_state_unverified",
+        "registry_binding_unavailable",
+        "endpoint_lease_unavailable",
+        "pane_label_unavailable",
+        "content_revision_unavailable",
+    ] {
+        assert!(
+            result["result"]["applicationReadiness"]["limitationCodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|value| value == code),
+            "missing {code}: {result}"
+        );
+    }
+    assert_eq!(result["result"]["surfaceObservation"]["clientId"], client_id);
+    assert_eq!(result["result"]["surfaceObservation"]["surfaceId"], surface_id);
+    assert_eq!(result["result"]["surfaceObservation"]["layout"]["paneId"], 1);
+    assert_eq!(
+        result["result"]["surfaceObservation"]["layout"]["futureLayoutField"]["extension"],
+        true
+    );
+    assert_eq!(
+        result["result"]["surfaceObservation"]["registryIdentity"],
+        Value::Null
+    );
+    assert_eq!(
+        result["result"]["surfaceObservation"]["endpointLeaseGeneration"],
+        Value::Null
+    );
+    assert_eq!(
+        result["result"]["surfaceObservation"]["panes"][0]["paneLabel"],
+        Value::Null
+    );
+    assert_eq!(
+        result["result"]["surfaceObservation"]["panes"][0]["contentObservation"]["revision"],
+        Value::Null
+    );
+    assert!(result["result"]["surfaceObservation"].get("futureClientField").is_none());
+    assert!(result["result"]["surfaceObservation"]["panes"][0]
+        .get("futurePaneField")
+        .is_none());
+    assert_eq!(registry_server.join().unwrap().len(), 2);
+    assert_eq!(endpoint_server.join().unwrap()["op"], "surface.describe");
+
+    let mut observation = describe_observation(&client_id, surface_id, 8);
+    observation["registryIdentity"] = json!({
+        "allocatorId": null,
+        "fleetId": "fleet_fixture",
+    });
+    observation["endpointLeaseGeneration"] = json!("unreadable");
+    observation["applicationReadiness"] = json!({
+        "status": "ready",
+        "limitationCodes": [null],
+        "futureReadinessField": true,
+    });
+    observation["panes"][0]["paneLabel"] = json!("unreadable");
+    observation["panes"][0]["contentObservation"] = Value::Null;
+    let (endpoint, endpoint_server) = spawn_surface_describe_server(observation);
+    let topology = discovery_topology(
+        vec![discovery_client(
+            &client_id,
+            Some(&endpoint),
+            vec![discovery_surface(surface_id, "a")],
+            8,
+            now - 10,
+            now + 10_000,
+            true,
+        )],
+        now,
+    );
+    let (registry, registry_server) = spawn_registry_sequence(vec![topology.clone(), topology]);
+    let output = run_window_describe(&registry, "a");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    common::schema::validate(&result_schema, &result_schema, &result)
+        .expect("unavailable per-pane observations validate as null");
+    assert_eq!(result["result"]["identityConsistency"]["registryIdentity"], "absent");
+    assert_eq!(result["result"]["identityConsistency"]["endpointLease"], "absent");
+    assert_eq!(result["result"]["applicationReadiness"]["status"], "degraded");
+    for code in [
+        "application_state_unverified",
+        "registry_binding_unavailable",
+        "endpoint_lease_unavailable",
+        "pane_label_unavailable",
+        "content_observation_unavailable",
+    ] {
+        assert!(
+            result["result"]["applicationReadiness"]["limitationCodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|value| value == code),
+            "missing {code}: {result}"
+        );
+    }
+    assert_eq!(
+        result["result"]["surfaceObservation"]["panes"][0]["paneLabel"],
+        Value::Null
+    );
+    assert_eq!(
+        result["result"]["surfaceObservation"]["panes"][0]["contentObservation"],
+        Value::Null
+    );
+    assert_eq!(registry_server.join().unwrap().len(), 2);
+    assert_eq!(endpoint_server.join().unwrap()["op"], "surface.describe");
+
+    // An unrelated inventory request remains usable after a partial describe.
+    let (registry, server) = spawn_registry_server(fleet_inventory_fixture(), "fleet.topology", true);
+    let temp = TempDir::new().unwrap();
+    let state_root = temp.path().join("state-must-remain-absent");
+    let output = run_native_cli(&[
+        "--state-root",
+        state_root.to_str().unwrap(),
+        "--registry",
+        &registry,
+        "fleet-list",
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let inventory: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(inventory["result"]["clients"].as_array().unwrap().len(), 2);
+    assert_eq!(server.join().unwrap()["op"], "fleet.topology");
+    assert!(!state_root.exists(), "fleet-list must remain state-free");
 }
 
 #[test]
@@ -4775,6 +5024,282 @@ fn native_cli_read_returns_current_content_when_unread_delta_is_empty() {
             .unwrap();
     assert_eq!(persisted["scopes"][scope_id]["projectedCursor"], 46);
     assert_eq!(persisted["scopes"][scope_id]["clientCursor"], 46);
+}
+
+#[test]
+fn native_cli_read_salvages_valid_scope_and_preserves_unreadable_sibling() {
+    let temp = TempDir::new().unwrap();
+    let readable_scope = "pane:sf_partial:1";
+    let unreadable_scope = "pane:sf_partial:2";
+    let current_content = pane_content_record("sf_partial", 1, 5, Some("saved-content"), None);
+    let unreadable_row = json!({
+        "clientCursor": "unknown-cursor-format",
+        "records": [{
+            "recordClass": "content",
+            "recordId": "retained-unreadable-content",
+            "payload": { "content": { "text": "preserve this saved content" } }
+        }]
+    });
+    let unreadable_ack = json!({
+        "scopeId": unreadable_scope,
+        "cursor": "unknown-cursor-format",
+        "idempotencyKey": "ack-unreadable"
+    });
+    fs::write(
+        temp.path().join("controller-state.json"),
+        serde_json::to_vec_pretty(&json!({
+            "version": 1,
+            "controllerInstanceId": "ctl_partial_saved_state",
+            "scopes": {
+                readable_scope: {
+                    "clientCursor": 6,
+                    "projectedCursor": 6,
+                    "firstRetainedSequence": 1,
+                    "lastRetainedSequence": 5,
+                    "records": [current_content],
+                    "gap": null,
+                    "synchronized": true,
+                    "synchronizationCutoff": "cutoff-partial"
+                },
+                unreadable_scope: unreadable_row
+            },
+            "acknowledgementOutbox": [unreadable_ack],
+            "unresolved": {},
+            "resumeMetadata": {}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let output = native_cli_read(&temp, readable_scope);
+    assert_eq!(output["ok"], true);
+    assert_eq!(output["result"]["cacheStatus"], "current");
+    assert_eq!(
+        output["result"]["currentContentRecord"]["payload"]["contentId"],
+        "saved-content"
+    );
+    assert!(output["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|warning| warning == "saved_state_scope_unreadable"));
+    assert!(output["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|warning| warning == "saved_state_acknowledgement_unreadable"));
+
+    let root = LockedStateRoot::open(temp.path(), 1024 * 1024).unwrap();
+    assert!(root.acknowledgement_is_guarded(unreadable_scope));
+    assert!(!root.acknowledgement_is_guarded(readable_scope));
+    drop(root);
+
+    let persisted: Value = serde_json::from_slice(
+        &fs::read(temp.path().join("controller-state.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(persisted["scopes"][unreadable_scope], unreadable_row);
+    assert_eq!(persisted["acknowledgementOutbox"][0], unreadable_ack);
+    assert_eq!(
+        persisted["scopes"][readable_scope]["records"][0],
+        current_content
+    );
+}
+
+#[test]
+fn surface_pair_skips_unreadable_saved_scope_snapshot_and_describes_readable_pane() {
+    let temp = TempDir::new().unwrap();
+    let readable_scope = "pane:sf_1:1";
+    let unreadable_scope = "pane:sf_1:2";
+    let saved_content = pane_content_record("sf_1", 1, 1, Some("saved-readable"), None);
+    let unreadable_row = json!({
+        "clientCursor": "unknown-cursor-format",
+        "records": [{
+            "recordClass": "content",
+            "recordId": "retained-unreadable-content",
+            "payload": { "content": { "text": "preserve this saved content" } }
+        }]
+    });
+    fs::write(
+        temp.path().join("controller-state.json"),
+        serde_json::to_vec_pretty(&json!({
+            "version": 1,
+            "controllerInstanceId": "ctl_unreadable_sibling_snapshot",
+            "scopes": {
+                readable_scope: {
+                    "clientCursor": 1,
+                    "projectedCursor": 1,
+                    "firstRetainedSequence": 1,
+                    "lastRetainedSequence": 1,
+                    "currentContentRecord": saved_content,
+                    "currentContentSequence": 1,
+                    "records": [saved_content],
+                    "gap": null,
+                    "synchronized": false,
+                    "synchronizationCutoff": null
+                },
+                unreadable_scope: unreadable_row
+            },
+            "acknowledgementOutbox": [],
+            "unresolved": {},
+            "resumeMetadata": {}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let readable_snapshot = pane_scope_snapshot(
+        readable_scope,
+        2,
+        vec![pane_content_record("sf_1", 1, 2, Some("fresh-readable"), None)],
+    );
+    let unreadable_snapshot = pane_scope_snapshot(
+        unreadable_scope,
+        2,
+        vec![pane_content_record("sf_1", 2, 2, Some("fresh-sibling"), None)],
+    );
+    let mut wire = FakeWire::ordinary();
+    wire.scopes = vec![readable_snapshot, unreadable_snapshot];
+
+    let output = execute_with_wire(
+        invocation(
+            &temp,
+            Command::PaneDescribe,
+            pane_describe_input("ctl_unreadable_sibling_snapshot", "sf_1", 1),
+        ),
+        &mut wire,
+    )
+    .unwrap();
+
+    assert_eq!(output.ok, true);
+    assert_eq!(output.result["paneId"], 1);
+    assert!(output
+        .warnings
+        .iter()
+        .any(|warning| warning == "saved_state_scope_unreadable"));
+    assert!(wire.operations.iter().any(|op| op == "panes.list"));
+
+    let persisted: Value =
+        serde_json::from_slice(&fs::read(temp.path().join("controller-state.json")).unwrap())
+            .unwrap();
+    assert_eq!(persisted["scopes"][readable_scope]["clientCursor"], 2);
+    assert_eq!(
+        persisted["scopes"][readable_scope]["records"][0]["payload"]["contentId"],
+        "fresh-readable"
+    );
+    assert_eq!(persisted["scopes"][unreadable_scope], unreadable_row);
+}
+
+#[test]
+fn unknown_saved_state_version_and_correlation_phase_preserve_reads_and_guard_mutations() {
+    let temp = TempDir::new().unwrap();
+    let scope_id = "pane:sf_future:1";
+    let current_content = pane_content_record("sf_future", 1, 3, Some("future-content"), None);
+    let correlation = json!({
+        "operation": "content.set",
+        "payloadDigest": "digest-future",
+        "phase": "queued_by_newer_cli",
+        "terminalResponse": null,
+        "futureCorrelationField": { "keep": true }
+    });
+    let unreadable_correlation = json!({
+        "operation": "content.clear",
+        "phase": "sent",
+        "unknownPayload": { "keep": true }
+    });
+    fs::write(
+        temp.path().join("controller-state.json"),
+        serde_json::to_vec_pretty(&json!({
+            "version": 2,
+            "controllerInstanceId": "ctl_future_state",
+            "futureStateField": { "keep": true },
+            "scopes": {
+                scope_id: {
+                    "clientCursor": 4,
+                    "projectedCursor": 4,
+                    "firstRetainedSequence": 1,
+                    "lastRetainedSequence": 3,
+                    "records": [current_content],
+                    "gap": null,
+                    "synchronized": true,
+                    "synchronizationCutoff": "cutoff-future"
+                }
+            },
+            "acknowledgementOutbox": [],
+            "unresolved": {
+                "rq_future": correlation,
+                "rq_unreadable": unreadable_correlation
+            },
+            "resumeMetadata": {}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let read = native_cli_read(&temp, scope_id);
+    assert_eq!(read["ok"], true);
+    assert_eq!(
+        read["result"]["currentContentRecord"]["payload"]["contentId"],
+        "future-content"
+    );
+    assert!(read["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|warning| warning == "saved_state_version_unrecognized"));
+    assert!(read["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|warning| warning == "saved_state_correlation_phase_unrecognized"));
+    assert!(read["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|warning| warning == "saved_state_correlation_unreadable"));
+
+    let mut list_wire = FakeWire::ordinary();
+    list_wire.resolutions = vec![json!({
+        "outcome": "still_pending",
+        "requestId": "rq_future"
+    })];
+    let listing =
+        execute_with_wire(invocation(&temp, Command::List, json!({})), &mut list_wire).unwrap();
+    assert!(listing.ok);
+    assert!(list_wire.operations.contains(&"surfaces.list".into()));
+
+    let mut wire = FakeWire::ordinary();
+    wire.resolutions = vec![json!({
+        "outcome": "still_pending",
+        "requestId": "rq_future"
+    })];
+    let error = execute_with_wire(
+        invocation(
+            &temp,
+            Command::Clear,
+            json!({ "surfaceId": "sf_future", "paneId": 1, "expectedRevision": 3 }),
+        ),
+        &mut wire,
+    )
+    .unwrap_err();
+    assert!(matches!(error, CliError::StillPending));
+    assert!(!wire.operations.contains(&"content.clear".into()));
+
+    let persisted: Value = serde_json::from_slice(
+        &fs::read(temp.path().join("controller-state.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(persisted["version"], 2);
+    assert_eq!(persisted["futureStateField"]["keep"], true);
+    assert_eq!(
+        persisted["unresolved"]["rq_future"]["phase"],
+        "queued_by_newer_cli"
+    );
+    assert_eq!(
+        persisted["unresolved"]["rq_future"]["futureCorrelationField"]["keep"],
+        true
+    );
+    assert_eq!(persisted["unresolved"]["rq_unreadable"], unreadable_correlation);
 }
 
 #[test]

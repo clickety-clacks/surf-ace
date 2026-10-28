@@ -48,8 +48,13 @@ the registered direct endpoint with a nonce-correlated `surface.describe`, and
 rechecks the same registration and lease after the response. The result keeps
 registry identity and lease freshness, transport reachability, application
 readiness, surface topology/layout, and each pane's content revision in
-separate fields. The v1 identity match is a consistency check, not
-authentication. The command does not pair, create controller state, or
+separate fields. Missing or unreadable saved registry values and per-pane label
+or content-observation details are reported as unavailable with limitation
+codes; different but readable registry values are retained and marked as
+different. The readable topology remains available. A different client or
+surface still returns an identity mismatch, and an incomplete topology is not
+presented as a successful observation. The v1 identity match is a consistency
+check, not authentication. The command does not pair, create controller state, or
 authorize a later mutation.
 
 `window_not_found` and `window_ambiguous` require a fresh explicit selection;
@@ -99,6 +104,10 @@ The existing public command set is `fleet-list`, `window-describe`, `list`,
 `target-register`, and `target-apply`. Each command accepts one JSON object via
 `--input-json` or standard input and writes exactly one JSON result to standard
 output. `read` is strictly local and rejects `--endpoint`.
+Successful stateful results may include warning codes when some saved state
+cannot be read. Readable scopes remain available; unreadable rows are retained,
+unresolved operations continue to guard mutations, and unreadable acknowledgement
+intents are not sent.
 Every successful `capture-pane` call includes its PNG screenshot; the command
 has no option to suppress it.
 

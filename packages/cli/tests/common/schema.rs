@@ -68,12 +68,15 @@ fn validate_at(root: &Value, schema: &Value, instance: &Value, path: &str) -> Re
     }
 
     if let Some(required) = schema.get("required").and_then(Value::as_array) {
-        let object = instance
-            .as_object()
-            .ok_or_else(|| format!("{path}: required applies to a non-object"))?;
-        for key in required.iter().filter_map(Value::as_str) {
-            if !object.contains_key(key) {
-                return Err(format!("{path}: missing required property {key}"));
+        // In JSON Schema, object-only keywords do not apply to other instance
+        // types. The type keyword above rejects non-objects when the schema
+        // requires an object, while nullable object schemas intentionally let
+        // `required` apply only to their object branch.
+        if let Some(object) = instance.as_object() {
+            for key in required.iter().filter_map(Value::as_str) {
+                if !object.contains_key(key) {
+                    return Err(format!("{path}: missing required property {key}"));
+                }
             }
         }
     }
