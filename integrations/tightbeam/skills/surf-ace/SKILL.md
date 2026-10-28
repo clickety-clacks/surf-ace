@@ -194,17 +194,17 @@ For example, list the selected client's surfaces:
   list
 ```
 
-Before targeting a pane, use this live `list` result to match the exact
-`surfaceId`, `paneId`, and confirmed `paneLabel`; do not select by a window
-label or pane number alone. `list` does not return `paneLineageId`. To verify
-the lineage too, run `pane-describe` for the same `surfaceId` and `paneId` and
-match its `paneLineageId` to the intended pane. Because `pane-describe` sends
-`pair.request` before `panes.list` and may persist admission, synchronization,
-cursor, acknowledgement, or pending-receipt state, use it only when that
-controller admission is intended. If pairing is not appropriate, `list` alone
-cannot establish the lineage match; do not claim a full identity match or
-mutate on that basis. Recheck the live list if any identity differs or is
-missing.
+Before an ordinary pane operation, use this live `list` result to match the
+stable `surfaceId` and `paneId`. Treat the surface name and `paneLabel` as
+human-facing confirmation only; never target by a label or pane number alone.
+If either stable ID does not match or is ambiguous, stop and re-identify. A
+lineage check is optional when comparing a durable prior reference with a
+possible reopened replacement: `list` does not return `paneLineageId`, so use
+`pane-describe` for the same stable IDs and compare its lineage with the prior
+reference. `pane-describe` sends `pair.request` before `panes.list` and may
+persist admission, synchronization, cursor, acknowledgement, or pending-receipt
+state; it is not a free read and is not required before ordinary content
+mutations.
 
 For `push`, use the protocol's typed JSON value; do not send a bare text string
 or use `contentType: "text"`. Accepted pairs include:

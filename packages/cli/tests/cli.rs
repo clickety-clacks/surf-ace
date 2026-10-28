@@ -793,6 +793,11 @@ fn help_and_schema_are_json_and_do_not_require_operational_arguments() {
     let list_help = run_native_cli(&["help", "list"]);
     assert!(list_help.status.success());
     let list_help_json: Value = serde_json::from_slice(&list_help.stdout).unwrap();
+    let list_summary = list_help_json["result"]["command"]["summary"]
+        .as_str()
+        .unwrap();
+    assert!(list_summary.contains("stable surfaceId and paneId"));
+    assert!(list_summary.contains("human confirmation"));
     assert!(list_help_json["result"]["command"]["effect"]
         .as_str()
         .unwrap()

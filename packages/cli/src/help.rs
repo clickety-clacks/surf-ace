@@ -513,7 +513,7 @@ fn command_spec(command: Command) -> Value {
         Command::List => (
             "direct-client",
             "paired_direct_read",
-            "List the selected endpoint's live surfaces.",
+            "List the selected endpoint's live surfaces; target panes by stable surfaceId and paneId, with labels for human confirmation.",
             "surfaces.list payload. This command sends pair.request first, which admits the controller and may persist client state.",
             vec!["missing_endpoint", "missing_product_label", "lifecycle_pair_mismatch"],
         ),
