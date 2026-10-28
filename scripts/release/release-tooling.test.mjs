@@ -1584,7 +1584,7 @@ test("a platform manifest cannot be written without the canonical skill asset", 
   await assert.rejects(fs.access(path.join(outputDir, TIGHTBEAM.manifest)));
 });
 
-test("the packaged CLI help command inventory must be covered by the skill", async (t) => {
+test("the coverage verifier handles synthetic missing-command cases", async (t) => {
   const root = await temporary(t);
   const cliBinary = path.join(root, "surf-ace");
   const skillSourceDir = path.join(root, "tooling");
@@ -1601,41 +1601,6 @@ test("the packaged CLI help command inventory must be covered by the skill", asy
   await assert.rejects(
     verifyTightbeamSkillDescribesCli(cliBinary, skillSourceDir),
     /tightbeam_skill_cli_command_coverage_mismatch:sync/,
-  );
-});
-
-test("the canonical skill covers the real CLI command inventory", async (t) => {
-  const commandSource = await fs.readFile(path.join(repository, "packages/cli/src/command.rs"), "utf8");
-  const helpSource = await fs.readFile(path.join(repository, "packages/cli/src/help.rs"), "utf8");
-  const allCommands = commandSource.match(/pub const ALL: \[Self; \d+\] = \[([\s\S]*?)\n\s*\];/);
-  const commandNames = commandSource.match(/pub const fn name\(self\)\s*->\s*&'static str\s*\{\s*match self \{([\s\S]*?)\n\s*\}\n\s*\}/);
-  const annotationActions = helpSource.match(/fn annotation_actions\(\)\s*->\s*&'static\s*\[&'static\s+str\]\s*\{\s*&\[([\s\S]*?)\]\s*\}/);
-  assert.ok(allCommands, "CLI Command::ALL inventory must remain readable");
-  assert.ok(commandNames, "CLI command names must remain readable");
-  assert.ok(annotationActions, "CLI annotation actions must remain readable");
-
-  const namesByVariant = new Map(
-    [...commandNames[1].matchAll(/Self::([A-Za-z]+)\s*=>\s*"([^"]+)"/g)]
-      .map(([, variant, name]) => [variant, name]),
-  );
-  const variants = [...allCommands[1].matchAll(/Self::([A-Za-z]+)/g)].map(([, variant]) => variant);
-  const commandInventory = variants.map((variant) => namesByVariant.get(variant));
-  const annotationNames = [...annotationActions[1].matchAll(/"([^"]+)"/g)]
-    .map(([, action]) => `annotations ${action}`);
-  assert.ok(commandInventory.every((name) => name), "every CLI help command must have a name");
-
-  const root = await temporary(t);
-  const cliBinary = path.join(root, "surf-ace");
-  const help = {
-    ok: true,
-    result: { commands: [...commandInventory, ...annotationNames].map((name) => ({ name })) },
-  };
-  await fs.writeFile(cliBinary, `#!/bin/sh\ncat <<'HELP'\n${JSON.stringify(help)}\nHELP\n`);
-  await fs.chmod(cliBinary, 0o755);
-
-  assert.deepEqual(
-    await verifyTightbeamSkillDescribesCli(cliBinary, repository),
-    [...commandInventory, ...annotationNames],
   );
 });
 

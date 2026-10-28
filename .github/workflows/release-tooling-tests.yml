@@ -36,3 +36,35 @@ jobs:
           pnpm install --frozen-lockfile
       - name: Run release tooling behavior tests
         run: pnpm test:release
+
+  built-cli-skill-coverage:
+    name: Built CLI skill coverage (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: Linux
+            runner: ubuntu-24.04
+          - platform: macOS
+            runner: macos-15
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - name: Check out the pull request
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Install the pinned Node toolchain
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24.3.0
+      - name: Install and verify the pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.89.0 --profile minimal
+          test "$(rustup run 1.89.0 rustc --version | awk '{print $2}')" = 1.89.0
+      - name: Build the native Surf Ace CLI
+        run: rustup run 1.89.0 cargo build --manifest-path packages/cli/Cargo.toml --release --locked
+      - name: Compare built CLI commands with the canonical skill
+        run: node scripts/release/verify-surf-ace-skill-coverage.mjs packages/cli/target/release/surf-ace
