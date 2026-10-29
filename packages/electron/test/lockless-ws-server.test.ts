@@ -5383,7 +5383,6 @@ test("a pair request that closes during local persistence does not strand its co
     releaseStalledPersistence = resolve;
   });
   const controllerInstanceId = "late-pair-admission-controller";
-  const port = nextPort++;
   const server = new SurfaceWsServer({
     bindAddress: "127.0.0.1",
     capturePaneImage: async () => null,
@@ -5398,11 +5397,15 @@ test("a pair request that closes during local persistence does not strand its co
         await stalledPersistence;
       }
     },
-    port,
+    port: 0,
     viewport: () => ({ height: 800, scale: 2, width: 1200 }),
   });
   await server.start();
-  const endpoint = `ws://127.0.0.1:${port}${server.wsPath}`;
+  const boundAddress = (server as unknown as {
+    httpServer: { address(): AddressInfo | string | null };
+  }).httpServer.address();
+  assert.ok(boundAddress && typeof boundAddress !== "string");
+  const endpoint = `ws://127.0.0.1:${boundAddress.port}${server.wsPath}`;
   const first = new PublicControllerWireClient(endpoint, 2_000);
   let retry: PublicControllerWireClient | null = null;
   try {
