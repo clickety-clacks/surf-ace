@@ -500,6 +500,59 @@ test("shared identity changes use a bound owner-session handoff and never SSH", 
   }
 });
 
+test("pending owner-session reads reuse one operation and return the later readback", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-owner-read-resume-test-"));
+  const { destination } = ownerIdentityFixture();
+  const current = Buffer.from("current shared skill\n");
+  const operationId = "a".repeat(64);
+  const requests = [];
+  let calls = 0;
+  const targets = createOwnerSessionIdentityAdapter([destination], {
+    directory,
+    handoffCommand: "private-owner-session-handoff",
+    requiredRuler: "user:operator",
+    command: async (_file, _args, { input }) => {
+      calls += 1;
+      const descriptor = JSON.parse(input.toString("utf8"));
+      requests.push(descriptor);
+      const request = JSON.parse(await fs.readFile(descriptor.requestPath, "utf8"));
+      assert.equal(request.operationId, operationId);
+      assert.equal(request.action, "read");
+      if (calls === 1) {
+        await fs.mkdir(path.dirname(descriptor.resultPath), { recursive: true });
+        await fs.writeFile(descriptor.resultPath, JSON.stringify({ status: "pending", operationId }));
+        return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+      }
+      const result = {
+        status: "complete",
+        operationId,
+        action: "read",
+        targetId: destination.id,
+        identityRevision: "revision-after-owner-read",
+        bytesBase64: current.toString("base64"),
+        sha256: sha256(current),
+      };
+      await fs.mkdir(path.dirname(descriptor.resultPath), { recursive: true });
+      await fs.writeFile(descriptor.resultPath, JSON.stringify(result));
+      return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+    },
+  });
+  try {
+    const first = await targets.read(destination.id, { operationId });
+    assert.deepEqual(first, { status: "pending", operationId });
+    const second = await targets.read(destination.id, { operationId });
+    assert.deepEqual(second.bytes, current);
+    assert.equal(second.identityRevision, "revision-after-owner-read");
+    assert.equal(calls, 2);
+    assert.equal(requests[0].operationId, requests[1].operationId);
+    assert.equal(requests[0].requestPath, requests[1].requestPath);
+    assert.equal(requests[0].resultPath, requests[1].resultPath);
+    assert.equal((await fs.readdir(path.join(directory, "shared-identity-requests"))).length, 1);
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
 function ownerIdentityFixture() {
   const destination = {
     id: "shared-skill",

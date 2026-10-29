@@ -458,8 +458,35 @@ function approvalMatchesPendingPlan(approval, plan) {
     approval?.planSha256 === plan.planSha256;
 }
 
-async function readCurrentState(targets, targetId) {
-  const current = await targets.read(targetId);
+function ownerReadOptions(destination, envelopeId, purpose, destinationMapSha256, planSha256 = null) {
+  if (destination?.kind !== "shared-identity") return undefined;
+  return {
+    operationId: sha256(Buffer.from(canonicalJson({
+      action: "read",
+      envelopeId,
+      targetId: destination.id,
+      destinationMapSha256,
+      planSha256,
+      purpose,
+    }))),
+  };
+}
+
+function isPendingOwnerOperation(error) {
+  return error?.code === "delivery_identity_operation_pending";
+}
+
+async function readCurrentState(targets, targetId, readOptions) {
+  const current = await targets.read(targetId, readOptions);
+  if (current?.status === "pending") {
+    if (typeof current.operationId !== "string" || current.operationId.length === 0) {
+      throw new Error("delivery_identity_pending_operation_invalid");
+    }
+    const error = new Error("delivery_identity_operation_pending");
+    error.code = "delivery_identity_operation_pending";
+    error.operationId = current.operationId;
+    throw error;
+  }
   return { sha256: snapshotDigest(current), mode: current.mode ?? null };
 }
 
@@ -495,8 +522,10 @@ async function rollbackCommitted({ targets, journal, envelopeId, committed, skil
   const receipts = [];
   let unresolved = false;
   for (const item of [...committed].reverse()) {
+    const destination = plan.destinationRecords.find(({ id }) => id === item.targetId);
     try {
-      const current = await readCurrentState(targets, item.targetId);
+      const current = await readCurrentState(targets, item.targetId,
+        ownerReadOptions(destination, envelopeId, "reconcile", plan.destinationMapSha256, planSha256));
       if (current.sha256 === item.priorSha256 && current.mode === item.priorMode) {
         receipts.push({ targetId: item.targetId, state: "already_restored", sha256: current.sha256, mode: current.mode });
         continue;
@@ -506,7 +535,6 @@ async function rollbackCommitted({ targets, journal, envelopeId, committed, skil
         receipts.push({ targetId: item.targetId, state: "conflict", sha256: current.sha256, mode: current.mode });
         continue;
       }
-      const destination = plan.destinationRecords.find(({ id }) => id === item.targetId);
       const restoreResult = await targets.restore(item.targetId, item.backupBytes, {
         expectedCurrentSha256: skillSha256,
         expectedCurrentMode: item.targetMode,
@@ -518,6 +546,14 @@ async function rollbackCommitted({ targets, journal, envelopeId, committed, skil
         destinationSetSha256: plan.destinationSetSha256,
         destinationMapSha256: plan.destinationMapSha256,
       });
+      if (destination.kind === "shared-identity" && restoreResult?.status === "pending") {
+        return {
+          receipts,
+          unresolved: false,
+          awaitingOwnerOperationId: restoreResult.operationId ?? null,
+          awaitingOwnerAction: "restore",
+        };
+      }
       const ownerReadback = requireOwnerSessionReceipt(restoreResult, destination, "restore", item.priorSha256);
       const restored = destination.kind === "shared-identity"
         ? { sha256: snapshotDigest(ownerReadback), mode: ownerReadback.mode ?? null }
@@ -534,7 +570,15 @@ async function rollbackCommitted({ targets, journal, envelopeId, committed, skil
         mode: restored.mode,
         ...(restoreResult?.ownerReceipt ? { ownerReceipt: restoreResult.ownerReceipt } : {}),
       });
-    } catch {
+    } catch (error) {
+      if (isPendingOwnerOperation(error)) {
+        return {
+          receipts,
+          unresolved: false,
+          awaitingOwnerOperationId: error.operationId ?? null,
+          awaitingOwnerAction: "read",
+        };
+      }
       unresolved = true;
       receipts.push({ targetId: item.targetId, state: "restore_unknown" });
     }
@@ -564,10 +608,81 @@ async function recoverInterruptedTransaction(entry, { targets, journal }) {
   }
 
   const receipts = [];
+  const resumedOwnerReceipts = new Map();
   let unresolved = false;
-  for (const snapshot of [...plan.snapshots].reverse()) {
+  if (entry?.sharedOperationPending === true && entry.sharedOperationAction === "restore") {
+    const targetId = entry.sharedOperationTargetId;
+    const snapshot = plan.snapshots.find((item) => item.targetId === targetId);
+    const destination = plan.destinationRecords.find(({ id }) => id === targetId);
     try {
-      const current = await readCurrentState(targets, snapshot.targetId);
+      if (!snapshot || destination?.kind !== "shared-identity") throw new Error("delivery_interrupted_journal_invalid");
+      const previousBytes = await journal.readBackup(envelopeId, targetId, snapshot.backupRef);
+      if (snapshot.priorSha256 === null ? previousBytes !== null : sha256(bytes(previousBytes, "backup")) !== snapshot.priorSha256) {
+        throw new Error("delivery_backup_verification_failed");
+      }
+      const restoreResult = await targets.restore(targetId, previousBytes, {
+        expectedCurrentSha256: skillSha256,
+        expectedCurrentMode: snapshot.targetMode,
+        priorMode: snapshot.priorMode,
+        envelopeId,
+        plan,
+        planSha256: plan.planSha256,
+        approval: entry.approval,
+        destinationSetSha256: plan.destinationSetSha256,
+        destinationMapSha256: plan.destinationMapSha256,
+      });
+      if (restoreResult?.status === "pending") {
+        await journal.recordPublishing(envelopeId, {
+          ...entry,
+          sharedOperationPending: true,
+          sharedOperationAction: "restore",
+          sharedOperationTargetId: targetId,
+          ownerOperationId: restoreResult.operationId ?? entry.ownerOperationId ?? null,
+        });
+        return { status: "awaiting_shared_identity", envelopeId, operationId: restoreResult.operationId ?? null };
+      }
+      const ownerReadback = requireOwnerSessionReceipt(restoreResult, destination, "restore", snapshot.priorSha256);
+      if (snapshotDigest(ownerReadback) !== snapshot.priorSha256 || (ownerReadback.mode ?? null) !== snapshot.priorMode) {
+        throw new Error("delivery_identity_owner_receipt_missing");
+      }
+      resumedOwnerReceipts.set(targetId, restoreResult);
+    } catch (error) {
+      if (isPendingOwnerOperation(error)) {
+        await journal.recordPublishing(envelopeId, {
+          ...entry,
+          sharedOperationPending: true,
+          sharedOperationAction: "restore",
+          sharedOperationTargetId: targetId,
+          ownerOperationId: error.operationId ?? entry.ownerOperationId ?? null,
+        });
+        return { status: "awaiting_shared_identity", envelopeId, operationId: error.operationId ?? null };
+      }
+      await journal.recordFailure(envelopeId, {
+        code: error.message,
+        status: "unresolved",
+        unresolved: true,
+        terminalEventKey: plan.envelope.eventKey,
+      });
+      return { status: "unresolved", envelopeId, code: error.message };
+    }
+  }
+  for (const snapshot of [...plan.snapshots].reverse()) {
+    const destination = plan.destinationRecords.find(({ id }) => id === snapshot.targetId);
+    const resumedRestore = resumedOwnerReceipts.get(snapshot.targetId);
+    if (resumedRestore) {
+      const ownerReadback = resumedRestore.readback;
+      receipts.push({
+        targetId: snapshot.targetId,
+        state: "restored",
+        sha256: snapshotDigest(ownerReadback),
+        mode: ownerReadback.mode ?? null,
+        ownerReceipt: resumedRestore.ownerReceipt,
+      });
+      continue;
+    }
+    try {
+      const current = await readCurrentState(targets, snapshot.targetId,
+        ownerReadOptions(destination, envelopeId, "reconcile", plan.destinationMapSha256, plan.planSha256));
       if (current.sha256 === snapshot.priorSha256 && current.mode === snapshot.priorMode) {
         receipts.push({ targetId: snapshot.targetId, state: "prior_state_confirmed", sha256: current.sha256, mode: current.mode });
         continue;
@@ -587,7 +702,6 @@ async function recoverInterruptedTransaction(entry, { targets, journal }) {
         receipts.push({ targetId: snapshot.targetId, state: "backup_missing_or_mismatched" });
         continue;
       }
-      const destination = plan.destinationRecords.find(({ id }) => id === snapshot.targetId);
       const restoreResult = await targets.restore(snapshot.targetId, previousBytes, {
         expectedCurrentSha256: skillSha256,
         expectedCurrentMode: snapshot.targetMode,
@@ -599,6 +713,16 @@ async function recoverInterruptedTransaction(entry, { targets, journal }) {
         destinationSetSha256: plan.destinationSetSha256,
         destinationMapSha256: plan.destinationMapSha256,
       });
+      if (destination.kind === "shared-identity" && restoreResult?.status === "pending") {
+        await journal.recordPublishing(envelopeId, {
+          ...entry,
+          sharedOperationPending: true,
+          sharedOperationAction: "restore",
+          sharedOperationTargetId: snapshot.targetId,
+          ownerOperationId: restoreResult.operationId ?? null,
+        });
+        return { status: "awaiting_shared_identity", envelopeId, operationId: restoreResult.operationId ?? null };
+      }
       const ownerReadback = requireOwnerSessionReceipt(restoreResult, destination, "restore", snapshot.priorSha256);
       const restored = destination.kind === "shared-identity"
         ? { sha256: snapshotDigest(ownerReadback), mode: ownerReadback.mode ?? null }
@@ -615,7 +739,17 @@ async function recoverInterruptedTransaction(entry, { targets, journal }) {
         mode: restored.mode,
         ...(restoreResult?.ownerReceipt ? { ownerReceipt: restoreResult.ownerReceipt } : {}),
       });
-    } catch {
+    } catch (error) {
+      if (isPendingOwnerOperation(error)) {
+        await journal.recordPublishing(envelopeId, {
+          ...entry,
+          sharedOperationPending: true,
+          sharedOperationAction: "read",
+          sharedOperationTargetId: snapshot.targetId,
+          ownerOperationId: error.operationId ?? null,
+        });
+        return { status: "awaiting_shared_identity", envelopeId, operationId: error.operationId ?? null };
+      }
       unresolved = true;
       receipts.push({ targetId: snapshot.targetId, state: "recovery_unknown" });
     }
@@ -697,7 +831,7 @@ export async function runSkillDeliveryConsumer({
   for (const entry of await journal.listPublishing()) {
     if (entry.sharedOperationPending === true) {
       pendingOwnerEnvelopeIds.add(entry.envelopeId);
-      continue;
+      if (entry.sharedOperationAction !== "restore" && entry.sharedOperationAction !== "read") continue;
     }
     const recovery = await recoverInterruptedTransaction(entry, { targets, journal });
     if (recovery.envelopeId) recoveredEnvelopeIds.add(recovery.envelopeId);
@@ -883,9 +1017,18 @@ export async function runSkillDeliveryConsumer({
         }
         approvedPendingPlan = true;
       } else {
+        let pendingOwnerRead = null;
         try {
           for (const { id: targetId, ...destination } of transactionOrderedDestinations(resolvedTargets)) {
-            const snapshot = await targets.read(targetId);
+            const snapshot = await targets.read(targetId,
+              ownerReadOptions(destination, envelopeId, "candidate-preflight", envelope.destinationMapSha256));
+            if (snapshot?.status === "pending") {
+              if (typeof snapshot.operationId !== "string" || snapshot.operationId.length === 0) {
+                throw new Error("delivery_identity_pending_operation_invalid");
+              }
+              pendingOwnerRead = snapshot;
+              break;
+            }
             const priorSha256 = snapshotDigest(snapshot);
             const priorMode = snapshot.mode ?? null;
             snapshots.push({
@@ -897,8 +1040,16 @@ export async function runSkillDeliveryConsumer({
             });
           }
         } catch (error) {
+          if (isPendingOwnerOperation(error)) {
+            results.push({ status: "awaiting_shared_identity", envelopeId, operationId: error.operationId });
+            continue;
+          }
           await journal.recordBlocked(envelopeId, { reason: error.message });
           results.push({ status: "blocked", envelopeId, code: error.message });
+          continue;
+        }
+        if (pendingOwnerRead) {
+          results.push({ status: "awaiting_shared_identity", envelopeId, operationId: pendingOwnerRead.operationId });
           continue;
         }
 
@@ -1011,7 +1162,16 @@ export async function runSkillDeliveryConsumer({
       const staged = [];
       try {
         for (const snapshot of snapshots) {
-          const current = await readCurrentState(targets, snapshot.targetId);
+          const destination = resolvedTargets.find(({ id }) => id === snapshot.targetId);
+          if (resumingSharedOperation && destination.kind === "shared-identity" &&
+              (prior.sharedOperationAction === undefined || prior.sharedOperationAction === "commit")) {
+            // The exact commit operation below retrieves the owner's bound
+            // receipt/readback; re-reading here would mistake that completed
+            // operation for a third-party change between polls.
+            continue;
+          }
+          const current = await readCurrentState(targets, snapshot.targetId,
+            ownerReadOptions(destination, envelopeId, "approved-precommit", plan.destinationMapSha256, planSha256));
           if (current.sha256 !== snapshot.priorSha256 || current.mode !== snapshot.priorMode) {
             throw new Error("delivery_destination_changed_after_approval");
           }
@@ -1025,6 +1185,10 @@ export async function runSkillDeliveryConsumer({
       } catch (error) {
         for (const { targetId, stage } of staged.reverse()) {
           try { await targets.discardStage(targetId, stage); } catch { /* staging cleanup remains in the journal */ }
+        }
+        if (isPendingOwnerOperation(error)) {
+          results.push({ status: "awaiting_shared_identity", envelopeId, operationId: error.operationId });
+          continue;
         }
         await journal.recordBlocked(envelopeId, { reason: error.message, planSha256 });
         results.push({ status: "blocked", envelopeId, code: error.message });
@@ -1080,6 +1244,8 @@ export async function runSkillDeliveryConsumer({
               planSha256,
               approval,
               sharedOperationPending: true,
+              sharedOperationAction: "commit",
+              sharedOperationTargetId: snapshot.targetId,
               ownerOperationId: commitResult.operationId ?? null,
               terminalEventKey: envelope.eventKey,
             });
@@ -1107,6 +1273,8 @@ export async function runSkillDeliveryConsumer({
                 planSha256,
                 approval,
                 sharedOperationPending: false,
+                sharedOperationAction: null,
+                sharedOperationTargetId: null,
                 ownerOperationId: commitResult.ownerReceipt.operationId,
                 sharedIdentityReceipt: commitResult.ownerReceipt,
                 terminalEventKey: envelope.eventKey,
@@ -1221,6 +1389,22 @@ export async function runSkillDeliveryConsumer({
         });
         for (const { targetId, stage } of staged.reverse()) {
           try { await targets.discardStage(targetId, stage); } catch { /* retain the unresolved stage reference in the failure receipt */ }
+        }
+        if (rollback.awaitingOwnerOperationId) {
+          await journal.recordPublishing(envelopeId, {
+            envelope,
+            plan,
+            planSha256,
+            approval,
+            sharedOperationPending: true,
+            sharedOperationAction: rollback.awaitingOwnerAction,
+            sharedOperationTargetId: committed.find(({ targetId }) =>
+              plan.destinationRecords.find(({ id }) => id === targetId)?.kind === "shared-identity")?.targetId ?? null,
+            ownerOperationId: rollback.awaitingOwnerOperationId,
+            terminalEventKey: envelope.eventKey,
+          });
+          results.push({ status: "awaiting_shared_identity", envelopeId, operationId: rollback.awaitingOwnerOperationId });
+          continue;
         }
         const unresolved = rollback.unresolved || failure.unresolved;
         try {

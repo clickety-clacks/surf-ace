@@ -406,11 +406,11 @@ export function createOwnerSessionIdentityAdapter(destinations, {
     return { available: true, bytes: readback, mode: null, identityRevision: result.identityRevision };
   }
 
-  const read = async (id) => {
+  const read = async (id, { operationId = randomUUID() } = {}) => {
     const destination = target(id);
     const request = {
       action: "read",
-      operationId: randomUUID(),
+      operationId,
       targetId: id,
       destination: {
         host: destination.host,
@@ -419,7 +419,8 @@ export function createOwnerSessionIdentityAdapter(destinations, {
         identitySkillName: destination.route.identitySkillName,
       },
     };
-    const result = await send(request);
+    const result = await send(request, { retryPending: true });
+    if (result?.status === "pending") return { status: "pending", operationId };
     if (!validateCommonResult(result, request, "read")) throw new Error("delivery_identity_read_pending");
     const value = decodeBase64Bytes(result.bytesBase64, "readback");
     const digest = value === null ? null : sha256(value);
@@ -557,7 +558,7 @@ export function createOwnerSessionIdentityAdapter(destinations, {
       priorMode: priorMode ?? null,
     };
     const result = await send(request, { retryPending: true });
-    if (result?.status === "pending") throw new Error("delivery_identity_restore_pending");
+    if (result?.status === "pending") return { status: "pending", operationId };
     const readback = validateApprovedWriteResult(result, request, "restore");
     if (!readback) throw new Error("delivery_identity_restore_pending");
     return { status: "complete", ownerReceipt: result, readback };
@@ -579,7 +580,7 @@ export function createDeliveryTargetAdapter(destinations, options = {}) {
     return kind === "shared-identity" ? sharedTargets : sshTargets;
   };
   return {
-    read: (id) => select(id).read(id),
+    read: (id, readOptions) => select(id).read(id, readOptions),
     stage: (id, value, envelopeId, stageOptions) => select(id).stage(id, value, envelopeId, stageOptions),
     discardStage: (id, stageRecord) => select(id).discardStage(id, stageRecord),
     commit: (id, stageRecord, commitOptions) => select(id).commit(id, stageRecord, commitOptions),

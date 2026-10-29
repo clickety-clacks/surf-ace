@@ -452,13 +452,38 @@ test("a pending shared identity edit holds standalone writes and resumes with th
   const journal = makeJournal();
   let requestedPlan;
   let holdShared = true;
+  let ownerAlreadyWrote = false;
   const committedIds = [];
+  let sharedReads = 0;
+  const originalRead = targetStore.read.bind(targetStore);
+  targetStore.read = async (id, options) => {
+    if (id === destinations[0]) sharedReads += 1;
+    return originalRead(id, options);
+  };
   const originalCommit = targetStore.commit.bind(targetStore);
   targetStore.commit = async (id, stage, options) => {
     committedIds.push(id);
     if (id === destinations[0] && holdShared) {
       holdShared = false;
+      const content = skillBytes;
+      targetStore.values.set(id, Buffer.from(content));
+      ownerAlreadyWrote = true;
       return { status: "pending", operationId: "owner-operation-1" };
+    }
+    if (id === destinations[0] && ownerAlreadyWrote) {
+      const content = targetStore.values.get(id);
+      const digest = sha256(content);
+      return {
+        status: "complete",
+        readback: { available: true, bytes: Buffer.from(content), mode: null },
+        ownerReceipt: {
+          operationId: "owner-operation-1",
+          action: "commit",
+          targetId: id,
+          finalSha256: digest,
+          readbackSha256: digest,
+        },
+      };
     }
     return originalCommit(id, stage, options);
   };
@@ -479,16 +504,225 @@ test("a pending shared identity edit holds standalone writes and resumes with th
   const pending = await runSkillDeliveryConsumer(args);
   assert.equal(pending.results[0].status, "awaiting_shared_identity");
   assert.deepEqual(committedIds, [destinations[0]]);
-  assert.deepEqual(destinations.map((id) => targetStore.values.get(id).toString()),
-    destinations.map((id) => `old:${id}`));
+  assert.deepEqual(destinations.map((id) => sha256(targetStore.values.get(id))),
+    [skillSha256, ...destinations.slice(1).map((id) => sha256(Buffer.from(`old:${id}`)))]);
   const pendingEntry = journal.entries.get(requestedPlan.envelopeId);
   assert.equal(pendingEntry.status, "publishing");
   assert.equal(pendingEntry.sharedOperationPending, true);
+  assert.equal(sha256(targetStore.values.get(destinations[0])), skillSha256,
+    "the owner may finish the exact edit before the next consumer poll");
 
   const resumed = await runSkillDeliveryConsumer(args);
   assert.equal(resumed.results[0].status, "complete");
   assert.deepEqual(committedIds, [destinations[0], ...destinations]);
+  assert.equal(sharedReads, 2, "resume consumes the original owner receipt instead of re-reading the changed shared target");
   assert.deepEqual(destinations.map((id) => sha256(targetStore.values.get(id))), destinations.map(() => skillSha256));
+});
+
+test("a pending shared preflight read resumes the same owner operation without blocking the event", async () => {
+  const candidate = desktopCandidate();
+  const targetStore = makeTargets();
+  const journal = makeJournal();
+  const originalRead = targetStore.read.bind(targetStore);
+  const sharedReadOperationIds = [];
+  let pendingFirstRead = true;
+  let approvalsRequested = 0;
+  let requestedPlan;
+  targetStore.read = async (id, options) => {
+    if (id === destinations[0]) {
+      sharedReadOperationIds.push(options?.operationId);
+      if (pendingFirstRead) {
+        pendingFirstRead = false;
+        return { status: "pending", operationId: options?.operationId };
+      }
+    }
+    return originalRead(id, options);
+  };
+  const args = {
+    enabled: true,
+    sources: [sourceFor(candidate)],
+    sourceReader: sourceReader(),
+    destinations: destinationRecords,
+    targets: targetStore,
+    approvals: {
+      async read() { return null; },
+      async request(plan) { approvalsRequested += 1; requestedPlan = plan; },
+    },
+    journal,
+  };
+
+  const first = await runSkillDeliveryConsumer(args);
+  assert.equal(first.results[0].status, "awaiting_shared_identity");
+  assert.equal(approvalsRequested, 0);
+  assert.equal(journal.entries.size, 0);
+  const second = await runSkillDeliveryConsumer(args);
+  assert.equal(second.results[0].status, "awaiting_approval");
+  assert.equal(approvalsRequested, 1);
+  assert.equal(sharedReadOperationIds.length, 2);
+  assert.equal(sharedReadOperationIds[0], sharedReadOperationIds[1]);
+  assert.match(sharedReadOperationIds[0], /^[a-f0-9]{64}$/);
+  assert.ok(requestedPlan);
+});
+
+test("pending shared reconciliation read is retried during recovery without terminalizing the event", async () => {
+  const candidate = desktopCandidate();
+  const targetStore = makeTargets();
+  const journal = makeJournal();
+  let requestedPlan;
+  const args = {
+    enabled: true,
+    sources: [sourceFor(candidate)],
+    sourceReader: sourceReader(),
+    destinations: destinationRecords,
+    targets: targetStore,
+    approvals: {
+      async read() { return null; },
+      async request(plan) { requestedPlan = plan; },
+    },
+    journal,
+  };
+  await runSkillDeliveryConsumer(args);
+  const entry = journal.entries.get(requestedPlan.envelopeId);
+  journal.entries.set(requestedPlan.envelopeId, {
+    ...entry,
+    status: "publishing",
+    approval: approvedReceipt(requestedPlan),
+    sharedOperationPending: false,
+  });
+
+  const originalRead = targetStore.read.bind(targetStore);
+  const sharedReadOperationIds = [];
+  let firstSharedReadPending = true;
+  targetStore.read = async (id, options) => {
+    if (id === destinations[0]) {
+      sharedReadOperationIds.push(options?.operationId);
+      if (firstSharedReadPending) {
+        firstSharedReadPending = false;
+        return { status: "pending", operationId: options?.operationId };
+      }
+    }
+    return originalRead(id, options);
+  };
+
+  const pending = await runSkillDeliveryConsumer(args);
+  assert.equal(pending.results[0].status, "awaiting_shared_identity");
+  assert.equal(journal.entries.get(requestedPlan.envelopeId).status, "publishing");
+  assert.notEqual(journal.entries.get(requestedPlan.envelopeId).status, "unresolved");
+  const recovered = await runSkillDeliveryConsumer(args);
+  assert.equal(recovered.results[0].status, "rolled_back");
+  assert.equal(sharedReadOperationIds[0], sharedReadOperationIds[1]);
+  assert.equal(journal.entries.get(requestedPlan.envelopeId).status, "rolled_back");
+});
+
+test("pending shared read during partial rollback resumes recovery with the same read operation", async () => {
+  const candidate = desktopCandidate();
+  const targetStore = makeTargets();
+  const journal = makeJournal();
+  let requestedPlan;
+  const args = {
+    enabled: true,
+    sources: [sourceFor(candidate)],
+    sourceReader: sourceReader(),
+    destinations: destinationRecords,
+    targets: targetStore,
+    approvals: {
+      async read() { return requestedPlan && approvedReceipt(requestedPlan); },
+      async request(plan) { requestedPlan = plan; },
+    },
+    journal,
+  };
+  await runSkillDeliveryConsumer(args);
+  const originalRead = targetStore.read.bind(targetStore);
+  const sharedReadOperationIds = [];
+  let sharedReadCount = 0;
+  targetStore.read = async (id, options) => {
+    if (id === destinations[0]) {
+      sharedReadCount += 1;
+      sharedReadOperationIds.push(options?.operationId);
+      if (sharedReadCount === 2) return { status: "pending", operationId: options?.operationId };
+    }
+    return originalRead(id, options);
+  };
+  const originalCommit = targetStore.commit.bind(targetStore);
+  targetStore.commit = async (id, stage, options) => {
+    if (id === destinations[2]) throw new Error("third standalone destination unavailable");
+    return originalCommit(id, stage, options);
+  };
+
+  const awaiting = await runSkillDeliveryConsumer(args);
+  assert.equal(awaiting.results[0].status, "awaiting_shared_identity");
+  assert.equal(journal.entries.get(requestedPlan.envelopeId).sharedOperationAction, "read");
+  assert.equal(sha256(targetStore.values.get(destinations[0])), skillSha256);
+  assert.equal(targetStore.values.get(destinations[1]).toString(), `old:${destinations[1]}`);
+
+  const recovered = await runSkillDeliveryConsumer(args);
+  assert.equal(recovered.results[0].status, "rolled_back");
+  assert.equal(sharedReadCount, 3);
+  assert.equal(sharedReadOperationIds[1], sharedReadOperationIds[2]);
+  assert.deepEqual(destinations.map((id) => targetStore.values.get(id).toString()),
+    destinations.map((id) => `old:${id}`));
+});
+
+test("pending shared restore is resumed from its exact owner operation before terminal rollback", async () => {
+  const candidate = desktopCandidate();
+  const targetStore = makeTargets();
+  const journal = makeJournal();
+  let requestedPlan;
+  let sharedRestoreCalls = 0;
+  const args = {
+    enabled: true,
+    sources: [sourceFor(candidate)],
+    sourceReader: sourceReader(),
+    destinations: destinationRecords,
+    targets: targetStore,
+    approvals: {
+      async read() { return requestedPlan && approvedReceipt(requestedPlan); },
+      async request(plan) { requestedPlan = plan; },
+    },
+    journal,
+  };
+  await runSkillDeliveryConsumer(args);
+  const originalCommit = targetStore.commit.bind(targetStore);
+  targetStore.commit = async (id, stage, options) => {
+    if (id === destinations[2]) throw new Error("third standalone destination unavailable");
+    return originalCommit(id, stage, options);
+  };
+  const originalRestore = targetStore.restore.bind(targetStore);
+  targetStore.restore = async (id, previousBytes, options) => {
+    if (id !== destinations[0]) return originalRestore(id, previousBytes, options);
+    sharedRestoreCalls += 1;
+    if (sharedRestoreCalls === 1) {
+      await originalRestore(id, previousBytes, options);
+      return { status: "pending", operationId: "shared-restore-operation-1" };
+    }
+    const current = targetStore.values.get(id);
+    const digest = sha256(current);
+    assert.equal(digest, sha256(previousBytes), "the first owner poll already restored the shared skill");
+    return {
+      status: "complete",
+      readback: { available: true, bytes: Buffer.from(current), mode: null },
+      ownerReceipt: {
+        operationId: "shared-restore-operation-1",
+        action: "restore",
+        targetId: id,
+        finalSha256: digest,
+        readbackSha256: digest,
+      },
+    };
+  };
+
+  const awaiting = await runSkillDeliveryConsumer(args);
+  assert.equal(awaiting.results[0].status, "awaiting_shared_identity");
+  assert.equal(journal.entries.get(requestedPlan.envelopeId).sharedOperationAction, "restore");
+  assert.equal(targetStore.values.get(destinations[0]).toString(), `old:${destinations[0]}`);
+  const recovered = await runSkillDeliveryConsumer(args);
+  assert.equal(recovered.results[0].status, "rolled_back");
+  assert.equal(sharedRestoreCalls, 2);
+  assert.deepEqual(destinations.map((id) => targetStore.values.get(id).toString()),
+    destinations.map((id) => `old:${id}`));
+  const receipt = journal.entries.get(requestedPlan.envelopeId).rollbackReceipts.find(({ targetId }) => targetId === destinations[0]);
+  assert.equal(receipt.ownerReceipt.operationId, "shared-restore-operation-1");
+  assert.equal(receipt.ownerReceipt.action, "restore");
 });
 
 test("matching hashes produce a no-change receipt without asking for approval", async () => {
