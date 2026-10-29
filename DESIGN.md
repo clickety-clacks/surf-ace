@@ -7,7 +7,7 @@ Depends on: `<spec-root>/clawline/specs/clawline-invariants.md`
 
 Surf Ace is a standalone display and annotation system that turns any screen running the Surf Ace app into an OpenClaw-managed surface. It is a purpose-built binary application — not embedded in another app — available on iOS/iPadOS, on visionOS as the Surf Ace Spatial app, and as an Electron app on Linux and macOS. Supported clients are Linux, macOS, iOS, iPadOS, and visionOS. Windows is not supported and is not a delivery or soak gate. Linux and macOS controller/server requirements remain in scope.
 
-visionOS is a supported client with the same client, soak, delivery, and release obligations as iOS/iPadOS. Wherever this document states such an obligation for iOS or iPadOS, it applies equally to visionOS, including delivery of the Surf Ace operating skill with each release of the app. This follows Mike's October 29, 2026 product ruling that visionOS is a supported Surf Ace client.
+visionOS is a supported client with the same client, soak, delivery, and release obligations as iOS/iPadOS. It implements the common client behavior this document requires of supported clients, it is a delivery and soak gate, its release-gated tests run for every release, and each release of the app delivers the Surf Ace operating skill. Requirements that this document ties to iPadOS or iOS/iPadOS scene sizing, input hardware, or visual presentation, such as the iPadOS full-device scene rule in §3.1.1, Apple Pencil input, and the iOS/iPadOS chrome placement and material rules in §15, remain specific to those platforms unless a requirement names visionOS. This follows Mike's October 29, 2026 product ruling that visionOS is a supported Surf Ace client.
 
 ### Actors
 
