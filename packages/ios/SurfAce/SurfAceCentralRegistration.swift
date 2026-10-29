@@ -471,14 +471,22 @@ enum SurfAceTailnetEndpoint {
     }
 
     private static func isTailnetAddress(_ host: String) -> Bool {
+        let address: String
+        if host.hasPrefix("[") && host.hasSuffix("]") {
+            address = String(host.dropFirst().dropLast())
+        } else if host.contains("[") || host.contains("]") {
+            return false
+        } else {
+            address = host
+        }
         var ipv4 = in_addr()
-        if host.withCString({ inet_pton(AF_INET, $0, &ipv4) }) == 1 {
-            let address = UInt32(bigEndian: ipv4.s_addr)
-            return (address & 0xffc00000) == 0x64400000
+        if address.withCString({ inet_pton(AF_INET, $0, &ipv4) }) == 1 {
+            let value = UInt32(bigEndian: ipv4.s_addr)
+            return (value & 0xffc00000) == 0x64400000
         }
 
         var ipv6 = in6_addr()
-        guard host.withCString({ inet_pton(AF_INET6, $0, &ipv6) }) == 1 else { return false }
+        guard address.withCString({ inet_pton(AF_INET6, $0, &ipv6) }) == 1 else { return false }
         let bytes = withUnsafeBytes(of: ipv6) { Array($0) }
         return bytes.count == 16 && (bytes[0] & 0xfe) == 0xfc
     }
