@@ -27,18 +27,9 @@ struct SurfAceDirectEndpointSelection: Equatable, Sendable {
 
     enum ObservedAddressResult: Equatable, Sendable {
         case selected(String)
-        case unavailable
+        case noCellularInterface
+        case inventoryUnavailable
         case cellularOnly
-
-        var address: String? {
-            guard case .selected(let address) = self else { return nil }
-            return address
-        }
-
-        var isCellularOnly: Bool {
-            if case .cellularOnly = self { return true }
-            return false
-        }
     }
 
     let endpoint: String?
@@ -48,10 +39,9 @@ struct SurfAceDirectEndpointSelection: Equatable, Sendable {
 
     static func select(
         configuredEndpoint: String?,
-        observedAddress: String?,
+        observedAddress: ObservedAddressResult,
         listeningPort: Int,
-        allowLoopbackObservedAddress: Bool = false,
-        cellularOnly: Bool = false
+        allowLoopbackObservedAddress: Bool = false
     ) -> Self {
         var warnings: [String] = []
         let listener: SurfAceDirectEndpointListener?
@@ -70,26 +60,30 @@ struct SurfAceDirectEndpointSelection: Equatable, Sendable {
             warnings.append("registration_configured_endpoint_unrecognized")
         }
 
-        if cellularOnly {
-            warnings.append("registration_direct_endpoint_cellular_only")
-            return Self(endpoint: nil, source: nil, listener: nil, warnings: warnings)
-        }
-
-        if let observedAddress,
-           (isUsableObservedAddress(observedAddress)
-                || (allowLoopbackObservedAddress && isLoopbackAddress(observedAddress))),
+        if case .selected(let address) = observedAddress,
+           (isUsableObservedAddress(address)
+                || (allowLoopbackObservedAddress && isLoopbackAddress(address))),
            let listener,
-           let endpoint = endpoint(address: observedAddress, port: listener.port) {
+           let endpoint = endpoint(address: address, port: listener.port) {
             warnings.append("registration_direct_endpoint_unconfirmed source=client-reported")
             return Self(endpoint: endpoint, source: .clientReported, listener: listener, warnings: warnings)
         }
 
-        if let listener {
-            warnings.append("registration_direct_endpoint_unconfirmed source=registry-observed")
-            return Self(endpoint: nil, source: nil, listener: listener, warnings: warnings)
+        switch observedAddress {
+        case .noCellularInterface:
+            if let listener {
+                warnings.append("registration_direct_endpoint_unconfirmed source=registry-observed")
+                return Self(endpoint: nil, source: nil, listener: listener, warnings: warnings)
+            }
+            warnings.append("registration_direct_endpoint_unavailable")
+        case .inventoryUnavailable:
+            warnings.append("registration_direct_endpoint_interface_inventory_unavailable")
+        case .cellularOnly:
+            warnings.append("registration_direct_endpoint_cellular_only")
+        case .selected:
+            warnings.append("registration_direct_endpoint_unavailable")
         }
 
-        warnings.append("registration_direct_endpoint_unavailable")
         return Self(
             endpoint: nil,
             source: nil,
@@ -100,7 +94,7 @@ struct SurfAceDirectEndpointSelection: Equatable, Sendable {
 
     static func observedConnectionAddress() -> ObservedAddressResult {
         var head: UnsafeMutablePointer<ifaddrs>?
-        guard getifaddrs(&head) == 0, let first = head else { return .unavailable }
+        guard getifaddrs(&head) == 0, let first = head else { return .inventoryUnavailable }
         defer { freeifaddrs(first) }
 
         var candidates: [InterfaceAddressCandidate] = []
@@ -109,11 +103,10 @@ struct SurfAceDirectEndpointSelection: Equatable, Sendable {
         while let entry = current {
             let item = entry.pointee
             current = item.ifa_next
-            guard item.ifa_flags & UInt32(IFF_UP) != 0,
-                  item.ifa_flags & UInt32(IFF_LOOPBACK) == 0 else { continue }
-
             let interface = String(cString: item.ifa_name)
-            if isCellularInterface(interface) { cellularInterfacePresent = true }
+            let properties = interfaceProperties(interface: interface, flags: item.ifa_flags)
+            if properties.isCellular { cellularInterfacePresent = true }
+            guard properties.canProvideAddress else { continue }
             guard let socketAddress = item.ifa_addr else { continue }
 
             let family = Int32(socketAddress.pointee.sa_family)
@@ -172,7 +165,19 @@ struct SurfAceDirectEndpointSelection: Equatable, Sendable {
         }.first?.address
 
         if let selected { return .selected(selected) }
-        return cellularInterfacePresent ? .cellularOnly : .unavailable
+        return cellularInterfacePresent ? .cellularOnly : .noCellularInterface
+    }
+
+    struct InterfaceProperties: Equatable, Sendable {
+        let isCellular: Bool
+        let canProvideAddress: Bool
+    }
+
+    static func interfaceProperties(interface: String, flags: UInt32) -> InterfaceProperties {
+        InterfaceProperties(
+            isCellular: isCellularInterface(interface),
+            canProvideAddress: flags & UInt32(IFF_UP) != 0 && flags & UInt32(IFF_LOOPBACK) == 0
+        )
     }
 
     static func endpoint(address: String, port: Int) -> String? {

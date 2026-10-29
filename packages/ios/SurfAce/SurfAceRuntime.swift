@@ -653,10 +653,9 @@ final class SurfAceRuntime {
                     : SurfAceDirectEndpointSelection.observedConnectionAddress()
                 let selection = SurfAceDirectEndpointSelection.select(
                     configuredEndpoint: self.configuredDirectEndpoint,
-                    observedAddress: observedAddress.address,
+                    observedAddress: observedAddress,
                     listeningPort: self.serverPort > 0 ? self.serverPort : Int(self.fixedServerPort),
-                    allowLoopbackObservedAddress: self.isIsolatedTestHost,
-                    cellularOnly: observedAddress.isCellularOnly
+                    allowLoopbackObservedAddress: self.isIsolatedTestHost
                 )
                 return try SurfAceRegistrationInput(
                     state: await adapter.snapshot(),

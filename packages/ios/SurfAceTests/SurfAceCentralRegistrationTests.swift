@@ -2554,7 +2554,7 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
     func testDirectEndpointSelectionPrefersConfigurationAndUsesReportedListenerFallback() {
         let configured = SurfAceDirectEndpointSelection.select(
             configuredEndpoint: "wss://surface.example/ws",
-            observedAddress: "192.168.50.135",
+            observedAddress: .selected("192.168.50.135"),
             listeningPort: 19_001
         )
         XCTAssertEqual(configured.endpoint, "wss://surface.example/ws")
@@ -2564,9 +2564,8 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
 
         let configuredOnCellular = SurfAceDirectEndpointSelection.select(
             configuredEndpoint: "wss://surface.example/ws",
-            observedAddress: nil,
-            listeningPort: 19_001,
-            cellularOnly: true
+            observedAddress: .cellularOnly,
+            listeningPort: 19_001
         )
         XCTAssertEqual(configuredOnCellular.endpoint, "wss://surface.example/ws")
         XCTAssertEqual(configuredOnCellular.source, .configured)
@@ -2575,7 +2574,7 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
 
         let observed = SurfAceDirectEndpointSelection.select(
             configuredEndpoint: nil,
-            observedAddress: "192.168.50.135",
+            observedAddress: .selected("192.168.50.135"),
             listeningPort: 19_001
         )
         XCTAssertEqual(observed.endpoint, "ws://192.168.50.135:19001/ws")
@@ -2587,7 +2586,7 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
 
         let ipv6 = SurfAceDirectEndpointSelection.select(
             configuredEndpoint: nil,
-            observedAddress: "2001:db8::4",
+            observedAddress: .selected("2001:db8::4"),
             listeningPort: 19_001
         )
         XCTAssertEqual(ipv6.endpoint, "ws://[2001:db8::4]:19001/ws")
@@ -2595,7 +2594,7 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
 
         let listenerOnly = SurfAceDirectEndpointSelection.select(
             configuredEndpoint: nil,
-            observedAddress: nil,
+            observedAddress: .noCellularInterface,
             listeningPort: 19_001
         )
         XCTAssertNil(listenerOnly.endpoint)
@@ -2607,7 +2606,7 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
 
         let invalidConfigured = SurfAceDirectEndpointSelection.select(
             configuredEndpoint: "http://invalid.example/ws",
-            observedAddress: nil,
+            observedAddress: .noCellularInterface,
             listeningPort: 19_001
         )
         XCTAssertNil(invalidConfigured.endpoint)
@@ -2620,7 +2619,7 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
 
         let unavailable = SurfAceDirectEndpointSelection.select(
             configuredEndpoint: "http://invalid.example/ws",
-            observedAddress: nil,
+            observedAddress: .noCellularInterface,
             listeningPort: 0
         )
         XCTAssertNil(unavailable.endpoint)
@@ -2630,6 +2629,21 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
             "registration_listening_port_unrecognized",
             "registration_configured_endpoint_unrecognized",
             "registration_direct_endpoint_unavailable",
+        ])
+    }
+
+    func testInterfaceInventoryUnavailableDoesNotSendListenerOnlyRegistration() {
+        let selection = SurfAceDirectEndpointSelection.select(
+            configuredEndpoint: nil,
+            observedAddress: .inventoryUnavailable,
+            listeningPort: 19_001
+        )
+
+        XCTAssertNil(selection.endpoint)
+        XCTAssertNil(selection.source)
+        XCTAssertNil(selection.listener)
+        XCTAssertEqual(selection.warnings, [
+            "registration_direct_endpoint_interface_inventory_unavailable",
         ])
     }
 
@@ -2685,14 +2699,36 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
 
         let noEndpoint = SurfAceDirectEndpointSelection.select(
             configuredEndpoint: nil,
-            observedAddress: cellularOnly.address,
-            listeningPort: 19_001,
-            cellularOnly: cellularOnly.isCellularOnly
+            observedAddress: cellularOnly,
+            listeningPort: 19_001
         )
         XCTAssertNil(noEndpoint.endpoint)
         XCTAssertNil(noEndpoint.source)
         XCTAssertNil(noEndpoint.listener)
         XCTAssertEqual(noEndpoint.warnings, ["registration_direct_endpoint_cellular_only"])
+    }
+
+    func testDownCellularInterfaceDoesNotEnableListenerOnlyRegistration() {
+        let downCellular = SurfAceDirectEndpointSelection.interfaceProperties(
+            interface: "pdp_ip0", flags: 0
+        )
+        XCTAssertTrue(downCellular.isCellular)
+        XCTAssertFalse(downCellular.canProvideAddress)
+
+        let observedAddress = SurfAceDirectEndpointSelection.preferredObservedAddress(
+            candidates: [], cellularInterfacePresent: downCellular.isCellular
+        )
+        XCTAssertEqual(observedAddress, .cellularOnly)
+
+        let selection = SurfAceDirectEndpointSelection.select(
+            configuredEndpoint: nil,
+            observedAddress: observedAddress,
+            listeningPort: 19_001
+        )
+        XCTAssertNil(selection.endpoint)
+        XCTAssertNil(selection.source)
+        XCTAssertNil(selection.listener)
+        XCTAssertEqual(selection.warnings, ["registration_direct_endpoint_cellular_only"])
     }
 
     func testRegistrationPublishesClientReportedEndpointAndListenerWithoutPrePairDescribeAndAcceptsLease() throws {
