@@ -619,6 +619,7 @@ struct SurfAceLocklessAuthorityState: Codable, Equatable, Sendable {
     var pendingControllerRetentionReclamations: [SurfAceLocklessControllerRetentionReclamation]?
     var pendingTombstoneReclamations: [SurfAceLocklessTombstoneReclamation]?
     var registryBinding: SurfAceRegistryBinding?
+    var rememberedTailnetEndpoint: SurfAceRememberedTailnetEndpoint? = nil
     var unconfirmedMigration: SurfAceUnconfirmedMigrationReceipt?
     var sceneSurfaceIds: [String: String]
     var scopes: [String: SurfAceLocklessConsumableScope]
@@ -643,6 +644,7 @@ struct SurfAceLocklessAuthorityState: Codable, Equatable, Sendable {
             pendingControllerRetentionReclamations: [],
             pendingTombstoneReclamations: [],
             registryBinding: nil,
+            rememberedTailnetEndpoint: nil,
             unconfirmedMigration: nil,
             sceneSurfaceIds: [:],
             scopes: [:],
@@ -1318,6 +1320,15 @@ struct SurfAceLocklessGenerationStore: Sendable {
             }
             return binding
         }
+        state.rememberedTailnetEndpoint = decode(
+            root["rememberedTailnetEndpoint"], as: SurfAceRememberedTailnetEndpoint.self
+        ).flatMap { remembered in
+            guard remembered.isValid,
+                  let binding = state.registryBinding,
+                  binding.allocatorId == remembered.registryIdentity.allocatorId,
+                  binding.fleetId == remembered.registryIdentity.fleetId else { return nil }
+            return remembered
+        }
         // Pre-binding migration receipts have no role in recovery.
         state.unconfirmedMigration = nil
         state.annotationPublisher = salvageAnnotationOutbox(root["annotationPublisher"])
@@ -1540,6 +1551,13 @@ struct SurfAceLocklessGenerationStore: Sendable {
         recovered.sequences = source.sequences
         recovered.surfaceSetRevision = source.surfaceSetRevision
         recovered.registryBinding = source.registryBinding
+        recovered.rememberedTailnetEndpoint = source.rememberedTailnetEndpoint.flatMap { remembered in
+            guard remembered.isValid,
+                  let binding = source.registryBinding,
+                  binding.allocatorId == remembered.registryIdentity.allocatorId,
+                  binding.fleetId == remembered.registryIdentity.fleetId else { return nil }
+            return remembered
+        }
         recovered.annotationPublisher = source.annotationPublisher
         recovered.controllers = [:]
         recovered.terminalCloseRecords = source.terminalCloseRecords

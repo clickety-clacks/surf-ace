@@ -30,6 +30,12 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         var acceptedReleaseIds: [String] = []
         var rejectsEveryRegistration = false
         var returnsGenerationV1 = true
+        var registrationCount = 0
+        var registrationIdentity: SurfAceRegistryIdentity?
+        var omitsRegistrationIdentity = false
+        var tailnetEndpoint: URL?
+        var onIdentityRead: (() -> Void)?
+        var onRegister: (() -> Void)?
         var assignedWindowLabels: [String: String] = [:]
         var assignedWindowGenerations: [String: Int64] = [:]
         var assignedPaneLabels: [String: Int64] = [:]
@@ -51,6 +57,7 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
 
         func readRegistryIdentity() async throws -> SurfAceRegistryIdentity {
             identityReads += 1
+            onIdentityRead?()
             return registryIdentity
         }
         func register(clientId: String, surfaces: [SurfAceRegistrationSurface],
@@ -85,9 +92,11 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
             expectedIdentity: SurfAceRegistryIdentity
         ) async throws -> SurfAceRegistrationReply {
             guard registryIdentity == expectedIdentity else { throw SurfAceRegistrationError.invalidResponse }
+            registrationCount += 1
             clients.append(clientId)
             registeredSurfaces = input.surfaces
             registrationInputs.append(input)
+            onRegister?()
             await onInputRegister?(input)
             if let error { throw error }
             if fails { throw SurfAceRegistrationError.noServer }
@@ -169,7 +178,10 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
                     endpointLease: nil,
                     completedPaneReleaseIds: input.pendingPaneReleases.map(\.releaseId),
                     completedWindowReleaseIds: input.pendingWindowReleases.map(\.releaseId)
-                )
+                ),
+                registryIdentity: registrationIdentity ?? registryIdentity,
+                reportedRegistryIdentity: omitsRegistrationIdentity ? nil : registrationIdentity ?? registryIdentity,
+                tailnetEndpoint: tailnetEndpoint
             )
         }
 
@@ -309,8 +321,34 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
             },
             recoverRefusedClaim: { claim in
                 _ = try await adapter.rotateRefusedClaim(claim)
+            },
+            rememberTailnetEndpoint: { endpoint, identity in
+                try await adapter.rememberTailnetEndpoint(
+                    endpoint.absoluteString, registryIdentity: identity, clientId: clientId
+                )
             }
         )
+    }
+
+    private func boundAdapter(
+        at root: URL,
+        clientId: String,
+        identity: SurfAceRegistryIdentity,
+        rememberedEndpoint: String? = nil
+    ) async throws -> (SurfAceLocklessGenerationStore, SurfAceLocklessRuntimeAdapter) {
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let store = SurfAceLocklessGenerationStore(stateURL: root.appendingPathComponent("state.json"))
+        try store.save(SurfAceLocklessAuthorityState.empty())
+        let adapter = try SurfAceLocklessRuntimeAdapter(store: store)
+        _ = try await adapter.bindRegistryIdentity(
+            identity, clientId: clientId, expectedSurfaces: [], allowRebinding: true
+        )
+        if let rememberedEndpoint {
+            _ = try await adapter.rememberTailnetEndpoint(
+                rememberedEndpoint, registryIdentity: identity, clientId: clientId
+            )
+        }
+        return (store, adapter)
     }
 
     private func addSavedSurface(
@@ -2719,5 +2757,302 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
             .map { String(format: "%02x", $0) }.joined()
         XCTAssertEqual(a.clientId, expected)
         XCTAssertNotEqual(a.clientId, a.fingerprint)
+    }
+
+    func testRememberedTailnetEndpointPersistsReplacesAndClearsWhenBindingChanges() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("remembered-endpoint-state-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let clientId = String(repeating: "a", count: 64)
+        let home = SurfAceRegistryIdentity(allocatorId: "alloc_home", fleetId: "home-fleet")
+        let (store, adapter) = try await boundAdapter(at: root, clientId: clientId, identity: home)
+        let first = "ws://100.101.102.103:19001/ws"
+        let second = "ws://100.101.102.104:19001/ws"
+
+        let firstStored = try await adapter.rememberTailnetEndpoint(first, registryIdentity: home, clientId: clientId)
+        XCTAssertTrue(firstStored)
+        let relaunched = try SurfAceLocklessRuntimeAdapter(store: store)
+        let restored = await relaunched.snapshot()
+        XCTAssertEqual(restored.rememberedTailnetEndpoint, .init(endpoint: first, registryIdentity: home))
+
+        let replacementStored = try await relaunched.rememberTailnetEndpoint(second, registryIdentity: home, clientId: clientId)
+        XCTAssertTrue(replacementStored)
+        let replaced = await relaunched.snapshot()
+        XCTAssertEqual(replaced.rememberedTailnetEndpoint, .init(endpoint: second, registryIdentity: home))
+
+        let away = SurfAceRegistryIdentity(allocatorId: "alloc_away", fleetId: "away-fleet")
+        _ = try await relaunched.bindRegistryIdentity(
+            away, clientId: clientId, expectedSurfaces: [], allowRebinding: true
+        )
+        let rebound = await relaunched.snapshot()
+        XCTAssertNil(rebound.rememberedTailnetEndpoint)
+    }
+
+    func testBonjourRegistrationStoresEndpointButConfiguredAndOlderRepliesDoNotReplaceIt() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("remembered-endpoint-home-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let clientId = String(repeating: "b", count: 64)
+        let identity = SurfAceRegistryIdentity(allocatorId: "alloc_home", fleetId: "home-fleet")
+        let (_, adapter) = try await boundAdapter(at: root, clientId: clientId, identity: identity)
+        let first = URL(string: "ws://100.101.102.103:19001/ws")!
+        let homeURL = URL(string: "ws://home.example:19001/ws")!
+        let homeTransport = Transport()
+        homeTransport.registryIdentity = identity
+        homeTransport.tailnetEndpoint = first
+        let homeRegistration = centralRegistration(
+            adapter: adapter, clientId: clientId, configured: nil,
+            discovered: [homeURL], transports: [homeURL: homeTransport]
+        )
+
+        try await homeRegistration.synchronize()
+        XCTAssertEqual(homeRegistration.status, .connected)
+        let homeState = await adapter.snapshot()
+        XCTAssertEqual(homeState.rememberedTailnetEndpoint, .init(
+            endpoint: first.absoluteString, registryIdentity: identity
+        ))
+        homeRegistration.stop()
+
+        let laterTailnet = URL(string: "ws://100.101.102.104:19001/ws")!
+        let laterHomeURL = URL(string: "ws://later-home.example:19001/ws")!
+        let laterHomeTransport = Transport()
+        laterHomeTransport.registryIdentity = identity
+        laterHomeTransport.tailnetEndpoint = laterTailnet
+        let laterHomeRegistration = centralRegistration(
+            adapter: adapter, clientId: clientId, configured: nil,
+            discovered: [laterHomeURL], transports: [laterHomeURL: laterHomeTransport]
+        )
+        try await laterHomeRegistration.synchronize()
+        let replacedByHome = await adapter.snapshot()
+        XCTAssertEqual(replacedByHome.rememberedTailnetEndpoint?.endpoint, laterTailnet.absoluteString)
+        laterHomeRegistration.stop()
+
+        let configuredURL = URL(string: "ws://configured.example:19001/ws")!
+        let configuredTransport = Transport()
+        configuredTransport.registryIdentity = identity
+        configuredTransport.tailnetEndpoint = URL(string: "ws://100.101.102.105:19001/ws")!
+        let configuredRegistration = centralRegistration(
+            adapter: adapter, clientId: clientId, configured: configuredURL,
+            discovered: [], transports: [configuredURL: configuredTransport]
+        )
+        try await configuredRegistration.synchronize()
+        XCTAssertEqual(configuredRegistration.status, .connected)
+        let configuredState = await adapter.snapshot()
+        XCTAssertEqual(configuredState.rememberedTailnetEndpoint?.endpoint, laterTailnet.absoluteString)
+        configuredRegistration.stop()
+
+        let olderPeerURL = URL(string: "ws://older.example:19001/ws")!
+        let olderPeer = Transport()
+        olderPeer.registryIdentity = identity
+        let olderPeerRegistration = centralRegistration(
+            adapter: adapter, clientId: clientId, configured: nil,
+            discovered: [olderPeerURL], transports: [olderPeerURL: olderPeer]
+        )
+        try await olderPeerRegistration.synchronize()
+        XCTAssertEqual(olderPeerRegistration.status, .connected)
+        let olderPeerState = await adapter.snapshot()
+        XCTAssertEqual(olderPeerState.rememberedTailnetEndpoint?.endpoint, laterTailnet.absoluteString)
+        olderPeerRegistration.stop()
+    }
+
+    func testSuccessfulConfiguredAddressDoesNotTryRememberedEndpoint() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("remembered-endpoint-configured-success-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let clientId = String(repeating: "a", count: 64)
+        let identity = SurfAceRegistryIdentity(allocatorId: "alloc_home", fleetId: "home-fleet")
+        let rememberedValue = "ws://100.101.102.103:19001/ws"
+        let (_, adapter) = try await boundAdapter(
+            at: root, clientId: clientId, identity: identity, rememberedEndpoint: rememberedValue
+        )
+        let configuredURL = URL(string: "ws://configured.example:19001/ws")!
+        let rememberedURL = try XCTUnwrap(SurfAceTailnetEndpoint.url(from: rememberedValue))
+        let configured = Transport()
+        configured.registryIdentity = identity
+        configured.tailnetEndpoint = URL(string: "ws://100.101.102.104:19001/ws")!
+        let remembered = Transport()
+        remembered.registryIdentity = identity
+        let registration = centralRegistration(
+            adapter: adapter, clientId: clientId, configured: configuredURL,
+            discovered: [], transports: [configuredURL: configured, rememberedURL: remembered]
+        )
+
+        try await registration.synchronize()
+
+        XCTAssertEqual(registration.status, .connected)
+        XCTAssertEqual(configured.registrationCount, 1)
+        XCTAssertEqual(remembered.identityReads, 0)
+        XCTAssertEqual(remembered.registrationCount, 0)
+        let state = await adapter.snapshot()
+        XCTAssertEqual(state.rememberedTailnetEndpoint?.endpoint, rememberedValue)
+        registration.stop()
+    }
+
+    func testRememberedEndpointRunsAfterEmptyBonjourAndConfiguredFailure() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("remembered-endpoint-order-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let clientId = String(repeating: "c", count: 64)
+        let identity = SurfAceRegistryIdentity(allocatorId: "alloc_home", fleetId: "home-fleet")
+        let rememberedValue = "ws://100.101.102.103:19001/ws"
+        let (_, adapter) = try await boundAdapter(
+            at: root, clientId: clientId, identity: identity, rememberedEndpoint: rememberedValue
+        )
+        let configuredURL = URL(string: "ws://configured.example:19001/ws")!
+        let rememberedURL = try XCTUnwrap(SurfAceTailnetEndpoint.url(from: rememberedValue))
+        let configuredTransport = Transport()
+        configuredTransport.registryIdentity = identity
+        configuredTransport.fails = true
+        let rememberedTransport = Transport()
+        rememberedTransport.registryIdentity = identity
+        rememberedTransport.tailnetEndpoint = URL(string: "ws://100.101.102.104:19001/ws")!
+        var events: [String] = []
+        configuredTransport.onIdentityRead = { events.append("configured.identity") }
+        configuredTransport.onRegister = { events.append("configured.register") }
+        rememberedTransport.onIdentityRead = { events.append("remembered.identity") }
+        rememberedTransport.onRegister = { events.append("remembered.register") }
+
+        let registration = centralRegistration(
+            adapter: adapter, clientId: clientId, configured: configuredURL,
+            discovered: [], transports: [configuredURL: configuredTransport, rememberedURL: rememberedTransport]
+        )
+        try await registration.synchronize()
+
+        XCTAssertEqual(events, [
+            "configured.identity", "configured.register", "remembered.identity", "remembered.register"
+        ])
+        XCTAssertEqual(configuredTransport.registrationCount, 1)
+        XCTAssertEqual(rememberedTransport.registrationCount, 1)
+        XCTAssertEqual(registration.status, .connected)
+        let state = await adapter.snapshot()
+        XCTAssertEqual(state.rememberedTailnetEndpoint?.endpoint, rememberedValue)
+        registration.stop()
+    }
+
+    func testRememberedEndpointIsNotTriedWhenBonjourFindsAServer() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("remembered-endpoint-discovery-wins-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let clientId = String(repeating: "f", count: 64)
+        let identity = SurfAceRegistryIdentity(allocatorId: "alloc_home", fleetId: "home-fleet")
+        let rememberedValue = "ws://100.101.102.103:19001/ws"
+        let (_, adapter) = try await boundAdapter(
+            at: root, clientId: clientId, identity: identity, rememberedEndpoint: rememberedValue
+        )
+        let discoveredURL = URL(string: "ws://home.example:19001/ws")!
+        let rememberedURL = try XCTUnwrap(SurfAceTailnetEndpoint.url(from: rememberedValue))
+        let discovered = Transport()
+        discovered.registryIdentity = identity
+        discovered.fails = true
+        let remembered = Transport()
+        remembered.registryIdentity = identity
+        let registration = centralRegistration(
+            adapter: adapter, clientId: clientId, configured: nil,
+            discovered: [discoveredURL],
+            transports: [discoveredURL: discovered, rememberedURL: remembered]
+        )
+
+        do {
+            try await registration.synchronize()
+            XCTFail("a failed Bonjour candidate fell through to the remembered endpoint")
+        } catch { }
+
+        XCTAssertEqual(discovered.registrationCount, 1)
+        XCTAssertEqual(remembered.identityReads, 0)
+        XCTAssertEqual(remembered.registrationCount, 0)
+        XCTAssertEqual(registration.status, .disconnected)
+        let state = await adapter.snapshot()
+        XCTAssertEqual(state.rememberedTailnetEndpoint?.endpoint, rememberedValue)
+    }
+
+    func testRememberedEndpointIdentityMismatchDoesNotRegisterOrDiscardAddress() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("remembered-endpoint-mismatch-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let clientId = String(repeating: "d", count: 64)
+        let current = SurfAceRegistryIdentity(allocatorId: "alloc_home", fleetId: "home-fleet")
+        let rememberedValue = "ws://100.101.102.103:19001/ws"
+        let (_, adapter) = try await boundAdapter(
+            at: root, clientId: clientId, identity: current, rememberedEndpoint: rememberedValue
+        )
+        let endpoint = try XCTUnwrap(SurfAceTailnetEndpoint.url(from: rememberedValue))
+        let other = Transport()
+        other.registryIdentity = SurfAceRegistryIdentity(allocatorId: "alloc_other", fleetId: "other-fleet")
+        let registration = centralRegistration(
+            adapter: adapter, clientId: clientId, configured: nil,
+            discovered: [], transports: [endpoint: other]
+        )
+
+        do {
+            try await registration.synchronize()
+            XCTFail("an endpoint for another registry connected")
+        } catch { }
+
+        XCTAssertEqual(registration.status, .disconnected)
+        XCTAssertEqual(other.registrationCount, 0)
+        let state = await adapter.snapshot()
+        XCTAssertEqual(state.rememberedTailnetEndpoint?.endpoint, rememberedValue)
+    }
+
+    func testRememberedEndpointFailureKeepsAddressForTheExistingRetry() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("remembered-endpoint-retry-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let clientId = String(repeating: "e", count: 64)
+        let identity = SurfAceRegistryIdentity(allocatorId: "alloc_home", fleetId: "home-fleet")
+        let rememberedValue = "ws://100.101.102.103:19001/ws"
+        let (_, adapter) = try await boundAdapter(
+            at: root, clientId: clientId, identity: identity, rememberedEndpoint: rememberedValue
+        )
+        let endpoint = try XCTUnwrap(SurfAceTailnetEndpoint.url(from: rememberedValue))
+        let transport = Transport()
+        transport.registryIdentity = identity
+        transport.fails = true
+        transport.tailnetEndpoint = URL(string: "ws://100.101.102.104:19001/ws")!
+        let registration = centralRegistration(
+            adapter: adapter, clientId: clientId, configured: nil,
+            discovered: [], transports: [endpoint: transport]
+        )
+
+        do {
+            try await registration.synchronize()
+            XCTFail("failed remembered registration connected")
+        } catch { }
+        XCTAssertEqual(registration.status, .disconnected)
+        let failedState = await adapter.snapshot()
+        XCTAssertEqual(failedState.rememberedTailnetEndpoint?.endpoint, rememberedValue)
+
+        transport.fails = false
+        try await registration.synchronize()
+        XCTAssertEqual(registration.status, .connected)
+        XCTAssertEqual(transport.registrationCount, 2)
+        let retriedState = await adapter.snapshot()
+        XCTAssertEqual(retriedState.rememberedTailnetEndpoint?.endpoint, rememberedValue)
+        registration.stop()
+    }
+
+    func testRegistrationTailnetEndpointIsOptionalAndMalformedValuesAreIgnored() throws {
+        let identity = SurfAceRegistryIdentity(allocatorId: "alloc_home", fleetId: "home-fleet")
+        func parse(_ optionalField: String) throws -> SurfAceRegistrationReply {
+            let response = Data("""
+            {"id":"register-1","op":"client.register","type":"response","v":1,"ok":true,"payload":{"clientId":"client","registryIdentity":{"allocatorId":"alloc_home","fleetId":"home-fleet"},"surfaces":[]\(optionalField)}}
+            """.utf8)
+            return try SurfAceRegistrationWire.registration(
+                from: response, requestId: "register-1", clientId: "client", surfaces: [],
+                expectedIdentity: identity
+            )
+        }
+
+        let valid = try parse(",\"tailnetEndpoint\":\"ws://100.101.102.103:19001/ws\"")
+        XCTAssertEqual(valid.reportedRegistryIdentity, identity)
+        XCTAssertEqual(valid.tailnetEndpoint?.absoluteString, "ws://100.101.102.103:19001/ws")
+        XCTAssertFalse(valid.discarded)
+
+        let absent = try parse("")
+        XCTAssertNil(absent.tailnetEndpoint)
+        XCTAssertFalse(absent.discarded)
+
+        let malformedType = try parse(",\"tailnetEndpoint\":42")
+        XCTAssertNil(malformedType.tailnetEndpoint)
+        XCTAssertTrue(malformedType.warnings.contains("registration_tailnet_endpoint_unrecognized"))
+        XCTAssertFalse(malformedType.discarded)
+
+        let invalidHost = try parse(",\"tailnetEndpoint\":\"ws://registry.example:19001/ws\"")
+        XCTAssertNil(invalidHost.tailnetEndpoint)
+        XCTAssertTrue(invalidHost.warnings.contains("registration_tailnet_endpoint_unrecognized"))
+        XCTAssertFalse(invalidHost.discarded)
     }
 }

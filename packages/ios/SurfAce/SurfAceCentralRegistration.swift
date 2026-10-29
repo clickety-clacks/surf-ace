@@ -287,6 +287,7 @@ struct SurfAceWindowReleaseRequest: Codable, Equatable, Sendable {
 struct SurfAceRegistrationInput: Equatable, Sendable {
     let clientId: String?
     let registryIdentity: SurfAceRegistryIdentity?
+    let rememberedTailnetEndpoint: SurfAceRememberedTailnetEndpoint?
     let surfaces: [SurfAceRegistrationSurface]
     let pendingPaneReleases: [SurfAcePaneReleaseRequest]
     let pendingWindowReleases: [SurfAceWindowReleaseRequest]
@@ -298,10 +299,12 @@ struct SurfAceRegistrationInput: Equatable, Sendable {
         surfaces: [SurfAceRegistrationSurface],
         pendingPaneReleases: [SurfAcePaneReleaseRequest],
         pendingWindowReleases: [SurfAceWindowReleaseRequest],
-        warnings: [String] = []
+        warnings: [String] = [],
+        rememberedTailnetEndpoint: SurfAceRememberedTailnetEndpoint? = nil
     ) {
         self.clientId = clientId
         self.registryIdentity = registryIdentity
+        self.rememberedTailnetEndpoint = rememberedTailnetEndpoint
         self.surfaces = surfaces
         self.pendingPaneReleases = pendingPaneReleases
         self.pendingWindowReleases = pendingWindowReleases
@@ -314,6 +317,10 @@ struct SurfAceRegistrationInput: Equatable, Sendable {
         let identity = binding.map { SurfAceRegistryIdentity(allocatorId: $0.allocatorId, fleetId: $0.fleetId) }
         self.clientId = currentClientId
         registryIdentity = identity
+        rememberedTailnetEndpoint = state.rememberedTailnetEndpoint.flatMap { remembered in
+            guard let identity, remembered.registryIdentity == identity, remembered.isValid else { return nil }
+            return remembered
+        }
         surfaces = SurfAceRegistrationSurface.snapshot(state).map { surface in
             guard binding != nil,
                   state.liveSurfaces[surface.surfaceId]?.windowLabelConfirmed != false else {
@@ -417,7 +424,8 @@ struct SurfAceRegistrationInput: Equatable, Sendable {
             surfaces: surfaces ?? self.surfaces,
             pendingPaneReleases: pendingPaneReleases ?? self.pendingPaneReleases,
             pendingWindowReleases: pendingWindowReleases ?? self.pendingWindowReleases,
-            warnings: warnings
+            warnings: warnings,
+            rememberedTailnetEndpoint: rememberedTailnetEndpoint
         )
     }
 
@@ -433,6 +441,46 @@ struct SurfAceRegistryIdentity: Codable, Equatable, Sendable {
     var isValid: Bool {
         allocatorId.range(of: #"^alloc_[A-Za-z0-9._:-]{3,64}$"#, options: .regularExpression) != nil &&
         fleetId.range(of: #"^[A-Za-z0-9._:-]{1,128}$"#, options: .regularExpression) != nil
+    }
+}
+
+struct SurfAceRememberedTailnetEndpoint: Codable, Equatable, Sendable {
+    let endpoint: String
+    let registryIdentity: SurfAceRegistryIdentity
+
+    var url: URL? {
+        SurfAceTailnetEndpoint.url(from: endpoint)
+    }
+
+    var isValid: Bool {
+        registryIdentity.isValid && url != nil
+    }
+}
+
+enum SurfAceTailnetEndpoint {
+    static func url(from value: String) -> URL? {
+        guard value.utf8.count <= 2_048,
+              let components = URLComponents(string: value),
+              components.scheme?.lowercased() == "ws",
+              let host = components.host, isTailnetAddress(host),
+              let port = components.port, (1...65_535).contains(port),
+              components.path == "/ws",
+              components.user == nil, components.password == nil,
+              components.query == nil, components.fragment == nil else { return nil }
+        return components.url
+    }
+
+    private static func isTailnetAddress(_ host: String) -> Bool {
+        var ipv4 = in_addr()
+        if host.withCString({ inet_pton(AF_INET, $0, &ipv4) }) == 1 {
+            let address = UInt32(bigEndian: ipv4.s_addr)
+            return (address & 0xffc00000) == 0x64400000
+        }
+
+        var ipv6 = in6_addr()
+        guard host.withCString({ inet_pton(AF_INET6, $0, &ipv6) }) == 1 else { return false }
+        let bytes = withUnsafeBytes(of: ipv6) { Array($0) }
+        return bytes.count == 16 && (bytes[0] & 0xfe) == 0xfc
     }
 }
 
@@ -482,6 +530,8 @@ struct SurfAceRegistrationReply: Equatable, Sendable {
     let projection: SurfAceRegistrationProjection
     let warnings: [String]
     let registryIdentity: SurfAceRegistryIdentity?
+    let reportedRegistryIdentity: SurfAceRegistryIdentity?
+    let tailnetEndpoint: URL?
     let discarded: Bool
     let needsRetry: Bool
 
@@ -490,6 +540,8 @@ struct SurfAceRegistrationReply: Equatable, Sendable {
         projection: SurfAceRegistrationProjection,
         warnings: [String] = [],
         registryIdentity: SurfAceRegistryIdentity? = nil,
+        reportedRegistryIdentity: SurfAceRegistryIdentity? = nil,
+        tailnetEndpoint: URL? = nil,
         discarded: Bool = false,
         needsRetry: Bool = false
     ) {
@@ -497,6 +549,8 @@ struct SurfAceRegistrationReply: Equatable, Sendable {
         self.projection = projection
         self.warnings = warnings
         self.registryIdentity = registryIdentity
+        self.reportedRegistryIdentity = reportedRegistryIdentity
+        self.tailnetEndpoint = tailnetEndpoint
         self.discarded = discarded
         self.needsRetry = needsRetry
     }
@@ -864,6 +918,8 @@ enum SurfAceRegistrationWire {
             let clientIdWasMalformed: Bool
             let registryIdentity: SurfAceRegistryIdentity?
             let registryIdentityWasMalformed: Bool
+            let tailnetEndpoint: String?
+            let tailnetEndpointWasMalformed: Bool
             let surfaces: [SurfAceRegistrationAssignment]
             let surfacesWereMissing: Bool
             let surfacesWereMalformed: Bool
@@ -886,7 +942,7 @@ enum SurfAceRegistrationWire {
             let discardedWindowReleaseIdCount: Int
 
             private enum CodingKeys: String, CodingKey {
-                case clientId, registryIdentity, surfaces, directEndpoint, prePairDescribeV1
+                case clientId, registryIdentity, tailnetEndpoint, surfaces, directEndpoint, prePairDescribeV1
                 case allocationGenerationV1, windowGenerationV1, endpointLease
                 case completedPaneReleaseIds, completedWindowReleaseIds
             }
@@ -902,6 +958,10 @@ enum SurfAceRegistrationWire {
                 )
                 registryIdentity = identity.value
                 registryIdentityWasMalformed = identity.malformed
+
+                let tailnet = decodeTolerantly(String.self, from: container, forKey: .tailnetEndpoint)
+                tailnetEndpoint = tailnet.value
+                tailnetEndpointWasMalformed = tailnet.malformed
 
                 surfacesWereMissing = !container.contains(.surfaces)
                 if container.contains(.surfaces) {
@@ -1122,13 +1182,14 @@ enum SurfAceRegistrationWire {
             )
         }
 
-        let identity: SurfAceRegistryIdentity?
-        if let reportedIdentity = payload.registryIdentity, reportedIdentity.isValid {
-            identity = reportedIdentity
+        let reportedIdentity: SurfAceRegistryIdentity?
+        if let decodedIdentity = payload.registryIdentity, decodedIdentity.isValid {
+            reportedIdentity = decodedIdentity
         } else {
-            identity = expectedIdentity
             warnings.append("registration_registry_identity_missing_or_unrecognized")
+            reportedIdentity = nil
         }
+        let identity = reportedIdentity ?? expectedIdentity
         if let identity, let expectedIdentity, identity != expectedIdentity {
             warnings.append("registration_registry_identity_changed")
         }
@@ -1142,6 +1203,7 @@ enum SurfAceRegistrationWire {
             return SurfAceRegistrationReply(
                 assignments: [], projection: emptyProjection,
                 warnings: Array(Set(warnings)).sorted(), registryIdentity: identity,
+                reportedRegistryIdentity: reportedIdentity,
                 discarded: true, needsRetry: true
             )
         }
@@ -1151,6 +1213,7 @@ enum SurfAceRegistrationWire {
             return SurfAceRegistrationReply(
                 assignments: [], projection: emptyProjection,
                 warnings: Array(Set(warnings)).sorted(), registryIdentity: identity,
+                reportedRegistryIdentity: reportedIdentity,
                 discarded: true, needsRetry: true
             )
         }
@@ -1230,9 +1293,13 @@ enum SurfAceRegistrationWire {
         }
 
         let directEndpoint = payload.directEndpoint
+        let tailnetEndpoint = payload.tailnetEndpoint.flatMap(SurfAceTailnetEndpoint.url(from:))
         let prePairDescribeV1 = payload.prePairDescribeV1 ?? false
         let allocationGenerationV1 = payload.allocationGenerationV1 ?? false
         let endpointLease = payload.endpointLease
+        if payload.tailnetEndpointWasMalformed || (payload.tailnetEndpoint != nil && tailnetEndpoint == nil) {
+            warnings.append("registration_tailnet_endpoint_unrecognized")
+        }
         if payload.directEndpointWasMalformed { warnings.append("registration_endpoint_unrecognized") }
         if payload.prePairDescribeV1WasMalformed { warnings.append("registration_pre_pair_capability_unrecognized") }
         if payload.endpointLeaseWasMalformed { warnings.append("registration_endpoint_lease_unrecognized") }
@@ -1299,6 +1366,8 @@ enum SurfAceRegistrationWire {
             ),
             warnings: Array(Set(warnings)).sorted(),
             registryIdentity: identity,
+            reportedRegistryIdentity: reportedIdentity,
+            tailnetEndpoint: tailnetEndpoint,
             needsRetry: needsRetry
         )
     }
@@ -1861,6 +1930,14 @@ final class SurfAceCentralRegistration {
     typealias VerifyRegistry = @MainActor (SurfAceRegistryIdentity, [SurfAceRegistrationSurface]) async throws -> Void
     typealias RecoverRefusedRelease = @MainActor (String) async throws -> Void
     typealias RecoverRefusedClaim = @MainActor (SurfAceRegistrationClaim) async throws -> Void
+    typealias RememberTailnetEndpoint = @MainActor (URL, SurfAceRegistryIdentity) async throws -> Bool
+
+    private enum CandidateOrigin: Equatable {
+        case configured
+        case bonjour
+        case remembered
+        case other
+    }
 
     private enum RecoveryResult {
         case applied
@@ -1872,6 +1949,19 @@ final class SurfAceCentralRegistration {
         let url: URL
         let transport: any SurfAceRegistrationTransport
         let phase: String
+        let origin: CandidateOrigin
+    }
+
+    private struct CandidateRoute {
+        let url: URL
+        let phase: String
+        let origin: CandidateOrigin
+    }
+
+    private struct Selected {
+        let url: URL
+        let transport: any SurfAceRegistrationTransport
+        let origin: CandidateOrigin
     }
 
     private struct IdentifiedCandidate {
@@ -1895,8 +1985,9 @@ final class SurfAceCentralRegistration {
     private let applyReplySubset: ApplyReplySubset?
     private let recoverRefusedRelease: RecoverRefusedRelease?
     private let recoverRefusedClaim: RecoverRefusedClaim?
+    private let rememberTailnetEndpoint: RememberTailnetEndpoint
     private let onVerifiedEndpoint: @MainActor (URL) -> Void
-    private var selected: (url: URL, transport: any SurfAceRegistrationTransport)?
+    private var selected: Selected?
     private var loop: Task<Void, Never>?
     private var synchronizationTask: Task<Void, Error>?
     private var synchronizationTaskId: UUID?
@@ -1953,6 +2044,7 @@ final class SurfAceCentralRegistration {
          applyReplySubset: ApplyReplySubset? = nil,
          recoverRefusedRelease: RecoverRefusedRelease? = nil,
          recoverRefusedClaim: RecoverRefusedClaim? = nil,
+         rememberTailnetEndpoint: @escaping RememberTailnetEndpoint = { _, _ in false },
          onError: @escaping @MainActor (Error) -> Void = { _ in },
          onWarning: @escaping @MainActor (String) -> Void = { _ in },
          onStatusChange: @escaping @MainActor (SurfAceCentralRegistrationStatus) -> Void = { _ in },
@@ -1973,6 +2065,7 @@ final class SurfAceCentralRegistration {
         self.bindRegistry = bindRegistry ?? verifyRegistry
         self.recoverRefusedRelease = recoverRefusedRelease
         self.recoverRefusedClaim = recoverRefusedClaim
+        self.rememberTailnetEndpoint = rememberTailnetEndpoint
         self.onError = onError
         self.onWarning = onWarning
         self.onStatusChange = onStatusChange
@@ -2051,10 +2144,11 @@ final class SurfAceCentralRegistration {
         // A healthy selected route is the steady-state path. Reuse its socket
         // and avoid a Bonjour scan and identity connections to other addresses
         // on every timer tick.
-        if let selected {
+        if let active = selected {
             do {
-                let identityRead = try await selected.transport.readRegistryIdentity(
-                    fallbackIdentity: input.registryIdentity
+                let storedEndpoint = input.rememberedTailnetEndpoint
+                let identityRead = try await active.transport.readRegistryIdentity(
+                    fallbackIdentity: active.origin == .remembered ? nil : input.registryIdentity
                 )
                 for warning in identityRead.warnings { onWarning(warning) }
                 let identity = identityRead.identity
@@ -2062,28 +2156,48 @@ final class SurfAceCentralRegistration {
                     onWarning("topology_registry_identity_unrecognized")
                     throw SurfAceRegistrationError.registryIdentityMissing
                 }
-                if let identity {
+                if active.origin == .remembered {
+                    guard let storedEndpoint, let identity,
+                          storedEndpoint.url == active.url,
+                          identity == storedEndpoint.registryIdentity,
+                          identity == input.registryIdentity else {
+                        throw SurfAceRegistrationError.foreignRegistryIdentity
+                    }
+                    _ = try await verifyRememberedBinding(storedEndpoint, identity: identity)
+                } else if let identity {
                     try await bindCandidateRegistry(identity)
                 }
                 let boundInput = try await currentInputSnapshot()
-                if identity != nil, inputSnapshot != nil, boundInput.registryIdentity != identity {
+                if active.origin == .remembered {
+                    guard let storedEndpoint,
+                          boundInput.registryIdentity == identity,
+                          boundInput.rememberedTailnetEndpoint == storedEndpoint else {
+                        throw SurfAceRegistrationError.foreignRegistryIdentity
+                    }
+                } else if identity != nil, inputSnapshot != nil, boundInput.registryIdentity != identity {
                     onWarning("registration_binding_not_yet_persisted; continuing with current claims")
                 }
-                try await registerAndApply(using: selected.transport, identity: identity, input: boundInput)
+                let reply = try await registerAndApply(
+                    using: active.transport,
+                    identity: identity,
+                    input: boundInput,
+                    requiredRegistryIdentity: active.origin == .remembered ? identity : nil
+                )
+                await rememberTailnetEndpointFromHomeReply(reply, origin: active.origin)
                 guard !stopped else { throw SurfAceRegistrationError.stopped }
                 setLastError(nil)
                 lastReportedError = nil
                 setStatus(.connected)
-                onVerifiedEndpoint(selected.url)
+                onVerifiedEndpoint(active.url)
                 return
             } catch {
                 if stopped { throw SurfAceRegistrationError.stopped }
                 selectedRouteFailed = true
-                selected.transport.close()
+                active.transport.close()
                 self.selected = nil
                 failures.values.append(reportFailure(
                     phase: "reconnect",
-                    endpoint: selected.url,
+                    endpoint: active.url,
                     underlying: surfAceRegistrationErrorDescription(error),
                     showInStatus: false
                 ).errorDescription ?? surfAceRegistrationErrorDescription(error))
@@ -2101,27 +2215,30 @@ final class SurfAceCentralRegistration {
             ).errorDescription ?? reason)
         }
 
-        let routeURLs = candidateURLs(discovered: discovered)
-        var scanURLs = routeURLs
+        var scanRoutes = candidateURLs(discovered: discovered)
         if selectedRouteFailed, let previousSelected {
             // A failed route has already had its attempt this tick. Keep other
             // addresses from the same registry available for failover.
-            scanURLs.removeAll { $0.0 == previousSelected.url }
+            scanRoutes.removeAll { $0.url == previousSelected.url }
         } else if let previousSelected,
-                  !scanURLs.contains(where: { $0.0 == previousSelected.url }) {
-            scanURLs.append((previousSelected.url, "reconnect"))
+                  !scanRoutes.contains(where: { $0.url == previousSelected.url }) {
+            scanRoutes.append(CandidateRoute(
+                url: previousSelected.url, phase: "reconnect", origin: previousSelected.origin
+            ))
         }
         var candidates: [Candidate] = []
         var seen = Set<String>()
-        for (url, phase) in scanURLs where (url.scheme == "ws" || url.scheme == "wss") {
-            guard seen.insert(url.absoluteString).inserted else { continue }
+        for route in scanRoutes where (route.url.scheme == "ws" || route.url.scheme == "wss") {
+            guard seen.insert(route.url.absoluteString).inserted else { continue }
             let transport: any SurfAceRegistrationTransport
-            if let active = self.selected, active.url == url {
+            if let active = self.selected, active.url == route.url {
                 transport = active.transport
             } else {
-                transport = makeTransport(url)
+                transport = makeTransport(route.url)
             }
-            candidates.append(Candidate(url: url, transport: transport, phase: phase))
+            candidates.append(Candidate(
+                url: route.url, transport: transport, phase: route.phase, origin: route.origin
+            ))
         }
 
         var identified: [IdentifiedCandidate] = []
@@ -2154,93 +2271,194 @@ final class SurfAceCentralRegistration {
         // Prefer the current registry while it is discoverable. Otherwise prefer
         // an identified registry; if every topology reply is incomplete, still
         // register with the discovered server and leave its claims unbound.
-        guard let preferredCandidate = matching ?? identified.first(where: { $0.identity != nil }) ?? identified.first else {
-            let reason = failures.values.isEmpty
-                ? "Bonjour found no _surf-ace._tcp service with role=server v=1 ws=/ws"
-                : failures.values.joined(separator: "; ")
-            let failure = SurfAceCentralRegistrationFailure(phase: "retry", endpoint: nil, underlying: reason)
-            setLastError(failure.errorDescription)
-            if lastReportedError != failure.errorDescription {
-                lastReportedError = failure.errorDescription
-                onError(failure)
-            }
-            for candidate in candidates { candidate.transport.close() }
-            if let selected { selected.transport.close() }
-            selected = nil
-            throw failure
-        }
-        let selectedIdentity = preferredCandidate.identity
-
-        for identifiedCandidate in identified where identifiedCandidate.identity == selectedIdentity {
-            let candidate = identifiedCandidate.candidate
-            do {
-                if let identity = identifiedCandidate.identity {
-                    try await bindCandidateRegistry(identity)
-                }
-                let boundInput = try await currentInputSnapshot()
-                if identifiedCandidate.identity != nil, inputSnapshot != nil,
-                   boundInput.registryIdentity != identifiedCandidate.identity {
-                    onWarning("registration_binding_not_yet_persisted; continuing with current claims")
-                }
-                try await registerAndApply(
-                    using: candidate.transport,
-                    identity: identifiedCandidate.identity,
-                    input: boundInput
-                )
-                guard !stopped else { throw SurfAceRegistrationError.stopped }
-                for other in candidates where other.transport !== candidate.transport {
-                    other.transport.close()
-                }
-                if let prior = selected, prior.transport !== candidate.transport {
-                    prior.transport.close()
-                }
-                selected = (candidate.url, candidate.transport)
-                setLastError(nil)
-                lastReportedError = nil
-                setStatus(.connected)
-                onVerifiedEndpoint(candidate.url)
-                return
-            } catch {
-                if stopped {
-                    for other in candidates {
-                        if let selected, other.transport === selected.transport { continue }
+        let preferredCandidate = matching ?? identified.first(where: { $0.identity != nil }) ?? identified.first
+        if let preferredCandidate {
+            let selectedIdentity = preferredCandidate.identity
+            for identifiedCandidate in identified where identifiedCandidate.identity == selectedIdentity {
+                let candidate = identifiedCandidate.candidate
+                do {
+                    if let identity = identifiedCandidate.identity {
+                        try await bindCandidateRegistry(identity)
+                    }
+                    let boundInput = try await currentInputSnapshot()
+                    if identifiedCandidate.identity != nil, inputSnapshot != nil,
+                       boundInput.registryIdentity != identifiedCandidate.identity {
+                        onWarning("registration_binding_not_yet_persisted; continuing with current claims")
+                    }
+                    let reply = try await registerAndApply(
+                        using: candidate.transport,
+                        identity: identifiedCandidate.identity,
+                        input: boundInput
+                    )
+                    await rememberTailnetEndpointFromHomeReply(reply, origin: candidate.origin)
+                    guard !stopped else { throw SurfAceRegistrationError.stopped }
+                    for other in candidates where other.transport !== candidate.transport {
                         other.transport.close()
                     }
-                    throw SurfAceRegistrationError.stopped
+                    if let prior = selected, prior.transport !== candidate.transport {
+                        prior.transport.close()
+                    }
+                    selected = Selected(
+                        url: candidate.url, transport: candidate.transport, origin: candidate.origin
+                    )
+                    setLastError(nil)
+                    lastReportedError = nil
+                    setStatus(.connected)
+                    onVerifiedEndpoint(candidate.url)
+                    return
+                } catch {
+                    if stopped {
+                        for other in candidates {
+                            if let selected, other.transport === selected.transport { continue }
+                            other.transport.close()
+                        }
+                        throw SurfAceRegistrationError.stopped
+                    }
+                    failures.values.append(reportFailure(
+                        phase: candidate.phase,
+                        endpoint: candidate.url,
+                        underlying: surfAceRegistrationErrorDescription(error),
+                        showInStatus: false
+                    ).errorDescription ?? surfAceRegistrationErrorDescription(error))
                 }
-                failures.values.append(reportFailure(
-                    phase: candidate.phase,
-                    endpoint: candidate.url,
-                    underlying: surfAceRegistrationErrorDescription(error),
-                    showInStatus: false
-                ).errorDescription ?? surfAceRegistrationErrorDescription(error))
             }
         }
 
         for candidate in candidates { candidate.transport.close() }
         if let selected { selected.transport.close() }
         self.selected = nil
+
+        let rememberedRouteAlreadyFailed = selectedRouteFailed && previousSelected?.origin == .remembered
+        if discovered.isEmpty, !rememberedRouteAlreadyFailed,
+           try await attemptRememberedEndpoint(failures: failures) {
+            return
+        }
+
         setStatus(.disconnected)
-        let reason = failures.values.isEmpty
-            ? "registry registration failed for every endpoint with identity \(selectedIdentity.map { "\($0.allocatorId)/\($0.fleetId)" } ?? "unreported")"
-            : failures.values.joined(separator: "; ")
+        let reason: String
+        if failures.values.isEmpty {
+            reason = "Bonjour found no _surf-ace._tcp service with role=server v=1 ws=/ws"
+        } else {
+            reason = failures.values.joined(separator: "; ")
+        }
         throw reportFailure(phase: "retry", endpoint: nil, underlying: reason, showInStatus: true)
     }
 
-    private func candidateURLs(discovered: [URL]) -> [(URL, String)] {
-        var result: [(URL, String)] = []
+    private func candidateURLs(discovered: [URL]) -> [CandidateRoute] {
+        var result: [CandidateRoute] = []
         var seen = Set<String>()
-        func append(_ url: URL, _ phase: String) {
+        func append(_ url: URL, _ phase: String, origin: CandidateOrigin) {
             guard seen.insert(url.absoluteString).inserted else { return }
-            result.append((url, phase))
+            result.append(CandidateRoute(url: url, phase: phase, origin: origin))
         }
-        if let configured { append(configured, "configured") }
+        if let configured { append(configured, "configured", origin: .configured) }
         for url in discovered {
             // Bonjour supplies resolved addresses for a role=server service.
-            for address in transportFallbacks(url) { append(address, "transport_address") }
-            append(url, "discovery")
+            for address in transportFallbacks(url) {
+                append(address, "transport_address", origin: .bonjour)
+            }
+            append(url, "discovery", origin: .bonjour)
         }
         return result
+    }
+
+    private func verifyRememberedBinding(
+        _ remembered: SurfAceRememberedTailnetEndpoint,
+        identity: SurfAceRegistryIdentity
+    ) async throws -> SurfAceRegistrationInput {
+        guard remembered.isValid, remembered.registryIdentity == identity else {
+            throw SurfAceRegistrationError.foreignRegistryIdentity
+        }
+        let before = try await currentInputSnapshot()
+        guard before.registryIdentity == identity,
+              before.rememberedTailnetEndpoint == remembered else {
+            throw SurfAceRegistrationError.foreignRegistryIdentity
+        }
+        try await verifyRegistry(identity, before.surfaces)
+        let after = try await currentInputSnapshot()
+        guard after.registryIdentity == identity,
+              after.rememberedTailnetEndpoint == remembered else {
+            throw SurfAceRegistrationError.foreignRegistryIdentity
+        }
+        return after
+    }
+
+    private func attemptRememberedEndpoint(failures: FailureCollector) async throws -> Bool {
+        let input = try await currentInputSnapshot()
+        guard let remembered = input.rememberedTailnetEndpoint,
+              let endpoint = remembered.url,
+              input.registryIdentity == remembered.registryIdentity else { return false }
+
+        let candidate = Candidate(
+            url: endpoint,
+            transport: makeTransport(endpoint),
+            phase: "remembered",
+            origin: .remembered
+        )
+        do {
+            let identityRead = try await candidate.transport.readRegistryIdentity(fallbackIdentity: nil)
+            for warning in identityRead.warnings { onWarning(warning) }
+            if identityRead.identity?.isValid == false {
+                onWarning("topology_registry_identity_unrecognized")
+            }
+            guard let identity = identityRead.identity, identity.isValid else {
+                throw SurfAceRegistrationError.registryIdentityMissing
+            }
+            guard identity == input.registryIdentity,
+                  identity == remembered.registryIdentity else {
+                throw SurfAceRegistrationError.foreignRegistryIdentity
+            }
+            let boundInput = try await verifyRememberedBinding(remembered, identity: identity)
+            let reply = try await registerAndApply(
+                using: candidate.transport,
+                identity: identity,
+                input: boundInput,
+                requiredRegistryIdentity: identity
+            )
+            guard !stopped else { throw SurfAceRegistrationError.stopped }
+            let current = try await currentInputSnapshot()
+            guard current.registryIdentity == identity,
+                  current.rememberedTailnetEndpoint == remembered else {
+                throw SurfAceRegistrationError.foreignRegistryIdentity
+            }
+            if let prior = selected { prior.transport.close() }
+            selected = Selected(url: endpoint, transport: candidate.transport, origin: .remembered)
+            setLastError(nil)
+            lastReportedError = nil
+            setStatus(.connected)
+            onVerifiedEndpoint(endpoint)
+            return true
+        } catch {
+            candidate.transport.close()
+            if stopped { throw SurfAceRegistrationError.stopped }
+            failures.values.append(reportFailure(
+                phase: "remembered",
+                endpoint: endpoint,
+                underlying: surfAceRegistrationErrorDescription(error),
+                showInStatus: false
+            ).errorDescription ?? surfAceRegistrationErrorDescription(error))
+            return false
+        }
+    }
+
+    private func rememberTailnetEndpointFromHomeReply(
+        _ reply: SurfAceRegistrationReply?,
+        origin: CandidateOrigin
+    ) async {
+        guard origin == .bonjour,
+              let reply,
+              let endpoint = reply.tailnetEndpoint,
+              let identity = reply.reportedRegistryIdentity,
+              identity.isValid,
+              reply.registryIdentity == identity else { return }
+        do {
+            guard try await rememberTailnetEndpoint(endpoint, identity) else {
+                onWarning("registration_tailnet_endpoint_not_stored_for_current_binding")
+                return
+            }
+        } catch {
+            onWarning("registration_tailnet_endpoint_persistence_failed")
+        }
     }
 
     private func bindCandidateRegistry(
@@ -2268,11 +2486,26 @@ final class SurfAceCentralRegistration {
         onWarning("registration_binding_snapshot_unstable; continuing with best available claims")
     }
 
+    private func requireRegistryIdentity(
+        _ reply: SurfAceRegistrationReply,
+        matching requiredIdentity: SurfAceRegistryIdentity?
+    ) throws {
+        guard let requiredIdentity else { return }
+        guard reply.registryIdentity == requiredIdentity,
+              reply.reportedRegistryIdentity == requiredIdentity else {
+            if reply.reportedRegistryIdentity == nil {
+                throw SurfAceRegistrationError.registryIdentityMissing
+            }
+            throw SurfAceRegistrationError.foreignRegistryIdentity
+        }
+    }
+
     private func registerAndApply(
         using transport: any SurfAceRegistrationTransport,
         identity: SurfAceRegistryIdentity?,
-        input: SurfAceRegistrationInput
-    ) async throws {
+        input: SurfAceRegistrationInput,
+        requiredRegistryIdentity: SurfAceRegistryIdentity? = nil
+    ) async throws -> SurfAceRegistrationReply? {
         var current = input
         var currentIdentity = identity
         var registryIdentityConfirmedForReleases = false
@@ -2281,6 +2514,16 @@ final class SurfAceCentralRegistration {
             + input.surfaces.reduce(0) { $0 + 1 + $1.panes.count }
         for _ in 0..<maximumRecoveryAttempts {
             guard !stopped else { throw SurfAceRegistrationError.stopped }
+            if let requiredRegistryIdentity {
+                let latest = try await currentInputSnapshot()
+                guard latest.registryIdentity == requiredRegistryIdentity,
+                      latest.rememberedTailnetEndpoint == input.rememberedTailnetEndpoint,
+                      latest.rememberedTailnetEndpoint?.registryIdentity == requiredRegistryIdentity else {
+                    throw SurfAceRegistrationError.foreignRegistryIdentity
+                }
+                current = latest
+                currentIdentity = requiredRegistryIdentity
+            }
             do {
                 let request = !registryIdentityConfirmedForReleases
                     && (!current.pendingPaneReleases.isEmpty || !current.pendingWindowReleases.isEmpty)
@@ -2288,6 +2531,7 @@ final class SurfAceCentralRegistration {
                 let reply = try await transport.register(
                     clientId: clientId, input: request, expectedIdentity: currentIdentity
                 )
+                try requireRegistryIdentity(reply, matching: requiredRegistryIdentity)
                 if let replyIdentity = reply.registryIdentity, replyIdentity != current.registryIdentity {
                     onWarning("registration_registry_identity_changed; rebinding and retrying")
                     try await bindCandidateRegistry(replyIdentity)
@@ -2309,7 +2553,7 @@ final class SurfAceCentralRegistration {
                     current = try await currentInputSnapshot()
                     continue
                 }
-                return
+                return reply
             } catch let error as SurfAceRegistrationError {
                 guard case .serverRejected = error else {
                     if !current.pendingPaneReleases.isEmpty || !current.pendingWindowReleases.isEmpty {
@@ -2318,9 +2562,10 @@ final class SurfAceCentralRegistration {
                             let reply = try await transport.register(
                                 clientId: clientId, input: noReleases, expectedIdentity: currentIdentity
                             )
+                            try requireRegistryIdentity(reply, matching: requiredRegistryIdentity)
                             _ = try await applyRegistrationReply(reply, input: current, request: noReleases)
                             onWarning("registration_release_outcome_unknown; retry_deferred")
-                            return
+                            return nil
                         } catch {
                             throw error
                         }
@@ -2329,10 +2574,11 @@ final class SurfAceCentralRegistration {
                 }
 
                 switch try await recoverSemanticRejection(
-                    using: transport, identity: currentIdentity, input: current
+                    using: transport, identity: currentIdentity, input: current,
+                    requiredRegistryIdentity: requiredRegistryIdentity
                 ) {
                 case .applied:
-                    return
+                    return nil
                 case .retry(let updated):
                     current = updated
                 case .rebind(let updatedIdentity, let updated):
@@ -2345,22 +2591,26 @@ final class SurfAceCentralRegistration {
                     let reply = try await transport.register(
                         clientId: clientId, input: noReleases, expectedIdentity: currentIdentity
                     )
+                    try requireRegistryIdentity(reply, matching: requiredRegistryIdentity)
                     _ = try await applyRegistrationReply(reply, input: current, request: noReleases)
                     onWarning("registration_release_outcome_unknown; retry_deferred")
-                    return
+                    return nil
                 }
                 throw error
             }
         }
         onWarning("registration_recovery_attempts_exhausted; continuing with confirmed claims")
+        return nil
     }
 
     private func applyRecoveredReply(
         _ reply: SurfAceRegistrationReply,
         input: SurfAceRegistrationInput,
         request: SurfAceRegistrationInput,
-        identity: SurfAceRegistryIdentity?
+        identity: SurfAceRegistryIdentity?,
+        requiredRegistryIdentity: SurfAceRegistryIdentity? = nil
     ) async throws -> RecoveryResult {
+        try requireRegistryIdentity(reply, matching: requiredRegistryIdentity)
         if let replyIdentity = reply.registryIdentity,
            replyIdentity != identity || replyIdentity != input.registryIdentity {
             onWarning("registration_registry_identity_changed; rebinding and retrying")
@@ -2381,7 +2631,8 @@ final class SurfAceCentralRegistration {
     private func recoverSemanticRejection(
         using transport: any SurfAceRegistrationTransport,
         identity: SurfAceRegistryIdentity?,
-        input: SurfAceRegistrationInput
+        input: SurfAceRegistrationInput,
+        requiredRegistryIdentity: SurfAceRegistryIdentity? = nil
     ) async throws -> RecoveryResult {
         let withoutReleases = input.withoutReleases
         var acceptedSurfaceReply: SurfAceRegistrationReply?
@@ -2389,11 +2640,13 @@ final class SurfAceCentralRegistration {
             acceptedSurfaceReply = try await transport.register(
                 clientId: clientId, input: withoutReleases, expectedIdentity: identity
             )
+            try requireRegistryIdentity(acceptedSurfaceReply!, matching: requiredRegistryIdentity)
         } catch let error as SurfAceRegistrationError {
             guard case .serverRejected = error else { throw error }
             let empty = withoutReleases.request(surfaces: [])
             do {
-                _ = try await transport.register(clientId: clientId, input: empty, expectedIdentity: identity)
+                let reply = try await transport.register(clientId: clientId, input: empty, expectedIdentity: identity)
+                try requireRegistryIdentity(reply, matching: requiredRegistryIdentity)
             } catch let error as SurfAceRegistrationError {
                 guard case .serverRejected = error else { throw error }
                 onWarning("registration_claims_refused; preserving saved content and pending releases")
@@ -2407,11 +2660,12 @@ final class SurfAceCentralRegistration {
                 let surfaceOnly = SurfAceRegistrationSurface(surfaceId: surface.surfaceId, panes: [])
                 let surfacePrefix = accepted + [surfaceOnly]
                 do {
-                    _ = try await transport.register(
+                    let reply = try await transport.register(
                         clientId: clientId,
                         input: withoutReleases.request(surfaces: surfacePrefix),
                         expectedIdentity: identity
                     )
+                    try requireRegistryIdentity(reply, matching: requiredRegistryIdentity)
                 } catch let probeError as SurfAceRegistrationError {
                     guard case .serverRejected = probeError else { throw probeError }
                     guard let recoverRefusedClaim else {
@@ -2427,7 +2681,8 @@ final class SurfAceCentralRegistration {
                         clientId: clientId, input: withoutReleases, expectedIdentity: identity
                     )
                     return try await applyRecoveredReply(
-                        reply, input: input, request: withoutReleases, identity: identity
+                        reply, input: input, request: withoutReleases, identity: identity,
+                        requiredRegistryIdentity: requiredRegistryIdentity
                     )
                 }
 
@@ -2435,11 +2690,12 @@ final class SurfAceCentralRegistration {
                 for pane in surface.panes {
                     let expanded = SurfAceRegistrationSurface(surfaceId: surface.surfaceId, panes: panes + [pane])
                     do {
-                        _ = try await transport.register(
+                        let reply = try await transport.register(
                             clientId: clientId,
                             input: withoutReleases.request(surfaces: accepted + [expanded]),
                             expectedIdentity: identity
                         )
+                        try requireRegistryIdentity(reply, matching: requiredRegistryIdentity)
                     } catch let probeError as SurfAceRegistrationError {
                         guard case .serverRejected = probeError else { throw probeError }
                         guard let recoverRefusedClaim else {
@@ -2456,7 +2712,8 @@ final class SurfAceCentralRegistration {
                             clientId: clientId, input: withoutReleases, expectedIdentity: identity
                         )
                         return try await applyRecoveredReply(
-                            reply, input: input, request: withoutReleases, identity: identity
+                            reply, input: input, request: withoutReleases, identity: identity,
+                            requiredRegistryIdentity: requiredRegistryIdentity
                         )
                     }
                     panes.append(pane)
@@ -2466,12 +2723,14 @@ final class SurfAceCentralRegistration {
             acceptedSurfaceReply = try await transport.register(
                 clientId: clientId, input: withoutReleases, expectedIdentity: identity
             )
+            try requireRegistryIdentity(acceptedSurfaceReply!, matching: requiredRegistryIdentity)
         }
 
         guard let acceptedSurfaceReply else { throw SurfAceRegistrationError.invalidResponse }
         guard !input.pendingPaneReleases.isEmpty || !input.pendingWindowReleases.isEmpty else {
             return try await applyRecoveredReply(
-                acceptedSurfaceReply, input: input, request: withoutReleases, identity: identity
+                acceptedSurfaceReply, input: input, request: withoutReleases, identity: identity,
+                requiredRegistryIdentity: requiredRegistryIdentity
             )
         }
 
@@ -2487,19 +2746,22 @@ final class SurfAceCentralRegistration {
                         pendingWindowReleases: acceptedWindows + [release]
                     ), expectedIdentity: identity
                 )
+                try requireRegistryIdentity(lastReply, matching: requiredRegistryIdentity)
             } catch let probeError as SurfAceRegistrationError {
                 guard case .serverRejected = probeError else { throw probeError }
                 guard let recoverRefusedRelease else {
                     onWarning("registration_window_release_refused; keeping its evidence pending")
                     return try await applyRecoveredReply(
-                        acceptedSurfaceReply, input: input, request: withoutReleases, identity: identity
+                        acceptedSurfaceReply, input: input, request: withoutReleases, identity: identity,
+                        requiredRegistryIdentity: requiredRegistryIdentity
                     )
                 }
                 try await recoverRefusedRelease(release.releaseId)
                 return .retry(try await currentInputSnapshot())
             } catch {
                 return try await applyRecoveredReply(
-                    acceptedSurfaceReply, input: input, request: withoutReleases, identity: identity
+                    acceptedSurfaceReply, input: input, request: withoutReleases, identity: identity,
+                    requiredRegistryIdentity: requiredRegistryIdentity
                 )
             }
             acceptedWindows.append(release)
@@ -2513,24 +2775,30 @@ final class SurfAceCentralRegistration {
                         pendingWindowReleases: acceptedWindows
                     ), expectedIdentity: identity
                 )
+                try requireRegistryIdentity(lastReply, matching: requiredRegistryIdentity)
             } catch let probeError as SurfAceRegistrationError {
                 guard case .serverRejected = probeError else { throw probeError }
                 guard let recoverRefusedRelease else {
                     onWarning("registration_pane_release_refused; keeping its evidence pending")
                     return try await applyRecoveredReply(
-                        acceptedSurfaceReply, input: input, request: withoutReleases, identity: identity
+                        acceptedSurfaceReply, input: input, request: withoutReleases, identity: identity,
+                        requiredRegistryIdentity: requiredRegistryIdentity
                     )
                 }
                 try await recoverRefusedRelease(release.releaseId)
                 return .retry(try await currentInputSnapshot())
             } catch {
                 return try await applyRecoveredReply(
-                    acceptedSurfaceReply, input: input, request: withoutReleases, identity: identity
+                    acceptedSurfaceReply, input: input, request: withoutReleases, identity: identity,
+                    requiredRegistryIdentity: requiredRegistryIdentity
                 )
             }
             acceptedPanes.append(release)
         }
-        return try await applyRecoveredReply(lastReply, input: input, request: input, identity: identity)
+        return try await applyRecoveredReply(
+            lastReply, input: input, request: input, identity: identity,
+            requiredRegistryIdentity: requiredRegistryIdentity
+        )
     }
 
     func claimPaneLabel(surfaceId: String, paneId: Int64, paneLineageId: String) async throws -> SurfAcePaneAllocation {
@@ -2543,18 +2811,28 @@ final class SurfAceCentralRegistration {
                 throw SurfAceRegistrationError.noServer
             }
         }
-        guard let selected, status == .connected else {
+        guard let selectedRoute = selected, status == .connected else {
             throw SurfAceRegistrationError.noServer
+        }
+        let latest = try await currentInputSnapshot()
+        let remembered = selectedRoute.origin == .remembered ? latest.rememberedTailnetEndpoint : nil
+        if selectedRoute.origin == .remembered {
+            guard let remembered,
+                  remembered.url == selectedRoute.url,
+                  remembered.registryIdentity == latest.registryIdentity else {
+                throw SurfAceRegistrationError.noServer
+            }
         }
         // Use a separate socket so a periodic registration response cannot be
         // consumed by this claim while either request is suspended.
-        let transport = makeTransport(selected.url)
+        let transport = makeTransport(selectedRoute.url)
         defer { transport.close() }
-        let latest = try await currentInputSnapshot()
         guard latest.pendingPaneReleases.isEmpty, latest.pendingWindowReleases.isEmpty else {
             throw SurfAceRegistrationError.noServer
         }
-        let identityRead = try await transport.readRegistryIdentity(fallbackIdentity: latest.registryIdentity)
+        let identityRead = try await transport.readRegistryIdentity(
+            fallbackIdentity: selectedRoute.origin == .remembered ? nil : latest.registryIdentity
+        )
         for warning in identityRead.warnings { onWarning(warning) }
         guard let identity = identityRead.identity, identity.isValid else {
             onWarning("pane_claim_registry_identity_unavailable")
@@ -2563,14 +2841,22 @@ final class SurfAceCentralRegistration {
                 warnings: ["pane_claim_registry_identity_unavailable"]
             )
         }
-        try await bindCandidateRegistry(identity)
-        let boundInput = try await currentInputSnapshot()
-        guard boundInput.registryIdentity == identity else {
-            onWarning("pane_claim_binding_not_persisted; keeping the pane usable without a new label")
-            return SurfAcePaneAllocation(
-                paneLabel: 0, allocationGeneration: nil,
-                warnings: ["pane_claim_binding_not_persisted"]
-            )
+        if selectedRoute.origin == .remembered {
+            guard let remembered, identity == remembered.registryIdentity,
+                  identity == latest.registryIdentity else {
+                throw SurfAceRegistrationError.foreignRegistryIdentity
+            }
+            _ = try await verifyRememberedBinding(remembered, identity: identity)
+        } else {
+            try await bindCandidateRegistry(identity)
+            let boundInput = try await currentInputSnapshot()
+            guard boundInput.registryIdentity == identity else {
+                onWarning("pane_claim_binding_not_persisted; keeping the pane usable without a new label")
+                return SurfAcePaneAllocation(
+                    paneLabel: 0, allocationGeneration: nil,
+                    warnings: ["pane_claim_binding_not_persisted"]
+                )
+            }
         }
         let allocation = try await transport.claimPaneLabel(
             clientId: clientId, surfaceId: surfaceId, paneId: paneId, paneLineageId: paneLineageId
@@ -2594,10 +2880,10 @@ final class SurfAceCentralRegistration {
             for warning in identityRead.warnings { onWarning(warning) }
             if let identity = identityRead.identity { try await bindCandidateRegistry(identity) }
             let latest = try await currentInputSnapshot()
-            try await registerAndApply(using: candidate, identity: identityRead.identity, input: latest)
+            _ = try await registerAndApply(using: candidate, identity: identityRead.identity, input: latest)
             guard !stopped else { throw SurfAceRegistrationError.stopped }
             selected?.transport.close()
-            selected = (url, candidate)
+            selected = Selected(url: url, transport: candidate, origin: .other)
             setLastError(nil)
             lastReportedError = nil
             setStatus(.connected)
