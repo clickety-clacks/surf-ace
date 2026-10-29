@@ -16,7 +16,9 @@ const destinationRecords = destinations.map((id, index) => ({
   host: `fixture-machine-${index < 3 ? "a" : "b"}`,
   path: `/fixture/${id}/SKILL.md`,
   writer: index === 0 ? "supported-identity-cli" : "existing-ssh",
-  route: {},
+  route: index === 0
+    ? { identityArchetype: "fixture-archetype", identitySkillName: "surf-ace" }
+    : { sshTarget: `fixture-ssh-${index}` },
   effects: index === 0
     ? {
       service: "publishes a shared identity revision for future loads",
@@ -38,6 +40,7 @@ function approvedReceipt(plan, overrides = {}) {
   return {
     status: "ruled",
     decision: "approve",
+    handoffId: "test-handoff-record",
     requestRef: "test-approval-record",
     ruling: testRuling,
     envelopeId: plan.envelopeId,
@@ -185,7 +188,9 @@ function makeJournal() {
     },
     async recordBlocked(envelopeId, detail) { entries.set(envelopeId, { ...entries.get(envelopeId), status: "blocked", ...detail }); },
     async recordPending(envelopeId, detail) { entries.set(envelopeId, { status: "pending", ...detail }); },
-    async recordPublishing(envelopeId, detail) { entries.set(envelopeId, { status: "publishing", envelopeId, ...detail }); },
+    async recordPublishing(envelopeId, detail) {
+      entries.set(envelopeId, { ...entries.get(envelopeId), status: "publishing", envelopeId, ...detail });
+    },
     async recordTargetReceipt(envelopeId, receipt) {
       const entry = entries.get(envelopeId) ?? { targetReceipts: [] };
       entry.targetReceipts ??= [];
@@ -227,6 +232,16 @@ function makeTargets(initialValues = {}, targetIds = destinations, initialModes 
       if (actualPriorSha256 !== expectedPriorSha256 || modes.get(id) !== expectedPriorMode) throw new Error("target_prior_state_changed");
       values.set(id, Buffer.from(stages.get(stage.id).bytes));
       modes.set(id, sharedIds.has(id) ? null : targetMode);
+      if (sharedIds.has(id)) {
+        const digest = sha256(values.get(id));
+        const readback = { available: true, bytes: Buffer.from(values.get(id)), mode: null };
+        return {
+          status: "complete",
+          readback,
+          ownerReceipt: { action: "commit", targetId: id, finalSha256: digest, readbackSha256: digest },
+        };
+      }
+      return { status: "complete" };
     },
     async restore(id, previousBytes, { expectedCurrentSha256, expectedCurrentMode, priorMode } = {}) {
       if ((values.has(id) ? sha256(values.get(id)) : null) !== expectedCurrentSha256 || modes.get(id) !== expectedCurrentMode) {
@@ -239,6 +254,16 @@ function makeTargets(initialValues = {}, targetIds = destinations, initialModes 
         values.set(id, Buffer.from(previousBytes));
         modes.set(id, sharedIds.has(id) ? null : priorMode);
       }
+      if (sharedIds.has(id)) {
+        const digest = values.has(id) ? sha256(values.get(id)) : null;
+        const readback = { available: true, bytes: values.has(id) ? Buffer.from(values.get(id)) : null, mode: null };
+        return {
+          status: "complete",
+          readback,
+          ownerReceipt: { action: "restore", targetId: id, finalSha256: digest, readbackSha256: digest },
+        };
+      }
+      return { status: "complete" };
     },
   };
   return targetStore;
@@ -406,6 +431,7 @@ test("exact matching approval is required before all five future-load copies", a
   ruling = {
     status: "ruled",
     decision: "approve",
+    handoffId: "test-handoff-record",
     requestRef: "test-approval-record",
     ruling: testRuling,
     envelopeId: requestedPlan.envelopeId,
@@ -418,6 +444,51 @@ test("exact matching approval is required before all five future-load copies", a
   assert.deepEqual([...targetStore.values.values()].map((value) => sha256(value)), destinations.map(() => skillSha256));
   assert.equal(journal.entries.get(requestedPlan.envelopeId).targetReceipts.length, destinations.length);
   assert.deepEqual(requestedPlan.destinationRecords, destinationRecords);
+});
+
+test("a pending shared identity edit holds standalone writes and resumes with the same plan", async () => {
+  const candidate = desktopCandidate();
+  const targetStore = makeTargets();
+  const journal = makeJournal();
+  let requestedPlan;
+  let holdShared = true;
+  const committedIds = [];
+  const originalCommit = targetStore.commit.bind(targetStore);
+  targetStore.commit = async (id, stage, options) => {
+    committedIds.push(id);
+    if (id === destinations[0] && holdShared) {
+      holdShared = false;
+      return { status: "pending", operationId: "owner-operation-1" };
+    }
+    return originalCommit(id, stage, options);
+  };
+  const args = {
+    enabled: true,
+    sources: [sourceFor(candidate)],
+    sourceReader: sourceReader(),
+    destinations: destinationRecords,
+    targets: targetStore,
+    approvals: {
+      async read() { return requestedPlan && approvedReceipt(requestedPlan); },
+      async request(plan) { requestedPlan = plan; },
+    },
+    journal,
+  };
+
+  await runSkillDeliveryConsumer(args);
+  const pending = await runSkillDeliveryConsumer(args);
+  assert.equal(pending.results[0].status, "awaiting_shared_identity");
+  assert.deepEqual(committedIds, [destinations[0]]);
+  assert.deepEqual(destinations.map((id) => targetStore.values.get(id).toString()),
+    destinations.map((id) => `old:${id}`));
+  const pendingEntry = journal.entries.get(requestedPlan.envelopeId);
+  assert.equal(pendingEntry.status, "publishing");
+  assert.equal(pendingEntry.sharedOperationPending, true);
+
+  const resumed = await runSkillDeliveryConsumer(args);
+  assert.equal(resumed.results[0].status, "complete");
+  assert.deepEqual(committedIds, [destinations[0], ...destinations]);
+  assert.deepEqual(destinations.map((id) => sha256(targetStore.values.get(id))), destinations.map(() => skillSha256));
 });
 
 test("matching hashes produce a no-change receipt without asking for approval", async () => {
@@ -501,6 +572,7 @@ test("destination count is driven by private configuration and included in the a
       host: "fixture-machine-c",
       path: "/fixture/target-f/SKILL.md",
       writer: "existing-ssh",
+      route: { sshTarget: "fixture-ssh-f" },
       effects: { service: "replaces one skill file", database: "none", downtime: "none" },
     },
   ];
@@ -563,6 +635,7 @@ test("approval binds exact resolved destination routes and effects", async () =>
   rulings.set(firstPlan.envelopeId, {
     status: "ruled",
     decision: "approve",
+    handoffId: "test-handoff-record",
     requestRef: "test-approval-record",
     ruling: testRuling,
     envelopeId: firstPlan.envelopeId,
@@ -593,6 +666,7 @@ test("a target changed after preflight is preserved by the expected-prior commit
     async read() { return requestedPlan && {
       status: "ruled",
       decision: "approve",
+      handoffId: "test-handoff-record",
       requestRef: "test-approval-record",
       ruling: testRuling,
       envelopeId: requestedPlan.envelopeId,
@@ -654,7 +728,7 @@ test("uncertain write with a third-state readback stops and never overwrites it"
       targetStore.values.set(id, Buffer.from("third-state"));
       throw new Error("write result unknown");
     }
-    await originalCommit(id, stage, options);
+    return originalCommit(id, stage, options);
   };
 
   const result = await runSkillDeliveryConsumer(args);
@@ -745,6 +819,7 @@ test("a ruling whose principal and behalf identity disagree cannot authorize tar
     async read() { return requestedPlan && {
       status: "ruled",
       decision: "approve",
+      handoffId: "test-handoff-record",
       requestRef: "test-approval-record",
       ruling: { principal: "user:other", onBehalfOf: "user:operator" },
       envelopeId: requestedPlan.envelopeId,
@@ -791,11 +866,18 @@ test("partial commit failure restores prior bytes in reverse order", async () =>
   };
   await runSkillDeliveryConsumer(args);
   const originalCommit = targetStore.commit.bind(targetStore);
+  const originalRestore = targetStore.restore.bind(targetStore);
+  const operations = [];
   let count = 0;
   targetStore.commit = async (id, stage, options) => {
+    operations.push({ action: "commit", id });
     count += 1;
     if (count === 2) throw new Error("destination unavailable");
-    await originalCommit(id, stage, options);
+    return originalCommit(id, stage, options);
+  };
+  targetStore.restore = async (id, previousBytes, options) => {
+    operations.push({ action: "restore", id });
+    return originalRestore(id, previousBytes, options);
   };
 
   const result = await runSkillDeliveryConsumer(args);
@@ -803,4 +885,10 @@ test("partial commit failure restores prior bytes in reverse order", async () =>
   assert.deepEqual([...targetStore.values.values()].map((value) => value.toString()), destinations.map((id) => `old:${id}`));
   assert.deepEqual([...targetStore.modes.values()], destinations.map((id) => id === destinations[0] ? null : initialModes[id]));
   assert.equal(journal.entries.get(requestedPlan.envelopeId).rollbackReceipts[0].state, "restored");
+  assert.deepEqual(operations, [
+    { action: "commit", id: destinations[0] },
+    { action: "commit", id: destinations[1] },
+    { action: "restore", id: destinations[0] },
+  ]);
+  assert.equal(journal.entries.get(requestedPlan.envelopeId).rollbackReceipts[0].ownerReceipt.action, "restore");
 });

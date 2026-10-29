@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import {
@@ -220,15 +221,14 @@ function remoteCommand(script) {
   return `sh -c ${shellQuote(script)}`;
 }
 
-function targetCommand(target, command, args) {
-  return [command, ...args].map(shellQuote).join(" ");
-}
-
 function hashScript(fileExpression) {
   return `if command -v sha256sum >/dev/null 2>&1; then sha256sum ${fileExpression} | awk '{print $1}'; elif command -v shasum >/dev/null 2>&1; then shasum -a 256 ${fileExpression} | awk '{print $1}'; else exit 47; fi`;
 }
 
 export function createSshTargetAdapter(destinations, { command = runCommand } = {}) {
+  if (destinations.some(({ kind }) => kind === "shared-identity")) {
+    throw new Error("delivery_ssh_shared_identity_forbidden");
+  }
   const targets = new Map(destinations.map((destination) => [destination.id, destination]));
   const read = async (id) => {
     const destination = targets.get(id);
@@ -245,7 +245,7 @@ export function createSshTargetAdapter(destinations, { command = runCommand } = 
     return {
       available: true,
       bytes: stdout.subarray(newline + 1),
-      mode: destination.kind === "shared-identity" ? null : Number.parseInt(present[1], 8),
+      mode: Number.parseInt(present[1], 8),
     };
   };
   const stage = async (id, value, envelopeId, { mode } = {}) => {
@@ -277,20 +277,6 @@ export function createSshTargetAdapter(destinations, { command = runCommand } = 
         (destination.kind === "standalone-skill" && current.mode !== expectedPriorMode)) {
       throw new Error("target_prior_state_changed");
     }
-    if (destination.kind === "shared-identity") {
-      const { identityArchetype, identitySkillName } = destination.route;
-      if (typeof identityArchetype !== "string" || typeof identitySkillName !== "string") {
-        throw new Error("delivery_identity_cli_route_missing");
-      }
-      const args = ["identity", "edit", identityArchetype, "--skill", identitySkillName, "--file", stageRecord.id];
-      if (typeof destination.route.identityAsUser === "string") args.unshift("--as-user", destination.route.identityAsUser);
-      try {
-        await command("ssh", ["-T", destination.route.sshTarget, remoteCommand(targetCommand(destination, destination.route.tightbeamCommand ?? "tightbeam", args))]);
-      } finally {
-        await discardStage(id, stageRecord);
-      }
-      return;
-    }
     const destinationPath = shellQuote(destination.path);
     const stagePath = shellQuote(stageRecord.id);
     const expected = shellQuote(expectedPriorSha256 ?? "ABSENT");
@@ -308,25 +294,6 @@ export function createSshTargetAdapter(destinations, { command = runCommand } = 
     if (current.bytes === null || sha256(current.bytes) !== expectedCurrentSha256 ||
         (destination.kind === "standalone-skill" && current.mode !== expectedCurrentMode)) {
       throw new Error("target_restore_state_changed");
-    }
-    if (destination.kind === "shared-identity") {
-      const { identityArchetype, identitySkillName } = destination.route;
-      if (typeof identityArchetype !== "string" || typeof identitySkillName !== "string") throw new Error("delivery_identity_cli_route_missing");
-      if (previousBytes === null) {
-        const args = ["identity", "edit", identityArchetype, "--skill", identitySkillName, "--rm"];
-        if (typeof destination.route.identityAsUser === "string") args.unshift("--as-user", destination.route.identityAsUser);
-        await command("ssh", ["-T", destination.route.sshTarget, remoteCommand(targetCommand(destination, destination.route.tightbeamCommand ?? "tightbeam", args))]);
-        return;
-      }
-      const temporaryStage = await stage(id, previousBytes, `restore-${sha256(previousBytes)}`);
-      const args = ["identity", "edit", identityArchetype, "--skill", identitySkillName, "--file", temporaryStage.id];
-      if (typeof destination.route.identityAsUser === "string") args.unshift("--as-user", destination.route.identityAsUser);
-      try {
-        await command("ssh", ["-T", destination.route.sshTarget, remoteCommand(targetCommand(destination, destination.route.tightbeamCommand ?? "tightbeam", args))]);
-      } finally {
-        await discardStage(id, temporaryStage);
-      }
-      return;
     }
     if (previousBytes === null) {
       const file = shellQuote(destination.path);
@@ -348,6 +315,276 @@ export function createSshTargetAdapter(destinations, { command = runCommand } = 
     }
   };
   return { read, stage, discardStage, commit, restore };
+}
+
+function decodeBase64Bytes(value, field) {
+  if (value === null) return null;
+  if (typeof value !== "string" || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) {
+    throw new Error(`delivery_identity_${field}_invalid`);
+  }
+  const decoded = Buffer.from(value, "base64");
+  if (decoded.toString("base64") !== value) throw new Error(`delivery_identity_${field}_invalid`);
+  return decoded;
+}
+
+// Shared identity changes are request/reply operations. The configured
+// handoff forwards the exact request to its accountable owner; this process
+// never stages a shared file or executes the identity edit.
+export function createOwnerSessionIdentityAdapter(destinations, {
+  directory,
+  handoffCommand,
+  requiredRuler,
+  command = runCommand,
+} = {}) {
+  const targets = new Map(destinations.map((destination) => [destination.id, destination]));
+  if (!directory || typeof handoffCommand !== "string" || handoffCommand.length === 0 ||
+      typeof requiredRuler !== "string" || requiredRuler.length === 0 ||
+      targets.size === 0 || [...targets.values()].some(({ kind }) => kind !== "shared-identity")) {
+    throw new Error("delivery_identity_handoff_unavailable");
+  }
+  const requestDirectory = path.join(directory, "shared-identity-requests");
+  const resultDirectory = path.join(directory, "shared-identity-results");
+
+  async function send(request, { retryPending = false } = {}) {
+    const requestPath = path.join(requestDirectory, `${request.operationId}.json`);
+    const resultPath = path.join(resultDirectory, `${request.operationId}.json`);
+    await fs.mkdir(requestDirectory, { recursive: true, mode: 0o700 });
+    await fs.mkdir(resultDirectory, { recursive: true, mode: 0o700 });
+    const priorRequest = await readJsonFile(requestPath, null);
+    if (priorRequest && canonicalJson(priorRequest) !== canonicalJson(request)) {
+      throw new Error("delivery_identity_handoff_conflict");
+    }
+    if (!priorRequest) await writeJsonAtomic(requestPath, request);
+    const existingResult = await readJsonFile(resultPath, null);
+    if (existingResult && (existingResult.status !== "pending" || !retryPending)) return existingResult;
+    try {
+      await command(handoffCommand, [], {
+        input: Buffer.from(JSON.stringify({ kind: "shared-identity", operationId: request.operationId, requestPath, resultPath })),
+      });
+    } catch (error) {
+      throw new Error(`delivery_identity_handoff_failed:${error.message}`);
+    }
+    return await readJsonFile(resultPath, null) ?? { status: "pending", operationId: request.operationId };
+  }
+
+  function target(id) {
+    const destination = targets.get(id);
+    if (!destination) throw new Error("delivery_identity_target_missing");
+    return destination;
+  }
+
+  function validateCommonResult(result, request, action) {
+    if (result?.status === "pending") return false;
+    if (result?.status !== "complete" || result.operationId !== request.operationId ||
+        result.action !== action || result.targetId !== request.targetId ||
+        typeof result.identityRevision !== "string" || result.identityRevision.length === 0) {
+      throw new Error("delivery_identity_receipt_mismatch");
+    }
+    return true;
+  }
+
+  function validateApprovedWriteResult(result, request, action) {
+    if (!validateCommonResult(result, request, action)) return null;
+    if (result.envelopeId !== request.envelopeId || result.planSha256 !== request.planSha256 ||
+        result.destinationSetSha256 !== request.destinationSetSha256 ||
+        result.destinationMapSha256 !== request.destinationMapSha256 ||
+        result.approvalHandoffId !== request.approvalHandoffId ||
+        result.requestRef !== request.requestRef || request.requestRef !== request.approval.requestRef ||
+        result.decision !== "approve" ||
+        result.rulingPrincipal !== requiredRuler || result.rulingOnBehalfOf !== requiredRuler ||
+        result.priorSha256 !== request.expectedPriorSha256 ||
+        result.desiredSha256 !== request.desiredSha256 || result.finalSha256 !== request.desiredSha256 ||
+        result.readbackSha256 !== request.desiredSha256) {
+      throw new Error("delivery_identity_receipt_mismatch");
+    }
+    const readback = decodeBase64Bytes(result.readbackBase64, "readback");
+    if ((readback === null ? null : sha256(readback)) !== request.desiredSha256 ||
+        (request.desiredBytesBase64 !== null &&
+          !readback.equals(decodeBase64Bytes(request.desiredBytesBase64, "request_bytes")))) {
+      throw new Error("delivery_identity_readback_mismatch");
+    }
+    return { available: true, bytes: readback, mode: null, identityRevision: result.identityRevision };
+  }
+
+  const read = async (id) => {
+    const destination = target(id);
+    const request = {
+      action: "read",
+      operationId: randomUUID(),
+      targetId: id,
+      destination: {
+        host: destination.host,
+        path: destination.path,
+        identityArchetype: destination.route.identityArchetype,
+        identitySkillName: destination.route.identitySkillName,
+      },
+    };
+    const result = await send(request);
+    if (!validateCommonResult(result, request, "read")) throw new Error("delivery_identity_read_pending");
+    const value = decodeBase64Bytes(result.bytesBase64, "readback");
+    const digest = value === null ? null : sha256(value);
+    if (result.sha256 !== digest) throw new Error("delivery_identity_readback_mismatch");
+    return { available: true, bytes: value, mode: null, identityRevision: result.identityRevision, ownerReceipt: result };
+  };
+
+  const stage = async (id, value, envelopeId) => {
+    target(id);
+    const content = Buffer.from(value);
+    return {
+      id: `${envelopeId}:shared-identity:${id}`,
+      sha256: sha256(content),
+      bytes: content,
+    };
+  };
+
+  const discardStage = async () => {};
+
+  const commit = async (id, stageRecord, options = {}) => {
+    const destination = target(id);
+    const { plan, planSha256, approval, expectedPriorSha256 } = options;
+    const { planSha256: storedPlanSha256, ...planBody } = plan ?? {};
+    const plannedSnapshot = plan?.snapshots?.find((snapshot) => snapshot.targetId === id);
+    if (!stageRecord?.bytes || sha256(stageRecord.bytes) !== stageRecord.sha256 ||
+        approval?.status !== "ruled" || approval?.decision !== "approve" ||
+        approval?.ruling?.principal !== requiredRuler || approval?.ruling?.onBehalfOf !== requiredRuler ||
+        typeof approval?.requestRef !== "string" || approval.requestRef.length === 0 ||
+        typeof approval?.handoffId !== "string" || approval.handoffId.length === 0 ||
+        plan?.envelopeId !== options.envelopeId || plan?.planSha256 !== planSha256 ||
+        storedPlanSha256 !== planSha256 || sha256(canonicalJson(planBody)) !== planSha256 ||
+        !plannedSnapshot || plannedSnapshot.priorSha256 !== expectedPriorSha256 ||
+        sha256(stageRecord.bytes) !== plan?.envelope?.skillSha256 ||
+        plan?.destinationSetSha256 !== options.destinationSetSha256 ||
+        plan?.destinationMapSha256 !== options.destinationMapSha256 ||
+        approval.envelopeId !== options.envelopeId || approval.planSha256 !== planSha256 ||
+        approval.destinationSetSha256 !== options.destinationSetSha256 ||
+        approval.destinationMapSha256 !== options.destinationMapSha256) {
+      throw new Error("delivery_identity_approval_mismatch");
+    }
+    const desiredBytes = Buffer.from(stageRecord.bytes);
+    const desiredSha256 = sha256(desiredBytes);
+    const operationId = sha256(canonicalJson({
+      action: "commit",
+      envelopeId: options.envelopeId,
+      planSha256,
+      approvalHandoffId: approval.handoffId,
+      requestRef: approval.requestRef,
+      targetId: id,
+      expectedPriorSha256,
+      desiredSha256,
+    }));
+    const request = {
+      action: "commit",
+      operationId,
+      targetId: id,
+      destination: {
+        host: destination.host,
+        path: destination.path,
+        identityArchetype: destination.route.identityArchetype,
+        identitySkillName: destination.route.identitySkillName,
+      },
+      envelopeId: options.envelopeId,
+      planSha256,
+      destinationSetSha256: options.destinationSetSha256,
+      destinationMapSha256: options.destinationMapSha256,
+      plan,
+      approval,
+      approvalHandoffId: approval.handoffId,
+      requestRef: approval.requestRef,
+      expectedPriorSha256,
+      desiredSha256,
+      desiredBytesBase64: desiredBytes.toString("base64"),
+    };
+    const result = await send(request, { retryPending: true });
+    if (result?.status === "pending") return { status: "pending", operationId };
+    const readback = validateApprovedWriteResult(result, request, "commit");
+    if (!readback) return { status: "pending", operationId };
+    return { status: "complete", ownerReceipt: result, readback };
+  };
+
+  const restore = async (id, previousBytes, options = {}) => {
+    const destination = target(id);
+    const { plan, planSha256, approval, expectedCurrentSha256, priorMode } = options;
+    const { planSha256: storedPlanSha256, ...planBody } = plan ?? {};
+    const plannedSnapshot = plan?.snapshots?.find((snapshot) => snapshot.targetId === id);
+    const desiredBytes = previousBytes === null ? null : Buffer.from(previousBytes);
+    const desiredSha256 = desiredBytes === null ? null : sha256(desiredBytes);
+    if (approval?.status !== "ruled" || approval?.decision !== "approve" ||
+        approval?.ruling?.principal !== requiredRuler || approval?.ruling?.onBehalfOf !== requiredRuler ||
+        typeof approval?.requestRef !== "string" || approval.requestRef.length === 0 ||
+        typeof approval?.handoffId !== "string" || approval.handoffId.length === 0 ||
+        plan?.envelopeId !== options.envelopeId || plan?.planSha256 !== planSha256 ||
+        storedPlanSha256 !== planSha256 || sha256(canonicalJson(planBody)) !== planSha256 ||
+        !plannedSnapshot || plannedSnapshot.priorSha256 !== desiredSha256 ||
+        expectedCurrentSha256 !== plan?.envelope?.skillSha256 ||
+        options.destinationSetSha256 !== plan?.destinationSetSha256 ||
+        options.destinationMapSha256 !== plan?.destinationMapSha256 ||
+        approval.envelopeId !== options.envelopeId || approval.planSha256 !== planSha256 ||
+        approval.destinationSetSha256 !== plan?.destinationSetSha256 ||
+        approval.destinationMapSha256 !== plan?.destinationMapSha256) {
+      throw new Error("delivery_identity_approval_mismatch");
+    }
+    const operationId = sha256(canonicalJson({
+      action: "restore",
+      envelopeId: options.envelopeId,
+      planSha256,
+      approvalHandoffId: approval.handoffId,
+      requestRef: approval.requestRef,
+      targetId: id,
+      expectedCurrentSha256,
+      desiredSha256,
+    }));
+    const request = {
+      action: "restore",
+      operationId,
+      targetId: id,
+      destination: {
+        host: destination.host,
+        path: destination.path,
+        identityArchetype: destination.route.identityArchetype,
+        identitySkillName: destination.route.identitySkillName,
+      },
+      envelopeId: options.envelopeId,
+      planSha256,
+      destinationSetSha256: plan.destinationSetSha256,
+      destinationMapSha256: plan.destinationMapSha256,
+      plan,
+      approval,
+      approvalHandoffId: approval.handoffId,
+      requestRef: approval.requestRef,
+      expectedPriorSha256: expectedCurrentSha256,
+      desiredSha256,
+      desiredBytesBase64: desiredBytes === null ? null : desiredBytes.toString("base64"),
+      priorMode: priorMode ?? null,
+    };
+    const result = await send(request, { retryPending: true });
+    if (result?.status === "pending") throw new Error("delivery_identity_restore_pending");
+    const readback = validateApprovedWriteResult(result, request, "restore");
+    if (!readback) throw new Error("delivery_identity_restore_pending");
+    return { status: "complete", ownerReceipt: result, readback };
+  };
+
+  return { read, stage, discardStage, commit, restore };
+}
+
+export function createDeliveryTargetAdapter(destinations, options = {}) {
+  const shared = destinations.filter(({ kind }) => kind === "shared-identity");
+  const standalone = destinations.filter(({ kind }) => kind === "standalone-skill");
+  if (shared.length !== 1) throw new Error("delivery_destination_set_invalid");
+  const sharedTargets = createOwnerSessionIdentityAdapter(shared, options);
+  const sshTargets = createSshTargetAdapter(standalone, options);
+  const targetKinds = new Map(destinations.map(({ id, kind }) => [id, kind]));
+  const select = (id) => {
+    const kind = targetKinds.get(id);
+    if (!kind) throw new Error("delivery_target_route_missing");
+    return kind === "shared-identity" ? sharedTargets : sshTargets;
+  };
+  return {
+    read: (id) => select(id).read(id),
+    stage: (id, value, envelopeId, stageOptions) => select(id).stage(id, value, envelopeId, stageOptions),
+    discardStage: (id, stageRecord) => select(id).discardStage(id, stageRecord),
+    commit: (id, stageRecord, commitOptions) => select(id).commit(id, stageRecord, commitOptions),
+    restore: (id, previousBytes, restoreOptions) => select(id).restore(id, previousBytes, restoreOptions),
+  };
 }
 
 async function readJsonFile(filePath, fallback) {
@@ -407,7 +644,10 @@ export async function createFileDeliveryJournal(directory) {
     },
     async recordBlocked(id, detail) { state.entries[id] = { ...state.entries[id], status: "blocked", envelopeId: id, ...detail }; await save(); },
     async recordPending(id, detail) { state.entries[id] = { status: "pending", envelopeId: id, ...detail }; await save(); },
-    async recordPublishing(id, detail) { state.entries[id] = { status: "publishing", envelopeId: id, ...detail }; await save(); },
+    async recordPublishing(id, detail) {
+      state.entries[id] = { ...state.entries[id], status: "publishing", envelopeId: id, ...detail };
+      await save();
+    },
     async recordTargetReceipt(id, receipt) {
       const entry = state.entries[id] ?? { status: "publishing", envelopeId: id, targetReceipts: [] };
       entry.targetReceipts ??= [];
@@ -544,6 +784,7 @@ export function createApprovalHandoffAdapter({ directory, handoffCommand, requir
           !["approve", "decline"].includes(result.decision)) return { status: "mismatch" };
       return {
         status: "ruled",
+        handoffId,
         decision: result.decision,
         requestRef: result.requestRef,
         ruling: result.ruling,
@@ -723,7 +964,12 @@ export async function createRuntime(config, { command = runCommand } = {}) {
     sourceReader,
     destinations,
     initialHighWater: config.initialHighWater,
-    targets: createSshTargetAdapter(destinations, { command }),
+    targets: createDeliveryTargetAdapter(destinations, {
+      directory: journalDirectory,
+      handoffCommand,
+      requiredRuler,
+      command,
+    }),
     approvals,
     journal,
   });

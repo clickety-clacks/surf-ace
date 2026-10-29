@@ -102,6 +102,16 @@ function normalizeDestinationRecords(destinations) {
       value === null || typeof value === "object" || !["string", "number", "boolean"].includes(typeof value))) {
       throw new Error("delivery_destination_set_invalid");
     }
+    if (kind === "shared-identity") {
+      if (typeof normalizedRoute.identityArchetype !== "string" || !normalizedRoute.identityArchetype ||
+          typeof normalizedRoute.identitySkillName !== "string" || !normalizedRoute.identitySkillName ||
+          Object.keys(normalizedRoute).some((key) => !["identityArchetype", "identitySkillName"].includes(key))) {
+        throw new Error("delivery_destination_set_invalid");
+      }
+    } else if (typeof normalizedRoute.sshTarget !== "string" || !normalizedRoute.sshTarget ||
+        Object.keys(normalizedRoute).some((key) => key !== "sshTarget")) {
+      throw new Error("delivery_destination_set_invalid");
+    }
     return {
       id,
       kind,
@@ -430,6 +440,7 @@ function snapshotDigest(snapshot) {
 function approvalMatches(approval, plan) {
   return approval?.status === "ruled" &&
     approval?.decision === "approve" &&
+    typeof approval?.handoffId === "string" && approval.handoffId.length > 0 &&
     typeof approval?.requestRef === "string" && approval.requestRef.length > 0 &&
     typeof approval?.ruling?.principal === "string" &&
     approval.ruling.principal === approval.ruling.onBehalfOf &&
@@ -457,7 +468,30 @@ function targetMode(snapshot, destination) {
   return snapshot.priorMode ?? 0o644;
 }
 
-async function rollbackCommitted({ targets, journal, envelopeId, committed, skillSha256 }) {
+function transactionOrderedDestinations(destinations) {
+  return [...destinations].sort((left, right) => {
+    const leftOrder = left.kind === "shared-identity" ? 0 : 1;
+    const rightOrder = right.kind === "shared-identity" ? 0 : 1;
+    return leftOrder - rightOrder || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0);
+  });
+}
+
+function requireOwnerSessionReceipt(result, destination, action, expectedSha256) {
+  if (!destination) throw new Error("delivery_destination_set_invalid");
+  if (destination.kind !== "shared-identity") return;
+  if (result?.status !== "complete" ||
+      result.ownerReceipt?.action !== action ||
+      result.ownerReceipt?.targetId !== destination.id ||
+      !result.readback || result.readback.available !== true ||
+      snapshotDigest(result.readback) !== expectedSha256 ||
+      result.ownerReceipt?.finalSha256 !== expectedSha256 ||
+      result.ownerReceipt?.readbackSha256 !== expectedSha256) {
+    throw new Error("delivery_identity_owner_receipt_missing");
+  }
+  return result.readback;
+}
+
+async function rollbackCommitted({ targets, journal, envelopeId, committed, skillSha256, plan, planSha256, approval }) {
   const receipts = [];
   let unresolved = false;
   for (const item of [...committed].reverse()) {
@@ -472,18 +506,34 @@ async function rollbackCommitted({ targets, journal, envelopeId, committed, skil
         receipts.push({ targetId: item.targetId, state: "conflict", sha256: current.sha256, mode: current.mode });
         continue;
       }
-      await targets.restore(item.targetId, item.backupBytes, {
+      const destination = plan.destinationRecords.find(({ id }) => id === item.targetId);
+      const restoreResult = await targets.restore(item.targetId, item.backupBytes, {
         expectedCurrentSha256: skillSha256,
         expectedCurrentMode: item.targetMode,
         priorMode: item.priorMode,
+        envelopeId,
+        plan,
+        planSha256,
+        approval,
+        destinationSetSha256: plan.destinationSetSha256,
+        destinationMapSha256: plan.destinationMapSha256,
       });
-      const restored = await readCurrentState(targets, item.targetId);
+      const ownerReadback = requireOwnerSessionReceipt(restoreResult, destination, "restore", item.priorSha256);
+      const restored = destination.kind === "shared-identity"
+        ? { sha256: snapshotDigest(ownerReadback), mode: ownerReadback.mode ?? null }
+        : await readCurrentState(targets, item.targetId);
       if (restored.sha256 !== item.priorSha256 || restored.mode !== item.priorMode) {
         unresolved = true;
         receipts.push({ targetId: item.targetId, state: "restore_mismatch", sha256: restored.sha256, mode: restored.mode });
         continue;
       }
-      receipts.push({ targetId: item.targetId, state: "restored", sha256: restored.sha256, mode: restored.mode });
+      receipts.push({
+        targetId: item.targetId,
+        state: "restored",
+        sha256: restored.sha256,
+        mode: restored.mode,
+        ...(restoreResult?.ownerReceipt ? { ownerReceipt: restoreResult.ownerReceipt } : {}),
+      });
     } catch {
       unresolved = true;
       receipts.push({ targetId: item.targetId, state: "restore_unknown" });
@@ -502,7 +552,9 @@ async function recoverInterruptedTransaction(entry, { targets, journal }) {
   const envelopeId = entry?.envelopeId;
   const plan = entry?.plan;
   const skillSha256 = plan?.envelope?.skillSha256;
-  if (typeof envelopeId !== "string" || !Array.isArray(plan?.snapshots) || !SHA256.test(skillSha256 ?? "")) {
+  if (typeof envelopeId !== "string" || !Array.isArray(plan?.snapshots) ||
+      !Array.isArray(plan?.destinationRecords) || !SHA256.test(skillSha256 ?? "") ||
+      !SHA256.test(plan?.planSha256 ?? "")) {
     await journal.recordFailure(envelopeId ?? "unknown", {
       code: "delivery_interrupted_journal_invalid",
       status: "unresolved",
@@ -535,18 +587,34 @@ async function recoverInterruptedTransaction(entry, { targets, journal }) {
         receipts.push({ targetId: snapshot.targetId, state: "backup_missing_or_mismatched" });
         continue;
       }
-      await targets.restore(snapshot.targetId, previousBytes, {
+      const destination = plan.destinationRecords.find(({ id }) => id === snapshot.targetId);
+      const restoreResult = await targets.restore(snapshot.targetId, previousBytes, {
         expectedCurrentSha256: skillSha256,
         expectedCurrentMode: snapshot.targetMode,
         priorMode: snapshot.priorMode,
+        envelopeId,
+        plan,
+        planSha256: plan.planSha256,
+        approval: entry.approval,
+        destinationSetSha256: plan.destinationSetSha256,
+        destinationMapSha256: plan.destinationMapSha256,
       });
-      const restored = await readCurrentState(targets, snapshot.targetId);
+      const ownerReadback = requireOwnerSessionReceipt(restoreResult, destination, "restore", snapshot.priorSha256);
+      const restored = destination.kind === "shared-identity"
+        ? { sha256: snapshotDigest(ownerReadback), mode: ownerReadback.mode ?? null }
+        : await readCurrentState(targets, snapshot.targetId);
       if (restored.sha256 !== snapshot.priorSha256 || restored.mode !== snapshot.priorMode) {
         unresolved = true;
         receipts.push({ targetId: snapshot.targetId, state: "restore_mismatch", sha256: restored.sha256, mode: restored.mode });
         continue;
       }
-      receipts.push({ targetId: snapshot.targetId, state: "restored", sha256: restored.sha256, mode: restored.mode });
+      receipts.push({
+        targetId: snapshot.targetId,
+        state: "restored",
+        sha256: restored.sha256,
+        mode: restored.mode,
+        ...(restoreResult?.ownerReceipt ? { ownerReceipt: restoreResult.ownerReceipt } : {}),
+      });
     } catch {
       unresolved = true;
       receipts.push({ targetId: snapshot.targetId, state: "recovery_unknown" });
@@ -624,8 +692,13 @@ export async function runSkillDeliveryConsumer({
 
   const results = [];
   const recoveredEnvelopeIds = new Set();
+  const pendingOwnerEnvelopeIds = new Set();
   const terminalEventKeys = new Set(await journal.listTerminalEventKeys());
   for (const entry of await journal.listPublishing()) {
+    if (entry.sharedOperationPending === true) {
+      pendingOwnerEnvelopeIds.add(entry.envelopeId);
+      continue;
+    }
     const recovery = await recoverInterruptedTransaction(entry, { targets, journal });
     if (recovery.envelopeId) recoveredEnvelopeIds.add(recovery.envelopeId);
     results.push(recovery);
@@ -654,6 +727,7 @@ export async function runSkillDeliveryConsumer({
       }
 
       const { envelope, envelopeId, destinations: resolvedTargets, skillBytes, skillSha256 } = verified;
+      if (pendingOwnerEnvelopeIds.size > 0 && !pendingOwnerEnvelopeIds.has(envelopeId)) continue;
       if (recoveredEnvelopeIds.has(envelopeId)) continue;
       const prior = await journal.read(envelopeId);
       if (prior?.status === "complete" || prior?.status === "no_change") {
@@ -720,12 +794,14 @@ export async function runSkillDeliveryConsumer({
       let planSha256;
       let approval;
       let approvedPendingPlan = false;
-      if (prior?.status === "pending") {
+      const resumingSharedOperation = prior?.status === "publishing" &&
+        prior.sharedOperationPending === true && pendingOwnerEnvelopeIds.has(envelopeId);
+      if (prior?.status === "pending" || resumingSharedOperation) {
         plan = prior.plan;
         planSha256 = prior.planSha256;
         const { planSha256: storedHash, ...storedBody } = plan ?? {};
         const storedSnapshots = plan?.snapshots;
-        const expectedDestinationIds = resolvedTargets.map(({ id }) => id);
+        const expectedDestinationIds = transactionOrderedDestinations(resolvedTargets).map(({ id }) => id);
         if (storedHash !== planSha256 || sha256(canonicalJson(storedBody)) !== storedHash ||
             plan?.envelopeId !== envelopeId || canonicalJson(plan?.envelope) !== canonicalJson(envelope) ||
             canonicalJson(plan?.destinationRecords) !== canonicalJson(resolvedTargets) ||
@@ -740,7 +816,18 @@ export async function runSkillDeliveryConsumer({
           results.push({ status: "blocked", envelopeId, code: "approval_mismatch" });
           continue;
         }
-        approval = await approvals.read(envelopeId, planSha256);
+        approval = resumingSharedOperation ? prior.approval : await approvals.read(envelopeId, planSha256);
+        if (resumingSharedOperation && !approvalMatches(approval, plan)) {
+          await journal.recordFailure(envelopeId, {
+            code: "delivery_shared_identity_approval_missing_or_mismatched",
+            status: "unresolved",
+            unresolved: true,
+            terminalEventKey: envelope.eventKey,
+          });
+          if (envelope.eventKey) terminalEventKeys.add(envelope.eventKey);
+          results.push({ status: "unresolved", envelopeId, code: "delivery_shared_identity_approval_missing_or_mismatched" });
+          continue;
+        }
         if (!approval) {
           await approvals.request(plan, { idempotencyKey: `${envelopeId}:${planSha256}` });
           results.push({ status: "awaiting_approval", envelopeId, planSha256 });
@@ -797,7 +884,7 @@ export async function runSkillDeliveryConsumer({
         approvedPendingPlan = true;
       } else {
         try {
-          for (const { id: targetId, ...destination } of resolvedTargets) {
+          for (const { id: targetId, ...destination } of transactionOrderedDestinations(resolvedTargets)) {
             const snapshot = await targets.read(targetId);
             const priorSha256 = snapshotDigest(snapshot);
             const priorMode = snapshot.mode ?? null;
@@ -945,7 +1032,14 @@ export async function runSkillDeliveryConsumer({
       }
 
       try {
-        await journal.recordPublishing(envelopeId, { envelope, plan, planSha256, terminalEventKey: envelope.eventKey });
+        await journal.recordPublishing(envelopeId, {
+          envelope,
+          plan,
+          planSha256,
+          approval,
+          sharedOperationPending: true,
+          terminalEventKey: envelope.eventKey,
+        });
       } catch {
         for (const { targetId, stage } of staged.reverse()) {
           try { await targets.discardStage(targetId, stage); } catch { /* publication did not start; stage cleanup is auxiliary */ }
@@ -956,21 +1050,78 @@ export async function runSkillDeliveryConsumer({
 
       const committed = [];
       let failure = null;
+      let awaitingOwnerOperation = false;
+      let pendingOwnerOperation = null;
       for (const snapshot of snapshots) {
         const stage = staged.find((item) => item.targetId === snapshot.targetId)?.stage;
+        const destination = resolvedTargets.find(({ id }) => id === snapshot.targetId);
+        let commitResult;
+        let commitError = null;
         try {
-          await targets.commit(snapshot.targetId, stage, {
+          commitResult = await targets.commit(snapshot.targetId, stage, {
             expectedPriorSha256: snapshot.priorSha256,
             expectedPriorMode: snapshot.priorMode,
             targetMode: snapshot.targetMode,
+            envelopeId,
+            plan,
+            planSha256,
+            approval,
+            destinationSetSha256: plan.destinationSetSha256,
+            destinationMapSha256: plan.destinationMapSha256,
           });
-        } catch {
-          // Readback below distinguishes a completed write from an uncertain result.
+        } catch (error) {
+          commitError = error;
+        }
+        if (destination.kind === "shared-identity" && commitResult?.status === "pending") {
+          try {
+            await journal.recordPublishing(envelopeId, {
+              envelope,
+              plan,
+              planSha256,
+              approval,
+              sharedOperationPending: true,
+              ownerOperationId: commitResult.operationId ?? null,
+              terminalEventKey: envelope.eventKey,
+            });
+          } catch {
+            // The pre-commit journal row already marks this operation pending.
+          }
+          awaitingOwnerOperation = true;
+          pendingOwnerEnvelopeIds.add(envelopeId);
+          pendingOwnerOperation = commitResult.operationId ?? null;
+          break;
+        }
+        let ownerReadback = null;
+        if (destination.kind === "shared-identity") {
+          try {
+            ownerReadback = requireOwnerSessionReceipt(commitResult, destination, "commit", skillSha256);
+          } catch (error) {
+            commitError ??= error;
+          }
+          if (ownerReadback) {
+            pendingOwnerEnvelopeIds.delete(envelopeId);
+            try {
+              await journal.recordPublishing(envelopeId, {
+                envelope,
+                plan,
+                planSha256,
+                approval,
+                sharedOperationPending: false,
+                ownerOperationId: commitResult.ownerReceipt.operationId,
+                sharedIdentityReceipt: commitResult.ownerReceipt,
+                terminalEventKey: envelope.eventKey,
+              });
+            } catch {
+              failure = { code: "delivery_shared_identity_receipt_record_failed", unresolved: true };
+            }
+          }
         }
         let currentHash;
         let current;
         try {
-          current = await readCurrentState(targets, snapshot.targetId);
+          current = destination.kind === "shared-identity" && ownerReadback
+            ? { sha256: snapshotDigest(ownerReadback), mode: ownerReadback.mode ?? null }
+            : await readCurrentState(targets, snapshot.targetId);
           currentHash = current.sha256;
           if (currentHash === skillSha256 && current.mode !== snapshot.targetMode) {
             await journal.recordTargetReceipt(envelopeId, {
@@ -1020,7 +1171,9 @@ export async function runSkillDeliveryConsumer({
             });
           } catch { /* the unresolved state is also captured in the transaction failure below */ }
           failure = currentHash === snapshot.priorSha256
-            ? { code: "delivery_write_not_committed", unresolved: false }
+            ? (commitError
+              ? { code: commitError.message, unresolved: false }
+              : { code: "delivery_write_not_committed", unresolved: false })
             : { code: "delivery_write_readback_conflict", unresolved: true };
           break;
         }
@@ -1034,6 +1187,7 @@ export async function runSkillDeliveryConsumer({
           stagedSha256: skillSha256,
           finalSha256: currentHash,
           finalMode: current.mode,
+          ...(commitResult?.ownerReceipt ? { ownerReceipt: commitResult.ownerReceipt } : {}),
         };
         committed.push({ ...snapshot, receipt });
         try {
@@ -1042,10 +1196,29 @@ export async function runSkillDeliveryConsumer({
           failure = { code: "delivery_receipt_record_failed", unresolved: true };
           break;
         }
+        if (failure) break;
+        if (commitError && destination.kind === "shared-identity") {
+          failure = { code: commitError.message, unresolved: false };
+          break;
+        }
+      }
+
+      if (awaitingOwnerOperation) {
+        for (const { targetId, stage } of staged.reverse()) {
+          try { await targets.discardStage(targetId, stage); } catch { /* retain the pending owner operation in the journal */ }
+        }
+        results.push({
+          status: "awaiting_shared_identity",
+          envelopeId,
+          ...(pendingOwnerOperation ? { operationId: pendingOwnerOperation } : {}),
+        });
+        continue;
       }
 
       if (failure) {
-        const rollback = await rollbackCommitted({ targets, journal, envelopeId, committed, skillSha256 });
+        const rollback = await rollbackCommitted({
+          targets, journal, envelopeId, committed, skillSha256, plan, planSha256, approval,
+        });
         for (const { targetId, stage } of staged.reverse()) {
           try { await targets.discardStage(targetId, stage); } catch { /* retain the unresolved stage reference in the failure receipt */ }
         }
@@ -1080,7 +1253,9 @@ export async function runSkillDeliveryConsumer({
         if (envelope.eventKey) terminalEventKeys.add(envelope.eventKey);
         highWater = { sourceCommit: envelope.sourceCommit, skillSha256 };
       } catch {
-        const rollback = await rollbackCommitted({ targets, journal, envelopeId, committed, skillSha256 });
+        const rollback = await rollbackCommitted({
+          targets, journal, envelopeId, committed, skillSha256, plan, planSha256, approval,
+        });
         await journal.recordFailure(envelopeId, {
           code: "delivery_completion_receipt_failed",
           unresolved: true,

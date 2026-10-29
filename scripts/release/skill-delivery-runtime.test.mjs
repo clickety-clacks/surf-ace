@@ -12,6 +12,7 @@ import {
   createGitHubSourceReader,
   createGitHubReleaseSource,
   createRuntime,
+  createOwnerSessionIdentityAdapter,
   createSshTargetAdapter,
   createApprovalHandoffAdapter,
   createXcodeCloudSource,
@@ -353,7 +354,7 @@ test("Xcode Cloud archive keeps ASC build 30 distinct from embedded manifest bui
   const verified = await verifyDeliveryCandidate(candidate, {
     destinations: [{
       id: "shared", kind: "shared-identity", host: "fixture", path: "/fixture/SKILL.md",
-      writer: "supported-identity-cli", route: {},
+      writer: "supported-identity-cli", route: { identityArchetype: "fixture", identitySkillName: "surf-ace" },
       effects: { service: "future loads", database: "publication record", downtime: "none" },
     }],
     sourceReader: {
@@ -418,46 +419,202 @@ test("ASC fallback accepts the repository's actual iOS target and canonical skil
   assert.equal(manifest.xcodeCloudBuildId, "xcode-run-44");
 });
 
-test("shared skill writes use the supported identity command and configured route", async () => {
+test("shared identity changes use a bound owner-session handoff and never SSH", async () => {
   const priorBytes = Buffer.from("prior skill\n");
   const nextBytes = Buffer.from("next skill\n");
-  const calls = [];
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-owner-identity-test-"));
+  const { destination, plan, approval, commitOptions } = ownerIdentityFixture();
+  let current = priorBytes;
+  let revision = 1;
+  const command = async (file, _args, { input }) => {
+    assert.equal(file, "private-owner-session-handoff");
+    const descriptor = JSON.parse(input.toString("utf8"));
+    const request = JSON.parse(await fs.readFile(descriptor.requestPath, "utf8"));
+    let readback;
+    if (request.action === "read") {
+      readback = current;
+    } else {
+      assert.equal(request.approvalHandoffId, "approval-handoff-1");
+      assert.equal(request.requestRef, "decision-1");
+      assert.equal(request.approval.requestRef, "decision-1");
+      assert.equal(sha256(current), request.expectedPriorSha256);
+      current = request.desiredBytesBase64 === null ? null : Buffer.from(request.desiredBytesBase64, "base64");
+      revision += 1;
+      readback = current;
+    }
+    const digest = readback === null ? null : sha256(readback);
+    const result = {
+      status: "complete",
+      operationId: request.operationId,
+      action: request.action,
+      targetId: request.targetId,
+      identityRevision: `revision-${revision}`,
+      bytesBase64: readback === null ? null : readback.toString("base64"),
+      sha256: digest,
+      envelopeId: request.envelopeId,
+      planSha256: request.planSha256,
+      destinationSetSha256: request.destinationSetSha256,
+      destinationMapSha256: request.destinationMapSha256,
+      approvalHandoffId: request.approvalHandoffId,
+      requestRef: request.requestRef,
+      decision: request.approval?.decision,
+      rulingPrincipal: request.approval?.ruling?.principal,
+      rulingOnBehalfOf: request.approval?.ruling?.onBehalfOf,
+      priorSha256: request.expectedPriorSha256,
+      desiredSha256: request.desiredSha256,
+      finalSha256: digest,
+      readbackSha256: digest,
+      readbackBase64: readback === null ? null : readback.toString("base64"),
+    };
+    await fs.mkdir(path.dirname(descriptor.resultPath), { recursive: true });
+    await fs.writeFile(descriptor.resultPath, JSON.stringify(result));
+    return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+  };
+  const targets = createOwnerSessionIdentityAdapter([destination], {
+    directory,
+    handoffCommand: "private-owner-session-handoff",
+    requiredRuler: "user:operator",
+    command,
+  });
+  try {
+    assert.deepEqual((await targets.read(destination.id)).bytes, priorBytes);
+    const stage = await targets.stage(destination.id, nextBytes, plan.envelopeId);
+    const committed = await targets.commit(destination.id, stage, commitOptions);
+    assert.equal(committed.status, "complete");
+    assert.equal(committed.ownerReceipt.action, "commit");
+    assert.deepEqual(committed.readback.bytes, nextBytes);
+    const restored = await targets.restore(destination.id, priorBytes, {
+      envelopeId: plan.envelopeId,
+      plan,
+      planSha256: plan.planSha256,
+      approval,
+      expectedCurrentSha256: sha256(nextBytes),
+      destinationSetSha256: plan.destinationSetSha256,
+      destinationMapSha256: plan.destinationMapSha256,
+    });
+    assert.equal(restored.ownerReceipt.action, "restore");
+    assert.deepEqual(restored.readback.bytes, priorBytes);
+    assert.throws(() => createSshTargetAdapter([destination]), /delivery_ssh_shared_identity_forbidden/);
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+function ownerIdentityFixture() {
   const destination = {
     id: "shared-skill",
     kind: "shared-identity",
     host: "configured-host",
     path: "/configured/identity/skills/surf-ace/SKILL.md",
     writer: "supported-identity-cli",
-    route: {
-      sshTarget: "configured-alias",
-      tightbeamCommand: "tightbeam",
-      identityArchetype: "configured-archetype",
-      identitySkillName: "surf-ace",
-    },
+    route: { identityArchetype: "configured-archetype", identitySkillName: "surf-ace" },
     effects: { service: "future loads", database: "publication record", downtime: "none" },
   };
-  const targets = createSshTargetAdapter([destination], {
-    command: async (file, args, options = {}) => {
-      calls.push({ file, args, options });
-      const remote = args[2];
-      if (remote.includes("PRESENT")) {
-        return { stdout: Buffer.concat([Buffer.from("PRESENT 600\n"), priorBytes]), stderr: Buffer.alloc(0) };
-      }
-      if (remote.includes("cat >")) {
-        return { stdout: Buffer.from(`${sha256(options.input)}\n`), stderr: Buffer.alloc(0) };
-      }
-      return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+  const plan = {
+    envelopeId: "event-1",
+    envelope: { skillSha256: sha256(Buffer.from("next skill\n")) },
+    destinationSetSha256: "b".repeat(64),
+    destinationMapSha256: "c".repeat(64),
+    snapshots: [{
+      targetId: "shared-skill",
+      priorSha256: sha256(Buffer.from("prior skill\n")),
+      priorMode: null,
+      targetMode: null,
+    }],
+  };
+  plan.planSha256 = sha256(canonicalJson(plan));
+  const approval = {
+    status: "ruled",
+    decision: "approve",
+    handoffId: "approval-handoff-1",
+    requestRef: "decision-1",
+    ruling: { principal: "user:operator", onBehalfOf: "user:operator" },
+    envelopeId: plan.envelopeId,
+    planSha256: plan.planSha256,
+    destinationSetSha256: plan.destinationSetSha256,
+    destinationMapSha256: plan.destinationMapSha256,
+  };
+  return {
+    destination,
+    plan,
+    approval,
+    commitOptions: {
+      envelopeId: plan.envelopeId,
+      plan,
+      planSha256: plan.planSha256,
+      approval,
+      destinationSetSha256: plan.destinationSetSha256,
+      destinationMapSha256: plan.destinationMapSha256,
+      expectedPriorSha256: sha256(Buffer.from("prior skill\n")),
     },
-  });
+  };
+}
 
-  assert.deepEqual(await targets.read(destination.id), { available: true, bytes: priorBytes, mode: null });
-  const stage = await targets.stage(destination.id, nextBytes, "f".repeat(64));
-  assert.equal(stage.sha256, sha256(nextBytes));
-  await targets.commit(destination.id, stage, { expectedPriorSha256: sha256(priorBytes) });
-  assert.ok(calls.some(({ file, args }) => file === "ssh" && args[1] === "configured-alias" &&
-    args[2].includes("tightbeam") && args[2].includes("identity") && args[2].includes("edit")));
-  assert.ok(calls.some(({ file, args }) => file === "ssh" && args[1] === "configured-alias" &&
-    args[2].includes("rm -f") && args[2].includes("surf-ace-stage")));
+test("owner-session write remains pending when its receipt is absent", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-owner-pending-test-"));
+  const { destination, commitOptions } = ownerIdentityFixture();
+  try {
+    const targets = createOwnerSessionIdentityAdapter([destination], {
+      directory,
+      handoffCommand: "private-owner-session-handoff",
+      requiredRuler: "user:operator",
+      command: async (_file, _args, { input }) => {
+        const descriptor = JSON.parse(input.toString("utf8"));
+        const request = JSON.parse(await fs.readFile(descriptor.requestPath, "utf8"));
+        assert.equal(request.action, "commit");
+        return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+      },
+    });
+    const stage = await targets.stage(destination.id, Buffer.from("next skill\n"), commitOptions.envelopeId);
+    const result = await targets.commit(destination.id, stage, commitOptions);
+    assert.equal(result.status, "pending");
+    assert.match(result.operationId, /^[a-f0-9]{64}$/);
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("owner-session write rejects a mismatched receipt", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-owner-mismatch-test-"));
+  const { destination, commitOptions } = ownerIdentityFixture();
+  try {
+    const targets = createOwnerSessionIdentityAdapter([destination], {
+      directory,
+      handoffCommand: "private-owner-session-handoff",
+      requiredRuler: "user:operator",
+      command: async (_file, _args, { input }) => {
+        const descriptor = JSON.parse(input.toString("utf8"));
+        const request = JSON.parse(await fs.readFile(descriptor.requestPath, "utf8"));
+        await fs.mkdir(path.dirname(descriptor.resultPath), { recursive: true });
+        await fs.writeFile(descriptor.resultPath, JSON.stringify({
+          status: "complete",
+          operationId: request.operationId,
+          action: "commit",
+          targetId: request.targetId,
+          identityRevision: "revision-2",
+          envelopeId: request.envelopeId,
+          planSha256: request.planSha256,
+          destinationSetSha256: request.destinationSetSha256,
+          destinationMapSha256: request.destinationMapSha256,
+          approvalHandoffId: "another-approval",
+          requestRef: request.requestRef,
+          decision: "approve",
+          rulingPrincipal: "user:operator",
+          rulingOnBehalfOf: "user:operator",
+          priorSha256: request.expectedPriorSha256,
+          desiredSha256: request.desiredSha256,
+          finalSha256: request.desiredSha256,
+          readbackSha256: request.desiredSha256,
+          readbackBase64: request.desiredBytesBase64,
+        }));
+        return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+      },
+    });
+    const stage = await targets.stage(destination.id, Buffer.from("next skill\n"), commitOptions.envelopeId);
+    await assert.rejects(() => targets.commit(destination.id, stage, commitOptions), /delivery_identity_receipt_mismatch/);
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("standalone SSH copies stage and commit with the existing file mode", async () => {
