@@ -465,7 +465,10 @@ export async function writeTightbeamManifest({
   const selectedComponents = tightbeamComponentsForAssets(assetNames);
   const publicFiles = [...assetNames, TIGHTBEAM.manifest, TIGHTBEAM.checksums];
   await verifyStandaloneElectronSource(source);
-  if (assetNames.includes(TIGHTBEAM_SKILL_ASSET)) await verifyTightbeamSkillAsset(skillSourceDir, output);
+  if (assetNames.includes(TIGHTBEAM_SKILL_ASSET)) {
+    await copyTightbeamSkillAsset(skillSourceDir, output);
+    await verifyTightbeamSkillAsset(skillSourceDir, output);
+  }
   const assetDetails = [];
   for (const name of assetNames) {
     const file = path.join(output, name);

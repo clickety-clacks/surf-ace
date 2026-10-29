@@ -1461,7 +1461,6 @@ test("each single-platform manifest includes and hashes the shared skill asset",
       for (const name of selectedAssets) {
         await fs.writeFile(path.join(outputDir, name), `fixture:${name}\n`);
       }
-      await copyTightbeamSkillAsset(toolingSkillDir, outputDir);
       const result = await writeTightbeamManifest({
         components: [component],
         outputDir,
@@ -1475,6 +1474,7 @@ test("each single-platform manifest includes and hashes the shared skill asset",
       assert.deepEqual(result.files, [...manifestAssets, TIGHTBEAM.manifest, TIGHTBEAM.checksums]);
       const skillRecord = manifest.assets.find(({ name }) => name === TIGHTBEAM_SKILL_ASSET);
       assert.equal(skillRecord.sha256, createHash("sha256").update(toolingSkillBytes).digest("hex"));
+      assert.deepEqual(await fs.readFile(path.join(outputDir, TIGHTBEAM_SKILL_ASSET)), toolingSkillBytes);
       assert.deepEqual(verifyTightbeamOperatingSkillManifest(manifest), manifest.operatingSkill);
       assert.deepEqual(manifest.operatingSkill.clientPlatforms, ["desktop", "cli"]);
       assert.equal(manifest.operatingSkill.version, manifest.version);
