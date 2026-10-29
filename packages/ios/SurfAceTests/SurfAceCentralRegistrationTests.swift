@@ -351,6 +351,29 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         return (store, adapter)
     }
 
+    private func boundAdapterWithSavedSurface(
+        at root: URL,
+        clientId: String,
+        identity: SurfAceRegistryIdentity,
+        rememberedEndpoint: String,
+        windowLabel: String,
+        paneLabel: Int64
+    ) async throws -> (SurfAceLocklessRuntimeAdapter, String) {
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let store = SurfAceLocklessGenerationStore(stateURL: root.appendingPathComponent("state.json"))
+        var state = try SurfAceLocklessAuthorityState.empty()
+        state.registryBinding = SurfAceRegistryBinding(
+            allocatorId: identity.allocatorId, clientId: clientId, fleetId: identity.fleetId
+        )
+        let surfaceId = try addSavedSurface(to: &state, windowLabel: windowLabel, paneLabel: paneLabel)
+        try store.save(state)
+        let adapter = try SurfAceLocklessRuntimeAdapter(store: store)
+        _ = try await adapter.rememberTailnetEndpoint(
+            rememberedEndpoint, registryIdentity: identity, clientId: clientId
+        )
+        return (adapter, surfaceId)
+    }
+
     private func addSavedSurface(
         to state: inout SurfAceLocklessAuthorityState,
         windowLabel: String,
@@ -2891,9 +2914,14 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         let clientId = String(repeating: "c", count: 64)
         let identity = SurfAceRegistryIdentity(allocatorId: "alloc_home", fleetId: "home-fleet")
         let rememberedValue = "ws://100.101.102.103:19001/ws"
-        let (_, adapter) = try await boundAdapter(
-            at: root, clientId: clientId, identity: identity, rememberedEndpoint: rememberedValue
+        let (adapter, surfaceId) = try await boundAdapterWithSavedSurface(
+            at: root, clientId: clientId, identity: identity, rememberedEndpoint: rememberedValue,
+            windowLabel: "c", paneLabel: 7
         )
+        let before = await adapter.snapshot()
+        let savedSurface = try XCTUnwrap(before.liveSurfaces[surfaceId])
+        let savedPane = try XCTUnwrap(savedSurface.panes["1"])
+        let paneKey = "\(surfaceId):1:\(savedPane.paneLineageId)"
         let configuredURL = URL(string: "ws://configured.example:19001/ws")!
         let rememberedURL = try XCTUnwrap(SurfAceTailnetEndpoint.url(from: rememberedValue))
         let configuredTransport = Transport()
@@ -2902,6 +2930,10 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         let rememberedTransport = Transport()
         rememberedTransport.registryIdentity = identity
         rememberedTransport.tailnetEndpoint = URL(string: "ws://100.101.102.104:19001/ws")!
+        rememberedTransport.assignedWindowLabels[surfaceId] = savedSurface.windowLabel
+        rememberedTransport.assignedWindowGenerations[surfaceId] = savedSurface.allocationGeneration
+        rememberedTransport.assignedPaneLabels[paneKey] = savedPane.paneLabel
+        rememberedTransport.assignedPaneGenerations[paneKey] = savedPane.allocationGeneration
         var events: [String] = []
         configuredTransport.onIdentityRead = { events.append("configured.identity") }
         configuredTransport.onRegister = { events.append("configured.register") }
@@ -2922,6 +2954,15 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         XCTAssertEqual(registration.status, .connected)
         let state = await adapter.snapshot()
         XCTAssertEqual(state.rememberedTailnetEndpoint?.endpoint, rememberedValue)
+        XCTAssertEqual(rememberedTransport.registrationInputs.last?.surfaces, SurfAceRegistrationSurface.snapshot(before))
+        let retainedSurface = try XCTUnwrap(state.liveSurfaces[surfaceId])
+        let retainedPane = try XCTUnwrap(retainedSurface.panes["1"])
+        XCTAssertEqual(retainedSurface.windowLabel, savedSurface.windowLabel)
+        XCTAssertEqual(retainedSurface.allocationGeneration, savedSurface.allocationGeneration)
+        XCTAssertEqual(retainedSurface.windowLabelConfirmed, true)
+        XCTAssertEqual(retainedPane.paneLabel, savedPane.paneLabel)
+        XCTAssertEqual(retainedPane.allocationGeneration, savedPane.allocationGeneration)
+        XCTAssertEqual(retainedPane.history.visible.content, savedPane.history.visible.content)
         registration.stop()
     }
 
@@ -2966,9 +3007,11 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         let clientId = String(repeating: "d", count: 64)
         let current = SurfAceRegistryIdentity(allocatorId: "alloc_home", fleetId: "home-fleet")
         let rememberedValue = "ws://100.101.102.103:19001/ws"
-        let (_, adapter) = try await boundAdapter(
-            at: root, clientId: clientId, identity: current, rememberedEndpoint: rememberedValue
+        let (adapter, surfaceId) = try await boundAdapterWithSavedSurface(
+            at: root, clientId: clientId, identity: current, rememberedEndpoint: rememberedValue,
+            windowLabel: "d", paneLabel: 9
         )
+        let before = await adapter.snapshot()
         let endpoint = try XCTUnwrap(SurfAceTailnetEndpoint.url(from: rememberedValue))
         let other = Transport()
         other.registryIdentity = SurfAceRegistryIdentity(allocatorId: "alloc_other", fleetId: "other-fleet")
@@ -2986,6 +3029,7 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         XCTAssertEqual(other.registrationCount, 0)
         let state = await adapter.snapshot()
         XCTAssertEqual(state.rememberedTailnetEndpoint?.endpoint, rememberedValue)
+        XCTAssertEqual(state.liveSurfaces[surfaceId], before.liveSurfaces[surfaceId])
     }
 
     func testRememberedEndpointFailureKeepsAddressForTheExistingRetry() async throws {
@@ -2994,14 +3038,23 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         let clientId = String(repeating: "e", count: 64)
         let identity = SurfAceRegistryIdentity(allocatorId: "alloc_home", fleetId: "home-fleet")
         let rememberedValue = "ws://100.101.102.103:19001/ws"
-        let (_, adapter) = try await boundAdapter(
-            at: root, clientId: clientId, identity: identity, rememberedEndpoint: rememberedValue
+        let (adapter, surfaceId) = try await boundAdapterWithSavedSurface(
+            at: root, clientId: clientId, identity: identity, rememberedEndpoint: rememberedValue,
+            windowLabel: "e", paneLabel: 11
         )
+        let before = await adapter.snapshot()
+        let savedSurface = try XCTUnwrap(before.liveSurfaces[surfaceId])
+        let savedPane = try XCTUnwrap(savedSurface.panes["1"])
+        let paneKey = "\(surfaceId):1:\(savedPane.paneLineageId)"
         let endpoint = try XCTUnwrap(SurfAceTailnetEndpoint.url(from: rememberedValue))
         let transport = Transport()
         transport.registryIdentity = identity
         transport.fails = true
         transport.tailnetEndpoint = URL(string: "ws://100.101.102.104:19001/ws")!
+        transport.assignedWindowLabels[surfaceId] = savedSurface.windowLabel
+        transport.assignedWindowGenerations[surfaceId] = savedSurface.allocationGeneration
+        transport.assignedPaneLabels[paneKey] = savedPane.paneLabel
+        transport.assignedPaneGenerations[paneKey] = savedPane.allocationGeneration
         let registration = centralRegistration(
             adapter: adapter, clientId: clientId, configured: nil,
             discovered: [], transports: [endpoint: transport]
@@ -3014,6 +3067,7 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         XCTAssertEqual(registration.status, .disconnected)
         let failedState = await adapter.snapshot()
         XCTAssertEqual(failedState.rememberedTailnetEndpoint?.endpoint, rememberedValue)
+        XCTAssertEqual(failedState.liveSurfaces[surfaceId], before.liveSurfaces[surfaceId])
 
         transport.fails = false
         try await registration.synchronize()
@@ -3021,6 +3075,12 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         XCTAssertEqual(transport.registrationCount, 2)
         let retriedState = await adapter.snapshot()
         XCTAssertEqual(retriedState.rememberedTailnetEndpoint?.endpoint, rememberedValue)
+        XCTAssertEqual(retriedState.liveSurfaces[surfaceId]?.windowLabel, savedSurface.windowLabel)
+        XCTAssertEqual(retriedState.liveSurfaces[surfaceId]?.panes["1"]?.paneLabel, savedPane.paneLabel)
+        XCTAssertEqual(
+            retriedState.liveSurfaces[surfaceId]?.panes["1"]?.history.visible.content,
+            savedPane.history.visible.content
+        )
         registration.stop()
     }
 
