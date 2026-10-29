@@ -490,6 +490,12 @@ actor SurfAceLocklessRuntimeAdapter {
                    !allowRebinding {
                     throw SurfAceRegistrationError.foreignRegistryIdentity
                 }
+                let previousIdentity = state.registryBinding.map {
+                    SurfAceRegistryIdentity(allocatorId: $0.allocatorId, fleetId: $0.fleetId)
+                }
+                if previousIdentity != identity {
+                    state.rememberedTailnetEndpoint = nil
+                }
                 state.registryBinding = binding
                 for surfaceId in Array(state.liveSurfaces.keys) {
                     guard var surface = state.liveSurfaces[surfaceId] else { continue }
@@ -522,6 +528,27 @@ actor SurfAceLocklessRuntimeAdapter {
                 return true
             }
             throw error
+        }
+    }
+
+    @discardableResult
+    func rememberTailnetEndpoint(
+        _ endpoint: String,
+        registryIdentity: SurfAceRegistryIdentity,
+        clientId: String
+    ) async throws -> Bool {
+        guard registryIdentity.isValid, SurfAceTailnetEndpoint.url(from: endpoint) != nil else {
+            return false
+        }
+        let remembered = SurfAceRememberedTailnetEndpoint(
+            endpoint: endpoint,
+            registryIdentity: registryIdentity
+        )
+        return try await coordinator.transact(trigger: "remembered_tailnet_endpoint", skipUnchanged: true) { state in
+            guard let binding = state.registryBinding,
+                  binding.matches(registryIdentity, clientId: clientId) else { return false }
+            state.rememberedTailnetEndpoint = remembered
+            return true
         }
     }
 
