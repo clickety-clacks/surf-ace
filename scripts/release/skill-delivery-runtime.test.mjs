@@ -13,7 +13,7 @@ import {
   createGitHubReleaseSource,
   createRuntime,
   createSshTargetAdapter,
-  createTightbeamApprovalAdapter,
+  createApprovalHandoffAdapter,
   createXcodeCloudSource,
 } from "./skill-delivery-runtime.mjs";
 
@@ -498,7 +498,7 @@ test("standalone SSH copies stage and commit with the existing file mode", async
   assert.ok(calls.some(({ args }) => args[2].includes("mode") && args[2].includes("640") && args[2].includes("mv -f")));
 });
 
-test("decision approval accepts only the direct configured user ruling for the exact plan", async () => {
+test("approval handoff keeps one exact event request and accepts only its ruled owner receipt", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-approval-test-"));
   try {
     const plan = {
@@ -508,37 +508,49 @@ test("decision approval accepts only the direct configured user ruling for the e
       destinationSetSha256: "f".repeat(64),
       destinationMapSha256: "f".repeat(64),
     };
-    const note = canonicalJson(plan);
-    const request = {
-      id: "request-fixture",
-      context: { note },
-      status: "ruled",
-      decision: "approve",
-      ruledBy: "user:operator",
-      rulingAttribution: {
-        onBehalfOf: "user:operator",
-        performer: {
-          principal: { state: "known", value: "agent-session:owner" },
-          session: { state: "known", value: "owner-session" },
-        },
-      },
-    };
-    const adapter = createTightbeamApprovalAdapter({
+    let requestCount = 0;
+    let requestDescriptor;
+    const adapter = createApprovalHandoffAdapter({
       directory,
-      assignmentId: "private-assignment-reference",
+      handoffCommand: "private-approval-handoff",
       requiredRuler: "user:operator",
-      command: async (_file, args) => {
-        if (args[0] === "decision-requests") return { stdout: Buffer.from(JSON.stringify({ decisionRequests: [] })) };
-        if (args[0] === "operator-ask") return { stdout: Buffer.from(JSON.stringify({ decisionRequest: { id: request.id } })) };
-        if (args[0] === "decision-request") return { stdout: Buffer.from(JSON.stringify({ decisionRequest: request })) };
-        throw new Error(`unexpected decision command: ${args[0]}`);
+      command: async (file, _args, { input }) => {
+        assert.equal(file, "private-approval-handoff");
+        requestCount += 1;
+        requestDescriptor = JSON.parse(input.toString("utf8"));
+        const request = JSON.parse(await fs.readFile(requestDescriptor.requestPath, "utf8"));
+        assert.equal(request.planSha256, plan.planSha256);
+        assert.deepEqual(request.plan, plan);
+        return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
       },
     });
 
     await adapter.request(plan);
-    assert.equal((await adapter.read(plan.envelopeId, plan.planSha256)).directUserConfirmed, true);
-    request.ruledBy = "user:other";
-    assert.equal((await adapter.read(plan.envelopeId, plan.planSha256)).directUserConfirmed, false);
+    assert.equal((await adapter.read(plan.envelopeId, plan.planSha256)).status, "pending");
+    await adapter.request(plan);
+    assert.equal(requestCount, 1, "repeated scans must reuse one event handoff");
+
+    const receipt = {
+      handoffId: requestDescriptor.handoffId,
+      requestRef: "ruled-decision-record",
+      status: "ruled",
+      decision: "approve",
+      ruling: {
+        principal: "user:operator",
+        onBehalfOf: "user:operator",
+        performer: { kind: "agent-session" },
+      },
+      envelopeId: plan.envelopeId,
+      planSha256: plan.planSha256,
+      destinationSetSha256: plan.destinationSetSha256,
+      destinationMapSha256: plan.destinationMapSha256,
+    };
+    await fs.mkdir(path.dirname(requestDescriptor.resultPath), { recursive: true });
+    await fs.writeFile(requestDescriptor.resultPath, `${JSON.stringify(receipt)}\n`);
+    assert.equal((await adapter.read(plan.envelopeId, plan.planSha256)).ruling.principal, "user:operator");
+    receipt.ruling.onBehalfOf = "user:other";
+    await fs.writeFile(requestDescriptor.resultPath, `${JSON.stringify(receipt)}\n`);
+    assert.equal((await adapter.read(plan.envelopeId, plan.planSha256)).status, "mismatch");
   } finally {
     await fs.rm(directory, { recursive: true, force: true });
   }

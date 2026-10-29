@@ -429,8 +429,10 @@ function snapshotDigest(snapshot) {
 
 function approvalMatches(approval, plan) {
   return approval?.status === "ruled" &&
-    approval?.approved === true &&
-    approval?.directUserConfirmed === true &&
+    approval?.decision === "approve" &&
+    typeof approval?.requestRef === "string" && approval.requestRef.length > 0 &&
+    typeof approval?.ruling?.principal === "string" &&
+    approval.ruling.principal === approval.ruling.onBehalfOf &&
     approval?.envelopeId === plan.envelopeId &&
     approval?.destinationSetSha256 === plan.destinationSetSha256 &&
     approval?.destinationMapSha256 === plan.destinationMapSha256 &&
@@ -748,7 +750,7 @@ export async function runSkillDeliveryConsumer({
           results.push({ status: "awaiting_approval", envelopeId, planSha256 });
           continue;
         }
-        if (approval.status === "ruled" && approval.approved !== true) {
+        if (approval.status === "ruled" && approval.decision !== "approve") {
           await journal.recordBlocked(envelopeId, {
             reason: "approval_declined",
             planSha256,
@@ -892,7 +894,7 @@ export async function runSkillDeliveryConsumer({
           results.push({ status: "awaiting_approval", envelopeId, planSha256 });
           continue;
         }
-        if (approval.status === "ruled" && approval.approved !== true) {
+        if (approval.status === "ruled" && approval.decision !== "approve") {
           await journal.recordBlocked(envelopeId, {
             reason: "approval_declined", planSha256, terminal: true, terminalEventKey: envelope.eventKey,
           });

@@ -442,63 +442,111 @@ export async function createFileDeliveryJournal(directory) {
   };
 }
 
-export function createTightbeamApprovalAdapter({ directory, assignmentId, requiredRuler, command = runCommand }) {
-  const filePath = path.join(directory, "approval-requests.json");
-  const keyFor = (envelopeId, planSha256) => `${envelopeId}:${planSha256}`;
-  async function load() { return readJsonFile(filePath, { requests: {} }); }
-  async function save(value) { return writeJsonAtomic(filePath, value); }
-  async function recordRequest(plan, planSha256, note) {
-    const key = keyFor(plan.envelopeId, planSha256);
-    let state = await load();
-    if (state.requests[key]) return state.requests[key];
-    const listed = await commandJson("tightbeam", ["decision-requests", "--status", "all"], { command });
-    const matching = (listed.decisionRequests ?? []).find((request) =>
-      request.assignmentId === assignmentId && request.context?.note === note);
-    let decisionRequest = matching;
-    if (!decisionRequest) {
-      const envelope = plan.envelope;
-      const question = `May Surf Ace publish the operating skill for ${envelope.releaseOrBuildId} (skill SHA-256 ${envelope.skillSha256}) to the exact configured agent locations in the attached plan? The plan shows the source commit, current destination hashes, and how to restore the prior bytes if any write fails. This changes skill files for future agent loads; it does not refresh running sessions. If this request is declined or still pending, nothing is written.`;
-      const response = await commandJson("tightbeam", [
-        "operator-ask", "--question", question, "--note", note,
-        "--options", "approve,decline", "--assignment", assignmentId,
-      ], { command });
-      decisionRequest = response.decisionRequest;
+// The configured private command forwards a persisted, exact-plan envelope to
+// its accountable owner and returns a receipt in resultDirectory. It must use
+// handoffId as an idempotency key. It creates no approval and may not write a
+// target; the receipt must come from the matching ruled operator record.
+export function createApprovalHandoffAdapter({ directory, handoffCommand, requiredRuler, command = runCommand }) {
+  const statePath = path.join(directory, "approval-handoffs.json");
+  const requestDirectory = path.join(directory, "approval-handoffs");
+  const resultDirectory = path.join(directory, "approval-results");
+  const keyFor = (envelopeId, planSha256) => sha256(Buffer.from(canonicalJson({ envelopeId, planSha256 })));
+  async function load() { return readJsonFile(statePath, { requests: {} }); }
+  async function save(value) { return writeJsonAtomic(statePath, value); }
+  async function prepare(plan, planSha256) {
+    if (typeof handoffCommand !== "string" || handoffCommand.length === 0) {
+      throw new Error("delivery_approval_handoff_unavailable");
     }
-    if (typeof decisionRequest?.id !== "string") throw new Error("delivery_approval_request_unavailable");
-    const item = {
-      requestId: decisionRequest.id,
+    const handoffId = keyFor(plan.envelopeId, planSha256);
+    const requestPath = path.join(requestDirectory, `${handoffId}.json`);
+    const resultPath = path.join(resultDirectory, `${handoffId}.json`);
+    const state = await load();
+    const existing = state.requests[handoffId];
+    if (existing && canonicalJson(existing.plan) !== canonicalJson(plan)) {
+      throw new Error("delivery_approval_handoff_plan_conflict");
+    }
+    const item = existing ?? {
+      handoffId,
       envelopeId: plan.envelopeId,
       planSha256,
       destinationSetSha256: plan.destinationSetSha256,
       destinationMapSha256: plan.destinationMapSha256,
-      note,
+      status: "queued",
+      requestPath,
+      resultPath,
+      plan,
     };
-    state.requests[key] = item;
+    state.requests[handoffId] = item;
     await save(state);
-    return item;
+    await fs.mkdir(requestDirectory, { recursive: true, mode: 0o700 });
+    await fs.mkdir(resultDirectory, { recursive: true, mode: 0o700 });
+    await writeJsonAtomic(requestPath, {
+      handoffId,
+      envelopeId: plan.envelopeId,
+      planSha256,
+      destinationSetSha256: plan.destinationSetSha256,
+      destinationMapSha256: plan.destinationMapSha256,
+      plan,
+    });
+    if (item.status !== "submitted") {
+      try {
+        await command(handoffCommand, [], {
+          input: Buffer.from(JSON.stringify({ handoffId, requestPath, resultPath })),
+        });
+      } catch (error) {
+        item.status = "retryable";
+        state.requests[handoffId] = item;
+        await save(state);
+        throw error;
+      }
+      item.status = "submitted";
+      state.requests[handoffId] = item;
+      await save(state);
+    }
+    return { item, resultPath };
   }
   return {
     async request(plan) {
-      const note = canonicalJson(plan);
-      await recordRequest(plan, plan.planSha256, note);
+      await prepare(plan, plan.planSha256);
     },
     async read(envelopeId, planSha256) {
       const state = await load();
-      const item = state.requests[keyFor(envelopeId, planSha256)];
+      const handoffId = keyFor(envelopeId, planSha256);
+      const item = state.requests[handoffId];
       if (!item) return null;
-      const response = await commandJson("tightbeam", ["decision-request", "--request", item.requestId], { command });
-      const request = response.decisionRequest;
-      if (!request || request.context?.note !== item.note) return { status: "mismatch" };
-      if (request.status !== "ruled") {
-        return { status: request.status === "open" ? "pending" : request.status, envelopeId, planSha256,
-          destinationSetSha256: item.destinationSetSha256, destinationMapSha256: item.destinationMapSha256 };
+      if (item.status !== "submitted") return null;
+      const resultPath = path.join(resultDirectory, `${handoffId}.json`);
+      const result = await readJsonFile(resultPath, null);
+      if (!result) return {
+        status: "pending",
+        envelopeId,
+        planSha256,
+        destinationSetSha256: item.destinationSetSha256,
+        destinationMapSha256: item.destinationMapSha256,
+      };
+      if (result.handoffId !== handoffId || result.envelopeId !== envelopeId ||
+          result.planSha256 !== planSha256 ||
+          result.destinationSetSha256 !== item.destinationSetSha256 ||
+          result.destinationMapSha256 !== item.destinationMapSha256 ||
+          typeof result.requestRef !== "string" || result.requestRef.length === 0) {
+        return { status: "mismatch" };
       }
-      const directUserConfirmed = request.ruledBy === requiredRuler &&
-        request.rulingAttribution?.onBehalfOf === requiredRuler;
+      if (result.status !== "ruled") return {
+        status: result.status === "pending" ? "pending" : result.status,
+        envelopeId,
+        planSha256,
+        destinationSetSha256: item.destinationSetSha256,
+        destinationMapSha256: item.destinationMapSha256,
+      };
+      const principal = result.ruling?.principal;
+      const onBehalfOf = result.ruling?.onBehalfOf;
+      if (typeof requiredRuler !== "string" || principal !== requiredRuler || onBehalfOf !== requiredRuler ||
+          !["approve", "decline"].includes(result.decision)) return { status: "mismatch" };
       return {
         status: "ruled",
-        approved: request.decision === "approve",
-        directUserConfirmed,
+        decision: result.decision,
+        requestRef: result.requestRef,
+        ruling: result.ruling,
         envelopeId,
         planSha256,
         destinationSetSha256: item.destinationSetSha256,
@@ -642,9 +690,9 @@ export async function createRuntime(config, { command = runCommand } = {}) {
   const { owner, repo, publishedAfter } = config.github ?? {};
   const { sshTarget, nodeExecutable, collectorScript, collectorConfig, expectedWorkflowId, startReasonToCondition } = config.xcodeCloud ?? {};
   const { directory: journalDirectory } = config.journal ?? {};
-  const { assignmentId, requiredRuler } = config.approval ?? {};
+  const { handoffCommand, requiredRuler } = config.approval ?? {};
   if (![owner, repo, publishedAfter, sshTarget, collectorScript, collectorConfig, expectedWorkflowId,
-    journalDirectory, assignmentId, requiredRuler].every((value) => typeof value === "string" && value.length > 0) ||
+    journalDirectory, handoffCommand, requiredRuler].every((value) => typeof value === "string" && value.length > 0) ||
       !Array.isArray(config.destinations) || config.destinations.length === 0 ||
       !COMMIT.test(config.initialHighWater?.sourceCommit ?? "") || !SHA256.test(config.initialHighWater?.skillSha256 ?? "")) {
     throw new Error("delivery_private_config_incomplete");
@@ -653,7 +701,7 @@ export async function createRuntime(config, { command = runCommand } = {}) {
   const destinations = config.destinations;
   const [journal, approvals] = await Promise.all([
     createFileDeliveryJournal(journalDirectory),
-    createTightbeamApprovalAdapter({ directory: journalDirectory, assignmentId, requiredRuler, command }),
+    createApprovalHandoffAdapter({ directory: journalDirectory, handoffCommand, requiredRuler, command }),
   ]);
   const sources = [
     createGitHubReleaseSource({ owner, repo, publishedAfter, command }),

@@ -32,6 +32,22 @@ const destinationRecords = destinations.map((id, index) => ({
 const skillBytes = Buffer.from("# Surf Ace operating skill\n");
 const skillSha256 = sha256(skillBytes);
 
+const testRuling = { principal: "user:operator", onBehalfOf: "user:operator" };
+
+function approvedReceipt(plan, overrides = {}) {
+  return {
+    status: "ruled",
+    decision: "approve",
+    requestRef: "test-approval-record",
+    ruling: testRuling,
+    envelopeId: plan.envelopeId,
+    destinationSetSha256: plan.destinationSetSha256,
+    destinationMapSha256: plan.destinationMapSha256,
+    planSha256: plan.planSha256,
+    ...overrides,
+  };
+}
+
 function desktopCandidate(overrides = {}) {
   const {
     skillBytes: candidateSkillBytes = skillBytes,
@@ -389,8 +405,9 @@ test("exact matching approval is required before all five future-load copies", a
 
   ruling = {
     status: "ruled",
-    approved: true,
-    directUserConfirmed: true,
+    decision: "approve",
+    requestRef: "test-approval-record",
+    ruling: testRuling,
     envelopeId: requestedPlan.envelopeId,
     destinationSetSha256: requestedPlan.destinationSetSha256,
     destinationMapSha256: requestedPlan.destinationMapSha256,
@@ -493,7 +510,7 @@ test("destination count is driven by private configuration and included in the a
   let requestedPlan;
   const approvals = {
     async read() { return requestedPlan && {
-      status: "ruled", approved: true, directUserConfirmed: true,
+      ...approvedReceipt(requestedPlan),
       envelopeId: requestedPlan.envelopeId,
       destinationSetSha256: requestedPlan.destinationSetSha256,
       destinationMapSha256: requestedPlan.destinationMapSha256,
@@ -545,8 +562,9 @@ test("approval binds exact resolved destination routes and effects", async () =>
   const firstPlan = requestedPlans[0];
   rulings.set(firstPlan.envelopeId, {
     status: "ruled",
-    approved: true,
-    directUserConfirmed: true,
+    decision: "approve",
+    requestRef: "test-approval-record",
+    ruling: testRuling,
     envelopeId: firstPlan.envelopeId,
     destinationSetSha256: firstPlan.destinationSetSha256,
     destinationMapSha256: firstPlan.destinationMapSha256,
@@ -574,8 +592,9 @@ test("a target changed after preflight is preserved by the expected-prior commit
   const approvals = {
     async read() { return requestedPlan && {
       status: "ruled",
-      approved: true,
-      directUserConfirmed: true,
+      decision: "approve",
+      requestRef: "test-approval-record",
+      ruling: testRuling,
       envelopeId: requestedPlan.envelopeId,
       destinationSetSha256: requestedPlan.destinationSetSha256,
       destinationMapSha256: requestedPlan.destinationMapSha256,
@@ -614,7 +633,7 @@ test("uncertain write with a third-state readback stops and never overwrites it"
   const journal = makeJournal();
   let requestedPlan;
   const approvals = {
-    async read() { return requestedPlan && { status: "ruled", approved: true, directUserConfirmed: true, envelopeId: requestedPlan.envelopeId, destinationSetSha256: requestedPlan.destinationSetSha256, destinationMapSha256: requestedPlan.destinationMapSha256, planSha256: requestedPlan.planSha256 }; },
+    async read() { return requestedPlan && approvedReceipt(requestedPlan); },
     async request(plan) { requestedPlan = plan; },
   };
   const args = {
@@ -701,7 +720,7 @@ test("approval from a different release cannot authorize a copy", async () => {
   const targetStore = makeTargets();
   const journal = makeJournal();
   const approvals = {
-    async read() { return { status: "ruled", approved: true, directUserConfirmed: true, envelopeId: "other-envelope" }; },
+    async read() { return approvedReceipt({ envelopeId: "other-envelope" }); },
     async request() { assert.fail("mismatched approval must not be replaced automatically"); },
   };
   const result = await runSkillDeliveryConsumer({
@@ -717,7 +736,7 @@ test("approval from a different release cannot authorize a copy", async () => {
   assert.deepEqual([...targetStore.values.values()].map((value) => value.toString()), destinations.map((id) => `old:${id}`));
 });
 
-test("a ruling without direct user confirmation cannot authorize target writes", async () => {
+test("a ruling whose principal and behalf identity disagree cannot authorize target writes", async () => {
   const candidate = desktopCandidate();
   const targetStore = makeTargets();
   const journal = makeJournal();
@@ -725,8 +744,9 @@ test("a ruling without direct user confirmation cannot authorize target writes",
   const approvals = {
     async read() { return requestedPlan && {
       status: "ruled",
-      approved: true,
-      directUserConfirmed: false,
+      decision: "approve",
+      requestRef: "test-approval-record",
+      ruling: { principal: "user:other", onBehalfOf: "user:operator" },
       envelopeId: requestedPlan.envelopeId,
       destinationSetSha256: requestedPlan.destinationSetSha256,
       destinationMapSha256: requestedPlan.destinationMapSha256,
@@ -757,7 +777,7 @@ test("partial commit failure restores prior bytes in reverse order", async () =>
   const journal = makeJournal();
   let requestedPlan;
   const approvals = {
-    async read() { return requestedPlan && { status: "ruled", approved: true, directUserConfirmed: true, envelopeId: requestedPlan.envelopeId, destinationSetSha256: requestedPlan.destinationSetSha256, destinationMapSha256: requestedPlan.destinationMapSha256, planSha256: requestedPlan.planSha256 }; },
+    async read() { return requestedPlan && approvedReceipt(requestedPlan); },
     async request(plan) { requestedPlan = plan; },
   };
   const args = {
