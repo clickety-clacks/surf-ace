@@ -5365,6 +5365,65 @@ test("guarded restart preserves two-pane display but cannot re-pair without dura
   }
 });
 
+test("a pair request that closes during local persistence does not strand its controller identity", async () => {
+  const core = new SurfaceCore();
+  const surface = core.ensurePrimarySurface("Surf Ace", {
+    height: 800,
+    scale: 2,
+    width: 1200,
+  });
+  let persistenceCalls = 0;
+  let startStalledPersistence!: () => void;
+  const stalledPersistenceStarted = new Promise<void>((resolve) => {
+    startStalledPersistence = resolve;
+  });
+  let releaseStalledPersistence!: () => void;
+  const stalledPersistence = new Promise<void>((resolve) => {
+    releaseStalledPersistence = resolve;
+  });
+  const controllerInstanceId = "late-pair-admission-controller";
+  const port = nextPort++;
+  const server = new SurfaceWsServer({
+    bindAddress: "127.0.0.1",
+    capturePaneImage: async () => null,
+    compositorSocketPath: null,
+    core,
+    endpointName: "Surf Ace",
+    hostName: "localhost",
+    persistLocklessState: async () => {
+      persistenceCalls += 1;
+      if (persistenceCalls === 3) {
+        startStalledPersistence();
+        await stalledPersistence;
+      }
+    },
+    port,
+    viewport: () => ({ height: 800, scale: 2, width: 1200 }),
+  });
+  await server.start();
+  const first = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+  let retry: WebSocket | null = null;
+  try {
+    void pair(first, controllerInstanceId, surface.surfaceId).catch(() => undefined);
+    await stalledPersistenceStarted;
+
+    const firstSocketClosed = new Promise<void>((resolve) => first.once("close", () => resolve()));
+    first.close();
+    await firstSocketClosed;
+    releaseStalledPersistence();
+
+    retry = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+    const retried = await pair(retry, controllerInstanceId, surface.surfaceId);
+    assert.equal(retried.ok, true, JSON.stringify(retried));
+    assert.deepEqual(core.locklessAuthority.liveControllerIds(), [controllerInstanceId]);
+  } finally {
+    releaseStalledPersistence();
+    if (retry) retry.close();
+    first.close();
+    await server.stop();
+  }
+});
+
 test("concurrent pair.requests are serialized through the global durable boundary", async () => {
   const core = new SurfaceCore();
   const surface = core.ensurePrimarySurface("Surf Ace", {
