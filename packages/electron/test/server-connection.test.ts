@@ -220,6 +220,8 @@ async function automaticRegistryFixture(options: {
   rejectClaim?: (payload: any) => boolean;
   rejectReleaseIds?: Set<string>;
   rejectRegistration?: () => boolean;
+  ignoreRegistrationReply?: () => boolean;
+  halfOpenPaneClaimReply?: () => boolean;
   registrationResultsV1?: boolean;
   shippedLegacyShape?: boolean;
   ignorePendingReleases?: boolean;
@@ -273,7 +275,12 @@ async function automaticRegistryFixture(options: {
       }
       requests.push({ socket, message });
       const payload = message.payload;
+      if (message.op === "client.register" && options.ignoreRegistrationReply?.()) return;
       if (message.op === "pane.claim") {
+        if (options.halfOpenPaneClaimReply?.()) {
+          (socket as any)._socket?.pause();
+          return;
+        }
         socket.send(JSON.stringify({
           type: "response", v: 1, id: message.id, op: message.op, ok: true,
           payload: options.paneClaimReply?.(payload) ?? { paneLabel: 701 },
@@ -800,6 +807,275 @@ test("central status waits for registration and persistence; loss, retry and rec
     await central.close();
   }
   assert.equal(state().connectionBar, "disconnected");
+});
+
+test("a stuck registration persistence step disconnects truthfully and recovers without losing pane content", async () => {
+  const directEndpoint = "ws://127.0.0.1:1/ws";
+  let leaseGeneration = 0;
+  const registry = await automaticRegistryFixture({
+    shippedLegacyShape: true,
+    transformRegistrationReply: (reply) => {
+      const observedAt = Date.now();
+      return {
+        ...reply,
+        directEndpoint,
+        prePairDescribeV1: true,
+        endpointLease: {
+          leaseGeneration: ++leaseGeneration,
+          registrationObservedAtMs: observedAt,
+          leaseExpiresAtMs: observedAt + 5_000,
+        },
+      };
+    },
+  });
+  const core = new SurfaceCore();
+  const surface = core.ensurePrimarySurface("Local persistence recovery", { width: 800, height: 600, scale: 1 });
+  core.admitSurfaceToLockless(surface.surfaceId);
+  const initial = core.getRendererWindowState(surface.surfaceId);
+  const paneId = initial.panes[0]!.paneId;
+  const paneLineageId = initial.panes[0]!.paneLineageId;
+  core.contentSet(surface.surfaceId, {
+    content: { markdown: "Readable content survives a stalled registration" },
+    contentId: "ct_local_persistence_recovery" as never,
+    contentType: "markdown",
+    historyOwnerToken: "hot_local_persistence_recovery",
+    paneId: paneId as never,
+    revision: 1 as never,
+  });
+  let persistenceCalls = 0;
+  const persistenceStalled = deferred();
+  const connection = new ServerConnection({
+    configuredAddress: registry.address,
+    directEndpoint,
+    clientId: "local-persistence-recovery-client",
+    core,
+    discovery: emptyDiscovery(),
+    requestTimeoutMs: 120,
+    registrationCycleTimeoutMs: 800,
+    persist: async () => {
+      persistenceCalls += 1;
+      if (persistenceCalls === 2) {
+        persistenceStalled.resolve();
+        await new Promise<void>(() => {});
+      }
+    },
+  });
+  const state = () => core.getRendererWindowState(surface.surfaceId);
+  const registrationCount = () => registry.requests.filter(({ message }) => message.op === "client.register").length;
+  try {
+    const first = connection.synchronize();
+    const rejected = assert.rejects(first, /registration_stage_timeout:local registration response persistence/);
+    await persistenceStalled.promise;
+    await rejected;
+    assert.equal(state().connectionBar, "disconnected");
+    assert.match(state().connectionError ?? "", /registry_cycle_timed_out:local registration response persistence/);
+
+    await until(() => state().connectionBar === "connected" && registrationCount() >= 2);
+    const recovered = state();
+    assert.equal(recovered.windowLabel, "a");
+    assert.equal(recovered.panes[0]?.label, "700");
+    assert.equal(recovered.panes[0]?.paneLineageId, paneLineageId);
+    assert.equal(recovered.panes[0]?.content.contentId, "ct_local_persistence_recovery");
+    assert.deepEqual(recovered.panes[0]?.content.content, {
+      markdown: "Readable content survives a stalled registration",
+    });
+    assert.equal(core.listSurfaces()[0]?.surfaceId, surface.surfaceId);
+    assert.equal(core.registryEndpointLease()?.leaseGeneration, 2,
+      "the retry commits a fresh lease after the stalled response transaction rolls back");
+  } finally {
+    await connection.stop();
+    await registry.close();
+  }
+});
+
+test("a sent registration with no reply reports its stage and automatically reconnects", async () => {
+  const directEndpoint = "ws://127.0.0.1:1/ws";
+  let leaseGeneration = 0;
+  let ignoreFirstReply = true;
+  const registry = await automaticRegistryFixture({
+    shippedLegacyShape: true,
+    ignoreRegistrationReply: () => {
+      if (!ignoreFirstReply) return false;
+      ignoreFirstReply = false;
+      return true;
+    },
+    transformRegistrationReply: (reply) => {
+      const observedAt = Date.now();
+      return {
+        ...reply,
+        directEndpoint,
+        prePairDescribeV1: true,
+        endpointLease: {
+          leaseGeneration: ++leaseGeneration,
+          registrationObservedAtMs: observedAt,
+          leaseExpiresAtMs: observedAt + 5_000,
+        },
+      };
+    },
+  });
+  const core = new SurfaceCore();
+  const surface = core.ensurePrimarySurface("Registration reply recovery", { width: 800, height: 600, scale: 1 });
+  const connection = new ServerConnection({
+    configuredAddress: registry.address,
+    directEndpoint,
+    clientId: "registration-reply-recovery-client",
+    core,
+    discovery: emptyDiscovery(),
+    requestTimeoutMs: 120,
+    registrationCycleTimeoutMs: 800,
+    persist: async () => {},
+  });
+  const state = () => core.getRendererWindowState(surface.surfaceId);
+  const registrationRequests = () => registry.requests.filter(({ message }) => message.op === "client.register");
+  try {
+    const first = connection.synchronize();
+    const rejected = assert.rejects(first, /controller_wire_timeout:client\.register/);
+    await until(() => registrationRequests().length === 1);
+    assert.equal(registrationRequests()[0]!.socket.readyState, WebSocket.OPEN,
+      "the request was sent over an established WebSocket while the registry withheld its reply");
+    await rejected;
+    assert.equal(state().connectionBar, "disconnected");
+    assert.match(state().connectionError ?? "", /registry_cycle_timed_out:client\.register request/);
+
+    await until(() => state().connectionBar === "connected" && registrationRequests().length >= 2);
+    assert.equal(state().connectionError, undefined);
+    assert.equal(core.registryEndpointLease()?.leaseGeneration, 1,
+      "the automatic retry obtains a current lease after the unanswered registration is abandoned");
+  } finally {
+    await connection.stop();
+    await registry.close();
+  }
+});
+
+test("a half-open pane control request disconnects and recovers while preserving content", async () => {
+  const directEndpoint = "ws://127.0.0.1:1/ws";
+  let leaseGeneration = 0;
+  let holdFirstClaimReply = true;
+  const registry = await automaticRegistryFixture({
+    shippedLegacyShape: true,
+    halfOpenPaneClaimReply: () => {
+      if (!holdFirstClaimReply) return false;
+      holdFirstClaimReply = false;
+      return true;
+    },
+    transformRegistrationReply: (reply) => {
+      const observedAt = Date.now();
+      return {
+        ...reply,
+        directEndpoint,
+        prePairDescribeV1: true,
+        endpointLease: {
+          leaseGeneration: ++leaseGeneration,
+          registrationObservedAtMs: observedAt,
+          leaseExpiresAtMs: observedAt + 5_000,
+        },
+      };
+    },
+  });
+  const core = new SurfaceCore();
+  const surface = core.ensurePrimarySurface("Half-open control recovery", { width: 800, height: 600, scale: 1 });
+  core.admitSurfaceToLockless(surface.surfaceId);
+  const paneId = core.getRendererWindowState(surface.surfaceId).panes[0]!.paneId;
+  const paneLineageId = core.getSurface(surface.surfaceId).panes.get(paneId)!.paneLineageId;
+  core.contentSet(surface.surfaceId, {
+    content: { markdown: "Pane content survives a half-open control request" },
+    contentId: "ct_half_open_control_recovery" as never,
+    contentType: "markdown",
+    historyOwnerToken: "hot_half_open_control_recovery",
+    paneId: paneId as never,
+    revision: 1 as never,
+  });
+  const connection = new ServerConnection({
+    configuredAddress: registry.address,
+    directEndpoint,
+    clientId: "half-open-control-recovery-client",
+    core,
+    discovery: emptyDiscovery(),
+    requestTimeoutMs: 120,
+    registrationCycleTimeoutMs: 800,
+    controlTimeoutMs: 500,
+    persist: async () => {},
+  });
+  const state = () => core.getRendererWindowState(surface.surfaceId);
+  const registrationRequests = () => registry.requests.filter(({ message }) => message.op === "client.register");
+  try {
+    await connection.synchronize();
+    assert.equal(state().connectionBar, "connected");
+    const initialLeaseGeneration = core.registryEndpointLease()?.leaseGeneration;
+    assert.equal(initialLeaseGeneration, 1);
+
+    const claim = connection.claimPaneLabel(surface.surfaceId, paneId, paneLineageId);
+    const rejected = assert.rejects(claim, /controller_wire_timeout:pane\.claim/);
+    await until(() => registry.requests.some(({ message }) => message.op === "pane.claim"));
+    const stalledRequest = registry.requests.find(({ message }) => message.op === "pane.claim")!;
+    assert.equal(stalledRequest.socket.readyState, WebSocket.OPEN);
+    assert.equal((stalledRequest.socket as any)._socket?.readyState, "open",
+      "the TCP connection remains established while the peer stops reading the request stream");
+    await rejected;
+    assert.equal(state().connectionBar, "disconnected");
+    assert.match(state().connectionError ?? "", /registry_cycle_timed_out:pane\.claim request/);
+
+    await until(() => state().connectionBar === "connected" && registrationRequests().length >= 2);
+    assert.equal(state().panes[0]?.content.contentId, "ct_half_open_control_recovery");
+    assert.deepEqual(state().panes[0]?.content.content, {
+      markdown: "Pane content survives a half-open control request",
+    });
+    assert.ok((core.registryEndpointLease()?.leaseGeneration ?? 0) > initialLeaseGeneration,
+      "the client re-registers for a fresh lease after abandoning the half-open control request");
+  } finally {
+    await connection.stop();
+    await registry.close();
+  }
+});
+
+test("an expired registry lease ends Connected status and refreshes automatically", async () => {
+  const directEndpoint = "ws://127.0.0.1:1/ws";
+  let leaseGeneration = 0;
+  const registry = await automaticRegistryFixture({
+    transformRegistrationReply: (reply) => {
+      leaseGeneration += 1;
+      const observedAt = Date.now();
+      return {
+        ...reply,
+        directEndpoint,
+        endpointLease: {
+          leaseGeneration,
+          registrationObservedAtMs: observedAt,
+          leaseExpiresAtMs: observedAt + (leaseGeneration === 1 ? 450 : 5_000),
+        },
+      };
+    },
+  });
+  const core = new SurfaceCore();
+  const surface = core.ensurePrimarySurface("Lease expiry recovery", { width: 800, height: 600, scale: 1 });
+  const expiryStatuses: Array<string | undefined> = [];
+  const connection = new ServerConnection({
+    configuredAddress: registry.address,
+    directEndpoint,
+    clientId: "lease-expiry-recovery-client",
+    core,
+    discovery: emptyDiscovery(),
+    requestTimeoutMs: 300,
+    registrationCycleTimeoutMs: 900,
+    persist: async () => {},
+    onError: (error) => {
+      if (error instanceof Error && error.message === "registry_lease_expired") {
+        expiryStatuses.push(core.getRendererWindowState(surface.surfaceId).connectionBar);
+      }
+    },
+  });
+  const state = () => core.getRendererWindowState(surface.surfaceId);
+  const registrationCount = () => registry.requests.filter(({ message }) => message.op === "client.register").length;
+  try {
+    await connection.synchronize();
+    assert.equal(state().connectionBar, "connected");
+    await until(() => state().connectionBar === "connected" && registrationCount() >= 2);
+    assert.deepEqual(expiryStatuses, ["disconnected"], "the expiry notification observes the truthful status");
+    assert.ok(leaseGeneration >= 2, "a fresh registry lease was accepted without restarting the client");
+  } finally {
+    await connection.stop();
+    await registry.close();
+  }
 });
 
 test("a configured endpoint without a valid identity falls back through Bonjour", async () => {

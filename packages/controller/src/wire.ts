@@ -42,6 +42,15 @@ export type RegistryIdentity = {
   fleetId: string;
 };
 
+export class ControllerWireTimeoutError extends Error {
+  readonly code = "controller_wire_timeout";
+
+  constructor(readonly operation: string) {
+    super(`controller_wire_timeout:${operation}`);
+    this.name = "ControllerWireTimeoutError";
+  }
+}
+
 export function parseRegistryIdentity(payload: unknown): RegistryIdentity {
   const identity = (payload as { registryIdentity?: RegistryIdentity } | null)?.registryIdentity;
   if (!identity ||
@@ -92,9 +101,19 @@ export class PublicControllerWireClient {
         listener();
       }
     });
+    socket.on("error", () => undefined);
     await new Promise<void>((resolve, reject) => {
-      socket.once("open", () => resolve());
-      socket.once("error", reject);
+      const cleanup = (): void => {
+        socket.off("open", opened);
+        socket.off("error", failed);
+        socket.off("close", closed);
+      };
+      const opened = (): void => { cleanup(); resolve(); };
+      const failed = (error: Error): void => { cleanup(); reject(error); };
+      const closed = (): void => { cleanup(); reject(new Error("controller_wire_closed")); };
+      socket.once("open", opened);
+      socket.once("error", failed);
+      socket.once("close", closed);
     });
   }
 
@@ -169,8 +188,15 @@ export class PublicControllerWireClient {
     return () => this.closeListeners.delete(listener);
   }
 
-  abort(): void {
-    this.socket?.terminate();
+  abort(reason: Error = new Error("controller_wire_aborted")): void {
+    const socket = this.socket;
+    this.socket = null;
+    for (const [id, pending] of this.pending) {
+      clearTimeout(pending.timeout);
+      pending.reject(reason);
+      this.pending.delete(id);
+    }
+    socket?.terminate();
   }
 
   async request(
@@ -193,7 +219,9 @@ export class PublicControllerWireClient {
     return await new Promise<ControllerWireEnvelope>((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error(`controller_wire_timeout:${op}`));
+        const error = new ControllerWireTimeoutError(op);
+        this.abort();
+        reject(error);
       }, this.requestTimeoutMs);
       this.pending.set(id, { reject, resolve, timeout });
       socket.send(JSON.stringify(envelope));
@@ -205,9 +233,16 @@ export class PublicControllerWireClient {
     if (!socket) {
       return;
     }
+    if (socket.readyState === WebSocket.CLOSED) return;
     await new Promise<void>((resolve) => {
-      socket.once("close", () => resolve());
-      socket.close(1000, "controller_shutdown");
+      const finish = (): void => { clearTimeout(timeout); resolve(); };
+      const timeout = setTimeout(() => {
+        socket.terminate();
+        finish();
+      }, Math.min(250, Math.max(25, this.requestTimeoutMs)));
+      socket.once("close", finish);
+      if (socket.readyState === WebSocket.CONNECTING) socket.terminate();
+      else socket.close(1000, "controller_shutdown");
     });
   }
 

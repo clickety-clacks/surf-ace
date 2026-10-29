@@ -1,12 +1,18 @@
 import { createHash, createPublicKey } from "node:crypto";
 import {
+  ControllerWireTimeoutError,
   PublicControllerWireClient,
   parseRegistryIdentity,
   type ControllerWireEnvelope,
   type RegistryIdentity,
 } from "../../controller/src/wire.js";
 import type { PersistentPaneRetirement, PersistentWindowRetirement } from "./lockless-client-authority.js";
-import type { PaneLabelAllocation, PersistentRegistryEndpointLease, SurfaceCore } from "./surface-core.js";
+import {
+  SurfaceCoreTransactionTimeoutError,
+  type PaneLabelAllocation,
+  type PersistentRegistryEndpointLease,
+  type SurfaceCore,
+} from "./surface-core.js";
 
 export function registrationClientId(publicKeyPem: string): string {
   return createHash("sha256").update(createPublicKey(publicKeyPem).export({ format: "der", type: "spki" })).digest("hex");
@@ -90,6 +96,15 @@ type ParsedRegistrationResponse = {
   windowGenerationV1: boolean;
 };
 
+export class RegistrationStageTimeoutError extends SurfaceCoreTransactionTimeoutError {
+  readonly code = "registration_stage_timeout";
+
+  constructor(readonly stage: string) {
+    super(`registration_stage_timeout:${stage}`);
+    this.name = "RegistrationStageTimeoutError";
+  }
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
@@ -115,6 +130,7 @@ export class ConfiguredServerRegistration {
   private readonly retrySuppressedClaimKeys = new Set<string>();
   private readonly reportedCompatibilityWarnings = new Set<string>();
   private registryIdentity: RegistryIdentity | null = null;
+  private readonly localWaitTimeoutMs: number;
 
   constructor(
     address: string,
@@ -124,35 +140,71 @@ export class ConfiguredServerRegistration {
     private readonly onError: (error: unknown) => void = () => undefined,
     requestTimeoutMs = 10_000,
     directEndpoint: string | null = null,
+    private readonly onStage: (stage: string) => void = () => undefined,
   ) {
     const url = new URL(address);
     if (url.protocol !== "ws:" && url.protocol !== "wss:") throw new Error("server address must use ws or wss");
     this.wire = new PublicControllerWireClient(url.toString(), requestTimeoutMs);
     this.directEndpoint = validateConfiguredDirectEndpoint(directEndpoint);
+    this.localWaitTimeoutMs = requestTimeoutMs;
   }
 
   private readonly directEndpoint: string | null;
+
+  private setStage(stage: string): void {
+    if (!this.stopped) this.onStage(stage);
+  }
+
+  private assertActive(): void {
+    if (this.stopped) throw new Error("registration_abandoned");
+  }
+
+  private async localTransaction<T>(stage: string, operation: () => Promise<T>): Promise<T> {
+    this.assertActive();
+    this.setStage(stage);
+    const result = await this.core.locklessAuthority.transactionAsync(() =>
+      this.core.transactionAsyncBounded(
+        operation,
+        this.localWaitTimeoutMs,
+        new RegistrationStageTimeoutError(stage),
+      ),
+    );
+    this.assertActive();
+    return result;
+  }
 
   onClose(listener: () => void): () => void {
     return this.wire.onClose(listener);
   }
 
   async readRegistryIdentity(): Promise<RegistryIdentity> {
-    if (this.stopped) throw new Error("registration_stopped");
+    this.assertActive();
+    this.setStage("registry identity connection");
     await this.wire.connect();
-    return await this.wire.readRegistryIdentity();
+    this.assertActive();
+    this.setStage("registry identity request");
+    const identity = await this.wire.readRegistryIdentity();
+    this.assertActive();
+    return identity;
   }
 
   async claimPaneLabel(surfaceId: string, paneId: number, paneLineageId: string): Promise<PaneLabelAllocation> {
-    if (this.stopped || !this.wire.isOpen()) throw new Error("allocator_unavailable");
+    this.assertActive();
+    if (!this.wire.isOpen()) throw new Error("allocator_unavailable");
     if (this.core.locklessAuthority.listPendingPaneReleases().length > 0 ||
         this.core.locklessAuthority.listPendingWindowReleases().length > 0) {
       throw new Error("allocator_release_pending");
     }
-    await this.confirmRegistryIdentity(await this.wire.readRegistryIdentity(), false);
+    this.setStage("pane claim registry identity");
+    const identity = await this.wire.readRegistryIdentity();
+    this.assertActive();
+    await this.confirmRegistryIdentity(identity, false);
+    this.assertActive();
+    this.setStage("pane.claim request");
     const response = await this.wire.request("pane.claim", {
       clientId: this.clientId, surfaceId, paneId: String(paneId), paneLineageId,
     });
+    this.assertActive();
     if (!response.ok) throw new Error(response.error?.message ?? "pane_allocation_failed");
     const payload = response.payload as { allocationGeneration?: unknown; paneLabel?: unknown };
     if (!Number.isSafeInteger(payload?.paneLabel) || Number(payload.paneLabel) < 1 ||
@@ -173,24 +225,33 @@ export class ConfiguredServerRegistration {
 
   async synchronize(options: { allowRebind?: boolean; expectedIdentity?: RegistryIdentity } = {}): Promise<void> {
     const run = this.pending.then(async () => {
-      if (this.stopped) return;
+      this.assertActive();
+      this.setStage("registry connection");
       await this.wire.connect();
+      this.assertActive();
+      this.setStage("registry identity request");
       const identity = await this.wire.readRegistryIdentity();
+      this.assertActive();
       if (options.expectedIdentity && !sameRegistry(identity, options.expectedIdentity)) {
         throw new Error("registry_identity_changed_during_connection");
       }
       await this.confirmRegistryIdentity(identity, options.allowRebind === true);
+      this.assertActive();
       this.registryIdentity = identity;
 
       const registrationPayload = await this.buildRegistrationPayload();
+      this.assertActive();
       if (!await this.deliverPendingReleases(registrationPayload)) {
+        this.assertActive();
         this.reportPendingWindowReleases();
         return;
       }
       const registered = await this.registerLiveClaims(registrationPayload);
+      this.assertActive();
       if (!registered.partialApplied) {
         const parsed = this.parseRegistrationResponse(registered.response, registered.payload, identity);
         await this.applyRegistrationResponse(parsed, registered.payload);
+        this.assertActive();
       }
       this.reportPendingWindowReleases();
       if (!this.wire.isOpen()) throw new Error("controller_wire_closed");
@@ -226,61 +287,58 @@ export class ConfiguredServerRegistration {
     if (existing && existing.clientId === this.clientId && sameRegistry(existing, identity)) {
       // Reconfirm durability on every mutation attempt. An ambiguous prior write
       // may leave the exact candidate in memory while local persistence is fenced.
-      await this.core.locklessAuthority.transactionAsync(() =>
-        this.core.transactionAsync(async () => { await this.persist(); }),
-      );
+      await this.localTransaction("local registry binding persistence", async () => { await this.persist(); });
       return;
     }
     if (existing && existing.clientId === this.clientId && !allowRebind) {
       throw new Error("foreign_registry_identity");
     }
-    await this.core.locklessAuthority.transactionAsync(() =>
-      this.core.transactionAsync(async () => {
-        this.core.beginRegistryBinding({ ...identity, clientId: this.clientId });
-        await this.persist();
-      }),
-    );
+    await this.localTransaction("local registry binding persistence", async () => {
+      this.core.beginRegistryBinding({ ...identity, clientId: this.clientId });
+      await this.persist();
+    });
   }
 
   private async buildRegistrationPayload(): Promise<RegistrationPayload> {
-    return await this.core.locklessAuthority.transactionAsync(() =>
-      this.core.transactionAsync(async () => {
-        if (this.core.normalizeRefusedRegistryClaims()) await this.persist();
-        const surfaces = this.core.listSurfaces();
-        for (const surface of surfaces) this.core.admitSurfaceToLockless(surface.surfaceId);
-        const hasPendingReleases = this.core.locklessAuthority.listPendingPaneReleases().length > 0 ||
-          this.core.locklessAuthority.listPendingWindowReleases().length > 0;
-        if (hasPendingReleases) {
-          // Persist the live snapshot and terminal close evidence together before
-          // the allocator can observe either the release or replacement claims.
-          await this.persist();
-        }
-        return {
-          clientId: this.clientId,
-          directEndpoint: this.directEndpoint,
-          allocationGenerationV1: true,
-          prePairDescribeV1: true,
-          registrationResultsV1: true,
-          windowGenerationV1: true,
-          pendingPaneReleases: [],
-          pendingWindowReleases: [],
-          surfaces: surfaces.map((surface) => ({
-            windowGeneration: surface.windowAllocationGeneration,
-            surfaceId: surface.surfaceId,
-            panes: [...surface.panes.values()].map((pane) => ({
-              allocationGeneration: pane.allocationGeneration,
-              paneId: String(pane.paneId),
-              paneLabel: pane.paneLabel,
-              paneLineageId: pane.paneLineageId,
-            })),
+    return await this.localTransaction("local registration snapshot", async () => {
+      if (this.core.normalizeRefusedRegistryClaims()) await this.persist();
+      const surfaces = this.core.listSurfaces();
+      for (const surface of surfaces) this.core.admitSurfaceToLockless(surface.surfaceId);
+      const hasPendingReleases = this.core.locklessAuthority.listPendingPaneReleases().length > 0 ||
+        this.core.locklessAuthority.listPendingWindowReleases().length > 0;
+      if (hasPendingReleases) {
+        // Persist the live snapshot and terminal close evidence together before
+        // the allocator can observe either the release or replacement claims.
+        await this.persist();
+      }
+      return {
+        clientId: this.clientId,
+        directEndpoint: this.directEndpoint,
+        allocationGenerationV1: true,
+        prePairDescribeV1: true,
+        registrationResultsV1: true,
+        windowGenerationV1: true,
+        pendingPaneReleases: [],
+        pendingWindowReleases: [],
+        surfaces: surfaces.map((surface) => ({
+          windowGeneration: surface.windowAllocationGeneration,
+          surfaceId: surface.surfaceId,
+          panes: [...surface.panes.values()].map((pane) => ({
+            allocationGeneration: pane.allocationGeneration,
+            paneId: String(pane.paneId),
+            paneLabel: pane.paneLabel,
+            paneLineageId: pane.paneLineageId,
           })),
-        } satisfies RegistrationPayload;
-      }),
-    );
+        })),
+      } satisfies RegistrationPayload;
+    });
   }
 
   private async sendRegistration(payload: RegistrationPayload): Promise<ControllerWireEnvelope> {
+    this.assertActive();
+    this.setStage("client.register request");
     const response = await this.wire.request("client.register", payload);
+    this.assertActive();
     if (response.type !== "response" || response.v !== 1 || response.op !== "client.register") {
       throw new Error("invalid_registration_response");
     }
@@ -368,12 +426,10 @@ export class ConfiguredServerRegistration {
   }
 
   private async reidentifyRefusedClaim(surfaceId: string, paneId?: number): Promise<void> {
-    await this.core.locklessAuthority.transactionAsync(() =>
-      this.core.transactionAsync(async () => {
-        this.core.reidentifyRegistryClaim(surfaceId, paneId);
-        await this.persist();
-      }),
-    );
+    await this.localTransaction("local refused claim update", async () => {
+      this.core.reidentifyRegistryClaim(surfaceId, paneId);
+      await this.persist();
+    });
   }
 
   private parseRegistrationResponse(
@@ -821,7 +877,7 @@ export class ConfiguredServerRegistration {
       surfaceId: string;
       panes: Array<{ allocationGeneration: number | null; paneId: string; paneLineageId: string; paneLabel: number }>;
     }> = [];
-    await this.core.locklessAuthority.transactionAsync(() => this.core.transactionAsync(async () => {
+    await this.localTransaction("local registration response persistence", async () => {
       for (const refused of parsed.refusedSurfaces) {
         const requested = requestedBySurfaceId.get(refused.surfaceId);
         const surface = this.core.listSurfaces().find((candidate) => candidate.surfaceId === refused.surfaceId);
@@ -919,7 +975,8 @@ export class ConfiguredServerRegistration {
       }
       this.core.setRegistryEndpointLease(parsed.endpointLease);
       await this.persist();
-    }));
+    });
+    this.assertActive();
     this.core.confirmRegistryPaneLabels(paneAssignments);
     for (const warning of warnings) this.reportWarning(warning);
     return reidentifiedCount;
@@ -1077,19 +1134,19 @@ export class ConfiguredServerRegistration {
     paneReleases: PersistentPaneRetirement[],
     windowReleases: PersistentWindowRetirement[],
   ): Promise<void> {
-    await this.core.locklessAuthority.transactionAsync(() => this.core.transactionAsync(async () => {
+    await this.localTransaction("local release acknowledgement persistence", async () => {
       this.core.locklessAuthority.acknowledgePaneReleases(paneReleases.map((release) => release.releaseId));
       this.core.locklessAuthority.acknowledgeWindowReleases(windowReleases.map((release) => release.releaseId));
       await this.persist();
-    }));
+    });
   }
 
   private async discardRejectedRelease(kind: "pane" | "window", releaseId: string): Promise<void> {
-    await this.core.locklessAuthority.transactionAsync(() => this.core.transactionAsync(async () => {
+    await this.localTransaction("local rejected release persistence", async () => {
       if (kind === "pane") this.core.locklessAuthority.discardRejectedPaneRelease(releaseId);
       else this.core.locklessAuthority.discardRejectedWindowRelease(releaseId);
       await this.persist();
-    }));
+    });
   }
 
   private async tryRelease(
@@ -1116,7 +1173,8 @@ export class ConfiguredServerRegistration {
       const baseline = await this.sendRegistration(releaseOnlyPayload);
       if (baseline.ok) return "rejected";
       return "unavailable";
-    } catch {
+    } catch (error) {
+      if (error instanceof ControllerWireTimeoutError || error instanceof RegistrationStageTimeoutError) throw error;
       try {
         const baseline = await this.sendRegistration(releaseOnlyPayload);
         if (baseline.ok) return "pending";
@@ -1156,11 +1214,14 @@ export class ConfiguredServerRegistration {
     void tick();
   }
 
-  async stop(): Promise<void> {
+  abandon(): void {
     this.stopped = true;
     clearTimeout(this.timer);
     this.wire.abort();
-    await this.pending;
+  }
+
+  async stop(): Promise<void> {
+    this.abandon();
     await this.wire.close();
   }
 }

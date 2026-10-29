@@ -406,6 +406,13 @@ export class SurfaceCoreError extends Error {
   }
 }
 
+export class SurfaceCoreTransactionTimeoutError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SurfaceCoreTransactionTimeoutError";
+  }
+}
+
 export function isValidWindowLabel(windowLabel: unknown): windowLabel is string {
   return typeof windowLabel === "string" && /^[a-z]+$/.test(windowLabel);
 }
@@ -721,8 +728,9 @@ export class SurfaceCore {
   private readonly listeners = new Set<(event: CoreEvent) => void>();
   private pendingEvents: CoreEvent[] | null = null;
   private deferredVerifiedEvents: { state: string; events: CoreEvent[] } | null = null;
-  private readonly transactionContext = new AsyncLocalStorage<symbol>();
-  private activeAsyncTransaction: symbol | null = null;
+  private readonly transactionContext = new AsyncLocalStorage<object>();
+  private readonly abandonedAsyncTransactions = new WeakSet<object>();
+  private activeAsyncTransaction: object | null = null;
   private transactionTail: Promise<void> = Promise.resolve();
   private readonly logger: { warn?: (message: string) => void };
   private readonly now: () => number;
@@ -799,6 +807,10 @@ export class SurfaceCore {
   }
 
   transaction<T>(operation: () => T): T {
+    const transactionToken = this.transactionContext.getStore();
+    if (transactionToken && this.abandonedAsyncTransactions.has(transactionToken)) {
+      throw new Error("surface_transaction_abandoned");
+    }
     if (this.pendingEvents) {
       if (this.activeAsyncTransaction !== null &&
           this.transactionContext.getStore() !== this.activeAsyncTransaction) {
@@ -823,6 +835,10 @@ export class SurfaceCore {
     retainUncertainEvents: boolean;
     onNotificationError: (error: unknown) => void;
   }): Promise<T> {
+    const transactionToken = this.transactionContext.getStore();
+    if (transactionToken && this.abandonedAsyncTransactions.has(transactionToken)) {
+      throw new Error("surface_transaction_abandoned");
+    }
     if (this.activeAsyncTransaction !== null &&
         this.transactionContext.getStore() === this.activeAsyncTransaction) {
       return await operation();
@@ -839,14 +855,34 @@ export class SurfaceCore {
       release();
       throw new Error("Surface transaction is already in progress");
     }
-    const token = Symbol("surface transaction");
+    const token = {};
     this.activeAsyncTransaction = token;
     try {
       return await this.transactionContext.run(token, () => this.transactionAsyncExclusive(operation, committed));
+    } catch (error) {
+      if (error instanceof SurfaceCoreTransactionTimeoutError) {
+        this.abandonedAsyncTransactions.add(token);
+      }
+      throw error;
     } finally {
       this.activeAsyncTransaction = null;
       release();
     }
+  }
+
+  async transactionAsyncBounded<T>(
+    operation: () => Promise<T>,
+    timeoutMs: number,
+    timeoutError: SurfaceCoreTransactionTimeoutError,
+  ): Promise<T> {
+    return await this.transactionAsync(() => {
+      const work = Promise.resolve().then(operation);
+      let timeout: NodeJS.Timeout | undefined;
+      const timedOut = new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(() => reject(timeoutError), Math.max(1, timeoutMs));
+      });
+      return Promise.race([work, timedOut]).finally(() => clearTimeout(timeout));
+    });
   }
 
   private async transactionAsyncExclusive<T>(operation: () => Promise<T>, committed?: {
