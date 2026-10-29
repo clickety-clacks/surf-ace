@@ -31,6 +31,7 @@ import {
 import { SurfaceWsServer } from "../src/ws-server.js";
 import { ConfiguredServerRegistration } from "../src/configured-server.js";
 import { PersistenceWriteReadiness } from "../src/persistence-write-readiness.js";
+import { ControllerWireTimeoutError, PublicControllerWireClient } from "../../controller/src/wire.js";
 
 let nextPort = 25901;
 let nextTestRegistryPaneLabel = 100_000;
@@ -5401,25 +5402,44 @@ test("a pair request that closes during local persistence does not strand its co
     viewport: () => ({ height: 800, scale: 2, width: 1200 }),
   });
   await server.start();
-  const first = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
-  let retry: WebSocket | null = null;
+  const endpoint = `ws://127.0.0.1:${port}${server.wsPath}`;
+  const first = new PublicControllerWireClient(endpoint, 2_000);
+  let retry: PublicControllerWireClient | null = null;
   try {
-    void pair(first, controllerInstanceId, surface.surfaceId).catch(() => undefined);
+    await first.connect();
+    const firstClientClosed = new Promise<void>((resolve) => first.onClose(resolve));
+    const firstPair = first.request("pair.request", {
+      controllerInstanceId,
+      controllerProductName: "OpenClaw",
+      projectionCapacityBytes: 5 * 1024 * 1024,
+      protocolFeatures: [SURF_ACE_LOCKLESS_V1_CAPABILITY],
+      protocolVersion: 1,
+      surfaceId: surface.surfaceId,
+    });
     await stalledPersistenceStarted;
+    await assert.rejects(firstPair, (error: unknown) =>
+      error instanceof ControllerWireTimeoutError && error.operation === "pair.request");
+    await firstClientClosed;
+    await new Promise<void>((resolve) => setImmediate(resolve));
 
-    const firstSocketClosed = new Promise<void>((resolve) => first.once("close", () => resolve()));
-    first.close();
-    await firstSocketClosed;
     releaseStalledPersistence();
 
-    retry = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
-    const retried = await pair(retry, controllerInstanceId, surface.surfaceId);
+    retry = new PublicControllerWireClient(endpoint, 2_000);
+    await retry.connect();
+    const retried = await retry.request("pair.request", {
+      controllerInstanceId,
+      controllerProductName: "OpenClaw",
+      projectionCapacityBytes: 5 * 1024 * 1024,
+      protocolFeatures: [SURF_ACE_LOCKLESS_V1_CAPABILITY],
+      protocolVersion: 1,
+      surfaceId: surface.surfaceId,
+    });
     assert.equal(retried.ok, true, JSON.stringify(retried));
     assert.deepEqual(core.locklessAuthority.liveControllerIds(), [controllerInstanceId]);
   } finally {
     releaseStalledPersistence();
-    if (retry) retry.close();
-    first.close();
+    retry?.abort();
+    first.abort();
     await server.stop();
   }
 });
