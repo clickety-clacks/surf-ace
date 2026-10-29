@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { EndpointLeaseBook, endpointLeaseGenerationRange, validateDirectEndpoint } from "./endpoint-leases.ts";
+import {
+  EndpointLeaseBook,
+  endpointLeaseGenerationRange,
+  resolveDirectEndpoint,
+  validateDirectEndpoint,
+} from "./endpoint-leases.ts";
 
 test("endpoint leases renew in place and advance when the registered route changes", () => {
   let now = 1000;
@@ -59,4 +64,50 @@ test("unconfigured endpoint clears the lease and malformed URLs are rejected", (
   }
   assert.equal(validateDirectEndpoint(null), null);
   assert.equal(validateDirectEndpoint("wss://client-a.example/ws"), "wss://client-a.example/ws");
+});
+
+test("listener fallback uses the accepted peer and client source claims cannot mint registry-observed", () => {
+  const listener = { scheme: "ws", port: 8080, path: "/ws" };
+  assert.deepEqual(resolveDirectEndpoint(undefined, undefined, listener, "192.0.2.7"), {
+    directEndpoint: "ws://192.0.2.7:8080/ws",
+    directEndpointSource: "registry-observed",
+  });
+  assert.deepEqual(resolveDirectEndpoint(
+    "wss://198.51.100.20:8080/ws",
+    "client-reported",
+    listener,
+    "192.0.2.7",
+  ), {
+    directEndpoint: "wss://198.51.100.20:8080/ws",
+    directEndpointSource: "client-reported",
+  });
+  assert.deepEqual(resolveDirectEndpoint(
+    "wss://198.51.100.20:8080/ws",
+    "registry-observed",
+    listener,
+    "192.0.2.7",
+  ), {
+    directEndpoint: "wss://198.51.100.20:8080/ws",
+    directEndpointSource: "client-reported",
+  });
+  assert.deepEqual(resolveDirectEndpoint(undefined, undefined, undefined, "192.0.2.7"), {
+    directEndpoint: null,
+    directEndpointSource: null,
+  });
+  assert.deepEqual(resolveDirectEndpoint(undefined, undefined, { ...listener, port: 80 }, "192.0.2.7"), {
+    directEndpoint: "ws://192.0.2.7:80/ws",
+    directEndpointSource: "registry-observed",
+  });
+  assert.deepEqual(resolveDirectEndpoint(undefined, undefined, { ...listener, scheme: "wss", port: 443 }, "192.0.2.7"), {
+    directEndpoint: "wss://192.0.2.7:443/ws",
+    directEndpointSource: "registry-observed",
+  });
+  assert.deepEqual(resolveDirectEndpoint(undefined, undefined, listener, "2001:db8::7"), {
+    directEndpoint: "ws://[2001:db8::7]:8080/ws",
+    directEndpointSource: "registry-observed",
+  });
+  assert.throws(() => resolveDirectEndpoint(undefined, "invented", listener, "192.0.2.7"),
+    /invalid_direct_endpoint_source/);
+  assert.throws(() => resolveDirectEndpoint(undefined, undefined, { ...listener, port: 65_536 }, "192.0.2.7"),
+    /invalid_direct_endpoint_listener/);
 });
