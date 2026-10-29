@@ -20,6 +20,27 @@ struct SurfAceDirectEndpointListener: Codable, Equatable, Sendable {
 }
 
 struct SurfAceDirectEndpointSelection: Equatable, Sendable {
+    struct InterfaceAddressCandidate: Equatable, Sendable {
+        let interface: String
+        let address: String
+    }
+
+    enum ObservedAddressResult: Equatable, Sendable {
+        case selected(String)
+        case unavailable
+        case cellularOnly
+
+        var address: String? {
+            guard case .selected(let address) = self else { return nil }
+            return address
+        }
+
+        var isCellularOnly: Bool {
+            if case .cellularOnly = self { return true }
+            return false
+        }
+    }
+
     let endpoint: String?
     let source: SurfAceRegistrationEndpointSource?
     let listener: SurfAceDirectEndpointListener?
@@ -29,7 +50,8 @@ struct SurfAceDirectEndpointSelection: Equatable, Sendable {
         configuredEndpoint: String?,
         observedAddress: String?,
         listeningPort: Int,
-        allowLoopbackObservedAddress: Bool = false
+        allowLoopbackObservedAddress: Bool = false,
+        cellularOnly: Bool = false
     ) -> Self {
         var warnings: [String] = []
         let listener: SurfAceDirectEndpointListener?
@@ -46,6 +68,11 @@ struct SurfAceDirectEndpointSelection: Equatable, Sendable {
                 return Self(endpoint: configuredEndpoint, source: .configured, listener: nil, warnings: [])
             }
             warnings.append("registration_configured_endpoint_unrecognized")
+        }
+
+        if cellularOnly {
+            warnings.append("registration_direct_endpoint_cellular_only")
+            return Self(endpoint: nil, source: nil, listener: nil, warnings: warnings)
         }
 
         if let observedAddress,
@@ -71,19 +98,23 @@ struct SurfAceDirectEndpointSelection: Equatable, Sendable {
         )
     }
 
-    static func observedConnectionAddress() -> String? {
+    static func observedConnectionAddress() -> ObservedAddressResult {
         var head: UnsafeMutablePointer<ifaddrs>?
-        guard getifaddrs(&head) == 0, let first = head else { return nil }
+        guard getifaddrs(&head) == 0, let first = head else { return .unavailable }
         defer { freeifaddrs(first) }
 
-        var candidates: [(priority: Int, interface: String, address: String)] = []
+        var candidates: [InterfaceAddressCandidate] = []
+        var cellularInterfacePresent = false
         var current: UnsafeMutablePointer<ifaddrs>? = first
         while let entry = current {
             let item = entry.pointee
             current = item.ifa_next
-            guard let socketAddress = item.ifa_addr,
-                  item.ifa_flags & UInt32(IFF_UP) != 0,
+            guard item.ifa_flags & UInt32(IFF_UP) != 0,
                   item.ifa_flags & UInt32(IFF_LOOPBACK) == 0 else { continue }
+
+            let interface = String(cString: item.ifa_name)
+            if isCellularInterface(interface) { cellularInterfacePresent = true }
+            guard let socketAddress = item.ifa_addr else { continue }
 
             let family = Int32(socketAddress.pointee.sa_family)
             let address: String?
@@ -102,24 +133,46 @@ struct SurfAceDirectEndpointSelection: Equatable, Sendable {
             } else {
                 address = nil
             }
-            guard let address, isUsableObservedAddress(address) else { continue }
-
-            let interface = String(cString: item.ifa_name)
-            let priority: Int
-            if interface == "en0" {
-                priority = family == AF_INET ? 0 : 1
-            } else if interface.hasPrefix("pdp_ip") {
-                priority = family == AF_INET ? 2 : 3
-            } else {
-                priority = family == AF_INET ? 4 : 5
-            }
-            candidates.append((priority, interface, address))
+            guard let address else { continue }
+            candidates.append(InterfaceAddressCandidate(interface: interface, address: address))
         }
-        return candidates.sorted {
+        return preferredObservedAddress(
+            candidates: candidates,
+            cellularInterfacePresent: cellularInterfacePresent
+        )
+    }
+
+    static func preferredObservedAddress(
+        candidates: [InterfaceAddressCandidate],
+        cellularInterfacePresent: Bool
+    ) -> ObservedAddressResult {
+        let ranked = candidates.compactMap { candidate -> (priority: Int, interface: String, address: String)? in
+            guard !isCellularInterface(candidate.interface),
+                  isUsableObservedAddress(candidate.address) else { return nil }
+
+            let familyPriority = candidate.address.contains(":") ? 1 : 0
+            let interfacePriority: Int
+            if candidate.interface.hasPrefix("utun"), isTailnetAddress(candidate.address) {
+                interfacePriority = 0
+            } else if candidate.interface == "en0" {
+                interfacePriority = 2
+            } else {
+                interfacePriority = 4
+            }
+            return (
+                priority: interfacePriority + familyPriority,
+                interface: candidate.interface,
+                address: candidate.address
+            )
+        }
+        let selected = ranked.sorted {
             if $0.priority != $1.priority { return $0.priority < $1.priority }
             if $0.interface != $1.interface { return $0.interface < $1.interface }
             return $0.address < $1.address
         }.first?.address
+
+        if let selected { return .selected(selected) }
+        return cellularInterfacePresent ? .cellularOnly : .unavailable
     }
 
     static func endpoint(address: String, port: Int) -> String? {
@@ -159,5 +212,21 @@ struct SurfAceDirectEndpointSelection: Equatable, Sendable {
     private static func isLoopbackAddress(_ value: String) -> Bool {
         if value.contains(":"), value.lowercased() == "::1" { return true }
         return value.split(separator: ".").first == "127"
+    }
+
+    private static func isCellularInterface(_ interface: String) -> Bool {
+        interface.hasPrefix("pdp_ip")
+    }
+
+    private static func isTailnetAddress(_ value: String) -> Bool {
+        if value.contains(":") {
+            guard let firstHextet = value.lowercased().split(separator: ":").first,
+                  let prefix = UInt16(firstHextet, radix: 16) else { return false }
+            return (prefix & 0xfe00) == 0xfc00
+        }
+
+        let octets = value.split(separator: ".").compactMap { Int($0) }
+        guard octets.count == 4 else { return false }
+        return octets[0] == 100 && (64...127).contains(octets[1])
     }
 }

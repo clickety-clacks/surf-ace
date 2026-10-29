@@ -2562,6 +2562,17 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         XCTAssertNil(configured.listener)
         XCTAssertTrue(configured.warnings.isEmpty)
 
+        let configuredOnCellular = SurfAceDirectEndpointSelection.select(
+            configuredEndpoint: "wss://surface.example/ws",
+            observedAddress: nil,
+            listeningPort: 19_001,
+            cellularOnly: true
+        )
+        XCTAssertEqual(configuredOnCellular.endpoint, "wss://surface.example/ws")
+        XCTAssertEqual(configuredOnCellular.source, .configured)
+        XCTAssertNil(configuredOnCellular.listener)
+        XCTAssertTrue(configuredOnCellular.warnings.isEmpty)
+
         let observed = SurfAceDirectEndpointSelection.select(
             configuredEndpoint: nil,
             observedAddress: "192.168.50.135",
@@ -2620,6 +2631,68 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
             "registration_configured_endpoint_unrecognized",
             "registration_direct_endpoint_unavailable",
         ])
+    }
+
+    func testObservedAddressPrefersTunnelTailnetThenWiFiAndExcludesCellular() {
+        typealias Candidate = SurfAceDirectEndpointSelection.InterfaceAddressCandidate
+
+        let tailnetIPv4 = SurfAceDirectEndpointSelection.preferredObservedAddress(
+            candidates: [
+                Candidate(interface: "en1", address: "10.0.0.8"),
+                Candidate(interface: "en0", address: "192.168.50.135"),
+                Candidate(interface: "utun4", address: "100.101.12.34"),
+                Candidate(interface: "pdp_ip0", address: "100.108.7.9"),
+            ],
+            cellularInterfacePresent: true
+        )
+        XCTAssertEqual(tailnetIPv4, .selected("100.101.12.34"))
+
+        let tailnetULA = SurfAceDirectEndpointSelection.preferredObservedAddress(
+            candidates: [
+                Candidate(interface: "en0", address: "192.168.50.135"),
+                Candidate(interface: "utun6", address: "fd7a:115c:a1e0::2"),
+            ],
+            cellularInterfacePresent: false
+        )
+        XCTAssertEqual(tailnetULA, .selected("fd7a:115c:a1e0::2"))
+
+        let wifiBeforeOther = SurfAceDirectEndpointSelection.preferredObservedAddress(
+            candidates: [
+                Candidate(interface: "en1", address: "10.0.0.8"),
+                Candidate(interface: "en0", address: "192.168.50.135"),
+                Candidate(interface: "utun4", address: "2001:db8::4"),
+            ],
+            cellularInterfacePresent: false
+        )
+        XCTAssertEqual(wifiBeforeOther, .selected("192.168.50.135"))
+
+        let otherNonCellular = SurfAceDirectEndpointSelection.preferredObservedAddress(
+            candidates: [
+                Candidate(interface: "en1", address: "10.0.0.8"),
+                Candidate(interface: "pdp_ip0", address: "100.108.7.9"),
+            ],
+            cellularInterfacePresent: true
+        )
+        XCTAssertEqual(otherNonCellular, .selected("10.0.0.8"))
+
+        let cellularOnly = SurfAceDirectEndpointSelection.preferredObservedAddress(
+            candidates: [
+                Candidate(interface: "pdp_ip0", address: "100.108.7.9"),
+            ],
+            cellularInterfacePresent: true
+        )
+        XCTAssertEqual(cellularOnly, .cellularOnly)
+
+        let noEndpoint = SurfAceDirectEndpointSelection.select(
+            configuredEndpoint: nil,
+            observedAddress: cellularOnly.address,
+            listeningPort: 19_001,
+            cellularOnly: cellularOnly.isCellularOnly
+        )
+        XCTAssertNil(noEndpoint.endpoint)
+        XCTAssertNil(noEndpoint.source)
+        XCTAssertNil(noEndpoint.listener)
+        XCTAssertEqual(noEndpoint.warnings, ["registration_direct_endpoint_cellular_only"])
     }
 
     func testRegistrationPublishesClientReportedEndpointAndListenerWithoutPrePairDescribeAndAcceptsLease() throws {

@@ -648,12 +648,15 @@ final class SurfAceRuntime {
             inputSnapshot: { [weak self] in
                 guard let self else { throw SurfAceRegistrationError.stopped }
                 let adapter = try self.ensureLocklessAdapter()
+                let observedAddress = self.isIsolatedTestHost
+                    ? SurfAceDirectEndpointSelection.ObservedAddressResult.selected("127.0.0.1")
+                    : SurfAceDirectEndpointSelection.observedConnectionAddress()
                 let selection = SurfAceDirectEndpointSelection.select(
                     configuredEndpoint: self.configuredDirectEndpoint,
-                    observedAddress: self.isIsolatedTestHost
-                        ? "127.0.0.1" : SurfAceDirectEndpointSelection.observedConnectionAddress(),
+                    observedAddress: observedAddress.address,
                     listeningPort: self.serverPort > 0 ? self.serverPort : Int(self.fixedServerPort),
-                    allowLoopbackObservedAddress: self.isIsolatedTestHost
+                    allowLoopbackObservedAddress: self.isIsolatedTestHost,
+                    cellularOnly: observedAddress.isCellularOnly
                 )
                 return try SurfAceRegistrationInput(
                     state: await adapter.snapshot(),
