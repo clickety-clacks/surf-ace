@@ -32,7 +32,9 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         var returnsGenerationV1 = true
         var registrationCount = 0
         var registrationIdentity: SurfAceRegistryIdentity?
-        var omitsRegistrationIdentity = false
+        // Keep the general registration fixtures compatible with older peers;
+        // identity-sensitive tests opt in to the newer reply field.
+        var reportsRegistrationIdentity = false
         var tailnetEndpoint: URL?
         var onIdentityRead: (() -> Void)?
         var onRegister: (() -> Void)?
@@ -179,8 +181,8 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
                     completedPaneReleaseIds: input.pendingPaneReleases.map(\.releaseId),
                     completedWindowReleaseIds: input.pendingWindowReleases.map(\.releaseId)
                 ),
-                registryIdentity: registrationIdentity ?? registryIdentity,
-                reportedRegistryIdentity: omitsRegistrationIdentity ? nil : registrationIdentity ?? registryIdentity,
+                registryIdentity: reportsRegistrationIdentity ? registrationIdentity ?? registryIdentity : nil,
+                reportedRegistryIdentity: reportsRegistrationIdentity ? registrationIdentity ?? registryIdentity : nil,
                 tailnetEndpoint: tailnetEndpoint
             )
         }
@@ -2820,6 +2822,7 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         let homeURL = URL(string: "ws://home.example:19001/ws")!
         let homeTransport = Transport()
         homeTransport.registryIdentity = identity
+        homeTransport.reportsRegistrationIdentity = true
         homeTransport.tailnetEndpoint = first
         let homeRegistration = centralRegistration(
             adapter: adapter, clientId: clientId, configured: nil,
@@ -2838,6 +2841,7 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         let laterHomeURL = URL(string: "ws://later-home.example:19001/ws")!
         let laterHomeTransport = Transport()
         laterHomeTransport.registryIdentity = identity
+        laterHomeTransport.reportsRegistrationIdentity = true
         laterHomeTransport.tailnetEndpoint = laterTailnet
         let laterHomeRegistration = centralRegistration(
             adapter: adapter, clientId: clientId, configured: nil,
@@ -2851,6 +2855,7 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         let configuredURL = URL(string: "ws://configured.example:19001/ws")!
         let configuredTransport = Transport()
         configuredTransport.registryIdentity = identity
+        configuredTransport.reportsRegistrationIdentity = true
         configuredTransport.tailnetEndpoint = URL(string: "ws://100.101.102.105:19001/ws")!
         let configuredRegistration = centralRegistration(
             adapter: adapter, clientId: clientId, configured: configuredURL,
@@ -2865,6 +2870,7 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         let olderPeerURL = URL(string: "ws://older.example:19001/ws")!
         let olderPeer = Transport()
         olderPeer.registryIdentity = identity
+        olderPeer.reportsRegistrationIdentity = true
         let olderPeerRegistration = centralRegistration(
             adapter: adapter, clientId: clientId, configured: nil,
             discovered: [olderPeerURL], transports: [olderPeerURL: olderPeer]
@@ -2889,6 +2895,7 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         let rememberedURL = try XCTUnwrap(SurfAceTailnetEndpoint.url(from: rememberedValue))
         let configured = Transport()
         configured.registryIdentity = identity
+        configured.reportsRegistrationIdentity = true
         configured.tailnetEndpoint = URL(string: "ws://100.101.102.104:19001/ws")!
         let remembered = Transport()
         remembered.registryIdentity = identity
@@ -2929,6 +2936,7 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         configuredTransport.fails = true
         let rememberedTransport = Transport()
         rememberedTransport.registryIdentity = identity
+        rememberedTransport.reportsRegistrationIdentity = true
         rememberedTransport.tailnetEndpoint = URL(string: "ws://100.101.102.104:19001/ws")!
         rememberedTransport.assignedWindowLabels[surfaceId] = savedSurface.windowLabel
         rememberedTransport.assignedWindowGenerations[surfaceId] = savedSurface.allocationGeneration
@@ -3049,6 +3057,7 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         let endpoint = try XCTUnwrap(SurfAceTailnetEndpoint.url(from: rememberedValue))
         let transport = Transport()
         transport.registryIdentity = identity
+        transport.reportsRegistrationIdentity = true
         transport.fails = true
         transport.tailnetEndpoint = URL(string: "ws://100.101.102.104:19001/ws")!
         transport.assignedWindowLabels[surfaceId] = savedSurface.windowLabel
