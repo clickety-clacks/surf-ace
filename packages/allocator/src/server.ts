@@ -1,5 +1,6 @@
 import { closeSync, fsyncSync, lstatSync, openSync, readFileSync, unlinkSync, writeSync } from "node:fs";
 import { createHash, randomBytes } from "node:crypto";
+import os from "node:os";
 import { setTimeout as delay } from "node:timers/promises";
 
 import WebSocket, { WebSocketServer, type RawData } from "ws";
@@ -22,6 +23,7 @@ import {
 import { PostgresCustodyAdapter, type AdapterTestHooks, type AnnotationInfo, type PaneRetirementEvidence, type PostgresCustodyConfig, type WindowRetirementEvidence } from "./custody.js";
 import { parseAllocatorRequest } from "./validation.js";
 import { EndpointLeaseBook, validateDirectEndpoint, type EndpointLease } from "./endpoint-leases.js";
+import { tailnetEndpointForListener, type NetworkInterfaceMap } from "./tailnet-endpoint.js";
 
 const DEFAULT_MAX_ENDPOINT_LEASE_MS = 15_000;
 
@@ -47,6 +49,10 @@ export type AllocatorServerConfig = {
   listenHost: string;
   listenPort: number;
   maxEndpointLeaseMs?: number;
+};
+
+export type AllocatorServerTestHooks = AdapterTestHooks & {
+  networkInterfaces?: () => NetworkInterfaceMap | null;
 };
 
 export type AllocatorDiagnostics = {
@@ -652,6 +658,18 @@ export class AllocatorServer {
     };
   }
 
+  private withTailnetEndpoint(payload: unknown): unknown {
+    if (!isRecord(payload)) return payload;
+    try {
+      const endpoint = tailnetEndpointForListener(this.webSocketServer.address(), this.networkInterfaces());
+      return endpoint === null ? payload : { ...payload, tailnetEndpoint: endpoint };
+    } catch {
+      // Interface and listener details are optional metadata. An unavailable
+      // observation must not turn a successful registration into a failure.
+      return payload;
+    }
+  }
+
   private constructor(
     private readonly config: AllocatorServerConfig,
     private readonly hostLock: HostLock,
@@ -660,10 +678,11 @@ export class AllocatorServer {
     private readonly webSocketServer: WebSocketServer,
     private readonly annotationVerified: boolean,
     private readonly endpointLeases: EndpointLeaseBook,
+    private readonly networkInterfaces: () => NetworkInterfaceMap | null,
   ) {}
 
   static async start(
-    config: AllocatorServerConfig, testHooks: AdapterTestHooks = {}, retrySignal?: AbortSignal,
+    config: AllocatorServerConfig, testHooks: AllocatorServerTestHooks = {}, retrySignal?: AbortSignal,
   ): Promise<AllocatorServer> {
     validateServerConfig(config);
     const { hostLock, custody } = await acquireStartupOwnership(config, testHooks, retrySignal);
@@ -716,6 +735,7 @@ export class AllocatorServer {
             custody.token.leaseGeneration,
             config.maxEndpointLeaseMs ?? DEFAULT_MAX_ENDPOINT_LEASE_MS,
           ),
+          testHooks.networkInterfaces ?? (() => os.networkInterfaces()),
         );
         webSocketServer.on("connection", (socket) => server.accept(socket));
         return server;
@@ -855,8 +875,12 @@ export class AllocatorServer {
             : registration.op === "pane.claim"
               ? await this.claimPane(registration.payload)
               : await this.fleetTopology();
+          const responsePayload = registration.op === "client.register"
+            ? this.withTailnetEndpoint(payload)
+            : payload;
           if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({
-            v: 1, type: "response", id: registration.id, op: registration.op, ok: true, payload, sentAt: Date.now(),
+            v: 1, type: "response", id: registration.id, op: registration.op, ok: true,
+            payload: responsePayload, sentAt: Date.now(),
           }));
         } catch (error) {
           if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({
