@@ -31,6 +31,7 @@ import {
 import { SurfaceWsServer } from "../src/ws-server.js";
 import { ConfiguredServerRegistration } from "../src/configured-server.js";
 import { PersistenceWriteReadiness } from "../src/persistence-write-readiness.js";
+import { ControllerWireTimeoutError, PublicControllerWireClient } from "../../controller/src/wire.js";
 
 let nextPort = 25901;
 let nextTestRegistryPaneLabel = 100_000;
@@ -5362,6 +5363,87 @@ test("guarded restart preserves two-pane display but cannot re-pair without dura
   } finally {
     socket.close();
     await guardedServer.stop();
+  }
+});
+
+test("a pair request that closes during local persistence does not strand its controller identity", async () => {
+  const core = new SurfaceCore();
+  const surface = core.ensurePrimarySurface("Surf Ace", {
+    height: 800,
+    scale: 2,
+    width: 1200,
+  });
+  let persistenceCalls = 0;
+  let startStalledPersistence!: () => void;
+  const stalledPersistenceStarted = new Promise<void>((resolve) => {
+    startStalledPersistence = resolve;
+  });
+  let releaseStalledPersistence!: () => void;
+  const stalledPersistence = new Promise<void>((resolve) => {
+    releaseStalledPersistence = resolve;
+  });
+  const controllerInstanceId = "late-pair-admission-controller";
+  const server = new SurfaceWsServer({
+    bindAddress: "127.0.0.1",
+    capturePaneImage: async () => null,
+    compositorSocketPath: null,
+    core,
+    endpointName: "Surf Ace",
+    hostName: "localhost",
+    persistLocklessState: async () => {
+      persistenceCalls += 1;
+      if (persistenceCalls === 3) {
+        startStalledPersistence();
+        await stalledPersistence;
+      }
+    },
+    port: 0,
+    viewport: () => ({ height: 800, scale: 2, width: 1200 }),
+  });
+  await server.start();
+  const boundAddress = (server as unknown as {
+    httpServer: { address(): AddressInfo | string | null };
+  }).httpServer.address();
+  assert.ok(boundAddress && typeof boundAddress !== "string");
+  const endpoint = `ws://127.0.0.1:${boundAddress.port}${server.wsPath}`;
+  const first = new PublicControllerWireClient(endpoint, 2_000);
+  let retry: PublicControllerWireClient | null = null;
+  try {
+    await first.connect();
+    const firstClientClosed = new Promise<void>((resolve) => first.onClose(resolve));
+    const firstPair = first.request("pair.request", {
+      controllerInstanceId,
+      controllerProductName: "OpenClaw",
+      projectionCapacityBytes: 5 * 1024 * 1024,
+      protocolFeatures: [SURF_ACE_LOCKLESS_V1_CAPABILITY],
+      protocolVersion: 1,
+      surfaceId: surface.surfaceId,
+    });
+    await stalledPersistenceStarted;
+    await assert.rejects(firstPair, (error: unknown) =>
+      error instanceof ControllerWireTimeoutError && error.operation === "pair.request");
+    await firstClientClosed;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    releaseStalledPersistence();
+
+    retry = new PublicControllerWireClient(endpoint, 2_000);
+    await retry.connect();
+    const retried = await retry.request("pair.request", {
+      controllerInstanceId,
+      controllerProductName: "OpenClaw",
+      projectionCapacityBytes: 5 * 1024 * 1024,
+      protocolFeatures: [SURF_ACE_LOCKLESS_V1_CAPABILITY],
+      protocolVersion: 1,
+      surfaceId: surface.surfaceId,
+    });
+    assert.equal(retried.ok, true, JSON.stringify(retried));
+    assert.deepEqual(core.locklessAuthority.liveControllerIds(), [controllerInstanceId]);
+  } finally {
+    releaseStalledPersistence();
+    retry?.abort();
+    first.abort();
+    await server.stop();
   }
 });
 

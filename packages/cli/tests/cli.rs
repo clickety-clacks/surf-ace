@@ -637,6 +637,73 @@ fn spawn_unresponsive_surface_server() -> (String, thread::JoinHandle<Value>) {
     (format!("ws://{address}"), task)
 }
 
+fn spawn_silent_direct_server(expected_op: &'static str) -> (String, thread::JoinHandle<Vec<Value>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let task = thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut socket = accept(stream).unwrap();
+        let pair = match socket.read().unwrap() {
+            Message::Text(text) => serde_json::from_str::<Value>(&text).unwrap(),
+            message => panic!("unexpected direct request frame: {message:?}"),
+        };
+        assert_eq!(pair["op"], "pair.request");
+        let pair_payload = json!({
+            "capabilities": {},
+            "controllerInstanceId": pair["payload"]["controllerInstanceId"],
+            "limits": {
+                "maxPendingOperationReceiptBytesPerController": 65536,
+                "maxPendingOperationReceiptsPerController": 16
+            },
+            "mode": "lockless",
+            "receiptResolutions": [],
+            "resumed": false,
+            "scopes": [],
+            "sessionId": "session_test",
+            "state": null,
+            "surfaceId": null,
+            "surfaceSetRevision": 1
+        });
+        socket.send(Message::Text(json!({
+            "id": pair["id"],
+            "op": "pair.request",
+            "payload": pair_payload,
+            "type": "response",
+            "v": 1,
+            "ok": true
+        }).to_string().into())).unwrap();
+        let request = match socket.read().unwrap() {
+            Message::Text(text) => serde_json::from_str::<Value>(&text).unwrap(),
+            message => panic!("unexpected direct request frame: {message:?}"),
+        };
+        assert_eq!(request["op"], expected_op);
+        // Keep the established connection open without sending an application reply.
+        let _ = socket.read();
+        vec![pair, request]
+    });
+    (format!("ws://{address}"), task)
+}
+
+#[test]
+fn ordinary_direct_command_returns_a_clear_error_within_its_transport_deadline() {
+    let (endpoint, server) = spawn_silent_direct_server("surfaces.list");
+    let temp = TempDir::new().unwrap();
+    let mut call = invocation(&temp, Command::List, json!({}));
+    call.endpoint = Some(endpoint);
+    let started = std::time::Instant::now();
+    let error = execute(call).unwrap_err();
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "direct command exceeded its two-second transport deadline: {:?}",
+        started.elapsed()
+    );
+    assert!(error.to_string().contains("deadline_exceeded"), "{error}");
+    let requests = server.join().unwrap();
+    assert_eq!(requests[0]["op"], "pair.request");
+    assert_eq!(requests[1]["op"], "surfaces.list");
+}
+
 fn epoch_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

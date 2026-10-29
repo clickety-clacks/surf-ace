@@ -276,6 +276,7 @@ export class SurfaceWsServer {
   private readonly httpServer: http.Server;
   private readonly wss: WebSocketServer;
   private readonly socketMeta = new WeakMap<WebSocket, SocketMeta>();
+  private readonly closedSockets = new WeakSet<WebSocket>();
   private panePaintRoute: PanePaintWsRoute<WebSocket> | null = null;
   private readonly ordinaryInFlight = new WeakMap<WebSocket, Map<string, number>>();
   private readonly locklessSessions = new Map<WebSocket, LocklessTransportSession>();
@@ -1945,6 +1946,7 @@ export class SurfaceWsServer {
     request: LocklessRequest,
   ): Promise<unknown> {
     if (request.op === "pair.request") {
+      this.assertPairSocketOpen(socket);
       if (this.locklessSessions.has(socket)) {
         throw new LocklessAuthorityError(
           "duplicate_controller_instance",
@@ -1982,6 +1984,7 @@ export class SurfaceWsServer {
         LocklessClientAuthority["admit"]
       >;
       try {
+        this.assertPairSocketOpen(socket);
         if (surfaceId && admissionAttempt) {
           // Durable witness (B2): stamped "started" through the same
           // serialized boundary, immediately before the paired operation
@@ -1993,6 +1996,7 @@ export class SurfaceWsServer {
               await this.persistLocklessState();
             },
           );
+          this.assertPairSocketOpen(socket);
           this.core.advanceSurfaceAdmissionAttempt(
             admissionAttempt.attemptSequence,
             "surface_lookup",
@@ -2040,6 +2044,21 @@ export class SurfaceWsServer {
                 );
               }
               await this.persistLocklessState();
+              if (!this.isPairSocketOpen(socket)) {
+                // A request can be admitted after its client has closed while
+                // this serialized transaction was waiting for local work or
+                // persistence. Persist the disconnected projection before
+                // aborting so a same-identity retry does not inherit a stale
+                // live connection token.
+                this.core.locklessAuthority.disconnect(
+                  request.payload.controllerInstanceId,
+                  connectionToken,
+                  connectionSlot,
+                );
+                this.core.markLocklessAuthorityChanged(surfaceId ?? undefined);
+                await this.persistLocklessState();
+                throw new Error("pair_request_socket_closed");
+              }
               return admitted;
             }),
         );
@@ -5938,6 +5957,7 @@ export class SurfaceWsServer {
   }
 
   private handleSocketClosed(socket: WebSocket): void {
+    this.closedSockets.add(socket);
     this.panePaintRoute?.close(socket);
     this.ordinaryInFlight.delete(socket);
     const locklessSession = this.locklessSessions.get(socket);
@@ -5956,6 +5976,14 @@ export class SurfaceWsServer {
       }).catch(() => {});
       return;
     }
+  }
+
+  private isPairSocketOpen(socket: WebSocket): boolean {
+    return !this.closedSockets.has(socket) && socket.readyState === WebSocket.OPEN;
+  }
+
+  private assertPairSocketOpen(socket: WebSocket): void {
+    if (!this.isPairSocketOpen(socket)) throw new Error("pair_request_socket_closed");
   }
 
   async completeDirectAnnotation(surfaceId: string, paneId: number): Promise<boolean> {

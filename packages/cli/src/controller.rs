@@ -16,6 +16,8 @@ const LOCKLESS_CAPABILITY: &str = "surf-ace.lockless-multi-controller.v1";
 const RECEIPT_CAPABILITY: &str = "operation-receipt-replay-v1";
 const CONTROL_PROJECTION_V1: &str = "control_projection_v1";
 const DISCOVERY_TIMEOUT: Duration = Duration::from_millis(2_000);
+const DIRECT_COMMAND_TIMEOUT: Duration = Duration::from_millis(2_000);
+const DIRECT_COMMAND_MAX_BYTES: usize = 64 * 1024 * 1024;
 const DISCOVERY_REGISTRY_MAX_BYTES: usize = 1_048_576;
 const DISCOVERY_DESCRIBE_MAX_BYTES: usize = 65_536;
 const MAX_READINESS_REASON_CHARS: usize = 512;
@@ -46,7 +48,12 @@ pub fn execute(invocation: Invocation) -> Result<CliOutput, CliError> {
             .registry
             .as_deref()
             .expect("fleet-list route validation requires registry");
-        let mut wire = WebSocketWire::connect_direct(registry).map_err(CliError::Wire)?;
+        let mut wire = WebSocketWire::connect_direct_bounded(
+            registry,
+            DIRECT_COMMAND_TIMEOUT,
+            DIRECT_COMMAND_MAX_BYTES,
+        )
+        .map_err(CliError::Wire)?;
         return execute_fleet_list_with_wire(&mut wire);
     }
     if invocation.command == crate::command::Command::WindowDescribe {
@@ -62,7 +69,12 @@ pub fn execute(invocation: Invocation) -> Result<CliOutput, CliError> {
     let mut root = open_invocation_state(&invocation)?;
     validate_expected_controller(&invocation, &root)?;
     let surface_id = operation_surface_id(&invocation)?;
-    let mut operation_wire = WebSocketWire::connect_direct(&endpoint).map_err(CliError::Wire)?;
+    let mut operation_wire = WebSocketWire::connect_direct_bounded(
+        &endpoint,
+        DIRECT_COMMAND_TIMEOUT,
+        DIRECT_COMMAND_MAX_BYTES,
+    )
+    .map_err(CliError::Wire)?;
     if invocation.command != crate::command::Command::PaneDescribe {
         if let Some(surface_id) = surface_id.as_deref() {
             discover_surface(&mut root, &mut operation_wire, surface_id)?;

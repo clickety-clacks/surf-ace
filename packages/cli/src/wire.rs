@@ -186,6 +186,14 @@ impl DeadlineTcpStream {
         Self { stream, deadline }
     }
 
+    fn normalize_timeout(error: io::Error) -> io::Error {
+        if matches!(error.kind(), io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock) {
+            io::Error::new(io::ErrorKind::TimedOut, "deadline_exceeded")
+        } else {
+            error
+        }
+    }
+
     fn refresh_read_timeout(&self) -> io::Result<()> {
         let remaining = self.deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
@@ -206,19 +214,19 @@ impl DeadlineTcpStream {
 impl Read for DeadlineTcpStream {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         self.refresh_read_timeout()?;
-        self.stream.read(buffer)
+        self.stream.read(buffer).map_err(Self::normalize_timeout)
     }
 }
 
 impl Write for DeadlineTcpStream {
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
         self.refresh_write_timeout()?;
-        self.stream.write(buffer)
+        self.stream.write(buffer).map_err(Self::normalize_timeout)
     }
 
     fn flush(&mut self) -> io::Result<()> {
         self.refresh_write_timeout()?;
-        self.stream.flush()
+        self.stream.flush().map_err(Self::normalize_timeout)
     }
 }
 
