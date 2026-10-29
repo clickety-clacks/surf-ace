@@ -3041,6 +3041,10 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         XCTAssertEqual(valid.tailnetEndpoint?.absoluteString, "ws://100.101.102.103:19001/ws")
         XCTAssertFalse(valid.discarded)
 
+        let ipv6 = try parse(",\"tailnetEndpoint\":\"ws://[fc00::1234]:19001/ws\"")
+        XCTAssertEqual(ipv6.tailnetEndpoint?.absoluteString, "ws://[fc00::1234]:19001/ws")
+        XCTAssertFalse(ipv6.discarded)
+
         let absent = try parse("")
         XCTAssertNil(absent.tailnetEndpoint)
         XCTAssertFalse(absent.discarded)

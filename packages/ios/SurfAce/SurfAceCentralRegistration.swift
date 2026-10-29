@@ -2409,7 +2409,7 @@ final class SurfAceCentralRegistration {
                 throw SurfAceRegistrationError.foreignRegistryIdentity
             }
             let boundInput = try await verifyRememberedBinding(remembered, identity: identity)
-            let reply = try await registerAndApply(
+            _ = try await registerAndApply(
                 using: candidate.transport,
                 identity: identity,
                 input: boundInput,
