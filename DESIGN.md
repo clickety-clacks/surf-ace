@@ -7,7 +7,7 @@ Depends on: `<spec-root>/clawline/specs/clawline-invariants.md`
 
 Surf Ace is a standalone display and annotation system that turns any screen running the Surf Ace app into an OpenClaw-managed surface. It is a purpose-built binary application — not embedded in another app — available on iOS/iPadOS, on visionOS as the Surf Ace Spatial app, and as an Electron app on Linux and macOS. Supported clients are Linux, macOS, iOS, iPadOS, and visionOS. Windows is not supported and is not a delivery or soak gate. Linux and macOS controller/server requirements remain in scope.
 
-visionOS is a supported client with the same client, soak, delivery, and release obligations as iOS/iPadOS. It implements the common client behavior this document requires of supported clients, it is a delivery and soak gate, its release-gated tests run for every release, and each release of the app delivers the Surf Ace operating skill. Requirements that this document ties to iPadOS or iOS/iPadOS scene sizing, input hardware, or visual presentation, such as the iPadOS full-device scene rule in §3.1.1, Apple Pencil input, and the iOS/iPadOS chrome placement and material rules in §15, remain specific to those platforms unless a requirement names visionOS. This follows Mike's October 29, 2026 product ruling that visionOS is a supported Surf Ace client.
+visionOS, as the Surf Ace Spatial app, is a supported client and implements the common client behavior this document requires of supported clients. Each visionOS build carries the Surf Ace operating skill that matches that build. Requirements that this document ties to iPadOS or iOS/iPadOS scene sizing, input hardware, or visual presentation, such as the iPadOS full-device scene rule in §3.1.1, Apple Pencil input, and the iOS/iPadOS chrome placement and material rules in §15, remain specific to those platforms unless a requirement names visionOS. This document does not make visionOS a delivery, soak, or release gate. This follows Mike's October 29, 2026 product ruling that visionOS is a supported Surf Ace client.
 
 ### Actors
 
@@ -74,7 +74,7 @@ Constraint: annotation semantics in §§13–14 are normative architecture and m
 5. `surfaces.list` enumerates active window surfaces for an endpoint; after pair/resume, `panes.list` and `surf_ace_list` expose pane topology and active content per pane.
 6. Content operations are isolated per pane (push/clear in pane A does not mutate pane B).
 7. Surfaces require lockless capability, concurrent controller admission, and client-local authority.
-8. At least one iOS, one visionOS, and one Electron implementation pass topology tests for pane isolation and routing.
+8. At least one iOS and one Electron implementation pass topology tests for pane isolation and routing.
 9. History model is active: every accepted `content.set` creates a distinct entry and makes it visible. The prior visible entry enters one shared per-pane pool of at most 20 non-visible Back/Forward entries, evicted by client `lastVisibleSequence` LRU. Surface provides Back/Forward navigation.
 10. Annotation reads are pane-scoped at the OpenClaw boundary; any finer-grained history bookkeeping needed for Back/Forward restore is implementation-internal to the surface/provider.
 
@@ -3823,7 +3823,7 @@ This section is a consolidated copy/reference index of existing UI/UX mentions e
 
 **Decision record (Mike, 2026-10-01):** fleet-wide pane-number allocation and always-visible window/pane identity are restored and remain normative. The audit's other reviewed changes remain as-is and authorized: annotation mode retains its current Done-only control; Windows remains unsupported; screenshot capture does not return visible text; app-window open/close remains Spatial-only for now; internal pane IDs remain per-surface; OpenClaw-era items retain their current scope; label opacity and the single-pane iOS focus outline remain cosmetic/current behavior; and the larger history, lockless, and controller redesigns remain unchanged. None of those kept items is restored or broadened by this ruling.
 
-Every named invariant in this index, including later single-invariant index entries, MUST have a build-failing conformance check in the release-gated Electron or Apple-native test suites; a check of Apple-native client behavior runs for both iOS/iPadOS and visionOS. `scripts/release/release-tooling.test.mjs` verifies that the index and its test-coverage map stay in one-to-one agreement and that each mapped test is present in a suite executed by the release workflow.
+Every named invariant in this index, including later single-invariant index entries, MUST have a build-failing conformance check in the release-gated Electron or iOS test suites. `scripts/release/release-tooling.test.mjs` verifies that the index and its test-coverage map stay in one-to-one agreement and that each mapped test is present in a suite executed by the release workflow.
 
 - **Window Letter Labels** — "Window labels (a, b, c…) are allocated by the single fleet-wide label allocator and are unique across the entire fleet; a client that cannot obtain one displays no label." Source: §3.1.1 core invariant
 - **Pane Name Authority** — "Pane names are optional extension-assigned metadata. They do not replace `paneLabel` as the visible identity token." Source: §3.1.1
@@ -3958,7 +3958,7 @@ The architecture forbids these classes of bugs:
 - hit regions route input under Surf Ace controls because they were derived from a different revision
 - debug/capture masks use a separate measurement path from the real applied geometry
 
-Acceptance tests MUST cover Electron, iOS, and visionOS: one snapshot revision produces content viewport, controls/chrome, overlay/hit regions, materialization geometry, and protocol viewport for that pane.
+Acceptance tests MUST cover both Electron and iOS: one snapshot revision produces content viewport, controls/chrome, overlay/hit regions, materialization geometry, and protocol viewport for that pane.
 
 ## Appendix A. Design Rationale and Decision Notes
 
