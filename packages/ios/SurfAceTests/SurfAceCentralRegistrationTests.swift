@@ -2551,6 +2551,433 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         XCTAssertEqual(reviewedReply.assignments, [])
     }
 
+    func testDirectEndpointSelectionPrefersConfigurationAndUsesReportedListenerFallback() {
+        let configured = SurfAceDirectEndpointSelection.select(
+            configuredEndpoint: "wss://surface.example/ws",
+            observedAddress: .selected("192.168.50.135"),
+            listeningPort: 19_001
+        )
+        XCTAssertEqual(configured.endpoint, "wss://surface.example/ws")
+        XCTAssertEqual(configured.source, .configured)
+        XCTAssertNil(configured.listener)
+        XCTAssertTrue(configured.warnings.isEmpty)
+
+        let configuredOnCellular = SurfAceDirectEndpointSelection.select(
+            configuredEndpoint: "wss://surface.example/ws",
+            observedAddress: .cellularOnly,
+            listeningPort: 19_001
+        )
+        XCTAssertEqual(configuredOnCellular.endpoint, "wss://surface.example/ws")
+        XCTAssertEqual(configuredOnCellular.source, .configured)
+        XCTAssertNil(configuredOnCellular.listener)
+        XCTAssertTrue(configuredOnCellular.warnings.isEmpty)
+
+        let observed = SurfAceDirectEndpointSelection.select(
+            configuredEndpoint: nil,
+            observedAddress: .selected("192.168.50.135"),
+            listeningPort: 19_001
+        )
+        XCTAssertEqual(observed.endpoint, "ws://192.168.50.135:19001/ws")
+        XCTAssertEqual(observed.source, .clientReported)
+        XCTAssertEqual(observed.listener, .init(scheme: "ws", port: 19_001, path: "/ws"))
+        XCTAssertEqual(observed.warnings, [
+            "registration_direct_endpoint_unconfirmed source=client-reported"
+        ])
+
+        let ipv6 = SurfAceDirectEndpointSelection.select(
+            configuredEndpoint: nil,
+            observedAddress: .selected("2001:db8::4"),
+            listeningPort: 19_001
+        )
+        XCTAssertEqual(ipv6.endpoint, "ws://[2001:db8::4]:19001/ws")
+        XCTAssertEqual(ipv6.source, .clientReported)
+
+        let listenerOnly = SurfAceDirectEndpointSelection.select(
+            configuredEndpoint: nil,
+            observedAddress: .noCellularInterface,
+            listeningPort: 19_001
+        )
+        XCTAssertNil(listenerOnly.endpoint)
+        XCTAssertNil(listenerOnly.source)
+        XCTAssertEqual(listenerOnly.listener, .init(scheme: "ws", port: 19_001, path: "/ws"))
+        XCTAssertEqual(listenerOnly.warnings, [
+            "registration_direct_endpoint_unconfirmed source=registry-observed"
+        ])
+
+        let invalidConfigured = SurfAceDirectEndpointSelection.select(
+            configuredEndpoint: "http://invalid.example/ws",
+            observedAddress: .noCellularInterface,
+            listeningPort: 19_001
+        )
+        XCTAssertNil(invalidConfigured.endpoint)
+        XCTAssertNil(invalidConfigured.source)
+        XCTAssertEqual(invalidConfigured.listener, .init(scheme: "ws", port: 19_001, path: "/ws"))
+        XCTAssertEqual(invalidConfigured.warnings, [
+            "registration_configured_endpoint_unrecognized",
+            "registration_direct_endpoint_unconfirmed source=registry-observed",
+        ])
+
+        let unavailable = SurfAceDirectEndpointSelection.select(
+            configuredEndpoint: "http://invalid.example/ws",
+            observedAddress: .noCellularInterface,
+            listeningPort: 0
+        )
+        XCTAssertNil(unavailable.endpoint)
+        XCTAssertNil(unavailable.source)
+        XCTAssertNil(unavailable.listener)
+        XCTAssertEqual(unavailable.warnings, [
+            "registration_listening_port_unrecognized",
+            "registration_configured_endpoint_unrecognized",
+            "registration_direct_endpoint_unavailable",
+        ])
+    }
+
+    func testInterfaceInventoryUnavailableDoesNotSendListenerOnlyRegistration() {
+        let selection = SurfAceDirectEndpointSelection.select(
+            configuredEndpoint: nil,
+            observedAddress: .inventoryUnavailable,
+            listeningPort: 19_001
+        )
+
+        XCTAssertNil(selection.endpoint)
+        XCTAssertNil(selection.source)
+        XCTAssertNil(selection.listener)
+        XCTAssertEqual(selection.warnings, [
+            "registration_direct_endpoint_interface_inventory_unavailable",
+        ])
+    }
+
+    func testObservedAddressPrefersTunnelTailnetThenWiFiAndExcludesCellular() {
+        typealias Candidate = SurfAceDirectEndpointSelection.InterfaceAddressCandidate
+
+        let tailnetIPv4 = SurfAceDirectEndpointSelection.preferredObservedAddress(
+            candidates: [
+                Candidate(interface: "en1", address: "10.0.0.8"),
+                Candidate(interface: "en0", address: "192.168.50.135"),
+                Candidate(interface: "utun4", address: "100.101.12.34"),
+                Candidate(interface: "pdp_ip0", address: "100.108.7.9"),
+            ],
+            cellularInterfacePresent: true
+        )
+        XCTAssertEqual(tailnetIPv4, .selected("100.101.12.34"))
+
+        let tailnetULA = SurfAceDirectEndpointSelection.preferredObservedAddress(
+            candidates: [
+                Candidate(interface: "en0", address: "192.168.50.135"),
+                Candidate(interface: "utun6", address: "fd7a:115c:a1e0::2"),
+            ],
+            cellularInterfacePresent: false
+        )
+        XCTAssertEqual(tailnetULA, .selected("fd7a:115c:a1e0::2"))
+
+        let wifiBeforeOther = SurfAceDirectEndpointSelection.preferredObservedAddress(
+            candidates: [
+                Candidate(interface: "en1", address: "10.0.0.8"),
+                Candidate(interface: "en0", address: "192.168.50.135"),
+                Candidate(interface: "utun4", address: "2001:db8::4"),
+            ],
+            cellularInterfacePresent: false
+        )
+        XCTAssertEqual(wifiBeforeOther, .selected("192.168.50.135"))
+
+        let otherNonCellular = SurfAceDirectEndpointSelection.preferredObservedAddress(
+            candidates: [
+                Candidate(interface: "en1", address: "10.0.0.8"),
+                Candidate(interface: "pdp_ip0", address: "100.108.7.9"),
+            ],
+            cellularInterfacePresent: true
+        )
+        XCTAssertEqual(otherNonCellular, .selected("10.0.0.8"))
+
+        let cellularOnly = SurfAceDirectEndpointSelection.preferredObservedAddress(
+            candidates: [
+                Candidate(interface: "pdp_ip0", address: "100.108.7.9"),
+            ],
+            cellularInterfacePresent: true
+        )
+        XCTAssertEqual(cellularOnly, .cellularOnly)
+
+        let noEndpoint = SurfAceDirectEndpointSelection.select(
+            configuredEndpoint: nil,
+            observedAddress: cellularOnly,
+            listeningPort: 19_001
+        )
+        XCTAssertNil(noEndpoint.endpoint)
+        XCTAssertNil(noEndpoint.source)
+        XCTAssertNil(noEndpoint.listener)
+        XCTAssertEqual(noEndpoint.warnings, ["registration_direct_endpoint_cellular_only"])
+    }
+
+    func testDownCellularInterfaceDoesNotEnableListenerOnlyRegistration() {
+        let downCellular = SurfAceDirectEndpointSelection.interfaceProperties(
+            interface: "pdp_ip0", flags: 0
+        )
+        XCTAssertTrue(downCellular.isCellular)
+        XCTAssertFalse(downCellular.canProvideAddress)
+
+        let observedAddress = SurfAceDirectEndpointSelection.preferredObservedAddress(
+            candidates: [], cellularInterfacePresent: downCellular.isCellular
+        )
+        XCTAssertEqual(observedAddress, .cellularOnly)
+
+        let selection = SurfAceDirectEndpointSelection.select(
+            configuredEndpoint: nil,
+            observedAddress: observedAddress,
+            listeningPort: 19_001
+        )
+        XCTAssertNil(selection.endpoint)
+        XCTAssertNil(selection.source)
+        XCTAssertNil(selection.listener)
+        XCTAssertEqual(selection.warnings, ["registration_direct_endpoint_cellular_only"])
+    }
+
+    func testRegistrationPublishesClientReportedEndpointAndListenerWithoutPrePairDescribeAndAcceptsLease() throws {
+        let endpoint = "ws://192.168.50.135:19001/ws"
+        let listener = SurfAceDirectEndpointListener(scheme: "ws", port: 19_001, path: "/ws")
+        let input = SurfAceRegistrationInput(
+            clientId: "stable-client",
+            registryIdentity: .init(allocatorId: "alloc_home", fleetId: "fleet-home"),
+            directEndpoint: endpoint,
+            directEndpointSource: .clientReported,
+            directEndpointListener: listener,
+            surfaces: [],
+            pendingPaneReleases: [],
+            pendingWindowReleases: [],
+            warnings: ["registration_direct_endpoint_unconfirmed"]
+        )
+        let request = try SurfAceRegistrationWire.requestData(
+            clientId: "stable-client", input: input, id: "register-1"
+        )
+        let requestObject = try XCTUnwrap(JSONSerialization.jsonObject(with: request) as? [String: Any])
+        let requestPayload = try XCTUnwrap(requestObject["payload"] as? [String: Any])
+        XCTAssertEqual(requestPayload["directEndpoint"] as? String, endpoint)
+        XCTAssertEqual(requestPayload["directEndpointSource"] as? String, "client-reported")
+        XCTAssertNil(requestPayload["directEndpointConfirmed"])
+        let listenerPayload = try XCTUnwrap(requestPayload["directEndpointListener"] as? [String: Any])
+        XCTAssertEqual(listenerPayload["scheme"] as? String, "ws")
+        XCTAssertEqual(listenerPayload["port"] as? Int, 19_001)
+        XCTAssertEqual(listenerPayload["path"] as? String, "/ws")
+        XCTAssertEqual(requestPayload["prePairDescribeV1"] as? Bool, false)
+        XCTAssertEqual(requestPayload["windowGenerationV1"] as? Bool, true)
+
+        let response = Data("""
+        {"id":"register-1","op":"client.register","ok":true,"payload":{
+          "clientId":"stable-client",
+          "registryIdentity":{"allocatorId":"alloc_home","fleetId":"fleet-home"},
+          "surfaces":[],
+          "directEndpoint":"ws://192.168.50.135:19001/ws",
+          "directEndpointSource":"client-reported",
+          "prePairDescribeV1":false,
+          "endpointLease":{"leaseGeneration":41,"registrationObservedAtMs":1000,"leaseExpiresAtMs":2000}
+        }}
+        """.utf8)
+        let reply = try SurfAceRegistrationWire.registration(
+            from: response, requestId: "register-1", clientId: "stable-client",
+            surfaces: [], expectedIdentity: input.registryIdentity,
+            expectedDirectEndpoint: endpoint, expectedDirectEndpointSource: .clientReported,
+            expectedDirectEndpointListener: listener,
+            expectedPrePairDescribeV1: false
+        )
+        XCTAssertEqual(reply.projection.directEndpoint, endpoint)
+        XCTAssertEqual(reply.projection.directEndpointSource, .clientReported)
+        XCTAssertFalse(reply.projection.prePairDescribeV1)
+        XCTAssertEqual(reply.projection.endpointLease, .init(
+            leaseGeneration: 41, registrationObservedAtMs: 1000, leaseExpiresAtMs: 2000
+        ))
+
+        let configuredInput = SurfAceRegistrationInput(
+            clientId: "stable-client",
+            registryIdentity: input.registryIdentity,
+            directEndpoint: "wss://configured.example/surface",
+            directEndpointSource: .configured,
+            surfaces: [],
+            pendingPaneReleases: [],
+            pendingWindowReleases: []
+        )
+        let configuredRequest = try SurfAceRegistrationWire.requestData(
+            clientId: "stable-client", input: configuredInput, id: "register-2"
+        )
+        let configuredRequestObject = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: configuredRequest) as? [String: Any]
+        )
+        let configuredPayload = try XCTUnwrap(configuredRequestObject["payload"] as? [String: Any])
+        XCTAssertEqual(configuredPayload["directEndpoint"] as? String, "wss://configured.example/surface")
+        XCTAssertEqual(configuredPayload["directEndpointSource"] as? String, "configured")
+        XCTAssertNil(configuredPayload["directEndpointListener"])
+
+        let sourceFallbackInput = SurfAceRegistrationInput(
+            clientId: "stable-client",
+            directEndpoint: endpoint,
+            surfaces: [],
+            pendingPaneReleases: [],
+            pendingWindowReleases: []
+        )
+        let sourceFallbackRequest = try SurfAceRegistrationWire.requestData(
+            clientId: "stable-client", input: sourceFallbackInput, id: "register-3"
+        )
+        let sourceFallbackObject = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: sourceFallbackRequest) as? [String: Any]
+        )
+        let sourceFallbackPayload = try XCTUnwrap(sourceFallbackObject["payload"] as? [String: Any])
+        XCTAssertEqual(sourceFallbackPayload["directEndpointSource"] as? String, "client-reported")
+        XCTAssertTrue(sourceFallbackInput.warnings.contains(
+            "registration_direct_endpoint_unconfirmed source=client-reported"
+        ))
+    }
+
+    func testLocalNumericRegistrationPathKeepsEndpointAndLeaseProjection() throws {
+        let endpoint = "ws://192.168.50.135:19001/ws"
+        let identity = SurfAceRegistryIdentity(allocatorId: "alloc_home", fleetId: "fleet-home")
+        let input = SurfAceRegistrationInput(
+            clientId: "stable-client",
+            registryIdentity: identity,
+            directEndpoint: endpoint,
+            directEndpointSource: .clientReported,
+            directEndpointListener: .init(scheme: "ws", port: 19_001, path: "/ws"),
+            surfaces: [],
+            pendingPaneReleases: [],
+            pendingWindowReleases: []
+        )
+        let response = Data("""
+        {"id":"local-register","op":"client.register","ok":true,"payload":{
+          "clientId":"stable-client",
+          "registryIdentity":{"allocatorId":"alloc_home","fleetId":"fleet-home"},
+          "surfaces":[],
+          "directEndpoint":"ws://192.168.50.135:19001/ws",
+          "directEndpointSource":"client-reported",
+          "prePairDescribeV1":false,
+          "allocationGenerationV1":true,
+          "windowGenerationV1":true,
+          "endpointLease":{"leaseGeneration":41,"registrationObservedAtMs":1000,"leaseExpiresAtMs":2000},
+          "completedPaneReleaseIds":[],
+          "completedWindowReleaseIds":[]
+        }}
+        """.utf8)
+
+        let reply = try SurfAceLocalNumericRegistrationWebSocket.registrationReply(
+            from: response,
+            requestId: "local-register",
+            clientId: "stable-client",
+            input: input,
+            expectedIdentity: identity
+        )
+
+        XCTAssertEqual(reply.projection.directEndpoint, endpoint)
+        XCTAssertEqual(reply.projection.directEndpointSource, .clientReported)
+        XCTAssertEqual(reply.projection.endpointLease, .init(
+            leaseGeneration: 41, registrationObservedAtMs: 1000, leaseExpiresAtMs: 2000
+        ))
+        XCTAssertFalse(reply.warnings.contains("registration_endpoint_capability_mismatch"))
+        XCTAssertFalse(reply.warnings.contains("registration_endpoint_source_mismatch"))
+        XCTAssertFalse(reply.warnings.contains("registration_endpoint_lease_unexpected"))
+        XCTAssertFalse(reply.warnings.contains("registration_endpoint_lease_unavailable; continuing_registration"))
+        XCTAssertFalse(reply.discarded)
+        XCTAssertFalse(reply.needsRetry)
+    }
+
+    func testRegistrationContinuesWhenOlderRegistryOmitsEndpointSourceAndLease() throws {
+        let endpoint = "ws://192.168.50.135:19001/ws"
+        let response = Data("""
+        {"id":"register-1","op":"client.register","ok":true,"payload":{
+          "clientId":"stable-client",
+          "registryIdentity":{"allocatorId":"alloc_home","fleetId":"fleet-home"},
+          "surfaces":[{"surfaceId":"sf_one","windowLabel":"a","panes":[]}],
+          "directEndpoint":"ws://192.168.50.135:19001/ws",
+          "directEndpointConfirmed":false,
+          "prePairDescribeV1":false,
+          "endpointLease":null
+        }}
+        """.utf8)
+        let reply = try SurfAceRegistrationWire.registration(
+            from: response, requestId: "register-1", clientId: "stable-client",
+            surfaces: [.init(surfaceId: "sf_one", panes: [])],
+            expectedIdentity: .init(allocatorId: "alloc_home", fleetId: "fleet-home"),
+            expectedDirectEndpoint: endpoint, expectedDirectEndpointSource: .clientReported,
+            expectedPrePairDescribeV1: false
+        )
+        XCTAssertEqual(reply.assignments.first?.windowLabel, "a")
+        XCTAssertEqual(reply.projection.directEndpoint, endpoint)
+        XCTAssertNil(reply.projection.directEndpointSource)
+        XCTAssertNil(reply.projection.endpointLease)
+        XCTAssertTrue(reply.warnings.contains(
+            "registration_endpoint_lease_unavailable; continuing_registration"
+        ))
+        XCTAssertTrue(reply.warnings.contains("registration_endpoint_source_unknown"))
+        XCTAssertFalse(reply.discarded)
+    }
+
+    func testRegistrationAcceptsRegistryObservedEndpointForListenerOnlyRequest() throws {
+        let listener = SurfAceDirectEndpointListener(scheme: "ws", port: 19_001, path: "/ws")
+        let input = SurfAceRegistrationInput(
+            clientId: "stable-client",
+            registryIdentity: .init(allocatorId: "alloc_home", fleetId: "fleet-home"),
+            directEndpointListener: listener,
+            surfaces: [],
+            pendingPaneReleases: [],
+            pendingWindowReleases: []
+        )
+        let request = try SurfAceRegistrationWire.requestData(
+            clientId: "stable-client", input: input, id: "register-1"
+        )
+        let requestObject = try XCTUnwrap(JSONSerialization.jsonObject(with: request) as? [String: Any])
+        let requestPayload = try XCTUnwrap(requestObject["payload"] as? [String: Any])
+        XCTAssertNil(requestPayload["directEndpoint"])
+        XCTAssertNil(requestPayload["directEndpointSource"])
+        XCTAssertEqual(requestPayload["prePairDescribeV1"] as? Bool, false)
+        let listenerPayload = try XCTUnwrap(requestPayload["directEndpointListener"] as? [String: Any])
+        XCTAssertEqual(listenerPayload["scheme"] as? String, "ws")
+        XCTAssertEqual(listenerPayload["port"] as? Int, 19_001)
+        XCTAssertEqual(listenerPayload["path"] as? String, "/ws")
+
+        let response = Data("""
+        {"id":"register-1","op":"client.register","ok":true,"payload":{
+          "clientId":"stable-client",
+          "registryIdentity":{"allocatorId":"alloc_home","fleetId":"fleet-home"},
+          "surfaces":[],
+          "directEndpoint":"ws://192.0.2.7:19001/ws",
+          "directEndpointSource":"registry-observed",
+          "prePairDescribeV1":false,
+          "endpointLease":{"leaseGeneration":41,"registrationObservedAtMs":1000,"leaseExpiresAtMs":2000}
+        }}
+        """.utf8)
+        let reply = try SurfAceRegistrationWire.registration(
+            from: response, requestId: "register-1", clientId: "stable-client",
+            surfaces: [], expectedIdentity: input.registryIdentity,
+            expectedDirectEndpointListener: listener, expectedPrePairDescribeV1: false
+        )
+        XCTAssertEqual(reply.projection.directEndpoint, "ws://192.0.2.7:19001/ws")
+        XCTAssertEqual(reply.projection.directEndpointSource, .registryObserved)
+        XCTAssertNotNil(reply.projection.endpointLease)
+        XCTAssertFalse(reply.discarded)
+    }
+
+    func testRegistrationKeepsEndpointAndSurfaceLabelsWhenEndpointSourceIsUnrecognized() throws {
+        let endpoint = "ws://192.0.2.9:19001/ws"
+        let response = Data("""
+        {"id":"register-1","op":"client.register","ok":true,"payload":{
+          "clientId":"stable-client",
+          "registryIdentity":{"allocatorId":"alloc_home","fleetId":"fleet-home"},
+          "surfaces":[{"surfaceId":"sf_one","windowLabel":"c","panes":[]}],
+          "directEndpoint":"ws://192.0.2.9:19001/ws",
+          "directEndpointSource":"future-registry-source",
+          "prePairDescribeV1":false
+        }}
+        """.utf8)
+        let reply = try SurfAceRegistrationWire.registration(
+            from: response, requestId: "register-1", clientId: "stable-client",
+            surfaces: [.init(surfaceId: "sf_one", panes: [])],
+            expectedIdentity: .init(allocatorId: "alloc_home", fleetId: "fleet-home"),
+            expectedDirectEndpoint: endpoint,
+            expectedDirectEndpointSource: .clientReported,
+            expectedPrePairDescribeV1: false
+        )
+        XCTAssertEqual(reply.assignments.first?.windowLabel, "c")
+        XCTAssertEqual(reply.projection.directEndpoint, endpoint)
+        XCTAssertNil(reply.projection.directEndpointSource)
+        XCTAssertTrue(reply.warnings.contains("registration_endpoint_source_unrecognized"))
+        XCTAssertFalse(reply.discarded)
+    }
+
     func testRegistrationProjectionRequiresMatchingEndpointAndLeaseCapability() throws {
         let expected = SurfAceRegistryIdentity(allocatorId: "alloc_home", fleetId: "fleet-home")
         let endpoint = "wss://client.example/ws"
@@ -2636,26 +3063,26 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         XCTAssertTrue(reply.warnings.contains("registration_pane_generation_missing surface=sf_one pane=1"))
     }
 
-    func testRegistrationRejectsMalformedOrIncompleteEndpointLease() throws {
+    func testRegistrationKeepsEndpointWhenLeaseIsMalformedButRejectsMalformedEndpoint() throws {
         let expected = SurfAceRegistryIdentity(allocatorId: "alloc_home", fleetId: "fleet-home")
-        let invalidPayloads = [
-            #"{"directEndpoint":"wss://client.example/ws","prePairDescribeV1":true,"endpointLease":{"leaseGeneration":0,"registrationObservedAtMs":1000,"leaseExpiresAtMs":2000}}"#,
-            #"{"directEndpoint":"wss://client.example/ws","prePairDescribeV1":true,"endpointLease":{"leaseGeneration":41,"registrationObservedAtMs":-1,"leaseExpiresAtMs":2000}}"#,
-            #"{"directEndpoint":"wss://client.example/ws","prePairDescribeV1":true,"endpointLease":{"leaseGeneration":41,"registrationObservedAtMs":2000,"leaseExpiresAtMs":2000}}"#,
-            #"{"directEndpoint":"wss://client.example/ws","prePairDescribeV1":true,"endpointLease":{"leaseGeneration":41,"registrationObservedAtMs":1000,"leaseExpiresAtMs":9007199254740992}}"#,
-            #"{"directEndpoint":"wss://user:example@client.example/ws","prePairDescribeV1":true,"endpointLease":{"leaseGeneration":41,"registrationObservedAtMs":1000,"leaseExpiresAtMs":2000}}"#,
-            #"{"directEndpoint":"wss://client.example/ws","prePairDescribeV1":true,"endpointLease":null}"#
+        let cases: [(payload: String, endpointRemainsUsable: Bool)] = [
+            (#"{"directEndpoint":"wss://client.example/ws","prePairDescribeV1":false,"endpointLease":{"leaseGeneration":0,"registrationObservedAtMs":1000,"leaseExpiresAtMs":2000}}"#, true),
+            (#"{"directEndpoint":"wss://client.example/ws","prePairDescribeV1":false,"endpointLease":{"leaseGeneration":41,"registrationObservedAtMs":-1,"leaseExpiresAtMs":2000}}"#, true),
+            (#"{"directEndpoint":"wss://client.example/ws","prePairDescribeV1":false,"endpointLease":{"leaseGeneration":41,"registrationObservedAtMs":2000,"leaseExpiresAtMs":2000}}"#, true),
+            (#"{"directEndpoint":"wss://client.example/ws","prePairDescribeV1":false,"endpointLease":{"leaseGeneration":41,"registrationObservedAtMs":1000,"leaseExpiresAtMs":9007199254740992}}"#, true),
+            (#"{"directEndpoint":"wss://user:example@client.example/ws","prePairDescribeV1":false,"endpointLease":{"leaseGeneration":41,"registrationObservedAtMs":1000,"leaseExpiresAtMs":2000}}"#, false),
+            (#"{"directEndpoint":"wss://client.example/ws","prePairDescribeV1":false,"endpointLease":null}"#, true),
         ]
-        for payloadFields in invalidPayloads {
+        for (payloadFields, endpointRemainsUsable) in cases {
             let response = Data("""
             {"id":"register-1","op":"client.register","ok":true,"payload":{"clientId":"stable-client","registryIdentity":{"allocatorId":"alloc_home","fleetId":"fleet-home"},"surfaces":[],\(payloadFields.dropFirst().dropLast())}}
             """.utf8)
             let reply = try SurfAceRegistrationWire.registration(
                 from: response, requestId: "register-1", clientId: "stable-client",
                 surfaces: [], expectedIdentity: expected,
-                expectedDirectEndpoint: "wss://client.example/ws", expectedPrePairDescribeV1: true
+                expectedDirectEndpoint: "wss://client.example/ws", expectedPrePairDescribeV1: false
             )
-            XCTAssertNil(reply.projection.directEndpoint)
+            XCTAssertEqual(reply.projection.directEndpoint, endpointRemainsUsable ? "wss://client.example/ws" : nil)
             XCTAssertNil(reply.projection.endpointLease)
             XCTAssertTrue(reply.warnings.contains { $0.hasPrefix("registration_endpoint") })
         }

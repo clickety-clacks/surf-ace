@@ -355,6 +355,7 @@ final class SurfAceRuntime {
     @ObservationIgnored private let userDefaults: UserDefaults
     @ObservationIgnored private let locklessStateURLOverride: URL?
     @ObservationIgnored private let configuredRegistryURLOverride: URL?
+    @ObservationIgnored private let configuredDirectEndpointOverride: String?
     @ObservationIgnored private let annotationClientIdOverride: String?
     @ObservationIgnored var annotationDirectStageMaxBytesForTesting: Int?
     @ObservationIgnored private let enableFleetDiscovery: Bool
@@ -406,6 +407,7 @@ final class SurfAceRuntime {
             surface.centralConnectionError = error
         }
     }
+
     @ObservationIgnored private var isStarted = false
     @ObservationIgnored private var isStarting = false
     @ObservationIgnored private var isolatedTestHostAtStart = false
@@ -466,6 +468,7 @@ final class SurfAceRuntime {
         userDefaults: UserDefaults = .standard,
         locklessStateURL: URL? = nil,
         configuredRegistryURL: URL? = nil,
+        configuredDirectEndpoint: String? = nil,
         annotationClientId: String? = nil,
         annotationPublisherTransportFactory: (@MainActor (URL) -> any SurfAceAnnotationWireTransport)? = nil,
         annotationDirectStageMaxBytesForTesting: Int? = nil,
@@ -486,6 +489,7 @@ final class SurfAceRuntime {
         self.userDefaults = userDefaults
         self.locklessStateURLOverride = locklessStateURL
         self.configuredRegistryURLOverride = configuredRegistryURL
+        self.configuredDirectEndpointOverride = configuredDirectEndpoint
         self.annotationClientIdOverride = annotationClientId
         self.annotationPublisherTransportFactory = annotationPublisherTransportFactory
         self.annotationDirectStageMaxBytesForTesting = annotationDirectStageMaxBytesForTesting
@@ -644,7 +648,25 @@ final class SurfAceRuntime {
             inputSnapshot: { [weak self] in
                 guard let self else { throw SurfAceRegistrationError.stopped }
                 let adapter = try self.ensureLocklessAdapter()
-                return try SurfAceRegistrationInput(state: await adapter.snapshot(), clientId: identity.clientId)
+                let observedAddress = self.isIsolatedTestHost
+                    ? SurfAceDirectEndpointSelection.ObservedAddressResult.selected("127.0.0.1")
+                    : SurfAceDirectEndpointSelection.observedConnectionAddress()
+                let selection = SurfAceDirectEndpointSelection.select(
+                    configuredEndpoint: self.configuredDirectEndpoint,
+                    observedAddress: observedAddress,
+                    listeningPort: self.serverPort > 0 ? self.serverPort : Int(self.fixedServerPort),
+                    allowLoopbackObservedAddress: self.isIsolatedTestHost
+                )
+                return try SurfAceRegistrationInput(
+                    state: await adapter.snapshot(),
+                    clientId: identity.clientId,
+                    directEndpoint: selection.endpoint,
+                    directEndpointSource: selection.source,
+                    directEndpointListener: selection.listener,
+                    additionalWarnings: selection.warnings + [
+                        "registration_pre_pair_describe_unsupported; continuing_window_labels"
+                    ]
+                )
             },
             applyReplySubset: { [weak self] reply, input, request in
                 guard let self else { throw SurfAceRegistrationError.stopped }
@@ -4291,6 +4313,15 @@ final class SurfAceRuntime {
         guard let address = ProcessInfo.processInfo.environment["SURF_ACE_SERVER"]?
             .trimmingCharacters(in: .whitespacesAndNewlines) else { return nil }
         return URL(string: address)
+    }
+
+    private var configuredDirectEndpoint: String? {
+        if let configuredDirectEndpointOverride { return configuredDirectEndpointOverride }
+        let environment = ProcessInfo.processInfo.environment["SURF_ACE_DIRECT_ENDPOINT"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let environment, !environment.isEmpty { return environment }
+        let bundled = Bundle.main.object(forInfoDictionaryKey: "SurfAceDirectEndpoint") as? String
+        return bundled?.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private static func jsonObject<T: Encodable>(_ value: T) throws -> Any {
