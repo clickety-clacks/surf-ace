@@ -203,7 +203,7 @@ test("browser_url diagnostics report host and guest sizing through surface comma
   assert.match(source.slice(diagnosticsIndex, renderBrowserIndex), /scroll: elementDiagnostics\(view\.scrollEl\)/);
   assert.match(source.slice(diagnosticsIndex, renderBrowserIndex), /webview: elementDiagnostics\(webview\)/);
   assert.match(source.slice(diagnosticsIndex, renderBrowserIndex), /browserUrlGuestDiagnosticsWithTimeout\(webview\)/);
-  assert.match(source.slice(diagnosticsIndex, renderBrowserIndex), /webviewCurrentUrl: browserUrlElementCurrentUrl\(webview\)/);
+  assert.match(source.slice(diagnosticsIndex, renderBrowserIndex), /webviewCurrentUrl: browserUrlElementDiagnosticUrl\(webview\)/);
   assert.match(source.slice(diagnosticsIndex, renderBrowserIndex), /webviewTitle: browserUrlElementTitle\(webview\)/);
   assert.match(source.slice(renderBrowserIndex), /reason === "dom-ready:guest-viewport" \? "dom-ready" : "did-finish-load"/);
   assert.match(source.slice(renderBrowserIndex), /reportBrowserUrlDiagnostics\(view, browserView, eventReason\)/);
@@ -221,9 +221,10 @@ test("browser_url diagnostics report URL scheme, load errors, and readback resul
   assert.match(source.slice(renderBrowserIndex), /browserUrlGuestDiagnosticsWithTimeout\(browserView\)\.catch/);
   assert.match(source, /BROWSER_URL_DIAGNOSTIC_READBACK_TIMEOUT_MS = 500/);
   assert.match(source.slice(renderBrowserIndex), /errorCode: failure\.errorCode/);
-  assert.match(source.slice(renderBrowserIndex), /failedUrl: failure\.validatedURL/);
+  assert.match(source.slice(renderBrowserIndex), /errorDescription: safeGuestConsoleText\(failure\.errorDescription \?\? ""\)/);
+  assert.match(source.slice(renderBrowserIndex), /failedUrl: safeDiagnosticUrl\(failure\.validatedURL \?\? ""\)\.display/);
   assert.match(source.slice(renderBrowserIndex), /isMainFrame: failure\.isMainFrame/);
-  assert.match(source.slice(renderBrowserIndex), /currentUrl: browserUrlElementCurrentUrl\(browserView\)/);
+  assert.match(source.slice(renderBrowserIndex), /currentUrl: browserUrlElementDiagnosticUrl\(browserView\)/);
   assert.match(source.slice(renderBrowserIndex), /pageTitle: browserUrlElementTitle\(browserView\)/);
   assert.match(source.slice(renderBrowserIndex), /readbackResult/);
 });
