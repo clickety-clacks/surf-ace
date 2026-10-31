@@ -33,6 +33,10 @@ import {
   errorDiagnosticFields,
   recordClientDiagnostic,
 } from "./client-flight-recorder.js";
+import {
+  GuestConsoleDiagnosticLimiter,
+  guestConsoleDiagnosticFields,
+} from "./guest-console-diagnostics.js";
 import { loadOrCreateIdentity } from "./identity.js";
 import {
   loadPersistentStateFile,
@@ -258,6 +262,7 @@ let server: SurfaceWsServer;
 let stateDir = "";
 let stateWrite = Promise.resolve();
 const persistentStateWriteReadiness = new PersistenceWriteReadiness();
+const guestConsoleDiagnosticLimiter = new GuestConsoleDiagnosticLimiter();
 
 function candidatePorts(preferredPort: number): number[] {
   if (EXPLICIT_WS_PORT) {
@@ -2010,10 +2015,17 @@ function installIpc(): void {
       });
       return;
     }
+    const rendererPayload = payload as Record<string, unknown>;
+    if (rendererPayload.event === "browser_content_console_message") {
+      const fields = guestConsoleDiagnosticFields(surfaceId, event.sender.id, rendererPayload);
+      const bounded = guestConsoleDiagnosticLimiter.record(fields);
+      if (bounded) clientWarn("renderer_diagnostic", bounded);
+      return;
+    }
     clientInfo("renderer_diagnostic", rendererDiagnosticFields(
       surfaceId,
       event.sender.id,
-      payload as Record<string, unknown>,
+      rendererPayload,
     ));
   });
 
