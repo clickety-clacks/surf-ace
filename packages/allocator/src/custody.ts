@@ -194,11 +194,24 @@ export type RestoreReady = {
   readyHeadSeq: number;
 };
 
+type ValidatedJournalCheckpoint = {
+  allocatorId: string;
+  backendPid: number;
+  custodyRevision: number;
+  fleetId: string;
+  headHash: string;
+  headSeq: number;
+  leaseGeneration: number;
+  leaseId: string;
+  leaseMode: LeaseMode;
+};
+
 export type AdapterTestHooks = {
   afterStartupFailure?: (error: unknown) => Promise<void> | void;
   afterCommitBeforeAck?: (operation: string) => Promise<void> | void;
   afterCommitBeforeWitness?: (operation: string) => Promise<void> | void;
   afterMutationBeforeCommit?: (operation: string, client: PgClient) => Promise<void> | void;
+  beforeJournalValidation?: () => Promise<void> | void;
   beforeMutation?: (operation: string, client: PgClient) => Promise<void> | void;
 };
 
@@ -260,6 +273,7 @@ export class PostgresCustodyAdapter<M extends LeaseMode> {
   readonly connectionLost = new Promise<void>((resolve) => { this.resolveConnectionLoss = resolve; });
   private operationTail: Promise<void> = Promise.resolve();
   private validated = false;
+  private validatedJournalCheckpoint: ValidatedJournalCheckpoint | null = null;
   private uncertain: { operation: string; before: AcceptedState; matches: (state: AcceptedState) => boolean } | null = null;
 
   private constructor(
@@ -272,6 +286,7 @@ export class PostgresCustodyAdapter<M extends LeaseMode> {
       if (this.closed || this.connectionFailed) return;
       this.connectionFailed = true;
       this.validated = false;
+      this.validatedJournalCheckpoint = null;
       this.resolveConnectionLoss();
     };
     primary.once("error", lost);
@@ -406,6 +421,8 @@ export class PostgresCustodyAdapter<M extends LeaseMode> {
       );
     } finally {
       this.closed = true;
+      this.validated = false;
+      this.validatedJournalCheckpoint = null;
       await this.primary.end().catch(() => undefined);
     }
   }
@@ -413,6 +430,8 @@ export class PostgresCustodyAdapter<M extends LeaseMode> {
   async terminate(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
+    this.validated = false;
+    this.validatedJournalCheckpoint = null;
     await this.primary.end().catch(() => undefined);
   }
 
@@ -451,14 +470,22 @@ export class PostgresCustodyAdapter<M extends LeaseMode> {
     this.validated = false;
     try {
       const state = await this.readAcceptedStateNow();
-      const journal = await this.primary.query<{ valid: boolean }>(
-        "SELECT surf_ace_allocator.validate_journal($1) AS valid",
-        [this.config.fleetId],
-      );
-      const backend = await this.primary.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
-      if (journal.rows[0]?.valid !== true) {
-        throw new AllocatorError("allocator_state_corrupt", "custody journal chain does not match the fleet head");
+      const checkpoint = validatedJournalCheckpointFor(state);
+      const reuseJournal = checkpoint !== null
+        && this.validatedJournalCheckpoint !== null
+        && sameValidatedJournalCheckpoint(this.validatedJournalCheckpoint, checkpoint);
+      if (!reuseJournal) {
+        this.validatedJournalCheckpoint = null;
+        await this.hooks.beforeJournalValidation?.();
+        const journal = await this.primary.query<{ valid: boolean }>(
+          "SELECT surf_ace_allocator.validate_journal($1) AS valid",
+          [this.config.fleetId],
+        );
+        if (journal.rows[0]?.valid !== true) {
+          throw new AllocatorError("allocator_state_corrupt", "custody journal chain does not match the fleet head");
+        }
       }
+      const backend = await this.primary.query<{ pid: number }>("SELECT pg_backend_pid() AS pid");
       if (
         state.leaseGeneration !== this.token.leaseGeneration
         || state.leaseId !== this.token.leaseId
@@ -479,9 +506,16 @@ export class PostgresCustodyAdapter<M extends LeaseMode> {
         }
         this.uncertain = null;
       }
+      if (this.closed || this.connectionFailed) {
+        throw new AllocatorError("writer_fence_unavailable", "custody lease is closed or its connection is lost");
+      }
+      if (!reuseJournal && checkpoint) {
+        this.validatedJournalCheckpoint = checkpoint;
+      }
       this.validated = true;
     } catch (error) {
       this.validated = false;
+      this.validatedJournalCheckpoint = null;
       throw error;
     }
   }
@@ -523,6 +557,7 @@ export class PostgresCustodyAdapter<M extends LeaseMode> {
       before = await this.readAcceptedStateNow();
     } catch (error) {
       this.validated = false;
+      this.validatedJournalCheckpoint = null;
       throw error;
     }
     precheck?.(before);
@@ -547,6 +582,7 @@ export class PostgresCustodyAdapter<M extends LeaseMode> {
     } catch (error) {
       if (committed || error instanceof PersistenceOutcomeUnknownError) {
         this.validated = false;
+        this.validatedJournalCheckpoint = null;
         this.uncertain = { operation, before, matches };
         const unknown = error instanceof PersistenceOutcomeUnknownError
           ? error
@@ -1247,6 +1283,46 @@ async function readAndValidateWitness(
 async function currentWalLsn(client: PgClient): Promise<string> {
   const result = await client.query<{ lsn: string }>("SELECT pg_current_wal_lsn()::text AS lsn");
   return requiredRow(result.rows[0], "current WAL LSN").lsn;
+}
+
+function validatedJournalCheckpointFor(state: AcceptedState): ValidatedJournalCheckpoint | null {
+  const backendPid = state.leaseBackendPid;
+  const leaseId = state.leaseId;
+  const leaseMode = state.leaseMode;
+  if (
+    backendPid === null
+    || !Number.isSafeInteger(backendPid)
+    || leaseId === null
+    || leaseMode === null
+  ) {
+    return null;
+  }
+  return {
+    allocatorId: state.allocatorId,
+    backendPid,
+    custodyRevision: state.custodyRevision,
+    fleetId: state.fleetId,
+    headHash: state.headHash,
+    headSeq: state.headSeq,
+    leaseGeneration: state.leaseGeneration,
+    leaseId,
+    leaseMode,
+  };
+}
+
+function sameValidatedJournalCheckpoint(
+  previous: ValidatedJournalCheckpoint,
+  current: ValidatedJournalCheckpoint,
+): boolean {
+  return previous.allocatorId === current.allocatorId
+    && previous.backendPid === current.backendPid
+    && previous.custodyRevision === current.custodyRevision
+    && previous.fleetId === current.fleetId
+    && previous.headHash === current.headHash
+    && previous.headSeq === current.headSeq
+    && previous.leaseGeneration === current.leaseGeneration
+    && previous.leaseId === current.leaseId
+    && previous.leaseMode === current.leaseMode;
 }
 
 function assertMatchingHead(state: AcceptedState, witness: HeadWitness): void {
