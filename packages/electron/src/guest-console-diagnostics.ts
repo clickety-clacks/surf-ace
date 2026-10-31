@@ -5,6 +5,7 @@ export const GUEST_CONSOLE_DIAGNOSTIC_INTERVAL_MS = 1_000;
 const MAX_DIAGNOSTIC_TEXT_LENGTH = 240;
 const MAX_TRACKED_PANES = 256;
 const TRACKED_PANE_IDLE_MS = 60_000;
+const DATA_URL_IN_TEXT_PATTERN = /(^|[\s"'(=]|\u0060)data:(?!\[omitted \d+ characters\])([^\s"'\)\u0060]*)/gi;
 
 type GuestConsolePayload = Record<string, unknown>;
 
@@ -65,14 +66,19 @@ export function safeDiagnosticUrl(value: string): SafeUrlSummary {
 
 export function safeGuestConsoleText(value: unknown, maxLength = MAX_DIAGNOSTIC_TEXT_LENGTH): string {
   const text = String(value ?? "");
-  const lower = text.toLowerCase();
-  if (lower.includes("data:[omitted ")) return text.slice(0, maxLength);
-  const dataUrlIndex = lower.indexOf("data:");
-  if (dataUrlIndex < 0) return text.slice(0, maxLength);
-
-  const prefix = text.slice(0, dataUrlIndex);
-  const marker = `data:[omitted ${text.length - dataUrlIndex} characters]`;
-  return `${prefix.slice(0, Math.max(0, maxLength - marker.length))}${marker}`;
+  let cursor = 0;
+  let sanitized = "";
+  for (const match of text.matchAll(DATA_URL_IN_TEXT_PATTERN)) {
+    const boundary = match[1] ?? "";
+    const dataUrlStart = (match.index ?? 0) + boundary.length;
+    const dataUrl = "data:" + (match[2] ?? "");
+    sanitized += text.slice(cursor, dataUrlStart);
+    sanitized += "data:[omitted " + dataUrl.length + " characters]";
+    cursor = dataUrlStart + dataUrl.length;
+  }
+  if (cursor === 0) return text.slice(0, maxLength);
+  sanitized += text.slice(cursor);
+  return sanitized.slice(0, maxLength);
 }
 
 export function guestConsoleDiagnosticFields(

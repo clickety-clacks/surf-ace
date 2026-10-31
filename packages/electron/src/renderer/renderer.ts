@@ -3068,8 +3068,8 @@ function renderBrowserContent(
         status,
         targetId: navigationReport.targetId,
         type: "browser-url-navigation",
-        url: navigationReport.url,
         ...browserUrlDiagnosticFields(navigationReport.url),
+        url: navigationReport.url,
       });
     });
   };

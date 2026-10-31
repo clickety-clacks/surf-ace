@@ -4,6 +4,7 @@ import fs from "node:fs/promises";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { runInNewContext } from "node:vm";
+import { safeDiagnosticUrl } from "../src/guest-console-diagnostics.js";
 
 function rendererSourceUrl(relativePath: string): URL {
   const candidates = [
@@ -777,6 +778,53 @@ test("renderer projects the numeric pane label while preserving the combined sem
   assert.match(updateSource, /Boolean\(pane\.label\)/);
   assert.match(updateSource, /`pane \$\{visibleAddress\}`/);
   assert.match(updateSource, /`Surf Ace\$\{visibleWindowLabel[\s\S]*pane \$\{visibleAddress\}`/);
+});
+
+test("browser_url navigation command preserves its requested URL alongside summarized diagnostics", async () => {
+  const source = await rendererSource();
+  const reportIndex = source.indexOf("const reportNavigation =");
+  const commandStart = source.indexOf("window.surfAce.command(", reportIndex);
+  const objectStart = source.indexOf("{", commandStart);
+  const commandClose = source.indexOf("});", objectStart);
+
+  assert.ok(reportIndex > -1);
+  assert.ok(commandStart > reportIndex);
+  assert.ok(objectStart > commandStart);
+  assert.ok(commandClose > objectStart);
+
+  const commandObject = source.slice(objectStart, commandClose + 1);
+  const context = {
+    browserView: {},
+    browserUrlDiagnosticFields: (url: string) => {
+      const summary = safeDiagnosticUrl(url);
+      return {
+        url: summary.display,
+        urlHost: summary.host,
+        urlLength: summary.length,
+        urlPort: summary.port,
+        urlScheme: summary.scheme,
+      };
+    },
+    browserUrlElementDiagnosticUrl: () => "https://example.test/",
+    browserUrlElementTitle: () => "Example",
+    errorMessage: undefined,
+    navigationReport: { targetId: "target-test", url: "" },
+    pane: { paneId: 4 },
+    readbackResult: "ok",
+    status: "applied",
+  };
+  for (const url of [
+    "https://example.test/" + "x".repeat(400),
+    "data:text/html;base64," + "payload".repeat(80),
+  ]) {
+    context.navigationReport.url = url;
+    const command = runInNewContext("(" + commandObject + ")", context) as Record<string, unknown>;
+    const summary = safeDiagnosticUrl(url);
+
+    assert.equal(command.url, url);
+    assert.equal(command.urlLength, url.length);
+    assert.equal(command.urlScheme, summary.scheme);
+  }
 });
 
 test("renderer fits pane identity labels inside pane bounds for native and renderer panes", async () => {

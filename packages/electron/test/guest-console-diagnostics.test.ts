@@ -63,6 +63,21 @@ test("renderer-provided URL summaries retain original lengths without restoring 
   assert.equal(JSON.stringify(fields).includes("payload"), false);
 });
 
+test("console text redacts data URLs without corrupting ordinary error words or trailing detail", () => {
+  const metadataError = "TypeError: invalid metadata: missing field 'id' at parseConfig";
+  const dataUrl = "data:text/plain;base64,c2VjcmV0";
+
+  assert.equal(safeGuestConsoleText(metadataError), metadataError);
+  assert.equal(
+    safeGuestConsoleText("Failed to load " + dataUrl + " because the server rejected it"),
+    "Failed to load data:[omitted " + dataUrl.length + " characters] because the server rejected it",
+  );
+  assert.equal(
+    safeGuestConsoleText("Already redacted data:[omitted 48000 characters] keeps following detail"),
+    "Already redacted data:[omitted 48000 characters] keeps following detail",
+  );
+});
+
 test("concise web URL details remain available for a guest error", () => {
   const fields = guestConsoleDiagnosticFields("surface-test", 18, {
     currentUrl: "https://example.test/page",
