@@ -637,13 +637,13 @@ export class AllocatorServer {
   }
 
   private async fleetTopology(): Promise<unknown> {
-    const registrationReady = await this.authority.refreshReadiness();
-    const state = await this.custody.readAcceptedState();
+    const readiness = await this.authority.refreshReadinessSnapshot();
+    const state = readiness.acceptedState ?? await this.custody.readAcceptedState();
     const registryServerTimeMs = this.endpointLeases.serverTimeMs();
     return {
       clients: [...this.registeredClients.values()],
       maxEndpointLeaseMs: this.endpointLeases.maxEndpointLeaseMs,
-      registrationReady,
+      registrationReady: readiness.ready,
       registryIdentity: {
         allocatorId: state.allocatorId,
         fleetId: state.fleetId,
