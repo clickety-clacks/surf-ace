@@ -83,6 +83,17 @@ test("release names derive from distinct product and tooling tags", () => {
   }), /release_tag_invalid/);
 });
 
+test("stable release names derive from distinct product and tooling tags", () => {
+  const names = publicReleaseNamesFromTags({
+    productTag: "surf-ace-v0.2.10-r1",
+    toolingTag: "surf-ace-release-tooling-v0.2.10-r1",
+  });
+  assert.equal(names.version, "0.2.10");
+  assert.equal(names.sourceTag, "surf-ace-v0.2.10-r1");
+  assert.equal(names.toolingTag, "surf-ace-release-tooling-v0.2.10-r1");
+  assert.equal(names.title, "Surf Ace v0.2.10");
+});
+
 test("the pinned release workflow uses the product title, not integration branding", async () => {
   const workflow = await fs.readFile(new URL("../../.github/workflows/release-tightbeam.yml", import.meta.url), "utf8");
   assert.match(workflow, /^name: Build standalone Surf Ace release$/m);
@@ -129,7 +140,7 @@ test("RC releases are prereleases while stable releases stay regular releases", 
   }
 });
 
-test("the release guard accepts a72e77c with distinct immutable RC2 tag inputs", async (t) => {
+test("the release guard accepts stable and RC tags with distinct product and tooling pins", async (t) => {
   const workflow = await fs.readFile(new URL("../../.github/workflows/release-tightbeam.yml", import.meta.url), "utf8");
   const stepMarker = "      - name: Require exact manual tooling and immutable release tags\n";
   const runMarker = "        run: |\n";
@@ -140,19 +151,34 @@ test("the release guard accepts a72e77c with distinct immutable RC2 tag inputs",
   assert.ok(stepStart >= 0 && runStart >= 0 && bodyEnd > bodyStart, "workflow guard step is present");
   const script = workflow.slice(bodyStart, bodyEnd).replace(/^ {10}/gm, "");
 
-  const productTag = "surf-ace-v0.2.10-rc2-r2";
-  const toolingTag = "surf-ace-release-tooling-v0.2.10-rc2-r3";
-  const productCommit = "a72e77c503f4bbc057d08819bb77066a62ca8092";
-  const workflowCommit = (await execFileAsync("git", ["-C", repositoryRoot, "rev-parse", "HEAD"])).stdout.trim();
-  assert.notEqual(productTag, toolingTag);
-  assert.match(workflowCommit, /^[a-f0-9]{40}$/);
-  assert.notEqual(productCommit, workflowCommit);
+  const currentWorkflowCommit = (await execFileAsync("git", ["-C", repositoryRoot, "rev-parse", "HEAD"])).stdout.trim();
+  const tagCases = [
+    {
+      name: "rc2",
+      productTag: "surf-ace-v0.2.10-rc2-r2",
+      toolingTag: "surf-ace-release-tooling-v0.2.10-rc2-r3",
+      productCommit: "a72e77c503f4bbc057d08819bb77066a62ca8092",
+      workflowCommit: currentWorkflowCommit,
+      version: "0.2.10-rc2",
+    },
+    {
+      name: "stable",
+      productTag: "surf-ace-v0.2.10-r1",
+      toolingTag: "surf-ace-release-tooling-v0.2.10-r1",
+      productCommit: "1e75f3bc465b022b81685a1545955f1e17c541ae",
+      workflowCommit: "b".repeat(40),
+      version: "0.2.10",
+    },
+  ];
+  for (const { productTag, toolingTag, productCommit, workflowCommit } of tagCases) {
+    assert.notEqual(productTag, toolingTag);
+    assert.match(workflowCommit, /^[a-f0-9]{40}$/);
+    assert.notEqual(productCommit, workflowCommit);
+  }
 
   const temporaryDirectory = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-release-guard-"));
   t.after(() => fs.rm(temporaryDirectory, { recursive: true, force: true }));
   const ghStubPath = path.join(temporaryDirectory, "gh");
-  const callsPath = path.join(temporaryDirectory, "gh-calls");
-  const outputPath = path.join(temporaryDirectory, "github-output");
   await fs.writeFile(ghStubPath, `#!/bin/bash
 set -euo pipefail
 printf '%s\\n' "$*" >> "$GH_API_CALLS"
@@ -164,30 +190,34 @@ esac
 `);
   await fs.chmod(ghStubPath, 0o755);
 
-  await execFileAsync("bash", ["--noprofile", "--norc", "-e", "-u", "-o", "pipefail", "-c", script], {
-    env: {
-      PATH: `${temporaryDirectory}:/usr/bin:/bin`,
-      GITHUB_EVENT_NAME: "workflow_dispatch",
-      GITHUB_REF_TYPE: "tag",
-      GITHUB_REF: `refs/tags/${toolingTag}`,
-      GITHUB_SHA: workflowCommit,
-      GITHUB_REPOSITORY: "clickety-clacks/surf-ace",
-      GITHUB_OUTPUT: outputPath,
-      GH_API_CALLS: callsPath,
-      EXPECTED_TOOLING_TAG: toolingTag,
-      EXPECTED_PRODUCT_TAG: productTag,
-      EXPECTED_WORKFLOW_SHA: workflowCommit,
-      EXPECTED_PRODUCT_SHA: productCommit,
-      PRODUCT_COMMIT_INPUT: productCommit,
-      PRODUCT_TAG_INPUT: productTag,
-      TOOLING_TAG_INPUT: toolingTag,
-      PRODUCT_TAG: productTag,
-      TOOLING_TAG: toolingTag,
-    },
-  });
+  for (const { name, productTag, toolingTag, productCommit, workflowCommit, version } of tagCases) {
+    const callsPath = path.join(temporaryDirectory, `gh-calls-${name}`);
+    const outputPath = path.join(temporaryDirectory, `github-output-${name}`);
+    await execFileAsync("bash", ["--noprofile", "--norc", "-e", "-u", "-o", "pipefail", "-c", script], {
+      env: {
+        PATH: `${temporaryDirectory}:/usr/bin:/bin`,
+        GITHUB_EVENT_NAME: "workflow_dispatch",
+        GITHUB_REF_TYPE: "tag",
+        GITHUB_REF: `refs/tags/${toolingTag}`,
+        GITHUB_SHA: workflowCommit,
+        GITHUB_REPOSITORY: "clickety-clacks/surf-ace",
+        GITHUB_OUTPUT: outputPath,
+        GH_API_CALLS: callsPath,
+        EXPECTED_TOOLING_TAG: toolingTag,
+        EXPECTED_PRODUCT_TAG: productTag,
+        EXPECTED_WORKFLOW_SHA: workflowCommit,
+        EXPECTED_PRODUCT_SHA: productCommit,
+        PRODUCT_COMMIT_INPUT: productCommit,
+        PRODUCT_TAG_INPUT: productTag,
+        TOOLING_TAG_INPUT: toolingTag,
+        PRODUCT_TAG: productTag,
+        TOOLING_TAG: toolingTag,
+      },
+    });
 
-  assert.equal(await fs.readFile(outputPath, "utf8"), `product_commit=${productCommit}\nproduct_version=0.2.10-rc2\ntooling_version=0.2.10-rc2\nversion_name_mismatch=false\n`);
-  const calls = await fs.readFile(callsPath, "utf8");
-  assert.ok(calls.includes(`git/ref/tags/${toolingTag}`));
-  assert.ok(calls.includes(`git/ref/tags/${productTag}`));
+    assert.equal(await fs.readFile(outputPath, "utf8"), `product_commit=${productCommit}\nproduct_version=${version}\ntooling_version=${version}\nversion_name_mismatch=false\n`);
+    const calls = await fs.readFile(callsPath, "utf8");
+    assert.ok(calls.includes(`git/ref/tags/${toolingTag}`));
+    assert.ok(calls.includes(`git/ref/tags/${productTag}`));
+  }
 });

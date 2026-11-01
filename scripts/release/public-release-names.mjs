@@ -1,7 +1,7 @@
 const VERSION = /^\d+\.\d+\.\d+(?:-rc[1-9]\d*)?$/;
 const REVISION = /^r[1-9]\d*$/;
-const PRODUCT_TAG = /^surf-ace-v(\d+\.\d+\.\d+(?:-rc[1-9]\d*))-(r[1-9]\d*)$/;
-const TOOLING_TAG = /^surf-ace-release-tooling-v(\d+\.\d+\.\d+(?:-rc[1-9]\d*))-(r[1-9]\d*)$/;
+const PRODUCT_TAG = /^surf-ace-v(\d+\.\d+\.\d+(?:-rc[1-9]\d*)?)-(r[1-9]\d*)$/;
+const TOOLING_TAG = /^surf-ace-release-tooling-v(\d+\.\d+\.\d+(?:-rc[1-9]\d*)?)-(r[1-9]\d*)$/;
 
 export function publicReleaseNames({ version, sourceRevision, toolingRevision, legacy = false }) {
   if (!VERSION.test(version ?? "")) throw new Error("release_version_invalid");
