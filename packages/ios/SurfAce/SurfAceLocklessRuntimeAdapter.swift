@@ -1,6 +1,10 @@
 import Foundation
 
+#if os(tvOS)
+let surfAceTargetCapabilities: [String] = []
+#else
 let surfAceTargetCapabilities = ["target.browser_url.v1"]
+#endif
 
 // Control/discovery views contain routing material, never the recovery payload.
 let surfAceControlProjectionCapability = "control_projection_v1"

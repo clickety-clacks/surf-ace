@@ -441,7 +441,11 @@ final class SurfAceRuntime {
     private let maxDrawingFlushBytes = 2 * 1024 * 1024
     private let webSocketPath = "/ws"
     private let healthPath = "/health"
+    #if os(tvOS)
+    private let supportedContentTypes: [SurfAceContentType] = [.image, .pdf, .terminal, .markdown]
+    #else
     private let supportedContentTypes: [SurfAceContentType] = [.html, .image, .pdf, .terminal, .markdown]
+    #endif
     let targetCapabilities = surfAceTargetCapabilities
     private let eventTypes = [
         "event.drawing_flush",
@@ -1252,6 +1256,15 @@ final class SurfAceRuntime {
         }
         if reidentifiedSurface { persistIdentityMapping() }
 
+        #if os(tvOS)
+        // tvOS has one scene but retains every logical fleet surface.
+        for material in state.liveSurfaces.values where surfaceById[material.surfaceId] == nil {
+            let surface = SurfAceSurfaceModel(sceneKey: "tv:" + material.surfaceId,
+                surfaceId: material.surfaceId, windowLabel: "", name: "Surf Ace")
+            surfaceById[material.surfaceId] = surface
+            surfaces.append(surface)
+        }
+        #endif
         var projectedSurfaceIds = Set(surfaces.map(\.surfaceId))
         if let connectedSceneKey, let surfaceId = state.sceneSurfaceIds[connectedSceneKey] {
             projectedSurfaceIds.insert(surfaceId)
@@ -1480,6 +1493,9 @@ final class SurfAceRuntime {
         source: String? = nil
     ) {
         guard let requestedPane = pane(surfaceId: surfaceId, paneId: paneId) else { return }
+        #if os(tvOS)
+        guard requestedPane.htmlDiagnostic == nil else { return }
+        #endif
         if !enabled {
             guard let generation = requestedPane.beginAnnotationDone() else { return }
             Task { @MainActor [weak requestedPane] in
@@ -3027,6 +3043,37 @@ final class SurfAceRuntime {
                       let contentValue = payload["content"] else {
                     throw SurfAceLocklessRuntimeAdapterError.invalidAdmission
                 }
+                #if os(tvOS)
+                if let localPaneId = Int(exactly: paneId),
+                   authorityBefore.liveSurfaces[surfaceId]?.panes[String(paneId)] != nil {
+                    let localPane = pane(surfaceId: surfaceId, paneId: localPaneId)
+                    if contentType == "html" || contentType == "canvas" || contentType == "video" {
+                        if contentType == "html", let fields = contentValue as? [String: Any],
+                           let html = fields["html"] as? String {
+                            localPane?.htmlDiagnostic = SurfAceTVHTMLDiagnostic(html: html)
+                        }
+                        localPane?.toast = "Apple TV does not support \(contentType) content."
+                        return await commitLocklessFailure(op: op, id: id,
+                            code: "unsupported_content_type", message: "Apple TV does not support \(contentType)",
+                            error: SurfAceLocklessContentOperationError.unsupportedContentType(contentType),
+                            connectionUUID: connectionUUID, adapter: adapter)
+                    }
+                    if let fields = contentValue as? [String: Any], let encoded = fields["data"] as? String {
+                        do {
+                            if contentType == "image" {
+                                try SurfAceTVPaneView.validate(.image(data: encoded, mediaType: fields["mediaType"] as? String ?? "", alt: nil))
+                            } else if contentType == "pdf" {
+                                try SurfAceTVPaneView.validate(.pdf(data: encoded))
+                            }
+                        } catch {
+                            localPane?.toast = "Content could not be rendered; previous content is unchanged."
+                            return await commitLocklessFailure(op: op, id: id, code: "render_failed",
+                                message: String(describing: error), error: error,
+                                connectionUUID: connectionUUID, adapter: adapter)
+                        }
+                    }
+                }
+                #endif
                 let content = try Self.locklessJSON(fromFoundation: contentValue)
                 let friendlyChatName = payload["friendlyChatName"] as? String
                 let intent = SurfAceLocklessContentSetIntent(
@@ -3137,6 +3184,11 @@ final class SurfAceRuntime {
             }
             if let failure = locklessCommittedFailureResult(committed, adapter: adapter) { return failure }
             try projectLocklessAuthorityState(await adapter.snapshot())
+            #if os(tvOS)
+            if let localPaneId = Int(exactly: paneId) {
+                pane(surfaceId: surfaceId, paneId: localPaneId)?.htmlDiagnostic = nil
+            }
+            #endif
             await fanoutLocklessConsumable(
                 scopeId: Self.locklessPaneScopeId(surfaceId: surfaceId, paneId: paneId),
                 adapter: adapter

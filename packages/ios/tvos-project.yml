@@ -1,0 +1,61 @@
+name: SurfAceTV
+options:
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: 6.0
+    DEVELOPMENT_TEAM: ""
+targets:
+  SurfAceTV:
+    type: application
+    platform: tvOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: SurfAce
+        excludes:
+          - Info.plist
+          - SurfAceSpatialIcon.png
+          - LaunchScreen.storyboard
+          - SurfAceApp.swift
+          - SurfAceSurfaceView.swift
+          - Assets.xcassets
+      - path: SurfAceTV
+        excludes:
+          - Info.plist
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: co.clicketyclacks.SurfAce.tv
+        PRODUCT_NAME: SurfAceTV
+        PRODUCT_MODULE_NAME: SurfAce
+        CURRENT_PROJECT_VERSION: 17
+        MARKETING_VERSION: 0.1.0
+        TARGETED_DEVICE_FAMILY: "3"
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_ITSAppUsesNonExemptEncryption: NO
+        INFOPLIST_KEY_NSLocalNetworkUsageDescription: Connect to Surf Ace and display your panes.
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: Z7R59J7QV8
+  SurfAceTVTests:
+    type: bundle.unit-test
+    platform: tvOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: SurfAceTVTests
+      - path: SurfAceTests/SurfAceTVHTMLDiagnosticTests.swift
+    dependencies:
+      - target: SurfAceTV
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: co.clicketyclacks.SurfAce.tv.tests
+schemes:
+  SurfAceTV:
+    build:
+      targets:
+        SurfAceTV: all
+    test:
+      targets:
+        - SurfAceTVTests
+      environmentVariables:
+        SURF_ACE_XCTEST_HOST_NO_AUTOSTART: "1"

@@ -1,0 +1,539 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		1AF0C324AB5DABC85CA5BB55 /* SurfAceLocklessRuntimeAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F3668B655B47711C90CDF5A /* SurfAceLocklessRuntimeAdapter.swift */; };
+		1DCBBDC6782F32FF338EF6DD /* Rajdhani-Regular.ttf in Resources */ = {isa = PBXBuildFile; fileRef = A04872CAEAB170E568881F03 /* Rajdhani-Regular.ttf */; };
+		2A675ADF548A245A159A9A78 /* SurfAceAnnotationOutbox.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A6C511E9E640A38A2399D6A /* SurfAceAnnotationOutbox.swift */; };
+		2DA597E008575655881FAEDD /* SurfAceLocklessTopologyCodec.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF164B3EA1566A4C62391DF8 /* SurfAceLocklessTopologyCodec.swift */; };
+		33B003E1AAE07F31E9A1A3BB /* SurfAceLocklessUIProjection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 156A7E9BE1810A1505B90C61 /* SurfAceLocklessUIProjection.swift */; };
+		51EA7C294F1746F2C0ED82EB /* OFL-Rajdhani.txt in Resources */ = {isa = PBXBuildFile; fileRef = 227478BC02BD7E97EFE89ED6 /* OFL-Rajdhani.txt */; };
+		554DF5F8B3E5A5EACDE381BE /* SurfAceTVHTMLDiagnosticTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 599B3929E3211F4BF0349918 /* SurfAceTVHTMLDiagnosticTests.swift */; };
+		9112DC7D2F5B25F7929F63FC /* SurfAceIdentityStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A97D5A825A270ED8C5422B5 /* SurfAceIdentityStore.swift */; };
+		96F8D3DF203DF0E5E574AFC8 /* SurfAceLocklessTopologyOperations.swift in Sources */ = {isa = PBXBuildFile; fileRef = E6FE3796A9EB9D8D666E413C /* SurfAceLocklessTopologyOperations.swift */; };
+		9FCABB80DE771DB9DBA561A7 /* SurfAceTVHTMLDiagnostic.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3FE24C33AAB31512046605CB /* SurfAceTVHTMLDiagnostic.swift */; };
+		B0062FD4D3081FB37AA2A180 /* SurfAceTVPaneView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0B1E1D149395D6342BA923E /* SurfAceTVPaneView.swift */; };
+		B12F32DC896FE44813D2AA38 /* SurfAceAnnotationPublisher.swift in Sources */ = {isa = PBXBuildFile; fileRef = BE62DD5EB6326DCBFACC0BC7 /* SurfAceAnnotationPublisher.swift */; };
+		C7303AF3CD9617DF58A9958E /* SurfAceRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D0F2912A0665C2C49932ABA /* SurfAceRuntime.swift */; };
+		C7AF99DF7CE65A4FE49D702B /* SurfAceTVRenderingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 92388BD66C0BF29C445EBE10 /* SurfAceTVRenderingTests.swift */; };
+		CBFF45DA958A1DB30D6B254B /* SurfAceCentralDiscoveryLifecycle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 61F1B4B8269BE24D748EFA93 /* SurfAceCentralDiscoveryLifecycle.swift */; };
+		CFA9ECC885BCB0EBDCF39B9B /* SurfAceCentralRegistration.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0534BFF30E8E184DBFF95FE /* SurfAceCentralRegistration.swift */; };
+		D1600410CED5CBD811D7DD26 /* SurfAceTVApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 30F994D394FFF6783A9F5A27 /* SurfAceTVApp.swift */; };
+		D356EB6973AAB84511BE4F35 /* SurfAceLocklessConsumableOperations.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8C85BBB28AAB2F7D74E220CF /* SurfAceLocklessConsumableOperations.swift */; };
+		D8BA8B306A12EAAB1AD445E0 /* Rajdhani-Bold.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 49D9AC9E6E36794D0762E179 /* Rajdhani-Bold.ttf */; };
+		DE156DE8D4010A6EE1DA2C5C /* SurfAceHTTPServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 101E8DB6A6C5E0E44141E393 /* SurfAceHTTPServer.swift */; };
+		E4747ADDDCE5EF86B0C60270 /* SurfAceBonjourPublisher.swift in Sources */ = {isa = PBXBuildFile; fileRef = FAA3A8C400F66EF1B9B88FCC /* SurfAceBonjourPublisher.swift */; };
+		F2216C21463301C30DB83477 /* SurfAceLocklessAuthority.swift in Sources */ = {isa = PBXBuildFile; fileRef = C5708EC5EED87839EAD5C233 /* SurfAceLocklessAuthority.swift */; };
+		F74F9A2FD6590E9951769FAE /* SurfAceModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD07E85E04A90B274617D77E /* SurfAceModels.swift */; };
+		FD45C4506957FC3293387464 /* SurfAceANSI.swift in Sources */ = {isa = PBXBuildFile; fileRef = F27843F5771357E13464EAA6 /* SurfAceANSI.swift */; };
+		FFF41AC0051763B8DDE031F9 /* SurfAceLocklessContentOperations.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6664999A4155A24EB51C63E7 /* SurfAceLocklessContentOperations.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		9D40597E42C271DD5D3E3EEB /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AAF404300776382C45D84808 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 75D10303627E04823007778D;
+			remoteInfo = SurfAceTV;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		101E8DB6A6C5E0E44141E393 /* SurfAceHTTPServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceHTTPServer.swift; sourceTree = "<group>"; };
+		156A7E9BE1810A1505B90C61 /* SurfAceLocklessUIProjection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceLocklessUIProjection.swift; sourceTree = "<group>"; };
+		227478BC02BD7E97EFE89ED6 /* OFL-Rajdhani.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "OFL-Rajdhani.txt"; sourceTree = "<group>"; };
+		30F994D394FFF6783A9F5A27 /* SurfAceTVApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceTVApp.swift; sourceTree = "<group>"; };
+		3FE24C33AAB31512046605CB /* SurfAceTVHTMLDiagnostic.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceTVHTMLDiagnostic.swift; sourceTree = "<group>"; };
+		49D9AC9E6E36794D0762E179 /* Rajdhani-Bold.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Rajdhani-Bold.ttf"; sourceTree = "<group>"; };
+		4A6C511E9E640A38A2399D6A /* SurfAceAnnotationOutbox.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceAnnotationOutbox.swift; sourceTree = "<group>"; };
+		4A97D5A825A270ED8C5422B5 /* SurfAceIdentityStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceIdentityStore.swift; sourceTree = "<group>"; };
+		4D0F2912A0665C2C49932ABA /* SurfAceRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceRuntime.swift; sourceTree = "<group>"; };
+		599B3929E3211F4BF0349918 /* SurfAceTVHTMLDiagnosticTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceTVHTMLDiagnosticTests.swift; sourceTree = "<group>"; };
+		61F1B4B8269BE24D748EFA93 /* SurfAceCentralDiscoveryLifecycle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceCentralDiscoveryLifecycle.swift; sourceTree = "<group>"; };
+		6664999A4155A24EB51C63E7 /* SurfAceLocklessContentOperations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceLocklessContentOperations.swift; sourceTree = "<group>"; };
+		6A1B4D3417CDFFC91DB082DA /* SurfAceTV.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = SurfAceTV.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		8C85BBB28AAB2F7D74E220CF /* SurfAceLocklessConsumableOperations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceLocklessConsumableOperations.swift; sourceTree = "<group>"; };
+		92388BD66C0BF29C445EBE10 /* SurfAceTVRenderingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceTVRenderingTests.swift; sourceTree = "<group>"; };
+		9B87A1CD5EADA05DC9704E19 /* SurfAceTVTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = SurfAceTVTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		9F3668B655B47711C90CDF5A /* SurfAceLocklessRuntimeAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceLocklessRuntimeAdapter.swift; sourceTree = "<group>"; };
+		A04872CAEAB170E568881F03 /* Rajdhani-Regular.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Rajdhani-Regular.ttf"; sourceTree = "<group>"; };
+		BE62DD5EB6326DCBFACC0BC7 /* SurfAceAnnotationPublisher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceAnnotationPublisher.swift; sourceTree = "<group>"; };
+		C5708EC5EED87839EAD5C233 /* SurfAceLocklessAuthority.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceLocklessAuthority.swift; sourceTree = "<group>"; };
+		D0B1E1D149395D6342BA923E /* SurfAceTVPaneView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceTVPaneView.swift; sourceTree = "<group>"; };
+		DF164B3EA1566A4C62391DF8 /* SurfAceLocklessTopologyCodec.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceLocklessTopologyCodec.swift; sourceTree = "<group>"; };
+		E6FE3796A9EB9D8D666E413C /* SurfAceLocklessTopologyOperations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceLocklessTopologyOperations.swift; sourceTree = "<group>"; };
+		F0534BFF30E8E184DBFF95FE /* SurfAceCentralRegistration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceCentralRegistration.swift; sourceTree = "<group>"; };
+		F27843F5771357E13464EAA6 /* SurfAceANSI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceANSI.swift; sourceTree = "<group>"; };
+		FAA3A8C400F66EF1B9B88FCC /* SurfAceBonjourPublisher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceBonjourPublisher.swift; sourceTree = "<group>"; };
+		FD07E85E04A90B274617D77E /* SurfAceModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceModels.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		10F05931A18C694DD0C77BB5 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				6A1B4D3417CDFFC91DB082DA /* SurfAceTV.app */,
+				9B87A1CD5EADA05DC9704E19 /* SurfAceTVTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		45552AEF6496FD0A0BF6CBDC /* SurfAce */ = {
+			isa = PBXGroup;
+			children = (
+				4A6C511E9E640A38A2399D6A /* SurfAceAnnotationOutbox.swift */,
+				BE62DD5EB6326DCBFACC0BC7 /* SurfAceAnnotationPublisher.swift */,
+				F27843F5771357E13464EAA6 /* SurfAceANSI.swift */,
+				FAA3A8C400F66EF1B9B88FCC /* SurfAceBonjourPublisher.swift */,
+				61F1B4B8269BE24D748EFA93 /* SurfAceCentralDiscoveryLifecycle.swift */,
+				F0534BFF30E8E184DBFF95FE /* SurfAceCentralRegistration.swift */,
+				101E8DB6A6C5E0E44141E393 /* SurfAceHTTPServer.swift */,
+				4A97D5A825A270ED8C5422B5 /* SurfAceIdentityStore.swift */,
+				C5708EC5EED87839EAD5C233 /* SurfAceLocklessAuthority.swift */,
+				8C85BBB28AAB2F7D74E220CF /* SurfAceLocklessConsumableOperations.swift */,
+				6664999A4155A24EB51C63E7 /* SurfAceLocklessContentOperations.swift */,
+				9F3668B655B47711C90CDF5A /* SurfAceLocklessRuntimeAdapter.swift */,
+				DF164B3EA1566A4C62391DF8 /* SurfAceLocklessTopologyCodec.swift */,
+				E6FE3796A9EB9D8D666E413C /* SurfAceLocklessTopologyOperations.swift */,
+				156A7E9BE1810A1505B90C61 /* SurfAceLocklessUIProjection.swift */,
+				FD07E85E04A90B274617D77E /* SurfAceModels.swift */,
+				4D0F2912A0665C2C49932ABA /* SurfAceRuntime.swift */,
+				3FE24C33AAB31512046605CB /* SurfAceTVHTMLDiagnostic.swift */,
+				DA8D68A180E5CDC26EEC0897 /* Fonts */,
+			);
+			path = SurfAce;
+			sourceTree = "<group>";
+		};
+		A48639C5DFB800137B71724B /* SurfAceTests */ = {
+			isa = PBXGroup;
+			children = (
+				599B3929E3211F4BF0349918 /* SurfAceTVHTMLDiagnosticTests.swift */,
+			);
+			path = SurfAceTests;
+			sourceTree = "<group>";
+		};
+		B80877ABB83C6FBDA33EB467 /* SurfAceTV */ = {
+			isa = PBXGroup;
+			children = (
+				30F994D394FFF6783A9F5A27 /* SurfAceTVApp.swift */,
+				D0B1E1D149395D6342BA923E /* SurfAceTVPaneView.swift */,
+			);
+			path = SurfAceTV;
+			sourceTree = "<group>";
+		};
+		CC30B165E7E28281D306CF9B = {
+			isa = PBXGroup;
+			children = (
+				45552AEF6496FD0A0BF6CBDC /* SurfAce */,
+				A48639C5DFB800137B71724B /* SurfAceTests */,
+				B80877ABB83C6FBDA33EB467 /* SurfAceTV */,
+				DBBC763E39CADCB6611526C3 /* SurfAceTVTests */,
+				10F05931A18C694DD0C77BB5 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		DA8D68A180E5CDC26EEC0897 /* Fonts */ = {
+			isa = PBXGroup;
+			children = (
+				227478BC02BD7E97EFE89ED6 /* OFL-Rajdhani.txt */,
+				49D9AC9E6E36794D0762E179 /* Rajdhani-Bold.ttf */,
+				A04872CAEAB170E568881F03 /* Rajdhani-Regular.ttf */,
+			);
+			path = Fonts;
+			sourceTree = "<group>";
+		};
+		DBBC763E39CADCB6611526C3 /* SurfAceTVTests */ = {
+			isa = PBXGroup;
+			children = (
+				92388BD66C0BF29C445EBE10 /* SurfAceTVRenderingTests.swift */,
+			);
+			path = SurfAceTVTests;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		75D10303627E04823007778D /* SurfAceTV */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 4B63157AD7C74451E9DA08EE /* Build configuration list for PBXNativeTarget "SurfAceTV" */;
+			buildPhases = (
+				DBE251B965D872A5211BC9DD /* Sources */,
+				F0CB75A84BCF78BCA262E578 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = SurfAceTV;
+			packageProductDependencies = (
+			);
+			productName = SurfAceTV;
+			productReference = 6A1B4D3417CDFFC91DB082DA /* SurfAceTV.app */;
+			productType = "com.apple.product-type.application";
+		};
+		BDF72916A356AFC517575699 /* SurfAceTVTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 1A7B6B248D868EB72A60FFDD /* Build configuration list for PBXNativeTarget "SurfAceTVTests" */;
+			buildPhases = (
+				88EE83AABAB63DBF82F7F02D /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				D4023A2CE693C47A2203DFCC /* PBXTargetDependency */,
+			);
+			name = SurfAceTVTests;
+			packageProductDependencies = (
+			);
+			productName = SurfAceTVTests;
+			productReference = 9B87A1CD5EADA05DC9704E19 /* SurfAceTVTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		AAF404300776382C45D84808 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					75D10303627E04823007778D = {
+						DevelopmentTeam = Z7R59J7QV8;
+						ProvisioningStyle = Automatic;
+					};
+					BDF72916A356AFC517575699 = {
+						DevelopmentTeam = "";
+					};
+				};
+			};
+			buildConfigurationList = 94A64F394CF29B02E1ECC05A /* Build configuration list for PBXProject "SurfAceTV" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = CC30B165E7E28281D306CF9B;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				75D10303627E04823007778D /* SurfAceTV */,
+				BDF72916A356AFC517575699 /* SurfAceTVTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		F0CB75A84BCF78BCA262E578 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				51EA7C294F1746F2C0ED82EB /* OFL-Rajdhani.txt in Resources */,
+				D8BA8B306A12EAAB1AD445E0 /* Rajdhani-Bold.ttf in Resources */,
+				1DCBBDC6782F32FF338EF6DD /* Rajdhani-Regular.ttf in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		88EE83AABAB63DBF82F7F02D /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				554DF5F8B3E5A5EACDE381BE /* SurfAceTVHTMLDiagnosticTests.swift in Sources */,
+				C7AF99DF7CE65A4FE49D702B /* SurfAceTVRenderingTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		DBE251B965D872A5211BC9DD /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				FD45C4506957FC3293387464 /* SurfAceANSI.swift in Sources */,
+				2A675ADF548A245A159A9A78 /* SurfAceAnnotationOutbox.swift in Sources */,
+				B12F32DC896FE44813D2AA38 /* SurfAceAnnotationPublisher.swift in Sources */,
+				E4747ADDDCE5EF86B0C60270 /* SurfAceBonjourPublisher.swift in Sources */,
+				CBFF45DA958A1DB30D6B254B /* SurfAceCentralDiscoveryLifecycle.swift in Sources */,
+				CFA9ECC885BCB0EBDCF39B9B /* SurfAceCentralRegistration.swift in Sources */,
+				DE156DE8D4010A6EE1DA2C5C /* SurfAceHTTPServer.swift in Sources */,
+				9112DC7D2F5B25F7929F63FC /* SurfAceIdentityStore.swift in Sources */,
+				F2216C21463301C30DB83477 /* SurfAceLocklessAuthority.swift in Sources */,
+				D356EB6973AAB84511BE4F35 /* SurfAceLocklessConsumableOperations.swift in Sources */,
+				FFF41AC0051763B8DDE031F9 /* SurfAceLocklessContentOperations.swift in Sources */,
+				1AF0C324AB5DABC85CA5BB55 /* SurfAceLocklessRuntimeAdapter.swift in Sources */,
+				2DA597E008575655881FAEDD /* SurfAceLocklessTopologyCodec.swift in Sources */,
+				96F8D3DF203DF0E5E574AFC8 /* SurfAceLocklessTopologyOperations.swift in Sources */,
+				33B003E1AAE07F31E9A1A3BB /* SurfAceLocklessUIProjection.swift in Sources */,
+				F74F9A2FD6590E9951769FAE /* SurfAceModels.swift in Sources */,
+				C7303AF3CD9617DF58A9958E /* SurfAceRuntime.swift in Sources */,
+				D1600410CED5CBD811D7DD26 /* SurfAceTVApp.swift in Sources */,
+				9FCABB80DE771DB9DBA561A7 /* SurfAceTVHTMLDiagnostic.swift in Sources */,
+				B0062FD4D3081FB37AA2A180 /* SurfAceTVPaneView.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		D4023A2CE693C47A2203DFCC /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 75D10303627E04823007778D /* SurfAceTV */;
+			targetProxy = 9D40597E42C271DD5D3E3EEB /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		1FF3109A470C6664E5C290C8 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = "";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = appletvos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+		329CB3DC6A7F8EF76234B572 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = "App Icon & Top Shelf Image";
+				ASSETCATALOG_COMPILER_LAUNCHIMAGE_NAME = LaunchImage;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 17;
+				DEVELOPMENT_TEAM = Z7R59J7QV8;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = SurfAce/Info.plist;
+				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Connect to Surf Ace and display your panes.";
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = co.clicketyclacks.SurfAce.tv;
+				PRODUCT_MODULE_NAME = SurfAce;
+				PRODUCT_NAME = SurfAceTV;
+				SDKROOT = appletvos;
+				TARGETED_DEVICE_FAMILY = 3;
+				TVOS_DEPLOYMENT_TARGET = 26.0;
+			};
+			name = Release;
+		};
+		3F007CFF7CF784CA9B21FA60 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = "App Icon & Top Shelf Image";
+				ASSETCATALOG_COMPILER_LAUNCHIMAGE_NAME = LaunchImage;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 17;
+				DEVELOPMENT_TEAM = Z7R59J7QV8;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = SurfAce/Info.plist;
+				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Connect to Surf Ace and display your panes.";
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = co.clicketyclacks.SurfAce.tv;
+				PRODUCT_MODULE_NAME = SurfAce;
+				PRODUCT_NAME = SurfAceTV;
+				SDKROOT = appletvos;
+				TARGETED_DEVICE_FAMILY = 3;
+				TVOS_DEPLOYMENT_TARGET = 26.0;
+			};
+			name = Debug;
+		};
+		7608527C2764019BFA3A9C1E /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = co.clicketyclacks.SurfAce.tv.tests;
+				SDKROOT = appletvos;
+				TARGETED_DEVICE_FAMILY = 3;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/SurfAceTV.app/SurfAceTV";
+				TVOS_DEPLOYMENT_TARGET = 26.0;
+			};
+			name = Debug;
+		};
+		A71B4BFC9D52470C9F3F7B0E /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = appletvos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		B1B1BAC5804F9F4A76F11AD3 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = co.clicketyclacks.SurfAce.tv.tests;
+				SDKROOT = appletvos;
+				TARGETED_DEVICE_FAMILY = 3;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/SurfAceTV.app/SurfAceTV";
+				TVOS_DEPLOYMENT_TARGET = 26.0;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		1A7B6B248D868EB72A60FFDD /* Build configuration list for PBXNativeTarget "SurfAceTVTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				7608527C2764019BFA3A9C1E /* Debug */,
+				B1B1BAC5804F9F4A76F11AD3 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		4B63157AD7C74451E9DA08EE /* Build configuration list for PBXNativeTarget "SurfAceTV" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				3F007CFF7CF784CA9B21FA60 /* Debug */,
+				329CB3DC6A7F8EF76234B572 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		94A64F394CF29B02E1ECC05A /* Build configuration list for PBXProject "SurfAceTV" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A71B4BFC9D52470C9F3F7B0E /* Debug */,
+				1FF3109A470C6664E5C290C8 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = AAF404300776382C45D84808 /* Project object */;
+}
