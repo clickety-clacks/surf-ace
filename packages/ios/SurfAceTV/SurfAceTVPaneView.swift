@@ -80,6 +80,7 @@ final class SurfAceTVPaneView: UIView, SurfAcePaneBridging {
         do {
             try Self.validate(payload)
             // Validation precedes every display mutation, including history restore.
+            let sameContent = renderedEntry?.contentId == entry?.contentId && renderedEntry?.revision == entry?.revision
             document = nil
             switch payload {
             case .image(let encoded, _, _):
@@ -88,26 +89,18 @@ final class SurfAceTVPaneView: UIView, SurfAcePaneBridging {
                 text.isHidden = true
             case .pdf(let encoded):
                 document = try Self.pdf(encoded)
-                page = 1
+                page = sameContent ? min(page, document?.numberOfPages ?? 1) : 1
                 renderPage()
             case .terminal(let lines, _):
                 text.attributedText = Self.terminal(lines.joined(separator: "\n"), size: 24 * scale)
                 image.isHidden = true
                 text.isHidden = false
             case .markdown(let source):
-                // Native markdown preserves inline formatting. Block layout is
-                // retained line-by-line; unsupported table syntax stays readable.
-                let formatted = NSMutableAttributedString()
-                for line in source.components(separatedBy: .newlines) {
-                    let inline = (try? AttributedString(markdown: line)) ?? AttributedString(line)
-                    formatted.append(NSAttributedString(inline))
-                    formatted.append(NSAttributedString(string: "\n"))
-                }
-                formatted.addAttributes([.font: UIFont.systemFont(ofSize: 24 * scale), .foregroundColor: UIColor.white], range: NSRange(location: 0, length: formatted.length))
-                text.attributedText = formatted
+                let formatted = SurfAceTVMarkdown.render(source, scale: scale)
+                text.attributedText = formatted.text
                 image.isHidden = true
                 text.isHidden = false
-                onWarning?("Links cannot open on Apple TV. Unsupported formatting is shown as text.")
+                if let warning = formatted.warning { onWarning?(warning) }
             default: break
             }
             renderedEntry = entry
@@ -144,7 +137,11 @@ final class SurfAceTVPaneView: UIView, SurfAcePaneBridging {
     func moveViewport(dx: CGFloat, dy: CGFloat) {
         scroll.contentOffset = CGPoint(x: max(0, min(scroll.contentSize.width - bounds.width, scroll.contentOffset.x + dx)), y: max(0, min(scroll.contentSize.height - bounds.height, scroll.contentOffset.y + dy)))
     }
-    func setContentScale(_ scale: CGFloat) { self.scale = scale; render(entry: renderedEntry, restoreViewport: nil) }
+    func setContentScale(_ scale: CGFloat) {
+        let previousViewport = viewport
+        self.scale = scale
+        render(entry: renderedEntry, restoreViewport: previousViewport)
+    }
     func setInteraction(annotationMode: Bool, fingerDrawEnabled: Bool) { scroll.isScrollEnabled = !annotationMode }
     func restoreDrawing(from drawingData: Data, strokes: [SurfAceStroke]) -> Bool { restoreDrawingStrokes(strokes) }
     func restoreDrawingStrokes(_ strokes: [SurfAceStroke]) -> Bool { self.strokes = strokes; updateDrawing(); return true }
@@ -161,6 +158,7 @@ final class SurfAceTVPaneView: UIView, SurfAcePaneBridging {
         }
         drawing.path = path.cgPath
     }
+    var visibleText: String { text.isHidden ? "" : text.attributedText?.string ?? text.text ?? "" }
     private var viewport: SurfAceViewport {
         .init(scrollOffset: .init(x: scroll.contentOffset.x, y: scroll.contentOffset.y), visibleRect: .init(x: scroll.contentOffset.x, y: scroll.contentOffset.y, width: bounds.width, height: bounds.height), contentSize: .init(width: scroll.contentSize.width, height: scroll.contentSize.height), zoomLevel: Double(scale))
     }

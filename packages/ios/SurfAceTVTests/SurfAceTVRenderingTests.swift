@@ -36,6 +36,8 @@ final class SurfAceTVRenderingTests: XCTestCase {
         let view = SurfAceTVPaneView(frame: window.bounds)
         controller.view.addSubview(view)
         var captures: Set<String> = []
+        var selectedPage: Int?
+        view.onPage = { selectedPage = $0; XCTAssertEqual($1, 2) }
         for (type, payload) in payloads {
             try SurfAceTVPaneView.validate(payload)
             let frame = SurfAceFrame(contentId: "ct_12345678", revision: 1, contentType: type,
@@ -45,12 +47,19 @@ final class SurfAceTVRenderingTests: XCTestCase {
             view.layoutIfNeeded()
             let snapshot = await view.fetchSnapshot()
             let capture = try XCTUnwrap(snapshot?.imageBase64)
-            XCTAssertNotNil(UIImage(data: try XCTUnwrap(Data(base64Encoded: capture))))
+            let renderedImage = try XCTUnwrap(UIImage(data: try XCTUnwrap(Data(base64Encoded: capture))))
+            let attachment = XCTAttachment(image: renderedImage)
+            attachment.name = "TV-native-\(type.rawValue)"
+            attachment.lifetime = .keepAlways
+            add(attachment)
             captures.insert(capture)
             if type == .pdf {
                 view.changePage(1)
                 let second = await view.fetchSnapshot()
                 XCTAssertNotEqual(second?.imageBase64, capture)
+                XCTAssertEqual(selectedPage, 2)
+                view.setContentScale(1.5)
+                XCTAssertEqual(selectedPage, 2)
             }
         }
         XCTAssertEqual(captures.count, payloads.count)

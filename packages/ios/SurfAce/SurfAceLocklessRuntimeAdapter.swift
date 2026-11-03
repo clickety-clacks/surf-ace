@@ -55,7 +55,7 @@ enum SurfAceLocklessControlProjection {
 }
 
 enum SurfAceLocklessTargetAdmission {
-    #if os(iOS)
+    #if os(iOS) || os(tvOS)
     static let platformPermitsLockless = true
     #else
     static let platformPermitsLockless = false
@@ -221,7 +221,7 @@ actor SurfAceLocklessRuntimeAdapter {
         }
         try Self.normalizeTopologies(in: &state)
         var upgradeTombstoneMigrationChanged = false
-        #if os(iOS)
+        #if os(iOS) || os(tvOS)
         upgradeTombstoneMigrationChanged = try SurfAceLocklessTopologyOperations
             .finalizeProvenUpgradeTombstones(state: &state)
         #endif

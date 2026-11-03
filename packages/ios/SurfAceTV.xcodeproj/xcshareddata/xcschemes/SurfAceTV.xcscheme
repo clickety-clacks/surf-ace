@@ -55,6 +55,11 @@
       </CommandLineArguments>
       <EnvironmentVariables>
          <EnvironmentVariable
+            key = "SURF_ACE_TEST_ALLOCATOR"
+            value = "$(SURF_ACE_TEST_ALLOCATOR)"
+            isEnabled = "YES">
+         </EnvironmentVariable>
+         <EnvironmentVariable
             key = "SURF_ACE_XCTEST_HOST_NO_AUTOSTART"
             value = "1"
             isEnabled = "YES">

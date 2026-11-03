@@ -978,7 +978,7 @@ final class SurfAceRuntime {
                 guard let surface = state.liveSurfaces[surfaceId] else {
                     throw SurfAceLocklessTopologyOperationError.surfaceNotFound(surfaceId)
                 }
-                #if os(iOS)
+                #if os(iOS) || os(tvOS)
                 let result = try SurfAceLocklessTopologyOperations.surfaceWindowFinalClose(
                     state: &state,
                     surfaceId: surfaceId,
@@ -1010,7 +1010,7 @@ final class SurfAceRuntime {
             }
             for key in surfaceBefore.sceneKeys { removeSurfaceModel(sceneKey: key, persistProjection: false) }
             try projectLocklessAuthorityState(await adapter.snapshot())
-            #if os(iOS)
+            #if os(iOS) || os(tvOS)
             await fanoutLocklessCommittedEvent(
                 op: "event.surface_removed",
                 payload: .object([
@@ -1045,7 +1045,7 @@ final class SurfAceRuntime {
             guard let surface = state.liveSurfaces[surfaceId] else {
                 throw SurfAceLocklessTopologyOperationError.surfaceNotFound(surfaceId)
             }
-            #if os(iOS)
+            #if os(iOS) || os(tvOS)
             let result = try SurfAceLocklessTopologyOperations.paneFinalClose(
                 state: &state,
                 surfaceId: surfaceId,
@@ -1077,7 +1077,7 @@ final class SurfAceRuntime {
         try projectLocklessAuthorityState(await adapter.snapshot())
         removedPane?.pendingFlushTask?.cancel()
         removedPane?.pendingFlushTask = nil
-        #if os(iOS)
+        #if os(iOS) || os(tvOS)
         await fanoutLocklessCommittedEvent(
             op: "event.pane_removed",
             payload: .object([
@@ -1257,7 +1257,11 @@ final class SurfAceRuntime {
         if reidentifiedSurface { persistIdentityMapping() }
 
         #if os(tvOS)
-        // tvOS has one scene but retains every logical fleet surface.
+        // tvOS has one scene but retains every live logical fleet surface.
+        for surface in surfaces where state.liveSurfaces[surface.surfaceId] == nil {
+            surfaceById.removeValue(forKey: surface.surfaceId)
+        }
+        surfaces.removeAll { state.liveSurfaces[$0.surfaceId] == nil }
         for material in state.liveSurfaces.values where surfaceById[material.surfaceId] == nil {
             let surface = SurfAceSurfaceModel(sceneKey: "tv:" + material.surfaceId,
                 surfaceId: material.surfaceId, windowLabel: "", name: "Surf Ace")
@@ -2079,6 +2083,9 @@ final class SurfAceRuntime {
         strokes: [SurfAceStroke],
         drawingData: Data
     ) {
+        #if os(tvOS)
+        guard pane(surfaceId: surfaceId, paneId: paneId)?.htmlDiagnostic == nil else { return }
+        #endif
         if let adapter = locklessAdapter, !strokes.isEmpty {
             let key = "\(surfaceId):\(paneId)"
             let previous = annotationStrokeTasks[key]
@@ -2133,6 +2140,9 @@ final class SurfAceRuntime {
     ) async {
         do {
             guard let sourcePane = pane(surfaceId: surfaceId, paneId: paneId) else { return }
+            #if os(tvOS)
+            guard sourcePane.htmlDiagnostic == nil else { return }
+            #endif
             let existingFrame = await adapter.snapshot().annotationPublisher?
                 .openFrame(surfaceId: surfaceId, paneId: paneId)
             let background = existingFrame == nil
@@ -3183,12 +3193,13 @@ final class SurfAceRuntime {
                 throw SurfAceLocklessRuntimeAdapterError.invalidAdmission
             }
             if let failure = locklessCommittedFailureResult(committed, adapter: adapter) { return failure }
-            try projectLocklessAuthorityState(await adapter.snapshot())
             #if os(tvOS)
-            if let localPaneId = Int(exactly: paneId) {
-                pane(surfaceId: surfaceId, paneId: localPaneId)?.htmlDiagnostic = nil
+            if let localPaneId = Int(exactly: paneId), let localPane = pane(surfaceId: surfaceId, paneId: localPaneId) {
+                localPane.htmlDiagnostic = nil
+                localPane.toast = nil
             }
             #endif
+            try projectLocklessAuthorityState(await adapter.snapshot())
             await fanoutLocklessConsumable(
                 scopeId: Self.locklessPaneScopeId(surfaceId: surfaceId, paneId: paneId),
                 adapter: adapter
@@ -3349,6 +3360,14 @@ final class SurfAceRuntime {
                   payload["targetPayload"] != nil else {
                 throw SurfAceLocklessRuntimeAdapterError.invalidAdmission
             }
+            #if os(tvOS)
+            if payload["targetKind"] as? String == "browser_url" {
+                let url = (payload["targetPayload"] as? [String: Any])?["url"] as? String ?? ""
+                let localPane = (payload["paneId"] as? Int).flatMap { pane(surfaceId: surfaceId, paneId: $0) }
+                    ?? (payload["paneLineageId"] as? String).flatMap { paneByLineage(surfaceId: surfaceId, paneLineageId: $0) }
+                localPane?.toast = "Apple TV cannot open web pages: \(url)"
+            }
+            #endif
             let request = try Self.locklessJSON(fromFoundation: payload)
             let committed = try await adapter.commitTargetIntent(
                 connectionToken: connectionUUID,
@@ -3538,7 +3557,7 @@ final class SurfAceRuntime {
         do {
             let committed: SurfAceLocklessCommittedMutation
             var confirmedAfterCommit: [String: Int64] = [:]
-            #if os(iOS)
+            #if os(iOS) || os(tvOS)
             let closeSceneKey = (payload["surfaceId"] as? String).flatMap { surfaceById[$0]?.sceneKey }
             #else
             let closeSceneKey: String? = nil
@@ -3623,7 +3642,7 @@ final class SurfAceRuntime {
                     consumableScopeId: Self.locklessSurfaceScopeId(surfaceId),
                     consumableScopeKind: "surface", consumableRecordClass: .topology
                 ) { state, sequence in
-                    #if os(iOS)
+                    #if os(iOS) || os(tvOS)
                     let result = try SurfAceLocklessTopologyOperations.paneFinalClose(
                         state: &state, surfaceId: surfaceId, paneId: paneId,
                         expectedTopologyRevision: expected
@@ -3801,7 +3820,7 @@ final class SurfAceRuntime {
                             "surfaceId": .string(surfaceId),
                         ])
                     )
-                    #if os(iOS)
+                    #if os(iOS) || os(tvOS)
                     let result = try SurfAceLocklessTopologyOperations.surfaceWindowFinalClose(
                         state: &state, surfaceId: surfaceId,
                         expectedSurfaceSetRevision: surfaceSet, expectedTopologyRevision: topology
@@ -3872,10 +3891,12 @@ final class SurfAceRuntime {
                 )
             }
             let postSendAction: (@MainActor () async -> Void)?
-            #if os(iOS)
+            #if os(iOS) || os(tvOS)
             if op == "surface.window.open" || op == "surface.window.restore" {
                 postSendAction = {
+                    #if os(iOS)
                     SurfAceSceneActivation.requestNewWindow(source: "lockless:\(op)")
+                    #endif
                 }
             } else if op == "pane.close",
                       let surfaceId = payload["surfaceId"] as? String,
@@ -3914,6 +3935,7 @@ final class SurfAceRuntime {
                             "tombstoneId": .string(tombstoneId),
                         ])
                     )
+                    #if os(iOS)
                     guard let sceneKey = closeSceneKey,
                           let scene = UIApplication.shared.connectedScenes.first(where: {
                               $0.session.persistentIdentifier == sceneKey
@@ -3923,6 +3945,7 @@ final class SurfAceRuntime {
                         fields: [("source", "lockless"), ("surface_id", surfaceId)]
                     )
                     UIApplication.shared.requestSceneSessionDestruction(scene.session, options: nil)
+                    #endif
                 }
             } else {
                 postSendAction = nil
@@ -4507,6 +4530,9 @@ final class SurfAceRuntime {
             pane.lastNavigationURL = nil
             pane.lastPage = nil
             pane.pendingSnapshotHintReason = nil
+            #if os(tvOS)
+            pane.htmlDiagnostic = nil
+            #endif
             pane.bridge?.render(entry: nil, restoreViewport: nil)
             surfAceLifecycleLog(
                 "event=render_transition_empty \(surfAceDiagnosticFields([("actor", "content.apply.clear"), ("pane_id", paneId), ("restore_attempt_id", restoreAttemptId), ("revision", revision), ("surface_id", surfaceId)]))"
@@ -4548,9 +4574,19 @@ final class SurfAceRuntime {
             return makeErrorResponse(op: "content.apply", id: id, code: "invalid_payload", message: "invalid content.apply payload")
         }
 
+        #if os(tvOS)
+        if frame.contentType == .html || frame.contentType == .canvas || frame.contentType == .video {
+            if case .html(let html, _) = frame.payload { pane.htmlDiagnostic = SurfAceTVHTMLDiagnostic(html: html) }
+            pane.toast = "Apple TV does not support \(frame.contentType.rawValue) content."
+            return makeErrorResponse(op: "content.apply", id: id, code: "unsupported_content_type", message: "unsupported contentType")
+        }
+        do { try SurfAceTVPaneView.validate(frame.payload) }
+        catch { return makeErrorResponse(op: "content.apply", id: id, code: "render_failed", message: "Content could not be rendered; previous content is unchanged") }
+        #else
         if frame.contentType == .canvas {
             return makeErrorResponse(op: "content.apply", id: id, code: "unsupported_content_type", message: "unsupported contentType")
         }
+        #endif
 
         guard let historyOwnerToken = normalizedHistoryOwnerToken(from: payload["historyOwnerToken"]) else {
             return makeErrorResponse(op: "content.apply", id: id, code: "invalid_payload", message: "historyOwnerToken is required")
@@ -4572,6 +4608,9 @@ final class SurfAceRuntime {
             restoreViewport = nil
         }
         let historyInfo = applyContentSet(frame: frame, to: pane, historyOwnerToken: historyOwnerToken)
+        #if os(tvOS)
+        pane.htmlDiagnostic = nil
+        #endif
         applyRestoredDrawingsPayload(payload["restoredDrawings"], to: pane)
         pane.currentTarget = nil
 
@@ -4979,6 +5018,51 @@ final class SurfAceRuntime {
         )
         onComplete()
     }
+
+    #if os(tvOS)
+    func confirmTVArrangement(surfaceId: String, preview: SurfAceTVArrangement) async throws {
+        let adapter = try locklessAuthorityForLocalMutation()
+        let expected = preview.expectedRevision
+        let result: SurfAceLocklessLocalCommit
+        if preview.action == .resize {
+            guard let resize = preview.resizeRequest,
+                  let committed = try await adapter.commitLocalResize(surfaceId: surfaceId,
+                    path: resize.path, weights: resize.weights, expectedSplitIdentity: resize.identity,
+                    expectedTopologyRevision: expected) else { return }
+            result = committed
+        } else if preview.action == .split {
+            let claims = try await claimNewPaneLabels(surfaceId: surfaceId,
+                expectedTopologyRevision: expected, newPaneCount: 1, adapter: adapter)
+            let paneId = Int64(preview.paneId)
+            let direction = preview.direction.rawValue
+            result = try await adapter.commitLocalMutation(operation: "local.pane.split") { state, sequence in
+                let mutation = try SurfAceLocklessTopologyOperations.paneSplit(state: &state,
+                    surfaceId: surfaceId, paneId: paneId, count: 2, direction: direction,
+                    expectedTopologyRevision: expected, assignedPaneLabels: claims.labels,
+                    assignedPaneLineages: claims.lineages, assignedPaneGenerations: claims.generations)
+                return .object(["surfaceId": .string(surfaceId), "topology": mutation.topology,
+                    "topologyRevision": .integer(mutation.topologyRevision)])
+            }
+            for (paneId, label) in claims.labels {
+                if let lineage = claims.lineages[paneId] { confirmedPaneLabels["\(surfaceId):\(lineage)"] = label }
+            }
+        } else {
+            let desired = try canonicalTopologyJSON(from: SurfAcePersistedPaneLayoutNode(from: preview.preview))
+            let original = try canonicalTopologyJSON(from: SurfAcePersistedPaneLayoutNode(from: preview.original))
+            guard desired != original else { return }
+            result = try await adapter.commitLocalMutation(operation: "local.topology.apply") { state, sequence in
+                let mutation = try SurfAceLocklessTopologyOperations.topologyApply(state: &state,
+                    surfaceId: surfaceId, targetPaneId: nil, desired: desired, allowDestroyPaneIds: [],
+                    expectedTopologyRevision: expected)
+                return .object(["surfaceId": .string(surfaceId), "topology": mutation.topology,
+                    "topologyRevision": .integer(mutation.topologyRevision)])
+            }
+        }
+        try projectLocklessAuthorityState(await adapter.snapshot())
+        await fanoutLocklessCommittedEvent(op: "event.topology_changed", payload: result.result)
+        await drainControllerRetentionReclamations(adapter: adapter)
+    }
+    #endif
 
     private func commitLocalResize(
         adapter: SurfAceLocklessRuntimeAdapter,
