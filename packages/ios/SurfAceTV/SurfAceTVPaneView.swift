@@ -58,7 +58,14 @@ final class SurfAceTVPaneView: UIView, SurfAcePaneBridging {
     }
     enum NativeRenderError: Error { case invalidImage, invalidPDF, unsupported }
     private static func pdf(_ encoded: String) throws -> CGPDFDocument {
-        guard let data = Data(base64Encoded: encoded), let provider = CGDataProvider(data: data as CFData),
+        // Core Graphics on tvOS 27 can crash while rejecting non-PDF bytes.
+        // Allow leading bytes before the header, but reject a missing signature
+        // before entering the native parser so accepted pane content survives.
+        guard let data = Data(base64Encoded: encoded),
+              data.prefix(1024).range(of: Data("%PDF-".utf8)) != nil else {
+            throw NativeRenderError.invalidPDF
+        }
+        guard let provider = CGDataProvider(data: data as CFData),
               let document = CGPDFDocument(provider), document.isUnlocked, document.numberOfPages > 0 else {
             throw NativeRenderError.invalidPDF
         }
