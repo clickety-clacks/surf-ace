@@ -2,6 +2,7 @@ import { ConfirmedAnnotationLocalSaves } from "./annotation-local-save.js";
 import { ServerConnection } from "./server-connection.js";
 import { splitResizeMatches, splitResizeIsNoOp } from "./split-resize.js";
 import fs from "node:fs/promises";
+import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 
