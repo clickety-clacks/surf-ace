@@ -63,7 +63,7 @@ test("lockless mutation readiness spans dispatch and releases after failure", as
       socket: WebSocket;
       surfaceId: string | null;
     }>;
-    handleOrdinaryLocklessMessage: (
+    handleLocklessMessage: (
       socket: WebSocket,
       request: Record<string, unknown>,
     ) => Promise<void>;
@@ -90,7 +90,7 @@ test("lockless mutation readiness spans dispatch and releases after failure", as
     throw new Error("dispatch failure");
   };
 
-  const dispatch = direct.handleOrdinaryLocklessMessage(fakeSocket, {
+  const dispatch = direct.handleLocklessMessage(fakeSocket, {
     id: "rq_readiness_dispatch_failure",
     op: "pane.split",
     payload: {},
