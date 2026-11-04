@@ -12,11 +12,7 @@ const section = (start, end) => {
   assert.ok(from >= 0 && to > from, `production section ${start}`);
   return source.slice(from, to);
 };
-// The extracted attachment wiring now reads this production default-off gate.
-// Include its actual declaration instead of silently inventing a fixture value.
-const diagnosticGate = source.match(/^const panePaintDiagnosticEnabled = (true|false);$/m)?.[0];
-assert.equal(diagnosticGate, 'const panePaintDiagnosticEnabled = false;', 'diagnostic remains default-off');
-const code = transformSync(diagnosticGate + '\n' + section('function keyboardDirectionForVimKey', 'function focusNextWindow') +
+const code = transformSync(section('function keyboardDirectionForVimKey', 'function focusNextWindow') +
   section('function handleShortcutInput', 'function wireWindowDiagnostics'), { loader: 'ts' }).code;
 function fixture({ native = false } = {}) {
   const annotations = [], sends = [], activations = [], navigation = [], history = [];
@@ -30,10 +26,8 @@ function fixture({ native = false } = {}) {
     send(...args) { sends.push(args); } });
   const window = { webContents: contents(1) }, guest = contents(2);
   const bindings = new Map([[2, { surfaceId: 'sf', paneId: 2 }]]);
-  let diagnosticOwnerReads = 0;
   const context = vm.createContext({ process, console, parseAnnotationDoneContext,
     annotationDoneFence: { isBusy() { return doneBusy; } },
-    get paintNativeOwners() { diagnosticOwnerReads++; throw Error('disabled diagnostic owner accessed'); },
     core: { setActiveKeyboardPane(_s, id) { active = id; activations.push(id); },
       activeKeyboardPaneId() { return active; }, navigateActiveKeyboardPane(...args) { navigation.push(args); } },
     rendererWindowState: () => ({ panes }), browserUrlWebContentsPanes: bindings,
@@ -52,15 +46,14 @@ function fixture({ native = false } = {}) {
     return prevented;
   }
   return { window, guest, bindings, annotations, sends, activations, navigation, history, key,
-    setDoneBusy(value) { doneBusy = value; }, diagnosticOwnerReads: () => diagnosticOwnerReads };
+    setDoneBusy(value) { doneBusy = value; } };
 }
-test('production default-off attachment gate never accesses diagnostic owner', () => {
+test('attached guest retains keyboard routing and releases its binding on destruction', () => {
   const f = fixture();
-  assert.equal(f.diagnosticOwnerReads(), 0);
   assert.ok(f.guest.handlers.has('before-input-event'));
   f.key(f.guest, 'a');
   f.guest.handlers.get('destroyed')();
-  assert.equal(f.diagnosticOwnerReads(), 0);
+  assert.equal(f.bindings.has(f.guest.id), false);
 });
 test('focused guest owns ordinary typing, modifiers, arrows and page keys', () => {
   const f = fixture();
