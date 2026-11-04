@@ -5,6 +5,15 @@ import CoreGraphics
 
 @MainActor
 final class SurfAceTVRenderingTests: XCTestCase {
+    func testTerminalKeepsBrightColorsAndResetsStylePerPushedLine() throws {
+        let result = SurfAceTVPaneView.terminal("\u{001B}[1;31mred\u{001B}[91mbright\nplain", size: 24)
+        XCTAssertEqual(result.string, "redbright\nplain")
+        let red = try XCTUnwrap(result.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? UIColor)
+        let bright = try XCTUnwrap(result.attribute(.foregroundColor, at: 3, effectiveRange: nil) as? UIColor)
+        let plain = try XCTUnwrap(result.attribute(.font, at: 10, effectiveRange: nil) as? UIFont)
+        XCTAssertNotEqual(red, bright)
+        XCTAssertFalse(plain.fontDescriptor.symbolicTraits.contains(.traitBold))
+    }
     func testInvalidImagesAreRejectedBeforeRendering() {
         XCTAssertThrowsError(try SurfAceTVPaneView.validate(.image(data: "bm90IGFuIGltYWdl", mediaType: "image/png", alt: nil)))
     }

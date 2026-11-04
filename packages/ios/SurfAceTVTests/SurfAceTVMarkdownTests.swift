@@ -23,6 +23,8 @@ final class SurfAceTVMarkdownTests: XCTestCase {
         XCTAssertTrue(rendered.text.string.contains("| A | B |"))
         XCTAssertTrue(rendered.text.string.contains("<script>no execution</script>"))
         XCTAssertNotNil(rendered.warning)
+        let nested = SurfAceTVMarkdown.render("```\n~~~ literal fence\n```", scale: 1)
+        XCTAssertEqual(nested.text.string, "~~~ literal fence\n")
     }
     func testLinksWarnWithoutInstallingInteractiveURLs() {
         let rendered = SurfAceTVMarkdown.render("Read [this](https://example.com).", scale: 1)

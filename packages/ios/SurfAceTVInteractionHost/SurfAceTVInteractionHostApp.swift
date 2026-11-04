@@ -138,6 +138,7 @@ private final class RemoteInteractionFixture {
                     "allContentIDs": runtime.surfaces.flatMap { $0.panes.compactMap { $0.currentEntry.contentId } },
                     "scrollY": firstPane.retainedHostView?.scroll.contentOffset.y ?? 0,
                     "layout": String(describing: surface.paneLayout),
+                    "paneIDs": surface.panes.map(\.paneId),
                     "contentIDs": surface.panes.compactMap { $0.currentEntry.contentId }.sorted(),
                     "annotationMode": surface.panes.contains { $0.annotationMode },
                     "strokeCount": surface.panes.reduce(0) { $0 + $1.currentEntry.strokesById.count },
@@ -145,6 +146,8 @@ private final class RemoteInteractionFixture {
                     "distinctPointCount": Set(points.map { "\($0.x),\($0.y)" }).count,
                     "scale": firstPane.contentScale,
                     "page": firstPane.lastPage?.page ?? 0,
+                    "viewportWidth": firstPane.retainedHostView?.bounds.width ?? 0,
+                    "viewportHeight": firstPane.retainedHostView?.bounds.height ?? 0,
                     "diagnostic": firstPane.htmlDiagnostic != nil,
                     "nativeStrokeCount": surface.panes.reduce(0) { $0 + ($1.retainedHostView?.strokes.count ?? 0) }
                 ]

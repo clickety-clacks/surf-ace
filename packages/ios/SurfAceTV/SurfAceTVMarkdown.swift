@@ -16,9 +16,9 @@ enum SurfAceTVMarkdown {
             let trimmed = original.trimmingCharacters(in: .whitespaces)
             if trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~") {
                 let marker = String(trimmed.prefix(3))
-                if fence == nil { fence = marker }
-                else if fence == marker { fence = nil }
-                continue
+                if fence == nil { fence = marker; continue }
+                if fence == marker { fence = nil; continue }
+                // A different marker inside code is part of its literal source.
             }
             var line = original
             var heading = 0

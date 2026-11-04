@@ -41,7 +41,7 @@ struct SurfAceTVSurface: View {
                 Button("Beside \(arrangement?.targetPaneId ?? 0)") { cyclePane(target: true) }
               }
               HStack {
-                SurfAceTVRemoteControl(title: "Preview — Select edits; Play/Pause confirms", move: { direction in
+                SurfAceTVRemoteControl(title: "Preview (\(arrangement?.action.rawValue.capitalized ?? "Split")) — Select edits; Play/Pause confirms", move: { direction in
                         if arrangement?.action == .resize {
                             let delta = direction == .left || direction == .up ? -0.05 : 0.05
                             arrangement?.fraction = min(0.9, max(0.1, (arrangement?.fraction ?? 0.5) + delta))
@@ -165,6 +165,7 @@ struct SurfAceTVPane: View {
                 }
             }
             if showControls && pane.htmlDiagnostic == nil {
+              Group {
                 if scrollingControls {
                     SurfAceTVRemoteControl(title: "Select to pan — arrows move, Back exits", move: { direction in
                         let dx: CGFloat = direction == .left ? -60 : direction == .right ? 60 : 0
@@ -217,6 +218,10 @@ struct SurfAceTVPane: View {
                         }
                     }.font(.caption)
                 }
+              }
+              // Back retains an open annotation frame. Keep its viewport stable
+              // when the regular controls include the additional Done button.
+              .frame(height: 190, alignment: .top)
             }
             if pane.currentEntry.contentType == .pdf, let page = pane.lastPage {
                 Text("Page \(page.page) of \(page.totalPages)").font(.caption)

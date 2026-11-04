@@ -30,12 +30,16 @@ final class SurfAceTVRemoteTests: XCTestCase {
                 return state["strokeCount"] as? Int == 1 && (state["distinctPointCount"] as? Int ?? 0) >= 3
             }
             attach(app, "\(type)-stroke-ended")
+            let annotationViewport = telemetry(app)
             remote.press(.menu)
             XCTAssertTrue(app.buttons["Annotate"].firstMatch.waitForExistence(timeout: 5))
             wait(app, "Back preserves annotation mode and captured stroke") {
                 let state = self.telemetry(app)
                 return state["annotationMode"] as? Bool == true && state["strokeCount"] as? Int == 1
             }
+            XCTAssertEqual(telemetry(app)["viewportWidth"] as? Double, annotationViewport["viewportWidth"] as? Double)
+            XCTAssertEqual(telemetry(app)["viewportHeight"] as? Double, annotationViewport["viewportHeight"] as? Double,
+                           "Back must not move the accepted image away from its retained annotation")
             attach(app, "\(type)-back-preserves-stroke")
 
             try select(app.buttons["Annotate"].firstMatch, in: app)
@@ -87,6 +91,33 @@ final class SurfAceTVRemoteTests: XCTestCase {
         extraCommit.isInverted = true
         XCTAssertEqual(XCTWaiter.wait(for: [extraCommit], timeout: 1), .completed)
         attach(app, "arrangement-confirmed")
+    }
+
+    func testRemoteSplitAndMoveKeepExistingPaneContent() throws {
+        let app = launch(content: "terminal", scenario: "arrangement")
+        defer { app.terminate() }
+        let before = telemetry(app)
+        let revision = try XCTUnwrap(before["revision"] as? Int)
+        try select(app.buttons["Arrange panes"], in: app)
+        try select(app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Preview (Split)")).firstMatch, in: app)
+        remote.press(.right)
+        remote.press(.playPause)
+        wait(app, "Remote split commits one new pane") {
+            self.telemetry(app)["revision"] as? Int == revision + 1 && (self.telemetry(app)["paneIDs"] as? [Int])?.count == 3
+        }
+        XCTAssertEqual(telemetry(app)["contentIDs"] as? [String], before["contentIDs"] as? [String])
+        let splitLayout = telemetry(app)["layout"] as? String
+        attach(app, "remote-split-confirmed")
+        try select(app.buttons["Arrange panes"], in: app)
+        try select(app.buttons["Move"], in: app)
+        try select(app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Preview (Move)")).firstMatch, in: app)
+        remote.press(.down)
+        remote.press(.playPause)
+        wait(app, "Remote move commits one arrangement") { self.telemetry(app)["revision"] as? Int == revision + 2 }
+        XCTAssertNotEqual(telemetry(app)["layout"] as? String, splitLayout)
+        XCTAssertEqual(telemetry(app)["contentIDs"] as? [String], before["contentIDs"] as? [String])
+        XCTAssertEqual((telemetry(app)["paneIDs"] as? [Int])?.count, 3)
+        attach(app, "remote-move-confirmed")
     }
 
     func testRemotePDFPagingAndScalePreserveSelectedPage() throws {
@@ -193,6 +224,10 @@ final class SurfAceTVRemoteTests: XCTestCase {
         }
         for _ in 0..<20 {
             if target.hasFocus { return }
+            let focusReady = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                app.descendants(matching: .any).allElementsBoundByIndex.contains { $0.hasFocus }
+            }, object: nil)
+            _ = XCTWaiter.wait(for: [focusReady], timeout: 5)
             guard let current = app.descendants(matching: .any).allElementsBoundByIndex.first(where: { $0.hasFocus }) else {
                 navigation.append("No focused element; target=\(target.label) frame=\(target.frame)")
                 attach(app, "missing-focus")

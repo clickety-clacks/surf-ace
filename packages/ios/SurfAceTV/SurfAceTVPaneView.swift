@@ -176,10 +176,29 @@ final class SurfAceTVPaneView: UIView, SurfAcePaneBridging {
     func applyHTMLPatch(_ patch: SurfAceFramePatchRequest) async -> SurfAceHTMLPatchResult { .failed("Apple TV cannot display web pages") }
     func renderBrowserURL(entry: SurfAcePaneEntry) async -> SurfAceBrowserNavigationResult { .init(errorMessage: "Apple TV cannot display web pages", status: "failed", url: entry.url ?? "") }
 
-    private static func terminal(_ source: String, size: CGFloat) -> NSAttributedString {
+    static func terminal(_ source: String, size: CGFloat) -> NSAttributedString {
         let result = NSMutableAttributedString()
-        let palette: [UIColor] = [.black, .systemRed, .systemGreen, .systemYellow, .systemBlue, .systemPurple, .systemTeal, .white]
-        var color = UIColor.white
+        // The iPad renderer applies ANSI style independently to each pushed line.
+        for (index, line) in source.components(separatedBy: "\n").enumerated() {
+            if index > 0 { result.append(NSAttributedString(string: "\n")) }
+            result.append(terminalLine(line, size: size))
+        }
+        return result
+    }
+
+    private static func terminalLine(_ source: String, size: CGFloat) -> NSAttributedString {
+        let result = NSMutableAttributedString()
+        func rgb(_ value: UInt32) -> UIColor {
+            UIColor(red: CGFloat((value >> 16) & 255) / 255,
+                    green: CGFloat((value >> 8) & 255) / 255,
+                    blue: CGFloat(value & 255) / 255, alpha: 1)
+        }
+        // Same basic and bright palette as SurfAceANSI's iPad presentation.
+        let palette: [UIColor] = [0x111111, 0xff5f56, 0x27c93f, 0xffbd2e,
+            0x56a8ff, 0xbf5af2, 0x32ade6, 0xe5e5e5, 0x7d7d7d, 0xff8f88,
+            0x74f28a, 0xffd66f, 0x89c6ff, 0xd9a8ff, 0x7eddfd, 0xffffff].map(rgb)
+        let defaultColor = rgb(0xd4e8ff)
+        var color = defaultColor
         var bold = false
         let pattern = try! NSRegularExpression(pattern: "\u{001B}\\[([0-9;]*)m")
         let range = NSRange(source.startIndex..., in: source)
@@ -194,10 +213,10 @@ final class SurfAceTVPaneView: UIView, SurfAcePaneBridging {
             let values = string.substring(with: match.range(at: 1))
             for code in (values.isEmpty ? [0] : values.split(separator: ";").compactMap { Int($0) }) {
                 switch code {
-                case 0: color = .white; bold = false
+                case 0: color = defaultColor; bold = false
                 case 1: bold = true
                 case 30...37: color = palette[code - 30]
-                case 90...97: color = palette[code - 90]
+                case 90...97: color = palette[code - 90 + 8]
                 default: break
                 }
             }
