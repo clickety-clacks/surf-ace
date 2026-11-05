@@ -4926,7 +4926,7 @@ test("surface.describe returns topology when saved registry binding or lease is 
       expectedLeaseGeneration: 16,
       expectedRegistryIdentityUnavailable: false,
       expectedEndpointLeaseUnavailable: false,
-      expectedLimitations: ["registry_binding_stale", "endpoint_lease_stale"],
+      expectedLimitations: ["registry_binding_stale", "endpoint_lease_expired", "endpoint_lease_stale"],
     },
   ] as const;
 

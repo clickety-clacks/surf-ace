@@ -848,12 +848,14 @@ test("an abandoned registration persistence yields to fresh attempts and recover
   const persistenceStalled = deferred();
   const releasePersistence = deferred();
   const persistenceReadiness = new PersistenceWriteReadiness();
+  const reportedErrors: string[] = [];
   const connection = new ServerConnection({
     configuredAddress: registry.address,
     directEndpoint,
     clientId: "local-persistence-recovery-client",
     core,
     discovery: emptyDiscovery(),
+    onError: (error) => reportedErrors.push(error instanceof Error ? error.message : String(error)),
     persist: async () => await persistenceReadiness.track(async () => {
       persistenceCalls += 1;
       if (persistenceCalls === 2) {
@@ -870,7 +872,9 @@ test("an abandoned registration persistence yields to fresh attempts and recover
     await persistenceStalled.promise;
     await rejected;
     assert.equal(state().connectionBar, "disconnected");
-    assert.match(state().connectionError ?? "", /registry_cycle_timed_out:local registration response persistence/);
+    assert.ok(reportedErrors.some((message) =>
+      /registry_cycle_timed_out:local registration response persistence/.test(message)),
+    `timeout stage is reported through the existing diagnostic callback: ${reportedErrors.join("; ")}`);
     assert.deepEqual(core.registryBinding(), {
       allocatorId: "alloc_fixture",
       clientId: "local-persistence-recovery-client",

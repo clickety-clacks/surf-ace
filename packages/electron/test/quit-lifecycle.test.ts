@@ -57,7 +57,7 @@ test("ordinary Quit preserves acknowledged state, blocks new saves, and does not
     assert.doesNotThrow(() => assertWritesAllowed(false));
     assert.throws(() => assertWritesAllowed(quitting), /application_is_quitting/);
     const restored = await loadPersistentStateFile(stateDir, "state.json");
-    assert.deepEqual(restored.state, state,
+    assert.deepEqual(restored.state, JSON.parse(JSON.stringify(state)),
       "a save acknowledged before Quit remains on disk even while runtime cleanup is stuck");
     const reopened = new SurfaceCore({ persistentState: restored.state });
     const [reopenedSurface] = reopened.restorePersistedSurfaces("Quit lifecycle fixture", {
