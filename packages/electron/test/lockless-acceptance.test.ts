@@ -9,7 +9,6 @@ import {
   LocklessAuthorityError,
   LocklessClientAuthority,
   createEmptyLocklessClientState,
-  exactDurableBytes,
   type AuthorityEvent,
 } from "../src/lockless-client-authority.js";
 import { SurfaceCore } from "../src/surface-core.js";
@@ -323,40 +322,6 @@ test("lockless lifecycle list replaces the renderer bootstrap pane before exposi
   });
 });
 
-test("AC-CAP-03 AC-SURF-06: SURF-12 is exact and rejects a one-byte-short recoverable envelope", () => {
-  const exact = acceptanceLimits({
-    maxAdmittedControllerEntries: 3,
-    maxPaneAnnotationRestoreBytes: 601,
-    maxPaneConsumableBytes: 311,
-    maxPaneRecoverableStateBytes: 701,
-    maxPanesPerSurface: 2,
-    maxRetainedTombstones: 3,
-    maxSurfaceConsumableBytes: 401,
-    maxSurfaceRecoverableBaseBytes: 503,
-    maxConsumableCursorStateBytesPerScope: 37,
-  });
-  const expected =
-    exact.maxSurfaceRecoverableBaseBytes +
-    exact.maxSurfaceConsumableBytes +
-    exact.maxAdmittedControllerEntries *
-      exact.maxConsumableCursorStateBytesPerScope +
-    (exact.maxPanesPerSurface + exact.maxRetainedTombstones) *
-      (
-        exact.maxPaneRecoverableStateBytes +
-        exact.maxPaneConsumableBytes +
-        exact.maxAdmittedControllerEntries *
-          exact.maxConsumableCursorStateBytesPerScope
-      );
-  assert.equal(exact.maxRecoverableSurfaceBytes, expected);
-  assert.doesNotThrow(() => assertLocklessCapacityLimits(exact));
-  assert.throws(
-    () => assertLocklessCapacityLimits({
-      ...exact,
-      maxRecoverableSurfaceBytes: expected - 1,
-    }),
-    /invalid_lockless_limit:recoverable_surface_envelope/,
-  );
-});
 
 test("AC-HIST-01..05: production SurfaceCore appends mixed-controller history, restores entry state, truncates Forward, and applies cross-controller LRU", () => {
   const core = coreWithLimits();
@@ -565,17 +530,13 @@ test("AC-TOPO-01 AC-TOPO-02 AC-TOPO-03 AC-TOPO-05 AC-TOPO-06 AC-OPS-02: stale to
 });
 
 test("AC-CAP-01 AC-FC-1: final pane close cannot be restored and pane creation remains bounded", async () => {
-  const core = coreWithLimits(acceptanceLimits({
-    maxPanesPerSurface: 2,
-  }));
+  const core = coreWithLimits(acceptanceLimits({ maxPanesPerSurface: 2 }));
   const surface = core.ensurePrimarySurface("Surf Ace", viewport);
   await withRegistryServer(core, async ({ url }) => {
     const socket = await connect(url);
     try {
       assert.equal((await pair(socket, "openclaw-capacity", surface.surfaceId)).ok, true);
-      const initial = await request(socket, "panes.list", {
-        surfaceId: surface.surfaceId,
-      });
+      const initial = await request(socket, "panes.list", { surfaceId: surface.surfaceId });
       const rootPaneId = initial.payload.panes[0].paneId;
       const split = await request(socket, "pane.split", {
         count: 2,
@@ -602,6 +563,18 @@ test("AC-CAP-01 AC-FC-1: final pane close cannot be restored and pane creation r
       assert.ok(finalClose, "the committed close keeps its terminal identity audit");
       assert.equal(finalClose.closeRevision, closed.payload.topologyRevision);
 
+      const beforeRestore = paneLifecycleBusinessState(core);
+      const restore = await request(socket, "pane.restore", {
+        anchorPaneId: rootPaneId,
+        direction: "horizontal",
+        expectedTopologyRevision: closed.payload.topologyRevision,
+        surfaceId: surface.surfaceId,
+        tombstoneId: closed.payload.tombstoneId,
+      });
+      assert.equal(restore.ok, false);
+      assert.equal(restore.error.code, "tombstone_not_found");
+      assert.deepEqual(paneLifecycleBusinessState(core), beforeRestore);
+
       const resplit = await request(socket, "pane.split", {
         count: 2,
         direction: "vertical",
@@ -611,19 +584,6 @@ test("AC-CAP-01 AC-FC-1: final pane close cannot be restored and pane creation r
       });
       assert.equal(resplit.ok, true, JSON.stringify(resplit));
       assert.equal(core.activePaneIds(surface.surfaceId).length, 2);
-
-      const beforeRestore = paneLifecycleBusinessState(core);
-      const restore = await request(socket, "pane.restore", {
-        anchorPaneId: rootPaneId,
-        direction: "horizontal",
-        expectedTopologyRevision: resplit.payload.topologyRevision,
-        surfaceId: surface.surfaceId,
-        tombstoneId: closed.payload.tombstoneId,
-      });
-      assert.equal(restore.ok, false);
-      assert.equal(restore.error.code, "tombstone_not_found");
-      assert.deepEqual(paneLifecycleBusinessState(core), beforeRestore);
-
       const beforeCapacityRefusal = paneLifecycleBusinessState(core);
       const refusedCreation = await request(socket, "pane.split", {
         count: 2,
@@ -642,217 +602,126 @@ test("AC-CAP-01 AC-FC-1: final pane close cannot be restored and pane creation r
   });
 });
 
-test("AC-CAP-02 AC-CLOSE-06 AC-CLOSE-09: exact byte limits accept equality, reject +1 silently, and report oldest tombstone reclamation", () => {
-  const paneValue = { content: "pane-at-limit".repeat(8) };
-  const annotations = [{ stroke: "annotation-at-limit" }];
-  const limits = acceptanceLimits({
-    maxPaneAnnotationRestoreBytes: exactDurableBytes(annotations),
-    maxPaneRecoverableStateBytes: exactDurableBytes(paneValue),
-    maxRetainedTombstones: 2,
-  });
-  const target = new LocklessClientAuthority(
-    createEmptyLocklessClientState(limits),
-  );
-  const events: AuthorityEvent[] = [];
-  target.subscribe((event) => events.push(event));
-  assert.doesNotThrow(() =>
-    target.assertPaneRecoverableCapacity({}, paneValue, annotations)
-  );
-  const before = target.exportState();
-  assert.throws(
-    () =>
-      target.assertPaneRecoverableCapacity(
-        {},
-        { content: `${paneValue.content}!` },
-        annotations,
-      ),
-    (error) =>
-      error instanceof LocklessAuthorityError &&
-      error.code === "pane_state_capacity",
-  );
-  assert.deepEqual(target.exportState(), before);
-  assert.deepEqual(events, []);
-
-  const first = target.createTombstone({
-    kind: "pane",
-    payload: { pane: { paneId: 1 } },
-    surfaceId: "surface-a",
-  });
-  const second = target.createTombstone({
-    kind: "pane",
-    payload: { pane: { paneId: 2 } },
-    surfaceId: "surface-a",
-  });
-  target.createTombstone({
-    kind: "pane",
-    payload: { pane: { paneId: 3 } },
-    surfaceId: "surface-a",
-  });
-  assert.deepEqual(
-    target.listTombstones("pane").map((entry) => entry.tombstoneId),
-    [second.tombstoneId, target.listTombstones("pane")[1]!.tombstoneId],
-  );
-  const reclaimed = events.find(
-    (event) =>
-      event.type === "event.tombstone_reclaimed" &&
-      event.tombstoneId === first.tombstoneId,
-  );
-  assert(reclaimed && reclaimed.type === "event.tombstone_reclaimed");
-  assert.equal(reclaimed.reason, "count_capacity");
-  assert.equal(reclaimed.surfaceId, "surface-a");
-  assert.equal(reclaimed.maxRetainedTombstones, 2);
-  assert.equal(reclaimed.bytes, first.bytes);
-});
-
-test("CAP-3 websocket mutations reject exact surface and pane byte classes atomically", async () => {
-  const surfaceProbe = coreWithLimits(acceptanceLimits());
-  const probeSurface = surfaceProbe.ensurePrimarySurface("Surf Ace", viewport);
-  applyRegistryInitialTopology(surfaceProbe);
-  surfaceProbe.admitSurfaceToLockless(probeSurface.surfaceId);
-  const surfaceLimit = exactDurableBytes(
-    surfaceProbe.captureSurfaceRecoverableBase(probeSurface.surfaceId),
-  );
-  const surfaceLimitedCore = coreWithLimits(acceptanceLimits({
-    maxPanesPerSurface: 4,
-    maxSurfaceRecoverableBaseBytes: surfaceLimit,
-  }));
-  const surface = surfaceLimitedCore.ensurePrimarySurface("Surf Ace", viewport);
-  await withRegistryServer(surfaceLimitedCore, async ({ url }) => {
+test("recoverable topology tombstones can restore above the creation limit without allowing new panes", async () => {
+  const core = coreWithLimits(acceptanceLimits({ maxPanesPerSurface: 2 }));
+  const surface = core.ensurePrimarySurface("Surf Ace", viewport);
+  await withRegistryServer(core, async ({ url }) => {
     const socket = await connect(url);
     try {
-      assert.equal((await pair(socket, "tight-cap-surface", surface.surfaceId)).ok, true);
-      const initial = await request(socket, "panes.list", {
-        surfaceId: surface.surfaceId,
-      });
-      const before = surfaceLimitedCore.getPersistentState();
+      assert.equal((await pair(socket, "openclaw-restored-capacity", surface.surfaceId)).ok, true);
+      const initial = await request(socket, "panes.list", { surfaceId: surface.surfaceId });
+      const rootPaneId = initial.payload.panes[0].paneId;
       const split = await request(socket, "pane.split", {
         count: 2,
         direction: "horizontal",
         expectedTopologyRevision: initial.payload.topology.topologyRevision,
-        paneId: initial.payload.panes[0].paneId,
+        paneId: rootPaneId,
         surfaceId: surface.surfaceId,
       });
-      assert.equal(split.ok, false);
-      assert.equal(split.error.code, "surface_state_capacity");
-      assert.deepEqual(
-        surfaceLimitedCore.getPersistentState().surfaces,
-        before.surfaces,
-      );
-      const topology = await request(socket, "topology.apply", {
-        allowDestroyPaneIds: [],
-        desired: {
-          children: [
-            { paneId: initial.payload.panes[0].paneId, type: "pane" },
-            { type: "pane" },
-          ],
-          direction: "horizontal",
-          type: "split",
-        },
-        expectedTopologyRevision: initial.payload.topology.topologyRevision,
+      assert.equal(split.ok, true, JSON.stringify(split));
+      const secondPaneId = split.payload.panes.find(
+        (pane: { paneId: number }) => pane.paneId !== rootPaneId,
+      ).paneId;
+      const removed = await request(socket, "topology.apply", {
+        allowDestroyPaneIds: [secondPaneId],
+        desired: { paneId: rootPaneId, type: "pane" },
+        expectedTopologyRevision: split.payload.topologyRevision,
         surfaceId: surface.surfaceId,
         target: { root: true },
       });
-      assert.equal(topology.ok, false);
-      assert.equal(topology.error.code, "surface_state_capacity");
-      assert.deepEqual(
-        surfaceLimitedCore.getPersistentState().surfaces,
-        before.surfaces,
-      );
-      assert.equal(
-        surfaceLimitedCore.locklessAuthority.listTombstones("pane").length,
-        0,
-      );
-    } finally {
-      socket.close();
-    }
-  });
+      assert.equal(removed.ok, true, JSON.stringify(removed));
+      const tombstone = removed.payload.destroyedPaneTombstones[0];
+      assert.equal(tombstone.paneId, secondPaneId);
+      assert.equal(core.activePaneIds(surface.surfaceId).length, 1);
 
-  const paneProbe = coreWithLimits(acceptanceLimits());
-  const probePaneSurface = paneProbe.ensurePrimarySurface("Surf Ace", viewport);
-  applyRegistryInitialTopology(paneProbe);
-  paneProbe.admitSurfaceToLockless(probePaneSurface.surfaceId);
-  const probePaneId = paneProbe.activePaneIds(probePaneSurface.surfaceId)[0]!;
-  const paneLimit =
-    exactDurableBytes(
-      paneProbe.capturePaneTombstonePayload(
-        probePaneSurface.surfaceId,
-        probePaneId,
-      ).pane,
-    ) + 128;
-  const paneLimitedCore = coreWithLimits(acceptanceLimits({
-    maxPaneAnnotationRestoreBytes: paneLimit,
-    maxPaneRecoverableStateBytes: paneLimit,
-  }));
-  const paneSurface = paneLimitedCore.ensurePrimarySurface("Surf Ace", viewport);
-  await withRegistryServer(paneLimitedCore, async ({ url }) => {
-    const socket = await connect(url);
-    try {
-      assert.equal((await pair(socket, "tight-cap-pane", paneSurface.surfaceId)).ok, true);
-      const initial = await request(socket, "panes.list", {
-        surfaceId: paneSurface.surfaceId,
+      const refilled = await request(socket, "pane.split", {
+        count: 2,
+        direction: "horizontal",
+        expectedTopologyRevision: removed.payload.topologyRevision,
+        paneId: rootPaneId,
+        surfaceId: surface.surfaceId,
       });
-      const pane = initial.payload.panes[0];
-      const before = paneLimitedCore.getPersistentState();
-      const register = await request(socket, "target.register", {
-        expectedPreviousTargetEpoch: null,
-        idempotencyKey: "oversize-register",
-        launchedAt: new Date().toISOString(),
-        paneId: pane.paneId,
-        registrationState: "before_attach",
-        surfaceId: paneSurface.surfaceId,
-        targetHeader: {},
-        targetKind: "markdown",
-        targetPayload: { markdown: "x".repeat(2_000) },
+      assert.equal(refilled.ok, true, JSON.stringify(refilled));
+      const restored = await request(socket, "pane.restore", {
+        anchorPaneId: rootPaneId,
+        direction: "horizontal",
+        expectedTopologyRevision: refilled.payload.topologyRevision,
+        surfaceId: surface.surfaceId,
+        tombstoneId: tombstone.tombstoneId,
       });
-      assert.equal(register.ok, false);
-      assert.equal(register.error.code, "pane_state_capacity");
-      assert.deepEqual(
-        paneLimitedCore.getPersistentState().surfaces,
-        before.surfaces,
-      );
-      const applyResult = nextEvent(socket, "event.target_apply_result");
-      const apply = await request(socket, "target.apply", {
-        paneId: pane.paneId,
-        requestId: "oversize-apply",
-        restoreReason: "initial",
-        surfaceId: paneSurface.surfaceId,
-        targetEpoch: 1,
-        targetHeader: {
-          payloadSchemaVersion: 1,
-          replaySemantics: "navigate",
-          requiredCapabilities: ["target.browser_url.v1"],
-          safeToLogFields: ["url"],
-          safetyClass: "network",
-          summary: "oversize",
+      assert.equal(restored.ok, true, JSON.stringify(restored));
+      assert.equal(core.activePaneIds(surface.surfaceId).length, 3,
+        "restoration preserves an existing pane even when the current creation limit is lower");
+
+      let creationAllocations = 0;
+      const allocateIdentity = core.locklessAuthority.allocatePaneIdentity.bind(core.locklessAuthority);
+      core.locklessAuthority.allocatePaneIdentity = (usedIds) => {
+        creationAllocations += 1;
+        return allocateIdentity(usedIds);
+      };
+      const beforeCreation = core.getPersistentState();
+      const nextCreation = await request(socket, "pane.split", {
+        count: 2,
+        direction: "horizontal",
+        expectedTopologyRevision: restored.payload.topologyRevision,
+        paneId: rootPaneId,
+        surfaceId: surface.surfaceId,
+      });
+      assert.equal(nextCreation.ok, false, JSON.stringify(nextCreation));
+      assert.equal(nextCreation.error.code, "pane_capacity");
+      assert.deepEqual(core.getPersistentState().surfaces, beforeCreation.surfaces);
+      assert.deepEqual(core.getPersistentState().lockless?.tombstones, beforeCreation.lockless?.tombstones);
+      assert.equal(core.activePaneIds(surface.surfaceId).length, 3);
+
+      const topologyCreation = await request(socket, "topology.apply", {
+        allowDestroyPaneIds: [],
+        desired: {
+          type: "split", direction: "horizontal",
+          children: [
+            ...core.activePaneIds(surface.surfaceId).map((paneId) => ({ type: "pane", paneId })),
+            { type: "pane", name: "Must not allocate" },
+          ],
         },
-        targetId: "oversize-apply",
-        targetKind: "browser_url",
-        targetPayload: {
-          url: `https://example.com/${"x".repeat(2_000)}`,
-        },
+        expectedTopologyRevision: restored.payload.topologyRevision,
+        surfaceId: surface.surfaceId,
+        target: { root: true },
       });
-      assert.equal(apply.ok, true, JSON.stringify(apply));
-      assert.equal(apply.payload.status, "intent_committed");
-      assert.equal(apply.payload.targetRequestId, "oversize-apply");
-      const result = await applyResult;
-      assert.equal(result.payload.status, "failed");
-      assert.equal(result.payload.errorCode, "pane_state_capacity");
-      assert.equal(
-        result.payload.intentCommitSequence,
-        apply.payload.operationReceipt.commitSequence,
-      );
-      assert.equal(
-        result.payload.operationRequestId,
-        apply.payload.operationRequestId,
-      );
-      assert.deepEqual(
-        paneLimitedCore.getPersistentState().surfaces,
-        before.surfaces,
-      );
+      assert.equal(topologyCreation.ok, false, JSON.stringify(topologyCreation));
+      assert.equal(topologyCreation.error.code, "pane_capacity");
+      assert.deepEqual(core.getPersistentState().surfaces, beforeCreation.surfaces);
+      assert.deepEqual(core.getPersistentState().lockless?.tombstones, beforeCreation.lockless?.tombstones);
+      assert.equal(creationAllocations, 0);
+
+      const rearranged = await request(socket, "topology.apply", {
+        allowDestroyPaneIds: [],
+        desired: {
+          type: "split", direction: "vertical",
+          children: core.activePaneIds(surface.surfaceId).map((paneId) => ({ type: "pane", paneId })),
+        },
+        expectedTopologyRevision: restored.payload.topologyRevision,
+        surfaceId: surface.surfaceId,
+        target: { root: true },
+      });
+      assert.equal(rearranged.ok, true, JSON.stringify(rearranged));
+      assert.equal(core.activePaneIds(surface.surfaceId).length, 3);
+      assert.equal(creationAllocations, 0);
     } finally {
       socket.close();
     }
   });
+});
+
+test("recoverable pane tombstones remain restorable beyond the legacy retention count", () => {
+  const target = new LocklessClientAuthority(createEmptyLocklessClientState(
+    acceptanceLimits({ maxRetainedTombstones: 2 })));
+  const recoverable = [1, 2, 3].map((paneId) => target.createTombstone({
+    kind: "pane", payload: { pane: { paneId } }, surfaceId: "surface-a",
+  }));
+  assert.deepEqual(target.listTombstones(), recoverable);
+  assert.deepEqual(target.retainedPaneIds("surface-a"), [1, 2, 3]);
+  assert.deepEqual(target.listPendingPaneReleases(), []);
+  assert.deepEqual(target.restoreTombstone(recoverable[0]!.tombstoneId, "pane"), recoverable[0]);
+  assert.deepEqual(target.listTombstones(), recoverable.slice(1));
 });
 
 test("global lifecycle seam serializes concurrent cross-surface pane final closes", async () => {

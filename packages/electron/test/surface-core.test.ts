@@ -11,7 +11,7 @@ import {
 } from "../../protocol/src/lockless.js";
 import type { NativePaneMaterialization } from "../src/native-pane-bridge.js";
 import { compositorPaneIdForSurface } from "../src/native-pane-bridge.js";
-import { SurfaceCore, SurfaceCoreError } from "../src/surface-core.js";
+import { SurfaceCore, SurfaceCoreError, coreEventNeedsPersistence } from "../src/surface-core.js";
 import { PersistentStateOutcomeUnknownError } from "../src/persistent-state-file.js";
 import {
   createEmptyLocklessClientState,
@@ -135,6 +135,152 @@ test("concurrent async surface transactions serialize rollback and event deliver
   assert.equal(core.listSurfaces()[0]?.surfaceId, committed.surfaceId);
   assert.equal(core.listSurfaces()[0]?.name, "second");
   assert.equal(delivered.filter((type) => type === "surface-created").length, 1);
+});
+
+// DESIGN 4.7/4.8: one accepted durable generation projects without saving
+// that same generation again; failed/uncertain saves never fake acceptance.
+test("durable transaction projects after save without notification-triggered rewrites", async () => {
+  const core = new SurfaceCore();
+  const surface = core.ensurePrimarySurface("save owner", { width: 800, height: 600, scale: 1 });
+  const paneId = applyProviderBootstrap(core, surface.surfaceId, 1);
+  let releaseSave = (): void => {};
+  const heldSave = new Promise<void>((resolve) => { releaseSave = resolve; });
+  let enteredSave = (): void => {};
+  const saveEntered = new Promise<void>((resolve) => { enteredSave = resolve; });
+  const saves: ReturnType<SurfaceCore["getPersistentState"]>[] = [];
+  const projected: string[] = [];
+  core.subscribe((event) => {
+    projected.push(event.type);
+    if (coreEventNeedsPersistence(event)) saves.push(core.getPersistentState());
+  });
+  const pending = core.transactionAsync(async () => {
+    core.paneRename(surface.surfaceId, paneId, "accepted name");
+    core.markLocklessAuthorityChanged(surface.surfaceId);
+    core.markLocklessAuthorityChanged(surface.surfaceId);
+    saves.push(core.getPersistentState());
+    enteredSave();
+    await heldSave;
+  }, { retainUncertainEvents: true, onNotificationError: (error) => { throw error; } });
+  await saveEntered;
+  assert.deepEqual(projected, [], "projection cannot precede accepted save");
+  releaseSave();
+  await pending;
+  assert.equal(saves.length, 1, "already saved notifications cannot create another generation");
+  assert.ok(projected.includes("surface-changed"));
+  assert.ok(projected.includes("lockless-authority-changed"));
+  const restarted = new SurfaceCore({ persistentState: saves[0] });
+  restarted.restorePersistedSurfaces("save owner", { width: 800, height: 600, scale: 1 });
+  assert.equal(restarted.getRendererWindowState(surface.surfaceId).panes[0]!.name, "accepted name");
+  core.paneRename(surface.surfaceId, paneId, "later local name");
+  assert.equal(saves.length, 2, "a later local change still needs its own save");
+  assert.equal(saves[1]!.surfaces![0]!.panes[0]!.name, "later local name");
+});
+
+test("definite save failure restores state and emits no committed projection", async () => {
+  const core = new SurfaceCore();
+  const surface = core.ensurePrimarySurface("failed owner", { width: 800, height: 600, scale: 1 });
+  const paneId = applyProviderBootstrap(core, surface.surfaceId, 1);
+  const before = core.getPersistentState();
+  const projected: string[] = [];
+  core.subscribe((event) => projected.push(event.type));
+  await assert.rejects(core.transactionAsync(async () => {
+    core.paneRename(surface.surfaceId, paneId, "not accepted");
+    core.markLocklessAuthorityChanged(surface.surfaceId);
+    throw new Error("definite store failure");
+  }, { retainUncertainEvents: true, onNotificationError: () => {} }), /definite store failure/);
+  assert.deepEqual(core.getPersistentState(), before);
+  assert.deepEqual(projected, []);
+});
+
+test("unknown save keeps candidate silent until exact accepted-state readback", async () => {
+  const core = new SurfaceCore();
+  const surface = core.ensurePrimarySurface("uncertain owner", { width: 800, height: 600, scale: 1 });
+  const paneId = applyProviderBootstrap(core, surface.surfaceId, 1);
+  const projected: string[] = [];
+  let redundantSaves = 0;
+  core.subscribe((event) => {
+    projected.push(event.type);
+    if (coreEventNeedsPersistence(event)) redundantSaves += 1;
+  });
+  await assert.rejects(core.transactionAsync(async () => {
+    core.paneRename(surface.surfaceId, paneId, "uncertain candidate");
+    core.markLocklessAuthorityChanged(surface.surfaceId);
+    throw new PersistentStateOutcomeUnknownError(new Error("selector outcome unknown"));
+  }, { retainUncertainEvents: true, onNotificationError: () => {} }), /outcome is unknown/);
+  assert.deepEqual(projected, []);
+  const candidate = core.getPersistentState();
+  const stale = structuredClone(candidate);
+  stale.surfaces![0]!.panes[0]!.name = "stale readback";
+  assert.equal(core.publishVerifiedTransactionEvents(stale, () => {}), false);
+  assert.deepEqual(projected, []);
+  assert.equal(core.publishVerifiedTransactionEvents(candidate, () => {}), true);
+  assert.equal(redundantSaves, 0);
+  assert.equal(core.publishVerifiedTransactionEvents(candidate, () => {}), false);
+});
+
+test("later listener mutation is not mislabeled as part of the saved generation", async () => {
+  const core = new SurfaceCore();
+  const surface = core.ensurePrimarySurface("follow-on owner", { width: 800, height: 600, scale: 1 });
+  const paneId = applyProviderBootstrap(core, surface.surfaceId, 1);
+  const followOn: ReturnType<SurfaceCore["getPersistentState"]>[] = [];
+  let changed = false;
+  let accepted: ReturnType<SurfaceCore["getPersistentState"]> | undefined;
+  core.subscribe((event) => {
+    if (event.persistence === "committed" && !changed) {
+      changed = true;
+      core.paneRename(surface.surfaceId, paneId, "follow-on");
+    }
+    if (coreEventNeedsPersistence(event)) followOn.push(core.getPersistentState());
+  });
+  await core.transactionAsync(async () => {
+    core.paneRename(surface.surfaceId, paneId, "first accepted");
+    accepted = core.getPersistentState();
+  }, { retainUncertainEvents: true, onNotificationError: () => {} });
+  assert.equal(accepted!.surfaces![0]!.panes[0]!.name, "first accepted");
+  assert.equal(followOn.length, 1);
+  assert.equal(followOn[0]!.surfaces![0]!.panes[0]!.name, "follow-on");
+});
+
+test("notification failure cannot roll back an already accepted durable generation", async () => {
+  const core = new SurfaceCore();
+  const surface = core.ensurePrimarySurface("notification owner", { width: 800, height: 600, scale: 1 });
+  const paneId = applyProviderBootstrap(core, surface.surfaceId, 1);
+  let saved: ReturnType<SurfaceCore["getPersistentState"]> | undefined;
+  const errors: unknown[] = [];
+  core.subscribe(() => { throw new Error("notification failed"); });
+  await core.transactionAsync(async () => {
+    core.paneRename(surface.surfaceId, paneId, "durably accepted");
+    saved = core.getPersistentState();
+  }, { retainUncertainEvents: true, onNotificationError: (error) => errors.push(error) });
+  assert.ok(errors.length > 0);
+  assert.equal(core.getRendererWindowState(surface.surfaceId).panes[0]!.name, "durably accepted");
+  assert.deepEqual(core.getPersistentState(), saved);
+});
+
+test("separate committed authority journal update projects without rewriting its saved receipt", async () => {
+  const core = new SurfaceCore();
+  const surface = core.ensurePrimarySurface("journal owner", { width: 800, height: 600, scale: 1 });
+  applyProviderBootstrap(core, surface.surfaceId, 1);
+  const scopeId = "surface:" + encodeURIComponent(surface.surfaceId);
+  const saves: ReturnType<SurfaceCore["getPersistentState"]>[] = [];
+  const projected: string[] = [];
+  core.subscribe((event) => {
+    projected.push(event.type);
+    if (coreEventNeedsPersistence(event)) saves.push(core.getPersistentState());
+  });
+  await core.locklessAuthority.transactionAsync(async () => {
+    core.locklessAuthority.appendConsumable({
+      payload: core.publicTopologyState(surface.surfaceId), recordClass: "topology",
+      scopeId, scopeKind: "surface", triggerOperation: "client.topology",
+    });
+    saves.push(core.getPersistentState());
+    assert.deepEqual(projected, []);
+    core.markLocklessAuthorityChanged(surface.surfaceId, "committed");
+  });
+  assert.equal(saves.length, 1);
+  assert.deepEqual(projected, ["lockless-authority-changed", "surface-changed"]);
+  const restarted = new SurfaceCore({ persistentState: saves[0] });
+  assert.equal(restarted.locklessAuthority.exportState().scopes[scopeId]!.records[0]!.recordClass, "topology");
 });
 
 function failedAdmissionAttempt(
@@ -4128,4 +4274,114 @@ test("a locally opened surface keeps its provisional letter out of public topolo
   core.applyWindowLabelOnly(surface.surfaceId, surface.windowLabel);
   assert.equal(core.surfaceWindowLabel(surface.surfaceId), surface.windowLabel);
   assert.equal(core.getRendererWindowState(surface.surfaceId).windowLabel, surface.windowLabel);
+});
+
+
+test("ordinary pane rollback restores failed content and authority without replacing sibling or other live panes", async () => {
+  const core = new SurfaceCore();
+  const viewport = { width: 800, height: 600, scale: 1 };
+  const first = core.ensurePrimarySurface("changed", viewport);
+  const paneId = applyProviderBootstrap(core, first.surfaceId, 1);
+  core.paneSplit(first.surfaceId, {
+    count: 2,
+    direction: "horizontal",
+    newPaneIds: [2],
+    newPaneLabels: [2],
+    paneId,
+  });
+  const sibling = core.getSurface(first.surfaceId).panes.get(2)!;
+  const other = core.createAdditionalSurface("untouched", viewport);
+  const otherPane = [...other.panes.values()][0]!;
+  otherPane.externalNative = true;
+  core.locklessContentPush(first.surfaceId, {
+    content: { lines: ["prior"] },
+    contentId: "ct_prior",
+    contentType: "terminal",
+    paneId,
+  }, "fixture");
+  const before = core.getPersistentState();
+  const projected: string[] = [];
+  core.subscribe((event) => projected.push(event.type));
+  await assert.rejects(core.transactionAsync(async () => {
+    core.locklessContentPush(first.surfaceId, {
+      content: { lines: ["rejected"] },
+      contentId: "ct_rejected",
+      contentType: "terminal",
+      paneId,
+    }, "fixture");
+    core.locklessAuthority.auditAccepted("rq_failed", "content.set", "controller", first.surfaceId, null);
+    throw new Error("definite store failure");
+  }, { retainUncertainEvents: true, rollbackPane: {
+    controllerInstanceId: "controller",
+    paneId,
+    requestId: "rq_failed",
+    surfaceId: first.surfaceId,
+  }, onNotificationError: () => {} }), /definite store failure/);
+  assert.deepEqual(core.getPersistentState(), before);
+  assert.equal(core.getRendererWindowState(first.surfaceId).panes[0]?.content.contentId, "ct_prior");
+  assert.equal(core.getSurface(first.surfaceId).panes.get(2), sibling,
+    "a rejected command on one pane does not recreate its sibling pane");
+  assert.equal(core.getSurface(other.surfaceId), other);
+  assert.equal(core.getSurface(other.surfaceId).panes.get(otherPane.paneId), otherPane);
+  assert.equal(otherPane.externalNative, true, "another live guest is not recreated by a rejected command");
+  assert.deepEqual(projected, []);
+});
+
+test("captured durable bytes are an immutable restartable generation", () => {
+  const core = new SurfaceCore();
+  const viewport = { width: 800, height: 600, scale: 1 };
+  const surface = core.ensurePrimarySurface("snapshot", viewport);
+  const paneId = applyProviderBootstrap(core, surface.surfaceId, 1);
+  core.locklessContentPush(surface.surfaceId, {
+    content: { lines: ["accepted"] },
+    contentId: "ct_accepted",
+    contentType: "terminal",
+    paneId,
+  }, "fixture");
+
+  const expected = core.getPersistentState();
+  const snapshot = core.capturePersistentStateSnapshot();
+  assert.equal(snapshot.contents, JSON.stringify(expected, null, 2));
+  const accepted = JSON.parse(snapshot.contents) as typeof expected;
+  const restarted = new SurfaceCore({ persistentState: accepted });
+  restarted.restorePersistedSurfaces("snapshot", viewport);
+  assert.equal(
+    restarted.getRendererWindowState(surface.surfaceId).panes[0]?.content.contentId,
+    "ct_accepted",
+  );
+
+  core.locklessContentPush(surface.surfaceId, {
+    content: { lines: ["later"] },
+    contentId: "ct_later",
+    contentType: "terminal",
+    paneId,
+  }, "fixture");
+  assert.equal(snapshot.contents, JSON.stringify(accepted, null, 2));
+});
+
+test("ordinary scoped rollback retains unknown candidate and publishes only exact verified acceptance", async () => {
+  const core = new SurfaceCore();
+  const viewport = { width: 800, height: 600, scale: 1 };
+  const surface = core.ensurePrimarySurface("changed", viewport);
+  const paneId = applyProviderBootstrap(core, surface.surfaceId, 1);
+  const other = core.createAdditionalSurface("untouched", viewport);
+  const projected: string[] = [];
+  core.subscribe((event) => projected.push(event.type));
+  await assert.rejects(core.transactionAsync(async () => {
+    core.locklessPaneRename(surface.surfaceId, paneId, "candidate");
+    throw new PersistentStateOutcomeUnknownError(new Error("selector outcome unknown"));
+  }, { retainUncertainEvents: true, rollbackPane: {
+    controllerInstanceId: "controller",
+    paneId,
+    requestId: "rq_unknown",
+    surfaceId: surface.surfaceId,
+  }, onNotificationError: () => {} }), /outcome is unknown/);
+  assert.deepEqual(projected, []);
+  const candidate = core.getPersistentState();
+  const stale = structuredClone(candidate);
+  stale.surfaces!.find((entry) => entry.surfaceId === surface.surfaceId)!.panes[0]!.name = "stale";
+  assert.equal(core.publishVerifiedTransactionEvents(stale, () => {}), false);
+  assert.equal(core.publishVerifiedTransactionEvents(candidate, () => {}), true);
+  assert.equal(core.publishVerifiedTransactionEvents(candidate, () => {}), false);
+  assert.equal(core.getSurface(other.surfaceId), other);
 });

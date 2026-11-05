@@ -8,6 +8,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import type { Revision } from "../../protocol/src/index.js";
 import { ServerConnection } from "../src/server-connection.js";
 import { ConfiguredServerRegistration } from "../src/configured-server.js";
+import { matchesProvisionedClaims } from "../src/registry-binding.js";
 import { SurfaceCore } from "../src/surface-core.js";
 import { createEmptyLocklessClientState, DEFAULT_LOCKLESS_LIMITS } from "../src/lockless-client-authority.js";
 import {
@@ -607,10 +608,7 @@ test("registration cannot export a release from a lifecycle transaction that lat
   const central = await centralFixture();
   const clientId = "a".repeat(64);
   const surfaceId = "sf_registry_release_race";
-  const lockless = createEmptyLocklessClientState({
-    ...DEFAULT_LOCKLESS_LIMITS,
-    maxRetainedTombstones: 1,
-  });
+  const lockless = createEmptyLocklessClientState();
   const core = new SurfaceCore({
     clientIdentity: clientId,
     persistentState: { lockless, primarySurfaceId: surfaceId, version: 1 },
@@ -618,19 +616,15 @@ test("registration cannot export a release from a lifecycle transaction that lat
   const surface = core.ensurePrimarySurface("Release race", { width: 800, height: 600, scale: 1 });
   core.admitSurfaceToLockless(surface.surfaceId);
   core.bindRegistryIdentity({ clientId, allocatorId: "alloc_fixture", fleetId: "fixture-fleet" });
-  const retained = core.locklessAuthority.createTombstone({
-    kind: "pane",
-    payload: {
-      closeTopologyRevision: 4,
-      pane: {
-        allocationGeneration: 6,
-        paneId: 8,
-        paneLabel: 708,
-        paneLineageId: "pl_release_race_retained",
-      },
+  const finalClosePayload = {
+    closeTopologyRevision: 5,
+    pane: {
+      allocationGeneration: 7,
+      paneId: 9,
+      paneLabel: 709,
+      paneLineageId: "pl_release_race_newer",
     },
-    surfaceId,
-  });
+  };
 
   let allowLifecycleFailure = (): void => {};
   const lifecycleFailure = new Promise<void>((resolve) => { allowLifecycleFailure = resolve; });
@@ -638,20 +632,14 @@ test("registration cannot export a release from a lifecycle transaction that lat
   const releaseCandidate = new Promise<void>((resolve) => { releaseCandidateCreated = resolve; });
   const lifecycle = core.locklessAuthority.transactionAsync(() =>
     core.transactionAsync(async () => {
-      core.locklessAuthority.createTombstone({
-        kind: "pane",
-        payload: {
-          closeTopologyRevision: 5,
-          pane: {
-            allocationGeneration: 7,
-            paneId: 9,
-            paneLabel: 709,
-            paneLineageId: "pl_release_race_newer",
-          },
-        },
+      core.locklessAuthority.recordPaneFinalClose(finalClosePayload, {
+        closeRevision: finalClosePayload.closeTopologyRevision,
         surfaceId,
       });
-      assert.equal(core.locklessAuthority.listPendingPaneReleases().length, 1);
+      assert.equal(core.locklessAuthority.listPendingPaneReleases().length, 1,
+        "the explicit close creates a release intent in the candidate generation");
+      assert.equal(core.locklessAuthority.exportState().finalCloseRecords.length, 1,
+        "the final-close audit is in that same candidate generation");
       releaseCandidateCreated();
       await lifecycleFailure;
       throw new Error("simulated_lifecycle_persistence_failure");
@@ -674,22 +662,51 @@ test("registration cannot export a release from a lifecycle transaction that lat
 
     allowLifecycleFailure();
     await assert.rejects(lifecycle, /simulated_lifecycle_persistence_failure/);
-    assert.deepEqual(core.locklessAuthority.listTombstones("pane").map((entry) => entry.tombstoneId),
-      [retained.tombstoneId]);
+    assert.deepEqual(core.locklessAuthority.listTombstones("pane"), []);
     assert.deepEqual(core.locklessAuthority.listPendingPaneReleases(), []);
+    assert.deepEqual(core.locklessAuthority.exportState().finalCloseRecords, []);
+    assert.deepEqual(core.locklessAuthority.exportState().paneRetirementAudits, []);
 
     await until(() => central.requests.length === 1);
     assert.deepEqual(central.requests[0]!.message.payload.pendingPaneReleases, []);
     assert.ok(persistedReleaseCounts.every((count) => count === 0));
     central.reply(0);
     await synchronizing;
-    assert.deepEqual(core.locklessAuthority.listTombstones("pane").map((entry) => entry.tombstoneId),
-      [retained.tombstoneId]);
+    assert.deepEqual(core.locklessAuthority.listTombstones("pane"), []);
   } finally {
     allowLifecycleFailure();
     await registration.stop();
     await central.close();
   }
+});
+
+test("owner-verified claims compare by identity without accepting omissions or duplicates", () => {
+  const first = { surfaceId: "sf_first", windowLabel: "d", panes: [
+    { allocationGeneration: 1, paneId: "1", paneLabel: 703, paneLineageId: "pl_first" },
+    { allocationGeneration: 2, paneId: "2", paneLabel: 704, paneLineageId: "pl_second" },
+  ] };
+  const second = { surfaceId: "sf_second", windowLabel: "e", panes: [] };
+  const provisioned = {
+    binding: { clientId: "owner-client", allocatorId: "alloc_home", fleetId: "fleet-home" },
+    confirmedClaims: [first, second],
+  };
+  assert.equal(matchesProvisionedClaims(provisioned, "owner-client", [
+    second, { ...first, panes: [...first.panes].reverse() },
+  ]), true);
+  assert.equal(matchesProvisionedClaims(provisioned, "other-client", [first, second]), false);
+  assert.equal(matchesProvisionedClaims(provisioned, "owner-client", [first]), false);
+  assert.equal(matchesProvisionedClaims(provisioned, "owner-client", [first, first]), false);
+  assert.equal(matchesProvisionedClaims({ ...provisioned, confirmedClaims: [first, first] },
+    "owner-client", [first, second]), false);
+  assert.equal(matchesProvisionedClaims(provisioned, "owner-client", [
+    { ...first, panes: [first.panes[0]!, first.panes[0]!] }, second,
+  ]), false);
+  assert.equal(matchesProvisionedClaims({ ...provisioned, confirmedClaims: [
+    { ...first, panes: [first.panes[0]!, first.panes[0]!] }, second,
+  ] }, "owner-client", [first, second]), false);
+  assert.equal(matchesProvisionedClaims(provisioned, "owner-client", [
+    { ...first, panes: [{ ...first.panes[0]!, paneLineageId: "pl_foreign" }, first.panes[1]!] }, second,
+  ]), false);
 });
 
 test("confirmed fleet pane labels remain visible through a transient central disconnect", async () => {

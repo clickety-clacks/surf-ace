@@ -3,6 +3,14 @@ import type { PersistentSurfaceState } from "./surface-core.js";
 export const ANNOTATION_LOCAL_SAVE_MAX_BYTES = 1024;
 export const ANNOTATION_LOCAL_SAVE_LIMIT = 64;
 export type AnnotationLocalSave = { version: 1; frameId: string; context: AnnotationDoneContext };
+export type ConfirmedAnnotationLocalSaveCandidate = {
+  surfaceId: string;
+  paneId: number;
+  annotating: boolean;
+  frameId?: string;
+  localSave?: unknown;
+  context: unknown;
+};
 export function validLocalAnnotationFrameId(value: unknown): value is string {
   return typeof value === "string" && /^lf_[a-f0-9]{32}$/.test(value);
 }
@@ -22,19 +30,38 @@ export function parseAnnotationLocalSave(value: unknown): AnnotationLocalSave | 
 export class ConfirmedAnnotationLocalSaves {
   private readonly records = new Map<string, AnnotationLocalSave>();
   confirm(state: PersistentSurfaceState): void {
+    this.confirmCandidates((state.surfaces ?? []).flatMap((surface) => surface.panes.map((pane) => {
+      const entry = pane.history[pane.historyIndex];
+      return {
+        surfaceId: surface.surfaceId,
+        paneId: pane.paneId,
+        annotating: pane.annotating,
+        frameId: pane.annotationLocalFrameId,
+        localSave: pane.annotationLocalSave,
+        context: entry ? {
+          contentId: entry.contentId,
+          paneId: pane.paneId,
+          paneLineageId: pane.paneLineageId,
+          renderVersion: pane.latestContentEventAt,
+          revision: entry.revision,
+        } : null,
+      };
+    })));
+  }
+
+  confirmCandidates(candidates: readonly ConfirmedAnnotationLocalSaveCandidate[]): void {
     this.records.clear();
-    for (const surface of state.surfaces ?? []) {
-      let count = 0;
-      for (const pane of surface.panes) {
-        if (count >= ANNOTATION_LOCAL_SAVE_LIMIT || this.records.size >= 4096) break;
-        const record = parseAnnotationLocalSave(pane.annotationLocalSave);
-        const entry = pane.history[pane.historyIndex];
-        const context = entry && parseAnnotationDoneContext({ ...entry, paneId: pane.paneId,
-          paneLineageId: pane.paneLineageId, renderVersion: pane.latestContentEventAt });
-        if (pane.annotating || !record || !context || record.frameId !== pane.annotationLocalFrameId ||
-            annotationDoneContextKey(record.context) !== annotationDoneContextKey(context)) continue;
-        this.records.set(JSON.stringify([surface.surfaceId, pane.paneId]), record); count++;
-      }
+    const counts = new Map<string, number>();
+    for (const candidate of candidates) {
+      if (this.records.size >= 4096) break;
+      const count = counts.get(candidate.surfaceId) ?? 0;
+      if (count >= ANNOTATION_LOCAL_SAVE_LIMIT) continue;
+      const record = parseAnnotationLocalSave(candidate.localSave);
+      const context = parseAnnotationDoneContext(candidate.context);
+      if (candidate.annotating || !record || !context || record.frameId !== candidate.frameId ||
+          annotationDoneContextKey(record.context) !== annotationDoneContextKey(context)) continue;
+      this.records.set(JSON.stringify([candidate.surfaceId, candidate.paneId]), record);
+      counts.set(candidate.surfaceId, count + 1);
     }
   }
   has(surfaceId: string, context: AnnotationDoneContext, frameId: string | undefined): boolean {

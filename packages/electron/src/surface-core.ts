@@ -72,7 +72,13 @@ import {
   type LocklessSurfaceAdmissionAttempt,
 } from "../../protocol/src/lockless.js";
 import { cloneWindowPlacement, type WindowPlacement } from "./window-placement.js";
-import { ANNOTATION_LOCAL_SAVE_LIMIT, parseAnnotationLocalSave, validLocalAnnotationFrameId, type AnnotationLocalSave } from "./annotation-local-save.js";
+import {
+  ANNOTATION_LOCAL_SAVE_LIMIT,
+  parseAnnotationLocalSave,
+  validLocalAnnotationFrameId,
+  type AnnotationLocalSave,
+  type ConfirmedAnnotationLocalSaveCandidate,
+} from "./annotation-local-save.js";
 import { AnnotationPublisherOutbox, ANNOTATION_PUBLISHER_MAX_BYTES, type PersistentAnnotationPublisher } from "./annotation-publisher-outbox.js";
 
 type ContentPayload = ContentSetRequest["payload"]["content"];
@@ -220,6 +226,11 @@ export type PersistentSurfaceState = {
   version: 1;
 };
 
+export type PersistentSurfaceStateSnapshot = {
+  annotationLocalSaveCandidates: ConfirmedAnnotationLocalSaveCandidate[];
+  contents: string;
+};
+
 export type PersistentRegistryBinding = {
   allocatorId: string;
   clientId: string;
@@ -355,7 +366,7 @@ export type ReloadEntryIdentity = {
   revision: number;
 };
 
-export type CoreEvent =
+export type CoreEvent = (
   | { type: "lockless-authority-changed" }
   | { surfaceId: string; type: "keyboard-focus-changed" }
   | { surfaceId: string; type: "surface-changed" }
@@ -368,7 +379,19 @@ export type CoreEvent =
   | { paneId: number; surfaceId: string; type: "annotation-committed" }
   | { contentId: string | null; direction: "back" | "forward"; paneId: number; revision: number; surfaceId: string; type: "history-navigated" }
   | { surfaceId: string; type: "topology-changed"; topology?: ReturnType<SurfaceCore["publicTopologyState"]>; admittedOccurrence?: { record: ConsumableRecord | null } }
-  | { paneId: number; surfaceId: string; type: "drawing-dirty" };
+  | { paneId: number; surfaceId: string; type: "drawing-dirty" }
+) & { persistence?: "committed" };
+
+// Committed notifications project a generation already saved by their owner.
+// Local mutations outside that transaction still need their own durable write.
+export function coreEventNeedsPersistence(event: CoreEvent): boolean {
+  return event.persistence !== "committed" && (
+    event.type === "lockless-authority-changed" ||
+    event.type === "surface-changed" ||
+    event.type === "surface-created" ||
+    event.type === "surface-removed"
+  );
+}
 
 export type PaneLabelAllocation = {
   allocationGeneration: number | null;
@@ -822,6 +845,12 @@ export class SurfaceCore {
   async transactionAsync<T>(operation: () => Promise<T>, committed?: {
     retainUncertainEvents: boolean;
     onNotificationError: (error: unknown) => void;
+    rollbackPane?: {
+      controllerInstanceId: string;
+      paneId: number;
+      requestId: string;
+      surfaceId: string;
+    };
   }): Promise<T> {
     if (this.activeAsyncTransaction !== null &&
         this.transactionContext.getStore() === this.activeAsyncTransaction) {
@@ -852,17 +881,38 @@ export class SurfaceCore {
   private async transactionAsyncExclusive<T>(operation: () => Promise<T>, committed?: {
     retainUncertainEvents: boolean;
     onNotificationError: (error: unknown) => void;
+    rollbackPane?: {
+      controllerInstanceId: string;
+      paneId: number;
+      requestId: string;
+      surfaceId: string;
+    };
   }): Promise<T> {
-    const before = this.getPersistentState();
+    const rollback = committed?.rollbackPane &&
+      this.surfaces.get(committed.rollbackPane.surfaceId)?.panes.has(committed.rollbackPane.paneId)
+      ? this.captureOrdinaryPaneRollback(committed.rollbackPane)
+      : (() => {
+          const before = this.getPersistentState();
+          return {
+            commit: () => {},
+            rollback: () => this.restorePersistentState(before),
+          };
+        })();
     this.pendingEvents = [];
     let result: T;
     try {
       result = await operation();
     } catch (error) {
       if ((error as { name?: string } | null)?.name !== "PersistentStateOutcomeUnknownError") {
-        this.restorePersistentState(before);
+        rollback.rollback();
       } else if (committed?.retainUncertainEvents) {
-        this.deferredVerifiedEvents = { state: JSON.stringify(this.getPersistentState()), events: this.pendingEvents };
+        rollback.commit();
+        this.deferredVerifiedEvents = {
+          state: this.capturePersistentStateSnapshot().contents,
+          events: this.pendingEvents,
+        };
+      } else {
+        rollback.commit();
       }
       this.pendingEvents = null;
       throw error;
@@ -876,14 +926,19 @@ export class SurfaceCore {
     } else {
       // Preserve the legacy notification/rollback policy for other callers.
       try { for (const event of events) this.deliver(event); }
-      catch (error) { this.restorePersistentState(before); throw error; }
+      catch (error) { rollback.rollback(); throw error; }
     }
+    rollback.commit();
     return result;
   }
 
-  publishVerifiedTransactionEvents(state: PersistentSurfaceState, onError: (error: unknown) => void): boolean {
+  publishVerifiedTransactionEvents(
+    state: PersistentSurfaceState | string,
+    onError: (error: unknown) => void,
+  ): boolean {
     const pending = this.deferredVerifiedEvents;
-    if (!pending || pending.state !== JSON.stringify(state)) return false;
+    const contents = typeof state === "string" ? state : JSON.stringify(state, null, 2);
+    if (!pending || pending.state !== contents) return false;
     // Retire before invoking callbacks: repeated reconciliation cannot duplicate.
     this.deferredVerifiedEvents = null;
     for (const event of pending.events) this.deliverCommitted(event, onError);
@@ -891,11 +946,59 @@ export class SurfaceCore {
   }
 
   private deliverCommitted(event: CoreEvent, onError: (error: unknown) => void): void {
+    const committedEvent: CoreEvent = { ...event, persistence: "committed" };
     for (const listener of this.listeners) {
-      try { listener(event); } catch (error) {
+      try { listener(committedEvent); } catch (error) {
         try { onError(error); } catch { /* notification reporting cannot reject a commit */ }
       }
     }
+  }
+
+  // The caller selects this only for the ordinary commands whose write set is
+  // one existing pane, a few pane flags, and the surface's geometry revisions.
+  // Those commands use copy-on-write for history entries, so the checkpoint can
+  // retain the old history root instead of cloning its content and annotations.
+  private captureOrdinaryPaneRollback(input: {
+    controllerInstanceId: string;
+    paneId: number;
+    requestId: string;
+    surfaceId: string;
+  }): { commit(): void; rollback(): void } {
+    const { paneId, surfaceId } = input;
+    const surface = this.getSurface(surfaceId);
+    const pane = this.expectPane(surfaceId, paneId);
+    const paneBefore = {
+      annotationFrameOpen: pane.annotationFrameOpen,
+      dirtyStrokeIds: pane.dirtyStrokeIds,
+      externalNative: pane.externalNative,
+      firstDirtyStrokeAt: pane.firstDirtyStrokeAt,
+      flushInFlight: pane.flushInFlight,
+      history: pane.history,
+      historyIndex: pane.historyIndex,
+      lastDirtyStrokeAt: pane.lastDirtyStrokeAt,
+      name: pane.name,
+      nativeHost: pane.nativeHost,
+      nativeWindowGroup: pane.nativeWindowGroup,
+      nextRevision: pane.nextRevision,
+      pendingAnnotationCommit: pane.pendingAnnotationCommit,
+      toast: pane.toast,
+      latestContentEventAt: pane.latestContentEventAt,
+    };
+    const geometryRevision = surface.geometryRevision;
+    const topologyRevision = surface.topologyRevision;
+    const authority = this.locklessAuthority.captureOrdinaryMutationRollback(
+      input.controllerInstanceId,
+      input.requestId,
+    );
+    return {
+      commit: () => authority.commit(),
+      rollback: () => {
+        Object.assign(pane, paneBefore);
+        surface.geometryRevision = geometryRevision;
+        surface.topologyRevision = topologyRevision;
+        authority.rollback();
+      },
+    };
   }
 
   private restorePersistentState(state: PersistentSurfaceState): void {
@@ -915,8 +1018,16 @@ export class SurfaceCore {
 
   getPersistentState(): PersistentSurfaceState {
     this.reconcileAnnotationTombstones();
+    // These partitions are serialized from their current owners below. Do not
+    // deep-copy the stale loaded versions only to immediately overwrite them.
+    const metadata = { ...this.persistentState };
+    delete metadata.surfaces;
+    delete metadata.lockless;
+    delete metadata.admissionAttempts;
+    delete metadata.nextAdmissionAttemptSequence;
+    if (this.annotationPublisher) delete metadata.annotationPublisher;
     return {
-      ...structuredClone(this.persistentState),
+      ...structuredClone(metadata),
       ...(this.annotationPublisher ? { annotationPublisher: this.annotationPublisher.snapshot() } : {}),
       admissionAttempts: structuredClone(this.admissionAttempts),
       lockless: this.locklessAuthority.exportState(),
@@ -925,18 +1036,64 @@ export class SurfaceCore {
     };
   }
 
+  /**
+   * Capture the exact durable candidate bytes before the caller queues an
+   * asynchronous write. Unlike getPersistentState(), this does not deep-copy
+   * the owned state graph: it projects borrowed live roots and synchronously
+   * encodes them, so no later mutation can change this candidate.
+   */
+  capturePersistentStateSnapshot(): PersistentSurfaceStateSnapshot {
+    this.reconcileAnnotationTombstones();
+    const metadata = { ...this.persistentState };
+    delete metadata.surfaces;
+    delete metadata.lockless;
+    delete metadata.admissionAttempts;
+    delete metadata.nextAdmissionAttemptSequence;
+    if (this.annotationPublisher) delete metadata.annotationPublisher;
+    const surfaces = this.listSurfaces();
+    const state = {
+      ...metadata,
+      ...(this.annotationPublisher
+        ? { annotationPublisher: this.annotationPublisher.stateForSynchronousSerialization() }
+        : {}),
+      admissionAttempts: this.admissionAttempts,
+      lockless: this.locklessAuthority.stateForSynchronousSerialization(),
+      nextAdmissionAttemptSequence: this.nextAdmissionAttemptSequence,
+      surfaces: surfaces.map((surface) => serializeSurface(surface, false)),
+    };
+    const annotationLocalSaveCandidates = surfaces.flatMap((surface) =>
+      surface.paneOrder.flatMap((paneId) => {
+        const pane = surface.panes.get(paneId);
+        if (!pane) return [];
+        const entry = currentEntry(pane);
+        return [{
+          surfaceId: surface.surfaceId,
+          paneId: pane.paneId,
+          annotating: pane.annotating,
+          frameId: pane.annotationLocalFrameId,
+          localSave: pane.annotationLocalSave ? structuredClone(pane.annotationLocalSave) : undefined,
+          context: entry ? {
+            contentId: entry.contentId,
+            paneId: pane.paneId,
+            paneLineageId: pane.paneLineageId,
+            renderVersion: pane.latestContentEventAt,
+            revision: entry.revision,
+          } : null,
+        }];
+      }),
+    );
+    return {
+      annotationLocalSaveCandidates,
+      contents: JSON.stringify(state, null, 2),
+    };
+  }
+
   private reconcileAnnotationTombstones(): void {
-    const tombstones = this.locklessAuthority.listTombstones("surface");
-    if (!this.annotationPublisher && tombstones.some((entry) =>
-      (entry.annotationPublisherPartitionBytes ?? 0) > 0)) {
-      throw new TypeError("retained annotation publisher requires its source state");
-    }
-    for (const tombstone of tombstones) {
-      this.locklessAuthority.reconcileAnnotationPublisherPartition(
-        tombstone.tombstoneId,
-        this.annotationPublisher?.partitionBytes(tombstone.surfaceId) ?? 0,
-      );
-    }
+    this.locklessAuthority.reconcileAnnotationPublisherPartitions(
+      this.annotationPublisher
+        ? (surfaceId) => this.annotationPublisher!.partitionBytes(surfaceId)
+        : null,
+    );
   }
 
   registryBinding(): PersistentRegistryBinding | null {
@@ -1653,14 +1810,14 @@ export class SurfaceCore {
     return attempt;
   }
 
-  markLocklessAuthorityChanged(surfaceId?: string): void {
-    this.emit({ type: "lockless-authority-changed" });
+  markLocklessAuthorityChanged(surfaceId?: string, persistence?: "committed"): void {
+    this.emit({ type: "lockless-authority-changed", ...(persistence ? { persistence } : {}) });
     const targetSurfaceId =
       surfaceId ??
       this.persistentState.primarySurfaceId ??
       this.listSurfaces()[0]?.surfaceId;
     if (targetSurfaceId) {
-      this.emit({ surfaceId: targetSurfaceId, type: "surface-changed" });
+      this.emit({ surfaceId: targetSurfaceId, type: "surface-changed", ...(persistence ? { persistence } : {}) });
     }
   }
 
@@ -1710,35 +1867,6 @@ export class SurfaceCore {
         }
         surface.windowLabel = candidate;
         surface.windowLabelConfirmed = false;
-      }
-      const prospective = serializeSurface(surface);
-      const surfaceBase = ({
-        panes: _panes,
-        ...base
-      }: PersistentSurfaceRecord) => base;
-      this.locklessAuthority.assertSurfaceRecoverableBaseCapacity(
-        surfaceBase(rollback),
-        surfaceBase(prospective),
-      );
-      for (const pane of prospective.panes) {
-        this.locklessAuthority.assertPaneRecoverableCapacity(
-          rollback.panes.find((entry) => entry.paneId === pane.paneId) ?? pane,
-          pane,
-          pane.history.map((entry) => entry.annotations),
-        );
-      }
-      const retainedPaneCount = this.locklessAuthority
-        .listTombstones("pane")
-        .filter((entry) => entry.surfaceId === surfaceId).length;
-      if (
-        surface.panes.size + retainedPaneCount >
-        this.locklessAuthority.limits.maxPanesPerSurface +
-          this.locklessAuthority.limits.maxRetainedTombstones
-      ) {
-        throw new LocklessAuthorityError(
-          "pane_capacity",
-          "Surface exceeds the lockless live-plus-tombstone envelope",
-        );
       }
       if (admissionAttemptSequence !== undefined) {
         this.advanceSurfaceAdmissionAttempt(
@@ -1832,10 +1960,24 @@ export class SurfaceCore {
   captureSurfaceRecoverableBase(
     surfaceId: string,
   ): Omit<PersistentSurfaceRecord, "panes"> {
-    const { panes: _panes, ...base } = serializeSurface(
-      this.getSurface(surfaceId),
-    );
-    return base;
+    // This work-item metadata does not contain pane history or drawings.
+    // Reading it must not materialize every pane only to discard those copies.
+    const surface = this.getSurface(surfaceId);
+    return {
+      activeKeyboardPaneId: surface.activeKeyboardPaneId,
+      focusIntentRevision: surface.focusIntentRevision,
+      geometryRevision: surface.geometryRevision,
+      layout: surface.layout ? structuredClone(surface.layout) : null,
+      name: surface.name,
+      paneOrder: [...surface.paneOrder],
+      surfaceEpochRevision: surface.surfaceEpochRevision,
+      surfaceId: surface.surfaceId,
+      topologyRevision: surface.topologyRevision,
+      viewport: cloneViewport(surface.viewport),
+      windowPlacement: cloneWindowPlacement(surface.windowPlacement),
+      windowLabel: surface.windowLabel,
+      windowLabelConfirmed: surface.windowLabelConfirmed,
+    };
   }
 
   restoreSurfaceTombstone(
@@ -3130,10 +3272,8 @@ export class SurfaceCore {
         throw new SurfaceCoreError("invalid_operation", "Cannot clear content while annotating");
       }
       assertRevision(pane, payload.revision);
-      if (pane.historyIndex < pane.history.length - 1) {
-        pane.history = pane.history.slice(0, pane.historyIndex + 1);
-      }
-      pane.history.push({
+      const nextHistory = pane.history.slice(0, pane.historyIndex + 1);
+      nextHistory.push({
         annotations: [],
         content: null,
         contentId: null,
@@ -3141,7 +3281,8 @@ export class SurfaceCore {
         ownerToken: null,
         revision: payload.revision,
       });
-      pane.historyIndex = pane.history.length - 1;
+      pane.history = nextHistory;
+      pane.historyIndex = nextHistory.length - 1;
       trimHistory(pane);
       pane.toast = null;
       pane.externalNative = false;
@@ -3165,9 +3306,6 @@ export class SurfaceCore {
     }
     assertRevision(pane, payload.revision);
 
-    if (pane.historyIndex < pane.history.length - 1) {
-      pane.history = pane.history.slice(0, pane.historyIndex + 1);
-    }
     const nextEntry: HistoryEntry = {
       annotations: payload.restoredDrawings ? structuredClone(payload.restoredDrawings) : [],
       content: cloneContent(payload.content),
@@ -3178,12 +3316,14 @@ export class SurfaceCore {
       reloadSource: cloneReloadSource(payload.reloadSource) ?? undefined,
       revision: payload.revision,
     };
+    const nextHistory = pane.history.slice(0, pane.historyIndex + 1);
     if (shouldReplaceVisibleEntry(pane, payload.historyOwnerToken)) {
-      pane.history[pane.historyIndex] = nextEntry;
+      nextHistory[pane.historyIndex] = nextEntry;
     } else {
-      pane.history.push(nextEntry);
-      pane.historyIndex = pane.history.length - 1;
+      nextHistory.push(nextEntry);
+      pane.historyIndex = nextHistory.length - 1;
     }
+    pane.history = nextHistory;
     trimHistory(pane);
     pane.toast = null;
     pane.externalNative = false;
@@ -3275,7 +3415,7 @@ export class SurfaceCore {
       targetKind: payload.targetKind as PaneCurrentTargetState["targetKind"],
       targetPayload: structuredClone(payload.targetPayload),
     };
-    entry.registeredTarget = target;
+    replaceCurrentEntry(pane, { ...entry, registeredTarget: target });
     this.emit({ surfaceId, type: "surface-changed" });
     return structuredClone(target);
   }
@@ -3558,10 +3698,6 @@ export class SurfaceCore {
       throw new SurfaceCoreError("invalid_operation", "Cannot replace content while annotating");
     }
 
-    if (pane.historyIndex < pane.history.length - 1) {
-      pane.history = pane.history.slice(0, pane.historyIndex + 1);
-    }
-
     const nextEntry: HistoryEntry = {
       annotations: [],
       content: cloneContent(payload.content),
@@ -3572,12 +3708,14 @@ export class SurfaceCore {
       reloadSource: cloneReloadSource(payload.reloadSource) ?? undefined,
       revision: payload.revision,
     };
+    const nextHistory = pane.history.slice(0, pane.historyIndex + 1);
     if (shouldReplaceVisibleEntry(pane, payload.historyOwnerToken)) {
-      pane.history[pane.historyIndex] = nextEntry;
+      nextHistory[pane.historyIndex] = nextEntry;
     } else {
-      pane.history.push(nextEntry);
-      pane.historyIndex = pane.history.length - 1;
+      nextHistory.push(nextEntry);
+      pane.historyIndex = nextHistory.length - 1;
     }
+    pane.history = nextHistory;
     trimHistory(pane);
     pane.toast = null;
     pane.externalNative = false;
@@ -3616,15 +3754,13 @@ export class SurfaceCore {
       Math.max(0, ...pane.history.map((entry) => entry.revision)) + 1,
     );
     pane.nextRevision = revision + 1;
-    if (pane.historyIndex < pane.history.length - 1) {
-      pane.history = pane.history.slice(0, pane.historyIndex + 1);
-    }
+    const history = pane.history.slice(0, pane.historyIndex + 1);
     const friendlyChatName = payload.friendlyChatName?.trim() || null;
     const productName = controllerProductName?.trim() || null;
     const visibleSequence =
       Math.max(0, ...pane.history.map((entry) => entry.lastVisibleSequence ?? 0)) +
       1;
-    pane.history.push({
+    history.push({
       annotations: [],
       content: cloneContent(payload.content as ContentPayload),
       contentId: payload.contentId,
@@ -3642,20 +3778,20 @@ export class SurfaceCore {
       },
       revision,
     });
-    pane.historyIndex = pane.history.length - 1;
-    while (pane.history.length > MAX_HISTORY_DEPTH + 1) {
-      const victim = pane.history
+    while (history.length > MAX_HISTORY_DEPTH + 1) {
+      const victim = history
         .map((entry, index) => ({ entry, index }))
-        .filter(({ index }) => index !== pane.historyIndex)
+        .filter(({ index }) => index !== history.length - 1)
         .sort(
           (left, right) =>
             (left.entry.lastVisibleSequence ?? 0) -
             (right.entry.lastVisibleSequence ?? 0),
         )[0];
       if (!victim) break;
-      pane.history.splice(victim.index, 1);
-      if (victim.index < pane.historyIndex) pane.historyIndex -= 1;
+      history.splice(victim.index, 1);
     }
+    pane.history = history;
+    pane.historyIndex = history.length - 1;
     pane.toast = null;
     pane.externalNative = false;
     pane.nativeHost = null;
@@ -3776,11 +3912,8 @@ export class SurfaceCore {
       throw new SurfaceCoreError("invalid_operation", "Cannot clear content while annotating");
     }
 
-    if (pane.historyIndex < pane.history.length - 1) {
-      pane.history = pane.history.slice(0, pane.historyIndex + 1);
-    }
-
-    pane.history.push({
+    const history = pane.history.slice(0, pane.historyIndex + 1);
+    history.push({
       annotations: [],
       content: null,
       contentId: null,
@@ -3788,8 +3921,10 @@ export class SurfaceCore {
       ownerToken: null,
       revision: payload.revision,
     });
-    pane.historyIndex = pane.history.length - 1;
-    trimHistory(pane);
+    const overflow = Math.max(0, history.length - MAX_HISTORY_DEPTH);
+    if (overflow > 0) history.splice(0, overflow);
+    pane.history = history;
+    pane.historyIndex = history.length - 1;
     pane.toast = null;
     pane.externalNative = false;
     pane.nativeHost = null;
@@ -3863,11 +3998,14 @@ export class SurfaceCore {
       );
     }
 
-    entry.content = {
-      ...entry.content,
-      lines: [...entry.content.lines, ...payload.lines],
-    };
-    entry.revision = payload.revision;
+    replaceCurrentEntry(pane, {
+      ...entry,
+      content: {
+        ...entry.content,
+        lines: [...entry.content.lines, ...payload.lines],
+      },
+      revision: payload.revision,
+    });
     pane.toast = null;
     pane.latestContentEventAt = this.now();
     this.emit({ surfaceId, type: "surface-changed" });
@@ -3893,11 +4031,14 @@ export class SurfaceCore {
       );
     }
 
-    entry.content = {
-      ...entry.content,
-      html: patchHtml(entry.content.html, payload.patch),
-    };
-    entry.revision = payload.revision;
+    replaceCurrentEntry(pane, {
+      ...entry,
+      content: {
+        ...entry.content,
+        html: patchHtml(entry.content.html, payload.patch),
+      },
+      revision: payload.revision,
+    });
     pane.latestContentEventAt = this.now();
     this.emit({ surfaceId, type: "surface-changed" });
     return currentMutationAck(pane);
@@ -4553,14 +4694,15 @@ function createPaneState(
   };
 }
 
-function serializeSurface(surface: SurfaceState): PersistentSurfaceRecord {
+function serializeSurface(surface: SurfaceState, clonePayloads = true): PersistentSurfaceRecord {
+  const copy = <T>(value: T): T => clonePayloads ? structuredClone(value) : value;
   return {
     activeKeyboardPaneId: surface.activeKeyboardPaneId,
     focusIntentRevision: surface.focusIntentRevision,
     geometryRevision: surface.geometryRevision,
-    layout: surface.layout ? structuredClone(surface.layout) : null,
+    layout: surface.layout ? copy(surface.layout) : null,
     name: surface.name,
-    paneOrder: [...surface.paneOrder],
+    paneOrder: clonePayloads ? [...surface.paneOrder] : surface.paneOrder,
     panes: surface.paneOrder
       .map((paneId) => surface.panes.get(paneId))
       .filter((pane): pane is PaneState => Boolean(pane))
@@ -4568,13 +4710,13 @@ function serializeSurface(surface: SurfaceState): PersistentSurfaceRecord {
         annotating: pane.annotating,
         annotationFrameOpen: pane.annotationFrameOpen,
         ...(pane.annotationLocalFrameId ? { annotationLocalFrameId: pane.annotationLocalFrameId } : {}),
-        ...(pane.annotationLocalSave ? { annotationLocalSave: structuredClone(pane.annotationLocalSave) } : {}),
+        ...(pane.annotationLocalSave ? { annotationLocalSave: copy(pane.annotationLocalSave) } : {}),
         deliveredClosedFrameCount: pane.deliveredClosedFrameCount,
-        dirtyStrokeIds: [...pane.dirtyStrokeIds],
+        dirtyStrokeIds: clonePayloads ? [...pane.dirtyStrokeIds] : pane.dirtyStrokeIds,
         externalNative: false,
         firstDirtyStrokeAt: pane.firstDirtyStrokeAt,
         flushInFlight: false,
-        history: pane.history.map(persistedHistoryEntry),
+        history: clonePayloads ? pane.history.map(persistedHistoryEntry) : pane.history,
         historyIndex: pane.historyIndex,
         lastDirtyStrokeAt: pane.lastDirtyStrokeAt,
         lastSuccessfulFlushAt: pane.lastSuccessfulFlushAt,
@@ -4586,14 +4728,14 @@ function serializeSurface(surface: SurfaceState): PersistentSurfaceRecord {
         paneLabel: pane.paneLabel,
         paneLineageId: pane.paneLineageId,
         pendingAnnotationCommit: pane.pendingAnnotationCommit,
-        snapshot: structuredClone(pane.snapshot),
+        snapshot: copy(pane.snapshot),
         toast: pane.toast,
       })),
     surfaceEpochRevision: surface.surfaceEpochRevision,
     surfaceId: surface.surfaceId,
     topologyRevision: surface.topologyRevision,
-    viewport: cloneViewport(surface.viewport),
-    windowPlacement: cloneWindowPlacement(surface.windowPlacement),
+    viewport: clonePayloads ? cloneViewport(surface.viewport) : surface.viewport,
+    windowPlacement: clonePayloads ? cloneWindowPlacement(surface.windowPlacement) : surface.windowPlacement,
     windowAllocationGeneration: surface.windowAllocationGeneration,
     windowLabel: surface.windowLabel,
     windowLabelConfirmed: surface.windowLabelConfirmed,
@@ -4768,6 +4910,12 @@ function assertSingleSurfacePaneLabelPayload(panes: Array<{ paneLabel: number }>
 
 function currentEntry(pane: PaneState): HistoryEntry {
   return pane.history[pane.historyIndex]!;
+}
+
+function replaceCurrentEntry(pane: PaneState, entry: HistoryEntry): void {
+  const history = [...pane.history];
+  history[pane.historyIndex] = entry;
+  pane.history = history;
 }
 
 function isPristineProviderBootstrapPane(
@@ -5555,7 +5703,7 @@ function patchHtml(
   html: string,
   patch: ContentPatchRequest["payload"]["patch"],
 ): string {
-  const { document } = parseHTML(`<body>${html}</body>`);
+  const { document } = parseHTML(`<html><body>${html}</body></html>`);
   const target = document.querySelector(patch.selector);
   if (!target) {
     throw new SurfaceCoreError("render_failed", `Patch selector not found: ${patch.selector}`);

@@ -14,7 +14,9 @@ import {
   PersistentStateOutcomeUnknownError,
   persistentStateHasArtifacts,
   persistentStateSelectorFileName,
+  shouldGuardUnrestorablePersistentState,
   writePersistentStateFile,
+  writePersistentStateFileContents,
 } from "../src/persistent-state-file.js";
 
 const STATE_FILE_NAME = "surface-core-state.json";
@@ -255,6 +257,20 @@ test("an undecodable committed generation can be replaced by fresh durable state
   const recovered = await loadPersistentStateFile(stateDir, STATE_FILE_NAME);
   assert.equal(recovered.writeGuard, false);
   assert.deepEqual(recovered.state, fresh);
+});
+
+test("pre-encoded candidate bytes remain the exact accepted generation", async () => {
+  const stateDir = await temporaryStateDir();
+  const state = multiWindowState();
+  const contents = JSON.stringify(state, null, 3);
+
+  await writePersistentStateFileContents(stateDir, STATE_FILE_NAME, contents);
+
+  const loaded = await loadPersistentStateFile(stateDir, STATE_FILE_NAME);
+  assert.equal(loaded.writeGuard, false);
+  assert.equal(loaded.serializedContents, contents);
+  assert.deepEqual(loaded.state, state);
+  assert.equal(await fs.readFile(path.join(stateDir, STATE_FILE_NAME), "utf8"), contents);
 });
 
 test("selector acknowledgement ambiguity can be reconciled to the exact committed generation", async () => {
@@ -796,4 +812,50 @@ test("persistent state leaves unrecoverable corrupt primary available for future
   assert.equal(result.state, undefined);
   assert.equal(result.writeGuard, false);
   assert.equal(await fs.readFile(path.join(stateDir, STATE_FILE_NAME), "utf8"), "{");
+});
+
+test("persistent state guards parsed saved surfaces when any saved surface does not restore", () => {
+  assert.equal(shouldGuardUnrestorablePersistentState(multiWindowState(), 0), true);
+  assert.equal(shouldGuardUnrestorablePersistentState(multiWindowState(), 1), true);
+  assert.equal(shouldGuardUnrestorablePersistentState(multiWindowState(), 2), false);
+  assert.equal(shouldGuardUnrestorablePersistentState(undefined, 0), false);
+  assert.equal(
+    shouldGuardUnrestorablePersistentState({ primarySurfaceId: null, surfaces: [], version: 1 }, 0),
+    false,
+  );
+});
+
+
+test("a new commit backs up only the predecessor bytes matched to the accepted generation", async () => {
+  const stateDir = await temporaryStateDir();
+  const statePath = path.join(stateDir, STATE_FILE_NAME);
+  const previous = multiWindowState();
+  await writePersistentStateFile(stateDir, STATE_FILE_NAME, previous);
+  const next = { ...previous, primarySurfaceId: "sf_next" as never };
+  const unaccepted = JSON.stringify({ ...previous, primarySurfaceId: "sf_unaccepted" });
+  const originalReadFile = fs.readFile;
+  const originalRename = fs.rename;
+  let primaryReads = 0;
+  const backupWrites: string[] = [];
+  fs.readFile = (async (...args: Parameters<typeof fs.readFile>) => {
+    if (String(args[0]) === statePath && ++primaryReads > 1) return unaccepted;
+    return await originalReadFile(...args);
+  }) as typeof fs.readFile;
+  fs.rename = (async (...args: Parameters<typeof fs.rename>) => {
+    if (String(args[1]) === path.join(stateDir, backupStateFileName(STATE_FILE_NAME))) {
+      backupWrites.push(await originalReadFile(args[0], "utf8"));
+    }
+    return await originalRename(...args);
+  }) as typeof fs.rename;
+  try {
+    await writePersistentStateFile(stateDir, STATE_FILE_NAME, next);
+  } finally {
+    fs.readFile = originalReadFile;
+    fs.rename = originalRename;
+  }
+  assert.deepEqual(JSON.parse(backupWrites[0]!), previous);
+  assert.deepEqual(JSON.parse(backupWrites.at(-1)!), next);
+  const restored = await loadPersistentStateFile(stateDir, STATE_FILE_NAME);
+  assert.equal(restored.writeGuard, false);
+  assert.deepEqual(restored.state, next);
 });

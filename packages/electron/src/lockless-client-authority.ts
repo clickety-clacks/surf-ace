@@ -339,7 +339,6 @@ function tombstoneScopes(
     ),
   ];
 }
-
 function refreshTombstoneBytes(tombstone: PersistentTombstone): void {
   const nested = (
     tombstone.payload as { paneTombstones?: PersistentTombstone[] }
@@ -352,13 +351,6 @@ function refreshTombstoneBytes(tombstone: PersistentTombstone): void {
     (tombstone.annotationPublisherPartitionBytes ?? 0);
 }
 
-function refreshRetainedTombstoneBytes(
-  state: PersistentLocklessClientState,
-): void {
-  for (const tombstone of state.tombstones) {
-    refreshTombstoneBytes(tombstone);
-  }
-}
 
 function scopeSurfaceId(scopeId: string): string | null {
   if (scopeId.startsWith("surface:")) {
@@ -516,38 +508,22 @@ export function assertRetainedTombstoneAggregate(
   limits: LocklessCapacityLimits,
   transition: RetainedTombstoneTransition,
 ): void {
-  const exactBytes = state.tombstones.reduce((total, tombstone) => {
+  // Historical count/byte budgets do not decide which user's recovery data
+  // survives. Validate the separately owned publisher partition, not a quota
+  // over a serialization of every retained pane.
+  for (const tombstone of state.tombstones) {
     for (const candidate of [tombstone, ...nestedTombstones(tombstone)]) {
-      const { bytes, ...material } = candidate;
-      const exact = exactDurableBytes({ version: 1, ...material });
       const publisherBytes = candidate.annotationPublisherPartitionBytes ?? 0;
       if (!Number.isSafeInteger(publisherBytes) || publisherBytes < 0 ||
           publisherBytes > (limits.maxAnnotationPublisherStateBytesPerSurface ?? 0) ||
-          candidate.kind === "pane" && publisherBytes !== 0 ||
-          bytes !== exact + publisherBytes) {
+          candidate.kind === "pane" && publisherBytes !== 0) {
         throw new LocklessAuthorityError(
           "capability_mismatch",
-          "Persisted tombstone byte accounting is invalid",
-          {
-            exactBytes: exact + publisherBytes,
-            persistedBytes: bytes,
-            tombstoneId: candidate.tombstoneId,
-          },
+          "Persisted annotation publisher partition is invalid",
+          { tombstoneId: candidate.tombstoneId },
         );
       }
     }
-    return total + tombstone.bytes;
-  }, 0);
-  if (exactBytes > limits.maxRetainedTombstoneBytes) {
-    throw new LocklessAuthorityError(
-      "tombstone_capacity",
-      "Retained tombstone aggregate exceeds the configured byte limit",
-      {
-        bytes: exactBytes,
-        maximumBytes: limits.maxRetainedTombstoneBytes,
-        transition,
-      },
-    );
   }
 }
 
@@ -647,6 +623,25 @@ export function navigateLocklessHistory<T>(
   return clone(history.visible);
 }
 
+type OrdinaryMutationRollbackJournal = {
+  controllerInstanceId: string;
+  createdScopeIds: Set<string>;
+  nextCommitSequence: number;
+  priorReceipt: PersistentOperationReceipt | undefined;
+  requestId: string;
+  scopeStates: Map<
+    PersistentConsumableScope,
+    Pick<PersistentConsumableScope, "cursors" | "liveFrames" | "nextSequence" | "records">
+  >;
+  removedConnectionTokens: Map<string, Map<string, string>>;
+  removedControllers: Map<string, PersistentControllerEntry>;
+};
+
+export type OrdinaryMutationRollback = {
+  commit(): void;
+  rollback(): void;
+};
+
 export class LocklessClientAuthority {
   private authorityWorkTail: Promise<void> = Promise.resolve();
   private readonly connectionTokens = new Map<
@@ -655,6 +650,7 @@ export class LocklessClientAuthority {
   >();
   private readonly listeners = new Set<(event: AuthorityEvent) => void>();
   private pendingEvents: AuthorityEvent[] | null = null;
+  private ordinaryMutationRollbackJournal: OrdinaryMutationRollbackJournal | null = null;
   private state: PersistentLocklessClientState;
 
   constructor(
@@ -724,19 +720,27 @@ export class LocklessClientAuthority {
     }
   }
 
-  async transactionAsync<T>(operation: () => Promise<T>, committed?: { onNotificationError: (error: unknown) => void }): Promise<T> {
+  // Ordinary server mutations have an enclosing SurfaceCore transaction whose
+  // durable checkpoint includes this authority. Keep token/event isolation here
+  // without making a second full copy of the same recovery data.
+  async transactionAsync<T>(
+    operation: () => Promise<T>,
+    committed?: { onNotificationError: (error: unknown) => void },
+    stateRollback: "authority" | "enclosing-core" = "authority",
+  ): Promise<T> {
     return await this.serializeAuthorityWork(async () => {
-      return await this.transactionAsyncExclusive(operation, committed);
+      return await this.transactionAsyncExclusive(operation, committed, stateRollback);
     });
   }
 
   private async transactionAsyncExclusive<T>(
     operation: () => Promise<T>,
-    committed?: { onNotificationError: (error: unknown) => void },
+    committed: { onNotificationError: (error: unknown) => void } | undefined,
+    stateRollback: "authority" | "enclosing-core",
   ): Promise<T> {
     const ownsEvents = this.pendingEvents === null;
     const beforeEventCount = this.pendingEvents?.length ?? 0;
-    const beforeState = clone(this.state);
+    const beforeState = stateRollback === "authority" ? clone(this.state) : null;
     const beforeTokens = new Map(
       [...this.connectionTokens].map(([controllerId, slots]) => [
         controllerId,
@@ -759,7 +763,7 @@ export class LocklessClientAuthority {
       return result;
     } catch (error) {
       if ((error as { name?: string } | null)?.name !== "PersistentStateOutcomeUnknownError") {
-        this.state = beforeState;
+        if (beforeState) this.state = beforeState;
         this.connectionTokens.clear();
         for (const [key, value] of beforeTokens) {
           this.connectionTokens.set(key, value);
@@ -831,6 +835,102 @@ export class LocklessClientAuthority {
 
   exportState(): PersistentLocklessClientState {
     return clone(this.state);
+  }
+
+  /**
+   * Journal only the authority partitions an ordinary mutation changes. Scope
+   * payloads and retained record objects stay shared; mutators replace the
+   * touched scope roots so a definite write failure can restore their prior
+   * references without copying retained content.
+   */
+  captureOrdinaryMutationRollback(
+    controllerInstanceId: string,
+    requestId: string,
+  ): OrdinaryMutationRollback {
+    if (this.ordinaryMutationRollbackJournal) {
+      throw new Error("An ordinary mutation rollback journal is already active");
+    }
+    const journal: OrdinaryMutationRollbackJournal = {
+      controllerInstanceId,
+      createdScopeIds: new Set(),
+      nextCommitSequence: this.state.nextCommitSequence,
+      priorReceipt: this.state.controllers[controllerInstanceId]
+        ?.pendingOperationReceipts[requestId],
+      requestId,
+      scopeStates: new Map(),
+      removedConnectionTokens: new Map(),
+      removedControllers: new Map(),
+    };
+    this.ordinaryMutationRollbackJournal = journal;
+    let finished = false;
+    const finish = (): void => {
+      if (finished) return;
+      finished = true;
+      if (this.ordinaryMutationRollbackJournal === journal) {
+        this.ordinaryMutationRollbackJournal = null;
+      }
+    };
+    return {
+      commit: finish,
+      rollback: () => {
+        if (finished) return;
+        for (const [scope, before] of journal.scopeStates) {
+          scope.cursors = before.cursors;
+          scope.liveFrames = before.liveFrames;
+          scope.nextSequence = before.nextSequence;
+          scope.records = before.records;
+        }
+        for (const scopeId of journal.createdScopeIds) {
+          delete this.state.scopes[scopeId];
+        }
+        for (const [id, controller] of journal.removedControllers) {
+          this.state.controllers[id] = controller;
+        }
+        for (const [id, tokens] of journal.removedConnectionTokens) {
+          this.connectionTokens.set(id, tokens);
+        }
+        this.state.nextCommitSequence = journal.nextCommitSequence;
+        const receipts = this.state.controllers[controllerInstanceId]
+          ?.pendingOperationReceipts;
+        if (receipts) {
+          if (journal.priorReceipt === undefined) delete receipts[requestId];
+          else receipts[requestId] = journal.priorReceipt;
+        }
+        finish();
+      },
+    };
+  }
+
+  private captureOrdinaryScopeMutation(scope: PersistentConsumableScope): void {
+    const journal = this.ordinaryMutationRollbackJournal;
+    if (!journal || journal.scopeStates.has(scope)) return;
+    journal.scopeStates.set(scope, {
+      cursors: scope.cursors,
+      liveFrames: scope.liveFrames,
+      nextSequence: scope.nextSequence,
+      records: scope.records,
+    });
+  }
+
+  private captureOrdinaryControllerRemoval(controllerInstanceId: string): void {
+    const journal = this.ordinaryMutationRollbackJournal;
+    const controller = this.state.controllers[controllerInstanceId];
+    if (journal && controller && !journal.removedControllers.has(controllerInstanceId)) {
+      journal.removedControllers.set(controllerInstanceId, controller);
+    }
+    const tokens = this.connectionTokens.get(controllerInstanceId);
+    if (journal && tokens && !journal.removedConnectionTokens.has(controllerInstanceId)) {
+      journal.removedConnectionTokens.set(controllerInstanceId, tokens);
+    }
+  }
+
+  /**
+   * Borrow the live state only for a synchronous JSON serialization. The caller
+   * must not retain or mutate this reference; encoding finishes before this
+   * method's caller can yield to another event-loop task.
+   */
+  stateForSynchronousSerialization(): PersistentLocklessClientState {
+    return this.state;
   }
 
   get limits(): LocklessCapacityLimits {
@@ -953,7 +1053,6 @@ export class LocklessClientAuthority {
         gapGeneration: 0,
       };
     }
-    refreshRetainedTombstoneBytes(this.state);
     this.acceptAudit(
       requestId,
       "controller.admit",
@@ -1154,7 +1253,6 @@ export class LocklessClientAuthority {
 
   admitTargetApplyWorkItem(input: {
     controllerInstanceId: string;
-    currentSurfaceBase: unknown;
     intentCommitSequence: number;
     operationRequestId: string;
     request: LocklessTargetApplyIntent;
@@ -1185,27 +1283,6 @@ export class LocklessClientAuthority {
       bytes: exactVersionedReceiptBytes(withoutBytes),
       ...withoutBytes,
     };
-    const currentBytes =
-      exactDurableBytes(input.currentSurfaceBase) +
-      Object.values(this.state.targetApplyWorkItems)
-        .filter((candidate) => candidate.surfaceId === item.surfaceId)
-        .reduce((total, candidate) => total + candidate.bytes, 0);
-    const prospectiveBytes = currentBytes + item.bytes;
-    if (
-      prospectiveBytes >
-      this.state.limits.maxSurfaceRecoverableBaseBytes
-    ) {
-      throw new LocklessAuthorityError(
-        "surface_state_capacity",
-        "Target apply work item exceeds surface recoverable base capacity",
-        {
-          currentBytes,
-          maximumBytes:
-            this.state.limits.maxSurfaceRecoverableBaseBytes,
-          prospectiveBytes,
-        },
-      );
-    }
     this.state.targetApplyWorkItems[key] = item;
     return clone(item);
   }
@@ -1340,6 +1417,7 @@ export class LocklessClientAuthority {
         gapGeneration: 0,
       };
     }
+    this.ordinaryMutationRollbackJournal?.createdScopeIds.add(scopeId);
     this.state.scopes[scopeId] = created;
     return created;
   }
@@ -1363,6 +1441,7 @@ export class LocklessClientAuthority {
     triggerOperation: string;
   }): { record: ConsumableRecord; retained: boolean } {
     const scope = this.ensureScope(input.scopeId, input.scopeKind);
+    this.captureOrdinaryScopeMutation(scope);
     const sequence = scope.nextSequence++;
     const candidateWithoutBytes = {
       payload: clone(input.payload),
@@ -1395,7 +1474,10 @@ export class LocklessClientAuthority {
       );
       return { record: clone(candidate), retained: false };
     }
-    scope.records.push(candidate);
+    // Replace the record array rather than mutating the prior root. The active
+    // ordinary rollback journal can then retain the old array reference without
+    // cloning any retained payloads.
+    scope.records = [...scope.records, candidate];
     const victims: ConsumableRecord[] = [];
     while (
       scope.records.length > maxRecords ||
@@ -1607,48 +1689,9 @@ export class LocklessClientAuthority {
       ...tombstoneWithoutBytes,
       bytes: exactDurableBytes({ version: 1, ...tombstoneWithoutBytes }) + publisherBytes,
     };
-    if (tombstone.bytes > this.state.limits.maxRetainedTombstoneBytes) {
-      throw new LocklessAuthorityError(
-        "internal_error",
-        "Admitted close exceeded its pre-reserved tombstone envelope",
-        {
-          bytes: tombstone.bytes,
-          maximumBytes: this.state.limits.maxRetainedTombstoneBytes,
-        },
-      );
-    }
-    const proposed = [...this.state.tombstones];
-    const reclaimed: Array<{
-      reason: "count_capacity" | "byte_capacity";
-      tombstone: PersistentTombstone;
-    }> = [];
-    while (
-      proposed.length + 1 > this.state.limits.maxRetainedTombstones ||
-      proposed.reduce((total, entry) => total + entry.bytes, 0) +
-        tombstone.bytes >
-        this.state.limits.maxRetainedTombstoneBytes
-    ) {
-      const exceedsCount =
-        proposed.length + 1 >
-        this.state.limits.maxRetainedTombstones;
-      const victim = proposed.shift();
-      if (!victim) {
-        throw new LocklessAuthorityError(
-          "internal_error",
-          "Admitted close could not satisfy its pre-reserved tombstone envelope",
-        );
-      }
-      reclaimed.push({
-        reason: exceedsCount ? "count_capacity" : "byte_capacity",
-        tombstone: victim,
-      });
-    }
-    this.state.tombstones = [...proposed, tombstone];
+    this.state.tombstones.push(tombstone);
     for (const scopeId of scopeIds) {
       delete this.state.scopes[scopeId];
-    }
-    for (const { reason, tombstone: victim } of reclaimed) {
-      this.recordTombstoneReclamation(victim, reason);
     }
     return clone(tombstone);
   }
@@ -1789,96 +1832,39 @@ export class LocklessClientAuthority {
   }
 
   reconcileAnnotationPublisherPartition(tombstoneId: string, publisherBytes: number): void {
+    const tombstone = this.state.tombstones.find((entry) =>
+      entry.tombstoneId === tombstoneId && entry.kind === "surface");
+    if (!tombstone) return;
+    this.setAnnotationPublisherPartition(tombstone, publisherBytes);
+  }
+
+  reconcileAnnotationPublisherPartitions(
+    partitionBytes: ((surfaceId: string) => number) | null,
+  ): void {
+    for (const tombstone of this.state.tombstones) {
+      if (tombstone.kind !== "surface") continue;
+      if (!partitionBytes) {
+        if ((tombstone.annotationPublisherPartitionBytes ?? 0) > 0) {
+          throw new TypeError("retained annotation publisher requires its source state");
+        }
+        continue;
+      }
+      this.setAnnotationPublisherPartition(tombstone, partitionBytes(tombstone.surfaceId));
+    }
+  }
+
+  private setAnnotationPublisherPartition(
+    tombstone: PersistentTombstone,
+    publisherBytes: number,
+  ): void {
     if (!Number.isSafeInteger(publisherBytes) || publisherBytes < 0 ||
         publisherBytes > (this.state.limits.maxAnnotationPublisherStateBytesPerSurface ?? 0)) {
       throw new LocklessAuthorityError("internal_error", "Invalid annotation publisher tombstone charge");
     }
-    const tombstone = this.state.tombstones.find((entry) =>
-      entry.tombstoneId === tombstoneId && entry.kind === "surface");
-    if (!tombstone || (tombstone.annotationPublisherPartitionBytes ?? 0) === publisherBytes) return;
+    if ((tombstone.annotationPublisherPartitionBytes ?? 0) === publisherBytes) return;
     if (publisherBytes > 0) tombstone.annotationPublisherPartitionBytes = publisherBytes;
     else delete tombstone.annotationPublisherPartitionBytes;
     refreshTombstoneBytes(tombstone);
-    while (this.state.tombstones.reduce((total, entry) => total + entry.bytes, 0) >
-           this.state.limits.maxRetainedTombstoneBytes) {
-      const victim = this.state.tombstones.shift();
-      if (!victim) throw new LocklessAuthorityError("internal_error", "Tombstone pool cannot be reconciled");
-      this.recordTombstoneReclamation(victim, "byte_capacity");
-    }
-  }
-
-  private recordTombstoneReclamation(
-    victim: PersistentTombstone, reason: "count_capacity" | "byte_capacity",
-  ): void {
-      const nested = nestedTombstones(victim);
-      const discardedRecords = tombstoneScopes(victim).flatMap(
-        (scope) => this.scopeProjectionRecords(scope),
-      );
-      const nestedLivePaneCount = victim.kind === "surface"
-        ? (
-            victim.payload as {
-              surface?: { panes?: unknown[] };
-            }
-          )?.surface?.panes?.length ?? 0
-        : 0;
-      const nestedPaneTombstoneCount = nested.filter(
-        (entry) => entry.kind === "pane",
-      ).length;
-      const unreadBytesDiscarded = discardedRecords.reduce(
-        (total, record) => total + record.bytes,
-        0,
-      );
-      const unreadFrameCount = discardedRecords.filter(
-        (record) => record.recordClass === "annotation_frame",
-      ).length;
-      const paneId = victim.kind === "pane"
-        ? (
-            victim.payload as { pane?: { paneId?: unknown } }
-          )?.pane?.paneId
-        : null;
-      const audit = this.acceptAudit(
-        newOpaqueId("reclamation"),
-        "tombstone.reclaimed",
-        null,
-        victim.surfaceId,
-        {
-          bytes: victim.bytes,
-          clientIdentity: this.clientIdentity,
-          closedSequence: victim.closedSequence,
-          kind: victim.kind,
-          maxRetainedTombstoneBytes:
-            this.state.limits.maxRetainedTombstoneBytes,
-          maxRetainedTombstones:
-            this.state.limits.maxRetainedTombstones,
-          nestedLivePaneCount,
-          nestedPaneTombstoneCount,
-          paneId: Number.isInteger(paneId) ? Number(paneId) : null,
-          reason,
-          surfaceId: victim.surfaceId,
-          tombstoneId: victim.tombstoneId,
-          unreadBytesDiscarded,
-          unreadFrameCount,
-        },
-      );
-      this.recordPaneRetirementIntents(victim, audit.commitSequence);
-      this.emit({
-        bytes: victim.bytes,
-        closedSequence: victim.closedSequence,
-        commitSequence: audit.commitSequence,
-        kind: victim.kind,
-        maxRetainedTombstoneBytes:
-          this.state.limits.maxRetainedTombstoneBytes,
-        maxRetainedTombstones:
-          this.state.limits.maxRetainedTombstones,
-        nestedLivePaneCount,
-        nestedPaneTombstoneCount,
-        reason,
-        surfaceId: victim.surfaceId,
-        tombstoneId: victim.tombstoneId,
-        type: "event.tombstone_reclaimed",
-        unreadBytesDiscarded,
-        unreadFrameCount,
-      });
   }
 
   private recordPaneRetirementIntents(
@@ -1969,6 +1955,7 @@ export class LocklessClientAuthority {
       }
     }
   }
+
 
   private recordWindowRetirementIntent(input: {
     windowGeneration: number | null;
@@ -2255,24 +2242,7 @@ export class LocklessClientAuthority {
         }
       }
     }
-    // Clearing allocator claims can increase the serialized size because a
-    // missing generation is longer than its former integer representation.
-    // Keep retained-byte accounting synchronized with the modified payloads.
-    refreshRetainedTombstoneBytes(this.state);
-    const maximumBytes = this.state.limits.maxRetainedTombstoneBytes;
-    while (
-      this.state.tombstones.some((tombstone) => tombstone.bytes > maximumBytes) ||
-      this.state.tombstones.reduce((total, tombstone) => total + tombstone.bytes, 0) > maximumBytes
-    ) {
-      const victim = this.state.tombstones.shift();
-      if (!victim) {
-        throw new LocklessAuthorityError(
-          "internal_error",
-          "Tombstone pool cannot be reconciled after allocator claims are cleared",
-        );
-      }
-      this.recordTombstoneReclamation(victim, "byte_capacity");
-    }
+
   }
 
   acknowledgePaneReleases(releaseIds: string[]): void {
@@ -2363,16 +2333,6 @@ export class LocklessClientAuthority {
     const combined = [...this.state.tombstones, ...clone(tombstones)].sort(
       (left, right) => left.closedSequence - right.closedSequence,
     );
-    if (
-      combined.length > this.state.limits.maxRetainedTombstones ||
-      combined.reduce((total, entry) => total + entry.bytes, 0) >
-        this.state.limits.maxRetainedTombstoneBytes
-    ) {
-      throw new LocklessAuthorityError(
-        "tombstone_capacity",
-        "Exact tombstone restore exceeds retained pool",
-      );
-    }
     this.state.tombstones = combined;
   }
 
@@ -2416,69 +2376,9 @@ export class LocklessClientAuthority {
       throw new LocklessAuthorityError(
         "pane_capacity",
         "Pane-creating operation exceeds maxPanesPerSurface",
-        {
-          currentLivePaneCount,
+        { currentLivePaneCount,
           maxPanesPerSurface: this.state.limits.maxPanesPerSurface,
-          requestedResultingCount,
-        },
-      );
-    }
-  }
-
-  assertSurfaceRecoverableBaseCapacity(
-    currentValue: unknown,
-    prospectiveValue: unknown,
-  ): void {
-    const currentBytes = exactDurableBytes(currentValue);
-    const prospectiveBytes = exactDurableBytes(prospectiveValue);
-    if (
-      prospectiveBytes >
-      this.state.limits.maxSurfaceRecoverableBaseBytes
-    ) {
-      throw new LocklessAuthorityError(
-        "surface_state_capacity",
-        "Surface recoverable base exceeds configured capacity",
-        {
-          currentBytes,
-          maximumBytes:
-            this.state.limits.maxSurfaceRecoverableBaseBytes,
-          prospectiveBytes,
-        },
-      );
-    }
-  }
-
-  assertPaneRecoverableCapacity(
-    currentValue: unknown,
-    prospectiveValue: unknown,
-    annotationRestoreValue: unknown,
-  ): void {
-    const currentBytes = exactDurableBytes(currentValue);
-    const prospectiveBytes = exactDurableBytes(prospectiveValue);
-    const annotationRestoreBytes = exactDurableBytes(annotationRestoreValue);
-    if (
-      prospectiveBytes > this.state.limits.maxPaneRecoverableStateBytes ||
-      annotationRestoreBytes >
-        this.state.limits.maxPaneAnnotationRestoreBytes
-    ) {
-      throw new LocklessAuthorityError(
-        "pane_state_capacity",
-        "Pane recoverable state exceeds configured capacity",
-        {
-          annotationRestoreBytes,
-          currentBytes,
-          exceededLimit:
-            annotationRestoreBytes >
-            this.state.limits.maxPaneAnnotationRestoreBytes
-              ? "maxPaneAnnotationRestoreBytes"
-              : "maxPaneRecoverableStateBytes",
-          maximumBytes:
-            annotationRestoreBytes >
-            this.state.limits.maxPaneAnnotationRestoreBytes
-              ? this.state.limits.maxPaneAnnotationRestoreBytes
-              : this.state.limits.maxPaneRecoverableStateBytes,
-          prospectiveBytes,
-        },
+          requestedResultingCount },
       );
     }
   }
@@ -2677,7 +2577,6 @@ export class LocklessClientAuthority {
         (scope.records.at(-1)?.sequence ?? 0) + 1,
       );
     }
-    refreshRetainedTombstoneBytes(this.state);
   }
 
   private allScopes(): PersistentConsumableScope[] {
@@ -2766,6 +2665,8 @@ export class LocklessClientAuthority {
       controllerInstanceId: string;
       gap: ConsumableGap;
     }> = [];
+    this.captureOrdinaryScopeMutation(scope);
+    scope.cursors = { ...scope.cursors };
     for (const [controllerInstanceId, cursor] of Object.entries(
       scope.cursors,
     )) {
@@ -2774,9 +2675,7 @@ export class LocklessClientAuthority {
       }
       const generation = cursor.gapGeneration + 1;
       const previous = cursor.gap;
-      cursor.cursor = Math.max(cursor.cursor, firstRetained);
-      cursor.gapGeneration = generation;
-      cursor.gap = {
+      const gap: ConsumableGap = {
         cause,
         droppedBytes:
           previous?.lossExtent === "unknown"
@@ -2831,9 +2730,16 @@ export class LocklessClientAuthority {
           ...new Set([...(previous?.recordClasses ?? []), ...classes]),
         ],
       };
+      const updatedCursor: ConsumableCursorProjection = {
+        ...cursor,
+        cursor: Math.max(cursor.cursor, firstRetained),
+        gap,
+        gapGeneration: generation,
+      };
+      scope.cursors[controllerInstanceId] = updatedCursor;
       affected.push({
         controllerInstanceId,
-        gap: clone(cursor.gap),
+        gap: clone(gap),
       });
     }
     const eventCount = lostRecords.filter((record) =>
@@ -2898,13 +2804,20 @@ export class LocklessClientAuthority {
   private dropFullyConsumedRecords(scope: PersistentConsumableScope): void {
     const cursors = Object.values(scope.cursors);
     if (cursors.length === 0) {
-      scope.records = [];
+      if (scope.records.length > 0) {
+        this.captureOrdinaryScopeMutation(scope);
+        scope.records = [];
+      }
       return;
     }
     const floor = Math.min(...cursors.map((cursor) => cursor.cursor));
-    scope.records = scope.records.filter(
+    const retained = scope.records.filter(
       (record) => record.sequence >= floor,
     );
+    if (retained.length !== scope.records.length) {
+      this.captureOrdinaryScopeMutation(scope);
+      scope.records = retained;
+    }
   }
 
   private dormantEntries(): PersistentControllerEntry[] {
@@ -3051,21 +2964,32 @@ export class LocklessClientAuthority {
           (scope) => scope.cursors[victim.controllerInstanceId],
         ),
     ).length;
+    this.captureOrdinaryControllerRemoval(victim.controllerInstanceId);
     delete this.state.controllers[victim.controllerInstanceId];
     this.connectionTokens.delete(victim.controllerInstanceId);
     for (const scope of this.allScopes()) {
-      delete scope.cursors[victim.controllerInstanceId];
+      if (scope.cursors[victim.controllerInstanceId]) {
+        this.captureOrdinaryScopeMutation(scope);
+        const cursors = { ...scope.cursors };
+        delete cursors[victim.controllerInstanceId];
+        scope.cursors = cursors;
+      }
+      let liveFrames: Record<string, ConsumableRecord> | null = null;
       for (const [frameId, frame] of Object.entries(scope.liveFrames)) {
         const retainedForAnotherController = Object.values(
           scope.cursors,
         ).some((cursor) => cursor.cursor <= frame.sequence);
         if (!retainedForAnotherController) {
-          delete scope.liveFrames[frameId];
+          if (liveFrames === null) {
+            this.captureOrdinaryScopeMutation(scope);
+            liveFrames = { ...scope.liveFrames };
+          }
+          delete liveFrames[frameId];
         }
       }
+      if (liveFrames !== null) scope.liveFrames = liveFrames;
       this.dropFullyConsumedRecords(scope);
     }
-    refreshRetainedTombstoneBytes(this.state);
     const correlation = {
       clientIdentity: this.clientIdentity,
       controllerInstanceId: victim.controllerInstanceId,
