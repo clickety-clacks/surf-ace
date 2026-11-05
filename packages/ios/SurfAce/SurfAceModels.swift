@@ -1,7 +1,9 @@
 import CoreGraphics
 import Foundation
 import Observation
+#if !os(tvOS)
 import PencilKit
+#endif
 import UIKit
 
 enum SurfAceConnectionBarState {
@@ -482,6 +484,7 @@ func surfAceRemovingAnnotationStrokes(
     strokesById: [String: SurfAceStroke],
     requestedStrokeIds: [String]
 ) throws -> SurfAceAnnotationRemovalResult {
+    #if !os(tvOS)
     let drawing = drawingData.isEmpty ? PKDrawing() : try PKDrawing(data: drawingData)
     let orderedStrokeIds = strokesById.keys.sorted()
     guard drawing.strokes.count == orderedStrokeIds.count else {
@@ -491,6 +494,7 @@ func surfAceRemovingAnnotationStrokes(
         )
     }
 
+    #endif
     var remainingStrokesById = strokesById
     var removedStrokeIds: [String] = []
     var notFoundStrokeIds: [String] = []
@@ -506,11 +510,15 @@ func surfAceRemovingAnnotationStrokes(
     if removedStrokeIds.isEmpty {
         transformedDrawingData = drawingData
     } else {
+        #if os(tvOS)
+        transformedDrawingData = try JSONEncoder().encode(remainingStrokesById.values.sorted { $0.strokeId < $1.strokeId })
+        #else
         let removed = Set(removedStrokeIds)
         let remainingDrawingStrokes = zip(orderedStrokeIds, drawing.strokes).compactMap { strokeId, stroke in
             removed.contains(strokeId) ? nil : stroke
         }
         transformedDrawingData = PKDrawing(strokes: remainingDrawingStrokes).dataRepresentation()
+        #endif
     }
     return SurfAceAnnotationRemovalResult(
         drawingData: transformedDrawingData,
@@ -1146,6 +1154,9 @@ final class SurfAcePaneModel {
     var name: String?
     var backStack: [SurfAcePaneEntry]
     var currentEntry: SurfAcePaneEntry
+    #if os(tvOS)
+    var htmlDiagnostic: SurfAceTVHTMLDiagnostic?
+    #endif
     var contentScale: CGFloat = 1
     var forwardStack: [SurfAcePaneEntry]
     var annotationMode = false
@@ -1201,7 +1212,11 @@ final class SurfAcePaneModel {
     // A topology edit may rebuild SwiftUI ancestors while this pane survives.
     // Keep its UIKit/WebKit host with the pane model so a reparent does not
     // discard the live document and its in-page state.
+    #if os(tvOS)
+    @ObservationIgnored var retainedHostView: SurfAceTVPaneView?
+    #else
     @ObservationIgnored var retainedHostView: SurfAceSurfaceHostView?
+    #endif
     let paneInstanceId: String
 
     init(paneId: Int, paneLineageId: String = "pl_\(UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased())", paneLabel: Int? = nil, name: String? = nil) {

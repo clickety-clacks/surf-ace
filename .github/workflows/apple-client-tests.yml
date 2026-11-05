@@ -80,3 +80,54 @@ jobs:
             ${{ runner.temp }}/apple-registration-tests.xcresult
             ${{ runner.temp }}/apple-recovery-tests.xcresult
           if-no-files-found: warn
+  tvos:
+    runs-on: xcode-27
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Record source and select tvOS simulator
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD HEAD^{tree}
+          sudo xcode-select --switch /Applications/Xcode_27.0.0.app
+          xcodebuild -version
+          xcrun simctl list runtimes -j > "$RUNNER_TEMP/tvos-runtimes.json"
+          runtime_id="$(python3 - "$RUNNER_TEMP/tvos-runtimes.json" <<'PY'
+          import json, sys
+          runtimes = [r for r in json.load(open(sys.argv[1]))['runtimes']
+                      if r['isAvailable'] and '.tvOS-' in r['identifier']]
+          print(max(runtimes, key=lambda r: tuple(map(int, r['version'].split('.'))))['identifier'])
+          PY
+          )"
+          simulator_id="$(xcrun simctl create 'Surf Ace tvOS tests' com.apple.CoreSimulator.SimDeviceType.Apple-TV-4K-3rd-generation-1080p "$runtime_id")"
+          echo "TVOS_SIMULATOR=$simulator_id" >> "$GITHUB_ENV"
+      - name: Test native panes and runtime preservation
+        run: |
+          xcodebuild test \
+            -project packages/ios/SurfAceTV.xcodeproj -scheme SurfAceTV \
+            -configuration Debug -jobs 2 -parallel-testing-enabled NO \
+            -destination "id=$TVOS_SIMULATOR" CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- \
+            -resultBundlePath "$RUNNER_TEMP/tvos-native-tests.xcresult"
+      - name: Test Siri Remote annotation and arrangement
+        run: |
+          xcodebuild test \
+            -project packages/ios/SurfAceTV.xcodeproj -scheme SurfAceTVRemote \
+            -configuration Debug -jobs 2 -parallel-testing-enabled NO \
+            -destination "id=$TVOS_SIMULATOR" CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- \
+            -resultBundlePath "$RUNNER_TEMP/tvos-remote-tests.xcresult"
+      - name: Preserve tvOS results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: apple-tvos-tests
+          path: |
+            ${{ runner.temp }}/tvos-native-tests.xcresult
+            ${{ runner.temp }}/tvos-remote-tests.xcresult
+          if-no-files-found: warn
+      - name: Remove isolated simulator
+        if: always() && env.TVOS_SIMULATOR != ''
+        run: |
+          xcrun simctl shutdown "$TVOS_SIMULATOR" || true
+          xcrun simctl delete "$TVOS_SIMULATOR"

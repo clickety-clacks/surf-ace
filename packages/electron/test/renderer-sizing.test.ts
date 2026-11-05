@@ -620,7 +620,7 @@ test("html content is loaded through the browser webview surface", async () => {
   assert.doesNotMatch(source.slice(htmlIndex, browserUrlIndex), /allowPopups: true/);
   assert.match(source, /const blockStaticHtmlNavigation = \(event: Event\) =>[\s\S]*sendNavigationIntent\(view, pane\.paneId, nextUrl\)/);
   const wrapperIndex = source.indexOf("function reportSnapshot(");
-  const wrapperEnd = source.indexOf("/** Synchronous fresh DOM association", wrapperIndex);
+  const wrapperEnd = source.indexOf("function reportPaneSnapshot(", wrapperIndex);
   const snapshotIndex = source.indexOf("function reportPaneSnapshot(");
   const snapshotEnd = source.indexOf("function reportAllPaneSnapshots", snapshotIndex);
   assert.ok(wrapperIndex >= 0 && wrapperEnd > wrapperIndex && snapshotEnd > snapshotIndex);
