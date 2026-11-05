@@ -8,7 +8,6 @@ import {
 } from "../../controller/src/wire.js";
 import type { PersistentPaneRetirement, PersistentWindowRetirement } from "./lockless-client-authority.js";
 import {
-  SurfaceCoreTransactionTimeoutError,
   type PaneLabelAllocation,
   type PersistentRegistryEndpointLease,
   type SurfaceCore,
@@ -96,7 +95,7 @@ type ParsedRegistrationResponse = {
   windowGenerationV1: boolean;
 };
 
-export class RegistrationStageTimeoutError extends SurfaceCoreTransactionTimeoutError {
+export class RegistrationStageTimeoutError extends Error {
   readonly code = "registration_stage_timeout";
 
   constructor(readonly stage: string) {
@@ -130,7 +129,6 @@ export class ConfiguredServerRegistration {
   private readonly retrySuppressedClaimKeys = new Set<string>();
   private readonly reportedCompatibilityWarnings = new Set<string>();
   private registryIdentity: RegistryIdentity | null = null;
-  private readonly localWaitTimeoutMs: number;
 
   constructor(
     address: string,
@@ -146,7 +144,6 @@ export class ConfiguredServerRegistration {
     if (url.protocol !== "ws:" && url.protocol !== "wss:") throw new Error("server address must use ws or wss");
     this.wire = new PublicControllerWireClient(url.toString(), requestTimeoutMs);
     this.directEndpoint = validateConfiguredDirectEndpoint(directEndpoint);
-    this.localWaitTimeoutMs = requestTimeoutMs;
   }
 
   private readonly directEndpoint: string | null;
@@ -162,13 +159,15 @@ export class ConfiguredServerRegistration {
   private async localTransaction<T>(stage: string, operation: () => Promise<T>): Promise<T> {
     this.assertActive();
     this.setStage(stage);
-    const result = await this.core.locklessAuthority.transactionAsync(() =>
-      this.core.transactionAsyncBounded(
-        operation,
-        this.localWaitTimeoutMs,
-        new RegistrationStageTimeoutError(stage),
-      ),
-    );
+    const result = await this.core.locklessAuthority.transactionAsync(() => this.core.transactionAsync(async () => {
+      // The cycle deadline may expire while either authoritative queue is
+      // occupied. Check only after acquiring both locks, before this attempt
+      // can mutate state. Once persistence starts, keep the existing
+      // serialization seam held until its outcome is known; racing it would
+      // let a late write overwrite a newer candidate.
+      this.assertActive();
+      return await operation();
+    }));
     this.assertActive();
     return result;
   }
@@ -301,7 +300,10 @@ export class ConfiguredServerRegistration {
 
   private async buildRegistrationPayload(): Promise<RegistrationPayload> {
     return await this.localTransaction("local registration snapshot", async () => {
-      if (this.core.normalizeRefusedRegistryClaims()) await this.persist();
+      if (this.core.normalizeRefusedRegistryClaims()) {
+        await this.persist();
+        this.assertActive();
+      }
       const surfaces = this.core.listSurfaces();
       for (const surface of surfaces) this.core.admitSurfaceToLockless(surface.surfaceId);
       const hasPendingReleases = this.core.locklessAuthority.listPendingPaneReleases().length > 0 ||

@@ -4894,6 +4894,21 @@ test("surface.describe returns topology when saved registry binding or lease is 
       expectedLimitations: ["endpoint_lease_unavailable"],
     },
     {
+      name: "lease-expired-matching",
+      prepare: (state: ReturnType<ReturnType<typeof describeFixture>["core"]["getPersistentState"]>) => {
+        state.registryEndpointLease = {
+          leaseGeneration: 17,
+          registrationObservedAtMs: Date.now() - 20_000,
+          leaseExpiresAtMs: Date.now() - 1_000,
+        };
+      },
+      expectedClientId: "a".repeat(64),
+      expectedLeaseGeneration: 17,
+      expectedRegistryIdentityUnavailable: false,
+      expectedEndpointLeaseUnavailable: false,
+      expectedLimitations: ["endpoint_lease_expired"],
+    },
+    {
       name: "stale",
       prepare: (state: ReturnType<ReturnType<typeof describeFixture>["core"]["getPersistentState"]>) => {
         state.registryBinding = {

@@ -15,6 +15,8 @@ type SelectedRegistration = {
 
 type CandidateRegistration = SelectedRegistration & { context: string; identity: RegistryIdentity };
 
+export const REGISTRATION_CYCLE_TIMEOUT_MS = 10_000;
+
 function describeError(error: unknown): string {
   if (!(error instanceof Error)) return String(error);
   const code = "code" in error && typeof error.code === "string" ? ` (${error.code})` : "";
@@ -260,7 +262,7 @@ export class ServerConnection {
     const deadline = new Promise<never>((_resolve, reject) => {
       timeout = setTimeout(
         () => reject(new RegistrationStageTimeoutError(this.currentStage)),
-        this.options.registrationCycleTimeoutMs ?? 10_000,
+        this.options.registrationCycleTimeoutMs ?? REGISTRATION_CYCLE_TIMEOUT_MS,
       );
     });
     const work = this.runSynchronization(cycle);

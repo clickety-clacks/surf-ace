@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { WebSocketServer, WebSocket } from "ws";
 import type { Revision } from "../../protocol/src/index.js";
-import { ServerConnection } from "../src/server-connection.js";
+import { REGISTRATION_CYCLE_TIMEOUT_MS, ServerConnection } from "../src/server-connection.js";
 import { ConfiguredServerRegistration } from "../src/configured-server.js";
 import { SurfaceCore } from "../src/surface-core.js";
 import { createEmptyLocklessClientState, DEFAULT_LOCKLESS_LIMITS } from "../src/lockless-client-authority.js";
@@ -809,7 +809,8 @@ test("central status waits for registration and persistence; loss, retry and rec
   assert.equal(state().connectionBar, "disconnected");
 });
 
-test("a stuck registration persistence step disconnects truthfully and recovers without losing pane content", async () => {
+test("a delayed registration persistence times out its attempt, stays serialized, and recovers without losing pane content", async () => {
+  assert.equal(REGISTRATION_CYCLE_TIMEOUT_MS, 10_000);
   const directEndpoint = "ws://127.0.0.1:1/ws";
   let leaseGeneration = 0;
   const registry = await automaticRegistryFixture({
@@ -844,19 +845,18 @@ test("a stuck registration persistence step disconnects truthfully and recovers 
   });
   let persistenceCalls = 0;
   const persistenceStalled = deferred();
+  const releasePersistence = deferred();
   const connection = new ServerConnection({
     configuredAddress: registry.address,
     directEndpoint,
     clientId: "local-persistence-recovery-client",
     core,
     discovery: emptyDiscovery(),
-    requestTimeoutMs: 120,
-    registrationCycleTimeoutMs: 800,
     persist: async () => {
       persistenceCalls += 1;
       if (persistenceCalls === 2) {
         persistenceStalled.resolve();
-        await new Promise<void>(() => {});
+        await releasePersistence.promise;
       }
     },
   });
@@ -869,8 +869,22 @@ test("a stuck registration persistence step disconnects truthfully and recovers 
     await rejected;
     assert.equal(state().connectionBar, "disconnected");
     assert.match(state().connectionError ?? "", /registry_cycle_timed_out:local registration response persistence/);
+    assert.deepEqual(core.registryBinding(), {
+      allocatorId: "alloc_fixture",
+      clientId: "local-persistence-recovery-client",
+      fleetId: "fixture-fleet",
+    }, "a timeout preserves the confirmed client and registry identity");
+    await new Promise<void>((resolve) => setTimeout(resolve, 200));
+    assert.equal(registrationCount(), 1,
+      "a fresh cycle waits behind the in-flight authoritative persistence instead of writing over it");
+    assert.equal(state().panes[0]?.content.contentId, "ct_local_persistence_recovery",
+      "the old content remains readable while the registration save is unresolved");
+    releasePersistence.resolve();
+    const dependencyRecoveredAt = Date.now();
 
     await until(() => state().connectionBar === "connected" && registrationCount() >= 2);
+    assert.ok(Date.now() - dependencyRecoveredAt <= 40_000,
+      "a recovered persistence dependency reaches a fresh ready registration within 30 seconds plus W");
     const recovered = state();
     assert.equal(recovered.windowLabel, "a");
     assert.equal(recovered.panes[0]?.label, "700");
@@ -880,9 +894,15 @@ test("a stuck registration persistence step disconnects truthfully and recovers 
       markdown: "Readable content survives a stalled registration",
     });
     assert.equal(core.listSurfaces()[0]?.surfaceId, surface.surfaceId);
+    assert.deepEqual(core.registryBinding(), {
+      allocatorId: "alloc_fixture",
+      clientId: "local-persistence-recovery-client",
+      fleetId: "fixture-fleet",
+    });
     assert.equal(core.registryEndpointLease()?.leaseGeneration, 2,
-      "the retry commits a fresh lease after the stalled response transaction rolls back");
+      "the retry commits a fresh lease after the earlier delayed transaction completes in order");
   } finally {
+    releasePersistence.resolve();
     await connection.stop();
     await registry.close();
   }

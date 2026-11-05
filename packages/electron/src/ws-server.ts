@@ -3445,8 +3445,13 @@ export class SurfaceWsServer {
     }
     if (!lease) {
       limitationCodes.push("endpoint_lease_unavailable");
-    } else if (lease.leaseGeneration !== request.payload.endpointLeaseGeneration) {
-      limitationCodes.push("endpoint_lease_stale");
+    } else {
+      if (observedAtMs >= lease.leaseExpiresAtMs) {
+        limitationCodes.push("endpoint_lease_expired");
+      }
+      if (lease.leaseGeneration !== request.payload.endpointLeaseGeneration) {
+        limitationCodes.push("endpoint_lease_stale");
+      }
     }
     type DescribePane = {
       paneId: number;
