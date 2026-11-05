@@ -98,21 +98,26 @@ test("ordinary Quit keeps its watchdog alive through IPC teardown and restores a
     child.once("exit", (code, signal) => resolve({ code, signal }));
   });
   const lifecycleMessages: string[] = [];
-  let resolveSaved!: () => void;
-  const saved = new Promise<void>((resolve) => { resolveSaved = resolve; });
+  let saved = false;
   let quitStartedAt: number | null = null;
-  let resolveQuitStarted!: () => void;
-  const quitStarted = new Promise<void>((resolve) => { resolveQuitStarted = resolve; });
-  child.on("message", (rawMessage) => {
-    const message = rawMessage as { type?: unknown };
-    if (message.type === "saved") {
-      lifecycleMessages.push("saved");
-      resolveSaved();
-    } else if (message.type === "quit-start") {
-      lifecycleMessages.push("quit-start");
-      quitStartedAt = Date.now();
-      resolveQuitStarted();
-    }
+  const lifecycle = new Promise<void>((resolve, reject) => {
+    child.on("message", (rawMessage) => {
+      const message = rawMessage as { type?: unknown };
+      if (message.type === "saved") {
+        saved = true;
+        lifecycleMessages.push("saved");
+      } else if (message.type === "quit-start") {
+        quitStartedAt = Date.now();
+        lifecycleMessages.push("quit-start");
+      }
+      if (saved && quitStartedAt !== null) resolve();
+    });
+    child.once("error", reject);
+    child.once("exit", (code, signal) => {
+      if (!saved || quitStartedAt === null) {
+        reject(new Error(`Electron Quit child exited before save acknowledgement and Quit (${code ?? signal})`));
+      }
+    });
   });
   let deadlineTimer: NodeJS.Timeout | undefined;
   const timeout = new Promise<never>((_resolve, reject) => {
@@ -123,8 +128,7 @@ test("ordinary Quit keeps its watchdog alive through IPC teardown and restores a
     deadlineTimer.unref();
   });
   try {
-    await saved;
-    await quitStarted;
+    await lifecycle;
     const result = await Promise.race([exited, timeout]);
     assert.equal(result.code, null);
     assert.ok(result.signal === "SIGTERM" || result.signal === "SIGKILL");
