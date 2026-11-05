@@ -17,6 +17,7 @@ import {
 import { loadPersistentStateFile, writePersistentStateFile } from "../src/persistent-state-file.js";
 
 const helperPath = fileURLToPath(new URL("../quit-lifecycle.cjs", import.meta.url));
+const watchdogQuitChildPath = fileURLToPath(new URL("./quit-lifecycle-watchdog-child.js", import.meta.url));
 const electronExecutable = createRequire(import.meta.url)("electron") as string;
 
 test("ordinary Quit preserves acknowledged state, blocks new saves, and does not wait for stalled cleanup", async () => {
@@ -75,7 +76,7 @@ test("ordinary Quit preserves acknowledged state, blocks new saves, and does not
   }
 });
 
-test("ordinary Quit uses an external Electron watchdog and leaves acknowledged state restorable", async () => {
+test("ordinary Quit keeps its watchdog alive through IPC teardown and restores acknowledged state after bounded exit", async () => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-quit-watchdog-"));
   const core = new SurfaceCore({ persistentState: { primarySurfaceId: null, version: 1 } });
   const surface = core.ensurePrimarySurface("Quit watchdog fixture", { height: 800, scale: 2, width: 1200 });
@@ -88,38 +89,50 @@ test("ordinary Quit uses an external Electron watchdog and leaves acknowledged s
     revision: 1 as never,
   });
   const state: PersistentSurfaceState = core.getPersistentState();
-  await writePersistentStateFile(stateDir, "state.json", state);
-  const program = [
-    `const { handleBeforeQuit, startQuitWatchdog } = require(${JSON.stringify(helperPath)});`,
-    "let quitting = false;",
-    "handleBeforeQuit({ preventDefault() {} }, {",
-    "  armWatchdog: () => startQuitWatchdog(900, 250),",
-    "  cleanup: [() => new Promise(() => {})],",
-    "  exit: () => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0),",
-    "  isQuitting: () => quitting,",
-    "  markQuitting: () => { quitting = true; },",
-    "  onError: () => {},",
-    "  stopBackgroundWork: () => {},",
-    "});",
-  ].join("\n");
-  const child = spawn(electronExecutable, ["-e", program], {
+  const child = spawn(electronExecutable, [watchdogQuitChildPath, stateDir, JSON.stringify(state)], {
     env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
-    stdio: "ignore",
+    stdio: ["ignore", "ignore", "ignore", "ipc"],
   });
   const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
     child.once("error", reject);
     child.once("exit", (code, signal) => resolve({ code, signal }));
   });
-  const timeout = new Promise<never>((_resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("external Electron watchdog did not exit the blocked process")), 3_000);
-    timer.unref();
+  const lifecycleMessages: string[] = [];
+  let resolveSaved!: () => void;
+  const saved = new Promise<void>((resolve) => { resolveSaved = resolve; });
+  let quitStartedAt: number | null = null;
+  let resolveQuitStarted!: () => void;
+  const quitStarted = new Promise<void>((resolve) => { resolveQuitStarted = resolve; });
+  child.on("message", (rawMessage) => {
+    const message = rawMessage as { type?: unknown };
+    if (message.type === "saved") {
+      lifecycleMessages.push("saved");
+      resolveSaved();
+    } else if (message.type === "quit-start") {
+      lifecycleMessages.push("quit-start");
+      quitStartedAt = Date.now();
+      resolveQuitStarted();
+    }
   });
-  const startedAt = Date.now();
+  let deadlineTimer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    deadlineTimer = setTimeout(
+      () => reject(new Error("Electron Quit watchdog did not exit the IPC-disconnected process by Q")),
+      QUIT_EXIT_DEADLINE_MS + 1_000,
+    );
+    deadlineTimer.unref();
+  });
   try {
+    await saved;
+    await quitStarted;
     const result = await Promise.race([exited, timeout]);
     assert.equal(result.code, null);
-    assert.equal(result.signal, "SIGTERM");
-    assert.ok(Date.now() - startedAt < 2_000);
+    assert.ok(result.signal === "SIGTERM" || result.signal === "SIGKILL");
+    assert.ok(quitStartedAt !== null);
+    assert.ok(Date.now() - quitStartedAt <= QUIT_EXIT_DEADLINE_MS,
+      "the real child process exits within Q after ordinary Quit starts");
+    assert.deepEqual(lifecycleMessages, ["saved", "quit-start"],
+      "the production persistence write is acknowledged before Quit begins");
     const restored = await loadPersistentStateFile(stateDir, "state.json");
     assert.deepEqual(restored.state, JSON.parse(JSON.stringify(state)));
     const reopened = new SurfaceCore({ persistentState: restored.state });
@@ -132,6 +145,7 @@ test("ordinary Quit uses an external Electron watchdog and leaves acknowledged s
     assert.deepEqual(reopened.getRendererWindowState(surface.surfaceId).panes[0]?.content.content,
       { markdown: "# State acknowledged before a stalled Quit" });
   } finally {
+    if (deadlineTimer) clearTimeout(deadlineTimer);
     if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
     await fs.rm(stateDir, { force: true, recursive: true });
   }

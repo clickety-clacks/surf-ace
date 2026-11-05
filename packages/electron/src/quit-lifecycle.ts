@@ -23,15 +23,26 @@ export function startQuitWatchdog(
     const forceDelayMs = Number(process.argv[3]);
     let termTimer;
     let forceTimer;
+    let parentPollTimer;
     const stop = () => {
       clearTimeout(termTimer);
       clearTimeout(forceTimer);
+      clearInterval(parentPollTimer);
       process.exit(0);
     };
-    process.on("disconnect", stop);
+    const parentHasExited = () => {
+      try { process.kill(parentPid, 0); return false; }
+      catch (error) { return error && error.code === "ESRCH"; }
+    };
+    // Electron can close Node's IPC handles before native exit cleanup finishes.
+    // Keep the deadline armed until the parent process itself has exited.
+    parentPollTimer = setInterval(() => {
+      if (parentHasExited()) stop();
+    }, 100);
     const terminate = (signal) => {
-      if (!process.connected) return stop();
-      try { process.kill(parentPid, signal); } catch { stop(); }
+      if (parentHasExited()) return stop();
+      try { process.kill(parentPid, signal); }
+      catch (error) { if (error && error.code === "ESRCH") stop(); }
     };
     termTimer = setTimeout(() => terminate("SIGTERM"), delayMs - forceDelayMs);
     forceTimer = setTimeout(() => terminate("SIGKILL"), delayMs);
