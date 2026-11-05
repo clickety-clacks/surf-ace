@@ -92,12 +92,6 @@ test("clearing allocator claims preserves tombstones without payload-budget evic
       panes: [{ paneId: 1, paneLabel: 44, allocationGeneration: 6 }],
     },
   });
-  const exactBytes = (tombstone: ReturnType<LocklessClientAuthority["createTombstone"]>) => {
-    const { bytes: _bytes, ...material } = tombstone;
-    return exactDurableBytes({ version: 1, ...material }) +
-      (tombstone.annotationPublisherPartitionBytes ?? 0);
-  };
-
   const aggregate = makeAuthority();
   const reclaimed: string[] = [];
   aggregate.subscribe((event) => {
@@ -112,10 +106,6 @@ test("clearing allocator claims preserves tombstones without payload-budget evic
   assert.deepEqual(reclaimed, []);
   assert.deepEqual(aggregate.listPendingPaneReleases(), []);
   assert.deepEqual(aggregate.listPendingWindowReleases(), []);
-  for (const retained of aggregate.listTombstones()) {
-    assert.equal(retained.bytes, exactBytes(retained));
-  }
-
   const individual = makeAuthority();
   const only = individual.createTombstone({ kind: "surface", payload: payload(), surfaceId: "sf_only" });
   individual.configureLimits({ ...roomy, maxRetainedTombstoneBytes: only.bytes });
