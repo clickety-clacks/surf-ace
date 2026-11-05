@@ -5703,7 +5703,7 @@ function patchHtml(
   html: string,
   patch: ContentPatchRequest["payload"]["patch"],
 ): string {
-  const { document } = parseHTML(`<body>${html}</body>`);
+  const { document } = parseHTML(`<html><body>${html}</body></html>`);
   const target = document.querySelector(patch.selector);
   if (!target) {
     throw new SurfaceCoreError("render_failed", `Patch selector not found: ${patch.selector}`);

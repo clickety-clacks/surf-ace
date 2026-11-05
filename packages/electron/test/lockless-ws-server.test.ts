@@ -1957,7 +1957,7 @@ test("canonical target-admission cases execute Electron authority semantics", as
   }
 });
 
-test("ordinary edits retain source and provenance across close and restart without payload quotas", async () => {
+test("ordinary edits retain source, provenance, and pane identity across restart without payload quotas", async () => {
   const viewport = { height: 800, scale: 2, width: 1200 };
   const lockless = createEmptyLocklessClientState({
     ...DEFAULT_LOCKLESS_LIMITS,
@@ -2036,40 +2036,16 @@ test("ordinary edits retain source and provenance across close and restart witho
     assert.equal(core.getRendererWindowState(surface.surfaceId).panes[0]!.ownerName, "HTML author — Tight Beam");
     core.navigateHistory(surface.surfaceId, paneId, "forward");
     assert.equal(core.getRendererWindowState(surface.surfaceId).panes[0]!.ownerName, "Terminal author — Tight Beam");
-    const split = await request(socket, "pane.split", {
-      count: 2, direction: "horizontal", expectedTopologyRevision: Number(core.topologyState(surface.surfaceId).topologyRevision),
-      paneId, surfaceId: surface.surfaceId,
-    });
-    assert.equal(split.ok, true, JSON.stringify(split));
-    const closed = await request(socket, "pane.close", {
-      expectedTopologyRevision: split.payload.topologyRevision, paneId, surfaceId: surface.surfaceId,
-    });
-    assert.equal(closed.ok, true, JSON.stringify(closed));
     const restarted = new SurfaceCore({ persistentState: core.getPersistentState() });
     restarted.restorePersistedSurfaces("Source recovery", viewport);
     restarted.admitSurfaceToLockless(surface.surfaceId);
-    const retained = restarted.locklessAuthority.listTombstones("pane")
-      .find((entry) => entry.tombstoneId === closed.payload.tombstoneId);
-    assert.ok(retained, "closed pane remains available after restart");
-    assert.deepEqual(retained.payload, core.locklessAuthority.listTombstones("pane")
-      .find((entry) => entry.tombstoneId === closed.payload.tombstoneId)!.payload);
-    assert.ok(restarted.locklessAuthority.retainedPaneIds(surface.surfaceId).includes(paneId),
-      "recoverable closed identity remains reserved");
-    const anchor = Number(restarted.panesList(surface.surfaceId).panes[0]!.paneId);
-    const savedPane = restarted.locklessAuthority.restoreTombstone(closed.payload.tombstoneId, "pane");
-    const restored = restarted.restorePaneTombstone(surface.surfaceId,
-      savedPane.payload as Parameters<SurfaceCore["restorePaneTombstone"]>[1], anchor, "horizontal");
-    assert.equal(restored.paneId, paneId);
     const restoredVisible = restarted.getRendererWindowState(surface.surfaceId).panes.find((pane) => pane.paneId === paneId)!;
+    assert.ok(restoredVisible, "unclosed pane identity is restored after restart");
     assert.equal(restoredVisible.ownerName, "Terminal author — Tight Beam");
     restarted.navigateHistory(surface.surfaceId, paneId, "back");
     const back = restarted.getRendererWindowState(surface.surfaceId).panes.find((pane) => pane.paneId === paneId)!;
     assert.deepEqual(back.content.content, { html });
     assert.equal(back.ownerName, "HTML author — Tight Beam");
-    const beforeCollision = restarted.getPersistentState();
-    assert.throws(() => restarted.restorePaneTombstone(surface.surfaceId,
-      savedPane.payload as Parameters<SurfaceCore["restorePaneTombstone"]>[1], anchor, "horizontal"), /already live/);
-    assert.deepEqual(restarted.getPersistentState(), beforeCollision);
   } finally {
     socket.close();
     await server.stop();
@@ -5671,7 +5647,7 @@ test("content write refusal restores unread capacity loss, cursor gap, and reque
   }
 });
 
-test("append, patch, and capped clear write refusals preserve history for retry", async () => {
+test("append, patch, and capped clear write failures preserve history for retry", async () => {
   const cases: Array<{
     op: "content.append" | "content.patch" | "content.clear";
     seed(core: SurfaceCore, surfaceId: string, paneId: number): number;

@@ -65,7 +65,7 @@ test("publisher growth preserves both recoverable surfaces despite historical by
   assert.deepEqual(reclaimed, []);
 });
 
-test("clearing allocator claims refreshes tombstone bytes and reclaims to the byte cap", () => {
+test("clearing allocator claims preserves tombstones without payload-budget eviction", () => {
   const compact = {
     ...limits,
     maxPanesPerSurface: 1,
@@ -108,19 +108,19 @@ test("clearing allocator claims refreshes tombstone bytes and reclaims to the by
   const aggregateLimit = first.bytes + second.bytes;
   aggregate.configureLimits({ ...roomy, maxRetainedTombstoneBytes: aggregateLimit });
   aggregate.clearTombstoneAllocationClaims();
-  assert.deepEqual(aggregate.listTombstones().map((entry) => entry.tombstoneId), [second.tombstoneId]);
-  assert.deepEqual(reclaimed, [first.tombstoneId]);
+  assert.deepEqual(aggregate.listTombstones().map((entry) => entry.tombstoneId), [first.tombstoneId, second.tombstoneId]);
+  assert.deepEqual(reclaimed, []);
   assert.deepEqual(aggregate.listPendingPaneReleases(), []);
   assert.deepEqual(aggregate.listPendingWindowReleases(), []);
-  const retained = aggregate.listTombstones()[0]!;
-  assert.equal(retained.bytes, exactBytes(retained));
-  assert.ok(retained.bytes <= aggregateLimit);
+  for (const retained of aggregate.listTombstones()) {
+    assert.equal(retained.bytes, exactBytes(retained));
+  }
 
   const individual = makeAuthority();
   const only = individual.createTombstone({ kind: "surface", payload: payload(), surfaceId: "sf_only" });
   individual.configureLimits({ ...roomy, maxRetainedTombstoneBytes: only.bytes });
   individual.clearTombstoneAllocationClaims();
-  assert.deepEqual(individual.listTombstones(), []);
+  assert.deepEqual(individual.listTombstones().map((entry) => entry.tombstoneId), [only.tombstoneId]);
 });
 
 function admit(

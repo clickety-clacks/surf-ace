@@ -168,6 +168,14 @@ async function loadNewestTemporaryState(
   return undefined;
 }
 
+export function shouldGuardUnrestorablePersistentState(
+  state: PersistentSurfaceState | undefined,
+  restoredSurfaceCount: number,
+): boolean {
+  const persistedSurfaceCount = state?.surfaces?.length ?? 0;
+  return persistedSurfaceCount > 0 && restoredSurfaceCount < persistedSurfaceCount;
+}
+
 async function atomicWriteFile(filePath: string, contents: string): Promise<void> {
   const temporaryPath = path.join(path.dirname(filePath), temporaryStateFileName(path.basename(filePath)));
   const temporaryFile = await fs.open(temporaryPath, "w");

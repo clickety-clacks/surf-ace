@@ -14,6 +14,7 @@ import {
   PersistentStateOutcomeUnknownError,
   persistentStateHasArtifacts,
   persistentStateSelectorFileName,
+  shouldGuardUnrestorablePersistentState,
   writePersistentStateFile,
   writePersistentStateFileContents,
 } from "../src/persistent-state-file.js";

@@ -216,14 +216,399 @@ async function centralFixture(
   };
 }
 
-test("registration waits for lifecycle rollback before exporting final-close releases", async () => {
+async function automaticRegistryFixture(options: {
+  identity?: { allocatorId: string; fleetId: string } | null;
+  rejectClaim?: (payload: any) => boolean;
+  rejectReleaseIds?: Set<string>;
+  rejectRegistration?: () => boolean;
+  registrationResultsV1?: boolean;
+  shippedLegacyShape?: boolean;
+  ignorePendingReleases?: boolean;
+  transformRegistrationReply?: (reply: Record<string, any>, requestPayload: any) => Record<string, any>;
+  paneClaimReply?: (requestPayload: any) => Record<string, unknown>;
+  rejectPartialSurfaceIds?: Set<string>;
+  rejectPartialPaneKeys?: Set<string>;
+  mismatchRegistrationCorrelation?: boolean;
+  mismatchRegistrationSurfaceId?: boolean;
+  seed?: Array<{ surfaceId: string; windowLabel: string; windowGeneration: number;
+    panes: Array<{ paneId: string; paneLineageId: string; paneLabel: number; allocationGeneration: number }> }>;
+} = {}) {
+  const registryIdentity = options.identity === undefined
+    ? { allocatorId: "alloc_fixture", fleetId: "fixture-fleet" } : options.identity;
+  const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  await new Promise<void>((resolve) => server.once("listening", resolve));
+  const port = (server.address() as AddressInfo).port;
+  const requests: Array<{ socket: WebSocket; message: any }> = [];
+  const responses: Array<Record<string, any>> = [];
+  const identityRequests: Array<{ socket: WebSocket; message: any }> = [];
+  const windows = new Map<string, { windowGeneration: number; windowLabel: string }>();
+  const panes = new Map<string, { allocationGeneration: number; paneLabel: number }>();
+  let nextGeneration = 1;
+  for (const surface of options.seed ?? []) {
+    windows.set(surface.surfaceId, { windowGeneration: surface.windowGeneration, windowLabel: surface.windowLabel });
+    nextGeneration = Math.max(nextGeneration, surface.windowGeneration + 1);
+    for (const pane of surface.panes) {
+      panes.set(`${surface.surfaceId}\0${pane.paneId}\0${pane.paneLineageId}`, {
+        allocationGeneration: pane.allocationGeneration, paneLabel: pane.paneLabel,
+      });
+      nextGeneration = Math.max(nextGeneration, pane.allocationGeneration + 1);
+    }
+  }
+  let nextWindowIndex = 0;
+  let nextPaneLabel = 700;
+  const completedPaneReleaseIds = new Set<string>();
+  const completedWindowReleaseIds = new Set<string>();
+  const releasedWindowLabels: string[] = [];
+  const releasedPaneLabels: number[] = [];
+  let mismatchedCorrelationSent = false;
+  server.on("connection", (socket) => {
+    socket.on("message", (raw) => {
+      const message = JSON.parse(String(raw));
+      if (message.op === "fleet.topology") {
+        identityRequests.push({ socket, message });
+        socket.send(JSON.stringify({
+          type: "response", v: 1, id: message.id, op: message.op, ok: true,
+          payload: registryIdentity ? { registryIdentity } : {},
+        }));
+        return;
+      }
+      requests.push({ socket, message });
+      const payload = message.payload;
+      if (message.op === "pane.claim") {
+        socket.send(JSON.stringify({
+          type: "response", v: 1, id: message.id, op: message.op, ok: true,
+          payload: options.paneClaimReply?.(payload) ?? { paneLabel: 701 },
+        }));
+        return;
+      }
+      const partialMode = options.registrationResultsV1 === true && payload.registrationResultsV1 === true;
+      if (options.rejectRegistration?.()) {
+        socket.send(JSON.stringify({
+          type: "response", v: 1, id: message.id, op: message.op, ok: false,
+          error: { code: "registration_failed", message: "registration_condition" },
+        }));
+        return;
+      }
+      const rejectedReleaseIds = options.rejectReleaseIds ?? new Set<string>();
+      const paneReleaseResults: Array<Record<string, unknown>> = [];
+      const pendingPaneReleases = options.ignorePendingReleases ? [] : (payload.pendingPaneReleases ?? []);
+      const pendingWindowReleases = options.ignorePendingReleases ? [] : (payload.pendingWindowReleases ?? []);
+      for (const [index, release] of pendingPaneReleases.entries()) {
+        if (rejectedReleaseIds.has(release.releaseId)) {
+          if (!partialMode) {
+            socket.send(JSON.stringify({
+              type: "response", v: 1, id: message.id, op: message.op, ok: false,
+              error: { code: "registration_failed", message: "release_refused" },
+            }));
+            return;
+          }
+          paneReleaseResults.push({ index, releaseId: release.releaseId, ok: false,
+            error: { code: "assignment_conflict", message: "release_refused" } });
+          continue;
+        }
+        const key = `${release.surfaceId}\0${release.paneId}\0${release.lineageId}`;
+        const allocated = panes.get(key);
+        if (allocated && allocated.paneLabel === release.paneLabel &&
+            allocated.allocationGeneration === release.allocationGeneration) {
+          panes.delete(key);
+          releasedPaneLabels.push(allocated.paneLabel);
+        }
+        completedPaneReleaseIds.add(release.releaseId);
+        paneReleaseResults.push({ index, releaseId: release.releaseId, ok: true });
+      }
+      const windowReleaseResults: Array<Record<string, unknown>> = [];
+      for (const [index, release] of pendingWindowReleases.entries()) {
+        if (rejectedReleaseIds.has(release.releaseId)) {
+          if (!partialMode) {
+            socket.send(JSON.stringify({
+              type: "response", v: 1, id: message.id, op: message.op, ok: false,
+              error: { code: "registration_failed", message: "release_refused" },
+            }));
+            return;
+          }
+          windowReleaseResults.push({ index, releaseId: release.releaseId, ok: false,
+            error: { code: "assignment_conflict", message: "release_refused" } });
+          continue;
+        }
+        const allocated = windows.get(release.surfaceId);
+        if (allocated && allocated.windowLabel === release.windowLabel &&
+            allocated.windowGeneration === release.windowGeneration) {
+          windows.delete(release.surfaceId);
+          releasedWindowLabels.push(allocated.windowLabel);
+        }
+        completedWindowReleaseIds.add(release.releaseId);
+        windowReleaseResults.push({ index, releaseId: release.releaseId, ok: true });
+      }
+      if (options.rejectClaim?.(payload)) {
+        socket.send(JSON.stringify({
+          type: "response", v: 1, id: message.id, op: message.op, ok: false,
+          error: { code: "registration_failed", message: "claim_refused" },
+        }));
+        return;
+      }
+      const surfaces: Array<Record<string, unknown>> = [];
+      const surfaceResults: Array<Record<string, unknown>> = [];
+      for (const [index, surface] of payload.surfaces.entries()) {
+        if (partialMode && options.rejectPartialSurfaceIds?.has(surface.surfaceId)) {
+          surfaceResults.push({ index, surfaceId: surface.surfaceId, ok: false,
+            error: { code: "assignment_conflict", message: "window_claim_refused" } });
+          continue;
+        }
+        let window = windows.get(surface.surfaceId);
+        if (!window) {
+          let windowLabel = releasedWindowLabels.shift();
+          if (!windowLabel) {
+            const used = new Set([...windows.values()].map((entry) => entry.windowLabel));
+            for (;;) {
+              const candidate = String.fromCharCode(97 + nextWindowIndex++);
+              if (!used.has(candidate)) { windowLabel = candidate; break; }
+            }
+          }
+          window = {
+            windowGeneration: Number.isSafeInteger(surface.windowGeneration) && surface.windowGeneration > 0
+              ? surface.windowGeneration : nextGeneration++,
+            windowLabel,
+          };
+          windows.set(surface.surfaceId, window);
+        }
+        const registeredPanes: Array<Record<string, unknown>> = [];
+        const paneResults: Array<Record<string, unknown>> = [];
+        for (const [paneIndex, pane] of (surface.panes ?? []).entries()) {
+          const key = `${surface.surfaceId}\0${pane.paneId}\0${pane.paneLineageId}`;
+          if (partialMode && options.rejectPartialPaneKeys?.has(key)) {
+            paneResults.push({ index: paneIndex, paneId: pane.paneId, paneLineageId: pane.paneLineageId,
+              ok: false, error: { code: "assignment_conflict", message: "pane_claim_refused" } });
+            continue;
+          }
+          let allocation = panes.get(key);
+          if (!allocation) {
+            allocation = {
+              allocationGeneration: Number.isSafeInteger(pane.allocationGeneration) && pane.allocationGeneration > 0
+                ? pane.allocationGeneration : nextGeneration++,
+              paneLabel: Number.isSafeInteger(pane.paneLabel) && pane.paneLabel > 0
+                ? pane.paneLabel : releasedPaneLabels.shift() ?? nextPaneLabel++,
+            };
+            panes.set(key, allocation);
+          }
+          const projection = { ...pane, ...allocation };
+          registeredPanes.push(projection);
+          paneResults.push({ index: paneIndex, paneId: pane.paneId, paneLineageId: pane.paneLineageId,
+            ok: true, ...projection });
+        }
+        surfaces.push({
+          surfaceId: surface.surfaceId,
+          windowLabel: window.windowLabel,
+          windowGeneration: window.windowGeneration,
+          panes: registeredPanes,
+        });
+        if (partialMode) {
+          surfaceResults.push({ index, surfaceId: surface.surfaceId, ok: true,
+            windowLabel: window.windowLabel, windowGeneration: window.windowGeneration, paneResults });
+        }
+      }
+      if (partialMode && options.mismatchRegistrationCorrelation && !mismatchedCorrelationSent && surfaceResults.length > 0) {
+        surfaceResults[0] = { ...surfaceResults[0], index: Number(surfaceResults[0]!.index) + 1 };
+        mismatchedCorrelationSent = true;
+      }
+      if (partialMode && options.mismatchRegistrationSurfaceId && !mismatchedCorrelationSent && surfaceResults.length > 0) {
+        surfaceResults[0] = { ...surfaceResults[0], surfaceId: "sf_unrequested_reply" };
+        mismatchedCorrelationSent = true;
+      }
+      const responsePayload: Record<string, any> = {
+        clientId: payload.clientId,
+        registryIdentity,
+        directEndpoint: null,
+        endpointLease: null,
+        prePairDescribeV1: true,
+        allocationGenerationV1: true,
+        windowGenerationV1: true,
+        completedPaneReleaseIds: pendingPaneReleases.map((release: any) => release.releaseId)
+          .filter((releaseId: string) => completedPaneReleaseIds.has(releaseId)),
+        completedWindowReleaseIds: pendingWindowReleases.map((release: any) => release.releaseId)
+          .filter((releaseId: string) => completedWindowReleaseIds.has(releaseId)),
+        ...(partialMode ? {
+          registrationResultsV1: true,
+          paneReleaseResults,
+          windowReleaseResults,
+          surfaceResults,
+        } : {}),
+        surfaces,
+      };
+      let reply = responsePayload;
+      if (options.shippedLegacyShape) {
+        reply = {
+          clientId: payload.clientId,
+          registryIdentity,
+          surfaces: surfaces.map((surface) => ({
+            surfaceId: surface.surfaceId,
+            windowLabel: surface.windowLabel,
+            panes: (surface.panes as any[]).map((pane: any) => ({
+              paneId: pane.paneId,
+              paneLineageId: pane.paneLineageId,
+              paneLabel: pane.paneLabel,
+              paneAddress: `${surface.windowLabel}${pane.paneLabel}`,
+            })),
+          })),
+        };
+      }
+      reply = options.transformRegistrationReply?.(reply, payload) ?? reply;
+      responses.push(reply);
+      socket.send(JSON.stringify({
+        type: "response", v: 1, id: message.id, op: message.op, ok: true,
+        payload: reply,
+      }));
+    });
+  });
+  return {
+    server, requests, responses, identityRequests, port, address: `ws://127.0.0.1:${port}/`,
+    endpoint: {
+      host: "127.0.0.1", port, wsPath: "/ws", protocolVersion: 1, role: "server", instanceName: "fixture",
+    } as any,
+    async close() {
+      for (const socket of server.clients) socket.terminate();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    },
+  };
+}
+
+function closeSurfaceWithAllocatedLabels(
+  core: SurfaceCore,
+  surfaceId: string,
+  windowLabel: string,
+  windowGeneration: number,
+  paneLabel: number,
+  paneGeneration: number,
+): { paneId: number; paneLineageId: string; surfaceId: string } {
+  const surface = core.getSurface(surfaceId);
+  core.admitSurfaceToLockless(surfaceId);
+  const pane = [...surface.panes.values()][0]!;
+  core.applyWindowLabels([{ surfaceId, windowGeneration, windowLabel }]);
+  core.applyRegistryPaneLabels([{
+    surfaceId,
+    panes: [{ allocationGeneration: paneGeneration, paneId: String(pane.paneId),
+      paneLineageId: pane.paneLineageId, paneLabel }],
+  }]);
+  const savedSurface = core.getPersistentState().surfaces!.find((record) => record.surfaceId === surfaceId)!;
+  core.locklessAuthority.recordSurfaceFinalClose({ ...savedSurface, topologyRevision: 1 }, [], { closeRevision: 2 });
+  core.removeSurface(surfaceId, false);
+  return { paneId: pane.paneId, paneLineageId: pane.paneLineageId, surfaceId };
+}
+
+test("pending window releases reach the registry before replacement claims", async () => {
+  const clientId = "b".repeat(64);
+  const core = new SurfaceCore({ clientIdentity: clientId });
+  core.bindRegistryIdentity({ clientId, allocatorId: "alloc_fixture", fleetId: "fixture-fleet" });
+  const closedSurface = core.ensurePrimarySurface("Pending release", { width: 800, height: 600, scale: 1 });
+  const oldClaim = closeSurfaceWithAllocatedLabels(core, closedSurface.surfaceId, "a", 8, 7, 9);
+  const claimSurface = core.ensurePrimarySurface("Replacement surface", { width: 800, height: 600, scale: 1 });
+  assert.notEqual(claimSurface.surfaceId, oldClaim.surfaceId);
+  const claimPane = [...claimSurface.panes.values()][0]!;
+  core.contentSet(claimSurface.surfaceId, {
+    content: { markdown: "Replacement content" }, contentId: "ct_replacement_surface" as never,
+    contentType: "markdown", historyOwnerToken: "hot_replacement_surface",
+    paneId: claimPane.paneId as never, revision: 1 as never,
+  });
+  const oldPane = core.getPersistentState().lockless!.paneRetirementAudits[0]!;
+  const registry = await automaticRegistryFixture({ seed: [{
+    surfaceId: oldClaim.surfaceId,
+    windowLabel: "a",
+    windowGeneration: 8,
+    panes: [{ paneId: oldClaim.paneId.toString(), paneLineageId: oldPane.lineageId,
+      paneLabel: 7, allocationGeneration: 9 }],
+  }] });
+  const registration = new ConfiguredServerRegistration(registry.address, clientId, core, async () => {}, () => {}, 500);
+
+  try {
+    await registration.synchronize();
+    assert.equal(registry.requests.length, 2);
+    const releaseRegistration = registry.requests[0]!.message.payload;
+    assert.deepEqual(releaseRegistration.surfaces, []);
+    assert.equal(releaseRegistration.pendingWindowReleases.length, 1);
+    assert.equal(releaseRegistration.pendingWindowReleases[0]!.windowGeneration, 8);
+    assert.equal(releaseRegistration.pendingPaneReleases.length, 1);
+    const claimRegistration = registry.requests[1]!.message.payload;
+    assert.equal(claimRegistration.surfaces[0]!.surfaceId, claimSurface.surfaceId);
+    assert.equal(claimRegistration.surfaces[0]!.windowGeneration, null);
+    assert.deepEqual(claimRegistration.pendingWindowReleases, []);
+    assert.deepEqual(claimRegistration.pendingPaneReleases, []);
+    assert.equal("allocationGeneration" in releaseRegistration.pendingWindowReleases[0]!, false);
+    assert.equal(core.locklessAuthority.listPendingWindowReleases().length, 0);
+    assert.equal(core.locklessAuthority.listPendingPaneReleases().length, 0);
+    assert.equal(core.getRendererWindowState(claimSurface.surfaceId).windowLabel, "a");
+    assert.equal(core.getRendererWindowState(claimSurface.surfaceId).panes[0]?.label, "7");
+    assert.equal(core.getRendererWindowState(claimSurface.surfaceId).panes[0]?.content.contentId, "ct_replacement_surface");
+    assert.equal((core.getRendererWindowState(claimSurface.surfaceId).panes[0]?.content.content as any)?.markdown,
+      "Replacement content");
+    assert.ok(Number(core.listSurfaces()[0]!.windowAllocationGeneration) > 8);
+  } finally {
+    await registration.stop();
+    await registry.close();
+  }
+});
+
+test("an incomplete release acknowledgement keeps only that release pending", async () => {
+  const central = await centralFixture();
+  const clientId = "c".repeat(64);
+  const core = new SurfaceCore({ clientIdentity: clientId });
+  const surface = core.ensurePrimarySurface("Final close", { width: 800, height: 600, scale: 1 });
+  core.admitSurfaceToLockless(surface.surfaceId);
+  core.bindRegistryIdentity({ clientId, allocatorId: "alloc_fixture", fleetId: "fixture-fleet" });
+  core.applyWindowLabels([{ surfaceId: surface.surfaceId, windowGeneration: 4, windowLabel: "a" }]);
+  core.locklessAuthority.recordSurfaceFinalClose({
+    panes: [],
+    surfaceId: surface.surfaceId,
+    topologyRevision: 1,
+    windowAllocationGeneration: 4,
+    windowLabel: "a",
+  }, [], { closeRevision: 2 });
+  core.removeSurface(surface.surfaceId, false);
+  core.ensurePrimarySurface("Replacement surface", { width: 800, height: 600, scale: 1 });
+  const connection = new ServerConnection({
+    clientId,
+    core,
+    persist: async () => {},
+    configuredAddress: central.address,
+    discovery: emptyDiscovery(),
+  });
+
+  try {
+    const sync = connection.synchronize();
+    await until(() => central.requests.length === 1);
+    assert.deepEqual(central.requests[0]!.message.payload.surfaces, []);
+    central.reply(0, true, true, 700, undefined, undefined, {
+      windowGenerationV1: true, completedWindowReleaseIds: [],
+    });
+    await until(() => central.requests.length === 2);
+    assert.deepEqual(central.requests[1]!.message.payload.pendingWindowReleases, []);
+    assert.deepEqual(central.requests[1]!.message.payload.surfaces, []);
+    central.reply(1);
+    await until(() => central.requests.length === 3);
+    assert.equal(central.requests[2]!.message.payload.pendingWindowReleases[0]!.releaseId,
+      core.locklessAuthority.listPendingWindowReleases()[0]!.releaseId);
+    assert.deepEqual(central.requests[2]!.message.payload.surfaces, []);
+    central.reply(2, true, true, 700, undefined, undefined, {
+      windowGenerationV1: true, completedWindowReleaseIds: [],
+    });
+    await until(() => central.requests.length === 4);
+    assert.deepEqual(central.requests[3]!.message.payload.pendingWindowReleases, []);
+    assert.equal(central.requests[3]!.message.payload.surfaces[0]!.surfaceId, core.listSurfaces()[0]!.surfaceId);
+    central.reply(3);
+    await sync;
+    assert.equal(core.locklessAuthority.listPendingWindowReleases().length, 1,
+      "an incomplete acknowledgement leaves the exact durable release intent pending");
+    assert.ok(Number(core.listSurfaces()[0]!.windowAllocationGeneration) > 0,
+      "live registration succeeds independently of the unresolved release");
+  } finally {
+    await connection.stop();
+    await central.close();
+  }
+});
+
+test("registration cannot export a release from a lifecycle transaction that later rolls back", async () => {
   const central = await centralFixture();
   const clientId = "a".repeat(64);
   const surfaceId = "sf_registry_release_race";
-  const lockless = createEmptyLocklessClientState({
-    ...DEFAULT_LOCKLESS_LIMITS,
-    maxRetainedTombstones: 1,
-  });
+  const lockless = createEmptyLocklessClientState();
   const core = new SurfaceCore({
     clientIdentity: clientId,
     persistentState: { lockless, primarySurfaceId: surfaceId, version: 1 },
@@ -231,19 +616,15 @@ test("registration waits for lifecycle rollback before exporting final-close rel
   const surface = core.ensurePrimarySurface("Release race", { width: 800, height: 600, scale: 1 });
   core.admitSurfaceToLockless(surface.surfaceId);
   core.bindRegistryIdentity({ clientId, allocatorId: "alloc_fixture", fleetId: "fixture-fleet" });
-  const retained = core.locklessAuthority.createTombstone({
-    kind: "pane",
-    payload: {
-      closeTopologyRevision: 4,
-      pane: {
-        allocationGeneration: 6,
-        paneId: 8,
-        paneLabel: 708,
-        paneLineageId: "pl_release_race_retained",
-      },
+  const finalClosePayload = {
+    closeTopologyRevision: 5,
+    pane: {
+      allocationGeneration: 7,
+      paneId: 9,
+      paneLabel: 709,
+      paneLineageId: "pl_release_race_newer",
     },
-    surfaceId,
-  });
+  };
 
   let allowLifecycleFailure = (): void => {};
   const lifecycleFailure = new Promise<void>((resolve) => { allowLifecycleFailure = resolve; });
@@ -251,20 +632,14 @@ test("registration waits for lifecycle rollback before exporting final-close rel
   const releaseCandidate = new Promise<void>((resolve) => { releaseCandidateCreated = resolve; });
   const lifecycle = core.locklessAuthority.transactionAsync(() =>
     core.transactionAsync(async () => {
-      core.locklessAuthority.createTombstone({
-        kind: "pane",
-        payload: {
-          closeTopologyRevision: 5,
-          pane: {
-            allocationGeneration: 7,
-            paneId: 9,
-            paneLabel: 709,
-            paneLineageId: "pl_release_race_newer",
-          },
-        },
+      core.locklessAuthority.recordPaneFinalClose(finalClosePayload, {
+        closeRevision: finalClosePayload.closeTopologyRevision,
         surfaceId,
       });
-      assert.equal(core.locklessAuthority.listPendingPaneReleases().length, 0);
+      assert.equal(core.locklessAuthority.listPendingPaneReleases().length, 1,
+        "the explicit close creates a release intent in the candidate generation");
+      assert.equal(core.locklessAuthority.exportState().finalCloseRecords.length, 1,
+        "the final-close audit is in that same candidate generation");
       releaseCandidateCreated();
       await lifecycleFailure;
       throw new Error("simulated_lifecycle_persistence_failure");
@@ -287,22 +662,51 @@ test("registration waits for lifecycle rollback before exporting final-close rel
 
     allowLifecycleFailure();
     await assert.rejects(lifecycle, /simulated_lifecycle_persistence_failure/);
-    assert.deepEqual(core.locklessAuthority.listTombstones("pane").map((entry) => entry.tombstoneId),
-      [retained.tombstoneId]);
+    assert.deepEqual(core.locklessAuthority.listTombstones("pane"), []);
     assert.deepEqual(core.locklessAuthority.listPendingPaneReleases(), []);
+    assert.deepEqual(core.locklessAuthority.exportState().finalCloseRecords, []);
+    assert.deepEqual(core.locklessAuthority.exportState().paneRetirementAudits, []);
 
     await until(() => central.requests.length === 1);
     assert.deepEqual(central.requests[0]!.message.payload.pendingPaneReleases, []);
     assert.ok(persistedReleaseCounts.every((count) => count === 0));
     central.reply(0);
     await synchronizing;
-    assert.deepEqual(core.locklessAuthority.listTombstones("pane").map((entry) => entry.tombstoneId),
-      [retained.tombstoneId]);
+    assert.deepEqual(core.locklessAuthority.listTombstones("pane"), []);
   } finally {
     allowLifecycleFailure();
     await registration.stop();
     await central.close();
   }
+});
+
+test("owner-verified claims compare by identity without accepting omissions or duplicates", () => {
+  const first = { surfaceId: "sf_first", windowLabel: "d", panes: [
+    { allocationGeneration: 1, paneId: "1", paneLabel: 703, paneLineageId: "pl_first" },
+    { allocationGeneration: 2, paneId: "2", paneLabel: 704, paneLineageId: "pl_second" },
+  ] };
+  const second = { surfaceId: "sf_second", windowLabel: "e", panes: [] };
+  const provisioned = {
+    binding: { clientId: "owner-client", allocatorId: "alloc_home", fleetId: "fleet-home" },
+    confirmedClaims: [first, second],
+  };
+  assert.equal(matchesProvisionedClaims(provisioned, "owner-client", [
+    second, { ...first, panes: [...first.panes].reverse() },
+  ]), true);
+  assert.equal(matchesProvisionedClaims(provisioned, "other-client", [first, second]), false);
+  assert.equal(matchesProvisionedClaims(provisioned, "owner-client", [first]), false);
+  assert.equal(matchesProvisionedClaims(provisioned, "owner-client", [first, first]), false);
+  assert.equal(matchesProvisionedClaims({ ...provisioned, confirmedClaims: [first, first] },
+    "owner-client", [first, second]), false);
+  assert.equal(matchesProvisionedClaims(provisioned, "owner-client", [
+    { ...first, panes: [first.panes[0]!, first.panes[0]!] }, second,
+  ]), false);
+  assert.equal(matchesProvisionedClaims({ ...provisioned, confirmedClaims: [
+    { ...first, panes: [first.panes[0]!, first.panes[0]!] }, second,
+  ] }, "owner-client", [first, second]), false);
+  assert.equal(matchesProvisionedClaims(provisioned, "owner-client", [
+    { ...first, panes: [{ ...first.panes[0]!, paneLineageId: "pl_foreign" }, first.panes[1]!] }, second,
+  ]), false);
 });
 
 test("confirmed fleet pane labels remain visible through a transient central disconnect", async () => {
@@ -2018,281 +2422,5 @@ test("ambiguous binding candidate cannot register until persistence is reconcile
   } finally {
     await registration.stop();
     await registry.close();
-  }
-});
-
-
-test("owner-verified claims compare by identity without accepting omissions or duplicates", () => {
-  const first = { surfaceId: "sf_first", windowLabel: "d", panes: [
-    { allocationGeneration: 1, paneId: "1", paneLabel: 703, paneLineageId: "pl_first" },
-    { allocationGeneration: 2, paneId: "2", paneLabel: 704, paneLineageId: "pl_second" },
-  ] };
-  const second = { surfaceId: "sf_second", windowLabel: "e", panes: [] };
-  const provisioned = {
-    binding: { clientId: "owner-client", allocatorId: "alloc_home", fleetId: "fleet-home" },
-    confirmedClaims: [first, second],
-  };
-  assert.equal(matchesProvisionedClaims(provisioned, "owner-client", [
-    second, { ...first, panes: [...first.panes].reverse() },
-  ]), true);
-  assert.equal(matchesProvisionedClaims(provisioned, "other-client", [first, second]), false);
-  assert.equal(matchesProvisionedClaims(provisioned, "owner-client", [first]), false);
-  assert.equal(matchesProvisionedClaims(provisioned, "owner-client", [first, first]), false);
-  assert.equal(matchesProvisionedClaims({ ...provisioned, confirmedClaims: [first, first] },
-    "owner-client", [first, second]), false);
-  assert.equal(matchesProvisionedClaims(provisioned, "owner-client", [
-    { ...first, panes: [first.panes[0]!, first.panes[0]!] }, second,
-  ]), false);
-  assert.equal(matchesProvisionedClaims({ ...provisioned, confirmedClaims: [
-    { ...first, panes: [first.panes[0]!, first.panes[0]!] }, second,
-  ] }, "owner-client", [first, second]), false);
-  assert.equal(matchesProvisionedClaims(provisioned, "owner-client", [
-    { ...first, panes: [{ ...first.panes[0]!, paneLineageId: "pl_foreign" }, first.panes[1]!] }, second,
-  ]), false);
-});
-
-
-test("configured rejection falls back through Bonjour and absent central stays disconnected", async () => {
-  const configured = await centralFixture();
-  const fallback = await centralFixture();
-  const core = new SurfaceCore();
-  const surface = core.ensurePrimarySurface("Fallback", { width: 800, height: 600, scale: 1 });
-  const discovery = emptyDiscovery();
-  let advertised = true;
-  discovery.getSnapshot = () => advertised ? [{
-    host: "127.0.0.1", port: fallback.port, wsPath: "/ws", protocolVersion: 1, role: "server",
-  }] : [];
-  const connection = new ServerConnection({
-    configuredAddress: configured.address, core, clientId: "fallback-client",
-    persist: async () => {}, discovery, requestTimeoutMs: 100,
-  });
-  const status = () => core.getRendererWindowState(surface.surfaceId).connectionBar;
-  try {
-    const attempt = connection.synchronize();
-    await until(() => configured.requests.length === 1);
-    assert.equal(status(), "connecting");
-    configured.reply(0, false);
-    await until(() => fallback.requests.length === 1);
-    assert.equal(status(), "connecting");
-    fallback.reply(0);
-    await attempt;
-    assert.equal(status(), "connected");
-    // Failed configured recovery must not flicker a healthy fallback indicator.
-    const recovery = connection.synchronize();
-    await until(() => fallback.requests.length === 2);
-    fallback.reply(1);
-    await until(() => configured.requests.length === 2);
-    assert.equal(status(), "connected");
-    configured.reply(1, false);
-    await recovery;
-    assert.equal(status(), "connected");
-    advertised = false;
-    await fallback.close();
-    await until(() => status() === "disconnected");
-    const retry = connection.synchronize();
-    const rejected = assert.rejects(retry, /no_surf_ace_server/);
-    await until(() => configured.requests.length === 3);
-    assert.equal(status(), "connecting");
-    configured.reply(2, false);
-    await rejected;
-    assert.equal(status(), "disconnected");
-  } finally {
-    await connection.stop();
-    await configured.close();
-    if (fallback.server.address()) await fallback.close();
-  }
-});
-
-
-test("discovery rejects an advertisement outside the v1 /ws contract", async () => {
-  const original = ConfiguredServerRegistration.prototype.synchronize;
-  const originalStop = ConfiguredServerRegistration.prototype.stop;
-  const attempted: string[] = [];
-  try {
-    ConfiguredServerRegistration.prototype.synchronize = async function () {
-      attempted.push((this as any).wire.url as string);
-      throw new Error("invalid advertisement was contacted");
-    };
-    ConfiguredServerRegistration.prototype.stop = async () => {};
-    const core = new SurfaceCore();
-    const surface = core.ensurePrimarySurface("Invalid advertisement", { width: 800, height: 600, scale: 1 });
-    const discovery = emptyDiscovery();
-    discovery.getSnapshot = () => [
-      {
-        host: "server.local", port: 19001, wsPath: "/", protocolVersion: 1,
-        role: "server", instanceName: "wrong-path",
-      },
-      {
-        host: "server.local", port: 19002, wsPath: "/ws", protocolVersion: 0,
-        role: "server", instanceName: "wrong-version",
-      },
-      {
-        host: "0.0.0.0", port: 19003, wsPath: "/ws", protocolVersion: 1,
-        role: "server", instanceName: "wildcard-target",
-      },
-    ] as any;
-    const connection = new ServerConnection({
-      clientId: "stable-client", core, discovery, persist: async () => {},
-    });
-
-    await assert.rejects(connection.synchronize(), /expected role=server v=1 ws=\/ws/);
-    const state = core.getRendererWindowState(surface.surfaceId);
-    assert.equal(state.connectionBar, "disconnected");
-    assert.match(state.connectionError ?? "", /ws=\//);
-    assert.match(state.connectionError ?? "", /v=0/);
-    assert.match(state.connectionError ?? "", /wildcard address/);
-    assert.deepEqual(attempted, []);
-    await connection.stop();
-  } finally {
-    ConfiguredServerRegistration.prototype.synchronize = original;
-    ConfiguredServerRegistration.prototype.stop = originalStop;
-  }
-});
-
-
-test("legacy labels wait for verified pin; foreign and missing identities never register", async () => {
-  const correct = await centralFixture({ allocatorId: "alloc_home", fleetId: "fleet-home" });
-  const moved = await centralFixture({ allocatorId: "alloc_home", fleetId: "fleet-home" });
-  const foreign = await centralFixture({ allocatorId: "alloc_foreign", fleetId: "fleet-foreign" });
-  const replacedAllocator = await centralFixture({ allocatorId: "alloc_replaced", fleetId: "fleet-home" });
-  const missing = await centralFixture(null);
-  const clientId = "legacy-client";
-  const core = new SurfaceCore();
-  const surface = core.ensurePrimarySurface("Preserved display", { width: 800, height: 600, scale: 1 });
-  const pane = [...surface.panes.values()][0]!;
-  const assignment = [{
-    surfaceId: surface.surfaceId, windowLabel: "d", panes: [{
-      allocationGeneration: 1, paneId: String(pane.paneId), paneLineageId: pane.paneLineageId, paneLabel: 703,
-    }],
-  }];
-  core.applyWindowLabels(assignment);
-  core.applyRegistryPaneLabels(assignment);
-  core.contentSet(surface.surfaceId, {
-    content: { markdown: "Legacy content remains readable" }, contentId: "ct_legacy_registry" as never,
-    contentType: "markdown", historyOwnerToken: "hot_legacy_registry",
-    paneId: pane.paneId as never, revision: 1 as never,
-  });
-  const before = core.getPersistentState();
-  const provisionedBinding = {
-    binding: { clientId, allocatorId: "alloc_home", fleetId: "fleet-home" },
-    confirmedClaims: core.confirmedRegistryClaims(),
-  };
-  const attempt = async (address: string, provisioned: typeof provisionedBinding | null = provisionedBinding) => {
-    const connection = new ConfiguredServerRegistration(address, clientId, core, async () => {}, () => {}, 200, provisioned);
-    try { await connection.synchronize(); } finally { await connection.stop(); }
-  };
-  try {
-    await assert.rejects(attempt(foreign.address, null), /legacy_registry_binding_pending/);
-    await assert.rejects(attempt(foreign.address), /foreign_registry_identity/);
-    await assert.rejects(attempt(replacedAllocator.address), /foreign_registry_identity/);
-    await assert.rejects(attempt(missing.address), /registry_identity_missing_or_invalid/);
-    assert.equal(foreign.requests.length, 0);
-    assert.equal(replacedAllocator.requests.length, 0);
-    assert.equal(missing.requests.length, 0);
-    assert.deepEqual(core.getPersistentState(), before);
-    assert.equal(core.getRendererWindowState(surface.surfaceId).panes[0]?.content.contentId, "ct_legacy_registry");
-
-    const connecting = attempt(correct.address);
-    await until(() => correct.requests.length === 1);
-    correct.reply(0, true, true, 703, "d");
-    await connecting;
-    assert.deepEqual(core.registryBinding(), provisionedBinding.binding);
-    assert.equal(core.panesList(surface.surfaceId).panes[0]?.paneLabel, 703);
-    assert.equal(core.getRendererWindowState(surface.surfaceId).windowLabel, "d");
-    const pinnedState = core.getPersistentState();
-    const restored = new SurfaceCore({ persistentState: pinnedState });
-    restored.restorePersistedSurfaces("Restored", { width: 800, height: 600, scale: 1 });
-    const replay = new ConfiguredServerRegistration(foreign.address, clientId, restored, async () => {}, () => {}, 200);
-    try {
-      await assert.rejects(replay.synchronize(), /foreign_registry_identity/);
-    } finally { await replay.stop(); }
-    assert.equal(foreign.requests.length, 0);
-    assert.deepEqual(restored.registryBinding(), provisionedBinding.binding);
-    const sameFleet = new ConfiguredServerRegistration(moved.address, clientId, restored, async () => {}, () => {}, 200);
-    try {
-      const reconnecting = sameFleet.synchronize();
-      await until(() => moved.requests.length === 1);
-      moved.reply(0, true, true, 703, "d");
-      await reconnecting;
-      assert.deepEqual(restored.registryBinding(), provisionedBinding.binding);
-      assert.equal(restored.panesList(surface.surfaceId).panes[0]?.paneLabel, 703);
-    } finally { await sameFleet.stop(); }
-  } finally {
-    await correct.close();
-    await moved.close();
-    await foreign.close();
-    await replacedAllocator.close();
-    await missing.close();
-  }
-});
-
-
-test("tombstone-only legacy labels refuse foreign-first binding and recover with verified home", async () => {
-  const foreign = await centralFixture({ allocatorId: "alloc_foreign", fleetId: "fleet-foreign" });
-  const home = await centralFixture({ allocatorId: "alloc_home", fleetId: "fleet-home" });
-  const core = new SurfaceCore();
-  const surface = core.ensurePrimarySurface("Retained legacy", { width: 800, height: 600, scale: 1 });
-  const pane = [...surface.panes.values()][0]!;
-  const assignment = [{ surfaceId: surface.surfaceId, windowLabel: "d", panes: [{
-    allocationGeneration: 1, paneId: String(pane.paneId), paneLineageId: pane.paneLineageId, paneLabel: 703,
-  }] }];
-  core.applyWindowLabels(assignment);
-  core.applyRegistryPaneLabels(assignment);
-  core.contentSet(surface.surfaceId, {
-    content: { markdown: "Retained content" }, contentId: "ct_retained_registry" as never,
-    contentType: "markdown", historyOwnerToken: "hot_retained_registry",
-    paneId: pane.paneId as never, revision: 1 as never,
-  });
-  const retained = core.captureSurfaceTombstonePayload(surface.surfaceId);
-  core.locklessAuthority.createTombstone({
-    kind: "surface", payload: { paneTombstones: [], surface: retained }, surfaceId: surface.surfaceId,
-  });
-  core.removeSurface(surface.surfaceId);
-  assert.equal(core.listSurfaces().length, 0);
-  const confirmedClaims = core.confirmedRegistryClaims();
-  assert.deepEqual(confirmedClaims, assignment);
-  const windowOnly = new SurfaceCore();
-  const unnumbered = windowOnly.ensurePrimarySurface("Window-only legacy", { width: 800, height: 600, scale: 1 });
-  assert.deepEqual(windowOnly.confirmedRegistryClaims(), []);
-  windowOnly.applyWindowLabelOnly(unnumbered.surfaceId, "e");
-  assert.deepEqual(windowOnly.confirmedRegistryClaims(), [
-    { surfaceId: unnumbered.surfaceId, windowLabel: "e", panes: [] },
-  ]);
-  const before = core.getPersistentState();
-  const provisioned = {
-    binding: { clientId: "tombstone-client", allocatorId: "alloc_home", fleetId: "fleet-home" },
-    confirmedClaims,
-  };
-  const attempt = async (address: string, pin: typeof provisioned | null) => {
-    const connection = new ConfiguredServerRegistration(address, provisioned.binding.clientId,
-      core, async () => {}, () => {}, 200, pin);
-    try { await connection.synchronize(); } finally { await connection.stop(); }
-  };
-  try {
-    await assert.rejects(attempt(foreign.address, null), /legacy_registry_binding_pending/);
-    await assert.rejects(attempt(foreign.address, provisioned), /foreign_registry_identity/);
-    assert.equal(foreign.requests.length, 0);
-    assert.equal(core.registryBinding(), null);
-    assert.deepEqual(core.getPersistentState(), before);
-
-    const recovering = attempt(home.address, provisioned);
-    await until(() => home.requests.length === 1);
-    assert.deepEqual(home.requests[0]!.message.payload.surfaces, []);
-    home.reply(0);
-    await recovering;
-    assert.deepEqual(core.registryBinding(), provisioned.binding);
-    const restored = core.restoreSurfaceTombstone(retained);
-    assert.equal(restored.windowLabel, "d");
-    assert.equal([...restored.panes.values()][0]?.paneLabel, 703);
-    assert.equal(core.getRendererWindowState(surface.surfaceId).panes[0]?.content.contentId,
-      "ct_retained_registry");
-    const restoredRegistration = attempt(home.address, null);
-    await until(() => home.requests.length === 2);
-    home.reply(1, true, true, 703, "d");
-    await restoredRegistration;
-    assert.equal(core.panesList(surface.surfaceId).panes[0]?.paneLabel, 703);
-  } finally {
-    await foreign.close();
-    await home.close();
   }
 });

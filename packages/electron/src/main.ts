@@ -36,6 +36,7 @@ import {
   PersistentStateOutcomeUnknownError,
   PersistentStateWriteGuardError,
   persistentStateHasArtifacts,
+  shouldGuardUnrestorablePersistentState,
   writePersistentStateFileContents,
   type PersistentStateLoadResult,
 } from "./persistent-state-file.js";
@@ -2167,6 +2168,13 @@ async function boot(): Promise<void> {
     persistentState: corePersistentState,
   });
   const restoredSurfaces = core.restorePersistedSurfaces(endpointName(), displayViewport());
+  if (shouldGuardUnrestorablePersistentState(persistentState, restoredSurfaces.length)) {
+    persistentStateWriteGuard = "unrestorable-primary";
+    clientWarn("state_restore_unrestorable_write_guard", {
+      persisted_surface_count: persistentState.surfaces?.length ?? 0,
+      write_guard: persistentStateWriteGuard,
+    });
+  }
   const primarySurface =
     restoredSurfaces.find(
       (surface) => surface.surfaceId === persistentState?.primarySurfaceId,
