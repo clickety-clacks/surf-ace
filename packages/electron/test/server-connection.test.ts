@@ -130,8 +130,9 @@ function deferred() {
   return { promise, resolve };
 }
 
-async function until(predicate: () => boolean): Promise<void> {
-  for (let i = 0; i < 200; i++) {
+async function until(predicate: () => boolean, timeoutMs = 1000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
     if (predicate()) return;
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
@@ -810,7 +811,7 @@ test("central status waits for registration and persistence; loss, retry and rec
   assert.equal(state().connectionBar, "disconnected");
 });
 
-test("an abandoned registration persistence yields to fresh attempts and recovers without false readiness or lost content", async () => {
+test("an abandoned registration persistence blocks queued retries until the serialized writer recovers", async () => {
   assert.equal(REGISTRATION_CYCLE_TIMEOUT_MS, 10_000);
   const directEndpoint = "ws://127.0.0.1:1/ws";
   let leaseGeneration = 0;
@@ -848,6 +849,8 @@ test("an abandoned registration persistence yields to fresh attempts and recover
   const persistenceStalled = deferred();
   const releasePersistence = deferred();
   const persistenceReadiness = new PersistenceWriteReadiness();
+  let stateWrite = Promise.resolve();
+  const savedStates: unknown[] = [];
   const reportedErrors: string[] = [];
   const connection = new ServerConnection({
     configuredAddress: registry.address,
@@ -856,21 +859,29 @@ test("an abandoned registration persistence yields to fresh attempts and recover
     core,
     discovery: emptyDiscovery(),
     onError: (error) => reportedErrors.push(error instanceof Error ? error.message : String(error)),
-    persist: async () => await persistenceReadiness.track(async () => {
-      persistenceCalls += 1;
-      if (persistenceCalls === 2) {
-        persistenceStalled.resolve();
-        await releasePersistence.promise;
-      }
-    }),
+    canPersistRegistration: () => persistenceReadiness.isReady,
+    persist: async () => {
+      const call = ++persistenceCalls;
+      const candidate = JSON.parse(JSON.stringify(core.getPersistentState()));
+      await persistenceReadiness.track(async () => {
+        stateWrite = stateWrite.catch(() => {}).then(async () => {
+          if (call === 2) {
+            persistenceStalled.resolve();
+            await releasePersistence.promise;
+          }
+          savedStates.push(candidate);
+        });
+        await stateWrite;
+      });
+    },
   });
   const state = () => core.getRendererWindowState(surface.surfaceId);
   const registrationCount = () => registry.requests.filter(({ message }) => message.op === "client.register").length;
   try {
-    const first = connection.synchronize();
-    const rejected = assert.rejects(first, /registration_stage_timeout:local registration response persistence/);
+    connection.start();
     await persistenceStalled.promise;
-    await rejected;
+    await until(() => reportedErrors.some((message) =>
+      /registry_cycle_timed_out:local registration response persistence/.test(message)), 15_000);
     assert.equal(state().connectionBar, "disconnected");
     assert.ok(reportedErrors.some((message) =>
       /registry_cycle_timed_out:local registration response persistence/.test(message)),
@@ -887,15 +898,22 @@ test("an abandoned registration persistence yields to fresh attempts and recover
     assert.equal(state().panes[0]?.content.contentId, "ct_local_persistence_recovery",
       "the old content remains readable while the registration save is unresolved");
 
-    await until(() => state().connectionBar === "connected" && registrationCount() >= 2);
-    assert.equal(core.registryEndpointLease()?.leaseGeneration, 2,
-      "a fresh registration attempt proceeds without waiting for abandoned transaction cleanup");
+    await until(() => reportedErrors.some((message) =>
+      message === "registry_registration_waiting_for_local_persistence"), 5_000);
+    await new Promise((resolve) => setTimeout(resolve, 2_200));
+    assert.equal(registrationCount(), 1,
+      "registration retries do not append new requests behind the unresolved serialized writer");
+    assert.equal(persistenceCalls, 2,
+      "registration retries do not enqueue another full-state snapshot while the single writer is stalled");
+    assert.equal(core.registryEndpointLease(), null,
+      "an unresolved old reply cannot supply a fresh lease");
     assert.equal(persistenceReadiness.isReady, false,
-      "a fresh lease alone does not make readiness true while a prior write is unresolved");
+      "the unresolved write keeps application readiness degraded");
 
     releasePersistence.resolve();
     const dependencyRecoveredAt = Date.now();
-    await until(() => persistenceReadiness.isReady && state().connectionBar === "connected" && registrationCount() >= 2);
+    await until(() => persistenceReadiness.isReady && state().connectionBar === "connected" &&
+      registrationCount() >= 2 && core.registryEndpointLease()?.leaseGeneration === 2, 30_000);
     assert.ok(Date.now() - dependencyRecoveredAt <= 40_000,
       "a recovered persistence dependency reaches ready with the fresh registration within 30 seconds plus W");
     const recovered = state();
@@ -913,7 +931,9 @@ test("an abandoned registration persistence yields to fresh attempts and recover
       fleetId: "fixture-fleet",
     });
     assert.equal(core.registryEndpointLease()?.leaseGeneration, 2,
-      "the retry commits a fresh lease after the earlier delayed transaction completes in order");
+      "the retry commits a fresh lease after the earlier serialized write completes in order");
+    assert.deepEqual(savedStates.at(-1), JSON.parse(JSON.stringify(core.getPersistentState())),
+      "the final serialized save contains the fresh binding, lease, labels, and readable content");
   } finally {
     releasePersistence.resolve();
     await connection.stop();

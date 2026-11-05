@@ -76,6 +76,7 @@ export class ServerConnection {
     clientId: string;
     core: SurfaceCore;
     persist: () => Promise<void>;
+    canPersistRegistration?: () => boolean;
     onError?: (error: unknown) => void;
     discovery?: SurfAceDiscoveryService;
     registryRebindWaitMs?: number;
@@ -251,6 +252,18 @@ export class ServerConnection {
   synchronize(): Promise<void> {
     if (this.stopped) return Promise.resolve();
     if (this.pending) return this.pending;
+    if (this.options.canPersistRegistration && !this.options.canPersistRegistration()) {
+      const message = "registry_registration_waiting_for_local_persistence";
+      if (!this.selected || !this.leaseIsFresh()) {
+        this.lastFailure = message;
+        this.setStatus("disconnected");
+      }
+      if (this.lastReportedFailure !== message) {
+        this.lastReportedFailure = message;
+        this.options.onError?.(new Error(message));
+      }
+      return Promise.reject(new Error(message));
+    }
     clearTimeout(this.recoveryTimer);
     this.recoveryTimer = undefined;
     const cycle = ++this.cycleId;

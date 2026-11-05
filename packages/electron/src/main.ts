@@ -2227,6 +2227,9 @@ async function boot(): Promise<void> {
     clientId: identityClientId,
     core,
     persist: persistRegistryState,
+    canPersistRegistration: () => persistentStateWriteReadiness.isReady &&
+      !persistentStateOutcomeUnknown &&
+      (!persistentStateWriteGuard || persistentStateWriteGuard === "corrupt-primary"),
     onError: (error) => clientWarn("server_registration_failed", errorDiagnosticFields(error)),
   }) : null;
   configuredRegistration?.start();
@@ -2283,7 +2286,9 @@ if (!singleInstanceLock) {
     handleBeforeQuit(event, {
       armWatchdog: () => {
         try {
-          startQuitWatchdog();
+          startQuitWatchdog(undefined, undefined, (error) => {
+            clientWarn("quit_watchdog_start_failed", errorDiagnosticFields(error));
+          });
         } catch (error) {
           clientWarn("quit_watchdog_start_failed", errorDiagnosticFields(error));
           process.kill(process.pid, "SIGKILL");

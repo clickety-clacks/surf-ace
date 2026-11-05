@@ -1,35 +1,52 @@
-import { Worker } from "node:worker_threads";
+import { spawn, type ChildProcess } from "node:child_process";
 
 export const QUIT_EXIT_DEADLINE_MS = 10_000;
 export const QUIT_WATCHDOG_DELAY_MS = QUIT_EXIT_DEADLINE_MS - 1_000;
 export const QUIT_WATCHDOG_FORCE_DELAY_MS = 500;
 
-let activeQuitWatchdog: Worker | null = null;
+let activeQuitWatchdog: ChildProcess | null = null;
 
 export function startQuitWatchdog(
   delayMs = QUIT_WATCHDOG_DELAY_MS,
   forceDelayMs = QUIT_WATCHDOG_FORCE_DELAY_MS,
-): Worker {
+  onSpawnError?: (error: Error) => void,
+): ChildProcess {
   if (!Number.isSafeInteger(delayMs) || delayMs < 1 || delayMs >= QUIT_EXIT_DEADLINE_MS) {
     throw new RangeError("quit_watchdog_delay_out_of_range");
   }
   if (!Number.isSafeInteger(forceDelayMs) || forceDelayMs < 0 || forceDelayMs >= delayMs) {
     throw new RangeError("quit_watchdog_force_delay_out_of_range");
   }
-  activeQuitWatchdog = new Worker(`
-    const { workerData } = require("node:worker_threads");
-    const terminate = (signal) => {
-      try { process.kill(workerData.processId, signal); } catch { /* the app already exited */ }
+  const watchdog = spawn(process.execPath, ["-e", `
+    const parentPid = Number(process.argv[1]);
+    const delayMs = Number(process.argv[2]);
+    const forceDelayMs = Number(process.argv[3]);
+    let termTimer;
+    let forceTimer;
+    const stop = () => {
+      clearTimeout(termTimer);
+      clearTimeout(forceTimer);
+      process.exit(0);
     };
-    setTimeout(() => terminate("SIGTERM"), workerData.delayMs - workerData.forceDelayMs);
-    setTimeout(() => {
-      terminate("SIGKILL");
-    }, workerData.delayMs);
-  `, {
-    eval: true,
-    workerData: { delayMs, forceDelayMs, processId: process.pid },
+    process.on("disconnect", stop);
+    const terminate = (signal) => {
+      if (!process.connected) return stop();
+      try { process.kill(parentPid, signal); } catch { stop(); }
+    };
+    termTimer = setTimeout(() => terminate("SIGTERM"), delayMs - forceDelayMs);
+    forceTimer = setTimeout(() => terminate("SIGKILL"), delayMs);
+  `, String(process.pid), String(delayMs), String(forceDelayMs)], {
+    detached: true,
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+    stdio: ["ignore", "ignore", "ignore", "ipc"],
+  });
+  activeQuitWatchdog = watchdog;
+  watchdog.once("error", (error) => {
+    try { onSpawnError?.(error); } catch { /* diagnostics must not block the exit bound */ }
+    try { process.kill(process.pid, "SIGKILL"); } catch { /* the app is already exiting */ }
   });
   activeQuitWatchdog.unref();
+  activeQuitWatchdog.channel?.unref();
   return activeQuitWatchdog;
 }
 
