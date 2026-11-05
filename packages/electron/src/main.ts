@@ -36,7 +36,7 @@ import {
   PersistentStateOutcomeUnknownError,
   PersistentStateWriteGuardError,
   persistentStateHasArtifacts,
-  writePersistentStateFile,
+  writePersistentStateFileContents,
   type PersistentStateLoadResult,
 } from "./persistent-state-file.js";
 import {
@@ -60,7 +60,9 @@ import {
 import {
   type PaneNavigationDirection,
   SurfaceCore,
+  coreEventNeedsPersistence,
   type PersistentSurfaceState,
+  type PersistentSurfaceStateSnapshot,
   type ReloadEntryIdentity,
   type RendererWindowState,
 } from "./surface-core.js";
@@ -97,7 +99,7 @@ const ADVERTISER_TXT_REFRESH_DEBOUNCE_MS = 500;
 const SURF_ACE_WEBAUTHN_KEYCHAIN_ACCESS_GROUP = "Z7R59J7QV8.ai.surf-ace.electron.webauthn";
 let persistentStateWriteGuard: PersistentStateLoadResult["writeGuard"] = false;
 let persistentStateOutcomeUnknown: PersistentStateOutcomeUnknownError | null = null;
-let uncertainStateCandidate: PersistentSurfaceState | null = null;
+let uncertainStateCandidate: PersistentSurfaceStateSnapshot | null = null;
 const confirmedAnnotationLocalSaves = new ConfirmedAnnotationLocalSaves();
 let persistenceRecoveryTimer: NodeJS.Timeout | null = null;
 let persistenceRetryDelayMs = 1_000;
@@ -504,15 +506,15 @@ async function persistState(): Promise<void> {
   await persistentStateWriteReadiness.track(async () => {
     // Bind this write to the state that requested it. A later source mutation
     // must enqueue its own write before the publisher can send its bytes.
-    const candidate = core.getPersistentState();
+    const candidate = core.capturePersistentStateSnapshot();
     stateWrite = stateWrite
       .catch(() => {})
       .then(async () => {
         if (persistentStateOutcomeUnknown) throw new Error("Local persistence is paused pending reconciliation");
         try {
-          await writePersistentStateFile(stateDir, STATE_FILE_NAME, candidate);
+          await writePersistentStateFileContents(stateDir, STATE_FILE_NAME, candidate.contents);
           persistentStateWriteGuard = false;
-          confirmedAnnotationLocalSaves.confirm(candidate);
+          confirmedAnnotationLocalSaves.confirmCandidates(candidate.annotationLocalSaveCandidates);
         } catch (error) {
           if (error instanceof PersistentStateOutcomeUnknownError) {
             uncertainStateCandidate = candidate;
@@ -564,17 +566,20 @@ async function reconcilePersistence(): Promise<void> {
     state: undefined,
     writeGuard: "ambiguous-persistence" as const,
   }));
+  const resultContents = result.state
+    ? result.serializedContents ?? JSON.stringify(result.state, null, 2)
+    : undefined;
   if (!result.writeGuard &&
-      JSON.stringify(result.state) !== JSON.stringify(uncertainStateCandidate) &&
+      resultContents !== uncertainStateCandidate.contents &&
       persistentStateOutcomeUnknown.acceptedSha256 !== undefined) {
-    const acceptedHash = result.state
-      ? createHash("sha256").update(JSON.stringify(result.state, null, 2)).digest("hex")
+    const acceptedHash = resultContents
+      ? createHash("sha256").update(resultContents).digest("hex")
       : null;
     if (acceptedHash === persistentStateOutcomeUnknown.acceptedSha256) {
       // The selector proves the previous generation, so rewriting the same
       // candidate state cannot duplicate the operation that produced it.
       try {
-        await writePersistentStateFile(stateDir, STATE_FILE_NAME, uncertainStateCandidate);
+        await writePersistentStateFileContents(stateDir, STATE_FILE_NAME, uncertainStateCandidate.contents);
         result = await loadPersistentStateFile(stateDir, STATE_FILE_NAME);
       } catch (error) {
         if (error instanceof PersistentStateOutcomeUnknownError) persistentStateOutcomeUnknown = error;
@@ -584,21 +589,24 @@ async function reconcilePersistence(): Promise<void> {
       }
     }
   }
+  const verifiedContents = result.state
+    ? result.serializedContents ?? JSON.stringify(result.state, null, 2)
+    : undefined;
   if (!result.writeGuard && result.state &&
-      JSON.stringify(result.state) === JSON.stringify(uncertainStateCandidate)) {
+      verifiedContents === uncertainStateCandidate.contents) {
     // The exact generation that produced the ambiguous reply is now proved
     // durable. Independent local interaction may have advanced in-memory
     // state meanwhile; queue its save after reopening the persistence seam.
-    const changedWhilePaused = JSON.stringify(core.getPersistentState()) !== JSON.stringify(uncertainStateCandidate);
+    const changedWhilePaused = core.capturePersistentStateSnapshot().contents !== uncertainStateCandidate.contents;
     const verifiedCandidate = uncertainStateCandidate;
-    confirmedAnnotationLocalSaves.confirm(verifiedCandidate);
+    confirmedAnnotationLocalSaves.confirmCandidates(verifiedCandidate.annotationLocalSaveCandidates);
     persistentStateOutcomeUnknown = null;
     uncertainStateCandidate = null;
     persistentStateWriteGuard = false;
     persistenceRetryDelayMs = 1_000;
     core.resumeAdmissionAfterVerifiedPersistence();
     server.resumeAfterVerifiedPersistence();
-    core.publishVerifiedTransactionEvents(verifiedCandidate, (error) =>
+    core.publishVerifiedTransactionEvents(verifiedCandidate.contents, (error) =>
       clientWarn("state_reconciliation_notification_failed", errorDiagnosticFields(error)));
     clientInfo("state_persistence_reconciled");
     for (const surface of core.listSurfaces()) broadcastSurfaceState(surface.surfaceId);
@@ -2186,19 +2194,19 @@ async function boot(): Promise<void> {
 
   core.subscribe((coreEvent) => {
     if (coreEvent.type === "lockless-authority-changed") {
-      void persistState().catch((error) =>
+      if (coreEventNeedsPersistence(coreEvent)) void persistState().catch((error) =>
         clientWarn("state_persist_after_authority_change_failed", errorDiagnosticFields(error)));
       return;
     }
     if (coreEvent.type === "surface-changed") {
       broadcastSurfaceState(coreEvent.surfaceId);
-      void persistState().catch((error) =>
+      if (coreEventNeedsPersistence(coreEvent)) void persistState().catch((error) =>
         clientWarn("state_persist_after_surface_change_failed", errorDiagnosticFields(error)));
       return;
     }
     if (coreEvent.type === "surface-created") {
       void createWindowForSurface(coreEvent.surfaceId);
-      void persistState().catch((error) =>
+      if (coreEventNeedsPersistence(coreEvent)) void persistState().catch((error) =>
         clientWarn("state_persist_after_surface_create_failed", errorDiagnosticFields(error)));
       return;
     }
@@ -2209,7 +2217,7 @@ async function boot(): Promise<void> {
         programmaticSurfaceCloses.add(coreEvent.surfaceId);
         window.close();
       }
-      void persistState().catch((error) =>
+      if (coreEventNeedsPersistence(coreEvent)) void persistState().catch((error) =>
         clientWarn("state_persist_after_surface_remove_failed", errorDiagnosticFields(error)));
     }
   });

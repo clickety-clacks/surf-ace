@@ -38,6 +38,7 @@ export type PersistentStateLoadResult =
       error?: unknown;
       recoveredFromBackup: boolean;
       recoverySource: PersistentStateRecoverySource;
+      serializedContents?: string;
       state: PersistentSurfaceState;
       writeGuard: false | "ambiguous-persistence";
     }
@@ -225,6 +226,7 @@ async function loadExplicitlyAcceptedState(
   stateDir: string,
   fileName: string,
   selector: PersistentStateSelector,
+  retainAcceptedContents?: (contents: string) => void,
 ): Promise<PersistentStateLoadResult> {
   const statePath = path.join(stateDir, fileName);
   const selectorPath = path.join(stateDir, persistentStateSelectorFileName(fileName));
@@ -304,13 +306,16 @@ async function loadExplicitlyAcceptedState(
       error,
       recoveredFromBackup: recoverySource === "backup",
       recoverySource,
+      serializedContents: acceptedContents,
       state,
       writeGuard: "ambiguous-persistence",
     };
   }
+  retainAcceptedContents?.(acceptedContents);
   return {
     recoveredFromBackup: recoverySource === "backup",
     recoverySource,
+    serializedContents: acceptedContents,
     state,
     writeGuard: false,
   };
@@ -352,20 +357,24 @@ export async function loadPersistentStateFile(stateDir: string, fileName: string
     };
   }
   try {
+    const serializedContents = await fs.readFile(statePath, "utf8");
     return {
       recoveredFromBackup: false,
       recoverySource: "primary",
-      state: await readStateFile(statePath),
+      serializedContents,
+      state: JSON.parse(serializedContents) as PersistentSurfaceState,
       writeGuard: false,
     };
   } catch (primaryError) {
     try {
       const backupPath = path.join(stateDir, backupStateFileName(fileName));
-      const state = await readStateFile(backupPath);
+      const serializedContents = await fs.readFile(backupPath, "utf8");
+      const state = JSON.parse(serializedContents) as PersistentSurfaceState;
       await atomicWriteFile(statePath, JSON.stringify(state, null, 2)).catch(() => {});
       return {
         recoveredFromBackup: true,
         recoverySource: "backup",
+        serializedContents,
         state,
         writeGuard: false,
       };
@@ -377,6 +386,7 @@ export async function loadPersistentStateFile(stateDir: string, fileName: string
         temporaryRecovery = undefined;
       }
       if (temporaryRecovery) {
+        const serializedContents = await fs.readFile(temporaryRecovery.filePath, "utf8");
         await atomicWriteFile(statePath, JSON.stringify(temporaryRecovery.state, null, 2)).catch(() => {});
         await atomicWriteFile(
           path.join(stateDir, backupStateFileName(fileName)),
@@ -385,6 +395,7 @@ export async function loadPersistentStateFile(stateDir: string, fileName: string
         return {
           recoveredFromBackup: false,
           recoverySource: "temporary",
+          serializedContents,
           state: temporaryRecovery.state,
           writeGuard: false,
         };
@@ -403,8 +414,16 @@ export async function writePersistentStateFile(
   fileName: string,
   state: PersistentSurfaceState,
 ): Promise<void> {
+  await writePersistentStateFileContents(stateDir, fileName, JSON.stringify(state, null, 2));
+}
+
+/** Persist an immutable candidate already encoded at the mutation boundary. */
+export async function writePersistentStateFileContents(
+  stateDir: string,
+  fileName: string,
+  contents: string,
+): Promise<void> {
   await fs.mkdir(stateDir, { recursive: true });
-  const contents = JSON.stringify(state, null, 2);
   const statePath = path.join(stateDir, fileName);
   const backupPath = path.join(stateDir, backupStateFileName(fileName));
   const selectorPath = path.join(stateDir, persistentStateSelectorFileName(fileName));
@@ -423,10 +442,13 @@ export async function writePersistentStateFile(
   }
   let previousContents: string | undefined;
   if (selector) {
-    const loaded = await loadExplicitlyAcceptedState(stateDir, fileName, selector);
+    const loaded = await loadExplicitlyAcceptedState(stateDir, fileName, selector, (accepted) => {
+      // Reuse the bytes verified against the selector instead of rereading the
+      // complete accepted state generation during each mutation.
+      previousContents = accepted;
+    });
     if (loaded.writeGuard === "ambiguous-persistence") throw loaded.error;
     if (loaded.writeGuard === "corrupt-primary") previousContents = undefined;
-    else if (loaded.state) previousContents = await fs.readFile(statePath, "utf8");
   } else {
     try {
       previousContents = await fs.readFile(statePath, "utf8");
