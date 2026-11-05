@@ -3,9 +3,13 @@ import {
   type SurfAceDiscoveryEndpoint,
   type SurfAceDiscoveryService,
 } from "./surf-ace-discovery.js";
-import { ConfiguredServerRegistration, RegistrationStageTimeoutError } from "./configured-server.js";
+import {
+  ConfiguredServerRegistration,
+  isControllerWireTimeout,
+  RegistrationStageTimeoutError,
+} from "./configured-server.js";
 import type { PaneLabelAllocation, SurfaceCore } from "./surface-core.js";
-import { ControllerWireTimeoutError, type RegistryIdentity } from "../../controller/src/wire.js";
+import type { RegistryIdentity } from "../../controller/src/wire.js";
 
 type SelectedRegistration = {
   address: string;
@@ -140,7 +144,7 @@ export class ServerConnection {
   }
 
   private isStallTimeout(error: unknown): boolean {
-    return error instanceof ControllerWireTimeoutError || error instanceof RegistrationStageTimeoutError;
+    return isControllerWireTimeout(error) || error instanceof RegistrationStageTimeoutError;
   }
 
   private reportStall(error: unknown, cycle: number): void {
@@ -474,7 +478,7 @@ export class ServerConnection {
         else await registration.stop();
         registration = null;
       } catch (error) {
-        if (error instanceof ControllerWireTimeoutError && this.currentStage === "registry identity request") {
+        if (isControllerWireTimeout(error) && this.currentStage === "registry identity request") {
           await registration?.stop();
           if (!this.isCurrentCycle(cycle)) return;
           registration = null;

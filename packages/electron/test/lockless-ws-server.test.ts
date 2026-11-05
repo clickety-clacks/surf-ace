@@ -31,7 +31,7 @@ import {
 import { SurfaceWsServer } from "../src/ws-server.js";
 import { ConfiguredServerRegistration } from "../src/configured-server.js";
 import { PersistenceWriteReadiness } from "../src/persistence-write-readiness.js";
-import { ControllerWireTimeoutError, PublicControllerWireClient } from "../../controller/src/wire.js";
+import { PublicControllerWireClient } from "../../controller/src/wire.js";
 
 let nextPort = 25901;
 let nextTestRegistryPaneLabel = 100_000;
@@ -5436,7 +5436,7 @@ test("a pair request that closes during local persistence does not strand its co
     });
     await stalledPersistenceStarted;
     await assert.rejects(firstPair, (error: unknown) =>
-      error instanceof ControllerWireTimeoutError && error.operation === "pair.request");
+      error instanceof Error && error.message === "controller_wire_timeout:pair.request");
     await firstClientClosed;
     await new Promise<void>((resolve) => setImmediate(resolve));
 

@@ -1,6 +1,5 @@
 import { createHash, createPublicKey } from "node:crypto";
 import {
-  ControllerWireTimeoutError,
   PublicControllerWireClient,
   parseRegistryIdentity,
   type ControllerWireEnvelope,
@@ -102,6 +101,10 @@ export class RegistrationStageTimeoutError extends Error {
     super(`registration_stage_timeout:${stage}`);
     this.name = "RegistrationStageTimeoutError";
   }
+}
+
+export function isControllerWireTimeout(error: unknown): error is Error {
+  return error instanceof Error && error.message.startsWith("controller_wire_timeout:");
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1207,7 +1210,7 @@ export class ConfiguredServerRegistration {
       if (baseline.ok) return "rejected";
       return "unavailable";
     } catch (error) {
-      if (error instanceof ControllerWireTimeoutError || error instanceof RegistrationStageTimeoutError) throw error;
+      if (isControllerWireTimeout(error) || error instanceof RegistrationStageTimeoutError) throw error;
       try {
         const baseline = await this.sendRegistration(releaseOnlyPayload);
         if (baseline.ok) return "pending";
