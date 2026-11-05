@@ -129,6 +129,7 @@ export class ConfiguredServerRegistration {
   private readonly retrySuppressedClaimKeys = new Set<string>();
   private readonly reportedCompatibilityWarnings = new Set<string>();
   private registryIdentity: RegistryIdentity | null = null;
+  private readonly abandonController = new AbortController();
 
   constructor(
     address: string,
@@ -156,18 +157,39 @@ export class ConfiguredServerRegistration {
     if (this.stopped) throw new Error("registration_abandoned");
   }
 
+  private raceAbandon<T>(operation: Promise<T>): Promise<T> {
+    this.assertActive();
+    const signal = this.abandonController.signal;
+    return new Promise<T>((resolve, reject) => {
+      const onAbandon = (): void => reject(new Error("registration_abandoned"));
+      const settle = (action: () => void): void => {
+        signal.removeEventListener("abort", onAbandon);
+        action();
+      };
+      signal.addEventListener("abort", onAbandon, { once: true });
+      void operation.then(
+        (value) => settle(() => resolve(value)),
+        (error) => settle(() => reject(error)),
+      );
+    });
+  }
+
   private async localTransaction<T>(stage: string, operation: () => Promise<T>): Promise<T> {
     this.assertActive();
     this.setStage(stage);
-    const result = await this.core.locklessAuthority.transactionAsync(() => this.core.transactionAsync(async () => {
+    const transaction = this.core.locklessAuthority.transactionAsync(() => this.core.transactionAsync(async () => {
       // The cycle deadline may expire while either authoritative queue is
-      // occupied. Check only after acquiring both locks, before this attempt
-      // can mutate state. Once persistence starts, keep the existing
-      // serialization seam held until its outcome is known; racing it would
-      // let a late write overwrite a newer candidate.
+      // occupied. Recheck after acquiring both locks and before commit so a
+      // late result cannot publish mutations from an abandoned attempt.
       this.assertActive();
-      return await operation();
+      const result = await this.raceAbandon(Promise.resolve().then(() => {
+        this.assertActive();
+        return operation();
+      }));
+      this.assertActive();
+      return result;
     }));
+    const result = await this.raceAbandon(transaction);
     this.assertActive();
     return result;
   }
@@ -286,7 +308,10 @@ export class ConfiguredServerRegistration {
     if (existing && existing.clientId === this.clientId && sameRegistry(existing, identity)) {
       // Reconfirm durability on every mutation attempt. An ambiguous prior write
       // may leave the exact candidate in memory while local persistence is fenced.
-      await this.localTransaction("local registry binding persistence", async () => { await this.persist(); });
+      await this.localTransaction("local registry binding persistence", async () => {
+        await this.persist();
+        this.assertActive();
+      });
       return;
     }
     if (existing && existing.clientId === this.clientId && !allowRebind) {
@@ -295,6 +320,7 @@ export class ConfiguredServerRegistration {
     await this.localTransaction("local registry binding persistence", async () => {
       this.core.beginRegistryBinding({ ...identity, clientId: this.clientId });
       await this.persist();
+      this.assertActive();
     });
   }
 
@@ -312,6 +338,7 @@ export class ConfiguredServerRegistration {
         // Persist the live snapshot and terminal close evidence together before
         // the allocator can observe either the release or replacement claims.
         await this.persist();
+        this.assertActive();
       }
       return {
         clientId: this.clientId,
@@ -431,6 +458,7 @@ export class ConfiguredServerRegistration {
     await this.localTransaction("local refused claim update", async () => {
       this.core.reidentifyRegistryClaim(surfaceId, paneId);
       await this.persist();
+      this.assertActive();
     });
   }
 
@@ -977,6 +1005,7 @@ export class ConfiguredServerRegistration {
       }
       this.core.setRegistryEndpointLease(parsed.endpointLease);
       await this.persist();
+      this.assertActive();
     });
     this.assertActive();
     this.core.confirmRegistryPaneLabels(paneAssignments);
@@ -1140,6 +1169,7 @@ export class ConfiguredServerRegistration {
       this.core.locklessAuthority.acknowledgePaneReleases(paneReleases.map((release) => release.releaseId));
       this.core.locklessAuthority.acknowledgeWindowReleases(windowReleases.map((release) => release.releaseId));
       await this.persist();
+      this.assertActive();
     });
   }
 
@@ -1148,6 +1178,7 @@ export class ConfiguredServerRegistration {
       if (kind === "pane") this.core.locklessAuthority.discardRejectedPaneRelease(releaseId);
       else this.core.locklessAuthority.discardRejectedWindowRelease(releaseId);
       await this.persist();
+      this.assertActive();
     });
   }
 
@@ -1217,7 +1248,9 @@ export class ConfiguredServerRegistration {
   }
 
   abandon(): void {
+    if (this.stopped) return;
     this.stopped = true;
+    this.abandonController.abort();
     clearTimeout(this.timer);
     this.wire.abort();
   }

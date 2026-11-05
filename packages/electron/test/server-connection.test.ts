@@ -9,6 +9,7 @@ import type { Revision } from "../../protocol/src/index.js";
 import { REGISTRATION_CYCLE_TIMEOUT_MS, ServerConnection } from "../src/server-connection.js";
 import { ConfiguredServerRegistration } from "../src/configured-server.js";
 import { SurfaceCore } from "../src/surface-core.js";
+import { PersistenceWriteReadiness } from "../src/persistence-write-readiness.js";
 import { createEmptyLocklessClientState, DEFAULT_LOCKLESS_LIMITS } from "../src/lockless-client-authority.js";
 import {
   loadPersistentStateFile,
@@ -809,7 +810,7 @@ test("central status waits for registration and persistence; loss, retry and rec
   assert.equal(state().connectionBar, "disconnected");
 });
 
-test("a delayed registration persistence times out its attempt, stays serialized, and recovers without losing pane content", async () => {
+test("an abandoned registration persistence yields to fresh attempts and recovers without false readiness or lost content", async () => {
   assert.equal(REGISTRATION_CYCLE_TIMEOUT_MS, 10_000);
   const directEndpoint = "ws://127.0.0.1:1/ws";
   let leaseGeneration = 0;
@@ -846,19 +847,20 @@ test("a delayed registration persistence times out its attempt, stays serialized
   let persistenceCalls = 0;
   const persistenceStalled = deferred();
   const releasePersistence = deferred();
+  const persistenceReadiness = new PersistenceWriteReadiness();
   const connection = new ServerConnection({
     configuredAddress: registry.address,
     directEndpoint,
     clientId: "local-persistence-recovery-client",
     core,
     discovery: emptyDiscovery(),
-    persist: async () => {
+    persist: async () => await persistenceReadiness.track(async () => {
       persistenceCalls += 1;
       if (persistenceCalls === 2) {
         persistenceStalled.resolve();
         await releasePersistence.promise;
       }
-    },
+    }),
   });
   const state = () => core.getRendererWindowState(surface.surfaceId);
   const registrationCount = () => registry.requests.filter(({ message }) => message.op === "client.register").length;
@@ -874,17 +876,24 @@ test("a delayed registration persistence times out its attempt, stays serialized
       clientId: "local-persistence-recovery-client",
       fleetId: "fixture-fleet",
     }, "a timeout preserves the confirmed client and registry identity");
-    await new Promise<void>((resolve) => setTimeout(resolve, 200));
-    assert.equal(registrationCount(), 1,
-      "a fresh cycle waits behind the in-flight authoritative persistence instead of writing over it");
+    assert.equal(core.registryEndpointLease(), null,
+      "the abandoned reply's lease is rolled back with its uncommitted local transaction");
+    assert.equal(persistenceReadiness.isReady, false,
+      "the unresolved persistence keeps application readiness degraded");
     assert.equal(state().panes[0]?.content.contentId, "ct_local_persistence_recovery",
       "the old content remains readable while the registration save is unresolved");
-    releasePersistence.resolve();
-    const dependencyRecoveredAt = Date.now();
 
     await until(() => state().connectionBar === "connected" && registrationCount() >= 2);
+    assert.equal(core.registryEndpointLease()?.leaseGeneration, 2,
+      "a fresh registration attempt proceeds without waiting for abandoned transaction cleanup");
+    assert.equal(persistenceReadiness.isReady, false,
+      "a fresh lease alone does not make readiness true while a prior write is unresolved");
+
+    releasePersistence.resolve();
+    const dependencyRecoveredAt = Date.now();
+    await until(() => persistenceReadiness.isReady && state().connectionBar === "connected" && registrationCount() >= 2);
     assert.ok(Date.now() - dependencyRecoveredAt <= 40_000,
-      "a recovered persistence dependency reaches a fresh ready registration within 30 seconds plus W");
+      "a recovered persistence dependency reaches ready with the fresh registration within 30 seconds plus W");
     const recovered = state();
     assert.equal(recovered.windowLabel, "a");
     assert.equal(recovered.panes[0]?.label, "700");
