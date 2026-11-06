@@ -70,6 +70,7 @@ export class ServerConnection {
   private cycleId = 0;
   private currentStage = "registry discovery";
   private readonly cycleRegistrations = new Map<number, Set<ConfiguredServerRegistration>>();
+  private readonly cyclesWithRouteTimeouts = new Set<number>();
   private lastFailure: string | null = null;
   private lastReportedFailure: string | null = null;
   private readonly discovery: SurfAceDiscoveryService;
@@ -273,9 +274,14 @@ export class ServerConnection {
     }).finally(() => {
       clearTimeout(timeout);
       this.cycleRegistrations.delete(cycle);
+      const routeTimedOut = this.cyclesWithRouteTimeouts.delete(cycle);
       if (this.pending === run) this.pending = null;
       if (this.isCurrentCycle(cycle) && this.status === "connected") this.armLeaseExpiry();
       else if (!this.stopped && cycle !== this.cycleId && this.status === "disconnected" && !this.selected) {
+        this.scheduleRecovery();
+      } else if (!this.stopped && this.isCurrentCycle(cycle) && routeTimedOut && this.status === "disconnected") {
+        // A request timeout may be recoverable through another route in this
+        // cycle. If no route succeeds, keep autonomous retry alive.
         this.scheduleRecovery();
       }
     });
@@ -287,6 +293,7 @@ export class ServerConnection {
     if (!this.isCurrentCycle(cycle)) return;
     if (!this.selected || this.status !== "connected") this.setStatus("connecting");
     const failures: string[] = [];
+    const visited = new Set<string>();
 
     if (this.selected) {
       const current = this.selected;
@@ -298,7 +305,9 @@ export class ServerConnection {
         this.setStatus("connected");
         return;
       } catch (error) {
-        if (this.isStallTimeout(error)) throw error;
+        if (error instanceof RegistrationStageTimeoutError) throw error;
+        visited.add(current.address);
+        if (isControllerWireTimeout(error)) this.cyclesWithRouteTimeouts.add(cycle);
         await current.registration.stop();
         if (!this.isCurrentCycle(cycle)) return;
         this.selected = null;
@@ -380,8 +389,6 @@ export class ServerConnection {
     const boundForClient = binding?.clientId === this.options.clientId ? binding : null;
     let matchingRegistrySeen = false;
     let firstForeign: CandidateRegistration | null = null;
-    const visited = new Set<string>();
-
     const adopt = async (candidate: CandidateRegistration, allowRebind: boolean): Promise<boolean> => {
       try {
         candidate.registration.onClose(() => {
@@ -420,7 +427,8 @@ export class ServerConnection {
         }
         return true;
       } catch (error) {
-        if (this.isStallTimeout(error)) throw error;
+        if (error instanceof RegistrationStageTimeoutError) throw error;
+        if (isControllerWireTimeout(error)) this.cyclesWithRouteTimeouts.add(cycle);
         await candidate.registration.stop();
         if (!this.isCurrentCycle(cycle)) return false;
         this.reportFailure(`${candidate.context} ${candidate.address} failed: ${describeError(error)}`, !this.selected, failures, cycle);
