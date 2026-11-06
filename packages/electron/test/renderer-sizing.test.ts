@@ -4,6 +4,7 @@ import fs from "node:fs/promises";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { runInNewContext } from "node:vm";
+import { safeDiagnosticUrl } from "../src/guest-console-diagnostics.js";
 
 function rendererSourceUrl(relativePath: string): URL {
   const candidates = [
@@ -203,7 +204,7 @@ test("browser_url diagnostics report host and guest sizing through surface comma
   assert.match(source.slice(diagnosticsIndex, renderBrowserIndex), /scroll: elementDiagnostics\(view\.scrollEl\)/);
   assert.match(source.slice(diagnosticsIndex, renderBrowserIndex), /webview: elementDiagnostics\(webview\)/);
   assert.match(source.slice(diagnosticsIndex, renderBrowserIndex), /browserUrlGuestDiagnosticsWithTimeout\(webview\)/);
-  assert.match(source.slice(diagnosticsIndex, renderBrowserIndex), /webviewCurrentUrl: browserUrlElementCurrentUrl\(webview\)/);
+  assert.match(source.slice(diagnosticsIndex, renderBrowserIndex), /webviewCurrentUrl: browserUrlElementDiagnosticUrl\(webview\)/);
   assert.match(source.slice(diagnosticsIndex, renderBrowserIndex), /webviewTitle: browserUrlElementTitle\(webview\)/);
   assert.match(source.slice(renderBrowserIndex), /reason === "dom-ready:guest-viewport" \? "dom-ready" : "did-finish-load"/);
   assert.match(source.slice(renderBrowserIndex), /reportBrowserUrlDiagnostics\(view, browserView, eventReason\)/);
@@ -221,9 +222,10 @@ test("browser_url diagnostics report URL scheme, load errors, and readback resul
   assert.match(source.slice(renderBrowserIndex), /browserUrlGuestDiagnosticsWithTimeout\(browserView\)\.catch/);
   assert.match(source, /BROWSER_URL_DIAGNOSTIC_READBACK_TIMEOUT_MS = 500/);
   assert.match(source.slice(renderBrowserIndex), /errorCode: failure\.errorCode/);
-  assert.match(source.slice(renderBrowserIndex), /failedUrl: failure\.validatedURL/);
+  assert.match(source.slice(renderBrowserIndex), /errorDescription: safeGuestConsoleText\(failure\.errorDescription \?\? ""\)/);
+  assert.match(source.slice(renderBrowserIndex), /failedUrl: safeDiagnosticUrl\(failure\.validatedURL \?\? ""\)\.display/);
   assert.match(source.slice(renderBrowserIndex), /isMainFrame: failure\.isMainFrame/);
-  assert.match(source.slice(renderBrowserIndex), /currentUrl: browserUrlElementCurrentUrl\(browserView\)/);
+  assert.match(source.slice(renderBrowserIndex), /currentUrl: browserUrlElementDiagnosticUrl\(browserView\)/);
   assert.match(source.slice(renderBrowserIndex), /pageTitle: browserUrlElementTitle\(browserView\)/);
   assert.match(source.slice(renderBrowserIndex), /readbackResult/);
 });
@@ -776,6 +778,53 @@ test("renderer projects the numeric pane label while preserving the combined sem
   assert.match(updateSource, /Boolean\(pane\.label\)/);
   assert.match(updateSource, /`pane \$\{visibleAddress\}`/);
   assert.match(updateSource, /`Surf Ace\$\{visibleWindowLabel[\s\S]*pane \$\{visibleAddress\}`/);
+});
+
+test("browser_url navigation command preserves its requested URL alongside summarized diagnostics", async () => {
+  const source = await rendererSource();
+  const reportIndex = source.indexOf("const reportNavigation =");
+  const commandStart = source.indexOf("window.surfAce.command(", reportIndex);
+  const objectStart = source.indexOf("{", commandStart);
+  const commandClose = source.indexOf("});", objectStart);
+
+  assert.ok(reportIndex > -1);
+  assert.ok(commandStart > reportIndex);
+  assert.ok(objectStart > commandStart);
+  assert.ok(commandClose > objectStart);
+
+  const commandObject = source.slice(objectStart, commandClose + 1);
+  const context = {
+    browserView: {},
+    browserUrlDiagnosticFields: (url: string) => {
+      const summary = safeDiagnosticUrl(url);
+      return {
+        url: summary.display,
+        urlHost: summary.host,
+        urlLength: summary.length,
+        urlPort: summary.port,
+        urlScheme: summary.scheme,
+      };
+    },
+    browserUrlElementDiagnosticUrl: () => "https://example.test/",
+    browserUrlElementTitle: () => "Example",
+    errorMessage: undefined,
+    navigationReport: { targetId: "target-test", url: "" },
+    pane: { paneId: 4 },
+    readbackResult: "ok",
+    status: "applied",
+  };
+  for (const url of [
+    "https://example.test/" + "x".repeat(400),
+    "data:text/html;base64," + "payload".repeat(80),
+  ]) {
+    context.navigationReport.url = url;
+    const command = runInNewContext("(" + commandObject + ")", context) as Record<string, unknown>;
+    const summary = safeDiagnosticUrl(url);
+
+    assert.equal(command.url, url);
+    assert.equal(command.urlLength, url.length);
+    assert.equal(command.urlScheme, summary.scheme);
+  }
 });
 
 test("renderer fits pane identity labels inside pane bounds for native and renderer panes", async () => {

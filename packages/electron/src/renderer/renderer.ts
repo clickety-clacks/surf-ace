@@ -1,5 +1,6 @@
 import { AnnotationDoneFence, type AnnotationDoneState } from "../annotation-done-state.js";
 import { annotationDoneContextKey, parseAnnotationDoneContext } from "../annotation-done-context.js";
+import { safeDiagnosticUrl, safeGuestConsoleText } from "../guest-console-diagnostics.js";
 import { browserContentScaleScript } from "./browser-content-scale.js";
 import {
   isMarkedOverlayVisible,
@@ -2515,23 +2516,15 @@ function browserUrlWebContentsId(webview: BrowserUrlWebViewElement): number | nu
   }
 }
 
-function browserUrlDiagnosticFields(url: string): Record<string, string> {
-  try {
-    const parsed = new URL(url);
-    return {
-      url,
-      urlHost: parsed.hostname,
-      urlPort: parsed.port || (parsed.protocol === "https:" ? "443" : parsed.protocol === "http:" ? "80" : ""),
-      urlScheme: parsed.protocol.replace(/:$/, ""),
-    };
-  } catch {
-    return {
-      url,
-      urlHost: "invalid",
-      urlPort: "",
-      urlScheme: "invalid",
-    };
-  }
+function browserUrlDiagnosticFields(url: string): Record<string, string | number> {
+  const summary = safeDiagnosticUrl(url);
+  return {
+    url: summary.display,
+    urlHost: summary.host,
+    urlLength: summary.length,
+    urlPort: summary.port || (summary.scheme === "https" ? "443" : summary.scheme === "http" ? "80" : ""),
+    urlScheme: summary.scheme,
+  };
 }
 
 function browserUrlElementCurrentUrl(webview: BrowserUrlWebViewElement): string {
@@ -2540,6 +2533,10 @@ function browserUrlElementCurrentUrl(webview: BrowserUrlWebViewElement): string 
   } catch {
     return "";
   }
+}
+
+function browserUrlElementDiagnosticUrl(webview: BrowserUrlWebViewElement): string {
+  return safeDiagnosticUrl(browserUrlElementCurrentUrl(webview)).display;
 }
 
 function browserUrlElementTitle(webview: BrowserUrlWebViewElement): string {
@@ -2651,7 +2648,7 @@ function reportBrowserUrlDiagnostics(
     reason,
     scroll: elementDiagnostics(view.scrollEl),
     type: "browser-url-diagnostics",
-    webviewCurrentUrl: browserUrlElementCurrentUrl(webview),
+    webviewCurrentUrl: browserUrlElementDiagnosticUrl(webview),
     webviewTitle: browserUrlElementTitle(webview),
     visualViewport: window.visualViewport
       ? {
@@ -3013,15 +3010,15 @@ function renderBrowserContent(
         : "ok";
       window.surfAce.command({
         ...(errorMessage ? { errorMessage } : {}),
-        currentUrl: browserUrlElementCurrentUrl(browserView),
+        currentUrl: browserUrlElementDiagnosticUrl(browserView),
         pageTitle: browserUrlElementTitle(browserView),
         paneId: pane.paneId,
         readbackResult,
         status,
         targetId: navigationReport.targetId,
         type: "browser-url-navigation",
-        url: navigationReport.url,
         ...browserUrlDiagnosticFields(navigationReport.url),
+        url: navigationReport.url,
       });
     });
   };
@@ -3094,7 +3091,7 @@ function renderBrowserContent(
       resetBrowserContentScaleMode(view, browserView);
       syncBrowserControlButtons(view);
       rendererDiagnostic("browser_content_did_start_loading", {
-        currentUrl: browserUrlElementCurrentUrl(browserView),
+        currentUrl: browserUrlElementDiagnosticUrl(browserView),
         paneId: pane.paneId,
         targetId: options?.navigationReport?.targetId ?? "",
         ...browserUrlDiagnosticFields(url),
@@ -3106,7 +3103,7 @@ function renderBrowserContent(
     "page-title-updated",
     (event) => {
       rendererDiagnostic("browser_content_page_title_updated", {
-        currentUrl: browserUrlElementCurrentUrl(browserView),
+        currentUrl: browserUrlElementDiagnosticUrl(browserView),
         paneId: pane.paneId,
         targetId: options?.navigationReport?.targetId ?? "",
         title: String((event as { title?: unknown }).title ?? "").slice(0, 160),
@@ -3118,12 +3115,23 @@ function renderBrowserContent(
   browserView.addEventListener(
     "console-message",
     (event) => {
+      const consoleEvent = event as {
+        level?: unknown;
+        line?: unknown;
+        message?: unknown;
+        sourceId?: unknown;
+      };
+      const currentUrl = browserUrlElementCurrentUrl(browserView);
+      const sourceId = String(consoleEvent.sourceId ?? "");
       rendererDiagnostic("browser_content_console_message", {
-        currentUrl: browserUrlElementCurrentUrl(browserView),
-        level: String((event as { level?: unknown }).level ?? ""),
-        message: String((event as { message?: unknown }).message ?? "").slice(0, 240),
+        currentUrl: safeDiagnosticUrl(currentUrl).display,
+        currentUrlLength: currentUrl.length,
+        level: String(consoleEvent.level ?? ""),
+        lineNumber: typeof consoleEvent.line === "number" ? consoleEvent.line : undefined,
+        message: safeGuestConsoleText(consoleEvent.message),
         paneId: pane.paneId,
-        sourceId: String((event as { sourceId?: unknown }).sourceId ?? "").slice(0, 160),
+        sourceId: safeGuestConsoleText(sourceId, 160),
+        sourceIdLength: sourceId.length,
         targetId: options?.navigationReport?.targetId ?? "",
         ...browserUrlDiagnosticFields(url),
         webContentsId: browserUrlWebContentsId(browserView),
@@ -3136,7 +3144,7 @@ function renderBrowserContent(
       browserView.dataset.guestReady = "true";
       syncBrowserControlButtons(view);
       rendererDiagnostic("browser_content_dom_ready", {
-        currentUrl: browserUrlElementCurrentUrl(browserView),
+        currentUrl: browserUrlElementDiagnosticUrl(browserView),
         paneId: pane.paneId,
         targetId: options?.navigationReport?.targetId ?? "",
         title: browserUrlElementTitle(browserView),
@@ -3151,7 +3159,7 @@ function renderBrowserContent(
     () => {
       syncBrowserControlButtons(view);
       rendererDiagnostic("browser_content_did_finish_load", {
-        currentUrl: browserUrlElementCurrentUrl(browserView),
+        currentUrl: browserUrlElementDiagnosticUrl(browserView),
         paneId: pane.paneId,
         targetId: options?.navigationReport?.targetId ?? "",
         title: browserUrlElementTitle(browserView),
@@ -3191,10 +3199,10 @@ function renderBrowserContent(
         return;
       }
       rendererDiagnostic("browser_content_did_fail_load", {
-        currentUrl: browserUrlElementCurrentUrl(browserView),
+        currentUrl: browserUrlElementDiagnosticUrl(browserView),
         errorCode: failure.errorCode ?? "",
-        errorDescription: failure.errorDescription ?? "",
-        failedUrl: failure.validatedURL ?? "",
+        errorDescription: safeGuestConsoleText(failure.errorDescription ?? ""),
+        failedUrl: safeDiagnosticUrl(failure.validatedURL ?? "").display,
         isMainFrame: failure.isMainFrame ?? true,
         paneId: pane.paneId,
         targetId: options?.navigationReport?.targetId ?? "",
@@ -3203,7 +3211,9 @@ function renderBrowserContent(
         webContentsId: browserUrlWebContentsId(browserView),
       });
       reportBrowserUrlDiagnostics(view, browserView, "did-fail-load");
-      const description = failure.errorDescription ? `: ${failure.errorDescription}` : "";
+      const description = failure.errorDescription
+        ? `: ${safeGuestConsoleText(failure.errorDescription)}`
+        : "";
       reportNavigation("failed", `webview navigation failed${description}`);
     },
     { once: true },
@@ -3211,7 +3221,7 @@ function renderBrowserContent(
   deferUntilPaneFrameReady(view, browserView, renderToken, () => {
     browserView.src = url;
     rendererDiagnostic("browser_content_navigation_assigned", {
-      currentUrl: browserUrlElementCurrentUrl(browserView),
+      currentUrl: browserUrlElementDiagnosticUrl(browserView),
       paneId: pane.paneId,
       targetId: options?.navigationReport?.targetId ?? "",
       ...browserUrlDiagnosticFields(url),

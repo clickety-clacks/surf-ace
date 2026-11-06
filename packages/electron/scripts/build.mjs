@@ -79,6 +79,7 @@ await build({
     path.join(rootDir, "test", "persistence-write-readiness.test.ts"),
     path.join(rootDir, "test", "port-selection.test.ts"),
     path.join(rootDir, "test", "disabled-native-pane-demo.test.ts"),
+    path.join(rootDir, "test", "guest-console-diagnostics.test.ts"),
     path.join(rootDir, "test", "markdown-rendering.test.ts"),
     path.join(rootDir, "test", "renderer-sizing.test.ts"),
     path.join(rootDir, "test", "renderer-dom-integration.test.ts"),
