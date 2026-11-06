@@ -440,14 +440,18 @@ export class PostgresCustodyAdapter<M extends LeaseMode> {
   }
 
   async validateLease(): Promise<void> {
-    await this.enqueuePrimary(async () => await this.validateLeaseNow());
+    await this.validateLeaseAndReadAcceptedState();
+  }
+
+  private async validateLeaseAndReadAcceptedState(): Promise<AcceptedState> {
+    return await this.enqueuePrimary(async () => await this.validateLeaseNow());
   }
 
   get registrationReady(): boolean {
     return !this.closed && !this.connectionFailed && this.validated && this.uncertain === null;
   }
 
-  private async validateLeaseNow(): Promise<void> {
+  private async validateLeaseNow(): Promise<AcceptedState> {
     this.validated = false;
     try {
       const state = await this.readAcceptedStateNow();
@@ -480,19 +484,24 @@ export class PostgresCustodyAdapter<M extends LeaseMode> {
         this.uncertain = null;
       }
       this.validated = true;
+      return state;
     } catch (error) {
       this.validated = false;
       throw error;
     }
   }
 
-  async recoverWriter(): Promise<boolean> {
+  async recoverWriterWithState(): Promise<AcceptedState | null> {
     try {
-      await this.validateLease();
-      return this.registrationReady;
+      const state = await this.validateLeaseAndReadAcceptedState();
+      return this.registrationReady ? state : null;
     } catch {
-      return false;
+      return null;
     }
+  }
+
+  async recoverWriter(): Promise<boolean> {
+    return (await this.recoverWriterWithState()) !== null;
   }
 
   private async mutate<T>(
