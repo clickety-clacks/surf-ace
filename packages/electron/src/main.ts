@@ -61,6 +61,7 @@ import {
 import {
   type PaneNavigationDirection,
   SurfaceCore,
+  coreEventNeedsPersistence,
   type PersistentSurfaceState,
   type ReloadEntryIdentity,
   type RendererWindowState,
@@ -2188,19 +2189,19 @@ async function boot(): Promise<void> {
 
   core.subscribe((coreEvent) => {
     if (coreEvent.type === "lockless-authority-changed") {
-      void persistState().catch((error) =>
+      if (coreEventNeedsPersistence(coreEvent)) void persistState().catch((error) =>
         clientWarn("state_persist_after_authority_change_failed", errorDiagnosticFields(error)));
       return;
     }
     if (coreEvent.type === "surface-changed") {
       broadcastSurfaceState(coreEvent.surfaceId);
-      void persistState().catch((error) =>
+      if (coreEventNeedsPersistence(coreEvent)) void persistState().catch((error) =>
         clientWarn("state_persist_after_surface_change_failed", errorDiagnosticFields(error)));
       return;
     }
     if (coreEvent.type === "surface-created") {
       void createWindowForSurface(coreEvent.surfaceId);
-      void persistState().catch((error) =>
+      if (coreEventNeedsPersistence(coreEvent)) void persistState().catch((error) =>
         clientWarn("state_persist_after_surface_create_failed", errorDiagnosticFields(error)));
       return;
     }
@@ -2211,7 +2212,7 @@ async function boot(): Promise<void> {
         programmaticSurfaceCloses.add(coreEvent.surfaceId);
         window.close();
       }
-      void persistState().catch((error) =>
+      if (coreEventNeedsPersistence(coreEvent)) void persistState().catch((error) =>
         clientWarn("state_persist_after_surface_remove_failed", errorDiagnosticFields(error)));
     }
   });

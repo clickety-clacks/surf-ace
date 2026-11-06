@@ -742,8 +742,8 @@ export class SurfaceWsServer {
         scopeKind: "pane",
         triggerOperation,
       });
-      this.core.markLocklessAuthorityChanged(surfaceId);
       await this.persistLocklessState();
+      this.core.markLocklessAuthorityChanged(surfaceId, "committed");
       return appended;
     });
     if (record) {
@@ -766,8 +766,8 @@ export class SurfaceWsServer {
         scopeKind: "surface",
         triggerOperation,
       });
-      this.core.markLocklessAuthorityChanged(surfaceId);
       await this.persistLocklessState();
+      this.core.markLocklessAuthorityChanged(surfaceId, "committed");
       return appended;
     });
     if (record) {
@@ -795,8 +795,8 @@ export class SurfaceWsServer {
         scopeId,
         triggerOperation: "renderer.annotation_live",
       });
-      this.core.markLocklessAuthorityChanged(surfaceId);
       await this.persistLocklessState();
+      this.core.markLocklessAuthorityChanged(surfaceId, "committed");
       return updated;
     });
     if (record) {
@@ -890,7 +890,7 @@ export class SurfaceWsServer {
         return committed;
       },
     );
-    this.core.markLocklessAuthorityChanged(result.surfaceId);
+    this.core.markLocklessAuthorityChanged(result.surfaceId, "committed");
     return result;
   }
 
