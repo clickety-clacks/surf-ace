@@ -223,7 +223,6 @@ async function automaticRegistryFixture(options: {
   rejectReleaseIds?: Set<string>;
   rejectRegistration?: () => boolean;
   ignoreRegistrationReply?: () => boolean;
-  halfOpenPaneClaimReply?: () => boolean;
   registrationResultsV1?: boolean;
   shippedLegacyShape?: boolean;
   ignorePendingReleases?: boolean;
@@ -279,10 +278,6 @@ async function automaticRegistryFixture(options: {
       const payload = message.payload;
       if (message.op === "client.register" && options.ignoreRegistrationReply?.()) return;
       if (message.op === "pane.claim") {
-        if (options.halfOpenPaneClaimReply?.()) {
-          (socket as any)._socket?.pause();
-          return;
-        }
         socket.send(JSON.stringify({
           type: "response", v: 1, id: message.id, op: message.op, ok: true,
           payload: options.paneClaimReply?.(payload) ?? { paneLabel: 701 },
@@ -941,7 +936,7 @@ test("an abandoned registration persistence blocks queued retries until the seri
   }
 });
 
-test("a sent registration with no reply reports its stage and automatically reconnects", async () => {
+test("a half-open registration cycle times out and reconnects while preserving pane identity and content", async () => {
   const directEndpoint = "ws://127.0.0.1:1/ws";
   let leaseGeneration = 0;
   let ignoreFirstReply = true;
@@ -966,27 +961,42 @@ test("a sent registration with no reply reports its stage and automatically reco
       };
     },
   });
+  const clientId = "half-open-registration-recovery-client";
   const core = new SurfaceCore();
-  const surface = core.ensurePrimarySurface("Registration reply recovery", { width: 800, height: 600, scale: 1 });
+  const surface = core.ensurePrimarySurface("Half-open registration recovery", { width: 800, height: 600, scale: 1 });
+  const pane = core.getRendererWindowState(surface.surfaceId).panes[0]!;
+  core.contentSet(surface.surfaceId, {
+    content: { markdown: "Pane content survives a half-open registration cycle" },
+    contentId: "ct_half_open_registration_recovery" as never,
+    contentType: "markdown",
+    historyOwnerToken: "hot_half_open_registration_recovery",
+    paneId: pane.paneId as never,
+    revision: 1 as never,
+  });
   const connection = new ServerConnection({
     configuredAddress: registry.address,
     directEndpoint,
-    clientId: "registration-reply-recovery-client",
+    clientId,
     core,
     discovery: emptyDiscovery(),
-    requestTimeoutMs: 120,
+    requestTimeoutMs: 1_200,
     registrationCycleTimeoutMs: 800,
     persist: async () => {},
   });
   const state = () => core.getRendererWindowState(surface.surfaceId);
   const registrationRequests = () => registry.requests.filter(({ message }) => message.op === "client.register");
   try {
+    const startedAt = Date.now();
     const first = connection.synchronize();
-    const rejected = assert.rejects(first, /controller_wire_timeout:client\.register/);
+    const rejected = assert.rejects(first, /registry_cycle_timed_out:client\.register request/);
     await until(() => registrationRequests().length === 1);
     assert.equal(registrationRequests()[0]!.socket.readyState, WebSocket.OPEN,
       "the request was sent over an established WebSocket while the registry withheld its reply");
+    assert.equal((registrationRequests()[0]!.socket as any)._socket?.readyState, "open",
+      "the TCP connection remains open during the half-open registration cycle");
     await rejected;
+    assert.ok(Date.now() - startedAt < 3_000,
+      "the whole registration cycle expires before the longer request timeout");
     assert.equal(state().connectionBar, "disconnected");
     assert.match(state().connectionError ?? "", /registry_cycle_timed_out:client\.register request/);
 
@@ -994,87 +1004,16 @@ test("a sent registration with no reply reports its stage and automatically reco
     assert.equal(state().connectionError, undefined);
     assert.equal(core.registryEndpointLease()?.leaseGeneration, 1,
       "the automatic retry obtains a current lease after the unanswered registration is abandoned");
-  } finally {
-    await connection.stop();
-    await registry.close();
-  }
-});
-
-test("a half-open pane control request disconnects and recovers while preserving content", async () => {
-  const directEndpoint = "ws://127.0.0.1:1/ws";
-  let leaseGeneration = 0;
-  let holdFirstClaimReply = true;
-  const registry = await automaticRegistryFixture({
-    shippedLegacyShape: true,
-    halfOpenPaneClaimReply: () => {
-      if (!holdFirstClaimReply) return false;
-      holdFirstClaimReply = false;
-      return true;
-    },
-    transformRegistrationReply: (reply) => {
-      const observedAt = Date.now();
-      return {
-        ...reply,
-        directEndpoint,
-        prePairDescribeV1: true,
-        endpointLease: {
-          leaseGeneration: ++leaseGeneration,
-          registrationObservedAtMs: observedAt,
-          leaseExpiresAtMs: observedAt + 5_000,
-        },
-      };
-    },
-  });
-  const core = new SurfaceCore();
-  const surface = core.ensurePrimarySurface("Half-open control recovery", { width: 800, height: 600, scale: 1 });
-  core.admitSurfaceToLockless(surface.surfaceId);
-  const paneId = core.getRendererWindowState(surface.surfaceId).panes[0]!.paneId;
-  const paneLineageId = core.getSurface(surface.surfaceId).panes.get(paneId)!.paneLineageId;
-  core.contentSet(surface.surfaceId, {
-    content: { markdown: "Pane content survives a half-open control request" },
-    contentId: "ct_half_open_control_recovery" as never,
-    contentType: "markdown",
-    historyOwnerToken: "hot_half_open_control_recovery",
-    paneId: paneId as never,
-    revision: 1 as never,
-  });
-  const connection = new ServerConnection({
-    configuredAddress: registry.address,
-    directEndpoint,
-    clientId: "half-open-control-recovery-client",
-    core,
-    discovery: emptyDiscovery(),
-    requestTimeoutMs: 120,
-    registrationCycleTimeoutMs: 800,
-    controlTimeoutMs: 500,
-    persist: async () => {},
-  });
-  const state = () => core.getRendererWindowState(surface.surfaceId);
-  const registrationRequests = () => registry.requests.filter(({ message }) => message.op === "client.register");
-  try {
-    await connection.synchronize();
-    assert.equal(state().connectionBar, "connected");
-    const initialLeaseGeneration = core.registryEndpointLease()?.leaseGeneration;
-    assert.equal(initialLeaseGeneration, 1);
-
-    const claim = connection.claimPaneLabel(surface.surfaceId, paneId, paneLineageId);
-    const rejected = assert.rejects(claim, /controller_wire_timeout:pane\.claim/);
-    await until(() => registry.requests.some(({ message }) => message.op === "pane.claim"));
-    const stalledRequest = registry.requests.find(({ message }) => message.op === "pane.claim")!;
-    assert.equal(stalledRequest.socket.readyState, WebSocket.OPEN);
-    assert.equal((stalledRequest.socket as any)._socket?.readyState, "open",
-      "the TCP connection remains established while the peer stops reading the request stream");
-    await rejected;
-    assert.equal(state().connectionBar, "disconnected");
-    assert.match(state().connectionError ?? "", /registry_cycle_timed_out:pane\.claim request/);
-
-    await until(() => state().connectionBar === "connected" && registrationRequests().length >= 2);
-    assert.equal(state().panes[0]?.content.contentId, "ct_half_open_control_recovery");
-    assert.deepEqual(state().panes[0]?.content.content, {
-      markdown: "Pane content survives a half-open control request",
+    assert.deepEqual(core.registryBinding(), {
+      clientId, allocatorId: "alloc_fixture", fleetId: "fixture-fleet",
     });
-    assert.ok((core.registryEndpointLease()?.leaseGeneration ?? 0) > initialLeaseGeneration,
-      "the client re-registers for a fresh lease after abandoning the half-open control request");
+    assert.equal(state().surfaceId, surface.surfaceId);
+    assert.equal(state().panes[0]?.paneId, pane.paneId);
+    assert.equal(state().panes[0]?.paneLineageId, pane.paneLineageId);
+    assert.equal(state().panes[0]?.content.contentId, "ct_half_open_registration_recovery");
+    assert.deepEqual(state().panes[0]?.content.content, {
+      markdown: "Pane content survives a half-open registration cycle",
+    });
   } finally {
     await connection.stop();
     await registry.close();

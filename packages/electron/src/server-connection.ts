@@ -86,7 +86,6 @@ export class ServerConnection {
     registryRebindWaitMs?: number;
     requestTimeoutMs?: number;
     registrationCycleTimeoutMs?: number;
-    controlTimeoutMs?: number;
   }) {
     this.discovery = options.discovery ?? createBonjourSurfAceDiscoveryService({ timeoutMs: 1500 });
   }
@@ -220,27 +219,11 @@ export class ServerConnection {
       throw new Error("allocator_release_pending");
     }
     const registration = this.selected.registration;
-    const timeoutMs = this.options.controlTimeoutMs ?? 10_000;
-    let timeout: ReturnType<typeof setTimeout> | undefined;
-    try {
-      const allocation = await Promise.race([
-        registration.claimPaneLabel(surfaceId, paneId, paneLineageId),
-        new Promise<never>((_resolve, reject) => {
-          timeout = setTimeout(() => reject(new RegistrationStageTimeoutError("pane.claim request")), timeoutMs);
-        }),
-      ]);
-      if (this.status !== "connected" || this.selected?.registration !== registration || !this.leaseIsFresh()) {
-        throw new Error("allocator_unavailable");
-      }
-      return allocation;
-    } catch (error) {
-      if (this.isStallTimeout(error) && this.selected?.registration === registration) {
-        this.reportStall(error, this.cycleId);
-      }
-      throw error;
-    } finally {
-      clearTimeout(timeout);
+    const allocation = await registration.claimPaneLabel(surfaceId, paneId, paneLineageId);
+    if (this.status !== "connected" || this.selected?.registration !== registration || !this.leaseIsFresh()) {
+      throw new Error("allocator_unavailable");
     }
+    return allocation;
   }
 
   async preparePaneLabelClaim(): Promise<void> {
