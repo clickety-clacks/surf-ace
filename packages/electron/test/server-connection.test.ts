@@ -988,7 +988,7 @@ test("a half-open registration cycle times out and reconnects while preserving p
   try {
     const startedAt = Date.now();
     const first = connection.synchronize();
-    const rejected = assert.rejects(first, /registry_cycle_timed_out:client\.register request/);
+    const rejected = assert.rejects(first, /registration_stage_timeout:client\.register request/);
     await until(() => registrationRequests().length === 1);
     assert.equal(registrationRequests()[0]!.socket.readyState, WebSocket.OPEN,
       "the request was sent over an established WebSocket while the registry withheld its reply");
