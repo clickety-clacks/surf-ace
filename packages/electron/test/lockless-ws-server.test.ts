@@ -6016,6 +6016,82 @@ test("content.set and content.apply accept payloads above the removed content-on
   }
 });
 
+test("content handlers accept over-10-MiB payloads below the whole-message limit without a socket listener", async () => {
+  const viewport = { height: 800, scale: 2, width: 1200 };
+  const core = new SurfaceCore();
+  const surface = core.ensurePrimarySurface("Surf Ace", viewport);
+  initializeRegistryBootstrapPanes(core);
+  const paneId = Number(core.panesList(surface.surfaceId).panes[0]!.paneId);
+  const server = new SurfaceWsServer({
+    capturePaneImage: async () => null,
+    compositorSocketPath: null,
+    core,
+    endpointName: "Surf Ace",
+    hostName: "localhost",
+    port: 0,
+    viewport: () => viewport,
+  });
+  const socket = { readyState: WebSocket.OPEN } as WebSocket;
+  const direct = server as unknown as {
+    handleContentApply: (socket: WebSocket, request: Record<string, any>) => Promise<Record<string, any>>;
+    handleContentSet: (socket: WebSocket, request: Record<string, any>) => Promise<Record<string, any>>;
+    socketMeta: WeakMap<WebSocket, {
+      cache: Map<string, unknown>;
+      pairedSurfaceId: string | null;
+      remoteAddress: string;
+      socketId: string;
+    }>;
+    wss: WebSocketServer;
+  };
+  direct.socketMeta.set(socket, {
+    cache: new Map(),
+    pairedSurfaceId: surface.surfaceId,
+    remoteAddress: "127.0.0.1",
+    socketId: "large-content-direct-handler",
+  });
+
+  const content = { html: "x".repeat(10 * 1024 * 1024 + 64 * 1024) };
+  const setId = "rq_large_direct_content_set";
+  const setPayload = {
+    content,
+    contentId: "large-direct-set",
+    contentType: "html",
+    friendlyChatName: "Large content author",
+    historyOwnerToken: "large-content-owner",
+    paneId,
+    revision: Number(core.captureSnapshot(surface.surfaceId, paneId).revision) + 1,
+    surfaceId: surface.surfaceId,
+  };
+  const setSentAt = Date.now();
+  const setMessage = JSON.stringify({
+    id: setId, op: "content.set", payload: setPayload, sentAt: setSentAt, type: "request", v: 1,
+  });
+  const setMessageBytes = Buffer.byteLength(setMessage, "utf8");
+  assert.ok(setMessageBytes > 10 * 1024 * 1024, `content.set wire message was only ${setMessageBytes} bytes`);
+  assert.ok(setMessageBytes < 12 * 1024 * 1024, `content.set wire message exceeded 12 MiB: ${setMessageBytes} bytes`);
+  const setResult = await direct.handleContentSet(socket, JSON.parse(setMessage));
+  assert.equal(setResult.ok, true, JSON.stringify(setResult));
+  assert.equal(core.captureSnapshot(surface.surfaceId, paneId).contentId, "large-direct-set");
+
+  const applyId = "rq_large_direct_content_apply";
+  const applyPayload = {
+    ...setPayload,
+    contentId: "large-direct-apply",
+    revision: Number(setResult.payload.revision) + 1,
+  };
+  const applySentAt = Date.now();
+  const applyMessage = JSON.stringify({
+    id: applyId, op: "content.apply", payload: applyPayload, sentAt: applySentAt, type: "request", v: 1,
+  });
+  const applyMessageBytes = Buffer.byteLength(applyMessage, "utf8");
+  assert.ok(applyMessageBytes > 10 * 1024 * 1024, `content.apply wire message was only ${applyMessageBytes} bytes`);
+  assert.ok(applyMessageBytes < 12 * 1024 * 1024, `content.apply wire message exceeded 12 MiB: ${applyMessageBytes} bytes`);
+  const applyResult = await direct.handleContentApply(socket, JSON.parse(applyMessage));
+  assert.equal(applyResult.ok, true, JSON.stringify(applyResult));
+  assert.equal(core.captureSnapshot(surface.surfaceId, paneId).contentId, "large-direct-apply");
+  assert.equal((direct.wss.options as { maxPayload?: number }).maxPayload, 12 * 1024 * 1024);
+});
+
 test("WebSocket rejects request messages above the 12 MiB whole-message limit", { timeout: 30_000 }, async () => {
   const viewport = { height: 800, scale: 2, width: 1200 };
   const core = new SurfaceCore();
