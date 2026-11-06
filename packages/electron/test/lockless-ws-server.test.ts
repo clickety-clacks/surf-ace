@@ -31,6 +31,7 @@ import {
 import { SurfaceWsServer } from "../src/ws-server.js";
 import { ConfiguredServerRegistration } from "../src/configured-server.js";
 import { PersistenceWriteReadiness } from "../src/persistence-write-readiness.js";
+import { PublicControllerWireClient } from "../../controller/src/wire.js";
 
 let nextPort = 25901;
 let nextTestRegistryPaneLabel = 100_000;
@@ -4893,6 +4894,21 @@ test("surface.describe returns topology when saved registry binding or lease is 
       expectedLimitations: ["endpoint_lease_unavailable"],
     },
     {
+      name: "lease-expired-matching",
+      prepare: (state: ReturnType<ReturnType<typeof describeFixture>["core"]["getPersistentState"]>) => {
+        state.registryEndpointLease = {
+          leaseGeneration: 17,
+          registrationObservedAtMs: Date.now() - 20_000,
+          leaseExpiresAtMs: Date.now() - 1_000,
+        };
+      },
+      expectedClientId: "a".repeat(64),
+      expectedLeaseGeneration: 17,
+      expectedRegistryIdentityUnavailable: false,
+      expectedEndpointLeaseUnavailable: false,
+      expectedLimitations: ["endpoint_lease_expired"],
+    },
+    {
       name: "stale",
       prepare: (state: ReturnType<ReturnType<typeof describeFixture>["core"]["getPersistentState"]>) => {
         state.registryBinding = {
@@ -4910,7 +4926,7 @@ test("surface.describe returns topology when saved registry binding or lease is 
       expectedLeaseGeneration: 16,
       expectedRegistryIdentityUnavailable: false,
       expectedEndpointLeaseUnavailable: false,
-      expectedLimitations: ["registry_binding_stale", "endpoint_lease_stale"],
+      expectedLimitations: ["registry_binding_stale", "endpoint_lease_expired", "endpoint_lease_stale"],
     },
   ] as const;
 
@@ -5362,6 +5378,88 @@ test("guarded restart preserves two-pane display but cannot re-pair without dura
   } finally {
     socket.close();
     await guardedServer.stop();
+  }
+});
+
+test("a pair request that closes during local persistence does not strand its controller identity", { timeout: 15_000 }, async () => {
+  const core = new SurfaceCore();
+  const surface = core.ensurePrimarySurface("Surf Ace", {
+    height: 800,
+    scale: 2,
+    width: 1200,
+  });
+  let persistenceCalls = 0;
+  let startStalledPersistence!: () => void;
+  const stalledPersistenceStarted = new Promise<void>((resolve) => {
+    startStalledPersistence = resolve;
+  });
+  let releaseStalledPersistence!: () => void;
+  const stalledPersistence = new Promise<void>((resolve) => {
+    releaseStalledPersistence = resolve;
+  });
+  const controllerInstanceId = "late-pair-admission-controller";
+  const server = new SurfaceWsServer({
+    bindAddress: "127.0.0.1",
+    capturePaneImage: async () => null,
+    compositorSocketPath: null,
+    core,
+    endpointName: "Surf Ace",
+    hostName: "localhost",
+    persistLocklessState: async () => {
+      persistenceCalls += 1;
+      if (persistenceCalls === 3) {
+        startStalledPersistence();
+        await stalledPersistence;
+      }
+    },
+    port: 0,
+    viewport: () => ({ height: 800, scale: 2, width: 1200 }),
+  });
+  await server.start();
+  const boundAddress = (server as unknown as {
+    httpServer: { address(): AddressInfo | string | null };
+  }).httpServer.address();
+  assert.ok(boundAddress && typeof boundAddress !== "string");
+  const endpoint = `ws://127.0.0.1:${boundAddress.port}${server.wsPath}`;
+  const first = new PublicControllerWireClient(endpoint, 2_000);
+  let retry: PublicControllerWireClient | null = null;
+  try {
+    await first.connect();
+    const firstClientClosed = new Promise<void>((resolve) => first.onClose(resolve));
+    const firstPair = first.request("pair.request", {
+      controllerInstanceId,
+      controllerProductName: "OpenClaw",
+      projectionCapacityBytes: 5 * 1024 * 1024,
+      protocolFeatures: [SURF_ACE_LOCKLESS_V1_CAPABILITY],
+      protocolVersion: 1,
+      surfaceId: surface.surfaceId,
+    });
+    await stalledPersistenceStarted;
+    await assert.rejects(firstPair, (error: unknown) =>
+      error instanceof Error && error.message === "controller_wire_timeout:pair.request");
+    first.abort();
+    await firstClientClosed;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    releaseStalledPersistence();
+
+    retry = new PublicControllerWireClient(endpoint, 2_000);
+    await retry.connect();
+    const retried = await retry.request("pair.request", {
+      controllerInstanceId,
+      controllerProductName: "OpenClaw",
+      projectionCapacityBytes: 5 * 1024 * 1024,
+      protocolFeatures: [SURF_ACE_LOCKLESS_V1_CAPABILITY],
+      protocolVersion: 1,
+      surfaceId: surface.surfaceId,
+    });
+    assert.equal(retried.ok, true, JSON.stringify(retried));
+    assert.deepEqual(core.locklessAuthority.liveControllerIds(), [controllerInstanceId]);
+  } finally {
+    releaseStalledPersistence();
+    retry?.abort();
+    first.abort();
+    await server.stop();
   }
 });
 

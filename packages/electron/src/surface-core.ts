@@ -721,8 +721,8 @@ export class SurfaceCore {
   private readonly listeners = new Set<(event: CoreEvent) => void>();
   private pendingEvents: CoreEvent[] | null = null;
   private deferredVerifiedEvents: { state: string; events: CoreEvent[] } | null = null;
-  private readonly transactionContext = new AsyncLocalStorage<symbol>();
-  private activeAsyncTransaction: symbol | null = null;
+  private readonly transactionContext = new AsyncLocalStorage<object>();
+  private activeAsyncTransaction: object | null = null;
   private transactionTail: Promise<void> = Promise.resolve();
   private readonly logger: { warn?: (message: string) => void };
   private readonly now: () => number;
@@ -839,7 +839,7 @@ export class SurfaceCore {
       release();
       throw new Error("Surface transaction is already in progress");
     }
-    const token = Symbol("surface transaction");
+    const token = {};
     this.activeAsyncTransaction = token;
     try {
       return await this.transactionContext.run(token, () => this.transactionAsyncExclusive(operation, committed));
