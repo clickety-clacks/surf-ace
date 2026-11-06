@@ -5381,7 +5381,7 @@ test("guarded restart preserves two-pane display but cannot re-pair without dura
   }
 });
 
-test("a pair request that closes during local persistence does not strand its controller identity", async () => {
+test("a pair request that closes during local persistence does not strand its controller identity", { timeout: 15_000 }, async () => {
   const core = new SurfaceCore();
   const surface = core.ensurePrimarySurface("Surf Ace", {
     height: 800,
@@ -5437,6 +5437,7 @@ test("a pair request that closes during local persistence does not strand its co
     await stalledPersistenceStarted;
     await assert.rejects(firstPair, (error: unknown) =>
       error instanceof Error && error.message === "controller_wire_timeout:pair.request");
+    first.abort();
     await firstClientClosed;
     await new Promise<void>((resolve) => setImmediate(resolve));
 
