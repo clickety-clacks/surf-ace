@@ -5940,7 +5940,7 @@ test("append, patch, and capped clear write failures preserve history for retry"
   }
 });
 
-test("content.set and content.apply accept payloads above the removed content-only limit", { timeout: 30_000 }, async () => {
+test("lockless content.set accepts payloads above the removed content-only limit", { timeout: 30_000 }, async () => {
   const viewport = { height: 800, scale: 2, width: 1200 };
   const core = new SurfaceCore();
   const surface = core.ensurePrimarySurface("Surf Ace", viewport);
@@ -5983,33 +5983,13 @@ test("content.set and content.apply accept payloads above the removed content-on
     const locklessSet = await request(socket, "content.set", setPayload, { id: setId, sentAt: setSentAt });
     assert.equal(locklessSet.ok, true, JSON.stringify(locklessSet));
     assert.equal(core.captureSnapshot(surface.surfaceId, paneId).contentId, "large-lockless-content");
-
-    const applyPayload = {
-      content,
-      contentId: "large-applied-content",
-      contentType: "html",
-      historyOwnerToken: "large-content-owner",
-      paneId,
-      revision: Number(locklessSet.payload.revision) + 1,
-      surfaceId: surface.surfaceId,
-    };
-    const applyId = "rq_large_applied_content";
-    const applySentAt = Date.now();
-    const applyMessageBytes = Buffer.byteLength(JSON.stringify({
-      id: applyId, op: "content.apply", payload: applyPayload, sentAt: applySentAt, type: "request", v: 1,
-    }), "utf8");
-    assert.ok(applyMessageBytes > 10 * 1024 * 1024, `content.apply wire message was only ${applyMessageBytes} bytes`);
-    assert.ok(applyMessageBytes < 12 * 1024 * 1024, `content.apply wire message exceeded 12 MiB: ${applyMessageBytes} bytes`);
-    const applied = await request(socket, "content.apply", applyPayload, { id: applyId, sentAt: applySentAt });
-    assert.equal(applied.ok, true, JSON.stringify(applied));
-    assert.equal(core.captureSnapshot(surface.surfaceId, paneId).contentId, "large-applied-content");
   } finally {
     socket?.close();
     if (serverStarted) await server.stop();
   }
 });
 
-test("content handlers accept over-10-MiB payloads below the whole-message limit without a socket listener", async () => {
+test("legacy content.set and content.apply handlers accept over-10-MiB payloads below the whole-message limit", async () => {
   const viewport = { height: 800, scale: 2, width: 1200 };
   const core = new SurfaceCore();
   const surface = core.ensurePrimarySurface("Surf Ace", viewport);
