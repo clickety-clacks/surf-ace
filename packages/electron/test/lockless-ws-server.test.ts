@@ -5997,7 +5997,7 @@ test("content.set and content.apply accept payloads above the removed content-on
       contentType: "html",
       historyOwnerToken: "large-content-owner",
       paneId,
-      revision: Number(legacy.payload.revision) + 1,
+      revision: Number(legacy.payload.currentRevision) + 1,
       surfaceId: surface.surfaceId,
     };
     const applyId = "rq_large_applied_content";
@@ -6077,7 +6077,7 @@ test("content handlers accept over-10-MiB payloads below the whole-message limit
   const applyPayload = {
     ...setPayload,
     contentId: "large-direct-apply",
-    revision: Number(setResult.payload.revision) + 1,
+    revision: Number(setResult.payload.currentRevision) + 1,
   };
   const applySentAt = Date.now();
   const applyMessage = JSON.stringify({
