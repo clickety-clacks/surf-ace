@@ -1410,13 +1410,29 @@ export class SurfaceWsServer {
       session &&
       locklessOperationMutates(request.op)
     ) {
+      const paneMutation = ["content.set", "content.append", "content.patch", "content.clear", "annotations.remove"]
+        .includes(request.op) && session.surfaceId !== null &&
+        Number.isInteger((request.payload as { paneId?: number }).paneId)
+        ? { surfaceId: session.surfaceId, paneId: (request.payload as { paneId: number }).paneId }
+        : null;
+      const rollbackPane = paneMutation
+        ? {
+            controllerInstanceId: session.controllerInstanceId,
+            paneId: paneMutation.paneId,
+            requestId: request.id,
+            surfaceId: paneMutation.surfaceId,
+          }
+        : undefined;
+      const onNotificationError = (error: unknown): void => {
+        persistentServerDiagnostic("warn", "lockless_mutation_notification_failed", {
+          operation: request.op,
+          request_id: request.id,
+          surface_id: session.surfaceId,
+          ...errorDiagnosticFields(error),
+        });
+      };
       try {
         response = await this.core.locklessAuthority.transactionAsync(async () => {
-          const paneMutation = ["content.set", "content.append", "content.patch", "content.clear", "annotations.remove"]
-            .includes(request.op) && session.surfaceId !== null &&
-            Number.isInteger((request.payload as { paneId?: number }).paneId)
-            ? { surfaceId: session.surfaceId, paneId: (request.payload as { paneId: number }).paneId }
-            : null;
           this.activePaneMutation = paneMutation;
           try {
             return await this.core.transactionAsync(async () => {
@@ -1482,11 +1498,15 @@ export class SurfaceWsServer {
             );
             await this.persistLocklessState();
             return response;
-            });
+            }, rollbackPane ? {
+              retainUncertainEvents: true,
+              onNotificationError,
+              rollbackPane,
+            } : undefined);
           } finally {
             this.activePaneMutation = null;
           }
-        });
+        }, undefined, rollbackPane ? "enclosing-core" : "authority");
       } catch (error) {
         if (error instanceof PersistentStateOutcomeUnknownError) {
           response = errorResponse(
@@ -2579,8 +2599,10 @@ export class SurfaceWsServer {
 
     if (request.op === "content.set") {
       const commit = await this.runSurfaceMutation(surfaceId, () => {
-        const rollbackSurface =
-          this.core.captureSurfaceMutationRollback(surfaceId);
+        const rollbackPane = this.core.capturePaneMutationRollback(
+          surfaceId,
+          Number(request.payload.paneId),
+        );
         try {
           return this.core.transaction(() => {
             return this.core.locklessContentPush(
@@ -2590,7 +2612,7 @@ export class SurfaceWsServer {
             );
           });
         } catch (error) {
-          rollbackSurface();
+          rollbackPane();
           throw error;
         }
       });
@@ -2623,8 +2645,10 @@ export class SurfaceWsServer {
       request.op === "content.clear"
     ) {
       const result = await this.runSurfaceMutation(surfaceId, () => {
-        const rollbackSurface =
-          this.core.captureSurfaceMutationRollback(surfaceId);
+        const rollbackPane = this.core.capturePaneMutationRollback(
+          surfaceId,
+          Number(request.payload.paneId),
+        );
         const paneSummary = this.core
           .pairState(surfaceId)
           .panes.find(
@@ -2670,7 +2694,7 @@ export class SurfaceWsServer {
             return committed;
           });
         } catch (error) {
-          rollbackSurface();
+          rollbackPane();
           throw error;
         }
       });

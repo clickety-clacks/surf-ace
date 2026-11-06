@@ -5691,6 +5691,10 @@ test("content write refusal restores unread capacity loss, cursor gap, and reque
       controllerInstanceId,
       scopeId,
     );
+    const liveSurface = core.getSurface(surface.surfaceId);
+    const livePane = liveSurface.panes.get(paneId)!;
+    const history = livePane.history;
+    const entries = [...history];
     assert.equal(beforeScope.records.length, 1);
     assert.equal(beforeScope.cursor.cursor, 1);
     assert.equal(beforeScope.cursor.gap, null);
@@ -5709,6 +5713,14 @@ test("content write refusal restores unread capacity loss, cursor gap, and reque
     assert.equal(failed.ok, false, JSON.stringify(failed));
     assert.equal(failed.error?.code, "internal_error");
     assert.equal(core.captureSnapshot(surface.surfaceId, paneId).contentId, "retained-unread");
+    assert.equal(core.getSurface(surface.surfaceId), liveSurface,
+      "a rejected ordinary mutation must not recreate the live surface");
+    assert.equal(liveSurface.panes.get(paneId), livePane,
+      "a rejected ordinary mutation must not recreate the live pane");
+    assert.equal(livePane.history, history,
+      "a rejected ordinary mutation restores the prior history root");
+    assert(livePane.history.every((entry, index) => entry === entries[index]),
+      "a rejected ordinary mutation preserves retained history entries by identity");
     assert.deepEqual(
       core.locklessAuthority.scopeSnapshot(controllerInstanceId, scopeId),
       beforeScope,
