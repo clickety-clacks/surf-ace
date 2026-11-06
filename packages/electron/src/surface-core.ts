@@ -1711,22 +1711,6 @@ export class SurfaceCore {
         surface.windowLabel = candidate;
         surface.windowLabelConfirmed = false;
       }
-      const prospective = serializeSurface(surface);
-      const surfaceBase = ({
-        panes: _panes,
-        ...base
-      }: PersistentSurfaceRecord) => base;
-      this.locklessAuthority.assertSurfaceRecoverableBaseCapacity(
-        surfaceBase(rollback),
-        surfaceBase(prospective),
-      );
-      for (const pane of prospective.panes) {
-        this.locklessAuthority.assertPaneRecoverableCapacity(
-          rollback.panes.find((entry) => entry.paneId === pane.paneId) ?? pane,
-          pane,
-          pane.history.map((entry) => entry.annotations),
-        );
-      }
       const retainedPaneCount = this.locklessAuthority
         .listTombstones("pane")
         .filter((entry) => entry.surfaceId === surfaceId).length;
@@ -1827,15 +1811,6 @@ export class SurfaceCore {
     surfaceId: string,
   ): PersistentSurfaceRecord {
     return serializeSurface(this.getSurface(surfaceId));
-  }
-
-  captureSurfaceRecoverableBase(
-    surfaceId: string,
-  ): Omit<PersistentSurfaceRecord, "panes"> {
-    const { panes: _panes, ...base } = serializeSurface(
-      this.getSurface(surfaceId),
-    );
-    return base;
   }
 
   restoreSurfaceTombstone(

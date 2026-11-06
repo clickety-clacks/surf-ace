@@ -165,7 +165,6 @@ const DEFAULT_DRAWING_FLUSH_CONFIG: DrawingFlushConfig = {
 };
 const DEFAULT_LIMITS = {
   maxDrawingFlushBytes: 2 * 1024 * 1024,
-  maxFrameBytes: 10 * 1024 * 1024,
   maxMessageBytes: 12 * 1024 * 1024,
   maxStrokePointsPerFlush: 8192,
   maxVisibleTextBytes: 4096,
@@ -1609,10 +1608,6 @@ export class SurfaceWsServer {
           );
           this.core.locklessAuthority.admitTargetApplyWorkItem({
             controllerInstanceId: session.controllerInstanceId,
-            currentSurfaceBase:
-              this.core.captureSurfaceRecoverableBase(
-                request.payload.surfaceId,
-              ),
             intentCommitSequence: audit.commitSequence,
             operationRequestId: request.id,
             request: {
@@ -2344,27 +2339,14 @@ export class SurfaceWsServer {
           const rollback = this.core.captureSurfaceMutationRollback(
             request.payload.surfaceId,
           );
-          const before = this.core.capturePaneTombstonePayload(
-            request.payload.surfaceId,
-            Number(pane.paneId),
-          ).pane;
           try {
             return this.core.transaction(() => {
-              const registered = this.core.registerLocklessTarget(
+              const target = this.core.registerLocklessTarget(
                 request.payload.surfaceId,
                 Number(pane.paneId),
                 request.payload,
               );
-              const after = this.core.capturePaneTombstonePayload(
-                request.payload.surfaceId,
-                Number(pane.paneId),
-              ).pane;
-              this.core.locklessAuthority.assertPaneRecoverableCapacity(
-                before,
-                after,
-                after.history.map((entry) => entry.annotations),
-              );
-              return { pane, target: registered };
+              return { pane, target };
             });
           } catch (error) {
             rollback();
@@ -2578,27 +2560,13 @@ export class SurfaceWsServer {
       const commit = await this.runSurfaceMutation(surfaceId, () => {
         const rollbackSurface =
           this.core.captureSurfaceMutationRollback(surfaceId);
-        const before = this.core.capturePaneTombstonePayload(
-          surfaceId,
-          request.payload.paneId,
-        ).pane;
         try {
           return this.core.transaction(() => {
-            const result = this.core.locklessContentPush(
+            return this.core.locklessContentPush(
               surfaceId,
               request.payload,
               session.controllerProductName,
             );
-            const after = this.core.capturePaneTombstonePayload(
-              surfaceId,
-              request.payload.paneId,
-            ).pane;
-            this.core.locklessAuthority.assertPaneRecoverableCapacity(
-              before,
-              after,
-              after.history.map((entry) => entry.annotations),
-            );
-            return result;
           });
         } catch (error) {
           rollbackSurface();
@@ -2636,10 +2604,6 @@ export class SurfaceWsServer {
       const result = await this.runSurfaceMutation(surfaceId, () => {
         const rollbackSurface =
           this.core.captureSurfaceMutationRollback(surfaceId);
-        const before = this.core.capturePaneTombstonePayload(
-          surfaceId,
-          request.payload.paneId,
-        ).pane;
         const paneSummary = this.core
           .pairState(surfaceId)
           .panes.find(
@@ -2682,15 +2646,6 @@ export class SurfaceWsServer {
                       paneId: request.payload.paneId as never,
                       revision: revision as never,
                     });
-            const after = this.core.capturePaneTombstonePayload(
-              surfaceId,
-              request.payload.paneId,
-            ).pane;
-            this.core.locklessAuthority.assertPaneRecoverableCapacity(
-              before,
-              after,
-              after.history.map((entry) => entry.annotations),
-            );
             return committed;
           });
         } catch (error) {
@@ -2718,8 +2673,6 @@ export class SurfaceWsServer {
       const result = await this.runSurfaceMutation(surfaceId, async () => {
         const rollbackSurface =
           this.core.captureSurfaceMutationRollback(surfaceId);
-        const rollbackRecord =
-          this.core.captureSurfaceTombstonePayload(surfaceId);
         const topology = this.core.topologyState(surfaceId);
         try {
           this.core.locklessAuthority.assertTopologyRevision(
@@ -2765,7 +2718,6 @@ export class SurfaceWsServer {
             newPaneAllocationGenerations,
             paneId: request.payload.paneId,
           }));
-          this.assertLocklessRecoverableCapacity(surfaceId, rollbackRecord);
           const numberedPanes = newPaneIds.flatMap((paneId, index) => {
             const paneLabel = newPaneLabels[index]!;
             const allocationGeneration = newPaneAllocationGenerations[index];
@@ -2846,10 +2798,6 @@ export class SurfaceWsServer {
       const result = await this.runSurfaceMutation(surfaceId, () => {
         const rollbackSurface =
           this.core.captureSurfaceMutationRollback(surfaceId);
-        const before = this.core.capturePaneTombstonePayload(
-          surfaceId,
-          request.payload.paneId,
-        ).pane;
         try {
           return this.core.transaction(() => {
             const topology = this.core.topologyState(surfaceId);
@@ -2862,15 +2810,6 @@ export class SurfaceWsServer {
               surfaceId,
               request.payload.paneId,
               request.payload.name,
-            );
-            const after = this.core.capturePaneTombstonePayload(
-              surfaceId,
-              request.payload.paneId,
-            ).pane;
-            this.core.locklessAuthority.assertPaneRecoverableCapacity(
-              before,
-              after,
-              after.history.map((entry) => entry.annotations),
             );
             return committed;
           });
@@ -3016,6 +2955,44 @@ export class SurfaceWsServer {
       const existing = new Map(
         current.panes.map((pane) => [Number(pane.paneId), pane]),
       );
+      // Check pane creation before reserving new identities or allocator labels.
+      const prospectiveIds = new Set(existing.keys());
+      if ("root" in request.payload.target) prospectiveIds.clear();
+      else {
+        if (!prospectiveIds.delete(request.payload.target.paneId)) {
+          throw new SurfaceCoreError("invalid_payload", "topology.apply target pane is not live");
+        }
+      }
+      let newPaneCount = 0;
+      const countDesired = (value: unknown): void => {
+        if (!value || typeof value !== "object") {
+          throw new SurfaceCoreError("invalid_payload", "topology.apply desired node must be an object");
+        }
+        const node = value as { type?: unknown; paneId?: unknown; children?: unknown[]; direction?: unknown };
+        if (node.type === "pane") {
+          if (node.paneId === undefined) newPaneCount += 1;
+          else {
+            const paneId = Number(node.paneId);
+            if (!existing.has(paneId)) {
+              throw new SurfaceCoreError("invalid_payload", "topology.apply cannot allocate a caller-selected paneId");
+            }
+            prospectiveIds.add(paneId);
+          }
+          return;
+        }
+        if (node.type !== "split" ||
+            (node.direction !== "horizontal" && node.direction !== "vertical") ||
+            !Array.isArray(node.children) || node.children.length < 2) {
+          throw new SurfaceCoreError("invalid_payload", "topology.apply desired split is malformed");
+        }
+        node.children.forEach(countDesired);
+      };
+      countDesired(request.payload.desired);
+      if (newPaneCount > 0) {
+        this.core.locklessAuthority.assertPaneCreationCapacity(
+          existing.size, prospectiveIds.size + newPaneCount,
+        );
+      }
       const retained = this.core.locklessAuthority.retainedPaneIds(surfaceId);
       const usedIds = new Set([
         ...existing.keys(),
@@ -3155,10 +3132,6 @@ export class SurfaceWsServer {
           { removedPaneIds: removed },
         );
       }
-      this.core.locklessAuthority.assertPaneCreationCapacity(
-        existing.size,
-        resultingIds.size,
-      );
       for (const [paneId, entry] of created) {
         const allocation = await claimPaneLabelOrUnnumbered(
           this.claimPaneLabel, surfaceId, paneId, entry.paneLineageId,
@@ -3176,8 +3149,6 @@ export class SurfaceWsServer {
         };
       });
       const rollback = this.core.captureSurfaceMutationRollback(surfaceId);
-      const beforeRecord =
-        this.core.captureSurfaceTombstonePayload(surfaceId);
       const removedPanePayloads = removed.map((paneId) =>
         this.core.capturePaneTombstonePayload(surfaceId, paneId),
       );
@@ -3191,7 +3162,6 @@ export class SurfaceWsServer {
               windowLabel: current.windowLabel,
             }, new Map([...created].map(([paneId, entry]) => [paneId, entry.paneLineageId])),
             new Map([...created].map(([paneId, entry]) => [paneId, entry.allocationGeneration])));
-          this.assertLocklessRecoverableCapacity(surfaceId, beforeRecord);
           const numberedPanes = [...created].flatMap(([paneId, entry]) =>
             entry.paneLabel > 0
               ? [{ allocationGeneration: entry.allocationGeneration,
@@ -3843,26 +3813,6 @@ export class SurfaceWsServer {
       this.core.transactionAsync(() => this.runSurfaceMutation(surfaceId, operation)));
   }
 
-  private assertLocklessRecoverableCapacity(
-    surfaceId: string,
-    before: ReturnType<SurfaceCore["captureSurfaceTombstonePayload"]>,
-  ): void {
-    const after = this.core.captureSurfaceTombstonePayload(surfaceId);
-    const { panes: _beforePanes, ...beforeBase } = before;
-    this.core.locklessAuthority.assertSurfaceRecoverableBaseCapacity(
-      beforeBase,
-      this.core.captureSurfaceRecoverableBase(surfaceId),
-    );
-    for (const pane of after.panes) {
-      this.core.locklessAuthority.assertPaneRecoverableCapacity(
-        before.panes.find((candidate) => candidate.paneId === pane.paneId) ??
-          {},
-        pane,
-        pane.history.map((entry) => entry.annotations),
-      );
-    }
-  }
-
   private async runProviderWindowLabelMutation<T>(operation: () => Promise<T> | T): Promise<T> {
     const previous = this.providerWindowLabelQueue;
     let releaseQueue = (): void => {};
@@ -4265,10 +4215,6 @@ export class SurfaceWsServer {
         v: 1,
       };
     }
-    const contentBytes = Buffer.byteLength(JSON.stringify(request.payload.content), "utf8");
-    if (contentBytes > DEFAULT_LIMITS.maxFrameBytes) {
-      throw new SurfaceCoreError("content_too_large", "Content exceeded max frame size");
-    }
     if (!request.payload.historyOwnerToken) {
       throw new SurfaceCoreError("invalid_payload", "content.apply requires historyOwnerToken");
     }
@@ -4402,17 +4348,13 @@ export class SurfaceWsServer {
           return { response: postReleaseSessionFailure };
         }
         const rollback = this.core.captureSurfaceMutationRollback(surfaceId);
-        const before =
-          this.core.captureSurfaceTombstonePayload(surfaceId);
         try {
           return {
             payload: this.core.transaction(() => {
-              const payload = this.core.targetApply(
+              return this.core.targetApply(
                 surfaceId,
                 request.payload,
               );
-              this.assertLocklessRecoverableCapacity(surfaceId, before);
-              return payload;
             }),
           };
         } catch (error) {
@@ -4588,10 +4530,6 @@ export class SurfaceWsServer {
       let hostApplied = false;
       let overlayRequest: CompositorControlRequest | null = null;
       let overlayApplied = false;
-      const recoverableBefore =
-        this.core.captureSurfaceTombstonePayload(surfaceId);
-      const rollbackRecoverable =
-        this.core.captureSurfaceMutationRollback(surfaceId);
       try {
         hostRequest = requestForCompositor(materialization);
         preflightStatus = await sendCompositorControl(this.compositorSocketPath, { type: "get_status" });
@@ -4685,10 +4623,6 @@ export class SurfaceWsServer {
               observedWindowGroups,
             );
           }
-          this.assertLocklessRecoverableCapacity(
-            surfaceId,
-            recoverableBefore,
-          );
         });
         this.onNativeMaterialized?.(surfaceId, materialization);
         return {
@@ -4701,13 +4635,6 @@ export class SurfaceWsServer {
           v: 1,
         };
       } catch (error) {
-        const capacityError =
-          error instanceof LocklessAuthorityError &&
-          (error.code === "surface_state_capacity" ||
-            error.code === "pane_state_capacity");
-        if (capacityError) {
-          rollbackRecoverable();
-        }
         const releasedAfterFailure = hostApplied
           ? await this.releaseNativePaneAfterFailedHost(surfaceId, materialization)
           : false;
@@ -4730,7 +4657,6 @@ export class SurfaceWsServer {
             target_id: request.payload.targetId,
           },
         );
-        if (capacityError) throw error;
         const payload: TargetApplyResponse["payload"] = {
           appliedAt,
           errorCode: "materialization_failed",
@@ -5464,10 +5390,6 @@ export class SurfaceWsServer {
 
   private async handleContentSet(socket: WebSocket, request: ContentSetRequest): Promise<Response> {
     const surfaceId = this.requirePairedSurfaceId(socket);
-    const contentBytes = Buffer.byteLength(JSON.stringify(request.payload.content), "utf8");
-    if (contentBytes > DEFAULT_LIMITS.maxFrameBytes) {
-      throw new SurfaceCoreError("content_too_large", "Content exceeded max frame size");
-    }
     if (!request.payload.historyOwnerToken) {
       throw new SurfaceCoreError(
         "invalid_payload",
