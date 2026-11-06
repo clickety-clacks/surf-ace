@@ -94,6 +94,25 @@ import {
 } from "./lockless-client-authority.js";
 import { PersistentStateOutcomeUnknownError, PersistentStateWriteGuardError } from "./persistent-state-file.js";
 
+function normalizeUnknownPersistenceOutcome(error: unknown): PersistentStateOutcomeUnknownError | null {
+  if (error instanceof PersistentStateOutcomeUnknownError) return error;
+  if (typeof error !== "object" || error === null ||
+      (error as { name?: unknown }).name !== "PersistentStateOutcomeUnknownError") {
+    return null;
+  }
+
+  // Some persistence adapters cross a module boundary and report the stable
+  // error name without sharing this module's constructor identity. Normalize
+  // that outcome once so every caller takes the same fail-stop path.
+  const acceptedSha256 = (error as { acceptedSha256?: unknown }).acceptedSha256;
+  return new PersistentStateOutcomeUnknownError(
+    error,
+    typeof acceptedSha256 === "string" || acceptedSha256 === null
+      ? acceptedSha256
+      : undefined,
+  );
+}
+
 type SocketCacheEntry = {
   payloadHash: string;
   response: Response;
@@ -317,8 +336,10 @@ export class SurfaceWsServer {
       try {
         await persistLocklessState();
       } catch (error) {
-        if (error instanceof PersistentStateOutcomeUnknownError) {
-          this.failStopPersistence(error);
+        const unknownOutcome = normalizeUnknownPersistenceOutcome(error);
+        if (unknownOutcome) {
+          this.failStopPersistence(unknownOutcome);
+          throw unknownOutcome;
         }
         throw error;
       }

@@ -5973,13 +5973,10 @@ test("content.set and content.apply accept payloads above the removed content-on
   }
 });
 
-// REMOVED PENDING A SERVER FIX, defect recorded on asg_2107e9db:
-// an unknown-outcome persistence failure during pair.request never produces a
-// response envelope, so the client hangs forever rather than receiving an
-// error. The test that proves it hangs the whole suite, so it is not left
-// armed here. Reproduction: supply persistLocklessState that throws a plain
-// Error, pair, and observe no response. The known-pre-state case above is
-// mapped correctly and passes.
+// Persistence adapters can report an unknown outcome with the stable error
+// name without sharing the server module's constructor identity. pair.request
+// must still fail-stop and return one bounded response without rolling back
+// the potentially committed admission sequence.
 
 test("unknown-outcome persistence still answers pair.request with exactly one bounded error envelope", async () => {
   const core = new SurfaceCore();
