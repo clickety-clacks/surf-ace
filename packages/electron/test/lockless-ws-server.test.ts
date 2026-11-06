@@ -5669,10 +5669,13 @@ test("content write refusal restores unread capacity loss, cursor gap, and reque
     port,
     viewport: () => ({ height: 800, scale: 2, width: 1200 }),
   });
-  await server.start();
-  const socket = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+  let serverStarted = false;
+  let socket: WebSocket | null = null;
   const controllerInstanceId = "content-rollback-client";
   try {
+    await server.start();
+    serverStarted = true;
+    socket = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
     assert.equal((await pair(socket, controllerInstanceId, surface.surfaceId)).ok, true);
     const paneId = Number(core.panesList(surface.surfaceId).panes[0]!.paneId);
     const first = await request(socket, "content.set", {
@@ -5680,7 +5683,9 @@ test("content write refusal restores unread capacity loss, cursor gap, and reque
       contentId: "retained-unread",
       contentType: "markdown",
       friendlyChatName: "Author",
+      historyOwnerToken: "content-rollback-owner",
       paneId,
+      revision: Number(core.captureSnapshot(surface.surfaceId, paneId).revision) + 1,
       surfaceId: surface.surfaceId,
     });
     assert.equal(first.ok, true, JSON.stringify(first));
@@ -5701,13 +5706,16 @@ test("content write refusal restores unread capacity loss, cursor gap, and reque
     assert.equal(core.captureSnapshot(surface.surfaceId, paneId).contentId, "retained-unread");
 
     const failedRequestId = "rq_content_capacity_failure";
+    const failedRevision = Number(core.captureSnapshot(surface.surfaceId, paneId).revision) + 1;
     refuseNextWrite = true;
     const failed = await request(socket, "content.set", {
       content: { markdown: "# rejected replacement" },
       contentId: "rejected-replacement",
       contentType: "markdown",
       friendlyChatName: "Author",
+      historyOwnerToken: "content-rollback-owner",
       paneId,
+      revision: failedRevision,
       surfaceId: surface.surfaceId,
     }, { id: failedRequestId });
     assert.equal(failed.ok, false, JSON.stringify(failed));
@@ -5741,7 +5749,9 @@ test("content write refusal restores unread capacity loss, cursor gap, and reque
       contentId: "accepted-replacement",
       contentType: "markdown",
       friendlyChatName: "Author",
+      historyOwnerToken: "content-rollback-owner",
       paneId,
+      revision: failedRevision,
       surfaceId: surface.surfaceId,
     }, { id: failedRequestId });
     assert.equal(retried.ok, true, JSON.stringify(retried));
@@ -5752,8 +5762,8 @@ test("content write refusal restores unread capacity loss, cursor gap, and reque
     assert.equal(afterRetry.cursor.gapGeneration, 1);
     assert.equal(afterRetry.cursor.gap?.cause, "scope_capacity");
   } finally {
-    socket.close();
-    await server.stop();
+    socket?.close();
+    if (serverStarted) await server.stop();
   }
 });
 
@@ -5953,22 +5963,35 @@ test("content.set and content.apply accept payloads above the removed content-on
     port,
     viewport: () => viewport,
   });
-  await server.start();
-  const socket = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+  let serverStarted = false;
+  let socket: WebSocket | null = null;
   try {
+    await server.start();
+    serverStarted = true;
+    socket = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
     assert.equal((await pair(socket, "large-content-client", surface.surfaceId)).ok, true);
-    const legacy = await request(socket, "content.set", {
+    const setPayload = {
       content,
       contentId: "large-legacy-content",
       contentType: "html",
       friendlyChatName: "Large content author",
+      historyOwnerToken: "large-content-owner",
       paneId,
+      revision: Number(core.captureSnapshot(surface.surfaceId, paneId).revision) + 1,
       surfaceId: surface.surfaceId,
-    });
+    };
+    const setId = "rq_large_legacy_content";
+    const setSentAt = Date.now();
+    const setMessageBytes = Buffer.byteLength(JSON.stringify({
+      id: setId, op: "content.set", payload: setPayload, sentAt: setSentAt, type: "request", v: 1,
+    }), "utf8");
+    assert.ok(setMessageBytes > 10 * 1024 * 1024, `content.set wire message was only ${setMessageBytes} bytes`);
+    assert.ok(setMessageBytes < 12 * 1024 * 1024, `content.set wire message exceeded 12 MiB: ${setMessageBytes} bytes`);
+    const legacy = await request(socket, "content.set", setPayload, { id: setId, sentAt: setSentAt });
     assert.equal(legacy.ok, true, JSON.stringify(legacy));
     assert.equal(core.captureSnapshot(surface.surfaceId, paneId).contentId, "large-legacy-content");
 
-    const applied = await request(socket, "content.apply", {
+    const applyPayload = {
       content,
       contentId: "large-applied-content",
       contentType: "html",
@@ -5976,12 +5999,65 @@ test("content.set and content.apply accept payloads above the removed content-on
       paneId,
       revision: Number(legacy.payload.revision) + 1,
       surfaceId: surface.surfaceId,
-    });
+    };
+    const applyId = "rq_large_applied_content";
+    const applySentAt = Date.now();
+    const applyMessageBytes = Buffer.byteLength(JSON.stringify({
+      id: applyId, op: "content.apply", payload: applyPayload, sentAt: applySentAt, type: "request", v: 1,
+    }), "utf8");
+    assert.ok(applyMessageBytes > 10 * 1024 * 1024, `content.apply wire message was only ${applyMessageBytes} bytes`);
+    assert.ok(applyMessageBytes < 12 * 1024 * 1024, `content.apply wire message exceeded 12 MiB: ${applyMessageBytes} bytes`);
+    const applied = await request(socket, "content.apply", applyPayload, { id: applyId, sentAt: applySentAt });
     assert.equal(applied.ok, true, JSON.stringify(applied));
     assert.equal(core.captureSnapshot(surface.surfaceId, paneId).contentId, "large-applied-content");
   } finally {
-    socket.close();
-    await server.stop();
+    socket?.close();
+    if (serverStarted) await server.stop();
+  }
+});
+
+test("WebSocket rejects request messages above the 12 MiB whole-message limit", { timeout: 30_000 }, async () => {
+  const viewport = { height: 800, scale: 2, width: 1200 };
+  const core = new SurfaceCore();
+  core.ensurePrimarySurface("Surf Ace", viewport);
+  const port = nextPort++;
+  const server = new SurfaceWsServer({
+    capturePaneImage: async () => null,
+    compositorSocketPath: null,
+    core,
+    endpointName: "Surf Ace",
+    hostName: "localhost",
+    port,
+    viewport: () => viewport,
+  });
+  let serverStarted = false;
+  let socket: WebSocket | null = null;
+  try {
+    await server.start();
+    serverStarted = true;
+    socket = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+    const oversized = JSON.stringify({
+      id: "rq_over_message_limit",
+      op: "surfaces.list",
+      payload: { padding: "x".repeat(12 * 1024 * 1024) },
+      sentAt: Date.now(),
+      type: "request",
+      v: 1,
+    });
+    assert.ok(Buffer.byteLength(oversized, "utf8") > 12 * 1024 * 1024);
+    const closed = new Promise<{ code: number; reason: string }>((resolve) => {
+      socket.once("close", (code, reason) => resolve({ code, reason: reason.toString() }));
+    });
+    socket.send(oversized);
+    const result = await Promise.race([
+      closed,
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 5_000)),
+    ]);
+    assert.ok(result, "oversized WebSocket message was not closed by the transport limit");
+    assert.equal(result.code, 1009, JSON.stringify(result));
+  } finally {
+    if (socket && socket.readyState !== WebSocket.CLOSED) socket.terminate();
+    if (serverStarted) await server.stop();
   }
 });
 

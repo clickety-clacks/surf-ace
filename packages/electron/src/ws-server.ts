@@ -359,7 +359,10 @@ export class SurfaceWsServer {
       response.writeHead(404);
       response.end();
     });
-    this.wss = new WebSocketServer({ noServer: true });
+    this.wss = new WebSocketServer({
+      maxPayload: DEFAULT_LIMITS.maxMessageBytes,
+      noServer: true,
+    });
 
     this.httpServer.on("upgrade", (request, socket, head) => {
       if (request.url !== this.wsPath) {
