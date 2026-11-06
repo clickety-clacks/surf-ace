@@ -3012,7 +3012,9 @@ test("target apply durably preserves history regardless of historical base byte 
         assert.equal((await pair(socket, "partition-controller", surface.surfaceId)).ok, true);
         if (oversizedBase) core.getSurface(surface.surfaceId).name = "b".repeat(DEFAULT_LOCKLESS_LIMITS.maxSurfaceRecoverableBaseBytes);
         const before = core.captureSurfaceTombstonePayload(surface.surfaceId);
-        const baseBytes = Buffer.byteLength(JSON.stringify(core.captureSurfaceRecoverableBase(surface.surfaceId)));
+        const baseBytes = Buffer.byteLength(JSON.stringify(
+          Object.fromEntries(Object.entries(before).filter(([key]) => key !== "panes")),
+        ));
         assert.ok(Buffer.byteLength(JSON.stringify(before)) > DEFAULT_LOCKLESS_LIMITS.maxSurfaceRecoverableBaseBytes);
         assert.ok(Buffer.byteLength(JSON.stringify(before.panes[0])) < DEFAULT_LOCKLESS_LIMITS.maxPaneRecoverableStateBytes);
         assert.equal(baseBytes > DEFAULT_LOCKLESS_LIMITS.maxSurfaceRecoverableBaseBytes, oversizedBase);
@@ -5683,9 +5685,7 @@ test("content write refusal restores unread capacity loss, cursor gap, and reque
       contentId: "retained-unread",
       contentType: "markdown",
       friendlyChatName: "Author",
-      historyOwnerToken: "content-rollback-owner",
       paneId,
-      revision: Number(core.captureSnapshot(surface.surfaceId, paneId).revision) + 1,
       surfaceId: surface.surfaceId,
     });
     assert.equal(first.ok, true, JSON.stringify(first));
@@ -5706,16 +5706,13 @@ test("content write refusal restores unread capacity loss, cursor gap, and reque
     assert.equal(core.captureSnapshot(surface.surfaceId, paneId).contentId, "retained-unread");
 
     const failedRequestId = "rq_content_capacity_failure";
-    const failedRevision = Number(core.captureSnapshot(surface.surfaceId, paneId).revision) + 1;
     refuseNextWrite = true;
     const failed = await request(socket, "content.set", {
       content: { markdown: "# rejected replacement" },
       contentId: "rejected-replacement",
       contentType: "markdown",
       friendlyChatName: "Author",
-      historyOwnerToken: "content-rollback-owner",
       paneId,
-      revision: failedRevision,
       surfaceId: surface.surfaceId,
     }, { id: failedRequestId });
     assert.equal(failed.ok, false, JSON.stringify(failed));
@@ -5749,9 +5746,7 @@ test("content write refusal restores unread capacity loss, cursor gap, and reque
       contentId: "accepted-replacement",
       contentType: "markdown",
       friendlyChatName: "Author",
-      historyOwnerToken: "content-rollback-owner",
       paneId,
-      revision: failedRevision,
       surfaceId: surface.surfaceId,
     }, { id: failedRequestId });
     assert.equal(retried.ok, true, JSON.stringify(retried));
@@ -5972,24 +5967,22 @@ test("content.set and content.apply accept payloads above the removed content-on
     assert.equal((await pair(socket, "large-content-client", surface.surfaceId)).ok, true);
     const setPayload = {
       content,
-      contentId: "large-legacy-content",
+      contentId: "large-lockless-content",
       contentType: "html",
       friendlyChatName: "Large content author",
-      historyOwnerToken: "large-content-owner",
       paneId,
-      revision: Number(core.captureSnapshot(surface.surfaceId, paneId).revision) + 1,
       surfaceId: surface.surfaceId,
     };
-    const setId = "rq_large_legacy_content";
+    const setId = "rq_large_lockless_content";
     const setSentAt = Date.now();
     const setMessageBytes = Buffer.byteLength(JSON.stringify({
       id: setId, op: "content.set", payload: setPayload, sentAt: setSentAt, type: "request", v: 1,
     }), "utf8");
     assert.ok(setMessageBytes > 10 * 1024 * 1024, `content.set wire message was only ${setMessageBytes} bytes`);
     assert.ok(setMessageBytes < 12 * 1024 * 1024, `content.set wire message exceeded 12 MiB: ${setMessageBytes} bytes`);
-    const legacy = await request(socket, "content.set", setPayload, { id: setId, sentAt: setSentAt });
-    assert.equal(legacy.ok, true, JSON.stringify(legacy));
-    assert.equal(core.captureSnapshot(surface.surfaceId, paneId).contentId, "large-legacy-content");
+    const locklessSet = await request(socket, "content.set", setPayload, { id: setId, sentAt: setSentAt });
+    assert.equal(locklessSet.ok, true, JSON.stringify(locklessSet));
+    assert.equal(core.captureSnapshot(surface.surfaceId, paneId).contentId, "large-lockless-content");
 
     const applyPayload = {
       content,
@@ -5997,7 +5990,7 @@ test("content.set and content.apply accept payloads above the removed content-on
       contentType: "html",
       historyOwnerToken: "large-content-owner",
       paneId,
-      revision: Number(legacy.payload.currentRevision) + 1,
+      revision: Number(locklessSet.payload.revision) + 1,
       surfaceId: surface.surfaceId,
     };
     const applyId = "rq_large_applied_content";
