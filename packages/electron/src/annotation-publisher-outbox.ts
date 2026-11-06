@@ -109,6 +109,15 @@ export class AnnotationPublisherOutbox {
 
   snapshot(): PersistentAnnotationPublisher { return structuredClone(this.state); }
 
+  /**
+   * Borrow the live state only for a synchronous JSON serialization. The caller
+   * must not retain or mutate this reference; encoding finishes before this
+   * method's caller can yield to another event-loop task.
+   */
+  stateForSynchronousSerialization(): PersistentAnnotationPublisher {
+    return this.state;
+  }
+
   partitionBytes(surfaceId: string): number {
     const surface = this.state.surfaces[surfaceId];
     if (!surface) return 0;
