@@ -6043,6 +6043,76 @@ test("unknown-outcome persistence still answers pair.request with exactly one bo
   }
 });
 
+test("pair handler answers a name-tagged unknown persistence outcome without rolling back admission", async () => {
+  const core = new SurfaceCore();
+  const surface = core.ensurePrimarySurface("Surf Ace", {
+    height: 800, scale: 2, width: 1200,
+  });
+  seedFullTerminalLedger(core);
+  const before = core.getPersistentState().nextAdmissionAttemptSequence;
+  const responses: Record<string, any>[] = [];
+  const socket = {
+    readyState: WebSocket.OPEN,
+    send(payload: string, callback?: (error?: Error) => void) {
+      responses.push(JSON.parse(payload) as Record<string, any>);
+      callback?.();
+    },
+  } as unknown as WebSocket;
+  const server = new SurfaceWsServer({
+    capturePaneImage: async () => null,
+    compositorSocketPath: null,
+    core,
+    endpointName: "Surf Ace",
+    hostName: "localhost",
+    persistLocklessState: async () => {
+      const unknown = new Error("Persistent state commit outcome is unknown");
+      unknown.name = "PersistentStateOutcomeUnknownError";
+      throw unknown;
+    },
+    port: 0,
+    viewport: () => ({ height: 800, scale: 2, width: 1200 }),
+  });
+  const direct = server as unknown as {
+    handleLocklessMessage: (socket: WebSocket, request: Record<string, any>) => Promise<void>;
+    socketMeta: WeakMap<WebSocket, {
+      cache: Map<string, unknown>;
+      pairedSurfaceId: string | null;
+      remoteAddress: string;
+      socketId: string;
+    }>;
+  };
+  direct.socketMeta.set(socket, {
+    cache: new Map(),
+    pairedSurfaceId: null,
+    remoteAddress: "127.0.0.1",
+    socketId: "unknown-outcome-pair-handler",
+  });
+
+  await direct.handleLocklessMessage(socket, {
+    id: "rq_unknown_outcome_pair_handler",
+    op: "pair.request",
+    payload: {
+      controllerInstanceId: "openclaw",
+      controllerProductName: "OpenClaw",
+      projectionCapacityBytes: 5 * 1024 * 1024,
+      protocolFeatures: [SURF_ACE_LOCKLESS_V1_CAPABILITY],
+      protocolVersion: 1,
+      surfaceId: surface.surfaceId,
+    },
+    sentAt: Date.now(),
+    type: "request",
+    v: 1,
+  });
+
+  assert.equal(core.isAdmissionFailStopped(), true);
+  assert.equal(core.getPersistentState().nextAdmissionAttemptSequence, before + 1);
+  assert.equal(responses.length, 1, JSON.stringify(responses));
+  assert.equal(responses[0]!.op, "pair.request");
+  assert.equal(responses[0]!.ok, false, JSON.stringify(responses[0]));
+  assert.equal(responses[0]!.error?.code, "internal_error");
+  assert.match(responses[0]!.error?.message ?? "", /commit outcome is unknown/);
+});
+
 test("a second pair.request while fail-stopped is answered, not left hanging", async () => {
   const core = new SurfaceCore();
   const surface = core.ensurePrimarySurface("Surf Ace", {
