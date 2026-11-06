@@ -3,7 +3,8 @@
   "private": true,
   "packageManager": "pnpm@10.15.1",
   "scripts": {
-    "test:release": "node --test scripts/release/*.test.mjs"
+    "test:release": "node --test scripts/release/*.test.mjs",
+    "skill:deliver": "node scripts/release/run-surf-ace-skill-delivery.mjs"
   },
   "workspaces": [
     "packages/*"
