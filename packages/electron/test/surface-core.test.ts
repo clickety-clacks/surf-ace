@@ -4359,6 +4359,118 @@ test("captured durable bytes are an immutable restartable generation", () => {
   assert.equal(snapshot.contents, JSON.stringify(accepted, null, 2));
 });
 
+test("scoped definite rollback preserves retained append, patch, capped-clear, and annotation history", async () => {
+  const viewport = { width: 800, height: 600, scale: 1 };
+  const scenarios = [
+    {
+      name: "append",
+      seed: (core: SurfaceCore, surfaceId: string, paneId: number) => {
+        core.contentSet(surfaceId, {
+          content: { lines: ["before"] }, contentId: "ct_append", contentType: "terminal",
+          historyOwnerToken: "append-owner", paneId: paneId as never, revision: 1 as never,
+        });
+      },
+      mutate: (core: SurfaceCore, surfaceId: string, paneId: number) => core.contentAppend(surfaceId, {
+        contentId: "ct_append" as never, lines: ["rejected"], paneId: paneId as never, revision: 2 as never,
+      }),
+    },
+    {
+      name: "patch",
+      seed: (core: SurfaceCore, surfaceId: string, paneId: number) => {
+        core.contentSet(surfaceId, {
+          content: { html: "<p>before</p>" }, contentId: "ct_patch", contentType: "html",
+          historyOwnerToken: "patch-owner", paneId: paneId as never, revision: 1 as never,
+        });
+      },
+      mutate: (core: SurfaceCore, surfaceId: string, paneId: number) => core.contentPatch(surfaceId, {
+        contentId: "ct_patch" as never, paneId: paneId as never, revision: 2 as never,
+        patch: { action: "replace_inner", html: "rejected", selector: "p" },
+      }),
+    },
+    {
+      name: "capped clear",
+      seed: (core: SurfaceCore, surfaceId: string, paneId: number) => {
+        for (let revision = 1; revision <= 20; revision += 1) {
+          core.contentSet(surfaceId, {
+            content: { markdown: `entry-${revision}` }, contentId: `ct_clear_${revision}` as never,
+            contentType: "markdown", historyOwnerToken: `clear-owner-${revision}`,
+            paneId: paneId as never, revision: revision as never,
+          });
+        }
+      },
+      mutate: (core: SurfaceCore, surfaceId: string, paneId: number) => core.contentClear(surfaceId, {
+        paneId: paneId as never, revision: 21 as never,
+      }),
+    },
+    {
+      name: "annotation removal",
+      seed: (core: SurfaceCore, surfaceId: string, paneId: number) => {
+        core.contentSet(surfaceId, {
+          content: { markdown: "# Retained drawing" }, contentId: "ct_annotation_rollback",
+          contentType: "markdown", historyOwnerToken: "annotation-rollback-owner",
+          paneId: paneId as never, revision: 1 as never,
+        });
+        core.setAnnotating(surfaceId, paneId, true);
+        core.addStroke(surfaceId, paneId, {
+          points: [{ timestamp: 1, x: 5, y: 6 }],
+          strokeId: "stroke_retained_after_rollback" as never,
+          tool: "mouse",
+        });
+        core.markDrawingFlushSent(surfaceId, paneId);
+        core.setAnnotating(surfaceId, paneId, false);
+        core.markAnnotationCommittedSent(surfaceId, paneId);
+      },
+      mutate: (core: SurfaceCore, surfaceId: string, paneId: number) => {
+        const result = core.annotationsRemove(surfaceId, {
+          contentId: "ct_annotation_rollback",
+          paneId,
+          strokeIds: ["stroke_retained_after_rollback"],
+        });
+        assert.equal(result.removedStrokeIds.length, 1);
+        assert.equal(result.remainingStrokeCount, 0);
+      },
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    const core = new SurfaceCore();
+    const surface = core.ensurePrimarySurface(scenario.name, viewport);
+    const paneId = applyProviderBootstrap(core, surface.surfaceId, 1);
+    scenario.seed(core, surface.surfaceId, paneId);
+    const liveSurface = core.getSurface(surface.surfaceId);
+    const livePane = liveSurface.panes.get(paneId)!;
+    const history = livePane.history;
+    const entries = [...history];
+    const before = core.getPersistentState();
+    if (scenario.name === "annotation removal") {
+      assert.deepEqual(history[0]?.annotations.map((stroke) => stroke.strokeId), ["stroke_retained_after_rollback"]);
+    }
+
+    await assert.rejects(core.transactionAsync(async () => {
+      scenario.mutate(core, surface.surfaceId, paneId);
+      throw new Error(`reject ${scenario.name}`);
+    }, {
+      onNotificationError: () => {},
+      retainUncertainEvents: true,
+      rollbackPane: {
+        controllerInstanceId: "rollback-test-controller",
+        paneId,
+        requestId: `rollback-${scenario.name}`,
+        surfaceId: surface.surfaceId,
+      },
+    }), new RegExp(`reject ${scenario.name}`));
+
+    assert.deepEqual(core.getPersistentState(), before, `${scenario.name} durable state rolls back`);
+    assert.equal(core.getSurface(surface.surfaceId), liveSurface, `${scenario.name} surface identity survives`);
+    assert.equal(liveSurface.panes.get(paneId), livePane, `${scenario.name} pane identity survives`);
+    assert.equal(livePane.history, history, `${scenario.name} retained history root survives`);
+    assert.deepEqual(livePane.history, entries, `${scenario.name} retained entries survive`);
+    assert.equal(livePane.history.length, entries.length, `${scenario.name} retained history count survives`);
+    assert(livePane.history.every((entry, index) => entry === entries[index]),
+      `${scenario.name} retained entry identities survive`);
+  }
+});
+
 test("ordinary scoped rollback retains unknown candidate and publishes only exact verified acceptance", async () => {
   const core = new SurfaceCore();
   const viewport = { width: 800, height: 600, scale: 1 };

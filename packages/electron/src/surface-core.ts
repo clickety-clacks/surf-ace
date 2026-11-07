@@ -2095,6 +2095,18 @@ export class SurfaceCore {
     };
   }
 
+  capturePaneMutationRollback(surfaceId: string, paneId: number): () => void {
+    const surface = this.getSurface(surfaceId);
+    const pane = this.expectPane(surfaceId, paneId);
+    const surfaceBefore = { ...surface, panes: new Map(surface.panes) };
+    const paneBefore = { ...pane };
+    return () => {
+      restoreOwnState(surface, surfaceBefore);
+      restoreOwnState(pane, paneBefore);
+      this.surfaces.set(surfaceId, surface);
+    };
+  }
+
   setConnectionBar(surfaceId: string, state: SurfaceState["connectionBar"], error?: string | null): void {
     const surface = this.getSurface(surfaceId);
     const nextError = state === "connected" ? null : error === undefined ? surface.connectionError : error;
@@ -4072,7 +4084,8 @@ export class SurfaceCore {
       }
     }
 
-    entry.annotations = entry.annotations.filter((stroke) => !toRemove.has(stroke.strokeId));
+    const annotations = entry.annotations.filter((stroke) => !toRemove.has(stroke.strokeId));
+    replaceCurrentEntry(pane, { ...entry, annotations });
     pane.dirtyStrokeIds = pane.dirtyStrokeIds.filter((strokeId) => !toRemove.has(strokeId));
     this.emit({ surfaceId, type: "surface-changed" });
 
@@ -4080,7 +4093,7 @@ export class SurfaceCore {
       contentId: entry.contentId,
       notFoundStrokeIds,
       paneId: pane.paneId,
-      remainingStrokeCount: entry.annotations.length,
+      remainingStrokeCount: annotations.length,
       removedStrokeIds,
     };
   }
@@ -4976,6 +4989,15 @@ function trimHistory(pane: PaneState): void {
   pane.historyIndex = Math.max(0, pane.historyIndex - overflow);
 }
 
+function restoreOwnState<T extends object>(target: T, before: T): void {
+  const mutableTarget = target as Record<string, unknown>;
+  const previous = before as Record<string, unknown>;
+  for (const key of Object.keys(mutableTarget)) {
+    if (!Object.prototype.hasOwnProperty.call(previous, key)) delete mutableTarget[key];
+  }
+  Object.assign(mutableTarget, previous);
+}
+
 function replaceVisibleEntryForNativeMaterialization(pane: PaneState, now: number): boolean {
   const current = currentEntry(pane);
   if (current.content === null && current.contentId === null && current.contentType === null) {
@@ -5703,7 +5725,8 @@ function patchHtml(
   html: string,
   patch: ContentPatchRequest["payload"]["patch"],
 ): string {
-  const { document } = parseHTML(`<html><body>${html}</body></html>`);
+  const { document } = parseHTML("<html><body></body></html>");
+  document.body.innerHTML = html;
   const target = document.querySelector(patch.selector);
   if (!target) {
     throw new SurfaceCoreError("render_failed", `Patch selector not found: ${patch.selector}`);
