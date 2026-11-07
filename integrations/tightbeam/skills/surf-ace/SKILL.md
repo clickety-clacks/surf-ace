@@ -20,16 +20,17 @@ topology into this portable guide.
 ## Install and verify the CLI
 
 Choose the Linux x86_64 or macOS arm64 CLI archive listed by the release
-manifest. Download the archive, skill, supplement manifest, and versioned
-checksum file from the same published release. Set the version from the
-manifest's top-level `version` field; the checksum file is named
-`surf-ace-cli-v${VERSION}-SHA256SUMS`. Verify the selected assets before
-extracting or installing them. For example, after downloading the release
-assets:
+manifest. From the same published release, download the selected archive,
+`surf-ace-skill-v${VERSION}.md`, `surf-ace-v${VERSION}-manifest.json`, and
+`SHA256SUMS`, using the manifest's top-level `version` field for `VERSION`.
+The CLI archives are `surf-ace-cli-linux-x86_64-v${VERSION}.tar.gz` and
+`surf-ace-cli-macos-arm64-v${VERSION}.tar.gz`; select the one listed for your
+platform. Verify the selected assets before extracting or installing them.
+The following commands check every entry in `SHA256SUMS`, so download every
+file it lists before running them:
 
 ```sh
-VERSION="REPLACE_WITH_MANIFEST_VERSION"
-CHECKSUMS="surf-ace-cli-v${VERSION}-SHA256SUMS"
+CHECKSUMS="SHA256SUMS"
 
 # Linux
 sha256sum -c "$CHECKSUMS"
@@ -51,11 +52,12 @@ CLI="$INSTALL_ROOT/surf-ace-cli/bin/surf-ace"
 ```
 
 The macOS CLI archive has the same `surf-ace-cli/bin/surf-ace` path. Check the
-supplement manifest's top-level `version`, `releaseTag`, `sourceCommit`, and
-`sourceTree` fields, plus the selected artifact's `file`, `target`, `bytes`,
-`sha256`, `binaryBytes`, and `binarySha256` fields. Verify the asset checksum
-to identify the installed bytes. Use `--help` and the command schema for a
-local capability check. To upgrade or roll back, select the versioned
+release manifest's `version`, `source.tag`, `source.commit`, `tooling.tag`,
+and `tooling.commit`, plus each selected `assets[]` entry's `name`,
+`sizeBytes`, and `sha256`. Match the CLI archive and skill to those entries;
+the manifest describes archive bytes, not a separate binary checksum.
+Verify the asset checksum to identify the installed bytes. Use `--help` and
+the command schema for a local capability check. To upgrade or roll back, select the versioned
 executable path for the desired verified release; no in-place CLI updater is
 provided.
 
