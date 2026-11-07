@@ -4359,7 +4359,7 @@ test("captured durable bytes are an immutable restartable generation", () => {
   assert.equal(snapshot.contents, JSON.stringify(accepted, null, 2));
 });
 
-test("scoped definite rollback preserves retained append, patch, and capped-clear history", async () => {
+test("scoped definite rollback preserves retained append, patch, capped-clear, and annotation history", async () => {
   const viewport = { width: 800, height: 600, scale: 1 };
   const scenarios = [
     {
@@ -4402,6 +4402,34 @@ test("scoped definite rollback preserves retained append, patch, and capped-clea
         paneId: paneId as never, revision: 21 as never,
       }),
     },
+    {
+      name: "annotation removal",
+      seed: (core: SurfaceCore, surfaceId: string, paneId: number) => {
+        core.contentSet(surfaceId, {
+          content: { markdown: "# Retained drawing" }, contentId: "ct_annotation_rollback",
+          contentType: "markdown", historyOwnerToken: "annotation-rollback-owner",
+          paneId: paneId as never, revision: 1 as never,
+        });
+        core.setAnnotating(surfaceId, paneId, true);
+        core.addStroke(surfaceId, paneId, {
+          points: [{ timestamp: 1, x: 5, y: 6 }],
+          strokeId: "stroke_retained_after_rollback" as never,
+          tool: "mouse",
+        });
+        core.markDrawingFlushSent(surfaceId, paneId);
+        core.setAnnotating(surfaceId, paneId, false);
+        core.markAnnotationCommittedSent(surfaceId, paneId);
+      },
+      mutate: (core: SurfaceCore, surfaceId: string, paneId: number) => {
+        const result = core.annotationsRemove(surfaceId, {
+          contentId: "ct_annotation_rollback",
+          paneId,
+          strokeIds: ["stroke_retained_after_rollback"],
+        });
+        assert.equal(result.removedStrokeIds.length, 1);
+        assert.equal(result.remainingStrokeCount, 0);
+      },
+    },
   ];
 
   for (const scenario of scenarios) {
@@ -4414,6 +4442,9 @@ test("scoped definite rollback preserves retained append, patch, and capped-clea
     const history = livePane.history;
     const entries = [...history];
     const before = core.getPersistentState();
+    if (scenario.name === "annotation removal") {
+      assert.deepEqual(history[0]?.annotations.map((stroke) => stroke.strokeId), ["stroke_retained_after_rollback"]);
+    }
 
     await assert.rejects(core.transactionAsync(async () => {
       scenario.mutate(core, surface.surfaceId, paneId);

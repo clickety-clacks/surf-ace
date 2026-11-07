@@ -4084,7 +4084,8 @@ export class SurfaceCore {
       }
     }
 
-    entry.annotations = entry.annotations.filter((stroke) => !toRemove.has(stroke.strokeId));
+    const annotations = entry.annotations.filter((stroke) => !toRemove.has(stroke.strokeId));
+    replaceCurrentEntry(pane, { ...entry, annotations });
     pane.dirtyStrokeIds = pane.dirtyStrokeIds.filter((strokeId) => !toRemove.has(strokeId));
     this.emit({ surfaceId, type: "surface-changed" });
 
@@ -4092,7 +4093,7 @@ export class SurfaceCore {
       contentId: entry.contentId,
       notFoundStrokeIds,
       paneId: pane.paneId,
-      remainingStrokeCount: entry.annotations.length,
+      remainingStrokeCount: annotations.length,
       removedStrokeIds,
     };
   }
