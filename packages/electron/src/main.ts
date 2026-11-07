@@ -1,6 +1,7 @@
 import { ConfirmedAnnotationLocalSaves } from "./annotation-local-save.js";
 import { ServerConnection } from "./server-connection.js";
 import { splitResizeMatches, splitResizeIsNoOp } from "./split-resize.js";
+import { assertWritesAllowed, handleBeforeQuit, startQuitWatchdog } from "./quit-lifecycle.js";
 import fs from "node:fs/promises";
 import { createHash } from "node:crypto";
 import os from "node:os";
@@ -491,6 +492,7 @@ async function loadPersistentState(): Promise<PersistentSurfaceState | undefined
 }
 
 async function persistState(): Promise<void> {
+  assertWritesAllowed(isQuitting);
   if (persistentStateOutcomeUnknown) {
     await reconcilePersistence();
     if (persistentStateOutcomeUnknown) {
@@ -2241,6 +2243,9 @@ async function boot(): Promise<void> {
     clientId: identityClientId,
     core,
     persist: persistRegistryState,
+    canPersistRegistration: () => persistentStateWriteReadiness.isReady &&
+      !persistentStateOutcomeUnknown &&
+      (!persistentStateWriteGuard || persistentStateWriteGuard === "corrupt-primary"),
     onError: (error) => clientWarn("server_registration_failed", errorDiagnosticFields(error)),
   }) : null;
   configuredRegistration?.start();
@@ -2293,24 +2298,42 @@ if (!singleInstanceLock) {
     throw error;
   });
 
-  app.on("before-quit", async () => {
-    clientInfo("app_before_quit", {
-      active_window_count: windows.size,
+  app.on("before-quit", (event) => {
+    handleBeforeQuit(event, {
+      armWatchdog: () => {
+        try {
+          startQuitWatchdog(undefined, undefined, (error) => {
+            clientWarn("quit_watchdog_start_failed", errorDiagnosticFields(error));
+          });
+        } catch (error) {
+          clientWarn("quit_watchdog_start_failed", errorDiagnosticFields(error));
+          process.kill(process.pid, "SIGKILL");
+        }
+      },
+      cleanup: [
+        () => providerEndpointAvailable ? server.stop() : undefined,
+        () => configuredRegistration?.stop(),
+        () => annotationSourceCoordinator?.stop(),
+        () => annotationRegistryPublisher?.stop(),
+        () => advertiser?.stop(),
+        ...[...windows.keys()].map((surfaceId) => () =>
+          releaseNativePaneInstancesForSurface(surfaceId, "app quit")),
+      ],
+      exit: (code) => app.exit(code),
+      isQuitting: () => isQuitting,
+      markQuitting: () => {
+        clientInfo("app_before_quit", { active_window_count: windows.size });
+        isQuitting = true;
+      },
+      onError: (error) => clientWarn("quit_cleanup_failed", errorDiagnosticFields(error)),
+      stopBackgroundWork: () => {
+        if (providerRetryTimer) clearTimeout(providerRetryTimer);
+        providerRetryTimer = null;
+        resolveProviderRetry?.();
+        resolveProviderRetry = null;
+        if (persistenceRecoveryTimer) clearTimeout(persistenceRecoveryTimer);
+        clearAdvertiserTxtRefreshTimer();
+      },
     });
-    isQuitting = true;
-    if (providerRetryTimer) clearTimeout(providerRetryTimer);
-    providerRetryTimer = null;
-    resolveProviderRetry?.();
-    resolveProviderRetry = null;
-    if (persistenceRecoveryTimer) clearTimeout(persistenceRecoveryTimer);
-    clearAdvertiserTxtRefreshTimer();
-    await Promise.allSettled(
-      [...windows.keys()].map((surfaceId) => releaseNativePaneInstancesForSurface(surfaceId, "app quit")),
-    );
-    await configuredRegistration?.stop();
-    annotationSourceCoordinator?.stop();
-    await annotationRegistryPublisher?.stop();
-    await advertiser?.stop();
-    if (providerEndpointAvailable) await server.stop();
   });
 }

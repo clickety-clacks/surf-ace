@@ -31,6 +31,7 @@ import {
 import { SurfaceWsServer } from "../src/ws-server.js";
 import { ConfiguredServerRegistration } from "../src/configured-server.js";
 import { PersistenceWriteReadiness } from "../src/persistence-write-readiness.js";
+import { PublicControllerWireClient } from "../../controller/src/wire.js";
 
 let nextPort = 25901;
 let nextTestRegistryPaneLabel = 100_000;
@@ -3011,7 +3012,9 @@ test("target apply durably preserves history regardless of historical base byte 
         assert.equal((await pair(socket, "partition-controller", surface.surfaceId)).ok, true);
         if (oversizedBase) core.getSurface(surface.surfaceId).name = "b".repeat(DEFAULT_LOCKLESS_LIMITS.maxSurfaceRecoverableBaseBytes);
         const before = core.captureSurfaceTombstonePayload(surface.surfaceId);
-        const baseBytes = Buffer.byteLength(JSON.stringify(core.captureSurfaceRecoverableBase(surface.surfaceId)));
+        const baseBytes = Buffer.byteLength(JSON.stringify(
+          Object.fromEntries(Object.entries(before).filter(([key]) => key !== "panes")),
+        ));
         assert.ok(Buffer.byteLength(JSON.stringify(before)) > DEFAULT_LOCKLESS_LIMITS.maxSurfaceRecoverableBaseBytes);
         assert.ok(Buffer.byteLength(JSON.stringify(before.panes[0])) < DEFAULT_LOCKLESS_LIMITS.maxPaneRecoverableStateBytes);
         assert.equal(baseBytes > DEFAULT_LOCKLESS_LIMITS.maxSurfaceRecoverableBaseBytes, oversizedBase);
@@ -4971,6 +4974,21 @@ test("surface.describe returns topology when saved registry binding or lease is 
       expectedLimitations: ["endpoint_lease_unavailable"],
     },
     {
+      name: "lease-expired-matching",
+      prepare: (state: ReturnType<ReturnType<typeof describeFixture>["core"]["getPersistentState"]>) => {
+        state.registryEndpointLease = {
+          leaseGeneration: 17,
+          registrationObservedAtMs: Date.now() - 20_000,
+          leaseExpiresAtMs: Date.now() - 1_000,
+        };
+      },
+      expectedClientId: "a".repeat(64),
+      expectedLeaseGeneration: 17,
+      expectedRegistryIdentityUnavailable: false,
+      expectedEndpointLeaseUnavailable: false,
+      expectedLimitations: ["endpoint_lease_expired"],
+    },
+    {
       name: "stale",
       prepare: (state: ReturnType<ReturnType<typeof describeFixture>["core"]["getPersistentState"]>) => {
         state.registryBinding = {
@@ -4988,7 +5006,7 @@ test("surface.describe returns topology when saved registry binding or lease is 
       expectedLeaseGeneration: 16,
       expectedRegistryIdentityUnavailable: false,
       expectedEndpointLeaseUnavailable: false,
-      expectedLimitations: ["registry_binding_stale", "endpoint_lease_stale"],
+      expectedLimitations: ["registry_binding_stale", "endpoint_lease_expired", "endpoint_lease_stale"],
     },
   ] as const;
 
@@ -5443,6 +5461,88 @@ test("guarded restart preserves two-pane display but cannot re-pair without dura
   }
 });
 
+test("a pair request that closes during local persistence does not strand its controller identity", { timeout: 15_000 }, async () => {
+  const core = new SurfaceCore();
+  const surface = core.ensurePrimarySurface("Surf Ace", {
+    height: 800,
+    scale: 2,
+    width: 1200,
+  });
+  let persistenceCalls = 0;
+  let startStalledPersistence!: () => void;
+  const stalledPersistenceStarted = new Promise<void>((resolve) => {
+    startStalledPersistence = resolve;
+  });
+  let releaseStalledPersistence!: () => void;
+  const stalledPersistence = new Promise<void>((resolve) => {
+    releaseStalledPersistence = resolve;
+  });
+  const controllerInstanceId = "late-pair-admission-controller";
+  const server = new SurfaceWsServer({
+    bindAddress: "127.0.0.1",
+    capturePaneImage: async () => null,
+    compositorSocketPath: null,
+    core,
+    endpointName: "Surf Ace",
+    hostName: "localhost",
+    persistLocklessState: async () => {
+      persistenceCalls += 1;
+      if (persistenceCalls === 3) {
+        startStalledPersistence();
+        await stalledPersistence;
+      }
+    },
+    port: 0,
+    viewport: () => ({ height: 800, scale: 2, width: 1200 }),
+  });
+  await server.start();
+  const boundAddress = (server as unknown as {
+    httpServer: { address(): AddressInfo | string | null };
+  }).httpServer.address();
+  assert.ok(boundAddress && typeof boundAddress !== "string");
+  const endpoint = `ws://127.0.0.1:${boundAddress.port}${server.wsPath}`;
+  const first = new PublicControllerWireClient(endpoint, 2_000);
+  let retry: PublicControllerWireClient | null = null;
+  try {
+    await first.connect();
+    const firstClientClosed = new Promise<void>((resolve) => first.onClose(resolve));
+    const firstPair = first.request("pair.request", {
+      controllerInstanceId,
+      controllerProductName: "OpenClaw",
+      projectionCapacityBytes: 5 * 1024 * 1024,
+      protocolFeatures: [SURF_ACE_LOCKLESS_V1_CAPABILITY],
+      protocolVersion: 1,
+      surfaceId: surface.surfaceId,
+    });
+    await stalledPersistenceStarted;
+    await assert.rejects(firstPair, (error: unknown) =>
+      error instanceof Error && error.message === "controller_wire_timeout:pair.request");
+    first.abort();
+    await firstClientClosed;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    releaseStalledPersistence();
+
+    retry = new PublicControllerWireClient(endpoint, 2_000);
+    await retry.connect();
+    const retried = await retry.request("pair.request", {
+      controllerInstanceId,
+      controllerProductName: "OpenClaw",
+      projectionCapacityBytes: 5 * 1024 * 1024,
+      protocolFeatures: [SURF_ACE_LOCKLESS_V1_CAPABILITY],
+      protocolVersion: 1,
+      surfaceId: surface.surfaceId,
+    });
+    assert.equal(retried.ok, true, JSON.stringify(retried));
+    assert.deepEqual(core.locklessAuthority.liveControllerIds(), [controllerInstanceId]);
+  } finally {
+    releaseStalledPersistence();
+    retry?.abort();
+    first.abort();
+    await server.stop();
+  }
+});
+
 test("concurrent pair.requests are serialized through the global durable boundary", async () => {
   const core = new SurfaceCore();
   const surface = core.ensurePrimarySurface("Surf Ace", {
@@ -5571,10 +5671,13 @@ test("content write refusal restores unread capacity loss, cursor gap, and reque
     port,
     viewport: () => ({ height: 800, scale: 2, width: 1200 }),
   });
-  await server.start();
-  const socket = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+  let serverStarted = false;
+  let socket: WebSocket | null = null;
   const controllerInstanceId = "content-rollback-client";
   try {
+    await server.start();
+    serverStarted = true;
+    socket = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
     assert.equal((await pair(socket, controllerInstanceId, surface.surfaceId)).ok, true);
     const paneId = Number(core.panesList(surface.surfaceId).panes[0]!.paneId);
     const first = await request(socket, "content.set", {
@@ -5593,6 +5696,10 @@ test("content write refusal restores unread capacity loss, cursor gap, and reque
       controllerInstanceId,
       scopeId,
     );
+    const liveSurface = core.getSurface(surface.surfaceId);
+    const livePane = liveSurface.panes.get(paneId)!;
+    const history = livePane.history;
+    const entries = [...history];
     assert.equal(beforeScope.records.length, 1);
     assert.equal(beforeScope.cursor.cursor, 1);
     assert.equal(beforeScope.cursor.gap, null);
@@ -5611,6 +5718,14 @@ test("content write refusal restores unread capacity loss, cursor gap, and reque
     assert.equal(failed.ok, false, JSON.stringify(failed));
     assert.equal(failed.error?.code, "internal_error");
     assert.equal(core.captureSnapshot(surface.surfaceId, paneId).contentId, "retained-unread");
+    assert.equal(core.getSurface(surface.surfaceId), liveSurface,
+      "a rejected ordinary mutation must not recreate the live surface");
+    assert.equal(liveSurface.panes.get(paneId), livePane,
+      "a rejected ordinary mutation must not recreate the live pane");
+    assert.equal(livePane.history, history,
+      "a rejected ordinary mutation restores the prior history root");
+    assert(livePane.history.every((entry, index) => entry === entries[index]),
+      "a rejected ordinary mutation preserves retained history entries by identity");
     assert.deepEqual(
       core.locklessAuthority.scopeSnapshot(controllerInstanceId, scopeId),
       beforeScope,
@@ -5642,8 +5757,8 @@ test("content write refusal restores unread capacity loss, cursor gap, and reque
     assert.equal(afterRetry.cursor.gapGeneration, 1);
     assert.equal(afterRetry.cursor.gap?.cause, "scope_capacity");
   } finally {
-    socket.close();
-    await server.stop();
+    socket?.close();
+    if (serverStarted) await server.stop();
   }
 });
 
@@ -5825,13 +5940,180 @@ test("append, patch, and capped clear write failures preserve history for retry"
   }
 });
 
-// REMOVED PENDING A SERVER FIX, defect recorded on asg_2107e9db:
-// an unknown-outcome persistence failure during pair.request never produces a
-// response envelope, so the client hangs forever rather than receiving an
-// error. The test that proves it hangs the whole suite, so it is not left
-// armed here. Reproduction: supply persistLocklessState that throws a plain
-// Error, pair, and observe no response. The known-pre-state case above is
-// mapped correctly and passes.
+test("lockless content.set accepts payloads above the removed content-only limit", { timeout: 30_000 }, async () => {
+  const viewport = { height: 800, scale: 2, width: 1200 };
+  const core = new SurfaceCore();
+  const surface = core.ensurePrimarySurface("Surf Ace", viewport);
+  initializeRegistryBootstrapPanes(core);
+  const paneId = Number(core.panesList(surface.surfaceId).panes[0]!.paneId);
+  const html = "x".repeat(10 * 1024 * 1024 + 64 * 1024);
+  const content = { html };
+  const port = nextPort++;
+  const server = new SurfaceWsServer({
+    capturePaneImage: async () => null,
+    compositorSocketPath: null,
+    core,
+    endpointName: "Surf Ace",
+    hostName: "localhost",
+    port,
+    viewport: () => viewport,
+  });
+  let serverStarted = false;
+  let socket: WebSocket | null = null;
+  try {
+    await server.start();
+    serverStarted = true;
+    socket = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+    assert.equal((await pair(socket, "large-content-client", surface.surfaceId)).ok, true);
+    const setPayload = {
+      content,
+      contentId: "large-lockless-content",
+      contentType: "html",
+      friendlyChatName: "Large content author",
+      paneId,
+      surfaceId: surface.surfaceId,
+    };
+    const setId = "rq_large_lockless_content";
+    const setSentAt = Date.now();
+    const setMessageBytes = Buffer.byteLength(JSON.stringify({
+      id: setId, op: "content.set", payload: setPayload, sentAt: setSentAt, type: "request", v: 1,
+    }), "utf8");
+    assert.ok(setMessageBytes > 10 * 1024 * 1024, `content.set wire message was only ${setMessageBytes} bytes`);
+    assert.ok(setMessageBytes < 12 * 1024 * 1024, `content.set wire message exceeded 12 MiB: ${setMessageBytes} bytes`);
+    const locklessSet = await request(socket, "content.set", setPayload, { id: setId, sentAt: setSentAt });
+    assert.equal(locklessSet.ok, true, JSON.stringify(locklessSet));
+    assert.equal(core.captureSnapshot(surface.surfaceId, paneId).contentId, "large-lockless-content");
+  } finally {
+    socket?.close();
+    if (serverStarted) await server.stop();
+  }
+});
+
+test("legacy content.set and content.apply handlers accept over-10-MiB payloads below the whole-message limit", async () => {
+  const viewport = { height: 800, scale: 2, width: 1200 };
+  const core = new SurfaceCore();
+  const surface = core.ensurePrimarySurface("Surf Ace", viewport);
+  initializeRegistryBootstrapPanes(core);
+  const paneId = Number(core.panesList(surface.surfaceId).panes[0]!.paneId);
+  const server = new SurfaceWsServer({
+    capturePaneImage: async () => null,
+    compositorSocketPath: null,
+    core,
+    endpointName: "Surf Ace",
+    hostName: "localhost",
+    port: 0,
+    viewport: () => viewport,
+  });
+  const socket = { readyState: WebSocket.OPEN } as WebSocket;
+  const direct = server as unknown as {
+    handleContentApply: (socket: WebSocket, request: Record<string, any>) => Promise<Record<string, any>>;
+    handleContentSet: (socket: WebSocket, request: Record<string, any>) => Promise<Record<string, any>>;
+    socketMeta: WeakMap<WebSocket, {
+      cache: Map<string, unknown>;
+      pairedSurfaceId: string | null;
+      remoteAddress: string;
+      socketId: string;
+    }>;
+    wss: WebSocketServer;
+  };
+  direct.socketMeta.set(socket, {
+    cache: new Map(),
+    pairedSurfaceId: surface.surfaceId,
+    remoteAddress: "127.0.0.1",
+    socketId: "large-content-direct-handler",
+  });
+
+  const content = { html: "x".repeat(10 * 1024 * 1024 + 64 * 1024) };
+  const setId = "rq_large_direct_content_set";
+  const setPayload = {
+    content,
+    contentId: "large-direct-set",
+    contentType: "html",
+    friendlyChatName: "Large content author",
+    historyOwnerToken: "large-content-owner",
+    paneId,
+    revision: Number(core.captureSnapshot(surface.surfaceId, paneId).revision) + 1,
+    surfaceId: surface.surfaceId,
+  };
+  const setSentAt = Date.now();
+  const setMessage = JSON.stringify({
+    id: setId, op: "content.set", payload: setPayload, sentAt: setSentAt, type: "request", v: 1,
+  });
+  const setMessageBytes = Buffer.byteLength(setMessage, "utf8");
+  assert.ok(setMessageBytes > 10 * 1024 * 1024, `content.set wire message was only ${setMessageBytes} bytes`);
+  assert.ok(setMessageBytes < 12 * 1024 * 1024, `content.set wire message exceeded 12 MiB: ${setMessageBytes} bytes`);
+  const setResult = await direct.handleContentSet(socket, JSON.parse(setMessage));
+  assert.equal(setResult.ok, true, JSON.stringify(setResult));
+  assert.equal(core.captureSnapshot(surface.surfaceId, paneId).contentId, "large-direct-set");
+
+  const applyId = "rq_large_direct_content_apply";
+  const applyPayload = {
+    ...setPayload,
+    contentId: "large-direct-apply",
+    revision: Number(setResult.payload.currentRevision) + 1,
+  };
+  const applySentAt = Date.now();
+  const applyMessage = JSON.stringify({
+    id: applyId, op: "content.apply", payload: applyPayload, sentAt: applySentAt, type: "request", v: 1,
+  });
+  const applyMessageBytes = Buffer.byteLength(applyMessage, "utf8");
+  assert.ok(applyMessageBytes > 10 * 1024 * 1024, `content.apply wire message was only ${applyMessageBytes} bytes`);
+  assert.ok(applyMessageBytes < 12 * 1024 * 1024, `content.apply wire message exceeded 12 MiB: ${applyMessageBytes} bytes`);
+  const applyResult = await direct.handleContentApply(socket, JSON.parse(applyMessage));
+  assert.equal(applyResult.ok, true, JSON.stringify(applyResult));
+  assert.equal(core.captureSnapshot(surface.surfaceId, paneId).contentId, "large-direct-apply");
+  assert.equal((direct.wss.options as { maxPayload?: number }).maxPayload, 12 * 1024 * 1024);
+});
+
+test("WebSocket rejects request messages above the 12 MiB whole-message limit", { timeout: 30_000 }, async () => {
+  const viewport = { height: 800, scale: 2, width: 1200 };
+  const core = new SurfaceCore();
+  core.ensurePrimarySurface("Surf Ace", viewport);
+  const port = nextPort++;
+  const server = new SurfaceWsServer({
+    capturePaneImage: async () => null,
+    compositorSocketPath: null,
+    core,
+    endpointName: "Surf Ace",
+    hostName: "localhost",
+    port,
+    viewport: () => viewport,
+  });
+  let serverStarted = false;
+  let socket: WebSocket | null = null;
+  try {
+    await server.start();
+    serverStarted = true;
+    socket = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+    const oversized = JSON.stringify({
+      id: "rq_over_message_limit",
+      op: "surfaces.list",
+      payload: { padding: "x".repeat(12 * 1024 * 1024) },
+      sentAt: Date.now(),
+      type: "request",
+      v: 1,
+    });
+    assert.ok(Buffer.byteLength(oversized, "utf8") > 12 * 1024 * 1024);
+    const closed = new Promise<{ code: number; reason: string }>((resolve) => {
+      socket.once("close", (code, reason) => resolve({ code, reason: reason.toString() }));
+    });
+    socket.send(oversized);
+    const result = await Promise.race([
+      closed,
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), 5_000)),
+    ]);
+    assert.ok(result, "oversized WebSocket message was not closed by the transport limit");
+    assert.equal(result.code, 1009, JSON.stringify(result));
+  } finally {
+    if (socket && socket.readyState !== WebSocket.CLOSED) socket.terminate();
+    if (serverStarted) await server.stop();
+  }
+});
+
+// Persistence adapters can report an unknown outcome with the stable error
+// name without sharing the server module's constructor identity. pair.request
+// must still fail-stop and return one bounded response without rolling back
+// the potentially committed admission sequence.
 
 test("unknown-outcome persistence still answers pair.request with exactly one bounded error envelope", async () => {
   const core = new SurfaceCore();
@@ -5896,6 +6178,76 @@ test("unknown-outcome persistence still answers pair.request with exactly one bo
     socket.close();
     await server.stop();
   }
+});
+
+test("pair handler answers a name-tagged unknown persistence outcome without rolling back admission", async () => {
+  const core = new SurfaceCore();
+  const surface = core.ensurePrimarySurface("Surf Ace", {
+    height: 800, scale: 2, width: 1200,
+  });
+  seedFullTerminalLedger(core);
+  const before = core.getPersistentState().nextAdmissionAttemptSequence;
+  const responses: Record<string, any>[] = [];
+  const socket = {
+    readyState: WebSocket.OPEN,
+    send(payload: string, callback?: (error?: Error) => void) {
+      responses.push(JSON.parse(payload) as Record<string, any>);
+      callback?.();
+    },
+  } as unknown as WebSocket;
+  const server = new SurfaceWsServer({
+    capturePaneImage: async () => null,
+    compositorSocketPath: null,
+    core,
+    endpointName: "Surf Ace",
+    hostName: "localhost",
+    persistLocklessState: async () => {
+      const unknown = new Error("Persistent state commit outcome is unknown");
+      unknown.name = "PersistentStateOutcomeUnknownError";
+      throw unknown;
+    },
+    port: 0,
+    viewport: () => ({ height: 800, scale: 2, width: 1200 }),
+  });
+  const direct = server as unknown as {
+    handleLocklessMessage: (socket: WebSocket, request: Record<string, any>) => Promise<void>;
+    socketMeta: WeakMap<WebSocket, {
+      cache: Map<string, unknown>;
+      pairedSurfaceId: string | null;
+      remoteAddress: string;
+      socketId: string;
+    }>;
+  };
+  direct.socketMeta.set(socket, {
+    cache: new Map(),
+    pairedSurfaceId: null,
+    remoteAddress: "127.0.0.1",
+    socketId: "unknown-outcome-pair-handler",
+  });
+
+  await direct.handleLocklessMessage(socket, {
+    id: "rq_unknown_outcome_pair_handler",
+    op: "pair.request",
+    payload: {
+      controllerInstanceId: "openclaw",
+      controllerProductName: "OpenClaw",
+      projectionCapacityBytes: 5 * 1024 * 1024,
+      protocolFeatures: [SURF_ACE_LOCKLESS_V1_CAPABILITY],
+      protocolVersion: 1,
+      surfaceId: surface.surfaceId,
+    },
+    sentAt: Date.now(),
+    type: "request",
+    v: 1,
+  });
+
+  assert.equal(core.isAdmissionFailStopped(), true);
+  assert.equal(core.getPersistentState().nextAdmissionAttemptSequence, before + 1);
+  assert.equal(responses.length, 1, JSON.stringify(responses));
+  assert.equal(responses[0]!.op, "pair.request");
+  assert.equal(responses[0]!.ok, false, JSON.stringify(responses[0]));
+  assert.equal(responses[0]!.error?.code, "internal_error");
+  assert.match(responses[0]!.error?.message ?? "", /commit outcome is unknown/);
 });
 
 test("a second pair.request while fail-stopped is answered, not left hanging", async () => {

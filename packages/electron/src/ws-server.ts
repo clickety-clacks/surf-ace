@@ -94,6 +94,25 @@ import {
 } from "./lockless-client-authority.js";
 import { PersistentStateOutcomeUnknownError, PersistentStateWriteGuardError } from "./persistent-state-file.js";
 
+function normalizeUnknownPersistenceOutcome(error: unknown): PersistentStateOutcomeUnknownError | null {
+  if (error instanceof PersistentStateOutcomeUnknownError) return error;
+  if (typeof error !== "object" || error === null ||
+      (error as { name?: unknown }).name !== "PersistentStateOutcomeUnknownError") {
+    return null;
+  }
+
+  // Some persistence adapters cross a module boundary and report the stable
+  // error name without sharing this module's constructor identity. Normalize
+  // that outcome once so every caller takes the same fail-stop path.
+  const acceptedSha256 = (error as { acceptedSha256?: unknown }).acceptedSha256;
+  return new PersistentStateOutcomeUnknownError(
+    error,
+    typeof acceptedSha256 === "string" || acceptedSha256 === null
+      ? acceptedSha256
+      : undefined,
+  );
+}
+
 type SocketCacheEntry = {
   payloadHash: string;
   response: Response;
@@ -165,7 +184,6 @@ const DEFAULT_DRAWING_FLUSH_CONFIG: DrawingFlushConfig = {
 };
 const DEFAULT_LIMITS = {
   maxDrawingFlushBytes: 2 * 1024 * 1024,
-  maxFrameBytes: 10 * 1024 * 1024,
   maxMessageBytes: 12 * 1024 * 1024,
   maxStrokePointsPerFlush: 8192,
   maxVisibleTextBytes: 4096,
@@ -274,6 +292,7 @@ export class SurfaceWsServer {
   private readonly httpServer: http.Server;
   private readonly wss: WebSocketServer;
   private readonly socketMeta = new WeakMap<WebSocket, SocketMeta>();
+  private readonly closedSockets = new WeakSet<WebSocket>();
   private readonly locklessSessions = new Map<WebSocket, LocklessTransportSession>();
   private readonly mutationQueues = new Map<string, Promise<void>>();
   private nativePaneStatusRefresh: Promise<CompositorControlResponse | null> | null = null;
@@ -317,8 +336,10 @@ export class SurfaceWsServer {
       try {
         await persistLocklessState();
       } catch (error) {
-        if (error instanceof PersistentStateOutcomeUnknownError) {
-          this.failStopPersistence(error);
+        const unknownOutcome = normalizeUnknownPersistenceOutcome(error);
+        if (unknownOutcome) {
+          this.failStopPersistence(unknownOutcome);
+          throw unknownOutcome;
         }
         throw error;
       }
@@ -338,7 +359,10 @@ export class SurfaceWsServer {
       response.writeHead(404);
       response.end();
     });
-    this.wss = new WebSocketServer({ noServer: true });
+    this.wss = new WebSocketServer({
+      maxPayload: DEFAULT_LIMITS.maxMessageBytes,
+      noServer: true,
+    });
 
     this.httpServer.on("upgrade", (request, socket, head) => {
       if (request.url !== this.wsPath) {
@@ -742,8 +766,8 @@ export class SurfaceWsServer {
         scopeKind: "pane",
         triggerOperation,
       });
-      this.core.markLocklessAuthorityChanged(surfaceId);
       await this.persistLocklessState();
+      this.core.markLocklessAuthorityChanged(surfaceId, "committed");
       return appended;
     });
     if (record) {
@@ -795,8 +819,8 @@ export class SurfaceWsServer {
         scopeId,
         triggerOperation: "renderer.annotation_live",
       });
-      this.core.markLocklessAuthorityChanged(surfaceId);
       await this.persistLocklessState();
+      this.core.markLocklessAuthorityChanged(surfaceId, "committed");
       return updated;
     });
     if (record) {
@@ -890,7 +914,7 @@ export class SurfaceWsServer {
         return committed;
       },
     );
-    this.core.markLocklessAuthorityChanged(result.surfaceId);
+    this.core.markLocklessAuthorityChanged(result.surfaceId, "committed");
     return result;
   }
 
@@ -1389,13 +1413,29 @@ export class SurfaceWsServer {
       session &&
       locklessOperationMutates(request.op)
     ) {
+      const paneMutation = ["content.set", "content.append", "content.patch", "content.clear", "annotations.remove"]
+        .includes(request.op) && session.surfaceId !== null &&
+        Number.isInteger((request.payload as { paneId?: number }).paneId)
+        ? { surfaceId: session.surfaceId, paneId: (request.payload as { paneId: number }).paneId }
+        : null;
+      const rollbackPane = paneMutation
+        ? {
+            controllerInstanceId: session.controllerInstanceId,
+            paneId: paneMutation.paneId,
+            requestId: request.id,
+            surfaceId: paneMutation.surfaceId,
+          }
+        : undefined;
+      const onNotificationError = (error: unknown): void => {
+        persistentServerDiagnostic("warn", "lockless_mutation_notification_failed", {
+          operation: request.op,
+          request_id: request.id,
+          surface_id: session.surfaceId,
+          ...errorDiagnosticFields(error),
+        });
+      };
       try {
         response = await this.core.locklessAuthority.transactionAsync(async () => {
-          const paneMutation = ["content.set", "content.append", "content.patch", "content.clear", "annotations.remove"]
-            .includes(request.op) && session.surfaceId !== null &&
-            Number.isInteger((request.payload as { paneId?: number }).paneId)
-            ? { surfaceId: session.surfaceId, paneId: (request.payload as { paneId: number }).paneId }
-            : null;
           this.activePaneMutation = paneMutation;
           try {
             return await this.core.transactionAsync(async () => {
@@ -1463,19 +1503,8 @@ export class SurfaceWsServer {
             return response;
             }, {
               retainUncertainEvents: true,
-              onNotificationError: (error) => persistentServerDiagnostic(
-                "warn", "mutation_notification_failed", errorDiagnosticFields(error),
-              ),
-              ...(["target.register", "content.set", "content.append", "content.patch", "content.clear", "pane.rename"]
-                .includes(request.op) && session.surfaceId &&
-                  Number.isSafeInteger((request.payload as { paneId?: number }).paneId)
-                ? { rollbackPane: {
-                    controllerInstanceId: session.controllerInstanceId,
-                    paneId: Number((request.payload as { paneId: number }).paneId),
-                    requestId: request.id,
-                    surfaceId: session.surfaceId,
-                  } }
-                : {}),
+              onNotificationError,
+              ...(rollbackPane ? { rollbackPane } : {}),
             });
           } finally {
             this.activePaneMutation = null;
@@ -1914,6 +1943,7 @@ export class SurfaceWsServer {
     request: LocklessRequest,
   ): Promise<unknown> {
     if (request.op === "pair.request") {
+      this.assertPairSocketOpen(socket);
       if (this.locklessSessions.has(socket)) {
         throw new LocklessAuthorityError(
           "duplicate_controller_instance",
@@ -1951,6 +1981,7 @@ export class SurfaceWsServer {
         LocklessClientAuthority["admit"]
       >;
       try {
+        this.assertPairSocketOpen(socket);
         if (surfaceId && admissionAttempt) {
           // Durable witness (B2): stamped "started" through the same
           // serialized boundary, immediately before the paired operation
@@ -1962,6 +1993,7 @@ export class SurfaceWsServer {
               await this.persistLocklessState();
             },
           );
+          this.assertPairSocketOpen(socket);
           this.core.advanceSurfaceAdmissionAttempt(
             admissionAttempt.attemptSequence,
             "surface_lookup",
@@ -2009,6 +2041,21 @@ export class SurfaceWsServer {
                 );
               }
               await this.persistLocklessState();
+              if (!this.isPairSocketOpen(socket)) {
+                // A request can be admitted after its client has closed while
+                // this serialized transaction was waiting for local work or
+                // persistence. Persist the disconnected projection before
+                // aborting so a same-identity retry does not inherit a stale
+                // live connection token.
+                this.core.locklessAuthority.disconnect(
+                  request.payload.controllerInstanceId,
+                  connectionToken,
+                  connectionSlot,
+                );
+                this.core.markLocklessAuthorityChanged(surfaceId ?? undefined);
+                await this.persistLocklessState();
+                throw new Error("pair_request_socket_closed");
+              }
               return admitted;
             }),
         );
@@ -2333,14 +2380,22 @@ export class SurfaceWsServer {
               { currentTarget: current },
             );
           }
-          return this.core.transaction(() => ({
-            pane,
-            target: this.core.registerLocklessTarget(
-              request.payload.surfaceId,
-              Number(pane.paneId),
-              request.payload,
-            ),
-          }));
+          const rollback = this.core.captureSurfaceMutationRollback(
+            request.payload.surfaceId,
+          );
+          try {
+            return this.core.transaction(() => {
+              const target = this.core.registerLocklessTarget(
+                request.payload.surfaceId,
+                Number(pane.paneId),
+                request.payload,
+              );
+              return { pane, target };
+            });
+          } catch (error) {
+            rollback();
+            throw error;
+          }
         },
       );
       return locklessSuccess(request, {
@@ -2546,13 +2601,24 @@ export class SurfaceWsServer {
     this.requireLocklessSurface(surfaceId);
 
     if (request.op === "content.set") {
-      const commit = await this.runSurfaceMutation(surfaceId, () =>
-        this.core.transaction(() => this.core.locklessContentPush(
+      const commit = await this.runSurfaceMutation(surfaceId, () => {
+        const rollbackPane = this.core.capturePaneMutationRollback(
           surfaceId,
-          request.payload,
-          session.controllerProductName,
-        )),
-      );
+          Number(request.payload.paneId),
+        );
+        try {
+          return this.core.transaction(() => {
+            return this.core.locklessContentPush(
+              surfaceId,
+              request.payload,
+              session.controllerProductName,
+            );
+          });
+        } catch (error) {
+          rollbackPane();
+          throw error;
+        }
+      });
       const scopeId = locklessPaneScopeId(surfaceId, commit.paneId);
       const record = this.core.locklessAuthority.appendConsumable({
         payload: { ...commit, surfaceId },
@@ -2582,6 +2648,10 @@ export class SurfaceWsServer {
       request.op === "content.clear"
     ) {
       const result = await this.runSurfaceMutation(surfaceId, () => {
+        const rollbackPane = this.core.capturePaneMutationRollback(
+          surfaceId,
+          Number(request.payload.paneId),
+        );
         const paneSummary = this.core
           .pairState(surfaceId)
           .panes.find(
@@ -2602,29 +2672,34 @@ export class SurfaceWsServer {
             },
           );
         }
-        return this.core.transaction(() => {
-          const revision = request.payload.expectedRevision + 1;
-          const committed =
-            request.op === "content.append"
-              ? this.core.contentAppend(surfaceId, {
-                  contentId: request.payload.contentId as never,
-                  lines: request.payload.lines,
-                  paneId: request.payload.paneId as never,
-                  revision: revision as never,
-                })
-              : request.op === "content.patch"
-                ? this.core.contentPatch(surfaceId, {
+        try {
+          return this.core.transaction(() => {
+            const revision = request.payload.expectedRevision + 1;
+            const committed =
+              request.op === "content.append"
+                ? this.core.contentAppend(surfaceId, {
                     contentId: request.payload.contentId as never,
+                    lines: request.payload.lines,
                     paneId: request.payload.paneId as never,
-                    patch: request.payload.patch,
                     revision: revision as never,
                   })
-                : this.core.contentClear(surfaceId, {
-                    paneId: request.payload.paneId as never,
-                    revision: revision as never,
-                  });
-          return committed;
-        });
+                : request.op === "content.patch"
+                  ? this.core.contentPatch(surfaceId, {
+                      contentId: request.payload.contentId as never,
+                      paneId: request.payload.paneId as never,
+                      patch: request.payload.patch,
+                      revision: revision as never,
+                    })
+                  : this.core.contentClear(surfaceId, {
+                      paneId: request.payload.paneId as never,
+                      revision: revision as never,
+                    });
+            return committed;
+          });
+        } catch (error) {
+          rollbackPane();
+          throw error;
+        }
       });
       const scopeId = locklessPaneScopeId(
         surfaceId,
@@ -2653,9 +2728,11 @@ export class SurfaceWsServer {
             Number(topology.topologyRevision),
             topology,
           );
+          const currentCount = topology.panes.length;
+          const prospectiveCount = currentCount - 1 + request.payload.count;
           this.core.locklessAuthority.assertPaneCreationCapacity(
-            topology.panes.length,
-            topology.panes.length - 1 + request.payload.count,
+            currentCount,
+            prospectiveCount,
           );
           const newPaneIds: number[] = [];
           const newPaneLabels: number[] = [];
@@ -2767,20 +2844,27 @@ export class SurfaceWsServer {
 
     if (request.op === "pane.rename") {
       const result = await this.runSurfaceMutation(surfaceId, () => {
-        return this.core.transaction(() => {
-          const topology = this.core.topologyState(surfaceId);
-          this.core.locklessAuthority.assertTopologyRevision(
-            request.payload.expectedTopologyRevision,
-            Number(topology.topologyRevision),
-            topology,
-          );
-          const committed = this.core.locklessPaneRename(
-            surfaceId,
-            request.payload.paneId,
-            request.payload.name,
-          );
-          return committed;
-        });
+        const rollbackSurface =
+          this.core.captureSurfaceMutationRollback(surfaceId);
+        try {
+          return this.core.transaction(() => {
+            const topology = this.core.topologyState(surfaceId);
+            this.core.locklessAuthority.assertTopologyRevision(
+              request.payload.expectedTopologyRevision,
+              Number(topology.topologyRevision),
+              topology,
+            );
+            const committed = this.core.locklessPaneRename(
+              surfaceId,
+              request.payload.paneId,
+              request.payload.name,
+            );
+            return committed;
+          });
+        } catch (error) {
+          rollbackSurface();
+          throw error;
+        }
       });
       this.core.markLocklessAuthorityChanged(surfaceId);
       return locklessSuccess(request, result);
@@ -2919,7 +3003,7 @@ export class SurfaceWsServer {
       const existing = new Map(
         current.panes.map((pane) => [Number(pane.paneId), pane]),
       );
-      // Count creation intent before allocating any identity or registry label.
+      // Check pane creation before reserving new identities or allocator labels.
       const prospectiveIds = new Set(existing.keys());
       if ("root" in request.payload.target) prospectiveIds.clear();
       else {
@@ -3379,8 +3463,13 @@ export class SurfaceWsServer {
     }
     if (!lease) {
       limitationCodes.push("endpoint_lease_unavailable");
-    } else if (lease.leaseGeneration !== request.payload.endpointLeaseGeneration) {
-      limitationCodes.push("endpoint_lease_stale");
+    } else {
+      if (observedAtMs >= lease.leaseExpiresAtMs) {
+        limitationCodes.push("endpoint_lease_expired");
+      }
+      if (lease.leaseGeneration !== request.payload.endpointLeaseGeneration) {
+        limitationCodes.push("endpoint_lease_stale");
+      }
     }
     type DescribePane = {
       paneId: number;
@@ -4310,11 +4399,10 @@ export class SurfaceWsServer {
         try {
           return {
             payload: this.core.transaction(() => {
-              const payload = this.core.targetApply(
+              return this.core.targetApply(
                 surfaceId,
                 request.payload,
               );
-              return payload;
             }),
           };
         } catch (error) {
@@ -5802,6 +5890,7 @@ export class SurfaceWsServer {
   }
 
   private handleSocketClosed(socket: WebSocket): void {
+    this.closedSockets.add(socket);
     const locklessSession = this.locklessSessions.get(socket);
     if (locklessSession) {
       this.locklessSessions.delete(socket);
@@ -5818,6 +5907,14 @@ export class SurfaceWsServer {
       }).catch(() => {});
       return;
     }
+  }
+
+  private isPairSocketOpen(socket: WebSocket): boolean {
+    return !this.closedSockets.has(socket) && socket.readyState === WebSocket.OPEN;
+  }
+
+  private assertPairSocketOpen(socket: WebSocket): void {
+    if (!this.isPairSocketOpen(socket)) throw new Error("pair_request_socket_closed");
   }
 
   async completeDirectAnnotation(surfaceId: string, paneId: number): Promise<boolean> {

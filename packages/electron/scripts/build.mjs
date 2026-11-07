@@ -33,6 +33,7 @@ await build({
     path.join(srcDir, "guest-preload.ts"),
     path.join(srcDir, "main.ts"),
     path.join(srcDir, "preload.ts"),
+    path.join(srcDir, "quit-lifecycle.ts"),
   ],
   external: ["electron"],
   format: "cjs",
@@ -93,6 +94,8 @@ await build({
     path.join(rootDir, "test", "window-options.test.ts"),
     path.join(rootDir, "test", "window-placement.test.ts"),
     path.join(rootDir, "test", "window-close-lifecycle.test.ts"),
+    path.join(rootDir, "test", "quit-lifecycle-watchdog-child.ts"),
+    path.join(rootDir, "test", "quit-lifecycle.test.ts"),
   ],
   external: [
     "@surf-ace/protocol",
