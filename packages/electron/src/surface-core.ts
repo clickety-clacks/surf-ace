@@ -613,7 +613,7 @@ function compactedAdmissionAttemptLedgerForCandidate(
 export type AdmissionRecoveryEvidence = {
   attemptSequence: number;
   requestId: string;
-  outcome: "succeeded" | "failed" | "never_began";
+  outcome: "succeeded" | "failed" | "never_began" | "interrupted";
   reason?: string;
   reasonCode?: string;
 };
@@ -629,8 +629,10 @@ export type AdmissionRecoveryPlan = {
 };
 
 const ADMISSION_RECOVERY_INTERRUPTED_REASON_CODE = "admission_interrupted";
-const ADMISSION_RECOVERY_INTERRUPTED_REASON =
+const ADMISSION_RECOVERY_NEVER_BEGAN_REASON =
   "Paired operation never began before the admission attempt was interrupted";
+const ADMISSION_RECOVERY_INTERRUPTED_REASON =
+  "No durable successful admission commit was present when this interrupted attempt was recovered";
 
 /**
  * Decide, for every pending row, whether durable evidence determines its
@@ -639,8 +641,10 @@ const ADMISSION_RECOVERY_INTERRUPTED_REASON =
  *
  * Conflict is never broken by precedence. Two authoritative classes for one
  * row stay indeterminate: choosing by record order, timestamp, or arrival
- * would invent an outcome the evidence does not support, and a pending
- * admission row is the only trace that an operation may already have happened.
+ * would invent an outcome the evidence does not support. A started witness by
+ * itself is not enough to infer success or failure; the caller may provide an
+ * interrupted outcome only when the accepted durable state proves no
+ * successful admission commit exists after reload.
  */
 export function planAdmissionRecovery(
   attempts: PersistentSurfaceAdmissionAttempt[],
@@ -682,6 +686,15 @@ export function planAdmissionRecovery(
         reasonCode: boundedAdmissionReasonCode(
           record?.reasonCode ?? "operation_failed",
         ),
+      });
+      continue;
+    }
+    if (only === "never_began") {
+      plan.terminalize.push({
+        attemptSequence: row.attemptSequence,
+        outcome: "failed",
+        reason: ADMISSION_RECOVERY_NEVER_BEGAN_REASON,
+        reasonCode: ADMISSION_RECOVERY_INTERRUPTED_REASON_CODE,
       });
       continue;
     }
@@ -1436,8 +1449,10 @@ export class SurfaceCore {
    * Durably transition a candidate's witness from "not_started" to "started",
    * immediately before the paired operation executes, through the SAME
    * serialized admission boundary that created the row. Until this commits,
-   * a crash proves the operation never began; after it commits, a crash
-   * proves only that the outcome is unknown, never that it did not happen.
+   * a crash proves the operation never began; after it commits, the witness
+   * alone proves only that the operation may have begun. A reloaded pending
+   * row can be resolved as uncommitted only when the accepted state generation
+   * also proves no successful admission commit was persisted.
    */
   async markSurfaceAdmissionAttemptStarted(
     attemptSequence: number,
@@ -1544,6 +1559,7 @@ export class SurfaceCore {
    */
   private deriveAdmissionRecoveryEvidence(): AdmissionRecoveryEvidence[] {
     const byRequestId = new Map<string, AdmissionRecoveryEvidence["outcome"][]>();
+    const pendingReceiptRequestIds = new Set<string>();
     for (
       const controller of Object.values(
         this.locklessAuthority.exportState().controllers ?? {},
@@ -1553,6 +1569,7 @@ export class SurfaceCore {
         const receipt of Object.values(controller.pendingOperationReceipts ?? {})
       ) {
         if (receipt.status === "pending") {
+          pendingReceiptRequestIds.add(receipt.requestId);
           continue;
         }
         const outcome = receipt.outcome === "resolved_success"
@@ -1568,6 +1585,18 @@ export class SurfaceCore {
       if (attempt.outcome !== "pending") {
         continue;
       }
+      // Recovery runs during ordinary admission calls as well as after a
+      // reload. An active attempt is not interrupted merely because its
+      // current witness precedes the operation's durable commit.
+      if (this.inFlightAdmissionSequences.has(attempt.attemptSequence)) {
+        continue;
+      }
+      // A pending receipt is explicitly inconclusive. Do not infer an
+      // interrupted admission from the absence of a terminal receipt while
+      // another durable write for this request is still pending.
+      if (pendingReceiptRequestIds.has(attempt.requestId)) {
+        continue;
+      }
       const receipts = byRequestId.get(attempt.requestId) ?? [];
       for (const outcome of receipts) {
         evidence.push({
@@ -1581,13 +1610,29 @@ export class SurfaceCore {
       }
       // Never-began evidence (B2): authoritative ONLY for an explicit
       // "not_started" witness. A row with no witness (legacy/absent state,
-      // predating this field) or witness "started" stays indeterminate here,
-      // exactly as it did before this field existed — absence of a record is
+      // predating this field) stays indeterminate — absence of a record is
       // never treated as a record.
       if (attempt.witness === "not_started") {
         evidence.push({
           attemptSequence: attempt.attemptSequence,
           outcome: "never_began",
+          requestId: attempt.requestId,
+        });
+        continue;
+      }
+      // A loaded accepted generation cannot contain a successful admission
+      // while this row remains pending: the pair request persists its surface
+      // admission and terminal success together in one state commit. After a
+      // process restart no in-memory attempt can still own this sequence, so
+      // a started row with no terminal/pending receipt is an interrupted,
+      // uncommitted admission. This does not claim the operation never ran in
+      // memory; it records only that no successful admission was durably
+      // committed. Rows with legacy witnesses, active work, or pending receipt
+      // evidence remain unresolved.
+      if (attempt.witness === "started") {
+        evidence.push({
+          attemptSequence: attempt.attemptSequence,
+          outcome: "interrupted",
           requestId: attempt.requestId,
         });
       }
