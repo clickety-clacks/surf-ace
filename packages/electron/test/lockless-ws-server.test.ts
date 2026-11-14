@@ -6531,31 +6531,49 @@ async function admitOneStartedNoReceiptOwner(
 }
 
 test("real socket-path: a not_started candidate survives a fresh reload, recovers as never-began, and admission resumes", async () => {
-  const { attempt } = await admitOneNotStartedOwner("solo-a");
-  const reloaded = new SurfaceCore({
-    persistentState: {
-      admissionAttempts: [attempt],
-      nextAdmissionAttemptSequence: attempt.attemptSequence + 1,
-      primarySurfaceId: null,
-      version: 1,
+  const { attempt, state } = await admitOneNotStartedOwner("solo-a");
+  const reloaded = new SurfaceCore({ persistentState: state });
+  const [restoredSurface] = reloaded.restorePersistedSurfaces("Recovered admission", {
+    height: 800, scale: 2, width: 1200,
+  });
+  assert(restoredSurface, "the durable surface is restored before the next paired request");
+
+  const persistedStates: Array<ReturnType<SurfaceCore["getPersistentState"]>> = [];
+  const port = nextPort++;
+  const server = new SurfaceWsServer({
+    capturePaneImage: async () => null,
+    compositorSocketPath: null,
+    core: reloaded,
+    endpointName: "Surf Ace",
+    hostName: "localhost",
+    port,
+    persistLocklessState: async () => {
+      persistedStates.push(reloaded.getPersistentState());
     },
+    viewport: () => ({ height: 800, scale: 2, width: 1200 }),
   });
-  const admitted = reloaded.beginSurfaceAdmissionAttempt({
-    controllerInstanceId: "controller_after_never_began",
-    requestId: "rq_after_never_began",
-    surfaceId: "sf_other0aaaaa",
-  });
-  assert(admitted.attemptSequence > 0);
-  const recovered = reloaded
-    .listSurfaceAdmissionAttempts()
-    .find((row) => row.attemptSequence === attempt.attemptSequence);
-  assert.equal(recovered?.outcome, "failed");
-  // The only remaining pending row is the NEW candidate itself, still
-  // in-flight from this call; the never-began row is gone from that list.
-  assert.deepEqual(
-    reloaded.listUnresolvedSurfaceAdmissionAttempts(),
-    [admitted.attemptSequence],
-  );
+  await server.start();
+  const socket = await connect(`ws://127.0.0.1:${port}${server.wsPath}`);
+  try {
+    const paired = await pair(socket, "controller_after_never_began", restoredSurface.surfaceId);
+    assert.equal(paired.ok, true, JSON.stringify(paired));
+    const recovered = reloaded
+      .listSurfaceAdmissionAttempts()
+      .find((row) => row.attemptSequence === attempt.attemptSequence);
+    assert.equal(recovered?.outcome, "failed");
+    assert.equal(recovered?.reasonCode, "admission_interrupted");
+    assert.deepEqual(reloaded.listUnresolvedSurfaceAdmissionAttempts(), [],
+      "relaunch recovery resolves the durable not_started row without editing the saved ledger");
+    assert.equal(reloaded.getRendererWindowState(restoredSurface.surfaceId).panes.length, 1,
+      "the restored pane identity remains available after admission resumes");
+    const savedAfterAdmission = persistedStates.at(-1);
+    assert(savedAfterAdmission);
+    assert.equal(savedAfterAdmission.surfaces?.find((entry) => entry.surfaceId === restoredSurface.surfaceId)?.panes[0]?.paneId,
+      1);
+  } finally {
+    socket.close();
+    await server.stop();
+  }
 });
 
 test("real socket-path: a started-without-receipt candidate survives a fresh reload as indeterminate and blocks admission", async () => {

@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { WebSocketServer, WebSocket } from "ws";
 import type { Revision } from "../../protocol/src/index.js";
+import { SURF_ACE_LOCKLESS_V1_CAPABILITY } from "../../protocol/src/lockless.js";
 import { REGISTRATION_CYCLE_TIMEOUT_MS, ServerConnection } from "../src/server-connection.js";
 import { ConfiguredServerRegistration } from "../src/configured-server.js";
 import { matchesProvisionedClaims } from "../src/registry-binding.js";
@@ -475,6 +476,211 @@ async function automaticRegistryFixture(options: {
     },
   };
 }
+
+let surfaceRequestSequence = 0;
+
+function surfaceRequest(
+  socket: WebSocket,
+  op: string,
+  payload: Record<string, unknown>,
+): Promise<Record<string, any>> {
+  const id = `rq_surface_reentrant_${++surfaceRequestSequence}`;
+  return new Promise((resolve, reject) => {
+    const cleanup = (): void => {
+      clearTimeout(timeout);
+      socket.off("message", onMessage);
+      socket.off("error", onError);
+    };
+    const onMessage = (raw: WebSocket.RawData): void => {
+      const message = JSON.parse(String(raw)) as Record<string, any>;
+      if (message.type !== "response" || message.id !== id) return;
+      cleanup();
+      resolve(message);
+    };
+    const onError = (error: Error): void => {
+      cleanup();
+      reject(error);
+    };
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error(`${op} timed out`));
+    }, 4_000);
+    socket.on("message", onMessage);
+    socket.on("error", onError);
+    socket.send(JSON.stringify({ id, op, payload, sentAt: Date.now(), type: "request", v: 1 }));
+  });
+}
+
+test("pane.split label claim reenters authority, leaves the request queue usable, and permits registry refresh", async () => {
+  const portProbe = createServer();
+  await new Promise<void>((resolve, reject) => {
+    portProbe.once("error", reject);
+    portProbe.listen(0, "127.0.0.1", resolve);
+  });
+  const controlPort = (portProbe.address() as AddressInfo).port;
+  await new Promise<void>((resolve, reject) => {
+    portProbe.close((error) => error ? reject(error) : resolve());
+  });
+  const directEndpoint = `ws://127.0.0.1:${controlPort}/ws`;
+  let leaseGeneration = 0;
+  const registry = await automaticRegistryFixture({
+    paneClaimReply: (payload) => ({
+      allocationGeneration: Number(payload.paneId) + 100,
+      paneLabel: Number(payload.paneId) + 700,
+    }),
+    transformRegistrationReply: (reply) => {
+      const observedAt = Date.now();
+      return {
+        ...reply,
+        directEndpoint,
+        prePairDescribeV1: true,
+        endpointLease: {
+          leaseGeneration: ++leaseGeneration,
+          registrationObservedAtMs: observedAt,
+          leaseExpiresAtMs: observedAt + 60_000,
+        },
+      };
+    },
+  });
+  const clientId = "reentrant-split-registration-client";
+  const core = new SurfaceCore({ clientIdentity: clientId });
+  const surface = core.ensurePrimarySurface("Reentrant split recovery", {
+    height: 600, scale: 1, width: 800,
+  });
+  const persistenceReadiness = new PersistenceWriteReadiness();
+  const persistedStates: unknown[] = [];
+  const registrationErrors: string[] = [];
+  const persist = async (): Promise<void> => {
+    await persistenceReadiness.track(async () => {
+      persistedStates.push(structuredClone(core.getPersistentState()));
+    });
+  };
+  const connection = new ServerConnection({
+    canPersistRegistration: () => persistenceReadiness.isReady,
+    clientId,
+    configuredAddress: registry.address,
+    core,
+    directEndpoint,
+    discovery: emptyDiscovery(),
+    onError: (error) => registrationErrors.push(error instanceof Error ? error.message : String(error)),
+    persist,
+  });
+  const releaseClaim = deferred();
+  let labelClaimStarted = false;
+  let surfaceServer: SurfaceWsServer | null = null;
+  let controlSocket: WebSocket | null = null;
+
+  try {
+    surfaceServer = new SurfaceWsServer({
+      beginApplicationStateMutation: () => persistenceReadiness.beginAuthorityMutation(),
+      bindAddress: "127.0.0.1",
+      capturePaneImage: async () => null,
+      claimPaneLabel: async (surfaceId, paneId, paneLineageId) => {
+        labelClaimStarted = true;
+        await releaseClaim.promise;
+        return await connection.claimPaneLabel(surfaceId, paneId, paneLineageId);
+      },
+      clientId,
+      compositorSocketPath: null,
+      core,
+      endpointName: "Surf Ace split transaction fixture",
+      hostName: "localhost",
+      isApplicationStateReady: () => persistenceReadiness.isReady,
+      persistLocklessState: persist,
+      port: controlPort,
+      preparePaneLabelClaim: () => connection.preparePaneLabelClaim(),
+      viewport: () => ({ height: 600, scale: 1, width: 800 }),
+    });
+    await surfaceServer.start();
+    assert(registry.server.address());
+    const registryProbe = new WebSocket(registry.address);
+    await new Promise<void>((resolve, reject) => {
+      registryProbe.once("open", resolve);
+      registryProbe.once("error", reject);
+    });
+    registryProbe.close();
+    await connection.synchronize();
+    assert.equal(core.registryEndpointLease()?.leaseGeneration, 1);
+    connection.start();
+    await until(() => core.registryEndpointLease()?.leaseGeneration === 2 &&
+      registry.requests.filter(({ message }) => message.op === "client.register").length === 2, 5_000);
+
+    controlSocket = new WebSocket(directEndpoint);
+    await new Promise<void>((resolve, reject) => {
+      controlSocket!.once("open", resolve);
+      controlSocket!.once("error", reject);
+    });
+    const paired = await surfaceRequest(controlSocket, "pair.request", {
+      controllerInstanceId: "controller_reentrant_split",
+      controllerProductName: "OpenClaw",
+      projectionCapacityBytes: 5 * 1024 * 1024,
+      protocolFeatures: [SURF_ACE_LOCKLESS_V1_CAPABILITY],
+      protocolVersion: 1,
+      surfaceId: surface.surfaceId,
+    });
+    assert.equal(paired.ok, true, JSON.stringify(paired));
+
+    const before = await surfaceRequest(controlSocket, "panes.list", { surfaceId: surface.surfaceId });
+    assert.equal(before.ok, true, JSON.stringify(before));
+    const initialTopologyRevision = Number(before.payload.topology.topologyRevision);
+    const split = surfaceRequest(controlSocket, "pane.split", {
+      count: 2,
+      direction: "vertical",
+      expectedTopologyRevision: initialTopologyRevision,
+      paneId: Number(before.payload.panes[0].paneId),
+      surfaceId: surface.surfaceId,
+    });
+    await until(() => labelClaimStarted, 4_000);
+    assert.equal(persistenceReadiness.isReady, false,
+      "the ordinary mutation readiness gate stays closed while the registry label claim is outstanding");
+
+    const concurrentList = surfaceRequest(controlSocket, "panes.list", { surfaceId: surface.surfaceId });
+    await until(() => registrationErrors.includes("registry_registration_waiting_for_local_persistence"), 5_000);
+    assert.equal(registry.requests.filter(({ message }) => message.op === "client.register").length, 2,
+      "registration waits at the existing readiness gate rather than sending client.register during a mutation");
+
+    releaseClaim.resolve();
+    const splitResponse = await split;
+    assert.equal(splitResponse.ok, true, JSON.stringify(splitResponse));
+    const listResponse = await concurrentList;
+    assert.equal(listResponse.ok, true, JSON.stringify(listResponse));
+    assert.equal(listResponse.payload.panes.length, 2,
+      "the queued request is served with the committed split after the nested claim completes");
+    assert.equal(persistenceReadiness.isReady, true,
+      "the split releases its application-state mutation readiness gate");
+
+    const staleSplit = await surfaceRequest(controlSocket, "pane.split", {
+      count: 2,
+      direction: "vertical",
+      expectedTopologyRevision: initialTopologyRevision,
+      paneId: Number(listResponse.payload.panes[0].paneId),
+      surfaceId: surface.surfaceId,
+    });
+    assert.equal(staleSplit.ok, false, JSON.stringify(staleSplit));
+    assert.equal(staleSplit.error.code, "stale_topology",
+      "a rejected stale split returns a usable topology error");
+    const afterError = await surfaceRequest(controlSocket, "panes.list", { surfaceId: surface.surfaceId });
+    assert.equal(afterError.ok, true, JSON.stringify(afterError),
+      "a usable split error does not leave later controller requests blocked");
+
+    await until(() => registry.requests.filter(({ message }) => message.op === "client.register").length >= 3 &&
+      core.registryEndpointLease()?.leaseGeneration >= 3, 5_000);
+    assert.equal(persistenceReadiness.isReady, true);
+    assert.ok(persistedStates.length > 0, "accepted generations were persisted");
+    const saved = persistedStates.at(-1) as ReturnType<SurfaceCore["getPersistentState"]>;
+    const savedSurface = saved.surfaces?.find((entry) => entry.surfaceId === surface.surfaceId);
+    assert.equal(savedSurface?.panes.length, 2,
+      "the persisted post-split state retains both pane identities for restart recovery");
+    assert.equal(core.registryEndpointLease()?.leaseGeneration, 3,
+      "the normal registration tick refreshes the lease after the split releases the readiness gate");
+  } finally {
+    releaseClaim.resolve();
+    controlSocket?.close();
+    await surfaceServer?.stop();
+    await connection.stop();
+    await registry.close();
+  }
+});
 
 function closeSurfaceWithAllocatedLabels(
   core: SurfaceCore,
