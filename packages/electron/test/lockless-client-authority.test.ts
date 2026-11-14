@@ -1300,6 +1300,51 @@ test("AC-OPS-01: restart restores limits modes controller bundles consumable sco
   assert.equal("audit" in restored.exportState(), false);
 });
 
+test("nested authority transactions reuse the active queue while independent work stays serialized", async () => {
+  const target = authority();
+  const order: string[] = [];
+  let releaseOuter!: () => void;
+  let markOuterHeld!: () => void;
+  const outerGate = new Promise<void>((resolve) => { releaseOuter = resolve; });
+  const outerHeld = new Promise<void>((resolve) => { markOuterHeld = resolve; });
+
+  const outer = target.transactionAsync(async () => {
+    order.push("outer-start");
+    await target.transactionAsync(async () => {
+      order.push("nested");
+    });
+    order.push("outer-held");
+    markOuterHeld();
+    await outerGate;
+    order.push("outer-end");
+  });
+
+  try {
+    let nestedTimeout: ReturnType<typeof setTimeout> | undefined;
+    const nestedCompleted = await Promise.race([
+      outerHeld.then(() => true),
+      new Promise<boolean>((resolve) => {
+        nestedTimeout = setTimeout(() => resolve(false), 1000);
+      }),
+    ]);
+    clearTimeout(nestedTimeout);
+    assert.equal(nestedCompleted, true, "nested work must not queue behind the transaction awaiting it");
+
+    const independent = target.transactionAsync(async () => {
+      order.push("independent");
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.deepEqual(order, ["outer-start", "nested", "outer-held"],
+      "work from outside the active async context remains behind the outer transaction");
+
+    releaseOuter();
+    await Promise.all([outer, independent]);
+    assert.deepEqual(order, ["outer-start", "nested", "outer-held", "outer-end", "independent"]);
+  } finally {
+    releaseOuter();
+  }
+});
+
 test("authority FIFO isolates persisted work, ordinary mutations, failure rollback, and restart", async () => {
   const target = authority();
   admit(target, "controller-a");

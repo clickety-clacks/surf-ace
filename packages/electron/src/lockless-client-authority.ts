@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 
 import {
   SURF_ACE_LOCKLESS_V1_CAPABILITY,
@@ -644,6 +645,8 @@ export type OrdinaryMutationRollback = {
 
 export class LocklessClientAuthority {
   private authorityWorkTail: Promise<void> = Promise.resolve();
+  private readonly transactionContext = new AsyncLocalStorage<object>();
+  private activeAsyncTransaction: object | null = null;
   private readonly connectionTokens = new Map<
     string,
     Map<string, string>
@@ -728,8 +731,21 @@ export class LocklessClientAuthority {
     committed?: { onNotificationError: (error: unknown) => void },
     stateRollback: "authority" | "enclosing-core" = "authority",
   ): Promise<T> {
+    if (this.activeAsyncTransaction !== null &&
+        this.transactionContext.getStore() === this.activeAsyncTransaction) {
+      // Nested authority work is part of the active transaction. Re-entering
+      // the serialized queue here would wait behind the operation awaiting it.
+      return await operation();
+    }
     return await this.serializeAuthorityWork(async () => {
-      return await this.transactionAsyncExclusive(operation, committed, stateRollback);
+      const token = {};
+      this.activeAsyncTransaction = token;
+      try {
+        return await this.transactionContext.run(token, () =>
+          this.transactionAsyncExclusive(operation, committed, stateRollback));
+      } finally {
+        this.activeAsyncTransaction = null;
+      }
     });
   }
 

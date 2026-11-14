@@ -3844,6 +3844,101 @@ const coreWithPending = (count: number) =>
     },
   });
 
+test("a reloaded started admission without a durable terminal receipt recovers as interrupted", () => {
+  const attempt = {
+    ...pendingLedger(1)[0]!,
+    witness: "started" as const,
+  };
+  const core = new SurfaceCore({
+    persistentState: {
+      admissionAttempts: [attempt],
+      nextAdmissionAttemptSequence: 2,
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+
+  const plan = core.recoverPendingSurfaceAdmissionAttempts();
+  assert.deepEqual(plan.terminalize, [{
+    attemptSequence: 1,
+    outcome: "failed",
+    reason: "No durable successful admission commit was present when this interrupted attempt was recovered",
+    reasonCode: "admission_interrupted",
+  }]);
+  assert.deepEqual(plan.unresolved, []);
+  const recovered = core.listSurfaceAdmissionAttempts()[0];
+  assert.equal(recovered?.outcome, "failed");
+  assert.equal(recovered?.witness, "started");
+  assert.deepEqual(core.listUnresolvedSurfaceAdmissionAttempts(), []);
+});
+
+test("an in-flight admission is not recovered from its pre-commit witness", () => {
+  const core = new SurfaceCore();
+  const active = core.beginSurfaceAdmissionAttempt({
+    controllerInstanceId: "controller_active",
+    requestId: "rq_active",
+    surfaceId: "sf_active",
+  });
+
+  const plan = core.recoverPendingSurfaceAdmissionAttempts();
+  assert.deepEqual(plan.terminalize, []);
+  assert.deepEqual(plan.unresolved, [active.attemptSequence]);
+  assert.equal(
+    core.surfaceAdmissionAttempt(active.attemptSequence).outcome,
+    "pending",
+  );
+  assert.equal(
+    core.surfaceAdmissionAttempt(active.attemptSequence).witness,
+    "not_started",
+  );
+});
+
+test("a matching pending operation receipt keeps a started admission unresolved", () => {
+  const attempt = {
+    ...pendingLedger(1)[0]!,
+    witness: "started" as const,
+  };
+  const lockless = createEmptyLocklessClientState();
+  const receiptFields = {
+    operation: "pair.request",
+    requestId: attempt.requestId,
+    status: "pending" as const,
+  };
+  const receiptWithBytes = (bytes: number) => ({ bytes, ...receiptFields });
+  let bytes = 0;
+  for (let pass = 0; pass < 6; pass += 1) {
+    bytes = Buffer.byteLength(
+      JSON.stringify({ version: 1, ...receiptWithBytes(bytes) }),
+      "utf8",
+    );
+  }
+  (lockless as any).controllers["ctl_pending_admission_receipt"] = {
+    controllerInstanceId: "ctl_pending_admission_receipt",
+    controllerProductName: null,
+    disconnectedAt: null,
+    dormantSequence: null,
+    pendingOperationReceipts: {
+      [attempt.requestId]: receiptWithBytes(bytes),
+    },
+    projectionCapacityBytes: 1024,
+    status: "dormant",
+  };
+  const core = new SurfaceCore({
+    persistentState: {
+      admissionAttempts: [attempt],
+      lockless,
+      nextAdmissionAttemptSequence: 2,
+      primarySurfaceId: null,
+      version: 1,
+    },
+  });
+
+  const plan = core.recoverPendingSurfaceAdmissionAttempts();
+  assert.deepEqual(plan.terminalize, []);
+  assert.deepEqual(plan.unresolved, [attempt.attemptSequence]);
+  assert.equal(core.listSurfaceAdmissionAttempts()[0]?.outcome, "pending");
+});
+
 test("conflicting exact evidence keeps its pending row unchanged and never picks a side", () => {
   const core = coreWithPendingAndReceipts(2, {
     rq_1: ["resolved_success", "resolved_failure"],
@@ -3864,11 +3959,8 @@ test("evidence naming a different request or sequence is not evidence for this r
 });
 
 test("mixed pending set terminalizes every determinate row in one transition and reports unresolved in order", () => {
-  // 1 succeeded, 2 failed, 3 conflicting, 4 and 5 no receipt at all.
-  // NOTE: the contract's third authoritative class, never-began, has no
-  // durable source in this system — absence of a receipt is indistinguishable
-  // from an operation that never started — so it is not exercised here rather
-  // than faked.
+  // 1 succeeded, 2 failed, 3 conflicting, 4 and 5 have no witness or receipt.
+  // The latter remain unresolved: absence of a record alone is not evidence.
   const core = coreWithPendingAndReceipts(5, {
     rq_1: ["resolved_success"],
     rq_2: ["resolved_failure"],
