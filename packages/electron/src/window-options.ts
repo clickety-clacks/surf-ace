@@ -1,3 +1,4 @@
+import type { BrowserWindow, NativeImage, WebContents } from "electron";
 import type { SurfaceViewport } from "../../protocol/src/index.js";
 
 export type SurfaceWindowOptions = {
@@ -13,9 +14,21 @@ export type SurfaceWindowOptions = {
 };
 
 export type SurfaceWindowCaptureMode = {
+  keepFramesForCoveredCapture: boolean;
   offscreen: false | { useSharedTexture: false };
   showAfterReady: boolean;
 };
+
+type PaneCaptureWindow = Pick<BrowserWindow, "capturePage" | "webContents">;
+type PaneCaptureRectangle = { height: number; width: number; x: number; y: number };
+
+type ActiveCoveredCapture = {
+  count: number;
+  restoreBackgroundThrottling: boolean;
+  firstFrames: Promise<void>;
+};
+
+const activeCoveredCaptures = new WeakMap<WebContents, ActiveCoveredCapture>();
 
 export function shouldDisableGpuForSoftwareCapture(params: {
   commandLineHasDisableGpu: boolean;
@@ -33,12 +46,57 @@ export function surfaceWindowCaptureMode(params: {
   const useOffscreenCapture = params.platform === "linux"
     && params.gpuDisabled
     && params.compositorSocketPath === null;
+  const keepFramesForCoveredCapture = params.platform === "linux"
+    && !params.gpuDisabled
+    && params.compositorSocketPath === null;
   return {
+    keepFramesForCoveredCapture,
     offscreen: useOffscreenCapture
       ? { useSharedTexture: false }
       : false,
     showAfterReady: !useOffscreenCapture,
   };
+}
+
+export async function captureWindowPageForPane(
+  window: PaneCaptureWindow,
+  rectangle: PaneCaptureRectangle,
+  keepFramesForCoveredCapture: boolean,
+): Promise<NativeImage> {
+  const webContents = window.webContents;
+  if (!keepFramesForCoveredCapture) {
+    return window.capturePage(rectangle);
+  }
+
+  let activeCapture = activeCoveredCaptures.get(webContents);
+  if (!activeCapture) {
+    const restoreBackgroundThrottling = webContents.getBackgroundThrottling();
+    if (restoreBackgroundThrottling) {
+      webContents.setBackgroundThrottling(false);
+    }
+    activeCapture = {
+      count: 0,
+      restoreBackgroundThrottling,
+      firstFrames: webContents.executeJavaScript(
+        "new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))",
+      ),
+    };
+    activeCoveredCaptures.set(webContents, activeCapture);
+  }
+
+  activeCapture.count += 1;
+  try {
+    await activeCapture.firstFrames;
+    return await window.capturePage(rectangle);
+  } finally {
+    activeCapture.count -= 1;
+    if (activeCapture.count === 0) {
+      activeCoveredCaptures.delete(webContents);
+      if (activeCapture.restoreBackgroundThrottling && !webContents.isDestroyed()) {
+        webContents.setBackgroundThrottling(true);
+      }
+    }
+  }
 }
 
 export function surfaceWindowOptions(params: {

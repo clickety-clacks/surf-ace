@@ -96,6 +96,7 @@ await build({
     path.join(rootDir, "test", "window-options.test.ts"),
     path.join(rootDir, "test", "window-placement.test.ts"),
     path.join(rootDir, "test", "window-close-lifecycle.test.ts"),
+    path.join(srcDir, "window-options.ts"),
     path.join(rootDir, "test", "quit-lifecycle-watchdog-child.ts"),
     path.join(rootDir, "test", "quit-lifecycle.test.ts"),
   ],

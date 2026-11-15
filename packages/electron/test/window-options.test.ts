@@ -49,12 +49,13 @@ test("surface window keeps the platform frame outside compositor hosting", () =>
   assert.equal(options.title, "workstation-a Surf Ace");
 });
 
-test("Linux GPU fallback keeps a non-compositor window offscreen for capture", () => {
+test("Linux capture mode selects software fallback or default-GPU covered-capture refresh", () => {
   assert.deepEqual(surfaceWindowCaptureMode({
     compositorSocketPath: null,
     gpuDisabled: true,
     platform: "linux",
   }), {
+    keepFramesForCoveredCapture: false,
     offscreen: { useSharedTexture: false },
     showAfterReady: false,
   });
@@ -64,6 +65,7 @@ test("Linux GPU fallback keeps a non-compositor window offscreen for capture", (
     gpuDisabled: false,
     platform: "linux",
   }), {
+    keepFramesForCoveredCapture: true,
     offscreen: false,
     showAfterReady: true,
   });
@@ -73,15 +75,27 @@ test("Linux GPU fallback keeps a non-compositor window offscreen for capture", (
     gpuDisabled: true,
     platform: "linux",
   }), {
+    keepFramesForCoveredCapture: false,
+    offscreen: false,
+    showAfterReady: true,
+  });
+
+  assert.deepEqual(surfaceWindowCaptureMode({
+    compositorSocketPath: "/tmp/surf-ace-compositor.sock",
+    gpuDisabled: false,
+    platform: "linux",
+  }), {
+    keepFramesForCoveredCapture: false,
     offscreen: false,
     showAfterReady: true,
   });
 
   assert.deepEqual(surfaceWindowCaptureMode({
     compositorSocketPath: null,
-    gpuDisabled: true,
+    gpuDisabled: false,
     platform: "darwin",
   }), {
+    keepFramesForCoveredCapture: false,
     offscreen: false,
     showAfterReady: true,
   });
