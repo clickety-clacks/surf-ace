@@ -684,13 +684,12 @@ In addition to the general fixtures above, deterministically inject restart (a) 
 
 Surface advertises limits in `pair.response`:
 1. `maxMessageBytes` (default 12 MiB).
-2. `maxFrameBytes` (default 10 MiB for `content.set` content payload).
-3. `maxVisibleTextBytes` (default 4096).
-4. `maxStrokePointsPerFlush` (default 8192 for `event.drawing_flush`).
-5. `maxDrawingFlushBytes` (default 2 MiB).
-6. Lockless pane creation field: `maxPanesPerSurface`. The former recoverable-state fields `maxSurfaceRecoverableBaseBytes`, `maxPaneRecoverableStateBytes`, `maxPaneAnnotationRestoreBytes`, `maxRetainedTombstones`, `maxRetainedTombstoneBytes`, and `maxRecoverableSurfaceBytes` may remain as legacy wire compatibility fields; they are not required capability gates and MUST NOT impose ordinary-mutation or retained-close/restore quotas.
-7. Lockless LIVEBUF limits: `maxPaneConsumableRecords`, `maxPaneConsumableBytes`, `maxSurfaceConsumableRecords`, `maxSurfaceConsumableBytes`, `maxConsumableRecordBytes`, and `maxConsumableCursorStateBytesPerScope`.
-8. Lockless CTLRET limits: `maxAdmittedControllerEntries`, `maxDormantControllerEntries`, and `maxDormantControllerBytes`.
+2. `maxVisibleTextBytes` (default 4096).
+3. `maxStrokePointsPerFlush` (default 8192 for `event.drawing_flush`).
+4. `maxDrawingFlushBytes` (default 2 MiB).
+5. Lockless pane creation field: `maxPanesPerSurface`. The former recoverable-state fields `maxSurfaceRecoverableBaseBytes`, `maxPaneRecoverableStateBytes`, `maxPaneAnnotationRestoreBytes`, `maxRetainedTombstones`, `maxRetainedTombstoneBytes`, and `maxRecoverableSurfaceBytes` may remain as legacy wire compatibility fields; they are not required capability gates and MUST NOT impose ordinary-mutation or retained-close/restore quotas.
+6. Lockless LIVEBUF limits: `maxPaneConsumableRecords`, `maxPaneConsumableBytes`, `maxSurfaceConsumableRecords`, `maxSurfaceConsumableBytes`, `maxConsumableRecordBytes`, and `maxConsumableCursorStateBytesPerScope`.
+7. Lockless CTLRET limits: `maxAdmittedControllerEntries`, `maxDormantControllerEntries`, and `maxDormantControllerBytes`.
 
 A client advertising `surf-ace.lockless-multi-controller.v1` MUST return every lockless limit above as a required finite positive capability field. Omission fails lockless admission; controllers MUST NOT infer defaults.
 
