@@ -1049,6 +1049,135 @@ test("real PostgreSQL allocator authority", { timeout: 180_000 }, async (t) => {
   }
 });
 
+test(
+  "fleet topology reuses validated journal work only while its checkpoint remains valid",
+  { timeout: 90_000 },
+  async () => {
+    const cluster = await startCluster();
+    const originalWitnessId = cluster.config.witnessServerId;
+    let server: AllocatorServer | null = null;
+    let wire: WireClient | null = null;
+    let journalValidations = 0;
+    let failNextClaim = false;
+    let injectedClaimFailure = false;
+    try {
+      const recovery = await PostgresCustodyAdapter.initializeAbsentFleet(
+        cluster.config,
+        "alloc_journal_checkpoint",
+      );
+      await recovery.release();
+
+      server = await AllocatorServer.start(serverConfig(cluster), {
+        beforeJournalValidation() {
+          journalValidations += 1;
+        },
+        afterCommitBeforeWitness(operation) {
+          if (failNextClaim && operation === "claim_pane") {
+            failNextClaim = false;
+            injectedClaimFailure = true;
+            throw new Error("lost-claim-reply");
+          }
+        },
+      });
+      wire = await WireClient.connect(server.address.url);
+      assert.equal(journalValidations, 1, "startup performs a full journal validation");
+
+      const ready = await wire.request("fleet.topology", {});
+      assert.equal(ready.ok, true);
+      assert.equal(ready.payload?.registrationReady, true);
+      assert.equal(journalValidations, 1, "an unchanged checkpoint reuses historical validation");
+
+      const beforeProgress = await server.diagnostics();
+      const replayBefore = await scalar(cluster.config.witnessUrl, "SELECT pg_last_wal_replay_lsn()::text AS lsn");
+      await adminQuery(cluster.adminUrl, "CREATE TABLE checkpoint_progress_probe (id integer)");
+      await adminQuery(cluster.adminUrl, "INSERT INTO checkpoint_progress_probe (id) VALUES (1)");
+      const replayAfter = await scalar(cluster.config.witnessUrl, "SELECT pg_last_wal_replay_lsn()::text AS lsn");
+      const afterProgress = await server.diagnostics();
+      assert.notEqual(replayAfter, replayBefore, "the witness replay position advanced");
+      assert.equal(afterProgress.primaryHeadSeq, beforeProgress.primaryHeadSeq);
+      assert.equal(afterProgress.primaryHeadHash, beforeProgress.primaryHeadHash);
+      assert.equal(afterProgress.custodyRevision, beforeProgress.custodyRevision);
+      assert.equal(afterProgress.leaseGeneration, beforeProgress.leaseGeneration);
+      assert.equal(afterProgress.leaseId, beforeProgress.leaseId);
+      assert.equal(afterProgress.leaseBackendPid, beforeProgress.leaseBackendPid);
+
+      const afterProgressReady = await wire.request("fleet.topology", {});
+      assert.equal(afterProgressReady.payload?.registrationReady, true);
+      assert.equal(journalValidations, 1, "replay-LSN-only progress does not rehash the journal");
+
+      const clientId = createHash("sha256").update("journal-checkpoint-client").digest("hex");
+      const surfaceId = "sf_journal-checkpoint";
+      const registered = await wire.request("client.register", { clientId, surfaces: [{ surfaceId, panes: [] }] });
+      assert.equal(registered.ok, true);
+      assert.equal((await wire.request("fleet.topology", {})).payload?.registrationReady, true);
+
+      const beforeClaim = await server.diagnostics();
+      const countBeforeClaim = journalValidations;
+      const claim = await wire.request("pane.claim", {
+        clientId,
+        surfaceId,
+        paneId: "pane-1",
+        paneLineageId: "pl_journal-checkpoint-1",
+      });
+      assert.equal(claim.ok, true);
+      const afterClaim = await server.diagnostics();
+      assert.notEqual(afterClaim.primaryHeadSeq, beforeClaim.primaryHeadSeq, "the claim advances the custody head");
+      const afterHeadChange = await wire.request("fleet.topology", {});
+      assert.equal(afterHeadChange.payload?.registrationReady, true);
+      assert.equal(journalValidations, countBeforeClaim + 1, "a custody-head change requires full validation");
+
+      failNextClaim = true;
+      const uncertainClaim = await wire.request("pane.claim", {
+        clientId,
+        surfaceId,
+        paneId: "pane-2",
+        paneLineageId: "pl_journal-checkpoint-2",
+      });
+      assert.equal(uncertainClaim.ok, false);
+      assert.equal(injectedClaimFailure, true);
+      const countBeforeUncertainRecovery = journalValidations;
+      const recoveredUncertainClaim = await wire.request("fleet.topology", {});
+      assert.equal(recoveredUncertainClaim.payload?.registrationReady, true);
+      assert.equal(journalValidations, countBeforeUncertainRecovery + 1,
+        "an uncertain write invalidates the checkpoint and requires full recovery validation");
+
+      const countBeforeWitnessFailure = journalValidations;
+      cluster.config.witnessServerId = "unexpected-witness";
+      const degraded = await wire.request("fleet.topology", {});
+      assert.equal(degraded.ok, true);
+      assert.equal(degraded.payload?.registrationReady, false,
+        "a fresh witness identity failure remains fail-closed with a checkpoint present");
+      assert.equal(journalValidations, countBeforeWitnessFailure,
+        "the failed fresh check does not use historical validation as a readiness substitute");
+
+      cluster.config.witnessServerId = originalWitnessId;
+      const recoveredWitness = await wire.request("fleet.topology", {});
+      assert.equal(recoveredWitness.payload?.registrationReady, true);
+      assert.equal(journalValidations, countBeforeWitnessFailure + 1,
+        "a failed fresh check invalidates the checkpoint before readiness recovers");
+
+      const validationsBeforeNewLease = journalValidations;
+      await wire.close();
+      wire = null;
+      await server.close();
+      server = null;
+      server = await AllocatorServer.start(serverConfig(cluster), {
+        beforeJournalValidation() {
+          journalValidations += 1;
+        },
+      });
+      wire = await WireClient.connect(server.address.url);
+      assert.equal(journalValidations, validationsBeforeNewLease + 1,
+        "a new writer session validates the journal before it can report readiness");
+    } finally {
+      cluster.config.witnessServerId = originalWitnessId;
+      await wire?.close();
+      await server?.close().catch(() => undefined);
+      await cluster.stop();
+    }
+  },
+);
+
 test("recovery waits for a busy port without repeating annotation consumer lease reset", { timeout: 90_000 }, async () => {
   const cluster = await startCluster();
   const inspector = new Client({ connectionString: cluster.adminUrl });
