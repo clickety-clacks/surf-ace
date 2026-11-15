@@ -22,6 +22,8 @@
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Surf Ace announces itself on your local network so paired controllers can discover the surface and render content.</string>
+	<key>SurfAceDirectEndpoint</key>
+	<string>$(SURF_ACE_DIRECT_ENDPOINT)</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>
