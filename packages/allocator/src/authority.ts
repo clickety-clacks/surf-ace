@@ -248,12 +248,17 @@ export class WindowLabelAuthority {
   }
 
   async refreshReadiness(): Promise<boolean> {
-    const ready = await this.custody.recoverWriter();
+    return (await this.refreshReadinessSnapshot()).ready;
+  }
+
+  async refreshReadinessSnapshot(): Promise<{ acceptedState: AcceptedState | null; ready: boolean }> {
+    const acceptedState = await this.custody.recoverWriterWithState();
+    const ready = acceptedState !== null;
     if (ready && this.failClosedReason?.startsWith("unknown-persistence:")) {
       // The same lease and accepted operation have been reconciled by custody.
       this.failClosedReason = null;
     }
-    return ready && this.failClosedReason === null;
+    return { acceptedState, ready: ready && this.failClosedReason === null };
   }
 
   private async accepted(fleetId: string, expectedAllocatorId?: string): Promise<AcceptedState> {
