@@ -4,6 +4,11 @@ import path from "node:path";
 
 export type ClientDiagnosticFields = Record<string, boolean | number | string | null | undefined>;
 
+const MAX_CLIENT_FLIGHT_RECORDER_LOG_BYTES = 8 * 1024 * 1024;
+// Keep headroom after trimming so normal appends do not rewrite the tail on every entry.
+const RETAINED_CLIENT_FLIGHT_RECORDER_LOG_BYTES = MAX_CLIENT_FLIGHT_RECORDER_LOG_BYTES / 2;
+const TRUNCATED_DIAGNOSTIC_SUFFIX = Buffer.from("...[truncated]\n");
+
 export const CLIENT_FLIGHT_RECORDER_LOG_PATH = process.env.SURF_ACE_CLIENT_DIAGNOSTIC_LOG
   ?? defaultClientFlightRecorderLogPath();
 
@@ -52,11 +57,75 @@ export function recordClientDiagnostic(
   const line = clientDiagnosticLine(scope, event, fields);
   try {
     fs.mkdirSync(path.dirname(CLIENT_FLIGHT_RECORDER_LOG_PATH), { recursive: true });
-    fs.appendFileSync(CLIENT_FLIGHT_RECORDER_LOG_PATH, `${new Date().toISOString()} ${line}\n`);
+    const entry = `${new Date().toISOString()} ${line}\n`;
+    appendBoundedDiagnosticEntry(
+      CLIENT_FLIGHT_RECORDER_LOG_PATH,
+      boundDiagnosticEntry(entry),
+    );
   } catch {
     // Diagnostics must never change Surf Ace runtime behavior.
   }
   console[level](line);
+}
+
+function boundDiagnosticEntry(entry: string): Buffer {
+  const bytes = Buffer.from(entry);
+  if (bytes.length <= MAX_CLIENT_FLIGHT_RECORDER_LOG_BYTES) return bytes;
+
+  let prefixEnd = MAX_CLIENT_FLIGHT_RECORDER_LOG_BYTES - TRUNCATED_DIAGNOSTIC_SUFFIX.length;
+  while (prefixEnd > 0 && (bytes[prefixEnd] & 0b1100_0000) === 0b1000_0000) {
+    prefixEnd -= 1;
+  }
+  return Buffer.concat([bytes.subarray(0, prefixEnd), TRUNCATED_DIAGNOSTIC_SUFFIX]);
+}
+
+function appendBoundedDiagnosticEntry(logPath: string, entry: Buffer): void {
+  if (fs.existsSync(logPath)) {
+    const fileSize = fs.statSync(logPath).size;
+    if (fileSize + entry.length > MAX_CLIENT_FLIGHT_RECORDER_LOG_BYTES) {
+      const retainedLimit = Math.min(
+        RETAINED_CLIENT_FLIGHT_RECORDER_LOG_BYTES,
+        MAX_CLIENT_FLIGHT_RECORDER_LOG_BYTES - entry.length,
+      );
+      retainRecentClientDiagnosticRecords(logPath, retainedLimit);
+    }
+  }
+  fs.appendFileSync(logPath, entry);
+}
+
+function retainRecentClientDiagnosticRecords(logPath: string, retainedLimit: number): void {
+  const fileSize = fs.statSync(logPath).size;
+  if (fileSize <= retainedLimit) return;
+  if (retainedLimit === 0) {
+    fs.writeFileSync(logPath, Buffer.alloc(0));
+    return;
+  }
+
+  const tail = Buffer.alloc(Math.min(retainedLimit, fileSize));
+  const readFd = fs.openSync(logPath, "r");
+  let bytesRead: number;
+  try {
+    bytesRead = fs.readSync(
+      readFd,
+      tail,
+      0,
+      tail.length,
+      fileSize - tail.length,
+    );
+  } finally {
+    fs.closeSync(readFd);
+  }
+
+  const recentBytes = tail.subarray(0, bytesRead);
+  const firstNewline = recentBytes.indexOf(0x0a);
+  // Keep the first line only when the selected byte tail starts at an ISO-8601 record boundary.
+  const startsAtRecord = /^\d{4}-\d{2}-\d{2}T/.test(
+    recentBytes.subarray(0, 20).toString("ascii"),
+  );
+  let retainedStart = recentBytes.length;
+  if (startsAtRecord) retainedStart = 0;
+  else if (firstNewline >= 0) retainedStart = firstNewline + 1;
+  fs.writeFileSync(logPath, recentBytes.subarray(retainedStart));
 }
 
 function defaultClientFlightRecorderLogPath(): string {

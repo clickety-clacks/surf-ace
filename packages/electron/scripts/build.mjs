@@ -68,6 +68,7 @@ await build({
     path.join(rootDir, "test", "bonjour-advertiser.test.ts"),
     path.join(rootDir, "test", "central-server-health.test.ts"),
     path.join(rootDir, "test", "central-server-package.test.ts"),
+    path.join(rootDir, "test", "client-flight-recorder.test.ts"),
     path.join(rootDir, "test", "identity.test.ts"),
     path.join(rootDir, "test", "lockless-acceptance.test.ts"),
     path.join(rootDir, "test", "lockless-client-authority.test.ts"),
