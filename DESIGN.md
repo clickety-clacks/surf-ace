@@ -684,12 +684,13 @@ In addition to the general fixtures above, deterministically inject restart (a) 
 
 Surface advertises limits in `pair.response`:
 1. `maxMessageBytes` (default 12 MiB).
-2. `maxVisibleTextBytes` (default 4096).
-3. `maxStrokePointsPerFlush` (default 8192 for `event.drawing_flush`).
-4. `maxDrawingFlushBytes` (default 2 MiB).
-5. Lockless pane creation field: `maxPanesPerSurface`. The former recoverable-state fields `maxSurfaceRecoverableBaseBytes`, `maxPaneRecoverableStateBytes`, `maxPaneAnnotationRestoreBytes`, `maxRetainedTombstones`, `maxRetainedTombstoneBytes`, and `maxRecoverableSurfaceBytes` may remain as legacy wire compatibility fields; they are not required capability gates and MUST NOT impose ordinary-mutation or retained-close/restore quotas.
-6. Lockless LIVEBUF limits: `maxPaneConsumableRecords`, `maxPaneConsumableBytes`, `maxSurfaceConsumableRecords`, `maxSurfaceConsumableBytes`, `maxConsumableRecordBytes`, and `maxConsumableCursorStateBytesPerScope`.
-7. Lockless CTLRET limits: `maxAdmittedControllerEntries`, `maxDormantControllerEntries`, and `maxDormantControllerBytes`.
+2. `maxFrameBytes` is a legacy wire-compatibility field, still required by the `pair.response.limits` schema. It MUST NOT impose a content-only size limit or refusal; requests remain bounded by `maxMessageBytes`.
+3. `maxVisibleTextBytes` (default 4096).
+4. `maxStrokePointsPerFlush` (default 8192 for `event.drawing_flush`).
+5. `maxDrawingFlushBytes` (default 2 MiB).
+6. Lockless pane creation field: `maxPanesPerSurface`. The former recoverable-state fields `maxSurfaceRecoverableBaseBytes`, `maxPaneRecoverableStateBytes`, `maxPaneAnnotationRestoreBytes`, `maxRetainedTombstones`, `maxRetainedTombstoneBytes`, and `maxRecoverableSurfaceBytes` may remain as legacy wire compatibility fields; they are not required capability gates and MUST NOT impose ordinary-mutation or retained-close/restore quotas.
+7. Lockless LIVEBUF limits: `maxPaneConsumableRecords`, `maxPaneConsumableBytes`, `maxSurfaceConsumableRecords`, `maxSurfaceConsumableBytes`, `maxConsumableRecordBytes`, and `maxConsumableCursorStateBytesPerScope`.
+8. Lockless CTLRET limits: `maxAdmittedControllerEntries`, `maxDormantControllerEntries`, and `maxDormantControllerBytes`.
 
 A client advertising `surf-ace.lockless-multi-controller.v1` MUST return every lockless limit above as a required finite positive capability field. Omission fails lockless admission; controllers MUST NOT infer defaults.
 
@@ -1874,7 +1875,7 @@ The schema below defines every v1 application message type over WS.
               ],
               "properties": {
                 "maxMessageBytes": { "type": "integer", "minimum": 1024 },
-                "maxFrameBytes": { "type": "integer", "minimum": 1024 },
+                "maxFrameBytes": { "type": "integer", "minimum": 1024, "description": "Legacy wire-compatibility field; it does not impose a content-only size limit or refusal. Requests remain bounded by maxMessageBytes." },
                 "maxVisibleTextBytes": { "type": "integer", "minimum": 256 },
                 "maxStrokePointsPerFlush": { "type": "integer", "minimum": 1 },
                 "maxDrawingFlushBytes": { "type": "integer", "minimum": 1024 },
