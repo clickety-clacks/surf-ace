@@ -684,7 +684,7 @@ In addition to the general fixtures above, deterministically inject restart (a) 
 
 Surface advertises limits in `pair.response`:
 1. `maxMessageBytes` (default 12 MiB).
-2. `maxFrameBytes` (default 10 MiB for `content.set` content payload).
+2. `maxFrameBytes` is a legacy wire-compatibility field, still required by the `pair.response.limits` schema. It MUST NOT impose a content-only size limit or refusal; requests remain bounded by `maxMessageBytes`.
 3. `maxVisibleTextBytes` (default 4096).
 4. `maxStrokePointsPerFlush` (default 8192 for `event.drawing_flush`).
 5. `maxDrawingFlushBytes` (default 2 MiB).
@@ -1875,7 +1875,7 @@ The schema below defines every v1 application message type over WS.
               ],
               "properties": {
                 "maxMessageBytes": { "type": "integer", "minimum": 1024 },
-                "maxFrameBytes": { "type": "integer", "minimum": 1024 },
+                "maxFrameBytes": { "type": "integer", "minimum": 1024, "description": "Legacy wire-compatibility field; it does not impose a content-only size limit or refusal. Requests remain bounded by maxMessageBytes." },
                 "maxVisibleTextBytes": { "type": "integer", "minimum": 256 },
                 "maxStrokePointsPerFlush": { "type": "integer", "minimum": 1 },
                 "maxDrawingFlushBytes": { "type": "integer", "minimum": 1024 },
