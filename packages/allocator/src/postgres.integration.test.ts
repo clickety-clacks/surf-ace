@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { appendFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer, createConnection, type Socket } from "node:net";
+import os from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { execFile as execFileCallback, spawn } from "node:child_process";
@@ -1491,6 +1492,76 @@ test("registration negotiates rc11 endpoint leases only behind the writer fence"
         if (bodyError === undefined) throw error;
       }
     }
+    await cluster.stop();
+  }
+});
+
+test("client.register reports a tailnet endpoint only from a listener-reachable VPN interface", { timeout: 90_000 }, async () => {
+  const cluster = await startCluster();
+  let allocator: AllocatorServer | null = null;
+  let wire: WireClient | null = null;
+  let interfaces: ReturnType<typeof os.networkInterfaces> | null = testNetworkInterfaces({
+    en0: ["100.90.1.3", "192.168.1.10"],
+    pdp_ip0: ["100.70.1.2"],
+    tailscale0: ["100.101.102.103"],
+    utun4: ["fd7a:115c:a1e0::1"],
+  });
+
+  try {
+    const recovery = await PostgresCustodyAdapter.initializeAbsentFleet(cluster.config, "alloc_tailnet-endpoint");
+    await recovery.release();
+    allocator = await AllocatorServer.start(
+      { ...serverConfig(cluster), listenHost: "0.0.0.0" },
+      { networkInterfaces: () => interfaces },
+    );
+    wire = await WireClient.connect(`ws://127.0.0.1:${allocator.address.port}`);
+
+    const register = async (name: string, registrationResultsV1 = false) => {
+      const response = await wire!.request("client.register", {
+        ...(registrationResultsV1 ? { registrationResultsV1: true } : {}),
+        clientId: createHash("sha256").update(name).digest("hex"),
+        surfaces: [],
+      });
+      assert.equal(response.ok, true, JSON.stringify(response));
+      return response.payload as Record<string, unknown>;
+    };
+
+    const legacy = await register("tailnet-legacy-client");
+    assert.equal(legacy.tailnetEndpoint, `ws://100.101.102.103:${allocator.address.port}/ws`);
+    assert.equal(legacy.registrationResultsV1, undefined,
+      "an older request remains accepted and receives the additive endpoint field");
+
+    const negotiated = await register("tailnet-results-client", true);
+    assert.equal(negotiated.registrationResultsV1, true);
+    assert.equal(negotiated.tailnetEndpoint, `ws://100.101.102.103:${allocator.address.port}/ws`);
+
+    interfaces = testNetworkInterfaces({
+      en0: ["100.90.1.3"],
+      pdp_ip0: ["100.70.1.2"],
+    });
+    const carrierAddresses = await register("carrier-address-client");
+    assert.equal(carrierAddresses.tailnetEndpoint, undefined,
+      "shared carrier address ranges do not qualify without a VPN tunnel interface");
+
+    interfaces = testNetworkInterfaces({ vpn_adapter: ["100.101.102.103"] });
+    const unprovenInterface = await register("unproven-interface-client");
+    assert.equal(unprovenInterface.tailnetEndpoint, undefined,
+      "an unrecognized interface does not prove VPN provenance");
+
+    interfaces = null;
+    const unavailableInterfaces = await register("unavailable-interface-client", true);
+    assert.equal(unavailableInterfaces.tailnetEndpoint, undefined,
+      "unavailable interface data leaves the optional field absent");
+
+    const topology = await wire.request("fleet.topology", {});
+    assert.equal(topology.ok, true);
+    for (const row of (topology.payload?.clients ?? []) as Array<Record<string, unknown>>) {
+      assert.equal(Object.hasOwn(row, "tailnetEndpoint"), false,
+        "tailnetEndpoint is a registration reply field, not a fleet topology field");
+    }
+  } finally {
+    await wire?.close();
+    await allocator?.close();
     await cluster.stop();
   }
 });
@@ -3179,6 +3250,24 @@ function serverConfig(cluster: TestCluster): AllocatorServerConfig {
     listenHost: "127.0.0.1",
     listenPort: 0,
   };
+}
+
+function testNetworkInterfaces(records: Record<string, string[]>): ReturnType<typeof os.networkInterfaces> {
+  const interfaces: ReturnType<typeof os.networkInterfaces> = {};
+  for (const [name, addresses] of Object.entries(records)) {
+    interfaces[name] = addresses.map((address) => {
+      const family = address.includes(":") ? "IPv6" : "IPv4";
+      return {
+        address,
+        family,
+        internal: false,
+        mac: "00:00:00:00:00:00",
+        netmask: family === "IPv6" ? "ffff:ffff:ffff:ffff::" : "255.255.255.0",
+        cidr: null,
+      };
+    });
+  }
+  return interfaces;
 }
 
 class WireClient {
