@@ -6388,17 +6388,35 @@ final class SurfAceRuntime {
         errorCode: Int? = nil,
         appliedAt: String
     ) -> [String: Any] {
+        let applyStatus: String
+        let navigationStatus: String
+        let message: String
+        switch status {
+        case "applied":
+            applyStatus = "applied"
+            navigationStatus = "loaded"
+            message = "browser_url navigation loaded"
+        case "started_unverified":
+            applyStatus = "applied"
+            navigationStatus = "started_unverified"
+            message = errorMessage ?? "browser_url navigation started but was not verified"
+        default:
+            applyStatus = "failed"
+            navigationStatus = "failed"
+            message = errorMessage ?? "browser_url navigation failed"
+        }
+
         var payload: [String: Any] = [
             "requestId": requestId,
             "targetId": targetId,
             "paneLineageId": paneLineageId,
             "targetEpoch": targetEpoch,
-            "status": status,
-            "message": status == "applied" ? "browser_url navigation loaded" : errorMessage ?? "browser_url navigation failed",
-            "materializedState": ["url": url, "replaySemantics": "navigate", "navigationStatus": status == "applied" ? "loaded" : "failed"],
+            "status": applyStatus,
+            "message": message,
+            "materializedState": ["url": url, "replaySemantics": "navigate", "navigationStatus": navigationStatus],
             "appliedAt": appliedAt,
         ]
-        if status != "applied" {
+        if applyStatus == "failed" {
             payload["errorCode"] = browserURLNavigationErrorCode(errorDomain: errorDomain, errorCode: errorCode)
         }
         return payload

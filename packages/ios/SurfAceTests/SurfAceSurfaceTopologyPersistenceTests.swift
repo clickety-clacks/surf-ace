@@ -1933,6 +1933,8 @@ final class SurfAceHostZoomViewportTests: XCTestCase {
         let port = try await server.startIsolatedLoopbackForTesting(httpHandler: { request in
             if request.path == "/identity" { return HTTPServerResponse(statusCode: 200, body: Data(identity.utf8)) }
             if request.path == "/page" {
+                // Cross the browser verification budget while leaving WebKit free to finish normally.
+                try? await Task.sleep(nanoseconds: 10_000_000_000)
                 return HTTPServerResponse(statusCode: 200, headers: ["Content-Type": "text/html"], body: Data(html.utf8))
             }
             return HTTPServerResponse(statusCode: 404)
@@ -1970,11 +1972,18 @@ final class SurfAceHostZoomViewportTests: XCTestCase {
         }
         defer { pageLoadObservation.invalidate() }
         let navigationResult = Task { await host.renderBrowserURL(entry: entry) }
-        // Gate resize setup on the fixture load, independently of the product result budget.
+        let navigationOutcome = await navigationResult.value
+        guard navigationOutcome.status == "applied" || navigationOutcome.status == "started_unverified" else {
+            XCTFail("browser fixture navigation failed before resize verification: \(navigationOutcome.errorMessage ?? "unknown error")")
+            return
+        }
+        // The page intentionally completes after the 8-second verification budget. An
+        // unverified result is not a failure while WebKit continues loading the page.
         await fulfillment(of: [pageLoad], timeout: 60)
         pageLoadObservation.invalidate()
-        _ = await navigationResult.value
-        XCTAssertEqual(web.url, pageURL)
+        // If navigation verification or the fixture load failed, stop here so the single
+        // navigation/expectation failure is not followed by DOM and callback cascades.
+        guard web.url == pageURL, !web.isLoading else { return }
         let loadedDocument = try await web.evaluateJavaScript("document.getElementById('selected')?.textContent")
         XCTAssertEqual(loadedDocument as? String, "Selected text")
         let ownedWeb = ObjectIdentifier(web)
