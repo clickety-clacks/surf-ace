@@ -28,7 +28,26 @@ type ActiveCoveredCapture = {
   firstFrames: Promise<void>;
 };
 
+const COVERED_CAPTURE_FRAME_WAIT_TIMEOUT_MS = 250;
 const activeCoveredCaptures = new WeakMap<WebContents, ActiveCoveredCapture>();
+
+function waitForCoveredCaptureFrames(webContents: WebContents): Promise<void> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const firstFrames = Promise.resolve()
+    .then(() => webContents.executeJavaScript(
+      "new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))",
+    ))
+    .then(() => undefined, () => undefined);
+  const timeoutFallback = new Promise<void>((resolve) => {
+    timeout = setTimeout(resolve, COVERED_CAPTURE_FRAME_WAIT_TIMEOUT_MS);
+  });
+
+  return Promise.race([firstFrames, timeoutFallback]).finally(() => {
+    if (timeout) {
+      clearTimeout(timeout);
+    }
+  });
+}
 
 export function shouldDisableGpuForSoftwareCapture(params: {
   commandLineHasDisableGpu: boolean;
@@ -77,9 +96,7 @@ export async function captureWindowPageForPane(
     activeCapture = {
       count: 0,
       restoreBackgroundThrottling,
-      firstFrames: webContents.executeJavaScript(
-        "new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))",
-      ),
+      firstFrames: waitForCoveredCaptureFrames(webContents),
     };
     activeCoveredCaptures.set(webContents, activeCapture);
   }

@@ -62,6 +62,8 @@ async function run() {
   assert.equal(captureMode.keepFramesForCoveredCapture, true,
     "Linux default-GPU capture mode must refresh frames while covered captures run");
   assert.equal(captureMode.offscreen, false, "the fixture must exercise the visible default-GPU path");
+  const keepFramesForCoveredCapture = process.env.SURF_ACE_TEST_FORCE_DIRECT_CAPTURE !== "1"
+    && captureMode.keepFramesForCoveredCapture;
 
   const scratch = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-covered-capture-"));
   app.setPath("userData", path.join(scratch, "profile"));
@@ -85,7 +87,7 @@ async function run() {
     const point = { x: Math.floor(viewport.width / 2), y: Math.floor(viewport.height / 2) };
 
     const uncovered = await waitForPixel(target, point.x, point.y, targetPixels, "uncovered target capture",
-      captureMode.keepFramesForCoveredCapture);
+      keepFramesForCoveredCapture);
     assert.equal(target.webContents.getBackgroundThrottling(), true, "uncovered capture restores the prior throttling state");
     console.log("CAPTURE_CASE=" + JSON.stringify({ label: "uncovered", ...uncovered }));
 
@@ -103,13 +105,13 @@ async function run() {
     await new Promise((resolve) => setTimeout(resolve, 150));
 
     const coveredTarget = await waitForPixel(target, point.x, point.y, [uncovered.expected], "covered target capture",
-      captureMode.keepFramesForCoveredCapture);
+      keepFramesForCoveredCapture);
     assert.equal(target.webContents.getBackgroundThrottling(), true, "covered capture restores the prior throttling state");
     console.log("CAPTURE_CASE=" + JSON.stringify({ label: "covered", ...coveredTarget }));
 
     cover.hide();
     const uncoveredAgain = await waitForPixel(target, point.x, point.y, [uncovered.expected], "uncovered target capture after cover",
-      captureMode.keepFramesForCoveredCapture);
+      keepFramesForCoveredCapture);
     assert.equal(target.webContents.getBackgroundThrottling(), true, "post-cover capture restores the prior throttling state");
     console.log("CAPTURE_CASE=" + JSON.stringify({ label: "uncovered-again", ...uncoveredAgain }));
   } finally {

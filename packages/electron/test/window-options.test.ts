@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import test from "node:test";
 
 import {
+  captureWindowPageForPane,
   shouldDisableGpuForSoftwareCapture,
   surfaceWindowCaptureMode,
   surfaceWindowLoadQuery,
@@ -99,6 +100,58 @@ test("Linux capture mode selects software fallback or default-GPU covered-captur
     offscreen: false,
     showAfterReady: true,
   });
+});
+
+test("pane capture uses capturePage directly when covered-frame refresh is disabled", async () => {
+  const calls: string[] = [];
+  const image = {};
+  const rectangle = { height: 20, width: 30, x: 4, y: 5 };
+  const window = {
+    capturePage: async (rect: typeof rectangle) => {
+      calls.push(`capture:${rect.x},${rect.y}`);
+      return image;
+    },
+    webContents: {
+      executeJavaScript: async () => {
+        calls.push("executeJavaScript");
+      },
+      getBackgroundThrottling: () => true,
+      isDestroyed: () => false,
+      setBackgroundThrottling: () => calls.push("setBackgroundThrottling"),
+    },
+  } as unknown as Parameters<typeof captureWindowPageForPane>[0];
+
+  assert.equal(await captureWindowPageForPane(window, rectangle, false), image);
+  assert.deepEqual(calls, ["capture:4,5"]);
+});
+
+test("covered pane capture falls back after a stalled frame wait and restores throttling", async () => {
+  const calls: string[] = [];
+  const image = {};
+  const rectangle = { height: 20, width: 30, x: 4, y: 5 };
+  let backgroundThrottling = true;
+  const window = {
+    capturePage: async (rect: typeof rectangle) => {
+      calls.push(`capture:${rect.x},${rect.y}`);
+      return image;
+    },
+    webContents: {
+      executeJavaScript: () => {
+        calls.push("executeJavaScript");
+        return new Promise<never>(() => {});
+      },
+      getBackgroundThrottling: () => backgroundThrottling,
+      isDestroyed: () => false,
+      setBackgroundThrottling: (enabled: boolean) => {
+        backgroundThrottling = enabled;
+        calls.push(`throttling:${enabled}`);
+      },
+    },
+  } as unknown as Parameters<typeof captureWindowPageForPane>[0];
+
+  assert.equal(await captureWindowPageForPane(window, rectangle, true), image);
+  assert.deepEqual(calls, ["throttling:false", "executeJavaScript", "capture:4,5", "throttling:true"]);
+  assert.equal(backgroundThrottling, true);
 });
 
 test("explicit disable-gpu launch selects software capture even without the environment override", () => {
