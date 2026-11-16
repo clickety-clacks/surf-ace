@@ -49,6 +49,7 @@ async function runFixture(forceDirectCapture) {
 function fixtureEvidence(output) {
   return output.split(/\r?\n/).filter((line) =>
     line.startsWith("FIXTURE_RUNTIME=")
+    || line.startsWith("FIXTURE_PHASE=")
     || line.startsWith("CAPTURE_CASE=")
     || line.includes("covered target capture: expected")
   );

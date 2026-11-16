@@ -12,20 +12,29 @@ const pixelPoints = (rgb) => [
   [...rgb, 255],
   [rgb[2], rgb[1], rgb[0], 255],
 ];
+const fixtureStartedAt = Date.now();
+
+function reportFixturePhase(name, fields = {}) {
+  console.log("FIXTURE_PHASE=" + JSON.stringify({ name, elapsedMs: Date.now() - fixtureStartedAt, ...fields }));
+}
 
 function matches(actual, expected, tolerance = 3) {
   return actual.every((channel, index) => Math.abs(channel - expected[index]) <= tolerance);
 }
 
-async function capturePixel(window, x, y, keepFramesForCoveredCapture) {
+async function capturePixel(window, x, y, keepFramesForCoveredCapture, label, attempt) {
   const crop = { height: 24, width: 24, x: x - 12, y: y - 12 };
-  return referencePixel(await captureWindowPageForPane(window, crop, keepFramesForCoveredCapture), 12, 12);
+  const startedAt = Date.now();
+  reportFixturePhase("capture-start", { label, attempt });
+  const image = await captureWindowPageForPane(window, crop, keepFramesForCoveredCapture);
+  reportFixturePhase("capture-finished", { label, attempt, durationMs: Date.now() - startedAt });
+  return referencePixel(image, 12, 12);
 }
 
 async function waitForPixel(window, x, y, expectedPixels, label, keepFramesForCoveredCapture) {
   let observed;
   for (let attempt = 1; attempt <= 40; attempt += 1) {
-    observed = await capturePixel(window, x, y, keepFramesForCoveredCapture);
+    observed = await capturePixel(window, x, y, keepFramesForCoveredCapture, label, attempt);
     const expected = expectedPixels.find((candidate) => matches(observed, candidate));
     if (expected) {
       return { attempt, expected, observed };
@@ -56,6 +65,7 @@ async function run() {
     node: process.versions.node,
     platform: process.platform,
   }));
+  reportFixturePhase("app-starting");
   assert.equal(app.commandLine.hasSwitch("disable-gpu"), false,
     "the fixture must run without an explicit --disable-gpu switch");
   assert.equal(["1", "true", "yes"].includes(process.env.SURF_ACE_DISABLE_GPU?.trim().toLowerCase()), false,
@@ -74,6 +84,7 @@ async function run() {
   const scratch = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-covered-capture-"));
   app.setPath("userData", path.join(scratch, "profile"));
   await app.whenReady();
+  reportFixturePhase("app-ready");
   let target;
   let cover;
   try {
@@ -86,10 +97,14 @@ async function run() {
 
     // Use the production capture mode and helper while preserving normal window throttling.
     target = fixtureWindow({ backgroundThrottling: true, x, y });
+    reportFixturePhase("target-created");
     await target.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(`<!doctype html><html><head><meta charset="utf-8"><style>html,body{box-sizing:border-box;margin:0;width:100%;height:100%;overflow:hidden;background:${targetColor}}</style></head><body></body></html>`)}`);
+    reportFixturePhase("target-loaded");
     target.show();
     await target.focus();
+    reportFixturePhase("target-shown");
     const viewport = await target.webContents.executeJavaScript("({width:innerWidth,height:innerHeight})");
+    reportFixturePhase("target-viewport-ready", viewport);
     const point = { x: Math.floor(viewport.width / 2), y: Math.floor(viewport.height / 2) };
 
     const uncovered = await waitForPixel(target, point.x, point.y, targetPixels, "uncovered target capture",
@@ -99,10 +114,13 @@ async function run() {
 
     cover = fixtureWindow({ backgroundThrottling: true, x, y });
     cover.setAlwaysOnTop(true);
+    reportFixturePhase("cover-created");
     await cover.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(`<!doctype html><html><head><meta charset="utf-8"><style>html,body{box-sizing:border-box;margin:0;width:100%;height:100%;overflow:hidden;background:${coverColor}}</style></head><body></body></html>`)}`);
+    reportFixturePhase("cover-loaded");
     cover.show();
     cover.focus();
     cover.moveTop();
+    reportFixturePhase("cover-shown");
     assert.equal(cover.isVisible(), true);
     assert.deepEqual(cover.getBounds(), target.getBounds(), "the second window covers the target bounds");
 
