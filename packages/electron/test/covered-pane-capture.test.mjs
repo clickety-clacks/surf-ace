@@ -74,5 +74,5 @@ test("Electron captures pane pixels while uncovered and covered, and the direct 
   assert.equal(direct.timedOut, false, "direct-path control fixture must finish within 40 seconds");
   assert.notEqual(direct.code, 0, `direct capture unexpectedly returned covered pane pixels:\n${direct.output}`);
   assert.match(direct.output, /CAPTURE_CASE=.*"label":"uncovered"/);
-  assert.match(direct.output, /covered target capture: expected/);
+  assert.match(direct.output, /covered target capture (?:left|right): expected/);
 });
