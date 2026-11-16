@@ -470,6 +470,60 @@ func surfAceSplitChildBounds(parent: CGRect, direction: SurfAceLayoutDirection,
                   width: parent.width, height: parent.height * fraction)
 }
 
+struct SurfAceRegistrySettingsView: View {
+    let runtime: SurfAceRuntime
+    @State private var text = ""
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    TextField("ws://host:port/", text: $text)
+                        .keyboardType(.URL)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .accessibilityIdentifier("surf-ace-registry-url-field")
+                        .onSubmit { runtime.saveRegistryURL(text) }
+                    if let error = runtime.registryURLValidationError {
+                        Text(error)
+                            .foregroundStyle(.red)
+                            .accessibilityIdentifier("surf-ace-registry-url-error")
+                    }
+                } header: {
+                    Text("Registry URL")
+                } footer: {
+                    Text("Optional. When no URL is saved, the registry is found automatically with Bonjour.")
+                }
+                Section {
+                    Button("Save") { runtime.saveRegistryURL(text) }
+                    Button("Clear saved URL", role: .destructive) {
+                        runtime.clearRegistryURL()
+                        text = ""
+                    }
+                    .disabled(runtime.registrySavedURL == nil)
+                }
+                Section("Connection") {
+                    if runtime.registrySourceReports.isEmpty {
+                        Text("No registry connection attempt reported yet.")
+                    }
+                    ForEach(Array(runtime.registrySourceReports.enumerated()), id: \.offset) { _, report in
+                        Text(report.summary)
+                    }
+                }
+            }
+            .navigationTitle("Registry")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+        .onAppear { text = runtime.registrySavedURL ?? "" }
+    }
+}
+
 private struct SurfAceCentralConnectionBanner: View {
     let message: String
     let state: SurfAceConnectionBarState
@@ -1755,6 +1809,7 @@ private struct SurfAcePaneControls: View {
     let onTogglePopout: () -> Void
     @Environment(\.colorScheme) private var colorScheme
     @State private var fontSizePopoverVisible = false
+    @State private var registrySettingsVisible = false
 
     var body: some View {
         SurfAcePaneControlsLayout {
@@ -1850,6 +1905,18 @@ private struct SurfAcePaneControls: View {
                     }
                     .padding(4)
                     .presentationCompactAdaptation(.popover)
+                }
+
+                Button {
+                    registrySettingsVisible = true
+                } label: {
+                    Image(systemName: "network")
+                }
+                .buttonStyle(SurfAceGlassButtonStyle())
+                .accessibilityLabel("Registry settings")
+                .accessibilityIdentifier("surf-ace-registry-settings")
+                .sheet(isPresented: $registrySettingsVisible) {
+                    SurfAceRegistrySettingsView(runtime: runtime)
                 }
 
                 Button {

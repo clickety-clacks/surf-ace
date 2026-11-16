@@ -353,6 +353,7 @@ final class SurfAceRuntime {
     @ObservationIgnored private let mappingStoreKey = "SurfAce.SurfaceIdentityMapping"
     @ObservationIgnored private let surfaceTopologyStoreKey = "SurfAce.SurfaceTopologyMapping"
     @ObservationIgnored private let userDefaults: UserDefaults
+    @ObservationIgnored private let registrySettingStore: SurfAceRegistrySettingStore
     @ObservationIgnored private let locklessStateURLOverride: URL?
     @ObservationIgnored private let configuredRegistryURLOverride: URL?
     @ObservationIgnored private let configuredDirectEndpointOverride: String?
@@ -382,6 +383,9 @@ final class SurfAceRuntime {
     @ObservationIgnored private var annotationRecoveryTask: Task<Void, Never>?
     @ObservationIgnored private var annotationReentryRequested: Set<String> = []
     @ObservationIgnored private var centralConnectionError: String?
+    private(set) var registrySavedURL: String?
+    private(set) var registryURLValidationError: String?
+    private(set) var registrySourceReports: [SurfAceRegistrySourceReport] = []
     @ObservationIgnored private var confirmedPaneLabels: [String: Int64] = [:]
     private var centralConnectionState: SurfAceConnectionBarState = .disconnected
 
@@ -491,6 +495,7 @@ final class SurfAceRuntime {
         locklessDeliveryWaitObserver: (@Sendable () -> Void)? = nil
     ) {
         self.userDefaults = userDefaults
+        self.registrySettingStore = SurfAceRegistrySettingStore(defaults: userDefaults)
         self.locklessStateURLOverride = locklessStateURL
         self.configuredRegistryURLOverride = configuredRegistryURL
         self.configuredDirectEndpointOverride = configuredDirectEndpoint
@@ -528,6 +533,7 @@ final class SurfAceRuntime {
 
         loadIdentityMapping()
         loadPersistedSurfaceTopologies()
+        registrySavedURL = userDefaults.string(forKey: SurfAceRegistrySettingStore.defaultsKey)
         surfAceLifecycleLog(
             "event=runtime_init \(surfAceDiagnosticFields([("device_collect_command", surfAceDeviceCollectCommand()), ("fingerprint", fingerprint), ("log_path", surfAceFlightRecorderLogPath()), ("screen_name", screenName), ("simulator_tail_command", surfAceSimulatorTailCommand())]))"
         )
@@ -609,7 +615,8 @@ final class SurfAceRuntime {
         guard centralRegistration == nil, let identity else { return }
         let discovery = SurfAceCentralDiscovery()
         let registration = SurfAceCentralRegistration(
-            clientId: identity.clientId, configured: configuredRegistryURL,
+            clientId: identity.clientId, configured: nil,
+            registrySources: { [weak self] in self?.currentRegistrySources() ?? [] },
             discover: { await discovery.discover() },
             discoveryError: { discovery.lastError },
             transportFallbacks: { discovery.transportURLs(for: $0) },
@@ -720,6 +727,9 @@ final class SurfAceRuntime {
             onConnectionError: { [weak self] error in
                 self?.updateCentralRegistrationError(error)
             },
+            onSourceReports: { [weak self] reports in
+                self?.registrySourceReports = reports
+            },
             onVerifiedEndpoint: { [weak self] endpoint in
                 self?.reconcileVerifiedAnnotationRegistry(endpoint)
             }
@@ -739,8 +749,10 @@ final class SurfAceRuntime {
         guard let endpoint = verifiedAnnotationRegistryURL ?? configuredRegistryURL,
               ["ws", "wss"].contains(endpoint.scheme?.lowercased() ?? ""),
               endpoint.host != nil else { return }
+        let configuredKind = currentRegistrySources().first { $0.url != nil }?.kind
         let provenance = verifiedAnnotationRegistryURL != nil ? "verified_selection"
-            : (configuredRegistryURLOverride != nil ? "explicit_override" : "explicit_environment")
+            : (configuredKind == .saved ? "saved_setting"
+               : (configuredRegistryURLOverride != nil ? "explicit_override" : "explicit_environment"))
         surfAceServerRuntimeLog("event=annotation_publisher_route \(surfAceDiagnosticFields([("provenance", provenance), ("endpoint", SurfAceAnnotationPublisher.safeEndpoint(endpoint))]))")
         do {
             if let annotationPublisher {
@@ -4384,10 +4396,64 @@ final class SurfAceRuntime {
     }
 
     private var configuredRegistryURL: URL? {
-        if let configuredRegistryURLOverride { return configuredRegistryURLOverride }
-        guard let address = ProcessInfo.processInfo.environment["SURF_ACE_SERVER"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines) else { return nil }
-        return URL(string: address)
+        currentRegistrySources().compactMap(\.url).first
+    }
+
+    /// Registry sources ahead of Bonjour, in priority order: the non-persistent
+    /// environment override, then the operator-saved setting.
+    private func currentRegistrySources() -> [SurfAceRegistrySource] {
+        var sources: [SurfAceRegistrySource] = []
+        let rawOverride = configuredRegistryURLOverride?.absoluteString
+            ?? ProcessInfo.processInfo.environment["SURF_ACE_SERVER"]?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let rawOverride, !rawOverride.isEmpty {
+            switch SurfAceRegistryURLValidation.validate(rawOverride) {
+            case .success(let url): sources.append(.valid(.environment, url))
+            case .failure(let error): sources.append(.invalid(.environment, reason: error.message))
+            }
+        }
+        switch registrySettingStore.value {
+        case .unset: break
+        case .valid(let url): sources.append(.valid(.saved, url))
+        case .invalid(_, let reason): sources.append(.invalid(.saved, reason: reason))
+        }
+        return sources
+    }
+
+    /// Saves a validated registry URL. An invalid edit leaves the last valid
+    /// saved value unchanged and is reported through `registryURLValidationError`.
+    @discardableResult
+    func saveRegistryURL(_ text: String) -> Bool {
+        switch SurfAceRegistryURLValidation.validate(text) {
+        case .failure(let error):
+            registryURLValidationError = error.message
+            return false
+        case .success(let url):
+            registryURLValidationError = nil
+            guard registrySettingStore.value != .valid(url) else { return true }
+            registrySettingStore.save(url)
+            registrySavedURL = url.absoluteString
+            registryConfigurationChanged()
+            return true
+        }
+    }
+
+    func clearRegistryURL() {
+        registryURLValidationError = nil
+        guard registrySettingStore.value != .unset else { return }
+        registrySettingStore.clear()
+        registrySavedURL = nil
+        registryConfigurationChanged()
+    }
+
+    private func registryConfigurationChanged() {
+        registrySourceReports = []
+        verifiedAnnotationRegistryURL = nil
+        let hadAnnotationPublisher = annotationPublisher != nil
+        annotationPublisher?.stop()
+        annotationPublisher = nil
+        centralRegistration?.registryConfigurationChanged()
+        if hadAnnotationPublisher { startAnnotationPublisher() }
     }
 
     private var configuredDirectEndpoint: String? {
