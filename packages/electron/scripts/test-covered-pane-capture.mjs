@@ -150,5 +150,8 @@ if (process.platform !== "linux") {
   console.log("SKIP: covered-pane occlusion capture regression requires Linux/X11.");
   app.quit();
 } else {
-  await run();
+  void run().catch((error) => {
+    console.error(error);
+    app.exit(1);
+  });
 }
