@@ -50,6 +50,12 @@ function fixtureWindow({ x, y, backgroundThrottling }) {
 }
 
 async function run() {
+  console.log("FIXTURE_RUNTIME=" + JSON.stringify({
+    electron: process.versions.electron,
+    chromium: process.versions.chrome,
+    node: process.versions.node,
+    platform: process.platform,
+  }));
   assert.equal(app.commandLine.hasSwitch("disable-gpu"), false,
     "the fixture must run without an explicit --disable-gpu switch");
   assert.equal(["1", "true", "yes"].includes(process.env.SURF_ACE_DISABLE_GPU?.trim().toLowerCase()), false,
