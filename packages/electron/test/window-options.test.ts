@@ -154,6 +154,35 @@ test("covered pane capture falls back after a stalled frame wait and restores th
   assert.equal(backgroundThrottling, true);
 });
 
+test("covered pane capture falls back after a failed frame wait and restores throttling", async () => {
+  const calls: string[] = [];
+  const image = {};
+  const rectangle = { height: 20, width: 30, x: 4, y: 5 };
+  let backgroundThrottling = true;
+  const window = {
+    capturePage: async (rect: typeof rectangle) => {
+      calls.push(`capture:${rect.x},${rect.y}`);
+      return image;
+    },
+    webContents: {
+      executeJavaScript: async () => {
+        calls.push("executeJavaScript");
+        throw new Error("renderer is unavailable");
+      },
+      getBackgroundThrottling: () => backgroundThrottling,
+      isDestroyed: () => false,
+      setBackgroundThrottling: (enabled: boolean) => {
+        backgroundThrottling = enabled;
+        calls.push(`throttling:${enabled}`);
+      },
+    },
+  } as unknown as Parameters<typeof captureWindowPageForPane>[0];
+
+  assert.equal(await captureWindowPageForPane(window, rectangle, true), image);
+  assert.deepEqual(calls, ["throttling:false", "executeJavaScript", "capture:4,5", "throttling:true"]);
+  assert.equal(backgroundThrottling, true);
+});
+
 test("explicit disable-gpu launch selects software capture even without the environment override", () => {
   assert.equal(shouldDisableGpuForSoftwareCapture({ commandLineHasDisableGpu: true }), true);
   assert.equal(shouldDisableGpuForSoftwareCapture({ commandLineHasDisableGpu: false }), false);

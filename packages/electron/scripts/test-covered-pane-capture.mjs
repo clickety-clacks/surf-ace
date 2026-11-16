@@ -66,7 +66,7 @@ function fixtureWindow({ x, y, backgroundThrottling }) {
     width: 360,
     x,
     y,
-    webPreferences: { backgroundThrottling, webviewTag: true },
+    webPreferences: { backgroundThrottling },
   });
 }
 
@@ -104,31 +104,25 @@ async function run() {
     const y = 100;
     const leftPaneColor = "#d93636";
     const rightPaneColor = "#246bce";
+    const coveredLeftPaneColor = "#db9d32";
+    const coveredRightPaneColor = "#26a680";
     const coverColor = "#2040dc";
     const targetPixels = {
       left: pixelPoints([217, 54, 54]),
       right: pixelPoints([36, 107, 206]),
     };
+    const coveredTargetPixels = {
+      left: pixelPoints([219, 157, 50]),
+      right: pixelPoints([38, 166, 128]),
+    };
     const coverPixels = pixelPoints([32, 64, 220]);
 
-    // Match pane content from the Linux baseline: red and blue HTML inside Surf Ace's webview path.
+    // Use the red/blue pane colors from the Linux baseline without nesting another webview in the fixture.
     target = fixtureWindow({ backgroundThrottling: true, x, y });
     reportFixturePhase("target-created");
-    const paneHtml = `<!doctype html><html><head><meta charset="utf-8"><style>html,body{box-sizing:border-box;margin:0;width:100%;height:100%;overflow:hidden}.left,.right{position:absolute;top:0;bottom:0;width:50%}.left{left:0;background:${leftPaneColor}}.right{right:0;background:${rightPaneColor}}</style></head><body><div class="left"></div><div class="right"></div></body></html>`;
-    const paneUrl = dataHtmlUrl(paneHtml);
-    const targetHtml = `<!doctype html><html><head><meta charset="utf-8"><style>html,body{box-sizing:border-box;margin:0;width:100%;height:100%;overflow:hidden}webview{position:absolute;inset:0;width:100%;height:100%;border:0}</style></head><body><webview src="${paneUrl}"></webview></body></html>`;
-    const guestReady = new Promise((resolve, reject) => {
-      target.webContents.once("did-attach-webview", (_event, guest) => {
-        guest.once("did-finish-load", resolve);
-        guest.once("did-fail-load", (_event, errorCode, errorDescription) => {
-          reject(new Error(`pane webview failed to load (${errorCode}): ${errorDescription}`));
-        });
-      });
-    });
+    const targetHtml = `<!doctype html><html><head><meta charset="utf-8"><style>html,body{box-sizing:border-box;margin:0;width:100%;height:100%;overflow:hidden}.pane{position:absolute;top:0;bottom:0;width:50%}.pane-left{left:0;background:${leftPaneColor}}.pane-right{right:0;background:${rightPaneColor}}</style></head><body><div class="pane pane-left"></div><div class="pane pane-right"></div></body></html>`;
     await target.loadURL(dataHtmlUrl(targetHtml));
     reportFixturePhase("target-loaded");
-    await guestReady;
-    reportFixturePhase("target-webview-ready");
     target.show();
     await target.focus();
     reportFixturePhase("target-shown");
@@ -154,15 +148,19 @@ async function run() {
     const coveredOverlay = await waitForPixel(cover, Math.floor(viewport.width / 2), Math.floor(viewport.height / 2),
       coverPixels, "covering window capture", false);
     console.log("CAPTURE_CASE=" + JSON.stringify({ label: "cover-window", ...coveredOverlay }));
-    await new Promise((resolve) => setTimeout(resolve, 150));
+    await target.webContents.executeJavaScript(`(() => {
+      document.querySelector(".pane-left").style.background = "${coveredLeftPaneColor}";
+      document.querySelector(".pane-right").style.background = "${coveredRightPaneColor}";
+    })()`);
+    reportFixturePhase("target-pane-content-updated-under-cover");
 
-    const coveredTarget = await waitForPanePixels(target, viewport.width, viewport.height, targetPixels, "covered target capture",
+    const coveredTarget = await waitForPanePixels(target, viewport.width, viewport.height, coveredTargetPixels, "covered target capture",
       keepFramesForCoveredCapture);
     assert.equal(target.webContents.getBackgroundThrottling(), true, "covered capture restores the prior throttling state");
     console.log("CAPTURE_CASE=" + JSON.stringify({ label: "covered", ...coveredTarget }));
 
     cover.hide();
-    const uncoveredAgain = await waitForPanePixels(target, viewport.width, viewport.height, targetPixels,
+    const uncoveredAgain = await waitForPanePixels(target, viewport.width, viewport.height, coveredTargetPixels,
       "uncovered target capture after cover", keepFramesForCoveredCapture);
     assert.equal(target.webContents.getBackgroundThrottling(), true, "post-cover capture restores the prior throttling state");
     console.log("CAPTURE_CASE=" + JSON.stringify({ label: "uncovered-again", ...uncoveredAgain }));
