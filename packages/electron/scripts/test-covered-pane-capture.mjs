@@ -120,7 +120,7 @@ async function run() {
     // Use the red/blue pane colors from the Linux baseline without nesting another webview in the fixture.
     target = fixtureWindow({ backgroundThrottling: true, x, y });
     reportFixturePhase("target-created");
-    const targetHtml = `<!doctype html><html><head><meta charset="utf-8"><style>html,body{box-sizing:border-box;margin:0;width:100%;height:100%;overflow:hidden}.pane{position:absolute;top:0;bottom:0;width:50%}.pane-left{left:0;background:${leftPaneColor}}.pane-right{right:0;background:${rightPaneColor}}</style></head><body><div class="pane pane-left"></div><div class="pane pane-right"></div></body></html>`;
+    const targetHtml = `<!doctype html><html><head><meta charset="utf-8"><style>html,body{box-sizing:border-box;margin:0;width:100%;height:100%;overflow:hidden}.pane{position:absolute;top:0;bottom:0;width:50%}.pane-left{left:0;background:${leftPaneColor}}.pane-right{right:0;background:${rightPaneColor}}</style><script>window.armCoveredPaneFrame=()=>requestAnimationFrame(()=>{document.querySelector(".pane-left").style.background="${coveredLeftPaneColor}";document.querySelector(".pane-right").style.background="${coveredRightPaneColor}"})</script></head><body><div class="pane pane-left"></div><div class="pane pane-right"></div></body></html>`;
     await target.loadURL(dataHtmlUrl(targetHtml));
     reportFixturePhase("target-loaded");
     target.show();
@@ -148,10 +148,7 @@ async function run() {
     const coveredOverlay = await waitForPixel(cover, Math.floor(viewport.width / 2), Math.floor(viewport.height / 2),
       coverPixels, "covering window capture", false);
     console.log("CAPTURE_CASE=" + JSON.stringify({ label: "cover-window", ...coveredOverlay }));
-    await target.webContents.executeJavaScript(`(() => {
-      document.querySelector(".pane-left").style.background = "${coveredLeftPaneColor}";
-      document.querySelector(".pane-right").style.background = "${coveredRightPaneColor}";
-    })()`);
+    await target.webContents.executeJavaScript("window.armCoveredPaneFrame()");
     reportFixturePhase("target-pane-content-updated-under-cover");
 
     const coveredTarget = await waitForPanePixels(target, viewport.width, viewport.height, coveredTargetPixels, "covered target capture",
