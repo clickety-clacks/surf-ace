@@ -47,7 +47,14 @@ async function capturePixel(window, x, y, keepFramesForCoveredCapture, label, at
 async function waitForPixel(window, x, y, expectedPixels, label, keepFramesForCoveredCapture) {
   let observed;
   for (let attempt = 1; attempt <= 40; attempt += 1) {
-    observed = await capturePixel(window, x, y, keepFramesForCoveredCapture, label, attempt);
+    try {
+      observed = await capturePixel(window, x, y, keepFramesForCoveredCapture, label, attempt);
+    } catch (error) {
+      observed = `capture error: ${error instanceof Error ? error.message : String(error)}`;
+      reportFixturePhase("capture-error", { label, attempt, message: observed });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      continue;
+    }
     const expected = expectedPixels.find((candidate) => matches(observed, candidate));
     if (expected) {
       return { attempt, expected, observed };
