@@ -11,6 +11,7 @@
     "package": "pnpm run build && electron-builder --mac dir --arm64",
     "start": "pnpm run build && electron .",
     "test": "node --test ./dist/test/*.test.js ./test/*.test.mjs",
+    "test:capture-occlusion": "electron --no-sandbox ./scripts/test-covered-pane-capture.mjs",
     "test:capture-response": "node ./scripts/verify-capture-response.mjs"
   },
   "dependencies": {
