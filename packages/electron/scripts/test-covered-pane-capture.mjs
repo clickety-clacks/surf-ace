@@ -44,9 +44,9 @@ async function capturePixel(window, x, y, keepFramesForCoveredCapture, label, at
   return referencePixel(image, 12, 12);
 }
 
-async function waitForPixel(window, x, y, expectedPixels, label, keepFramesForCoveredCapture) {
+async function waitForPixel(window, x, y, expectedPixels, label, keepFramesForCoveredCapture, maxAttempts = 40) {
   let observed;
-  for (let attempt = 1; attempt <= 40; attempt += 1) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
       observed = await capturePixel(window, x, y, keepFramesForCoveredCapture, label, attempt);
     } catch (error) {
@@ -59,16 +59,16 @@ async function waitForPixel(window, x, y, expectedPixels, label, keepFramesForCo
     if (expected) {
       return { attempt, expected, observed };
     }
-    if (attempt < 40) await new Promise((resolve) => setTimeout(resolve, 50));
+    if (attempt < maxAttempts) await new Promise((resolve) => setTimeout(resolve, 50));
   }
   assert.fail(`${label}: expected ${JSON.stringify(expectedPixels)}, observed ${JSON.stringify(observed)}`);
 }
 
-async function waitForPanePixels(window, width, height, expectedPixels, label, keepFramesForCoveredCapture) {
+async function waitForPanePixels(window, width, height, expectedPixels, label, keepFramesForCoveredCapture, maxAttempts) {
   const left = await waitForPixel(window, Math.floor(width / 4), Math.floor(height / 2), expectedPixels.left,
-    `${label} left`, keepFramesForCoveredCapture);
+    `${label} left`, keepFramesForCoveredCapture, maxAttempts);
   const right = await waitForPixel(window, Math.floor(width * 3 / 4), Math.floor(height / 2), expectedPixels.right,
-    `${label} right`, keepFramesForCoveredCapture);
+    `${label} right`, keepFramesForCoveredCapture, maxAttempts);
   return { left, right };
 }
 
@@ -176,8 +176,10 @@ async function run() {
     await target.webContents.executeJavaScript("window.updatePanes()");
     reportFixturePhase("target-pane-content-updated-under-cover");
 
+    // A direct capture of a covered window can catch up about a second after the update, so the control only
+    // samples the first 300 ms.
     const coveredTarget = await waitForPanePixels(target, viewport.width, viewport.height, coveredTargetPixels, "covered target capture",
-      keepFramesForCoveredCapture);
+      keepFramesForCoveredCapture, keepFramesForCoveredCapture ? 40 : 6);
     assert.equal(target.webContents.getBackgroundThrottling(), true, "covered capture restores the prior throttling state");
     assert.deepEqual(webviewGuests(target).map((guest) => guest.getBackgroundThrottling()), [true, true],
       "covered capture restores the pane webviews' throttling state");
