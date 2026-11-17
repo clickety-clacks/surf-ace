@@ -22,22 +22,48 @@ export type SurfaceWindowCaptureMode = {
 type PaneCaptureWindow = Pick<BrowserWindow, "capturePage" | "webContents">;
 type PaneCaptureRectangle = { height: number; width: number; x: number; y: number };
 
-type ActiveCoveredCapture = {
+type CoveredCaptureHold = {
   count: number;
   restoreBackgroundThrottling: boolean;
-  firstFrames: Promise<void>;
 };
 
 const COVERED_CAPTURE_FRAME_WAIT_TIMEOUT_MS = 250;
-const activeCoveredCaptures = new WeakMap<WebContents, ActiveCoveredCapture>();
+const coveredCaptureHolds = new WeakMap<WebContents, CoveredCaptureHold>();
 
-function waitForCoveredCaptureFrames(webContents: WebContents): Promise<void> {
+function holdFramesForCoveredCapture(webContents: WebContents): void {
+  let hold = coveredCaptureHolds.get(webContents);
+  if (!hold) {
+    const restoreBackgroundThrottling = webContents.getBackgroundThrottling();
+    if (restoreBackgroundThrottling) {
+      webContents.setBackgroundThrottling(false);
+    }
+    hold = { count: 0, restoreBackgroundThrottling };
+    coveredCaptureHolds.set(webContents, hold);
+  }
+  hold.count += 1;
+}
+
+function releaseFramesForCoveredCapture(webContents: WebContents): void {
+  const hold = coveredCaptureHolds.get(webContents);
+  if (!hold) {
+    return;
+  }
+  hold.count -= 1;
+  if (hold.count === 0) {
+    coveredCaptureHolds.delete(webContents);
+    if (hold.restoreBackgroundThrottling && !webContents.isDestroyed()) {
+      webContents.setBackgroundThrottling(true);
+    }
+  }
+}
+
+function waitForCoveredCaptureFrames(webContents: WebContents[]): Promise<void> {
   let timeout: ReturnType<typeof setTimeout> | undefined;
-  const firstFrames = Promise.resolve()
-    .then(() => webContents.executeJavaScript(
+  const firstFrames = Promise.all(webContents.map((contents) => Promise.resolve()
+    .then(() => contents.executeJavaScript(
       "new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))",
     ))
-    .then(() => undefined, () => undefined);
+    .then(() => undefined, () => undefined))).then(() => undefined);
   const timeoutFallback = new Promise<void>((resolve) => {
     timeout = setTimeout(resolve, COVERED_CAPTURE_FRAME_WAIT_TIMEOUT_MS);
   });
@@ -77,42 +103,25 @@ export function surfaceWindowCaptureMode(params: {
   };
 }
 
+// Pane webviews are separate guest WebContents; a covered window stops producing their frames
+// unless each guest is also unthrottled for the capture.
 export async function captureWindowPageForPane(
   window: PaneCaptureWindow,
   rectangle: PaneCaptureRectangle,
   keepFramesForCoveredCapture: boolean,
+  guestWebContents: readonly WebContents[] = [],
 ): Promise<NativeImage> {
-  const webContents = window.webContents;
   if (!keepFramesForCoveredCapture) {
     return window.capturePage(rectangle);
   }
 
-  let activeCapture = activeCoveredCaptures.get(webContents);
-  if (!activeCapture) {
-    const restoreBackgroundThrottling = webContents.getBackgroundThrottling();
-    if (restoreBackgroundThrottling) {
-      webContents.setBackgroundThrottling(false);
-    }
-    activeCapture = {
-      count: 0,
-      restoreBackgroundThrottling,
-      firstFrames: waitForCoveredCaptureFrames(webContents),
-    };
-    activeCoveredCaptures.set(webContents, activeCapture);
-  }
-
-  activeCapture.count += 1;
+  const contents = [window.webContents, ...guestWebContents.filter((guest) => !guest.isDestroyed())];
+  contents.forEach(holdFramesForCoveredCapture);
   try {
-    await activeCapture.firstFrames;
+    await waitForCoveredCaptureFrames(contents);
     return await window.capturePage(rectangle);
   } finally {
-    activeCapture.count -= 1;
-    if (activeCapture.count === 0) {
-      activeCoveredCaptures.delete(webContents);
-      if (activeCapture.restoreBackgroundThrottling && !webContents.isDestroyed()) {
-        webContents.setBackgroundThrottling(true);
-      }
-    }
+    contents.forEach(releaseFramesForCoveredCapture);
   }
 }
 

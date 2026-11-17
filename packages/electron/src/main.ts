@@ -16,6 +16,7 @@ import {
   nativeImage,
   screen,
   session,
+  webContents as electronWebContents,
   type ContextMenuParams,
   type MenuItemConstructorOptions,
   type WebContents,
@@ -1633,7 +1634,8 @@ async function capturePaneImage(surfaceId: string, paneId: number): Promise<stri
     width: Math.max(1, Math.floor(bounds.width)),
     x: Math.max(0, Math.floor(bounds.x)),
     y: Math.max(0, Math.floor(bounds.y)),
-  }, captureMode.keepFramesForCoveredCapture);
+  }, captureMode.keepFramesForCoveredCapture, electronWebContents.getAllWebContents()
+    .filter((contents) => contents.hostWebContents === window.webContents));
   return image.toPNG().toString("base64");
 }
 

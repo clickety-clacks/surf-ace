@@ -183,6 +183,55 @@ test("covered pane capture falls back after a failed frame wait and restores thr
   assert.equal(backgroundThrottling, true);
 });
 
+test("covered pane capture unthrottles pane webviews for the capture and restores them", async () => {
+  const calls: string[] = [];
+  const image = {};
+  const rectangle = { height: 20, width: 30, x: 4, y: 5 };
+  const fakeContents = (name: string, initialThrottling: boolean) => {
+    let backgroundThrottling = initialThrottling;
+    return {
+      contents: {
+        executeJavaScript: async () => {
+          calls.push(`${name}:frames`);
+        },
+        getBackgroundThrottling: () => backgroundThrottling,
+        isDestroyed: () => false,
+        setBackgroundThrottling: (enabled: boolean) => {
+          backgroundThrottling = enabled;
+          calls.push(`${name}:throttling:${enabled}`);
+        },
+      },
+      throttling: () => backgroundThrottling,
+    };
+  };
+  const host = fakeContents("host", true);
+  const guest = fakeContents("guest", true);
+  const unthrottledGuest = fakeContents("unthrottled", false);
+  const window = {
+    capturePage: async () => {
+      calls.push(`capture:${host.throttling()},${guest.throttling()}`);
+      return image;
+    },
+    webContents: host.contents,
+  } as unknown as Parameters<typeof captureWindowPageForPane>[0];
+
+  assert.equal(await captureWindowPageForPane(window, rectangle, true,
+    [guest.contents, unthrottledGuest.contents] as unknown as Parameters<typeof captureWindowPageForPane>[3]), image);
+  assert.deepEqual(calls, [
+    "host:throttling:false",
+    "guest:throttling:false",
+    "host:frames",
+    "guest:frames",
+    "unthrottled:frames",
+    "capture:false,false",
+    "host:throttling:true",
+    "guest:throttling:true",
+  ]);
+  assert.equal(host.throttling(), true);
+  assert.equal(guest.throttling(), true);
+  assert.equal(unthrottledGuest.throttling(), false);
+});
+
 test("explicit disable-gpu launch selects software capture even without the environment override", () => {
   assert.equal(shouldDisableGpuForSoftwareCapture({ commandLineHasDisableGpu: true }), true);
   assert.equal(shouldDisableGpuForSoftwareCapture({ commandLineHasDisableGpu: false }), false);
