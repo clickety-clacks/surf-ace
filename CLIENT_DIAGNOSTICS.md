@@ -2,6 +2,8 @@
 
 Surf Ace clients write a local flight recorder for disconnected-client triage. Entries are timestamped in ISO-8601 and include lifecycle, selected endpoint, WebSocket, pair/session, surface, pane, and topology breadcrumbs when known.
 
+The Electron flight recorder is bounded to 8 MiB. When it reaches the limit, it removes the oldest complete entries in place, keeping the existing log path and collection commands pointed at the most recent detail.
+
 ## macOS Electron
 
 Default path:

@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import test from "node:test";
 
 import {
+  captureWindowPageForPane,
   shouldDisableGpuForSoftwareCapture,
   surfaceWindowCaptureMode,
   surfaceWindowLoadQuery,
@@ -49,12 +50,13 @@ test("surface window keeps the platform frame outside compositor hosting", () =>
   assert.equal(options.title, "workstation-a Surf Ace");
 });
 
-test("Linux GPU fallback keeps a non-compositor window offscreen for capture", () => {
+test("Linux capture mode selects software fallback or default-GPU covered-capture refresh", () => {
   assert.deepEqual(surfaceWindowCaptureMode({
     compositorSocketPath: null,
     gpuDisabled: true,
     platform: "linux",
   }), {
+    keepFramesForCoveredCapture: false,
     offscreen: { useSharedTexture: false },
     showAfterReady: false,
   });
@@ -64,6 +66,7 @@ test("Linux GPU fallback keeps a non-compositor window offscreen for capture", (
     gpuDisabled: false,
     platform: "linux",
   }), {
+    keepFramesForCoveredCapture: true,
     offscreen: false,
     showAfterReady: true,
   });
@@ -73,18 +76,160 @@ test("Linux GPU fallback keeps a non-compositor window offscreen for capture", (
     gpuDisabled: true,
     platform: "linux",
   }), {
+    keepFramesForCoveredCapture: false,
+    offscreen: false,
+    showAfterReady: true,
+  });
+
+  assert.deepEqual(surfaceWindowCaptureMode({
+    compositorSocketPath: "/tmp/surf-ace-compositor.sock",
+    gpuDisabled: false,
+    platform: "linux",
+  }), {
+    keepFramesForCoveredCapture: false,
     offscreen: false,
     showAfterReady: true,
   });
 
   assert.deepEqual(surfaceWindowCaptureMode({
     compositorSocketPath: null,
-    gpuDisabled: true,
+    gpuDisabled: false,
     platform: "darwin",
   }), {
+    keepFramesForCoveredCapture: false,
     offscreen: false,
     showAfterReady: true,
   });
+});
+
+test("pane capture uses capturePage directly when covered-frame refresh is disabled", async () => {
+  const calls: string[] = [];
+  const image = {};
+  const rectangle = { height: 20, width: 30, x: 4, y: 5 };
+  const window = {
+    capturePage: async (rect: typeof rectangle) => {
+      calls.push(`capture:${rect.x},${rect.y}`);
+      return image;
+    },
+    webContents: {
+      executeJavaScript: async () => {
+        calls.push("executeJavaScript");
+      },
+      getBackgroundThrottling: () => true,
+      isDestroyed: () => false,
+      setBackgroundThrottling: () => calls.push("setBackgroundThrottling"),
+    },
+  } as unknown as Parameters<typeof captureWindowPageForPane>[0];
+
+  assert.equal(await captureWindowPageForPane(window, rectangle, false), image);
+  assert.deepEqual(calls, ["capture:4,5"]);
+});
+
+test("covered pane capture falls back after a stalled frame wait and restores throttling", async () => {
+  const calls: string[] = [];
+  const image = {};
+  const rectangle = { height: 20, width: 30, x: 4, y: 5 };
+  let backgroundThrottling = true;
+  const window = {
+    capturePage: async (rect: typeof rectangle) => {
+      calls.push(`capture:${rect.x},${rect.y}`);
+      return image;
+    },
+    webContents: {
+      executeJavaScript: () => {
+        calls.push("executeJavaScript");
+        return new Promise<never>(() => {});
+      },
+      getBackgroundThrottling: () => backgroundThrottling,
+      isDestroyed: () => false,
+      setBackgroundThrottling: (enabled: boolean) => {
+        backgroundThrottling = enabled;
+        calls.push(`throttling:${enabled}`);
+      },
+    },
+  } as unknown as Parameters<typeof captureWindowPageForPane>[0];
+
+  assert.equal(await captureWindowPageForPane(window, rectangle, true), image);
+  assert.deepEqual(calls, ["throttling:false", "executeJavaScript", "capture:4,5", "throttling:true"]);
+  assert.equal(backgroundThrottling, true);
+});
+
+test("covered pane capture falls back after a failed frame wait and restores throttling", async () => {
+  const calls: string[] = [];
+  const image = {};
+  const rectangle = { height: 20, width: 30, x: 4, y: 5 };
+  let backgroundThrottling = true;
+  const window = {
+    capturePage: async (rect: typeof rectangle) => {
+      calls.push(`capture:${rect.x},${rect.y}`);
+      return image;
+    },
+    webContents: {
+      executeJavaScript: async () => {
+        calls.push("executeJavaScript");
+        throw new Error("renderer is unavailable");
+      },
+      getBackgroundThrottling: () => backgroundThrottling,
+      isDestroyed: () => false,
+      setBackgroundThrottling: (enabled: boolean) => {
+        backgroundThrottling = enabled;
+        calls.push(`throttling:${enabled}`);
+      },
+    },
+  } as unknown as Parameters<typeof captureWindowPageForPane>[0];
+
+  assert.equal(await captureWindowPageForPane(window, rectangle, true), image);
+  assert.deepEqual(calls, ["throttling:false", "executeJavaScript", "capture:4,5", "throttling:true"]);
+  assert.equal(backgroundThrottling, true);
+});
+
+test("covered pane capture unthrottles pane webviews for the capture and restores them", async () => {
+  const calls: string[] = [];
+  const image = {};
+  const rectangle = { height: 20, width: 30, x: 4, y: 5 };
+  const fakeContents = (name: string, initialThrottling: boolean) => {
+    let backgroundThrottling = initialThrottling;
+    return {
+      contents: {
+        executeJavaScript: async () => {
+          calls.push(`${name}:frames`);
+        },
+        getBackgroundThrottling: () => backgroundThrottling,
+        isDestroyed: () => false,
+        setBackgroundThrottling: (enabled: boolean) => {
+          backgroundThrottling = enabled;
+          calls.push(`${name}:throttling:${enabled}`);
+        },
+      },
+      throttling: () => backgroundThrottling,
+    };
+  };
+  const host = fakeContents("host", true);
+  const guest = fakeContents("guest", true);
+  const unthrottledGuest = fakeContents("unthrottled", false);
+  const window = {
+    capturePage: async () => {
+      calls.push(`capture:${host.throttling()},${guest.throttling()}`);
+      return image;
+    },
+    webContents: host.contents,
+  } as unknown as Parameters<typeof captureWindowPageForPane>[0];
+
+  assert.equal(await captureWindowPageForPane(window, rectangle, true,
+    [guest.contents, unthrottledGuest.contents] as unknown as Parameters<typeof captureWindowPageForPane>[3]), image);
+  assert.deepEqual(calls, [
+    "host:throttling:false",
+    "guest:throttling:false",
+    "host:frames",
+    "guest:frames",
+    "unthrottled:frames",
+    "capture:false,false",
+    "host:throttling:true",
+    "guest:throttling:true",
+  ]);
+  assert.equal(host.throttling(), true);
+  assert.equal(guest.throttling(), true);
+  assert.equal(unthrottledGuest.throttling(), false);
 });
 
 test("explicit disable-gpu launch selects software capture even without the environment override", () => {

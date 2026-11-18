@@ -270,6 +270,17 @@ Deterministic acceptance fixtures MUST cover, on every client platform that regi
 
 **Open questions.** (1) NON-BLOCKING: if an unbound client discovers several registries with different valid identity pairs at once, it binds to the first that answers in its existing endpoint order, with an explicitly configured registry address ahead of discovered ones. The same order applies when a bound client rebinds under item 6(b). (2) NON-BLOCKING: keeping old labels on a registry that has no record of the client would require the registry to accept requested labels. That is a registry change and is not specified; such a client takes fresh labels, which this section permits.
 
+#### 3.1.2.1 Optional persistent iOS/iPadOS registry URL
+
+The installed iOS/iPadOS app MAY expose an operator-set registry URL. This is an optional client-side override; without one, Bonjour discovery remains automatic and requires no user action. It does not change server listeners or advertisements, or the fleet binding and label authority in §3.1.2.
+
+1. **Validation and persistence.** The setting accepts only a validated absolute `ws://` or `wss://` URL with a non-empty host. Validate before saving. Reject an invalid edit with a visible validation error and keep the last valid saved value unchanged; if no valid value was saved, leave the setting unset. Store a valid operator-set value in the app's persistent local settings so it survives process restart and relaunch. `SURF_ACE_SERVER` remains a non-persistent environment override for testing and development. A URL learned from Bonjour or a registration response MUST NOT be saved or remembered as a future registry endpoint.
+2. **Candidate priority.** At installed-app startup and on each connection or registration retry, try registry sources in this order: a valid `SURF_ACE_SERVER` environment override, a valid saved setting, then current Bonjour advertisements that pass the existing server filter, in the existing endpoint order. An invalid override or stored value is reported as invalid and skipped; never pass an invalid URL to the transport. Do not cache Bonjour results across attempts.
+3. **Unreachable candidates.** Report a valid configured URL that cannot be reached as unreachable, not as a successful connection or as an unset setting. Continue the current attempt with the next source in the priority order. If a later candidate connects, report that candidate as active; do not imply that the unreachable URL connected. Keep a valid saved setting so it is first again on the next retry, which starts selection again at the highest-priority source. If no candidate connects, retain the existing disconnected or reconnecting status. A connection failure MUST NOT clear or renumber local content, layout, client identity, binding, or confirmed labels. Only successful registration subject to §3.1.2 can confirm a registry or apply labels.
+4. **Change and clear.** Saving a different valid URL replaces the saved value and immediately starts selection using the new priority order. Clearing removes only the saved value and immediately re-runs selection; an environment override remains first, otherwise Bonjour is used. A setting change or clear invalidates the previous selected registry and any in-flight attempt using the old value; a late result from that attempt MUST NOT become the selected registry or update connection status. Until registration succeeds through a candidate selected under the current value, report disconnected or reconnecting. These operations MUST NOT clear local content, layout, client identity, binding, or confirmed labels.
+
+**Acceptance:** With no environment override or saved setting, the app retains automatic Bonjour startup and retry behavior. A valid environment override takes priority over a saved value, which takes priority over Bonjour, both at startup and after retry. An invalid edit is visible and leaves the last valid saved value intact; an invalid URL is never attempted. An unreachable saved URL is reported, remains saved, and falls through to Bonjour for the current attempt; the next retry tries it first again. Changing or clearing the saved value cannot let an older attempt restore the previous selection. Clearing with no environment override returns to Bonjour. No Bonjour-learned URL persists across attempts, and failed or changed registry selection preserves client content, layout, binding, and confirmed labels.
+
 #### 3.1.3 Registry-Leased Direct Endpoint Discovery (v1)
 
 This is an additional explicit discovery path for a controller that has a configured registry URL and a named window. It supplements Bonjour/mDNS and does not replace app discovery, change surface advertisement, or change the existing pair-then-list flow. It follows Mike's v1 consistency-only ruling and the approved contract for this discovery path. The ruling explicitly does not require cryptographic proof of key possession.
@@ -684,7 +695,7 @@ In addition to the general fixtures above, deterministically inject restart (a) 
 
 Surface advertises limits in `pair.response`:
 1. `maxMessageBytes` (default 12 MiB).
-2. `maxFrameBytes` (default 10 MiB for `content.set` content payload).
+2. `maxFrameBytes` is a legacy wire-compatibility field, still required by the `pair.response.limits` schema. It MUST NOT impose a content-only size limit or refusal; requests remain bounded by `maxMessageBytes`.
 3. `maxVisibleTextBytes` (default 4096).
 4. `maxStrokePointsPerFlush` (default 8192 for `event.drawing_flush`).
 5. `maxDrawingFlushBytes` (default 2 MiB).
@@ -1875,7 +1886,7 @@ The schema below defines every v1 application message type over WS.
               ],
               "properties": {
                 "maxMessageBytes": { "type": "integer", "minimum": 1024 },
-                "maxFrameBytes": { "type": "integer", "minimum": 1024 },
+                "maxFrameBytes": { "type": "integer", "minimum": 1024, "description": "Legacy wire-compatibility field; it does not impose a content-only size limit or refusal. Requests remain bounded by maxMessageBytes." },
                 "maxVisibleTextBytes": { "type": "integer", "minimum": 256 },
                 "maxStrokePointsPerFlush": { "type": "integer", "minimum": 1 },
                 "maxDrawingFlushBytes": { "type": "integer", "minimum": 1024 },
