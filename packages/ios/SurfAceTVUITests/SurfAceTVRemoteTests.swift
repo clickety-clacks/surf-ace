@@ -202,6 +202,16 @@ final class SurfAceTVRemoteTests: XCTestCase {
         app.launchEnvironment["REMOTE_FIXTURE_SCENARIO"] = scenario
         app.launch()
         wait(app, "Isolated host seeds accepted content") { self.telemetry(app)["ready"] as? Bool == true }
+        // The fixture replaces its non-focusable loading screen asynchronously.
+        // Content readiness does not mean the first Remote focus has been assigned.
+        // Enter through the real focus engine before routing to a control; never
+        // synthesize a selection or repair missing focus during an interaction.
+        attach(app, "launch-before-remote-input")
+        remote.press(.right)
+        wait(app, "Initial Remote input establishes focus") {
+            app.descendants(matching: .any).allElementsBoundByIndex.contains { $0.hasFocus }
+        }
+        attach(app, "launch-after-remote-input")
         return app
     }
 
