@@ -17,12 +17,14 @@
 		23706992BF5583DCF7AAFBE6 /* SurfAceTVViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = E57A55DB96BBAC2756733F38 /* SurfAceTVViews.swift */; };
 		27C2CF88E0FC0A04C198468F /* Rajdhani-Regular.ttf in Resources */ = {isa = PBXBuildFile; fileRef = A04872CAEAB170E568881F03 /* Rajdhani-Regular.ttf */; };
 		2A675ADF548A245A159A9A78 /* SurfAceAnnotationOutbox.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A6C511E9E640A38A2399D6A /* SurfAceAnnotationOutbox.swift */; };
+		2B7B87C2B74641C5BE219811 /* SurfAceDirectEndpoint.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1B92CEB203645C3A837E9DD /* SurfAceDirectEndpoint.swift */; };
 		2DA597E008575655881FAEDD /* SurfAceLocklessTopologyCodec.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF164B3EA1566A4C62391DF8 /* SurfAceLocklessTopologyCodec.swift */; };
 		33B003E1AAE07F31E9A1A3BB /* SurfAceLocklessUIProjection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 156A7E9BE1810A1505B90C61 /* SurfAceLocklessUIProjection.swift */; };
 		3667C0AF389567187BF5523A /* SurfAceTVInteractionHostApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1B187CAF9DAB981B9E5D7BC /* SurfAceTVInteractionHostApp.swift */; };
 		3A926704E0488B2F6077BBA0 /* SurfAceAnnotationPublisher.swift in Sources */ = {isa = PBXBuildFile; fileRef = BE62DD5EB6326DCBFACC0BC7 /* SurfAceAnnotationPublisher.swift */; };
 		47DA1F9A549F783143789D63 /* SurfAceCentralRegistration.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0534BFF30E8E184DBFF95FE /* SurfAceCentralRegistration.swift */; };
 		482814AE344628D88FD6C1C2 /* SurfAceLocklessTopologyCodec.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF164B3EA1566A4C62391DF8 /* SurfAceLocklessTopologyCodec.swift */; };
+		489926F08B8F437F8B1DC658 /* SurfAceDirectEndpoint.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1B92CEB203645C3A837E9DD /* SurfAceDirectEndpoint.swift */; };
 		4B15357436F6BBF162959B42 /* SurfAceTVRemoteControl.swift in Sources */ = {isa = PBXBuildFile; fileRef = 79BD590CF3137202658135F8 /* SurfAceTVRemoteControl.swift */; };
 		4B2B10B2CABCB958200396B6 /* SurfAceBonjourPublisher.swift in Sources */ = {isa = PBXBuildFile; fileRef = FAA3A8C400F66EF1B9B88FCC /* SurfAceBonjourPublisher.swift */; };
 		4F34FDBD38047FB244ABA737 /* SurfAceLocklessContentOperations.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6664999A4155A24EB51C63E7 /* SurfAceLocklessContentOperations.swift */; };
@@ -116,6 +118,7 @@
 		A04872CAEAB170E568881F03 /* Rajdhani-Regular.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = "Rajdhani-Regular.ttf"; sourceTree = "<group>"; };
 		A5EAF29DA2B25C39D696FE6C /* SurfAceTVRemoteTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceTVRemoteTests.swift; sourceTree = "<group>"; };
 		A85B0A064C2B2A244227643E /* SurfAceTVArrangementTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceTVArrangementTests.swift; sourceTree = "<group>"; };
+		B1B92CEB203645C3A837E9DD /* SurfAceDirectEndpoint.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceDirectEndpoint.swift; sourceTree = "<group>"; };
 		BE62DD5EB6326DCBFACC0BC7 /* SurfAceAnnotationPublisher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceAnnotationPublisher.swift; sourceTree = "<group>"; };
 		C5708EC5EED87839EAD5C233 /* SurfAceLocklessAuthority.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceLocklessAuthority.swift; sourceTree = "<group>"; };
 		D0B1E1D149395D6342BA923E /* SurfAceTVPaneView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfAceTVPaneView.swift; sourceTree = "<group>"; };
@@ -150,6 +153,7 @@
 				FAA3A8C400F66EF1B9B88FCC /* SurfAceBonjourPublisher.swift */,
 				61F1B4B8269BE24D748EFA93 /* SurfAceCentralDiscoveryLifecycle.swift */,
 				F0534BFF30E8E184DBFF95FE /* SurfAceCentralRegistration.swift */,
+				B1B92CEB203645C3A837E9DD /* SurfAceDirectEndpoint.swift */,
 				101E8DB6A6C5E0E44141E393 /* SurfAceHTTPServer.swift */,
 				4A97D5A825A270ED8C5422B5 /* SurfAceIdentityStore.swift */,
 				C5708EC5EED87839EAD5C233 /* SurfAceLocklessAuthority.swift */,
@@ -403,6 +407,7 @@
 				4B2B10B2CABCB958200396B6 /* SurfAceBonjourPublisher.swift in Sources */,
 				CC9780CABA23D6E483CC7E9A /* SurfAceCentralDiscoveryLifecycle.swift in Sources */,
 				47DA1F9A549F783143789D63 /* SurfAceCentralRegistration.swift in Sources */,
+				489926F08B8F437F8B1DC658 /* SurfAceDirectEndpoint.swift in Sources */,
 				2274D9C536C74ADD58605C8C /* SurfAceHTTPServer.swift in Sources */,
 				6351ABD57AC943F0E77231D0 /* SurfAceIdentityStore.swift in Sources */,
 				EC13601925E12BEFFA65198F /* SurfAceLocklessAuthority.swift in Sources */,
@@ -447,6 +452,7 @@
 				E4747ADDDCE5EF86B0C60270 /* SurfAceBonjourPublisher.swift in Sources */,
 				CBFF45DA958A1DB30D6B254B /* SurfAceCentralDiscoveryLifecycle.swift in Sources */,
 				CFA9ECC885BCB0EBDCF39B9B /* SurfAceCentralRegistration.swift in Sources */,
+				2B7B87C2B74641C5BE219811 /* SurfAceDirectEndpoint.swift in Sources */,
 				DE156DE8D4010A6EE1DA2C5C /* SurfAceHTTPServer.swift in Sources */,
 				9112DC7D2F5B25F7929F63FC /* SurfAceIdentityStore.swift in Sources */,
 				F2216C21463301C30DB83477 /* SurfAceLocklessAuthority.swift in Sources */,
