@@ -637,6 +637,23 @@ fn spawn_unresponsive_surface_server() -> (String, thread::JoinHandle<Value>) {
     (format!("ws://{address}"), task)
 }
 
+fn spawn_endpoint_server_without_pre_pair_describe() -> (String, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let task = thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut socket = accept(stream).unwrap();
+        match socket.read() {
+            Ok(Message::Close(_)) | Err(tungstenite::Error::ConnectionClosed) => {}
+            other => panic!("expected client to close without sending surface.describe: {other:?}"),
+        }
+    });
+    (format!("ws://{address}"), task)
+}
+
 fn epoch_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1285,6 +1302,81 @@ fn window_describe_reads_a_leased_endpoint_before_pairing_and_rechecks_the_regis
         !state_root.exists(),
         "window-describe must not create controller state"
     );
+}
+
+#[test]
+fn window_describe_resolves_a_leased_window_when_pre_pair_describe_is_unsupported() {
+    let schema_output = run_native_cli(&["schema", "window-describe"]);
+    assert!(schema_output.status.success());
+    let schema: Value = serde_json::from_slice(&schema_output.stdout).unwrap();
+    let result_schema = schema["result"]["command"]["resultSchema"].clone();
+
+    for supports_describe in [Some(false), None] {
+        let now = epoch_ms();
+        let client_id = "d".repeat(64);
+        let surface_id = "sf_legacy_window_fixture";
+        let (endpoint, endpoint_server) = spawn_endpoint_server_without_pre_pair_describe();
+        let mut client = discovery_client(
+            &client_id,
+            Some(&endpoint),
+            vec![discovery_surface(surface_id, "a")],
+            9,
+            now - 100,
+            now + 10_000,
+            supports_describe.unwrap_or(false),
+        );
+        if supports_describe.is_none() {
+            client.as_object_mut().unwrap().remove("prePairDescribeV1");
+        }
+        let first = discovery_topology(vec![client.clone()], now);
+        let second = discovery_topology(vec![client], now + 5);
+        let (registry, registry_server) = spawn_registry_sequence(vec![first, second]);
+
+        let output = run_window_describe(&registry, "a");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+        common::schema::validate(&result_schema, &result_schema, &result)
+            .expect("unsupported pre-pair describe keeps the published result shape");
+
+        assert_eq!(result["result"]["windowLabel"], "a");
+        assert_eq!(result["result"]["registryBefore"]["surfaceId"], surface_id);
+        assert_eq!(result["result"]["registryAfter"]["surfaceId"], surface_id);
+        assert_eq!(
+            result["result"]["registryBefore"]["endpointLease"],
+            result["result"]["registryAfter"]["endpointLease"]
+        );
+        assert_eq!(
+            result["result"]["transportReachability"]["status"],
+            "reachable"
+        );
+        assert_eq!(
+            result["result"]["applicationReadiness"]["status"],
+            "unknown"
+        );
+        assert_eq!(
+            result["result"]["applicationReadiness"]["limitationCodes"],
+            json!(["prepair_describe_unsupported"])
+        );
+        assert_eq!(
+            result["result"]["identityConsistency"]["clientId"],
+            "unverified"
+        );
+        assert_eq!(result["result"]["surfaceObservation"], Value::Null);
+        assert!(result["warnings"].as_array().unwrap().contains(&json!(
+            "prepair_describe_unsupported"
+        )));
+
+        let registry_requests = registry_server.join().unwrap();
+        assert_eq!(registry_requests.len(), 2);
+        assert!(registry_requests
+            .iter()
+            .all(|request| request["op"] == "fleet.topology"));
+        endpoint_server.join().unwrap();
+    }
 }
 
 #[test]

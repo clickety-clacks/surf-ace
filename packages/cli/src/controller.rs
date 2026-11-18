@@ -191,9 +191,15 @@ struct EndpointCandidate {
     surface_id: String,
     window_label: String,
     direct_endpoint: String,
+    pre_pair_describe_supported: bool,
     lease_generation: u64,
     registration_observed_at_ms: u64,
     lease_expires_at_ms: u64,
+}
+
+enum EndpointProbeOutcome {
+    Described(Value),
+    DescribeUnavailable,
 }
 
 impl EndpointCandidate {
@@ -269,28 +275,60 @@ fn execute_window_describe(invocation: &Invocation) -> Result<CliOutput, CliErro
             &probe,
         ));
     }
-    let surface_observation = probe?;
-    let identity_consistency = identity_consistency(&surface_observation, &rechecked);
+    let (result, warnings) = match probe? {
+        EndpointProbeOutcome::Described(observation) => {
+            let identity_consistency = identity_consistency(&observation, &rechecked);
+            (
+                json!({
+                    "windowLabel": window_label,
+                    "identitySemantics": "consistency_only_not_authentication",
+                    "transportReachability": {
+                        "status": "reachable",
+                        "directEndpoint": selected.direct_endpoint,
+                        "observedAtMs": direct_observed_at_ms,
+                    },
+                    "registryBefore": selected.evidence(&before),
+                    "registryAfter": rechecked.evidence(&after),
+                    "applicationReadiness": observation["applicationReadiness"].clone(),
+                    "identityConsistency": identity_consistency,
+                    "surfaceObservation": observation,
+                }),
+                vec![],
+            )
+        }
+        EndpointProbeOutcome::DescribeUnavailable => (
+            json!({
+                "windowLabel": window_label,
+                "identitySemantics": "consistency_only_not_authentication",
+                "transportReachability": {
+                    "status": "reachable",
+                    "directEndpoint": selected.direct_endpoint,
+                    "observedAtMs": direct_observed_at_ms,
+                },
+                "registryBefore": selected.evidence(&before),
+                "registryAfter": rechecked.evidence(&after),
+                "applicationReadiness": {
+                    "status": "unknown",
+                    "limitationCodes": ["prepair_describe_unsupported"],
+                },
+                "identityConsistency": {
+                    "clientId": "unverified",
+                    "surfaceId": "unverified",
+                    "registryIdentity": "unverified",
+                    "endpointLease": "unverified",
+                },
+                "surfaceObservation": null,
+            }),
+            vec!["prepair_describe_unsupported".to_owned()],
+        ),
+    };
     Ok(CliOutput {
         ok: true,
         command: crate::command::Command::WindowDescribe.name().into(),
         controller_instance_id: None,
         reconciliations: vec![],
-        warnings: vec![],
-        result: json!({
-            "windowLabel": window_label,
-            "identitySemantics": "consistency_only_not_authentication",
-            "transportReachability": {
-                "status": "reachable",
-                "directEndpoint": selected.direct_endpoint,
-                "observedAtMs": direct_observed_at_ms,
-            },
-            "registryBefore": selected.evidence(&before),
-            "registryAfter": rechecked.evidence(&after),
-            "applicationReadiness": surface_observation["applicationReadiness"].clone(),
-            "identityConsistency": identity_consistency,
-            "surfaceObservation": surface_observation,
-        }),
+        warnings,
+        result,
     })
 }
 
@@ -480,9 +518,7 @@ fn select_endpoint_candidate(
             else {
                 continue;
             };
-            if !is_supported_direct_endpoint(direct_endpoint)
-                || client_object.get("prePairDescribeV1") != Some(&Value::Bool(true))
-            {
+            if !is_supported_direct_endpoint(direct_endpoint) {
                 continue;
             }
             label_has_supported_endpoint = true;
@@ -530,6 +566,10 @@ fn select_endpoint_candidate(
                 surface_id: surface_id.to_owned(),
                 window_label: window_label.to_owned(),
                 direct_endpoint: direct_endpoint.to_owned(),
+                pre_pair_describe_supported: client_object
+                    .get("prePairDescribeV1")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
                 lease_generation,
                 registration_observed_at_ms,
                 lease_expires_at_ms,
@@ -539,7 +579,7 @@ fn select_endpoint_candidate(
     match candidates.len() {
         0 if label_seen && !label_has_supported_endpoint => Err(discovery_error(
             "endpoint_unconfigured",
-            "Named window has no configured direct endpoint with pre-pair describe support",
+            "Named window has no supported direct endpoint",
         )),
         0 if label_seen => Err(discovery_error(
             "stale_registration",
@@ -557,7 +597,10 @@ fn select_endpoint_candidate(
     }
 }
 
-fn probe_surface(candidate: &EndpointCandidate, observed_at_ms: u64) -> Result<Value, CliError> {
+fn probe_surface(
+    candidate: &EndpointCandidate,
+    observed_at_ms: u64,
+) -> Result<EndpointProbeOutcome, CliError> {
     let mut wire = match WebSocketWire::connect_direct_bounded(
         &candidate.direct_endpoint,
         DISCOVERY_TIMEOUT,
@@ -575,6 +618,10 @@ fn probe_surface(candidate: &EndpointCandidate, observed_at_ms: u64) -> Result<V
             ));
         }
     };
+    if !candidate.pre_pair_describe_supported {
+        let _ = wire.close();
+        return Ok(EndpointProbeOutcome::DescribeUnavailable);
+    }
     let request_id = format!("rq_{}", Uuid::new_v4().simple());
     // Two independent v4 values provide 244 random bits after their fixed version/variant bits.
     let nonce = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
@@ -644,11 +691,13 @@ fn probe_surface(candidate: &EndpointCandidate, observed_at_ms: u64) -> Result<V
             .and_then(|error| error.get("code"))
             .and_then(Value::as_str)
             .unwrap_or("unknown");
+        if matches!(
+            code,
+            "prepair_describe_unsupported" | "unsupported_operation"
+        ) {
+            return Ok(EndpointProbeOutcome::DescribeUnavailable);
+        }
         let (mapped, message) = match code {
-            "prepair_describe_unsupported" => (
-                "prepair_describe_unsupported",
-                "Client does not support pre-pair surface.describe",
-            ),
             "identity_mismatch" => (
                 "identity_mismatch",
                 "Client refused the registry identity or endpoint lease",
@@ -714,15 +763,11 @@ fn probe_surface(candidate: &EndpointCandidate, observed_at_ms: u64) -> Result<V
             ));
         }
     };
-    validate_surface_observation(&payload, candidate, &nonce).map_err(|error| {
-        with_probe_evidence(
-            error,
-            candidate,
-            observed_at_ms,
-            "reachable",
-            "unknown",
-        )
-    })
+    let observation =
+        validate_surface_observation(&payload, candidate, &nonce).map_err(|error| {
+            with_probe_evidence(error, candidate, observed_at_ms, "reachable", "unknown")
+        })?;
+    Ok(EndpointProbeOutcome::Described(observation))
 }
 
 fn bounded_readiness_reason(message: &str) -> Option<String> {
@@ -802,13 +847,13 @@ fn with_probe_observation(
     error: CliError,
     candidate: &EndpointCandidate,
     observed_at_ms: u64,
-    probe: &Result<Value, CliError>,
+    probe: &Result<EndpointProbeOutcome, CliError>,
 ) -> CliError {
     let CliError::Discovery { code, message, .. } = error else {
         return error;
     };
     let (transport_reachability, application_readiness, surface_observation) = match probe {
-        Ok(observation) => (
+        Ok(EndpointProbeOutcome::Described(observation)) => (
             json!({
                 "status": "reachable",
                 "directEndpoint": candidate.direct_endpoint,
@@ -819,6 +864,18 @@ fn with_probe_observation(
                 .cloned()
                 .unwrap_or(Value::Null),
             Some(observation.clone()),
+        ),
+        Ok(EndpointProbeOutcome::DescribeUnavailable) => (
+            json!({
+                "status": "reachable",
+                "directEndpoint": candidate.direct_endpoint,
+                "observedAtMs": observed_at_ms,
+            }),
+            json!({
+                "status": "unknown",
+                "limitationCodes": ["prepair_describe_unsupported"],
+            }),
+            None,
         ),
         Err(probe_error) => {
             let details = probe_error.details();

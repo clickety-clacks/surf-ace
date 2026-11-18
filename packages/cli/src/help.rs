@@ -149,7 +149,7 @@ pub fn document(target: Option<&str>) -> Result<Value, String> {
             "errorBehavior": "Success and error records are one JSON object on stdout; nonzero exit indicates failure.",
             "discoveryLimits": [
                 "fleet-list reads registry inventory and configured endpoint leases; it does not prove endpoint reachability.",
-                "window-describe reads fleet.topology, sends one nonce-correlated surface.describe to the leased direct endpoint before pairing, then rechecks fleet.topology; identity matching is consistency only and does not authenticate either peer.",
+                "window-describe reads fleet.topology, connects to a leased direct endpoint, sends one nonce-correlated surface.describe only when prePairDescribeV1 is supported, then rechecks fleet.topology; when that operation is unsupported it keeps the registry window resolution, reports unknown application readiness, and returns a warning. Registry identity matching remains consistency-only and does not authenticate either peer.",
                 "If window-describe reports endpoint_unconfigured and no direct endpoint is otherwise available, continue with Bonjour/DNS-SD browse and resolve for _surf-ace._tcp; use the resolved WebSocket endpoint for direct-client commands.",
                 "For a readable client and surface match, missing or unreadable saved registry values and pane details do not suppress the topology; unavailable values stay null, different readable registry values are retained, and scoped limitations are reported separately.",
                 "For client_not_ready, window-describe includes the direct client's existing message as applicationReadiness.readinessReason, limited to 512 characters.",
@@ -500,13 +500,13 @@ fn command_spec(command: Command) -> Value {
         Command::WindowDescribe => (
             "registry-and-direct-client",
             "registry_leased_read_only_pre_pair_probe",
-            "Resolve exactly one current registry lease for a named window, read it directly before pairing, and recheck the registry row.",
-            "Separate registry identity, registration and lease freshness, direct transport reachability, client application readiness, topology/layout, and per-pane content revision evidence. This is consistency only, does not authenticate either peer, and does not authorize a later mutation.",
+            "Resolve exactly one current endpoint lease for a named window, connect before pairing, and send surface.describe only when the client advertises pre-pair describe support; recheck the registry row.",
+            "Separate registry identity, registration and lease freshness, direct transport reachability, client application readiness, topology/layout, and per-pane content revision evidence. If pre-pair describe is unsupported, retain the registry label resolution with unknown readiness and a warning. This is consistency only, does not authenticate either peer, and does not authorize a later mutation.",
             vec![
                 "missing_registry", "invalid_registry", "registry_timeout", "registry_unreachable",
                 "registry_response_invalid", "registry_unavailable", "window_not_found", "window_ambiguous", "endpoint_unconfigured", "stale_registration",
                 "endpoint_unreachable", "application_unresponsive", "describe_timeout", "describe_response_too_large",
-                "describe_response_invalid", "describe_rejected", "prepair_describe_unsupported", "identity_mismatch",
+                "describe_response_invalid", "describe_rejected", "identity_mismatch",
                 "revision_churn", "client_not_ready", "unsupported_protocol_version", "clock_unavailable",
             ],
         ),
@@ -874,7 +874,7 @@ fn result_schema(command: Command, description: &str) -> Value {
                 "registryAfter": registry_candidate_schema(),
                 "applicationReadiness": {
                     "type": "object", "required": ["status", "limitationCodes"],
-                    "properties": { "status": { "enum": ["ready", "degraded"] }, "limitationCodes": { "type": "array", "items": { "type": "string", "pattern": "^[a-z_]{1,64}$" } } },
+                    "properties": { "status": { "enum": ["ready", "degraded", "unknown"] }, "limitationCodes": { "type": "array", "items": { "type": "string", "pattern": "^[a-z_]{1,64}$" } } },
                     "additionalProperties": false
                 },
                 "identityConsistency": {
@@ -888,7 +888,7 @@ fn result_schema(command: Command, description: &str) -> Value {
                     "additionalProperties": false
                 },
                 "surfaceObservation": {
-                    "type": "object", "required": ["nonce", "clientId", "registryIdentity", "surfaceId", "endpointLeaseGeneration", "observedAtMs", "applicationReadiness", "surfaceSetRevision", "topologyRevision", "layout", "panes"],
+                    "type": ["object", "null"], "required": ["nonce", "clientId", "registryIdentity", "surfaceId", "endpointLeaseGeneration", "observedAtMs", "applicationReadiness", "surfaceSetRevision", "topologyRevision", "layout", "panes"],
                     "properties": {
                         "nonce": { "type": "string", "pattern": "^[a-f0-9]{32,128}$" },
                         "clientId": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
@@ -952,6 +952,7 @@ fn result_schema(command: Command, description: &str) -> Value {
             "command": { "const": command.name() },
             "controllerInstanceId": { "type": "string" },
             "reconciliations": { "type": "array", "items": { "type": "object" } },
+            "warnings": { "type": "array", "items": { "type": "string" } },
             "result": result
         },
         "additionalProperties": false
