@@ -1359,15 +1359,19 @@ fn window_describe_resolves_a_leased_window_when_pre_pair_describe_is_unsupporte
         );
         assert_eq!(
             result["result"]["applicationReadiness"]["limitationCodes"],
-            json!(["prepair_describe_unsupported"])
+            json!(["prepair_describe_unavailable"])
         );
         assert_eq!(
             result["result"]["identityConsistency"]["clientId"],
             "unverified"
         );
         assert_eq!(result["result"]["surfaceObservation"], Value::Null);
+        assert_eq!(
+            result["result"]["registryPanes"],
+            json!([{ "paneId": "1", "paneLabel": 1, "paneAddress": "a1" }])
+        );
         assert!(result["warnings"].as_array().unwrap().contains(&json!(
-            "prepair_describe_unsupported"
+            "prepair_describe_unavailable"
         )));
 
         let registry_requests = registry_server.join().unwrap();

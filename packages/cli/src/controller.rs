@@ -191,6 +191,7 @@ struct EndpointCandidate {
     surface_id: String,
     window_label: String,
     direct_endpoint: String,
+    registry_panes: Value,
     pre_pair_describe_supported: bool,
     lease_generation: u64,
     registration_observed_at_ms: u64,
@@ -309,7 +310,7 @@ fn execute_window_describe(invocation: &Invocation) -> Result<CliOutput, CliErro
                 "registryAfter": rechecked.evidence(&after),
                 "applicationReadiness": {
                     "status": "unknown",
-                    "limitationCodes": ["prepair_describe_unsupported"],
+                    "limitationCodes": ["prepair_describe_unavailable"],
                 },
                 "identityConsistency": {
                     "clientId": "unverified",
@@ -317,9 +318,10 @@ fn execute_window_describe(invocation: &Invocation) -> Result<CliOutput, CliErro
                     "registryIdentity": "unverified",
                     "endpointLease": "unverified",
                 },
+                "registryPanes": rechecked.registry_panes,
                 "surfaceObservation": null,
             }),
-            vec!["prepair_describe_unsupported".to_owned()],
+            vec!["prepair_describe_unavailable".to_owned()],
         ),
     };
     Ok(CliOutput {
@@ -566,6 +568,11 @@ fn select_endpoint_candidate(
                 surface_id: surface_id.to_owned(),
                 window_label: window_label.to_owned(),
                 direct_endpoint: direct_endpoint.to_owned(),
+                registry_panes: surface_object
+                    .get("panes")
+                    .filter(|panes| panes.is_array())
+                    .cloned()
+                    .unwrap_or_else(|| Value::Array(Vec::new())),
                 pre_pair_describe_supported: client_object
                     .get("prePairDescribeV1")
                     .and_then(Value::as_bool)
@@ -873,7 +880,7 @@ fn with_probe_observation(
             }),
             json!({
                 "status": "unknown",
-                "limitationCodes": ["prepair_describe_unsupported"],
+                "limitationCodes": ["prepair_describe_unavailable"],
             }),
             None,
         ),
