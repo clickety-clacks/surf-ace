@@ -2840,7 +2840,7 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
             Task { @MainActor [weak self] in
                 try? await Task.sleep(nanoseconds: 8_000_000_000)
                 self?.finishPendingBrowserNavigation(
-                    status: "failed",
+                    status: "started_unverified",
                     errorMessage: "browser_url navigation was not verified before timeout",
                     navigation: navigation,
                     url: self?.pendingBrowserNavigationURL
