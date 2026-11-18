@@ -149,7 +149,7 @@ pub fn document(target: Option<&str>) -> Result<Value, String> {
             "errorBehavior": "Success and error records are one JSON object on stdout; nonzero exit indicates failure.",
             "discoveryLimits": [
                 "fleet-list reads registry inventory and configured endpoint leases; it does not prove endpoint reachability.",
-                "window-describe reads fleet.topology, connects to a leased direct endpoint, sends one nonce-correlated surface.describe only when prePairDescribeV1 is supported, then rechecks fleet.topology; when that operation is unsupported it keeps the registry window and pane resolution, reports unknown application readiness, and returns the prepair_describe_unavailable warning. Registry identity matching remains consistency-only and does not authenticate either peer.",
+                "window-describe reads fleet.topology, connects to a leased direct endpoint, sends one nonce-correlated surface.describe only when prePairDescribeV1 is supported, then rechecks fleet.topology; when that operation is unsupported it keeps the registry window and pane resolution, reports unknown application readiness, includes directEndpointSource, and returns prepair_describe_unavailable plus direct_endpoint_unconfirmed for a non-configured or unknown endpoint source. Registry identity matching remains consistency-only and does not authenticate either peer.",
                 "If window-describe reports endpoint_unconfigured and no direct endpoint is otherwise available, continue with Bonjour/DNS-SD browse and resolve for _surf-ace._tcp; use the resolved WebSocket endpoint for direct-client commands.",
                 "For a readable client and surface match, missing or unreadable saved registry values and pane details do not suppress the topology; unavailable values stay null, different readable registry values are retained, and scoped limitations are reported separately.",
                 "For client_not_ready, window-describe includes the direct client's existing message as applicationReadiness.readinessReason, limited to 512 characters.",
@@ -501,7 +501,7 @@ fn command_spec(command: Command) -> Value {
             "registry-and-direct-client",
             "registry_leased_read_only_pre_pair_probe",
             "Resolve exactly one current endpoint lease for a named window, connect before pairing, and send surface.describe only when the client advertises pre-pair describe support; recheck the registry row.",
-            "Separate registry identity, registration and lease freshness, direct transport reachability, client application readiness, topology/layout, and per-pane content revision evidence. If pre-pair describe is unsupported, retain registry window and pane resolution with unknown readiness and the prepair_describe_unavailable warning. This is consistency only, does not authenticate either peer, and does not authorize a later mutation.",
+            "Separate registry identity, registration and lease freshness, direct transport reachability, client application readiness, topology/layout, and per-pane content revision evidence. If pre-pair describe is unsupported, retain registry window and pane resolution with unknown readiness; include directEndpointSource and report prepair_describe_unavailable plus direct_endpoint_unconfirmed for non-configured or unknown sources. This is consistency only, does not authenticate either peer, and does not authorize a later mutation.",
             vec![
                 "missing_registry", "invalid_registry", "registry_timeout", "registry_unreachable",
                 "registry_response_invalid", "registry_unavailable", "window_not_found", "window_ambiguous", "endpoint_unconfigured", "stale_registration",
@@ -891,6 +891,7 @@ fn result_schema(command: Command, description: &str) -> Value {
                     "type": "array",
                     "items": { "type": "object" }
                 },
+                "directEndpointSource": { "type": "string" },
                 "surfaceObservation": {
                     "type": ["object", "null"], "required": ["nonce", "clientId", "registryIdentity", "surfaceId", "endpointLeaseGeneration", "observedAtMs", "applicationReadiness", "surfaceSetRevision", "topologyRevision", "layout", "panes"],
                     "properties": {

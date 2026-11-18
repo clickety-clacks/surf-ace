@@ -673,6 +673,7 @@ fn discovery_client(
     json!({
         "clientId": client_id,
         "directEndpoint": endpoint,
+        "directEndpointSource": "configured",
         "prePairDescribeV1": supports_describe,
         "registryIdentity": { "allocatorId": "alloc_fixture", "fleetId": "fleet_fixture" },
         "endpointLease": {
@@ -1311,7 +1312,12 @@ fn window_describe_resolves_a_leased_window_when_pre_pair_describe_is_unsupporte
     let schema: Value = serde_json::from_slice(&schema_output.stdout).unwrap();
     let result_schema = schema["result"]["command"]["resultSchema"].clone();
 
-    for supports_describe in [Some(false), None] {
+    for (supports_describe, endpoint_source) in [
+        (Some(false), Some("client-reported")),
+        (Some(false), Some("registry-observed")),
+        (None, None),
+        (Some(false), Some("configured")),
+    ] {
         let now = epoch_ms();
         let client_id = "d".repeat(64);
         let surface_id = "sf_legacy_window_fixture";
@@ -1327,6 +1333,11 @@ fn window_describe_resolves_a_leased_window_when_pre_pair_describe_is_unsupporte
         );
         if supports_describe.is_none() {
             client.as_object_mut().unwrap().remove("prePairDescribeV1");
+        }
+        if let Some(source) = endpoint_source {
+            client["directEndpointSource"] = json!(source);
+        } else {
+            client.as_object_mut().unwrap().remove("directEndpointSource");
         }
         let first = discovery_topology(vec![client.clone()], now);
         let second = discovery_topology(vec![client], now + 5);
@@ -1367,12 +1378,19 @@ fn window_describe_resolves_a_leased_window_when_pre_pair_describe_is_unsupporte
         );
         assert_eq!(result["result"]["surfaceObservation"], Value::Null);
         assert_eq!(
+            result["result"]["directEndpointSource"],
+            endpoint_source.unwrap_or("unknown")
+        );
+        assert_eq!(
             result["result"]["registryPanes"],
             json!([{ "paneId": "1", "paneLabel": 1, "paneAddress": "a1" }])
         );
-        assert!(result["warnings"].as_array().unwrap().contains(&json!(
-            "prepair_describe_unavailable"
-        )));
+        let expected_warnings = if endpoint_source == Some("configured") {
+            json!(["prepair_describe_unavailable"])
+        } else {
+            json!(["direct_endpoint_unconfirmed", "prepair_describe_unavailable"])
+        };
+        assert_eq!(result["warnings"], expected_warnings);
 
         let registry_requests = registry_server.join().unwrap();
         assert_eq!(registry_requests.len(), 2);

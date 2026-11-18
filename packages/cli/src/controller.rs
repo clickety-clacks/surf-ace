@@ -191,6 +191,7 @@ struct EndpointCandidate {
     surface_id: String,
     window_label: String,
     direct_endpoint: String,
+    direct_endpoint_source: String,
     registry_panes: Value,
     pre_pair_describe_supported: bool,
     lease_generation: u64,
@@ -276,6 +277,19 @@ fn execute_window_describe(invocation: &Invocation) -> Result<CliOutput, CliErro
             &probe,
         ));
     }
+    if matches!(probe, Ok(EndpointProbeOutcome::DescribeUnavailable))
+        && selected.direct_endpoint_source != rechecked.direct_endpoint_source
+    {
+        return Err(with_probe_observation(
+            discovery_error(
+                "stale_registration",
+                "Registry endpoint source changed during describe-unavailable resolution",
+            ),
+            &selected,
+            direct_observed_at_ms,
+            &probe,
+        ));
+    }
     let (result, warnings) = match probe? {
         EndpointProbeOutcome::Described(observation) => {
             let identity_consistency = identity_consistency(&observation, &rechecked);
@@ -297,32 +311,40 @@ fn execute_window_describe(invocation: &Invocation) -> Result<CliOutput, CliErro
                 vec![],
             )
         }
-        EndpointProbeOutcome::DescribeUnavailable => (
-            json!({
-                "windowLabel": window_label,
-                "identitySemantics": "consistency_only_not_authentication",
-                "transportReachability": {
-                    "status": "reachable",
-                    "directEndpoint": selected.direct_endpoint,
-                    "observedAtMs": direct_observed_at_ms,
-                },
-                "registryBefore": selected.evidence(&before),
-                "registryAfter": rechecked.evidence(&after),
-                "applicationReadiness": {
-                    "status": "unknown",
-                    "limitationCodes": ["prepair_describe_unavailable"],
-                },
-                "identityConsistency": {
-                    "clientId": "unverified",
-                    "surfaceId": "unverified",
-                    "registryIdentity": "unverified",
-                    "endpointLease": "unverified",
-                },
-                "registryPanes": rechecked.registry_panes,
-                "surfaceObservation": null,
-            }),
-            vec!["prepair_describe_unavailable".to_owned()],
-        ),
+        EndpointProbeOutcome::DescribeUnavailable => {
+            let mut warnings = Vec::with_capacity(2);
+            if rechecked.direct_endpoint_source != "configured" {
+                warnings.push("direct_endpoint_unconfirmed".to_owned());
+            }
+            warnings.push("prepair_describe_unavailable".to_owned());
+            (
+                json!({
+                    "windowLabel": window_label,
+                    "identitySemantics": "consistency_only_not_authentication",
+                    "directEndpointSource": rechecked.direct_endpoint_source,
+                    "transportReachability": {
+                        "status": "reachable",
+                        "directEndpoint": selected.direct_endpoint,
+                        "observedAtMs": direct_observed_at_ms,
+                    },
+                    "registryBefore": selected.evidence(&before),
+                    "registryAfter": rechecked.evidence(&after),
+                    "applicationReadiness": {
+                        "status": "unknown",
+                        "limitationCodes": ["prepair_describe_unavailable"],
+                    },
+                    "identityConsistency": {
+                        "clientId": "unverified",
+                        "surfaceId": "unverified",
+                        "registryIdentity": "unverified",
+                        "endpointLease": "unverified",
+                    },
+                    "registryPanes": rechecked.registry_panes,
+                    "surfaceObservation": null,
+                }),
+                warnings,
+            )
+        }
     };
     Ok(CliOutput {
         ok: true,
@@ -568,6 +590,11 @@ fn select_endpoint_candidate(
                 surface_id: surface_id.to_owned(),
                 window_label: window_label.to_owned(),
                 direct_endpoint: direct_endpoint.to_owned(),
+                direct_endpoint_source: client_object
+                    .get("directEndpointSource")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+                    .to_owned(),
                 registry_panes: surface_object
                     .get("panes")
                     .filter(|panes| panes.is_array())
