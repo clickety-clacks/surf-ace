@@ -16,6 +16,7 @@ import {
   nativeImage,
   screen,
   session,
+  webContents as electronWebContents,
   type ContextMenuParams,
   type MenuItemConstructorOptions,
   type WebContents,
@@ -92,7 +93,13 @@ import { AnnotationSourceCoordinator } from "./annotation-source-coordinator.js"
 import { AnnotationDoneFence } from "./annotation-done-state.js";
 import { annotationDoneContextKey, parseAnnotationDoneContext } from "./annotation-done-context.js";
 import { restoreWindowPlacement, type WindowPlacement } from "./window-placement.js";
-import { shouldDisableGpuForSoftwareCapture, surfaceWindowCaptureMode, surfaceWindowLoadQuery, surfaceWindowOptions } from "./window-options.js";
+import {
+  captureWindowPageForPane,
+  shouldDisableGpuForSoftwareCapture,
+  surfaceWindowCaptureMode,
+  surfaceWindowLoadQuery,
+  surfaceWindowOptions,
+} from "./window-options.js";
 
 const DEFAULT_WS_PORT = 19001;
 const WS_PORT = Number(process.env.SURF_ACE_PORT ?? DEFAULT_WS_PORT);
@@ -1590,6 +1597,11 @@ async function capturePaneImage(surfaceId: string, paneId: number): Promise<stri
     return null;
   }
   const compositorSocketPath = resolveCompositorControlSocketPath();
+  const captureMode = surfaceWindowCaptureMode({
+    compositorSocketPath,
+    gpuDisabled: gpuDisableRequested(),
+    platform: process.platform,
+  });
   if (compositorSocketPath && core.nativeHostedPaneIdForPaneId(surfaceId, paneId) !== null) {
     const capturePath = path.join(
       os.tmpdir(),
@@ -1617,12 +1629,13 @@ async function capturePaneImage(surfaceId: string, paneId: number): Promise<stri
       await fs.rm(capturePath, { force: true }).catch(() => {});
     }
   }
-  const image = await window.capturePage({
+  const image = await captureWindowPageForPane(window, {
     height: Math.max(1, Math.floor(bounds.height)),
     width: Math.max(1, Math.floor(bounds.width)),
     x: Math.max(0, Math.floor(bounds.x)),
     y: Math.max(0, Math.floor(bounds.y)),
-  });
+  }, captureMode.keepFramesForCoveredCapture, electronWebContents.getAllWebContents()
+    .filter((contents) => contents.hostWebContents === window.webContents));
   return image.toPNG().toString("base64");
 }
 

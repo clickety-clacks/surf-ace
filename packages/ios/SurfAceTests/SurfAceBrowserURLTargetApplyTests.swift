@@ -99,6 +99,38 @@ final class SurfAceBrowserURLTargetApplyTests: XCTestCase {
         XCTAssertEqual(surface.panes.first?.currentTarget?.lastApplyEvidence?["status"] as? String, "failed")
     }
 
+    func testBrowserURLTargetApplyRecordsStartedUnverifiedNavigationWithoutFailure() async throws {
+        let runtime = SurfAceRuntime(userDefaults: isolatedUserDefaults())
+        let surface = runtime.registerSurface(sceneKey: "browser-url-unverified")
+        let pane = try XCTUnwrap(surface.panes.first)
+        let message = "browser_url navigation was not verified before timeout"
+        let bridge = ControlledPaneBridge(
+            result: SurfAceBrowserNavigationResult(
+                errorMessage: message,
+                status: "started_unverified",
+                url: "https://slow.example/"
+            )
+        )
+        runtime.attachPaneBridge(surfaceId: surface.surfaceId, paneId: pane.paneId, bridge: bridge)
+
+        let response = await runtime.materializeTargetApply(
+            id: "rq_slow",
+            payload: targetApplyPayload(surface: surface, pane: pane, targetId: "tg_slow", url: "https://slow.example/"),
+            surfaceId: surface.surfaceId
+        )
+        let payload = try XCTUnwrap(response["payload"] as? [String: Any])
+        let materializedState = try XCTUnwrap(payload["materializedState"] as? [String: Any])
+        let lastApplyEvidence = try XCTUnwrap(surface.panes.first?.currentTarget?.lastApplyEvidence)
+        let evidenceState = try XCTUnwrap(lastApplyEvidence["materializedState"] as? [String: Any])
+
+        XCTAssertEqual(payload["status"] as? String, "applied")
+        XCTAssertNil(payload["errorCode"])
+        XCTAssertEqual(payload["message"] as? String, message)
+        XCTAssertEqual(materializedState["navigationStatus"] as? String, "started_unverified")
+        XCTAssertEqual(lastApplyEvidence["status"] as? String, "applied")
+        XCTAssertEqual(evidenceState["navigationStatus"] as? String, "started_unverified")
+    }
+
     func testBrowserURLTargetApplyClassifiesWebKitFrameLoadInterruptedCodeAsPolicyDenied() async throws {
         let runtime = SurfAceRuntime(userDefaults: isolatedUserDefaults())
         let surface = runtime.registerSurface(sceneKey: "browser-url-frame-interrupted")
