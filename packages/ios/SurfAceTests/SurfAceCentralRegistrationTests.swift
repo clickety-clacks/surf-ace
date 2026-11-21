@@ -49,8 +49,11 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
             return result
         }
 
+        var identityError: Error?
+
         func readRegistryIdentity() async throws -> SurfAceRegistryIdentity {
             identityReads += 1
+            if let identityError { throw identityError }
             return registryIdentity
         }
         func register(clientId: String, surfaces: [SurfAceRegistrationSurface],
@@ -3146,5 +3149,343 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
             .map { String(format: "%02x", $0) }.joined()
         XCTAssertEqual(a.clientId, expected)
         XCTAssertNotEqual(a.clientId, a.fingerprint)
+    }
+
+    // MARK: - Operator-set registry URL (DESIGN.md 3.1.2.1)
+
+    private func registrySettingDefaults() -> UserDefaults {
+        let suiteName = "SurfAceRegistrySettingTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        return defaults
+    }
+
+    func testRegistryURLValidationAcceptsOnlyAbsoluteWsAndWssURLsWithAHost() throws {
+        for text in ["ws://registry.example:9000/", "wss://registry.example/ws", " WS://100.64.0.2:43867 ", "ws://[fd7a::1]:9000/"] {
+            guard case .success = SurfAceRegistryURLValidation.validate(text) else {
+                return XCTFail("expected \(text) to validate")
+            }
+        }
+        for text in ["", "   ", "registry.example:9000", "http://registry.example/", "https://registry.example/",
+                     "ftp://registry.example/", "ws://", "ws:///ws", "ws://:9000/", "wss:", "/relative/path"] {
+            guard case .failure(let error) = SurfAceRegistryURLValidation.validate(text) else {
+                return XCTFail("expected \(text) to be rejected")
+            }
+            XCTAssertFalse(error.message.isEmpty)
+        }
+    }
+
+    func testSavedRegistryURLPersistsAcrossRestartAndInvalidEditKeepsLastValidValue() throws {
+        let defaults = registrySettingDefaults()
+        let first = SurfAceRuntime(userDefaults: defaults)
+        XCTAssertNil(first.registrySavedURL)
+
+        XCTAssertFalse(first.saveRegistryURL("not a url"))
+        XCTAssertNotNil(first.registryURLValidationError, "invalid edit is visible")
+        XCTAssertNil(first.registrySavedURL, "no valid value was saved, so the setting stays unset")
+        XCTAssertEqual(SurfAceRegistrySettingStore(defaults: defaults).value, .unset)
+
+        XCTAssertTrue(first.saveRegistryURL("ws://registry.example:9000/"))
+        XCTAssertNil(first.registryURLValidationError)
+        XCTAssertFalse(first.saveRegistryURL("http://registry.example/"))
+        XCTAssertNotNil(first.registryURLValidationError)
+        XCTAssertEqual(first.registrySavedURL, "ws://registry.example:9000/")
+        XCTAssertEqual(
+            SurfAceRegistrySettingStore(defaults: defaults).value,
+            .valid(try XCTUnwrap(URL(string: "ws://registry.example:9000/")))
+        )
+
+        let relaunched = SurfAceRuntime(userDefaults: defaults)
+        XCTAssertEqual(relaunched.registrySavedURL, "ws://registry.example:9000/")
+
+        relaunched.clearRegistryURL()
+        XCTAssertNil(relaunched.registrySavedURL)
+        XCTAssertEqual(SurfAceRegistrySettingStore(defaults: defaults).value, .unset)
+        XCTAssertNil(SurfAceRuntime(userDefaults: defaults).registrySavedURL)
+    }
+
+    func testStoredRegistryValueThatIsNotAValidURLReadsAsInvalid() {
+        let defaults = registrySettingDefaults()
+        defaults.set("http://registry.example/", forKey: SurfAceRegistrySettingStore.defaultsKey)
+        guard case .invalid(let raw, let reason) = SurfAceRegistrySettingStore(defaults: defaults).value else {
+            return XCTFail("expected invalid stored value")
+        }
+        XCTAssertEqual(raw, "http://registry.example/")
+        XCTAssertFalse(reason.isEmpty)
+    }
+
+    func testEnvironmentOverrideIsFirstThenSavedThenBonjourAtStartup() async throws {
+        let environment = try XCTUnwrap(URL(string: "ws://environment.test:9001/"))
+        let saved = try XCTUnwrap(URL(string: "ws://saved.test:9002/"))
+        let discovered = try XCTUnwrap(URL(string: "ws://bonjour.test:9003/"))
+
+        func selectedEndpoint(configured: URL?, sources: [SurfAceRegistrySource]) async throws
+            -> (URL?, [SurfAceRegistrySourceReport]) {
+            var verified: [URL] = []
+            let registration = SurfAceCentralRegistration(
+                clientId: "priority", configured: configured, registrySources: { sources },
+                discover: { [discovered] }, makeTransport: { _ in Transport() },
+                snapshot: { [.init(surfaceId: "sf_one", panes: [])] }, apply: { _, _ in },
+                verifyRegistry: { _, _ in },
+                onVerifiedEndpoint: { verified.append($0) }
+            )
+            defer { registration.stop() }
+            try await registration.synchronize()
+            return (verified.last, registration.sourceReports)
+        }
+
+        let all = try await selectedEndpoint(configured: environment, sources: [.valid(.saved, saved)])
+        XCTAssertEqual(all.0, environment, "environment override beats saved setting and Bonjour")
+        XCTAssertEqual(all.1.first?.kind, .environment)
+        XCTAssertEqual(all.1.first?.outcome, .active)
+        XCTAssertEqual(all.1.dropFirst().first?.kind, .saved)
+        XCTAssertNotEqual(all.1.dropFirst().first?.outcome, .active)
+
+        let withoutEnvironment = try await selectedEndpoint(configured: nil, sources: [.valid(.saved, saved)])
+        XCTAssertEqual(withoutEnvironment.0, saved, "saved setting beats Bonjour")
+        XCTAssertEqual(withoutEnvironment.1.first?.outcome, .active)
+
+        let bonjourOnly = try await selectedEndpoint(configured: nil, sources: [])
+        XCTAssertEqual(bonjourOnly.0, discovered, "with nothing configured Bonjour is used automatically")
+        XCTAssertEqual(bonjourOnly.1.map(\.kind), [.bonjour])
+        XCTAssertEqual(bonjourOnly.1.map(\.outcome), [.active])
+    }
+
+    func testConfiguredPriorityHoldsAfterRetryNotOnlyAtStartup() async throws {
+        let saved = try XCTUnwrap(URL(string: "ws://saved.test:9002/"))
+        let discovered = try XCTUnwrap(URL(string: "ws://bonjour.test:9003/"))
+        let savedTransport = Transport()
+        let bonjour = Transport()
+        var verified: [URL] = []
+        let registration = SurfAceCentralRegistration(
+            clientId: "retry", configured: nil, registrySources: { [.valid(.saved, saved)] },
+            discover: { [discovered] },
+            makeTransport: { $0 == saved ? savedTransport : bonjour },
+            snapshot: { [.init(surfaceId: "sf_one", panes: [])] }, apply: { _, _ in },
+            verifyRegistry: { _, _ in },
+            onVerifiedEndpoint: { verified.append($0) }
+        )
+        defer { registration.stop() }
+        try await registration.synchronize()
+        XCTAssertEqual(verified, [saved])
+
+        savedTransport.fails = true
+        try await registration.synchronize()
+        XCTAssertEqual(verified.last, discovered)
+        XCTAssertEqual(registration.sourceReports.map(\.kind), [.saved, .bonjour])
+        XCTAssertEqual(registration.sourceReports.last?.outcome, .active)
+
+        savedTransport.fails = false
+        bonjour.fails = true
+        try await registration.synchronize()
+        XCTAssertEqual(verified.last, saved, "the next retry starts again at the saved URL")
+        XCTAssertEqual(registration.sourceReports.first?.outcome, .active)
+    }
+
+    func testInvalidOverrideAndInvalidStoredValueAreReportedAndNeverPassedToTheTransport() async throws {
+        let saved = try XCTUnwrap(URL(string: "ws://saved.test:9002/"))
+        var attempted: [URL] = []
+        var applied: [String] = []
+        let registration = SurfAceCentralRegistration(
+            clientId: "invalid", configured: nil,
+            registrySources: {
+                [.invalid(.environment, reason: "bad override"), .valid(.saved, saved)]
+            },
+            discover: { [] },
+            makeTransport: { url in attempted.append(url); let t = Transport(); t.assignedWindowLabels["sf_one"] = "saved"; return t },
+            snapshot: { [.init(surfaceId: "sf_one", panes: [])] },
+            apply: { assignments, _ in applied.append(assignments[0].windowLabel) },
+            verifyRegistry: { _, _ in }
+        )
+        defer { registration.stop() }
+        try await registration.synchronize()
+        XCTAssertEqual(attempted, [saved])
+        XCTAssertEqual(applied, ["saved"])
+        XCTAssertEqual(registration.sourceReports.map(\.kind), [.environment, .saved])
+        XCTAssertEqual(registration.sourceReports.first?.outcome, .invalid("bad override"))
+        XCTAssertNil(registration.sourceReports.first?.endpoint)
+        XCTAssertEqual(registration.sourceReports.last?.outcome, .active)
+    }
+
+    func testUnreachableSavedURLIsReportedKeptAndFallsThroughToBonjourWithoutClaimingItConnected() async throws {
+        let saved = try XCTUnwrap(URL(string: "ws://saved.test:9002/"))
+        let discovered = try XCTUnwrap(URL(string: "ws://bonjour.test:9003/"))
+        let savedTransport = Transport()
+        savedTransport.identityError = URLError(.cannotConnectToHost)
+        let bonjour = Transport()
+        bonjour.assignedWindowLabels["sf_one"] = "bonjour"
+        var applied: [String] = []
+        var verified: [URL] = []
+        var statuses: [SurfAceCentralRegistrationStatus] = []
+        let registration = SurfAceCentralRegistration(
+            clientId: "unreachable", configured: nil, registrySources: { [.valid(.saved, saved)] },
+            discover: { [discovered] },
+            makeTransport: { $0 == saved ? savedTransport : bonjour },
+            snapshot: { [.init(surfaceId: "sf_one", panes: [])] },
+            apply: { assignments, _ in applied.append(assignments[0].windowLabel) },
+            verifyRegistry: { _, _ in },
+            onStatusChange: { statuses.append($0) },
+            onVerifiedEndpoint: { verified.append($0) }
+        )
+        defer { registration.stop() }
+        try await registration.synchronize()
+
+        XCTAssertEqual(registration.status, .connected)
+        XCTAssertEqual(verified, [discovered])
+        XCTAssertEqual(applied, ["bonjour"])
+        XCTAssertEqual(registration.sourceReports.map(\.kind), [.saved, .bonjour])
+        guard case .unreachable = registration.sourceReports[0].outcome else {
+            return XCTFail("saved URL must be reported unreachable, got \(registration.sourceReports[0].outcome)")
+        }
+        XCTAssertEqual(registration.sourceReports[1].outcome, .active)
+        XCTAssertTrue(registration.sourceReports[0].summary.contains("unreachable"))
+        XCTAssertTrue(registration.sourceReports[1].summary.contains("active"))
+    }
+
+    func testReachableSavedURLThatRefusesRegistrationIsReportedAsNotRegistered() async throws {
+        let saved = try XCTUnwrap(URL(string: "ws://saved.test:9002/"))
+        let savedTransport = Transport()
+        savedTransport.fails = true
+        var applied = 0
+        let registration = SurfAceCentralRegistration(
+            clientId: "refused", configured: nil, registrySources: { [.valid(.saved, saved)] },
+            discover: { [] }, makeTransport: { _ in savedTransport },
+            snapshot: { [.init(surfaceId: "sf_one", panes: [])] }, apply: { _, _ in applied += 1 },
+            verifyRegistry: { _, _ in }
+        )
+        defer { registration.stop() }
+        do { try await registration.synchronize(); XCTFail("no registry connected") } catch { }
+        XCTAssertEqual(applied, 0, "a failed selection applies no labels")
+        XCTAssertNotEqual(registration.status, .connected)
+        guard case .failed = registration.sourceReports.first?.outcome else {
+            return XCTFail("expected failed outcome, got \(String(describing: registration.sourceReports.first))")
+        }
+        XCTAssertEqual(registration.sourceReports.last?.kind, .bonjour)
+        XCTAssertNotEqual(registration.sourceReports.last?.outcome, .active)
+    }
+
+    func testChangingTheSavedURLReselectsImmediatelyAndClearingReturnsToEnvironmentThenBonjour() async throws {
+        let first = try XCTUnwrap(URL(string: "ws://first.test:9001/"))
+        let second = try XCTUnwrap(URL(string: "ws://second.test:9002/"))
+        let environment = try XCTUnwrap(URL(string: "ws://environment.test:9004/"))
+        let discovered = try XCTUnwrap(URL(string: "ws://bonjour.test:9003/"))
+        var transports: [URL: Transport] = [:]
+        func transport(_ url: URL) -> Transport {
+            if let existing = transports[url] { return existing }
+            let created = Transport(); transports[url] = created; return created
+        }
+        var sources: [SurfAceRegistrySource] = [.valid(.saved, first)]
+        var verified: [URL] = []
+        var statuses: [SurfAceCentralRegistrationStatus] = []
+        let registration = SurfAceCentralRegistration(
+            clientId: "change", configured: nil, registrySources: { sources },
+            discover: { [discovered] }, makeTransport: { transport($0) },
+            snapshot: { [.init(surfaceId: "sf_one", panes: [])] }, apply: { _, _ in },
+            verifyRegistry: { _, _ in },
+            onStatusChange: { statuses.append($0) },
+            onVerifiedEndpoint: { verified.append($0) }
+        )
+        defer { registration.stop() }
+        try await registration.synchronize()
+        XCTAssertEqual(verified, [first])
+        let firstTransport = transport(first)
+
+        sources = [.valid(.saved, second)]
+        registration.registryConfigurationChanged()
+        XCTAssertTrue(firstTransport.closed, "the previous selected registry is invalidated")
+        XCTAssertEqual(registration.status, .connecting, "not connected until the new selection registers")
+        XCTAssertTrue(registration.sourceReports.isEmpty)
+        try await registration.synchronize()
+        XCTAssertEqual(verified, [first, second])
+        XCTAssertEqual(registration.status, .connected)
+
+        sources = []
+        registration.registryConfigurationChanged()
+        try await registration.synchronize()
+        XCTAssertEqual(verified, [first, second, discovered], "clearing with no override returns to Bonjour")
+
+        sources = []
+        let withEnvironment = SurfAceCentralRegistration(
+            clientId: "change", configured: environment, registrySources: { sources },
+            discover: { [discovered] }, makeTransport: { transport($0) },
+            snapshot: { [.init(surfaceId: "sf_one", panes: [])] }, apply: { _, _ in },
+            verifyRegistry: { _, _ in },
+            onVerifiedEndpoint: { verified.append($0) }
+        )
+        defer { withEnvironment.stop() }
+        sources = [.valid(.saved, first)]
+        try await withEnvironment.synchronize()
+        sources = []
+        withEnvironment.registryConfigurationChanged()
+        try await withEnvironment.synchronize()
+        XCTAssertEqual(verified.suffix(2), [environment, environment], "an environment override stays first after a clear")
+    }
+
+    func testLateResultFromAttemptUsingThePreviousValueNeverBecomesSelectedOrChangesStatus() async throws {
+        let old = try XCTUnwrap(URL(string: "ws://old.test:9001/"))
+        let new = try XCTUnwrap(URL(string: "ws://new.test:9002/"))
+        let oldTransport = Transport()
+        let newTransport = Transport()
+        var gate: CheckedContinuation<Void, Never>?
+        oldTransport.onInputRegister = { _ in await withCheckedContinuation { gate = $0 } }
+        var sources: [SurfAceRegistrySource] = [.valid(.saved, old)]
+        var verified: [URL] = []
+        var statuses: [SurfAceCentralRegistrationStatus] = []
+        let registration = SurfAceCentralRegistration(
+            clientId: "late", configured: nil, registrySources: { sources },
+            discover: { [] }, makeTransport: { $0 == old ? oldTransport : newTransport },
+            snapshot: { [.init(surfaceId: "sf_one", panes: [])] }, apply: { _, _ in },
+            verifyRegistry: { _, _ in },
+            onStatusChange: { statuses.append($0) },
+            onVerifiedEndpoint: { verified.append($0) }
+        )
+        defer { registration.stop() }
+
+        let stale = Task { @MainActor in try await registration.synchronize() }
+        while gate == nil { await Task.yield() }
+
+        sources = [.valid(.saved, new)]
+        registration.registryConfigurationChanged()
+        try await registration.synchronize()
+        XCTAssertEqual(verified, [new])
+        XCTAssertEqual(registration.status, .connected)
+        let statusCount = statuses.count
+        let reports = registration.sourceReports
+
+        gate?.resume()
+        switch await stale.result {
+        case .success: XCTFail("the superseded attempt must not complete")
+        case .failure(let error):
+            guard case SurfAceRegistrationError.superseded = error else {
+                return XCTFail("expected superseded, got \(error)")
+            }
+        }
+        XCTAssertEqual(verified, [new])
+        XCTAssertEqual(registration.status, .connected)
+        XCTAssertEqual(statuses.count, statusCount, "a late result does not update connection status")
+        XCTAssertEqual(registration.sourceReports, reports)
+        XCTAssertTrue(oldTransport.closed)
+    }
+
+    func testRegistryNumbersArriveOnlyAfterSuccessfulRegistrationThroughTheSavedURL() async throws {
+        let saved = try XCTUnwrap(URL(string: "ws://saved.test:9002/"))
+        let transport = Transport()
+        transport.assignsPaneLabels = true
+        transport.nextPaneLabel = 41
+        var appliedPaneLabels: [Int64] = []
+        let surfaces = [SurfAceRegistrationSurface(
+            surfaceId: "sf_one", panes: [.init(paneId: "1", paneLineageId: "lineage_one", paneLabel: 0)]
+        )]
+        let registration = SurfAceCentralRegistration(
+            clientId: "labels", configured: nil, registrySources: { [.valid(.saved, saved)] },
+            discover: { [] }, makeTransport: { _ in transport },
+            snapshot: { surfaces },
+            apply: { assignments, _ in appliedPaneLabels = assignments.flatMap { $0.panes.map(\.paneLabel) } },
+            verifyRegistry: { _, _ in }
+        )
+        defer { registration.stop() }
+        XCTAssertTrue(appliedPaneLabels.isEmpty, "the pane stays unnumbered before registration")
+        try await registration.synchronize()
+        XCTAssertEqual(appliedPaneLabels, [41])
     }
 }

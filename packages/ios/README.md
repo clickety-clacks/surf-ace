@@ -15,6 +15,14 @@ pairing remains on the client WebSocket endpoint. Configured registration is
 attempted first; a successful configured registration does not start browsing.
 Only absent, invalid, or failed configuration enters Bonjour discovery.
 
+An operator can also save a registry URL in the installed app (the network
+button in the pane controls opens the Registry settings). The saved value must
+be a `ws://` or `wss://` URL with a host, is validated before saving, and
+persists across relaunch. Selection order is `SURF_ACE_SERVER`, then the saved
+URL, then Bonjour; an invalid value is reported and skipped, an unreachable one
+is reported and kept so the next retry tries it first, and clearing it returns
+to Bonjour. Bonjour-learned addresses are never saved.
+
 Transport security is narrow by design: hostname URLs, all `wss://` URLs, and
 non-local numeric URLs continue through URLSession and ATS. A local-use numeric
 `ws://` endpoint uses Network.framework's WebSocket transport to avoid the

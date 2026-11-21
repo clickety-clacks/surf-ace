@@ -683,6 +683,7 @@ enum SurfAceRegistrationError: Error {
     case serverRejected(code: String?, message: String?)
     case noServer
     case stopped
+    case superseded
     case topologyChanged
     case registryIdentityMissing
     case foreignRegistryIdentity
@@ -713,6 +714,7 @@ private func surfAceRegistrationErrorDescription(_ error: Error) -> String {
             return "server_rejected code=\(code ?? "missing") message=\(message ?? "missing")"
         case .noServer: return "no_surf_ace_server"
         case .stopped: return "registration_stopped"
+        case .superseded: return "registration_superseded"
         case .topologyChanged: return "registration_topology_changed"
         case .registryIdentityMissing: return "registry_identity_missing_or_invalid"
         case .foreignRegistryIdentity: return "foreign_registry_identity"
@@ -1944,6 +1946,103 @@ enum SurfAceRegistrationTransportFactory {
     }
 }
 
+struct SurfAceRegistryURLError: Error, Equatable, LocalizedError {
+    let message: String
+    var errorDescription: String? { message }
+}
+
+enum SurfAceRegistryURLValidation {
+    static func validate(_ text: String) -> Result<URL, SurfAceRegistryURLError> {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return .failure(.init(message: "Enter a ws:// or wss:// registry URL."))
+        }
+        guard let components = URLComponents(string: trimmed),
+              let scheme = components.scheme?.lowercased(), scheme == "ws" || scheme == "wss" else {
+            return .failure(.init(message: "The registry URL must start with ws:// or wss://."))
+        }
+        guard let host = components.host, !host.isEmpty, let url = components.url else {
+            return .failure(.init(message: "The registry URL needs a host name or address."))
+        }
+        return .success(url)
+    }
+}
+
+/// Operator-set registry URL, kept in the app's persistent local settings.
+struct SurfAceRegistrySettingStore {
+    enum Value: Equatable {
+        case unset
+        case valid(URL)
+        case invalid(raw: String, reason: String)
+    }
+
+    static let defaultsKey = "SurfAce.RegistryURL"
+
+    let defaults: UserDefaults
+
+    var value: Value {
+        guard let raw = defaults.string(forKey: Self.defaultsKey) else { return .unset }
+        switch SurfAceRegistryURLValidation.validate(raw) {
+        case .success(let url): return .valid(url)
+        case .failure(let error): return .invalid(raw: raw, reason: error.message)
+        }
+    }
+
+    func save(_ url: URL) { defaults.set(url.absoluteString, forKey: Self.defaultsKey) }
+    func clear() { defaults.removeObject(forKey: Self.defaultsKey) }
+}
+
+enum SurfAceRegistrySourceKind: String, Equatable, Sendable {
+    case environment
+    case saved
+    case bonjour
+}
+
+struct SurfAceRegistrySource: Equatable, Sendable {
+    let kind: SurfAceRegistrySourceKind
+    let url: URL?
+    let invalidReason: String?
+
+    static func valid(_ kind: SurfAceRegistrySourceKind, _ url: URL) -> Self {
+        .init(kind: kind, url: url, invalidReason: nil)
+    }
+
+    static func invalid(_ kind: SurfAceRegistrySourceKind, reason: String) -> Self {
+        .init(kind: kind, url: nil, invalidReason: reason)
+    }
+}
+
+enum SurfAceRegistrySourceOutcome: Equatable, Sendable {
+    case invalid(String)
+    case unreachable(String)
+    case failed(String)
+    case notUsed(String)
+    case active
+}
+
+struct SurfAceRegistrySourceReport: Equatable, Sendable {
+    let kind: SurfAceRegistrySourceKind
+    let endpoint: String?
+    let outcome: SurfAceRegistrySourceOutcome
+
+    var summary: String {
+        let name: String
+        switch kind {
+        case .environment: name = "Environment override"
+        case .saved: name = "Saved URL"
+        case .bonjour: name = "Bonjour"
+        }
+        let target = endpoint.map { " \($0)" } ?? ""
+        switch outcome {
+        case .invalid(let reason): return "\(name) is invalid and was skipped: \(reason)"
+        case .unreachable(let reason): return "\(name)\(target) is unreachable: \(reason)"
+        case .failed(let reason): return "\(name)\(target) did not register: \(reason)"
+        case .notUsed(let reason): return "\(name)\(target) was reachable but not used: \(reason)"
+        case .active: return "\(name)\(target) is active"
+        }
+    }
+}
+
 enum SurfAceCentralRegistrationStatus: Equatable {
     case disconnected
     case connecting
@@ -1983,6 +2082,7 @@ final class SurfAceCentralRegistration {
         let url: URL
         let transport: any SurfAceRegistrationTransport
         let phase: String
+        let kind: SurfAceRegistrySourceKind
     }
 
     private struct IdentifiedCandidate {
@@ -1991,6 +2091,7 @@ final class SurfAceCentralRegistration {
     }
     private let clientId: String
     private let configured: URL?
+    private let registrySources: @MainActor () -> [SurfAceRegistrySource]
     private let discover: @MainActor () async -> [URL]
     private let discoveryError: @MainActor () -> String?
     private let makeTransport: @MainActor (URL) -> any SurfAceRegistrationTransport
@@ -2015,6 +2116,9 @@ final class SurfAceCentralRegistration {
     private var warnedInputDiagnostics = Set<String>()
     private let onStatusChange: @MainActor (SurfAceCentralRegistrationStatus) -> Void
     private let onConnectionError: @MainActor (String?) -> Void
+    private let onSourceReports: @MainActor ([SurfAceRegistrySourceReport]) -> Void
+    private var generation: UInt64 = 0
+    private(set) var sourceReports: [SurfAceRegistrySourceReport] = []
     private(set) var lastError: String?
     private var lastReportedError: String?
     private(set) var status: SurfAceCentralRegistrationStatus = .disconnected
@@ -2052,6 +2156,7 @@ final class SurfAceCentralRegistration {
     }
 
     init(clientId: String, configured: URL?,
+         registrySources: @escaping @MainActor () -> [SurfAceRegistrySource] = { [] },
          discover: @escaping @MainActor () async -> [URL],
          discoveryError: @escaping @MainActor () -> String? = { nil },
          makeTransport: @escaping @MainActor (URL) -> any SurfAceRegistrationTransport = { SurfAceRegistrationTransportFactory.make(url: $0) },
@@ -2068,9 +2173,11 @@ final class SurfAceCentralRegistration {
          onWarning: @escaping @MainActor (String) -> Void = { _ in },
          onStatusChange: @escaping @MainActor (SurfAceCentralRegistrationStatus) -> Void = { _ in },
          onConnectionError: @escaping @MainActor (String?) -> Void = { _ in },
+         onSourceReports: @escaping @MainActor ([SurfAceRegistrySourceReport]) -> Void = { _ in },
          onVerifiedEndpoint: @escaping @MainActor (URL) -> Void = { _ in }) {
         self.clientId = clientId
         self.configured = configured
+        self.registrySources = registrySources
         self.discover = discover
         self.discoveryError = discoveryError
         self.makeTransport = makeTransport
@@ -2088,7 +2195,45 @@ final class SurfAceCentralRegistration {
         self.onWarning = onWarning
         self.onStatusChange = onStatusChange
         self.onConnectionError = onConnectionError
+        self.onSourceReports = onSourceReports
         self.onVerifiedEndpoint = onVerifiedEndpoint
+    }
+
+    private func ensureCurrent(_ attempt: UInt64) throws {
+        if stopped { throw SurfAceRegistrationError.stopped }
+        if attempt != generation { throw SurfAceRegistrationError.superseded }
+    }
+
+    private func setSourceReports(_ next: [SurfAceRegistrySourceReport]) {
+        guard sourceReports != next else { return }
+        sourceReports = next
+        onSourceReports(next)
+    }
+
+    /// Invalidates the selected registry and any in-flight attempt after the
+    /// operator changes or clears the saved registry URL, then reselects from
+    /// the highest-priority source.
+    func registryConfigurationChanged() {
+        guard !stopped else { return }
+        generation &+= 1
+        synchronizationTask?.cancel()
+        synchronizationTask = nil
+        synchronizationTaskId = nil
+        selected?.transport.close()
+        selected = nil
+        setSourceReports([])
+        setLastError(nil)
+        lastReportedError = nil
+        setStatus(.connecting)
+        if let loop {
+            loop.cancel()
+            self.loop = nil
+            start()
+        }
+    }
+
+    private func currentSources() -> [SurfAceRegistrySource] {
+        (configured.map { [SurfAceRegistrySource.valid(.environment, $0)] } ?? []) + registrySources()
     }
 
     func synchronize() async throws {
@@ -2150,14 +2295,16 @@ final class SurfAceCentralRegistration {
 
     private func synchronizeOnce() async throws {
         guard !stopped else { throw SurfAceRegistrationError.stopped }
+        let attempt = generation
         if selected == nil { setStatus(.connecting) }
-        defer { if status == .connecting { setStatus(.disconnected) } }
+        defer { if attempt == generation, status == .connecting { setStatus(.disconnected) } }
         let input = try await currentInputSnapshot()
-        guard !stopped else { throw SurfAceRegistrationError.stopped }
+        try ensureCurrent(attempt)
 
         let failures = FailureCollector()
         var selectedRouteFailed = false
         let previousSelected = selected
+        var previousFailure: (url: URL, description: String)?
 
         // A healthy selected route is the steady-state path. Reuse its socket
         // and avoid a Bonjour scan and identity connections to other addresses
@@ -2181,28 +2328,33 @@ final class SurfAceCentralRegistration {
                     onWarning("registration_binding_not_yet_persisted; continuing with current claims")
                 }
                 try await registerAndApply(using: selected.transport, identity: identity, input: boundInput)
-                guard !stopped else { throw SurfAceRegistrationError.stopped }
+                try ensureCurrent(attempt)
                 setLastError(nil)
                 lastReportedError = nil
                 setStatus(.connected)
                 onVerifiedEndpoint(selected.url)
                 return
             } catch {
-                if stopped { throw SurfAceRegistrationError.stopped }
+                try ensureCurrent(attempt)
                 selectedRouteFailed = true
                 selected.transport.close()
                 self.selected = nil
+                let description = surfAceRegistrationErrorDescription(error)
+                previousFailure = (selected.url, description)
                 failures.values.append(reportFailure(
                     phase: "reconnect",
                     endpoint: selected.url,
-                    underlying: surfAceRegistrationErrorDescription(error),
+                    underlying: description,
                     showInStatus: false
-                ).errorDescription ?? surfAceRegistrationErrorDescription(error))
+                ).errorDescription ?? description)
                 setStatus(.connecting)
             }
         }
 
+        let sources = currentSources()
         let discovered = await discover()
+        try ensureCurrent(attempt)
+        let bonjourFailureStart = failures.values.count
         if let reason = discoveryError() {
             failures.values.append(reportFailure(
                 phase: "discovery",
@@ -2212,19 +2364,19 @@ final class SurfAceCentralRegistration {
             ).errorDescription ?? reason)
         }
 
-        let routeURLs = candidateURLs(discovered: discovered)
+        let routeURLs = candidateURLs(sources: sources, discovered: discovered)
         var scanURLs = routeURLs
         if selectedRouteFailed, let previousSelected {
             // A failed route has already had its attempt this tick. Keep other
             // addresses from the same registry available for failover.
-            scanURLs.removeAll { $0.0 == previousSelected.url }
+            scanURLs.removeAll { $0.url == previousSelected.url }
         } else if let previousSelected,
-                  !scanURLs.contains(where: { $0.0 == previousSelected.url }) {
-            scanURLs.append((previousSelected.url, "reconnect"))
+                  !scanURLs.contains(where: { $0.url == previousSelected.url }) {
+            scanURLs.append((previousSelected.url, "reconnect", .bonjour))
         }
         var candidates: [Candidate] = []
         var seen = Set<String>()
-        for (url, phase) in scanURLs where (url.scheme == "ws" || url.scheme == "wss") {
+        for (url, phase, kind) in scanURLs where (url.scheme == "ws" || url.scheme == "wss") {
             guard seen.insert(url.absoluteString).inserted else { continue }
             let transport: any SurfAceRegistrationTransport
             if let active = self.selected, active.url == url {
@@ -2232,11 +2384,51 @@ final class SurfAceCentralRegistration {
             } else {
                 transport = makeTransport(url)
             }
-            candidates.append(Candidate(url: url, transport: transport, phase: phase))
+            candidates.append(Candidate(url: url, transport: transport, phase: phase, kind: kind))
+        }
+
+        // Outcome per configured URL, and failure text for the Bonjour group.
+        var outcomes: [String: SurfAceRegistrySourceOutcome] = [:]
+        if let previousFailure { outcomes[previousFailure.url.absoluteString] = .failed(previousFailure.description) }
+        func bonjourFailureReason(_ fallback: String) -> String {
+            let own = failures.values.dropFirst(bonjourFailureStart)
+            return own.isEmpty ? fallback : own.joined(separator: "; ")
+        }
+        func report(winner: Candidate?, bonjourFailure: String?) -> [SurfAceRegistrySourceReport] {
+            var result: [SurfAceRegistrySourceReport] = []
+            var listed = Set<String>()
+            for source in sources {
+                guard let url = source.url else {
+                    result.append(.init(
+                        kind: source.kind, endpoint: nil,
+                        outcome: .invalid(source.invalidReason ?? "invalid registry URL")
+                    ))
+                    continue
+                }
+                guard listed.insert(url.absoluteString).inserted else { continue }
+                let outcome: SurfAceRegistrySourceOutcome
+                if let winner, winner.url == url {
+                    outcome = .active
+                } else if let known = outcomes[url.absoluteString] {
+                    outcome = known
+                } else {
+                    outcome = .notUsed("another reachable registry was selected for this attempt")
+                }
+                result.append(.init(kind: source.kind, endpoint: surfAceRegistrationEndpointLabel(url), outcome: outcome))
+            }
+            if let winner, winner.kind == .bonjour {
+                result.append(.init(
+                    kind: .bonjour, endpoint: surfAceRegistrationEndpointLabel(winner.url), outcome: .active
+                ))
+            } else if let bonjourFailure {
+                result.append(.init(kind: .bonjour, endpoint: nil, outcome: .unreachable(bonjourFailure)))
+            }
+            return result
         }
 
         var identified: [IdentifiedCandidate] = []
         for candidate in candidates {
+            try ensureCurrent(attempt)
             do {
                 let identityRead = try await candidate.transport.readRegistryIdentity(
                     fallbackIdentity: input.registryIdentity
@@ -2248,16 +2440,19 @@ final class SurfAceCentralRegistration {
                 let identity = identityRead.identity?.isValid == true ? identityRead.identity : nil
                 identified.append(.init(candidate: candidate, identity: identity))
             } catch {
+                try ensureCurrent(attempt)
+                let description = surfAceRegistrationErrorDescription(error)
+                if candidate.kind != .bonjour { outcomes[candidate.url.absoluteString] = .unreachable(description) }
                 failures.values.append(reportFailure(
                     phase: "identity",
                     endpoint: candidate.url,
-                    underlying: surfAceRegistrationErrorDescription(error),
+                    underlying: description,
                     showInStatus: false
-                ).errorDescription ?? surfAceRegistrationErrorDescription(error))
+                ).errorDescription ?? description)
             }
         }
 
-        guard !stopped else { throw SurfAceRegistrationError.stopped }
+        try ensureCurrent(attempt)
 
         let matching = input.registryIdentity.flatMap { identity in
             identified.first(where: { $0.identity == identity })
@@ -2270,6 +2465,10 @@ final class SurfAceCentralRegistration {
                 ? "Bonjour found no _surf-ace._tcp service with role=server v=1 ws=/ws"
                 : failures.values.joined(separator: "; ")
             let failure = SurfAceCentralRegistrationFailure(phase: "retry", endpoint: nil, underlying: reason)
+            setSourceReports(report(
+                winner: nil,
+                bonjourFailure: bonjourFailureReason("Bonjour found no _surf-ace._tcp service with role=server v=1 ws=/ws")
+            ))
             setLastError(failure.errorDescription)
             if lastReportedError != failure.errorDescription {
                 lastReportedError = failure.errorDescription
@@ -2288,6 +2487,7 @@ final class SurfAceCentralRegistration {
                 if let identity = identifiedCandidate.identity {
                     try await bindCandidateRegistry(identity)
                 }
+                try ensureCurrent(attempt)
                 let boundInput = try await currentInputSnapshot()
                 if identifiedCandidate.identity != nil, inputSnapshot != nil,
                    boundInput.registryIdentity != identifiedCandidate.identity {
@@ -2298,7 +2498,7 @@ final class SurfAceCentralRegistration {
                     identity: identifiedCandidate.identity,
                     input: boundInput
                 )
-                guard !stopped else { throw SurfAceRegistrationError.stopped }
+                try ensureCurrent(attempt)
                 for other in candidates where other.transport !== candidate.transport {
                     other.transport.close()
                 }
@@ -2306,50 +2506,63 @@ final class SurfAceCentralRegistration {
                     prior.transport.close()
                 }
                 selected = (candidate.url, candidate.transport)
+                setSourceReports(report(winner: candidate, bonjourFailure: nil))
                 setLastError(nil)
                 lastReportedError = nil
                 setStatus(.connected)
                 onVerifiedEndpoint(candidate.url)
                 return
             } catch {
-                if stopped {
+                if stopped || attempt != generation {
                     for other in candidates {
                         if let selected, other.transport === selected.transport { continue }
                         other.transport.close()
                     }
-                    throw SurfAceRegistrationError.stopped
+                    try ensureCurrent(attempt)
                 }
+                let description = surfAceRegistrationErrorDescription(error)
+                if candidate.kind != .bonjour { outcomes[candidate.url.absoluteString] = .failed(description) }
                 failures.values.append(reportFailure(
                     phase: candidate.phase,
                     endpoint: candidate.url,
-                    underlying: surfAceRegistrationErrorDescription(error),
+                    underlying: description,
                     showInStatus: false
-                ).errorDescription ?? surfAceRegistrationErrorDescription(error))
+                ).errorDescription ?? description)
             }
         }
 
+        try ensureCurrent(attempt)
         for candidate in candidates { candidate.transport.close() }
         if let selected { selected.transport.close() }
         self.selected = nil
         setStatus(.disconnected)
+        setSourceReports(report(
+            winner: nil,
+            bonjourFailure: bonjourFailureReason("Bonjour found no _surf-ace._tcp service with role=server v=1 ws=/ws")
+        ))
         let reason = failures.values.isEmpty
             ? "registry registration failed for every endpoint with identity \(selectedIdentity.map { "\($0.allocatorId)/\($0.fleetId)" } ?? "unreported")"
             : failures.values.joined(separator: "; ")
         throw reportFailure(phase: "retry", endpoint: nil, underlying: reason, showInStatus: true)
     }
 
-    private func candidateURLs(discovered: [URL]) -> [(URL, String)] {
-        var result: [(URL, String)] = []
+    private func candidateURLs(
+        sources: [SurfAceRegistrySource], discovered: [URL]
+    ) -> [(url: URL, phase: String, kind: SurfAceRegistrySourceKind)] {
+        var result: [(url: URL, phase: String, kind: SurfAceRegistrySourceKind)] = []
         var seen = Set<String>()
-        func append(_ url: URL, _ phase: String) {
+        func append(_ url: URL, _ phase: String, _ kind: SurfAceRegistrySourceKind) {
             guard seen.insert(url.absoluteString).inserted else { return }
-            result.append((url, phase))
+            result.append((url, phase, kind))
         }
-        if let configured { append(configured, "configured") }
+        // An invalid source is reported and skipped; it never reaches the transport.
+        for source in sources {
+            if let url = source.url { append(url, "configured", source.kind) }
+        }
         for url in discovered {
             // Bonjour supplies resolved addresses for a role=server service.
-            for address in transportFallbacks(url) { append(address, "transport_address") }
-            append(url, "discovery")
+            for address in transportFallbacks(url) { append(address, "transport_address", .bonjour) }
+            append(url, "discovery", .bonjour)
         }
         return result
     }
@@ -2733,7 +2946,8 @@ final class SurfAceCentralRegistration {
         guard loop == nil, !stopped else { return }
         loop = Task { [weak self] in
             while let self, !self.stopped {
-                do { try await self.synchronize() } catch {
+                do { try await self.synchronize() } catch SurfAceRegistrationError.superseded {
+                } catch {
                     let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
                     if self.lastReportedError != message {
                         self.lastReportedError = message
