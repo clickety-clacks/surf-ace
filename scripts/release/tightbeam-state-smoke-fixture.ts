@@ -1187,6 +1187,7 @@ async function packagedV023MigrationSmoke(options: Options) {
   const annotationMigration = path.join(options.candidateRoot, "schemas/allocator/003_annotation_journal.sql");
   const paneGenerationMigration = path.join(options.candidateRoot, "schemas/allocator/004_pane_label_reuse.sql");
   const windowGenerationMigration = path.join(options.candidateRoot, "schemas/allocator/005_window_label_reuse.sql");
+  const windowDisableMigration = path.join(options.candidateRoot, "schemas/allocator/006_disable_window_label_reuse.sql");
   const cluster = await startCluster(path.join(options.stateRoot, "v023-migration-primary"), baselineSchema, false);
   const backup = path.join(options.stateRoot, "v023-pre-migration.dump");
   let stage: Cluster | undefined;
@@ -1237,6 +1238,7 @@ async function packagedV023MigrationSmoke(options: Options) {
     await command(path.join(cluster.postgresBin, "psql"), [cluster.adminUrl, "-v", "ON_ERROR_STOP=1", "-f", annotationMigration]);
     await command(path.join(cluster.postgresBin, "psql"), [cluster.adminUrl, "-v", "ON_ERROR_STOP=1", "-f", paneGenerationMigration]);
     await command(path.join(cluster.postgresBin, "psql"), [cluster.adminUrl, "-v", "ON_ERROR_STOP=1", "-f", windowGenerationMigration]);
+    await command(path.join(cluster.postgresBin, "psql"), [cluster.adminUrl, "-v", "ON_ERROR_STOP=1", "-f", windowDisableMigration]);
     const annotationRows = await postgresQuery(cluster.adminUrl, `
       SELECT epoch, head_sequence::text AS "headSequence"
       FROM surf_ace_allocator.annotation_journal_head WHERE fleet_id = $1
@@ -1326,6 +1328,8 @@ async function freshInstallMain(options: Options) {
       path.join(options.candidateRoot, "schemas/allocator/004_pane_label_reuse.sql")]);
     await command(path.join(cluster.postgresBin, "psql"), [cluster.adminUrl, "-v", "ON_ERROR_STOP=1", "-f",
       path.join(options.candidateRoot, "schemas/allocator/005_window_label_reuse.sql")]);
+    await command(path.join(cluster.postgresBin, "psql"), [cluster.adminUrl, "-v", "ON_ERROR_STOP=1", "-f",
+      path.join(options.candidateRoot, "schemas/allocator/006_disable_window_label_reuse.sql")]);
     const initialization = await PostgresCustodyAdapter.initializeAbsentFleet(cluster.config, "alloc_release-smoke");
     await initialization.release();
     registryProcess = await startPackagedServer(registryLauncher, registryConfig, cluster.root, "fresh-install-registry");

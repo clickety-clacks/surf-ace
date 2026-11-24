@@ -43,6 +43,7 @@ export const TIGHTBEAM_LINUX_SERVER_FILES = Object.freeze([
   "schemas/allocator/003_annotation_journal.sql",
   "schemas/allocator/004_pane_label_reuse.sql",
   "schemas/allocator/005_window_label_reuse.sql",
+  "schemas/allocator/006_disable_window_label_reuse.sql",
   "schemas/protocol/schema.json",
   "server/central-server.cjs",
   "service/surf-ace-server@.service",
@@ -166,6 +167,29 @@ const linuxServerReadme = [
   "and in-progress restores settled. Pane-label reuse remains disabled by default.",
   "Apply `schemas/allocator/005_window_label_reuse.sql` after 004 and before",
   "generation-aware window close registration.",
+  "Apply `schemas/allocator/006_disable_window_label_reuse.sql` once 005 is installed;",
+  "do not reapply 005. This additive function installation changes no gate, label,",
+  "allocation or identity. Stage and verify it before a separately authorized installation.",
+  "",
+  "To disable future window-label reuse, connect to the intended primary as an",
+  "operator with membership in `surf_ace_allocator_owner` and run:",
+  "",
+  "```sql",
+  "BEGIN;",
+  "SET LOCAL synchronous_commit = 'remote_apply';",
+  "SET LOCAL ROLE surf_ace_allocator_owner;",
+  "SELECT surf_ace_allocator.disable_window_label_reuse('your-fleet-id', 'operator-disable');",
+  "COMMIT;",
+  "```",
+  "",
+  "Replace the fleet ID and supply a nonempty audit reason of at most 128 letters,",
+  "digits, dots, underscores, colons or hyphens. The gate-off event and flag commit",
+  "together under the fleet lock. Repeating the call while off is a no-op.",
+  "Existing allocations and durable window/pane identities remain intact; future",
+  "allocations use the monotonic ordinal fence, even when a released letter is free.",
+  "This does not undo earlier reuse or make generation-unaware rollback readers safe.",
+  "Reuse activation and client, backup, reference and rollback-reader compatibility",
+  "require separate verification; installing this function does not enable reuse.",
   "The packaged server configuration",
   "uses the existing AllocatorServerConfig fields and a single owned host lock.",
   "The callable module remains available for embedding by one process owner:",
@@ -251,6 +275,7 @@ export async function assembleTightbeamLinuxStage({ sourceDir, stageDir, target 
     "schemas/allocator/003_annotation_journal.sql": path.join(source, "packages/allocator/sql/003_annotation_journal.sql"),
     "schemas/allocator/004_pane_label_reuse.sql": path.join(source, "packages/allocator/sql/004_pane_label_reuse.sql"),
     "schemas/allocator/005_window_label_reuse.sql": path.join(source, "packages/allocator/sql/005_window_label_reuse.sql"),
+    "schemas/allocator/006_disable_window_label_reuse.sql": path.join(source, "packages/allocator/sql/006_disable_window_label_reuse.sql"),
     "schemas/protocol/schema.json": path.join(source, "packages/electron/dist/schema.json"),
     "server/central-server.cjs": path.join(source, "packages/electron/dist/central-server.cjs"),
     "service/surf-ace-server@.service": path.join(toolingRoot, "scripts/release/templates/surf-ace-server@.service"),
@@ -487,6 +512,8 @@ export async function writeTightbeamManifest({
   const cargoDependencies = await cargoLockedPackages(path.join(source, "packages/cli/Cargo.lock"));
   const windowLabelMigrationPath = "schemas/allocator/005_window_label_reuse.sql";
   const windowLabelMigration = path.join(source, "packages/allocator/sql/005_window_label_reuse.sql");
+  const disableWindowLabelMigrationPath = "schemas/allocator/006_disable_window_label_reuse.sql";
+  const disableWindowLabelMigration = path.join(source, "packages/allocator/sql/006_disable_window_label_reuse.sql");
   const manifestPath = path.join(output, TIGHTBEAM.manifest);
   await writeCanonicalJson(manifestPath, {
     acceptance: {
@@ -523,6 +550,10 @@ export async function writeTightbeamManifest({
         path: windowLabelMigrationPath,
         sha256: await sha256(windowLabelMigration),
         sizeBytes: (await fs.stat(windowLabelMigration)).size,
+      }, {
+        path: disableWindowLabelMigrationPath,
+        sha256: await sha256(disableWindowLabelMigration),
+        sizeBytes: (await fs.stat(disableWindowLabelMigration)).size,
       }],
     } } : {}),
     toolchains: TOOLCHAINS,

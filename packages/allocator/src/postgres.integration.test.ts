@@ -3096,7 +3096,8 @@ test("pane allocation generations release exact tombstoned identities and gate s
   }
 });
 
-test("window allocation generations keep reconnects reserved and reuse only exact released labels", { timeout: 240_000 }, async () => {
+for (const disableMode of ["legacy claim", "operator"] as const) {
+test(`window allocation generations keep reconnects reserved and reuse only exact released labels (${disableMode})`, { timeout: 240_000 }, async () => {
   const cluster = await startCluster();
   let allocator: AllocatorServer | null = null;
   let wire: WireClient | null = null;
@@ -3273,6 +3274,111 @@ test("window allocation generations keep reconnects reserved and reuse only exac
       { windowLabel: "b", windowGeneration: fifth.windowGeneration },
     ]);
 
+    if (disableMode === "operator") {
+      const withPane = await register([{
+        surfaceId: "sf_window_d", windowGeneration: fourth.windowGeneration,
+        panes: [{ paneId: "pane-keeper", paneLabel: 0, paneLineageId: "pl_window_keeper" }],
+      }]);
+      assert.equal(withPane.ok, true, JSON.stringify(withPane));
+      const releaseC = makeRelease("sf_window_c", third.windowLabel, third.windowGeneration, "st_window_c_close", 1);
+      const freed = await register([], [releaseC]);
+      assert.equal(freed.ok, true, JSON.stringify(freed));
+
+      const operator = new Client({ connectionString: cluster.adminUrl });
+      await operator.connect();
+      try {
+        const readState = async (): Promise<AcceptedState> =>
+          (await operator.query("SELECT surf_ace_allocator.read_accepted_state('fleet-test') AS state")).rows[0].state;
+        const beforeDisable = await readState();
+        assert.equal(beforeDisable.windowLabelReuseEnabled, true);
+        assert.equal(beforeDisable.nextOrdinalFence, 3);
+        assert.equal(beforeDisable.paneMappings.length, 1);
+        assert.deepEqual(beforeDisable.mappings.map(({ windowLabel }) => windowLabel), ["a", "b"],
+          "c is released and available while a and b retain their reused generations");
+        const migration = await readFile(new URL("../sql/006_disable_window_label_reuse.sql", import.meta.url), "utf8");
+        await operator.query(migration);
+        await operator.query(migration);
+        assert.deepEqual(await readState(), beforeDisable, "install and reinstall change no accepted state");
+
+        const disableSql = "SELECT surf_ace_allocator.disable_window_label_reuse('fleet-test', 'operator-disable')";
+        for (const url of [cluster.writerUrl, cluster.recoveryUrl]) {
+          await assert.rejects(adminQuery(url, disableSql), { code: "42501" },
+            "runtime roles cannot invoke the owner-only operation");
+        }
+        for (const reason of [null, "", "contains spaces", "x".repeat(129)]) {
+          await assert.rejects(operator.query(
+            "SELECT surf_ace_allocator.disable_window_label_reuse('fleet-test', $1)", [reason],
+          ), { code: "22023" });
+        }
+        await assert.rejects(operator.query(
+          "SELECT surf_ace_allocator.disable_window_label_reuse('missing-fleet', 'operator-disable')",
+        ), { code: "P0002" });
+        assert.deepEqual(await readState(), beforeDisable, "refused operations change neither the gate nor journal");
+        await operator.query("BEGIN; SET LOCAL synchronous_commit = 'remote_apply'; SET LOCAL ROLE surf_ace_allocator_owner");
+        await operator.query(disableSql);
+        await operator.query("ROLLBACK");
+        assert.deepEqual(await readState(), beforeDisable, "rollback restores both gate and journal atomically");
+
+        await operator.query("BEGIN; SET LOCAL synchronous_commit = 'remote_apply'; SET LOCAL ROLE surf_ace_allocator_owner");
+        assert.equal((await operator.query(disableSql)).rows[0].disable_window_label_reuse, true);
+        await operator.query("COMMIT");
+        const disabled = await readState();
+        assert.deepEqual(disabled, {
+          ...beforeDisable,
+          windowLabelReuseEnabled: false,
+          headSeq: beforeDisable.headSeq + 1,
+          headHash: disabled.headHash,
+          custodyRevision: beforeDisable.custodyRevision + 1,
+          lastCommitAt: disabled.lastCommitAt,
+        }, "disable changes only the gate and journal head, preserving every allocation, fence and identity");
+        assert.notEqual(disabled.headHash, beforeDisable.headHash);
+        const event = (await operator.query(`SELECT event FROM surf_ace_allocator.custody_journal
+          WHERE fleet_id = 'fleet-test' AND head_seq = $1`, [disabled.headSeq])).rows[0].event;
+        assert.deepEqual(event, {
+          allocatorId: beforeDisable.allocatorId, enabled: false, fleetId: "fleet-test",
+          reason: "operator-disable", type: "window-label-reuse-gate",
+        });
+        await operator.query(disableSql);
+        assert.deepEqual(await readState(), disabled, "repeated disable is idempotent");
+      } finally {
+        await operator.end();
+      }
+
+      const afterDisable = await register([{ surfaceId: "sf_window_after_disable", panes: [] }]);
+      assert.equal(afterDisable.ok, true, JSON.stringify(afterDisable));
+      assert.equal(readSurfaces(afterDisable)[0]?.windowLabel, "d",
+        "operator disable skips free c and resumes at the monotonic high-water mark");
+      await wire.close();
+      wire = null;
+      await allocator.close();
+      allocator = null;
+      recovery = await PostgresCustodyAdapter.acquireRecovery(cluster.config);
+      const beforeRestore = await recovery.readAcceptedState();
+      const restoreId = `restore_window_disabled_${Date.now()}`;
+      await recovery.stageRestore(restoreId, `${restoreId}_idem`, beforeRelease, await recovery.readWitness());
+      await recovery.activateRestore(restoreId, await recovery.markRestoreReady(restoreId));
+      const afterRestore = await recovery.readAcceptedState();
+      assert.equal(afterRestore.windowLabelReuseEnabled, false, "restore replays the operator-off event");
+      const identities = (state: AcceptedState) => state.mappings.map(({ recoveredAtCustodyRevision, ...identity }) => identity);
+      assert.deepEqual(identities(afterRestore), identities(beforeRestore));
+      assert.deepEqual(afterRestore.paneMappings, beforeRestore.paneMappings);
+      assert.deepEqual(afterRestore.windowReleases, beforeRestore.windowReleases);
+      assert.equal(afterRestore.nextOrdinalFence, beforeRestore.nextOrdinalFence);
+      await recovery.release();
+      recovery = null;
+      allocator = await AllocatorServer.start(serverConfig(cluster));
+      wire = await WireClient.connect(allocator.address.url);
+      const afterRestart = await register([
+        { surfaceId: "sf_window_d", windowGeneration: fourth.windowGeneration, panes: [] },
+        { surfaceId: "sf_window_e", windowGeneration: fifth.windowGeneration, panes: [] },
+        { surfaceId: "sf_window_after_restore", panes: [] },
+      ]);
+      assert.equal(afterRestart.ok, true, JSON.stringify(afterRestart));
+      assert.deepEqual(readSurfaces(afterRestart).map(({ windowLabel }) => windowLabel), ["a", "b", "e"],
+        "restart preserves previously reused labels and keeps new allocations monotonic");
+      return;
+    }
+
     const legacyClientId = createHash("sha256").update("legacy-window-client").digest("hex");
     const legacyClaim = await wire.request("client.register", {
       clientId: legacyClientId,
@@ -3305,6 +3411,7 @@ test("window allocation generations keep reconnects reserved and reuse only exac
     await cluster.stop();
   }
 });
+}
 
 async function startCluster(schemaVersion: "current" | "v0.2.3" = "current"): Promise<TestCluster> {
   const root = await mkdtemp(join(process.cwd(), ".allocator-pg-"));
@@ -3336,6 +3443,7 @@ fsync = on
       await PostgresCustodyAdapter.installSchema(adminUrl);
       await adminQuery(adminUrl, await readFile(new URL("../sql/004_pane_label_reuse.sql", import.meta.url), "utf8"));
       await adminQuery(adminUrl, await readFile(new URL("../sql/005_window_label_reuse.sql", import.meta.url), "utf8"));
+      await adminQuery(adminUrl, await readFile(new URL("../sql/006_disable_window_label_reuse.sql", import.meta.url), "utf8"));
     }
     await adminQuery(adminUrl, `
       CREATE ROLE allocator_writer LOGIN IN ROLE surf_ace_allocator_writer;

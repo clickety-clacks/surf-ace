@@ -1397,10 +1397,15 @@ test("Tightbeam manifest assembles the six hosted assets including the exact ski
   assert.deepEqual(result.files, TIGHTBEAM_PUBLIC_FILES);
   assert.deepEqual(manifest.assets.map(({ name }) => name), TIGHTBEAM.assets);
   const migrationBytes = await fs.readFile(path.join(repository, "packages/allocator/sql/005_window_label_reuse.sql"));
+  const disableMigrationBytes = await fs.readFile(path.join(repository, "packages/allocator/sql/006_disable_window_label_reuse.sql"));
   assert.deepEqual(manifest.serverPackage.schemaMigrations, [{
     path: "schemas/allocator/005_window_label_reuse.sql",
     sha256: createHash("sha256").update(migrationBytes).digest("hex"),
     sizeBytes: migrationBytes.length,
+  }, {
+    path: "schemas/allocator/006_disable_window_label_reuse.sql",
+    sha256: createHash("sha256").update(disableMigrationBytes).digest("hex"),
+    sizeBytes: disableMigrationBytes.length,
   }]);
   const skillRecord = manifest.assets.find(({ name }) => name === TIGHTBEAM_SKILL_ASSET);
   const skillDigest = createHash("sha256").update(toolingSkillBytes).digest("hex");
@@ -1689,6 +1694,7 @@ test("Tightbeam Linux stage contains only the standalone CLI, callable server cl
     "packages/allocator/sql/003_annotation_journal.sql": "-- annotation migration\n",
     "packages/allocator/sql/004_pane_label_reuse.sql": "-- pane generation migration\n",
     "packages/allocator/sql/005_window_label_reuse.sql": "-- window generation migration\n",
+    "packages/allocator/sql/006_disable_window_label_reuse.sql": "-- window reuse operator disable\n",
   };
   for (const [relative, contents] of Object.entries(files)) {
     const file = path.join(source, relative);
@@ -1714,6 +1720,10 @@ test("Tightbeam Linux stage contains only the standalone CLI, callable server cl
   const windowGenerationMigration = path.join(stage, "schemas/allocator/005_window_label_reuse.sql");
   const windowGenerationBytes = await fs.readFile(path.join(source, "packages/allocator/sql/005_window_label_reuse.sql"));
   assert.deepEqual(await fs.readFile(windowGenerationMigration), windowGenerationBytes);
+  assert.deepEqual(
+    await fs.readFile(path.join(stage, "schemas/allocator/006_disable_window_label_reuse.sql")),
+    await fs.readFile(path.join(source, "packages/allocator/sql/006_disable_window_label_reuse.sql")),
+  );
   const guide = await fs.readFile(path.join(stage, "README.md"), "utf8");
   assert.match(guide, /startCentralServer\(config, name\)/);
   assert.match(guide, /await service\.close\(\)/);
