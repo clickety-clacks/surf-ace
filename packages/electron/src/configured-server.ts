@@ -146,7 +146,6 @@ export class ConfiguredServerRegistration {
     private readonly core: SurfaceCore,
     private readonly persist: () => Promise<void>,
     private readonly onError: (error: unknown) => void = () => undefined,
-    _requestTimeoutMs = 10_000,
     directEndpoint: string | null = null,
     private readonly onStage: (stage: string) => void = () => undefined,
     private readonly committedState?: () => RegistryRegistrationState,

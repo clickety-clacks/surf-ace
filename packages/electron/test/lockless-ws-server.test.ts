@@ -2512,7 +2512,7 @@ test("new panes stay unnumbered when the registry rejects a pane claim and recov
   await new Promise<void>((resolve) => registry.once("listening", resolve));
   const registryAddress = `ws://127.0.0.1:${(registry.address() as AddressInfo).port}/`;
   const clientRegistration = new ConfiguredServerRegistration(
-    registryAddress, "allocator-recovery-client", core, async () => {}, () => {}, 500,
+    registryAddress, "allocator-recovery-client", core, async () => {},
   );
   try {
     assert.equal((await pair(controller, "allocator-recovery-controller", surface.surfaceId)).ok, true);
@@ -3899,8 +3899,6 @@ test("explicit window close sends an allocator-compatible windowGeneration relea
     clientId,
     core,
     async () => {},
-    () => {},
-    500,
   );
   const registrationRequests: Array<{ socket: WebSocket; message: any }> = [];
   const registrationWaiters: Array<(request: { socket: WebSocket; message: any }) => void> = [];

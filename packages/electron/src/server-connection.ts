@@ -86,8 +86,6 @@ export class ServerConnection {
     onError?: (error: unknown) => void;
     discovery?: SurfAceDiscoveryService;
     registryRebindWaitMs?: number;
-    requestTimeoutMs?: number;
-    registrationCycleTimeoutMs?: number;
   }) {
     this.discovery = options.discovery ?? createBonjourSurfAceDiscoveryService({ timeoutMs: 1500 });
   }
@@ -153,7 +151,6 @@ export class ServerConnection {
         }
         this.logFailure(message);
       },
-      undefined,
       this.options.directEndpoint ?? null,
       undefined,
       this.options.committedState,
