@@ -1,3 +1,4 @@
+import { applicationQueueWait } from "./persistence-write-readiness.js";
 import { createHash, randomUUID } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 
@@ -644,7 +645,7 @@ export type OrdinaryMutationRollback = {
 };
 
 export class LocklessClientAuthority {
-  private authorityWorkTail: Promise<void> = Promise.resolve();
+  private authorityWorkTail: Promise<void> | null = null;
   private readonly transactionContext = new AsyncLocalStorage<object>();
   private activeAsyncTransaction: object | null = null;
   private readonly connectionTokens = new Map<
@@ -679,15 +680,16 @@ export class LocklessClientAuthority {
     const current = new Promise<void>((resolve) => {
       release = resolve;
     });
-    const queued = previous.catch(() => undefined).then(() => current);
+    const queued = (previous ?? Promise.resolve()).catch(() => undefined).then(() => current);
     this.authorityWorkTail = queued;
-    await previous.catch(() => undefined);
+    if (previous) applicationQueueWait.getStore()?.("client");
+    await previous?.catch(() => undefined);
     try {
       return await operation();
     } finally {
       release();
       if (this.authorityWorkTail === queued) {
-        this.authorityWorkTail = Promise.resolve();
+        this.authorityWorkTail = null;
       }
     }
   }

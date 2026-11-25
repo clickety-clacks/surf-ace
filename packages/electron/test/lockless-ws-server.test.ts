@@ -5384,6 +5384,7 @@ test("guarded restore keeps two visible panes and local input while refusing an 
     assert.equal(writeResponse.error?.code, "internal_error");
     assert.match(writeResponse.error.message, /^Blocked behind pane resize since /);
     assert.deepEqual(writeResponse.error.details.blockedBy, blocker);
+    console.log("Guarded write response", JSON.stringify(writeResponse));
     assert.equal(core.captureSnapshot(surface.surfaceId, firstPaneId).contentId, "first-visible");
     assert.deepEqual(durable, committed, "the guarded write must not change durable state");
     assert.equal((await request(socket, "heartbeat.ping", { nonce: "guarded-alive" })).ok, true,

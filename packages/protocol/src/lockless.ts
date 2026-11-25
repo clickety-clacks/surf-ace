@@ -1,6 +1,9 @@
 export const SURF_ACE_LOCKLESS_V1_CAPABILITY =
   "surf-ace.lockless-multi-controller.v1" as const;
 
+export const SURF_ACE_OPERATION_BLOCKED_V1_CAPABILITY =
+  "surf-ace.operation-blocked.v1" as const;
+
 export const LOCKLESS_MAX_REQUEST_ID_LENGTH = 64;
 export const LOCKLESS_MAX_CONTROLLER_INSTANCE_ID_LENGTH = 64;
 export const LOCKLESS_MAX_SURFACE_ADMISSION_ATTEMPTS = 256;
@@ -506,7 +509,18 @@ export type LocklessRequest =
     >
   | LocklessWireRequest<"heartbeat.ping", { nonce: string }>;
 
+export type LocklessOpenChange = {
+  operation: string;
+  startedAtMs: number;
+};
+
 export type LocklessEvent =
+  | LocklessWireEvent<"event.operation_blocked", {
+      requestId: string;
+      surfaceId: string;
+      message: string;
+      openChanges: LocklessOpenChange[];
+    }>
   | LocklessWireEvent<
       "event.lockless_content_committed",
       LocklessContentCommit & { surfaceId: string }
@@ -808,6 +822,7 @@ const LOCKLESS_REQUEST_FIELDS: Record<
 };
 
 const LOCKLESS_EVENT_OPS = new Set<LocklessEvent["op"]>([
+  "event.operation_blocked",
   "event.lockless_content_committed",
   "event.lockless_scope_snapshot",
   "event.lockless_consumable_delta",
@@ -1208,6 +1223,13 @@ function validateLocklessEventPayload(
   payload: Record<string, unknown>,
 ): boolean {
   switch (op) {
+    case "event.operation_blocked":
+      return hasExactKeys(payload, ["requestId", "surfaceId", "message", "openChanges"]) &&
+        nonemptyString(payload.requestId) && nonemptyString(payload.surfaceId) &&
+        nonemptyString(payload.message) && Array.isArray(payload.openChanges) &&
+        payload.openChanges.length > 0 && payload.openChanges.every((entry) =>
+          plainRecord(entry) && hasExactKeys(entry, ["operation", "startedAtMs"]) &&
+          nonemptyString(entry.operation) && revision(entry.startedAtMs));
     case "event.lockless_content_committed":
       return (
         hasExactKeys(payload, [

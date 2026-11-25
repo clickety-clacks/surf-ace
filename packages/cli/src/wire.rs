@@ -66,6 +66,7 @@ pub struct WebSocketWire<S: Read + Write = TcpStream> {
     socket: WebSocket<MaybeTlsStream<S>>,
     deadline: Option<Instant>,
     max_response_bytes: Option<usize>,
+    last_operation_block: Option<Value>,
 }
 
 impl WebSocketWire<TcpStream> {
@@ -77,6 +78,7 @@ impl WebSocketWire<TcpStream> {
             socket,
             deadline: None,
             max_response_bytes: None,
+            last_operation_block: None,
         })
     }
 }
@@ -171,6 +173,7 @@ impl WebSocketWire<DeadlineTcpStream> {
             socket,
             deadline: Some(deadline),
             max_response_bytes: Some(max_response_bytes),
+            last_operation_block: None,
         };
         Ok(wire)
     }
@@ -234,6 +237,12 @@ impl<S: Read + Write> WebSocketWire<S> {
     }
 }
 
+impl<S: Read + Write> WebSocketWire<S> {
+    pub(crate) fn operation_block(&self) -> Option<&Value> {
+        self.last_operation_block.as_ref()
+    }
+}
+
 impl<S: Read + Write> DirectWire for WebSocketWire<S> {
     fn request(
         &mut self,
@@ -242,6 +251,7 @@ impl<S: Read + Write> DirectWire for WebSocketWire<S> {
         payload: Value,
         sent: &mut dyn FnMut() -> Result<(), String>,
     ) -> Result<WireResponse, WireFailure> {
+        self.last_operation_block = None;
         self.check_deadline()
             .map_err(|error| WireFailure::BeforeSend {
                 code: format!("deadline:{error}"),
@@ -303,6 +313,21 @@ impl<S: Read + Write> DirectWire for WebSocketWire<S> {
                     code: format!("response_decode:{error}"),
                 })?;
             if envelope.envelope_type == "event" {
+                if envelope.op == "event.operation_blocked" {
+                    if let Some(payload) = envelope.payload.filter(|payload| {
+                        envelope.v == 1
+                            && payload.get("requestId").and_then(Value::as_str) == Some(id)
+                            && payload.get("message").and_then(Value::as_str).is_some()
+                            && payload.get("openChanges").and_then(Value::as_array).is_some_and(|changes| !changes.is_empty())
+                    }) {
+                        if self.last_operation_block.is_none() {
+                            let notice = serde_json::json!({ "event": "operation_blocked", "payload": payload });
+                            let _ = writeln!(io::stderr().lock(), "{notice}");
+                            self.last_operation_block = Some(payload);
+                        }
+                    }
+                    continue;
+                }
                 events.push(envelope);
                 continue;
             }

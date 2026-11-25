@@ -1,4 +1,4 @@
-import { surfaceBlockerLimitation, surfaceBlockerMessage, type ApplicationStateMutation, type SurfaceBlocker } from "./persistence-write-readiness.js";
+import { applicationQueueWait, surfaceBlockerLimitation, surfaceBlockerMessage, type ApplicationStateMutation, type SurfaceBlocker } from "./persistence-write-readiness.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import http from "node:http";
 import { splitResizeMatches, splitResizeIsNoOp, type SplitResizeExpectation, type SplitResizeGeometry, splitResizeGeometryIsValid } from "./split-resize.js";
@@ -43,6 +43,7 @@ import type {
 import { validateEnvelopeType } from "../../protocol/src/validate.js";
 import {
   SURF_ACE_LOCKLESS_V1_CAPABILITY,
+  SURF_ACE_OPERATION_BLOCKED_V1_CAPABILITY,
   locklessPaneScopeId,
   validateLocklessEnvelope,
   type LocklessEvent,
@@ -125,6 +126,7 @@ type LocklessTransportSession = {
   connectionToken: string;
   controllerInstanceId: string;
   controllerProductName: string | null;
+  operationBlockedV1?: boolean;
   surfaceId: string | null;
   socket: WebSocket;
 };
@@ -178,7 +180,7 @@ export type SurfaceWsServerOptions = {
   isApplicationStateReady?: () => boolean;
   beginApplicationStateMutation?: (details: Omit<ApplicationStateMutation, "startedAtMs">) => () => void;
   openApplicationStateMutations?: () => ApplicationStateMutation[];
-  getSurfaceBlockers?: (surfaceId: string, excludingRequestId?: string) => SurfaceBlocker[];
+  getSurfaceBlockers?: (surfaceId?: string, excludingRequestId?: string) => SurfaceBlocker[];
   port: number;
   protocolVersion?: number;
   viewport: () => SurfaceViewport;
@@ -304,7 +306,7 @@ export class SurfaceWsServer {
   private readonly socketMeta = new WeakMap<WebSocket, SocketMeta>();
   private readonly closedSockets = new WeakSet<WebSocket>();
   private readonly locklessSessions = new Map<WebSocket, LocklessTransportSession>();
-  private readonly trackedLocklessMutation = new AsyncLocalStorage<{ surfaceId?: string; active: boolean }>();
+  private readonly trackedLocklessMutation = new AsyncLocalStorage<{ surfaceId?: string; active: boolean; queuedBehind?: SurfaceBlocker[] }>();
   private readonly mutationQueues = new Map<string, Promise<void>>();
   private nativePaneStatusRefresh: Promise<CompositorControlResponse | null> | null = null;
   private readonly nativePaneStatusPollSurfaces = new Set<string>();
@@ -1222,15 +1224,49 @@ export class SurfaceWsServer {
       (session !== undefined && locklessOperationMutates(request.op));
     const payloadSurfaceId = (request.payload as { surfaceId?: unknown } | null)?.surfaceId;
     const surfaceId = typeof payloadSurfaceId === "string" ? payloadSurfaceId : session?.surfaceId;
-    const tracking = { surfaceId: surfaceId ?? undefined, active: changesApplicationState };
+    const tracking: { surfaceId?: string; active: boolean; queuedBehind?: SurfaceBlocker[] } = {
+      surfaceId: surfaceId ?? undefined, active: changesApplicationState,
+    };
+    const supportsBlocked = session?.operationBlockedV1 ?? (
+      request.op === "pair.request" &&
+      Array.isArray(request.payload?.protocolFeatures) &&
+      request.payload.protocolFeatures.includes(SURF_ACE_OPERATION_BLOCKED_V1_CAPABILITY));
+    let inDispatch = true;
+    const onQueueWait = (scope: "surface" | "client"): void => {
+      if (!inDispatch || !surfaceId || tracking.queuedBehind) return;
+      const openChanges = this.getSurfaceBlockers(scope === "surface" ? surfaceId : undefined, request.id);
+      if (openChanges.length === 0) return;
+      tracking.queuedBehind = openChanges;
+      if (supportsBlocked) {
+        const event: LocklessEvent = {
+          eventId: makeEventId(),
+          op: "event.operation_blocked",
+          payload: { requestId: request.id, surfaceId, openChanges, message: surfaceBlockerMessage(openChanges[0]!) },
+          sentAt: Date.now(),
+          type: "event",
+          v: 1,
+        };
+        void this.send(socket, JSON.stringify(event)).catch(() => {});
+      }
+    };
     const finishMutation = changesApplicationState
       ? this.beginApplicationStateMutation({ operation: request.op, requestId: request.id, surfaceId: surfaceId ?? undefined })
       : () => {};
     let afterCommit: (() => Promise<unknown>) | void;
     try {
-      afterCommit = await this.trackedLocklessMutation.run(tracking,
-        () => this.handleOrdinaryLocklessMessageBody(socket, request));
+      afterCommit = await applicationQueueWait.run(onQueueWait, () =>
+        this.trackedLocklessMutation.run(tracking, async () => {
+          try {
+            return await this.handleOrdinaryLocklessMessageBody(socket, request);
+          } catch (error) {
+            if (!(error instanceof PersistentStateWriteGuardError)) throw error;
+            const response = this.persistenceBlockedResponse(socket, request,
+              "Local persistence is guarded; durable operations are unavailable");
+            return () => this.send(socket, JSON.stringify(response));
+          }
+        }));
     } finally {
+      inDispatch = false;
       tracking.active = false;
       finishMutation();
     }
@@ -1240,12 +1276,12 @@ export class SurfaceWsServer {
   private persistenceBlockedResponse(socket: WebSocket, request: LocklessRequest, message: string): Response {
     const payloadSurfaceId = (request.payload as { surfaceId?: unknown } | null)?.surfaceId;
     const surfaceId = this.locklessSessions.get(socket)?.surfaceId ?? payloadSurfaceId;
-    const blocker = typeof surfaceId === "string"
-      ? this.getSurfaceBlockers(surfaceId, request.id)[0]
-      : undefined;
+    const openChanges = this.trackedLocklessMutation.getStore()?.queuedBehind ??
+      (typeof surfaceId === "string" ? this.getSurfaceBlockers(surfaceId, request.id) : []);
+    const [blocker] = openChanges;
     return errorResponse(request.op, request.id, "internal_error",
       blocker ? `${surfaceBlockerMessage(blocker)}. ${message}` : message,
-      blocker ? { blockedBy: blocker } : undefined);
+      blocker ? { blockedBy: blocker, openChanges } : undefined);
   }
 
   private async handleOrdinaryLocklessMessageBody(
@@ -2114,6 +2150,7 @@ export class SurfaceWsServer {
         controllerInstanceId: request.payload.controllerInstanceId,
         controllerProductName:
           request.payload.controllerProductName?.trim() || null,
+        operationBlockedV1: request.payload.protocolFeatures.includes(SURF_ACE_OPERATION_BLOCKED_V1_CAPABILITY),
         socket,
         surfaceId,
       };
@@ -3854,15 +3891,16 @@ export class SurfaceWsServer {
     operation: () => Promise<T> | T,
     details: Pick<ApplicationStateMutation, "operation" | "requestId"> = { operation: "surface_mutation" },
   ): Promise<T> {
-    const previous = this.mutationQueues.get(surfaceId) ?? Promise.resolve();
+    const previous = this.mutationQueues.get(surfaceId);
+    if (previous) applicationQueueWait.getStore()?.("surface");
     let releaseQueue = (): void => {};
     const current = new Promise<void>((resolve) => {
       releaseQueue = resolve;
     });
-    const queued = previous.catch(() => undefined).then(() => current);
+    const queued = (previous ?? Promise.resolve()).catch(() => undefined).then(() => current);
     this.mutationQueues.set(surfaceId, queued);
     try {
-      await previous.catch(() => undefined);
+      await previous?.catch(() => undefined);
       // The enclosing lockless request already owns generic surface work.
       // Local and explicitly named work still owns its own readiness scope.
       const enclosing = this.trackedLocklessMutation.getStore();
@@ -5910,7 +5948,7 @@ export class SurfaceWsServer {
     return {
       ...capabilities,
       limits: this.core.locklessAuthority.limits,
-      protocolFeatures: [SURF_ACE_LOCKLESS_V1_CAPABILITY],
+      protocolFeatures: [SURF_ACE_LOCKLESS_V1_CAPABILITY, SURF_ACE_OPERATION_BLOCKED_V1_CAPABILITY],
       ...(runtimeAppBinding ? { runtimeAppBinding } : {}),
       surfaceLifecycle: true,
       targetCapabilities: this.compositorSocketPath

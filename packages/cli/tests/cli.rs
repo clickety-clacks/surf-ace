@@ -4296,6 +4296,56 @@ fn pane_describe_refuses_duplicate_live_controller_wrong_surface_unpaired_and_di
 }
 
 #[test]
+fn native_cli_retains_the_queued_blocker_when_a_mutation_loses_its_reply() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("ws://{}", listener.local_addr().unwrap());
+    let server = thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut socket = accept(stream).unwrap();
+        let listed = read_request(&mut socket);
+        send_response(&mut socket, listed["id"].as_str().unwrap(), "surfaces.list.result",
+            json!({ "surfaces": [{ "surfaceId": "sf_fixture" }] }));
+        let pair = read_request(&mut socket);
+        assert!(pair["payload"]["protocolFeatures"].as_array().unwrap().iter()
+            .any(|feature| feature == "surf-ace.operation-blocked.v1"));
+        let mut admitted = pair_payload(pair["payload"]["controllerInstanceId"].clone());
+        admitted["surfaceId"] = json!("sf_fixture");
+        send_response(&mut socket, pair["id"].as_str().unwrap(), "pair.request", admitted);
+        let mutation = read_request(&mut socket);
+        assert_eq!(mutation["op"], "content.set");
+        socket.send(Message::Text(json!({
+            "op": "event.operation_blocked", "eventId": "ev_queued", "sentAt": 1000,
+            "type": "event", "v": 1,
+            "payload": {
+                "requestId": mutation["id"], "surfaceId": "sf_fixture",
+                "message": "Blocked behind pane split since 1970-01-01T00:00:01.000Z",
+                "openChanges": [{ "operation": "pane.split", "startedAtMs": 1000 }]
+            }
+        }).to_string().into())).unwrap();
+        mutation["id"].clone()
+    });
+
+    let directory = TempDir::new().unwrap();
+    let input = json!({
+        "surfaceId": "sf_fixture", "paneId": 1, "contentId": "fixture",
+        "contentType": "markdown", "content": { "markdown": "held" }
+    }).to_string();
+    let output = run_native_cli(&[
+        "--endpoint", &endpoint, "--state-root", directory.path().to_str().unwrap(),
+        "--product-label", "OpenClaw", "--input-json", &input, "push",
+    ]);
+    assert!(!output.status.success());
+    let error: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let notice: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(error["error"]["code"], "outcome_unknown");
+    let detail = &error["error"]["details"];
+    assert_eq!(detail["requestId"], server.join().unwrap());
+    assert_eq!(detail["blockedBy"], json!({ "operation": "pane.split", "startedAtMs": 1000 }));
+    assert_eq!(detail["blockedMessage"], notice["payload"]["message"]);
+    println!("{error}");
+}
+
+#[test]
 fn cli_targeted_mutation_discovers_before_pair_on_one_bounded_connection() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = format!("ws://{}", listener.local_addr().unwrap());

@@ -165,6 +165,7 @@ fn mutation_rules() -> Value {
     json!([
         "Revision guards are command-specific: push sends content.set without a controller-supplied revision, while clear requires expectedRevision for the selected pane.",
         "Use each command's result schema to check its correlated operationReceipt when that command returns one.",
+        "Direct commands offer surf-ace.operation-blocked.v1. A matching event.operation_blocked is one nonterminal JSON notice on stderr while the command waits; stdout retains its single command result. The notice includes the request, the blocking change and start time, and the open changes.",
         "Never retry outcome_unknown; the request may have committed, and a later networked invocation resolves its durable correlation.",
         "still_pending forbids another mutation until the outstanding request is resolved.",
         "topology-realize requires an explicit allowDestroyPaneIds list for pane removal."

@@ -1,3 +1,7 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+
+export const applicationQueueWait = new AsyncLocalStorage<(scope: "surface" | "client") => void>();
+
 export type ApplicationStateMutation = {
   operation: string;
   requestId?: string;
@@ -37,10 +41,10 @@ export class PersistenceWriteReadiness {
     return [...this.pending].flatMap(([entry, kind]) => kind === "mutation" ? [{ ...entry }] : []);
   }
 
-  blockersForSurface(surfaceId: string, excludingRequestId?: string): SurfaceBlocker[] {
+  blockersForSurface(surfaceId?: string, excludingRequestId?: string): SurfaceBlocker[] {
     return Array.from(this.pending.keys())
       .filter((entry) =>
-        (entry.surfaceId === undefined || entry.surfaceId === surfaceId) &&
+        (surfaceId === undefined || entry.surfaceId === undefined || entry.surfaceId === surfaceId) &&
         (excludingRequestId === undefined || entry.requestId !== excludingRequestId))
       .map(({ operation, startedAtMs }) => ({ operation, startedAtMs }));
   }
@@ -55,6 +59,7 @@ export class PersistenceWriteReadiness {
 
   async track<T>(write: () => Promise<T>): Promise<T> {
     // Saved state shares one write queue and checkpoint across all windows.
+    if ([...this.pending.values()].includes("write")) applicationQueueWait.getStore()?.("client");
     const finish = this.begin({ operation: "saving application state" }, "write");
     try {
       return await write();

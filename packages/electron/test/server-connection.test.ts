@@ -7,7 +7,7 @@ import path from "node:path";
 import { WebSocketServer, WebSocket } from "ws";
 import type { Revision } from "../../protocol/src/index.js";
 import { validateEnvelopeType } from "../../protocol/src/validate.js";
-import { SURF_ACE_LOCKLESS_V1_CAPABILITY } from "../../protocol/src/lockless.js";
+import { SURF_ACE_LOCKLESS_V1_CAPABILITY, SURF_ACE_OPERATION_BLOCKED_V1_CAPABILITY, validateLocklessEnvelope } from "../../protocol/src/lockless.js";
 import { REGISTRATION_CYCLE_TIMEOUT_MS, ServerConnection } from "../src/server-connection.js";
 import { ConfiguredServerRegistration } from "../src/configured-server.js";
 import { matchesProvisionedClaims } from "../src/registry-binding.js";
@@ -614,11 +614,16 @@ test("pane.split label claim reenters authority, leaves the request queue usable
       controlSocket!.once("open", resolve);
       controlSocket!.once("error", reject);
     });
+    const queuedNotices: Record<string, any>[] = [];
+    controlSocket.on("message", (raw) => {
+      const envelope = JSON.parse(String(raw));
+      if (envelope.op === "event.operation_blocked") queuedNotices.push(envelope);
+    });
     const paired = await surfaceRequest(controlSocket, "pair.request", {
       controllerInstanceId: "controller_reentrant_split",
       controllerProductName: "OpenClaw",
       projectionCapacityBytes: 5 * 1024 * 1024,
-      protocolFeatures: [SURF_ACE_LOCKLESS_V1_CAPABILITY],
+      protocolFeatures: [SURF_ACE_LOCKLESS_V1_CAPABILITY, SURF_ACE_OPERATION_BLOCKED_V1_CAPABILITY],
       protocolVersion: 1,
       surfaceId: surface.surfaceId,
     });
@@ -658,7 +663,16 @@ test("pane.split label claim reenters authority, leaves the request queue usable
     assert.ok(persistenceReadiness.openMutations().some((mutation) =>
       mutation.operation === "pane.split" && mutation.surfaceId === surface.surfaceId &&
       mutation.requestId && mutation.startedAtMs > 0));
-    const concurrentList = surfaceRequest(controlSocket, "panes.list", { surfaceId: surface.surfaceId });
+    let listSettled = false;
+    const concurrentList = surfaceRequest(controlSocket, "panes.list", { surfaceId: surface.surfaceId }).finally(() => {
+      listSettled = true;
+    });
+    await until(() => queuedNotices.length > 0);
+    assert.equal(listSettled, false);
+    const queuedNotice = queuedNotices[0]!;
+    assert.deepEqual(validateLocklessEnvelope(queuedNotice), { ok: true });
+    assert.match(queuedNotice.payload.message, /^Blocked behind pane split since /);
+    assert.deepEqual(queuedNotice.payload.openChanges, persistenceReadiness.blockersForSurface(surface.surfaceId));
     await until(() => registrationErrors.includes("registry_registration_waiting_for_local_persistence"), 5_000);
     assert.equal(registry.requests.filter(({ message }) => message.op === "client.register").length, 2,
       "registration waits at the existing readiness gate rather than sending client.register during a mutation");
@@ -668,6 +682,8 @@ test("pane.split label claim reenters authority, leaves the request queue usable
     assert.equal(splitResponse.ok, true, JSON.stringify(splitResponse));
     const listResponse = await concurrentList;
     assert.equal(listResponse.ok, true, JSON.stringify(listResponse));
+    assert.equal(queuedNotices.length, 1);
+    assert.equal(queuedNotice.payload.requestId, listResponse.id);
     assert.equal(listResponse.payload.panes.length, 2,
       "the queued request is served with the committed split after the nested claim completes");
     assert.equal(persistenceReadiness.isReady, true,

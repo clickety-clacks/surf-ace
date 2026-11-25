@@ -84,3 +84,20 @@ banner, query `surface.describe`, and run `surf-ace window-describe` for that
 window. Return the fixture's label allocation and check that all three
 observations clear. The Electron server-connection test
 `pane.split label claim reenters authority` holds and releases this request.
+
+
+### Queued controller requests
+
+A controller can include `surf-ace.operation-blocked.v1` in the
+`pair.request` protocol features. Supporting Electron surfaces send at most
+one `event.operation_blocked` when that controller's request queues behind
+tracked work. The event payload has `requestId`, `surfaceId`, `message` and
+`openChanges`. Each open change has `operation` and `startedAtMs`, the Unix
+epoch in milliseconds. The event is diagnostic, with no receipt or terminal
+status. The request stays queued and retains its normal terminal response.
+Controllers that omit the capability receive no event.
+
+The native CLI offers the capability and prints the notice as one JSON line to
+stderr as it arrives. Stdout still contains a single command result. An error
+caused by a hold preserves its error code and includes the known blocker and
+open changes in the error details.
