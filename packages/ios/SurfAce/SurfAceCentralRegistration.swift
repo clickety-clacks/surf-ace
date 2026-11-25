@@ -1636,13 +1636,32 @@ final class SurfAceRegistrationWebSocket: SurfAceRegistrationTransport {
               envelope["payload"] is [String: Any] else {
             throw SurfAceRegistrationError.invalidResponse
         }
-        return SurfAceRegistrationWire.registryIdentityReply(from: data, requestId: id, fallbackIdentity: nil)
+        let reply = SurfAceRegistrationWire.registryIdentityReply(from: data, requestId: id, fallbackIdentity: nil)
+        guard reply.identity != nil else { throw SurfAceRegistrationError.registryIdentityMissing }
+        return reply
+    }
+
+    private func validateRegistrationIdentity(_ data: Data, expected: SurfAceRegistryIdentity) throws {
+        guard let envelope = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw SurfAceRegistrationError.invalidResponse
+        }
+        // Negative replies carry their own application-level error code.
+        guard envelope["ok"] as? Bool == true else { return }
+        let payload = envelope["payload"] as? [String: Any]
+        guard let fields = payload?["registryIdentity"] as? [String: Any],
+              let allocatorId = fields["allocatorId"] as? String, let fleetId = fields["fleetId"] as? String else {
+            throw SurfAceRegistrationError.registryIdentityMissing
+        }
+        let actual = SurfAceRegistryIdentity(allocatorId: allocatorId, fleetId: fleetId)
+        guard actual.isValid else { throw SurfAceRegistrationError.registryIdentityMissing }
+        guard actual == expected else { throw SurfAceRegistrationError.foreignRegistryIdentity }
     }
 
     func register(clientId: String, surfaces: [SurfAceRegistrationSurface],
                   expectedIdentity: SurfAceRegistryIdentity) async throws -> [SurfAceRegistrationAssignment] {
         let id = "rq_" + UUID().uuidString.replacingOccurrences(of: "-", with: "")
         let data = try await exchange(SurfAceRegistrationWire.requestData(clientId: clientId, surfaces: surfaces, id: id))
+        try validateRegistrationIdentity(data, expected: expectedIdentity)
         return try SurfAceRegistrationWire.assignments(from: data, requestId: id, clientId: clientId,
                                                         surfaces: surfaces, expectedIdentity: expectedIdentity)
     }
@@ -1654,8 +1673,10 @@ final class SurfAceRegistrationWebSocket: SurfAceRegistrationTransport {
 
     func register(clientId: String, input: SurfAceRegistrationInput,
                   expectedIdentity: SurfAceRegistryIdentity?) async throws -> SurfAceRegistrationReply {
+        guard let expectedIdentity else { throw SurfAceRegistrationError.registryIdentityMissing }
         let id = "rq_" + UUID().uuidString.replacingOccurrences(of: "-", with: "")
         let data = try await exchange(SurfAceRegistrationWire.requestData(clientId: clientId, input: input, id: id))
+        try validateRegistrationIdentity(data, expected: expectedIdentity)
         return try Self.registrationReply(from: data, requestId: id, clientId: clientId, input: input,
                                           expectedIdentity: expectedIdentity)
     }
