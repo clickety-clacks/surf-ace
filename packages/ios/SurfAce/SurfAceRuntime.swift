@@ -698,9 +698,18 @@ final class SurfAceRuntime {
             applyReplySubset: { [weak self] reply, input, request in
                 guard let self else { throw SurfAceRegistrationError.stopped }
                 let adapter = try self.ensureLocklessAdapter()
-                let application = try await adapter.applyRegistration(
-                    reply, expectedInput: input, requestInput: request, clientId: identity.clientId
-                )
+                let surfacesWithChanges = reply.assignments.compactMap { assignment -> String? in
+                    let saved = input.surfaces.first { $0.surfaceId == assignment.surfaceId }
+                    let samePanes = saved?.panes.sorted(by: { $0.paneId < $1.paneId })
+                        == assignment.panes.sorted(by: { $0.paneId < $1.paneId })
+                    if samePanes && saved?.windowGeneration == assignment.windowAllocationGeneration { return nil }
+                    return assignment.surfaceId
+                }
+                let application = try await self.withRegistryLabelStatus(surfacesWithChanges, waitingOnPersistence: true) {
+                    try await adapter.applyRegistration(
+                        reply, expectedInput: input, requestInput: request, clientId: identity.clientId
+                    )
+                }
                 for warning in application.warnings {
                     surfAceServerRuntimeLog(
                         "event=central_registration_warning \(surfAceDiagnosticFields([("warning", warning)]))"
@@ -3576,9 +3585,11 @@ final class SurfAceRuntime {
                 throw SurfAceLocklessRuntimeAdapterError.invalidAdmission
             }
             do {
-                let allocation = try await registration.claimPaneLabel(
-                    surfaceId: surfaceId, paneId: paneId, paneLineageId: lineageId
-                )
+                let allocation = try await withRegistryLabelStatus([surfaceId], waitingOnPersistence: false) {
+                    try await registration.claimPaneLabel(
+                        surfaceId: surfaceId, paneId: paneId, paneLineageId: lineageId
+                    )
+                }
                 if allocation.paneLabel > 0 { labels[paneId] = allocation.paneLabel }
                 if let generation = allocation.allocationGeneration {
                     generations[paneId] = generation
@@ -3589,6 +3600,18 @@ final class SurfAceRuntime {
             }
         }
         return (labels, lineages, generations)
+    }
+
+    private func withRegistryLabelStatus<Result>(
+        _ surfaceIds: [String], waitingOnPersistence: Bool,
+        operation: () async throws -> Result
+    ) async rethrows -> Result {
+        let keyPath = waitingOnPersistence
+            ? \SurfAceSurfaceModel.registryLabelWritesPending : \SurfAceSurfaceModel.registryClaimsPending
+        let affected = surfaceIds.compactMap { surfaceById[$0] }
+        for surface in affected { surface[keyPath: keyPath] += 1 }
+        defer { for surface in affected { surface[keyPath: keyPath] -= 1 } }
+        return try await operation()
     }
 
     private func claimRestoredPaneLabel(
@@ -3604,9 +3627,11 @@ final class SurfAceRuntime {
             return (pane.paneId, pane.paneLineageId, nil, pane.allocationGeneration)
         }
         do {
-            let allocation = try await registration.claimPaneLabel(
-                surfaceId: surfaceId, paneId: pane.paneId, paneLineageId: pane.paneLineageId
-            )
+            let allocation = try await withRegistryLabelStatus([surfaceId], waitingOnPersistence: false) {
+                try await registration.claimPaneLabel(
+                    surfaceId: surfaceId, paneId: pane.paneId, paneLineageId: pane.paneLineageId
+                )
+            }
             guard allocation.paneLabel > 0 else {
                 return (pane.paneId, pane.paneLineageId, nil, pane.allocationGeneration)
             }

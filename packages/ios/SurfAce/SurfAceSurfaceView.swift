@@ -412,12 +412,19 @@ struct SurfAceWindowView: View {
                         runtime.updateViewport(surfaceId: surface.surfaceId, size: newSize, scale: displayScale)
                     }
 
-                if let message = surface.centralConnectionError {
-                    SurfAceCentralConnectionBanner(message: message, state: surface.connectionBarState)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                        .padding(.horizontal, 16)
-                        .padding(.top, 14)
-                        .allowsHitTesting(false)
+                if surface.centralConnectionError != nil || surface.registryLabelStatus != nil {
+                    VStack(spacing: 6) {
+                        if let message = surface.centralConnectionError {
+                            SurfAceCentralConnectionBanner(message: message, state: surface.connectionBarState)
+                        }
+                        if let message = surface.registryLabelStatus {
+                            SurfAceCentralConnectionBanner(message: message, state: .connecting)
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.top, 14)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    .allowsHitTesting(false)
                 }
 
                 if runtime.resizeSaveFailures.contains(surface.surfaceId) {
