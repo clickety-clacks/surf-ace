@@ -542,7 +542,7 @@ test("pane.split label claim reenters authority, leaves the request queue usable
       };
     },
   });
-  const clientId = "reentrant-split-registration-client";
+  const clientId = "d".repeat(64);
   const core = new SurfaceCore({ clientIdentity: clientId });
   const surface = core.ensurePrimarySurface("Reentrant split recovery", {
     height: 600, scale: 1, width: 800,
@@ -557,6 +557,7 @@ test("pane.split label claim reenters authority, leaves the request queue usable
   };
   const connection = new ServerConnection({
     canPersistRegistration: () => persistenceReadiness.isReady,
+    openApplicationStateMutations: () => persistenceReadiness.openMutations(),
     clientId,
     configuredAddress: registry.address,
     core,
@@ -572,7 +573,8 @@ test("pane.split label claim reenters authority, leaves the request queue usable
 
   try {
     surfaceServer = new SurfaceWsServer({
-      beginApplicationStateMutation: () => persistenceReadiness.beginAuthorityMutation(),
+      beginApplicationStateMutation: (details) => persistenceReadiness.beginAuthorityMutation(details),
+      openApplicationStateMutations: () => persistenceReadiness.openMutations(),
       bindAddress: "127.0.0.1",
       capturePaneImage: async () => null,
       claimPaneLabel: async (surfaceId, paneId, paneLineageId) => {
@@ -634,6 +636,16 @@ test("pane.split label claim reenters authority, leaves the request queue usable
     assert.equal(persistenceReadiness.isReady, false,
       "the ordinary mutation readiness gate stays closed while the registry label claim is outstanding");
 
+    const described = await surfaceRequest(controlSocket, "surface.describe", {
+      clientId, endpointLeaseGeneration: 2, nonce: "a".repeat(32),
+      registryIdentity: { allocatorId: "alloc_fixture", fleetId: "fixture-fleet" },
+      surfaceId: surface.surfaceId,
+    });
+    assert.equal(described.ok, true, JSON.stringify(described));
+    assert.ok(described.payload.applicationReadiness.limitationCodes.includes("application_mutation_in_progress"));
+    assert.ok(persistenceReadiness.openMutations().some((mutation) =>
+      mutation.operation === "pane.split" && mutation.surfaceId === surface.surfaceId &&
+      mutation.requestId && mutation.startedAtMs > 0));
     const concurrentList = surfaceRequest(controlSocket, "panes.list", { surfaceId: surface.surfaceId });
     await until(() => registrationErrors.includes("registry_registration_waiting_for_local_persistence"), 5_000);
     assert.equal(registry.requests.filter(({ message }) => message.op === "client.register").length, 2,
@@ -3071,5 +3083,153 @@ test("ambiguous binding candidate cannot register until persistence is reconcile
   } finally {
     await registration.stop();
     await registry.close();
+  }
+});
+
+test("browser navigation leaves registry renewal and later pane mutations free to commit", { timeout: 20_000 }, async () => {
+  const portProbe = createServer();
+  await new Promise<void>((resolve, reject) => {
+    portProbe.once("error", reject);
+    portProbe.listen(0, "127.0.0.1", resolve);
+  });
+  const port = (portProbe.address() as AddressInfo).port;
+  await new Promise<void>((resolve, reject) => portProbe.close((error) => error ? reject(error) : resolve()));
+  const directEndpoint = `ws://127.0.0.1:${port}/ws`;
+  let leaseGeneration = 0;
+  const registry = await automaticRegistryFixture({
+    transformRegistrationReply: (reply) => {
+      const observedAt = Date.now();
+      return {
+        ...reply, directEndpoint, prePairDescribeV1: true,
+        endpointLease: {
+          leaseGeneration: ++leaseGeneration,
+          registrationObservedAtMs: observedAt,
+          leaseExpiresAtMs: observedAt + 3_000,
+        },
+      };
+    },
+  });
+  const clientId = "browser-navigation-fixture";
+  const viewport = { height: 600, scale: 1, width: 800 };
+  const core = new SurfaceCore({ clientIdentity: clientId });
+  const { surfaceId } = core.ensurePrimarySurface("Browser navigation fixture", viewport);
+  const readiness = new PersistenceWriteReadiness();
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "surf-ace-browser-navigation-"));
+  const persist = () => readiness.track(() => writePersistentStateFile(stateDir, "state.json", core.getPersistentState()));
+  const connection = new ServerConnection({
+    canPersistRegistration: () => readiness.isReady, clientId, configuredAddress: registry.address,
+    core, directEndpoint, discovery: emptyDiscovery(), persist,
+  });
+  const server = new SurfaceWsServer({
+    beginApplicationStateMutation: () => readiness.beginAuthorityMutation(),
+    bindAddress: "127.0.0.1", capturePaneImage: async () => null,
+    claimPaneLabel: (sid, pid, lineage) => connection.claimPaneLabel(sid, pid, lineage),
+    clientId, compositorSocketPath: null, core, endpointName: "Browser navigation fixture",
+    hostName: "localhost", isApplicationStateReady: () => readiness.isReady, persistLocklessState: persist,
+    port, preparePaneLabelClaim: () => connection.preparePaneLabelClaim(), viewport: () => viewport,
+  });
+  const sockets: WebSocket[] = [];
+  const results = new Map<string, string>();
+  const open = async (controllerInstanceId: string): Promise<WebSocket> => {
+    const socket = new WebSocket(directEndpoint);
+    sockets.push(socket);
+    socket.on("message", (raw) => {
+      const message = JSON.parse(String(raw));
+      if (message.op === "event.target_apply_result") {
+        results.set(message.payload.targetRequestId, message.payload.errorCode);
+      }
+    });
+    await new Promise<void>((resolve, reject) => {
+      socket.once("open", resolve);
+      socket.once("error", reject);
+    });
+    const reply = await surfaceRequest(socket, "pair.request", {
+      controllerInstanceId, controllerProductName: "OpenClaw",
+      projectionCapacityBytes: 5 * 1024 * 1024,
+      protocolFeatures: [SURF_ACE_LOCKLESS_V1_CAPABILITY], protocolVersion: 1, surfaceId,
+    });
+    assert.equal(reply.ok, true, JSON.stringify(reply));
+    return socket;
+  };
+  const committedLease = () => core.registryEndpointLease()?.leaseGeneration ?? 0;
+  try {
+    await server.start();
+    connection.start();
+    await until(() => committedLease() > 0, 5_000);
+    const navigating = await open("controller_navigation");
+    const editing = await open("controller_editing");
+    const paneId = core.activePaneIds(surfaceId)[0]!;
+    const split = async () => {
+      const reply = await surfaceRequest(editing, "pane.split", {
+        count: 2, direction: "horizontal", paneId, surfaceId,
+        expectedTopologyRevision: Number(core.topologyState(surfaceId).topologyRevision),
+      });
+      assert.equal(reply.ok, true, JSON.stringify(reply));
+      return {
+        paneId: core.activePaneIds(surfaceId).find((id) => id !== paneId)!,
+        revision: reply.payload.topologyRevision,
+      };
+    };
+    const startNavigation = async (browserPaneId: number, targetId: string) => {
+      const reply = await surfaceRequest(navigating, "target.apply", {
+        paneId: browserPaneId, requestId: targetId, restoreReason: "initial", surfaceId, targetEpoch: 1,
+        targetHeader: {
+          payloadSchemaVersion: 1, replaySemantics: "navigate",
+          requiredCapabilities: ["target.browser_url.v1"], safeToLogFields: ["url"],
+          safetyClass: "network", summary: "Unverified navigation",
+        },
+        targetId, targetKind: "browser_url", targetPayload: { url: "https://navigation.invalid/" },
+      });
+      assert.equal(reply.payload?.status, "intent_committed", JSON.stringify(reply));
+      await until(() => core.panesList(surfaceId).panes.some((pane) =>
+        Number(pane.paneId) === browserPaneId && pane.currentTarget?.targetId === targetId));
+    };
+
+    const closing = await split();
+    await startNavigation(closing.paneId, "close-during-navigation");
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const closed = await surfaceRequest(editing, "pane.close", {
+      expectedTopologyRevision: closing.revision, paneId: closing.paneId, surfaceId,
+    });
+    assert.equal(closed.ok, true, JSON.stringify(closed));
+    const leaseAfterClose = committedLease();
+    // On the broken build this wait crosses the original navigation deadline
+    // and observes the uncaught exception and frozen renewal.
+    await until(() => committedLease() > leaseAfterClose && readiness.isReady, 9_500);
+    assert.equal(results.get("close-during-navigation"), "pane_closed");
+    assert.equal(readiness.isReady, true);
+    const recovered = await split();
+    await startNavigation(recovered.paneId, "superseded-navigation");
+    await startNavigation(recovered.paneId, "destroy-during-navigation");
+    await until(() => results.has("superseded-navigation"));
+    assert.equal(results.get("superseded-navigation"), "target_superseded");
+
+    const leaseDuringNavigation = committedLease();
+    await until(() => committedLease() > leaseDuringNavigation, 5_000);
+    assert.equal(results.has("destroy-during-navigation"), false, "registry renewed while navigation was pending");
+    const renamed = await surfaceRequest(editing, "pane.rename", {
+      expectedTopologyRevision: recovered.revision, name: "Retained pane", paneId, surfaceId,
+    });
+    assert.equal(renamed.ok, true, JSON.stringify(renamed));
+    assert.equal(results.has("destroy-during-navigation"), false, "another pane mutation committed during verification");
+    const realized = await surfaceRequest(editing, "topology.apply", {
+      allowDestroyPaneIds: [recovered.paneId], desired: { paneId, type: "pane" },
+      expectedTopologyRevision: Number(core.topologyState(surfaceId).topologyRevision), surfaceId, target: { root: true },
+    });
+    assert.equal(realized.ok, true, JSON.stringify(realized));
+    await until(() => results.has("destroy-during-navigation"));
+    assert.equal(results.get("destroy-during-navigation"), "pane_closed");
+
+    await startNavigation(paneId, "quit-during-navigation");
+    server.stopBrowserUrlNavigation();
+    await until(() => results.has("quit-during-navigation"));
+    assert.equal(results.get("quit-during-navigation"), "provider_shutdown");
+    assert.deepEqual(core.locklessAuthority.targetApplyWorkItems(), []);
+  } finally {
+    for (const socket of sockets) socket.terminate();
+    await server.stop();
+    await connection.stop();
+    await registry.close();
+    await fs.rm(stateDir, { force: true, recursive: true });
   }
 });

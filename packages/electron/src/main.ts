@@ -30,6 +30,7 @@ import {
   clientFlightRecorderGrepCommand,
   clientFlightRecorderTailCommand,
   errorDiagnosticFields,
+  installMainProcessFailureDiagnostics,
   recordClientDiagnostic,
 } from "./client-flight-recorder.js";
 import {
@@ -105,6 +106,8 @@ const DEFAULT_WS_PORT = 19001;
 const WS_PORT = Number(process.env.SURF_ACE_PORT ?? DEFAULT_WS_PORT);
 const EXPLICIT_WS_PORT = process.env.SURF_ACE_PORT != null;
 const STATE_FILE_NAME = "surface-core-state.json";
+installMainProcessFailureDiagnostics();
+
 const BIND_ADDRESS = process.env.SURF_ACE_BIND?.trim() || "0.0.0.0";
 let runtimeAppBindingDiagnostics: RuntimeAppBindingDiagnostics | null = null;
 const compositorRejectedStartupSurfaces = new Set<string>();
@@ -272,7 +275,8 @@ function createServer(coreValue: SurfaceCore, clientId: string | null): SurfaceW
       hostName: shortHostName(),
       getOverlayDiagnostics: (surfaceId) => overlayDiagnostics.get(surfaceId) ?? null,
       getRuntimeAppBinding: refreshRuntimeAppBindingDiagnostics,
-      beginApplicationStateMutation: () => persistentStateWriteReadiness.beginAuthorityMutation(),
+      beginApplicationStateMutation: (details) => persistentStateWriteReadiness.beginAuthorityMutation(details),
+      openApplicationStateMutations: () => persistentStateWriteReadiness.openMutations(),
       isApplicationStateReady: () => persistentStateWriteReadiness.isReady &&
         !persistentStateWriteGuard && !persistentStateOutcomeUnknown,
       onNativeMaterialized: (surfaceId, materialization) => {
@@ -2271,6 +2275,7 @@ async function boot(): Promise<void> {
     canPersistRegistration: () => persistentStateWriteReadiness.isReady &&
       !persistentStateOutcomeUnknown &&
       (!persistentStateWriteGuard || persistentStateWriteGuard === "corrupt-primary"),
+    openApplicationStateMutations: () => persistentStateWriteReadiness.openMutations(),
     onError: (error) => clientWarn("server_registration_failed", errorDiagnosticFields(error)),
   }) : null;
   configuredRegistration?.start();
@@ -2349,6 +2354,7 @@ if (!singleInstanceLock) {
       markQuitting: () => {
         clientInfo("app_before_quit", { active_window_count: windows.size });
         isQuitting = true;
+        server?.stopBrowserUrlNavigation();
       },
       onError: (error) => clientWarn("quit_cleanup_failed", errorDiagnosticFields(error)),
       stopBackgroundWork: () => {

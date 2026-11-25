@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -35,7 +38,7 @@ test("client flight recorder keeps its diagnostic line and collection command fo
   assert.equal(clientFlightRecorderTailCommand(logPath), `tail -n 200 '${logPath}'`);
   assert.equal(
     clientFlightRecorderGrepCommand(logPath),
-    `rg 'event=(app_|server_|socket_|pair_|panes_|topology_|surface_|window_)' '${logPath}'`,
+    `rg 'event=(app_|server_|socket_|pair_|pane_|panes_|topology_|surface_|window_|target_apply_browser_url_|registry_)' '${logPath}'`,
   );
 });
 
@@ -83,4 +86,21 @@ test("a single oversized diagnostic entry is truncated without exceeding the sam
   assert.doesNotMatch(text, /old_detail/);
   assert.match(text, /^\d{4}-\d{2}-\d{2}T[^ ]+ \[surf-ace:app\] event=large_error /);
   assert.match(text, /\.\.\.\[truncated\]\n$/);
+});
+
+
+test("the production flight recorder captures uncaught exceptions and unhandled rejections", async () => {
+  const electron = createRequire(import.meta.url)("electron") as string;
+  const fixture = fileURLToPath(new URL("./client-flight-recorder-child.js", import.meta.url));
+  const crashLog = path.join(logDir, "main-process-errors.log");
+  for (const event of ["app_uncaught_exception", "app_unhandled_rejection"]) {
+    const child = spawnSync(electron, [fixture, event], {
+      env: { ...process.env, NODE_ENV: "production", ELECTRON_RUN_AS_NODE: "1", SURF_ACE_CLIENT_DIAGNOSTIC_LOG: crashLog },
+      encoding: "utf8",
+    });
+    assert.equal(child.error, undefined);
+    assert.equal(child.status, 1, child.stderr);
+    const log = await fs.readFile(crashLog, "utf8");
+    assert.ok(log.includes(`event=${event} error_message=${event}`), log);
+  }
 });
