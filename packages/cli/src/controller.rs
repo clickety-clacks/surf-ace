@@ -63,7 +63,19 @@ pub fn execute(invocation: Invocation) -> Result<CliOutput, CliError> {
     let mut root = open_invocation_state(&invocation)?;
     validate_expected_controller(&invocation, &root)?;
     let surface_id = operation_surface_id(&invocation)?;
-    let mut operation_wire = WebSocketWire::connect_direct(&endpoint).map_err(CliError::Wire)?;
+    let registry = match invocation.command {
+        crate::command::Command::Push => invocation.registry.clone(),
+        _ => None,
+    };
+    let lookup = registry.as_deref().zip(surface_id.as_deref());
+    let (connected, unreachable) = WebSocketWire::connect_direct_with_presence(&endpoint);
+    let mut operation_wire = connected.map_err(|error| {
+        classify_push_absence(
+            CliError::Wire(error),
+            &endpoint,
+            if unreachable { lookup } else { None },
+        )
+    })?;
     let result = (|| {
         if invocation.command != crate::command::Command::PaneDescribe {
             if let Some(surface_id) = surface_id.as_deref() {
@@ -72,11 +84,18 @@ pub fn execute(invocation: Invocation) -> Result<CliOutput, CliError> {
         }
         execute_locked(invocation, &mut root, &mut operation_wire, surface_id.as_deref())
     })();
-    result.map_err(|source| match operation_wire.operation_block() {
-        Some(notice) if source.details().get("blockedBy").is_none() => CliError::WithOperationBlock {
-            source: Box::new(source), notice: notice.clone(),
-        },
-        _ => source,
+    result.map_err(|error| {
+        // Keep the durable correlation when content.set may have committed.
+        // Only a transport error outside that uncertain outcome can be classified.
+        let closed = matches!(&error, CliError::Wire(_)) && operation_wire.connection_closed();
+        let source = classify_push_absence(error, &endpoint, if closed { lookup } else { None });
+        match operation_wire.operation_block() {
+            Some(notice) if source.details().get("blockedBy").is_none() => CliError::WithOperationBlock {
+                source: Box::new(source),
+                notice: notice.clone(),
+            },
+            _ => source,
+        }
     })
 }
 
@@ -140,7 +159,8 @@ fn validate_expected_controller(
 }
 
 fn validate_invocation_route(invocation: &Invocation) -> Result<(), CliError> {
-    if invocation.endpoint.is_some() && invocation.registry.is_some() {
+    if invocation.command != crate::command::Command::Push &&
+        invocation.endpoint.is_some() && invocation.registry.is_some() {
         return Err(CliError::Input("ambiguous_endpoint_registry".into()));
     }
     if matches!(
@@ -168,7 +188,7 @@ fn validate_invocation_route(invocation: &Invocation) -> Result<(), CliError> {
         uri_mode(request.uri()).map_err(|_| CliError::Input("invalid_registry".into()))?;
         return Ok(());
     }
-    if invocation.registry.is_some() {
+    if invocation.command != crate::command::Command::Push && invocation.registry.is_some() {
         return Err(CliError::Input("registry_only_for_fleet_list".into()));
     }
     Ok(())
@@ -358,6 +378,51 @@ fn execute_window_describe(invocation: &Invocation) -> Result<CliOutput, CliErro
         warnings,
         result,
     })
+}
+
+fn classify_push_absence(
+    original: CliError,
+    endpoint: &str,
+    lookup: Option<(&str, &str)>,
+) -> CliError {
+    let Some((registry, surface_id)) = lookup else { return original };
+    observe_offline_target(registry, endpoint, surface_id).unwrap_or(original)
+}
+
+fn observe_offline_target(registry: &str, endpoint: &str, surface_id: &str) -> Option<CliError> {
+    let endpoint = endpoint.into_client_request().ok()?;
+    let snapshot = read_discovery_registry(registry).ok()?;
+    let mut matches = snapshot.payload.get("clients")?.as_array()?.iter().filter(|row| {
+        row.get("directEndpoint").and_then(Value::as_str)
+            .and_then(|route| route.into_client_request().ok())
+            .is_some_and(|route| route.uri() == endpoint.uri())
+            && row.get("surfaces").and_then(Value::as_array).is_some_and(|surfaces|
+                surfaces.iter().any(|surface| surface.get("surfaceId").and_then(Value::as_str) == Some(surface_id)))
+    });
+    let client = matches.next()?;
+    if matches.next().is_some()
+        || client.get("presence").and_then(Value::as_str) != Some("offline")
+        || parse_registry_identity(client.get("registryIdentity")).ok()? != snapshot.identity
+    {
+        return None;
+    }
+    let last_seen = client.get("lastSeenAtMs")?;
+    if !last_seen.is_null() && safe_nonnegative_u64(last_seen).is_none() {
+        return None;
+    }
+    Some(client_offline(
+        client.get("clientId")?.as_str()?,
+        last_seen.clone(),
+    ))
+}
+
+fn client_offline(client_id: &str, last_seen: Value) -> CliError {
+    let message = "The registry reports that the client is offline".to_owned();
+    CliError::Discovery {
+        code: "client_offline",
+        details: json!({ "message": message, "clientId": client_id, "lastSeenAtMs": last_seen }),
+        message,
+    }
 }
 
 fn read_discovery_registry(registry: &str) -> Result<RegistrySnapshot, CliError> {
@@ -606,12 +671,7 @@ fn select_endpoint_candidate(
     match candidates.len() {
         0 if online_matches == 0 && offline.len() == 1 => {
             let (client_id, last_seen) = &offline[0];
-            let message = "The registry reports that the client is offline".to_owned();
-            Err(CliError::Discovery {
-                code: "client_offline",
-                details: json!({ "message": message, "clientId": client_id, "lastSeenAtMs": last_seen }),
-                message,
-            })
+            Err(client_offline(client_id, last_seen.clone()))
         }
         0 if label_seen && !label_has_supported_endpoint => Err(discovery_error(
             "endpoint_unconfigured",

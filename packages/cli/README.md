@@ -12,6 +12,13 @@ supplies its friendly chat label in the command input. `fleet-list` and
 client admission. Nothing about a host, surface, deployment, or provenance
 label is compiled in.
 
+For `push`, supply the direct `--endpoint` and the target through
+`--surface-id` or the input's `surfaceId`. An optional `--registry` can
+classify an unreachable or closed direct connection as `client_offline`
+with `lastSeenAtMs` when it confirms the same client is offline. A usable direct
+connection proceeds without looking up registry presence. Uncertain write
+outcomes still carry the original request correlation.
+
 To discover registered client and surface identities, query the configured
 registry explicitly:
 

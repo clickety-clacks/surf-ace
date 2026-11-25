@@ -1566,6 +1566,52 @@ fn window_describe_rejects_missing_ambiguous_and_stale_registry_rows() {
 }
 
 #[test]
+fn push_classifies_only_a_confirmed_offline_direct_target() {
+    let now = epoch_ms();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("ws://{}/ws", listener.local_addr().unwrap());
+    drop(listener);
+    let client_id = "6".repeat(64);
+
+    for (presence, surface, expected) in [
+        ("offline", "sf_target", "client_offline"),
+        ("online", "sf_target", "transport_error"),
+        ("offline", "sf_another", "transport_error"),
+    ] {
+        let mut client = discovery_client(
+            &client_id,
+            Some(&endpoint),
+            vec![discovery_surface(surface, "a")],
+            4,
+            now - 10,
+            true,
+        );
+        client["presence"] = json!(presence);
+        client["lastSeenAtMs"] = if presence == "offline" { json!(now - 1) } else { Value::Null };
+        let (registry, server) = spawn_registry_server(
+            discovery_topology(vec![client], now), "fleet.topology", true,
+        );
+        let temp = TempDir::new().unwrap();
+        let output = run_native_cli(&[
+            "--state-root", temp.path().to_str().unwrap(), "--endpoint", &endpoint,
+            "--surface-id", "sf_target", "--registry", &registry, "--product-label", "Proof controller",
+            "--input-json", r#"{"paneId":1,"contentId":"candidate","contentType":"markdown","content":{"markdown":"test"}}"#,
+            "push",
+        ]);
+        assert!(!output.status.success());
+        let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(result["error"]["code"], expected, "{result}");
+        if expected == "client_offline" {
+            assert_eq!(result["error"]["details"]["clientId"], client_id);
+            assert_eq!(result["error"]["details"]["lastSeenAtMs"], now - 1);
+        } else {
+            assert!(result["error"]["details"]["message"].as_str().unwrap().starts_with("before_send:reachability:"));
+        }
+        assert_eq!(server.join().unwrap()["op"], "fleet.topology");
+    }
+}
+
+#[test]
 fn window_describe_requires_selected_row_identity_to_match_registry_identity() {
     let now = epoch_ms();
     let client_id = "6".repeat(64);

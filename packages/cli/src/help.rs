@@ -480,9 +480,10 @@ fn annotation_examples(action: &str) -> Value {
 fn global_options() -> Value {
     json!([
         { "name": "--state-root", "type": "path", "required": true, "appliesTo": "stateful operational commands; window-describe is stateless" },
-        { "name": "--registry", "type": "websocket-url", "requiredFor": ["fleet-list", "window-describe"], "exclusiveWith": ["--endpoint"] },
-        { "name": "--endpoint", "type": "websocket-url", "requiredFor": "direct-client commands", "exclusiveWith": ["--registry"] },
+        { "name": "--registry", "type": "websocket-url", "requiredFor": ["fleet-list", "window-describe"], "optionalFor": ["push"], "description": "On push, classify a failed direct connection using registry presence. A healthy direct connection needs no registry query." },
+        { "name": "--endpoint", "type": "websocket-url", "requiredFor": "direct-client commands", "description": "Explicit direct endpoint. Only push can also accept --registry." },
         { "name": "--product-label", "type": "string", "requiredFor": "direct-client commands", "description": "Descriptive provenance; not identity or authority." },
+        { "name": "--surface-id", "type": "string", "optionalFor": ["push"], "description": "Explicit push target surface, equivalent to surfaceId in the command input." },
         { "name": "--input-json", "type": "object", "description": "One command input object; standard input is used when omitted." },
         { "name": "--projection-capacity-bytes", "type": "integer", "default": 16777216 }
     ])
@@ -538,8 +539,8 @@ fn command_spec(command: Command) -> Value {
             "direct-client",
             "client_mutation",
             "Set typed content in one explicit pane as a new visible Back/Forward history entry.",
-            "Correlated content.set result and operationReceipt.",
-            vec!["missing_endpoint", "missing_product_label", "outcome_unknown", "still_pending"],
+            "Uses the explicit direct endpoint and surface. With --registry, a failed connection can return client_offline with lastSeenAtMs when the registry confirms the same target is offline. A healthy direct connection proceeds without contacting the registry. A possibly committed operation still reports outcome_unknown.",
+            vec!["missing_endpoint", "missing_product_label", "client_offline", "outcome_unknown", "still_pending"],
         ),
         Command::Sync => (
             "direct-client", "client_projection_sync",
