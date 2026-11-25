@@ -104,3 +104,24 @@ test("the production flight recorder captures uncaught exceptions and unhandled 
     assert.ok(log.includes(`event=${event} error_message=${event}`), log);
   }
 });
+
+test("the Electron main process records rejection warnings and preserves its warning policy", async () => {
+  const electron = createRequire(import.meta.url)("electron") as string;
+  const fixture = fileURLToPath(new URL("./client-flight-recorder-child.js", import.meta.url));
+  const rejectionLog = path.join(logDir, "electron-rejection-warnings.log");
+  const env: NodeJS.ProcessEnv = { ...process.env, NODE_ENV: "production", SURF_ACE_CLIENT_DIAGNOSTIC_LOG: rejectionLog };
+  delete env.ELECTRON_RUN_AS_NODE;
+  const args = ["--no-sandbox", `--user-data-dir=${path.join(logDir, "profile")}`, fixture, "electron_warning_probe"];
+  const child = process.platform === "linux"
+    ? spawnSync("xvfb-run", ["--auto-servernum", electron, ...args], { env, encoding: "utf8" })
+    : spawnSync(electron, args, { env, encoding: "utf8" });
+  assert.equal(child.error, undefined);
+  assert.match(child.stdout, /RECORDER_PROBE_CONTINUED exitCode=1/);
+  assert.equal(child.status, 1, child.stderr);
+  assert.match(child.stderr + child.stdout, /UnhandledPromiseRejectionWarning: Error: recorder-main-error/);
+  const entries = (await fs.readFile(rejectionLog, "utf8")).trim().split("\n");
+  assert.equal(entries.length, 2);
+  assert.match(entries[0]!, /event=app_unhandled_rejection error_message="Error: recorder-main-error"/);
+  assert.match(entries[0]!, /error_stack=.*client-flight-recorder-child\.js/);
+  assert.match(entries[1]!, /event=app_unhandled_rejection error_message=recorder-main-string/);
+});

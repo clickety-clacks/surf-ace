@@ -101,3 +101,23 @@ The native CLI offers the capability and prints the notice as one JSON line to
 stderr as it arrives. Stdout still contains a single command result. An error
 caused by a hold preserves its error code and includes the known blocker and
 open changes in the error details.
+
+## Rejection recorder probe
+
+Use a disposable Electron profile and a loopback-only test environment.
+Launch the packaged desktop executable or the production Electron app with
+`--inspect=127.0.0.1:0`, a fresh `--user-data-dir`, and
+`SURF_ACE_CLIENT_DIAGNOSTIC_LOG` pointing to a scratch log. Keep
+`ELECTRON_RUN_AS_NODE` unset. Attach to the main-process inspector URL
+printed at startup and evaluate the following expression without awaiting
+the promise.
+
+```js
+Promise.reject(new Error("surf-ace-rejection-probe")); "injected"
+```
+
+Check for `event=app_unhandled_rejection` with the reason and stack in the
+scratch recorder. Evaluate `process.type` again to confirm the Electron
+main process remains responsive. For a rejection with a non-Error reason,
+the recorder includes the runtime warning stack when there is no original
+error stack. The probe uses an inspector in the scratch app only.
