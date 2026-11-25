@@ -1,8 +1,10 @@
 export const EXTERNAL_NEW_WINDOW_EVENT = "surf-ace-external-new-window";
-export const EXTERNAL_NEW_WINDOW_FEATURE = "surfAceExternalNewWindow=1";
 
-export const externalNewWindowFrameScript = `(() => {
-  const requestEventName = ${JSON.stringify(EXTERNAL_NEW_WINDOW_EVENT)};
+export function externalNewWindowFrameScript(): string {
+  return `(() => {
+  const eventName = ${JSON.stringify(EXTERNAL_NEW_WINDOW_EVENT)};
+  const dispatchEvent = window.dispatchEvent;
+  const CustomEventConstructor = CustomEvent;
   const resolveHttpUrl = (rawUrl) => {
     try {
       const url = new URL(String(rawUrl), document.baseURI);
@@ -15,39 +17,43 @@ export const externalNewWindowFrameScript = `(() => {
     if (!navigator.userActivation?.isActive) return false;
     const url = resolveHttpUrl(rawUrl);
     if (!url) return false;
-    if (window.top !== window) {
-      Reflect.apply(originalOpen, window, [url, "_blank", ${JSON.stringify(EXTERNAL_NEW_WINDOW_FEATURE)}]);
-    } else {
-      window.dispatchEvent(new CustomEvent(requestEventName, { detail: { url } }));
-    }
+    Reflect.apply(dispatchEvent, window, [new CustomEventConstructor(eventName, { detail: { url } })]);
     return true;
   };
-  let anchorOpenUrl = null;
-  document.addEventListener("click", (event) => {
-    if (!event.isTrusted || !navigator.userActivation?.isActive || !(event.target instanceof Element)) return;
-    const link = event.target.closest("a[href]");
-    if (!(link instanceof HTMLAnchorElement) || link.target.toLowerCase() !== "_blank") return;
-    const url = resolveHttpUrl(link.href);
-    if (!url) return;
-    event.preventDefault();
-    anchorOpenUrl = url;
-    queueMicrotask(() => {
-      if (anchorOpenUrl === url) anchorOpenUrl = null;
+  const installAnchorHandler = () => {
+    window.addEventListener("click", (event) => {
+      if (!event.isTrusted || !navigator.userActivation?.isActive || !(event.target instanceof Element)) return;
+      if (event.defaultPrevented) return;
+      const link = event.target.closest("a[href]");
+      if (!(link instanceof HTMLAnchorElement) || link.target.trim().toLowerCase() !== "_blank") return;
+      const url = resolveHttpUrl(link.href);
+      if (!url) return;
+      event.preventDefault();
+      requestExternalOpen(url);
     });
-    requestExternalOpen(url);
-  }, true);
+  };
+  if (document.readyState === "complete") {
+    installAnchorHandler();
+  } else {
+    const installAfterLoad = (event) => {
+      if (!event.isTrusted) return;
+      window.removeEventListener("load", installAfterLoad);
+      queueMicrotask(installAnchorHandler);
+    };
+    window.addEventListener("load", installAfterLoad);
+  }
   const originalOpen = window.open;
   window.open = function(url, target, features) {
-    const targetName = arguments.length > 1 ? String(target).trim().toLowerCase() : "_blank";
-    const opensNewContext = targetName !== "_self" && targetName !== "_parent" && targetName !== "_top";
-    const resolvedUrl = arguments.length > 0 ? resolveHttpUrl(url) : null;
-    if (opensNewContext && resolvedUrl && navigator.userActivation?.isActive) {
-      if (anchorOpenUrl === resolvedUrl) return null;
+    const targetName = arguments.length > 1 && target !== undefined ? String(target).trim().toLowerCase() : "_blank";
+    const rawUrl = arguments.length > 0 ? url : undefined;
+    const resolvedUrl = rawUrl == null || !String(rawUrl).trim() ? null : resolveHttpUrl(String(rawUrl));
+    if (targetName === "_blank" && resolvedUrl && navigator.userActivation?.isActive) {
       if (requestExternalOpen(resolvedUrl)) return null;
     }
     return Reflect.apply(originalOpen, this, arguments);
   };
 })();`;
+}
 
 export function externalNewWindowRequestUrl(detail: unknown, userActivationIsActive: boolean): string | null {
   if (!userActivationIsActive || !detail || typeof detail !== "object") {
@@ -55,22 +61,6 @@ export function externalNewWindowRequestUrl(detail: unknown, userActivationIsAct
   }
   const rawUrl = (detail as { url?: unknown }).url;
   return typeof rawUrl === "string" ? resolveExternalHttpUrl(rawUrl) : null;
-}
-
-export function isMarkedExternalSubframeWindowOpen(features: string): boolean {
-  return features.split(",").some((feature) => feature.trim().toLowerCase() === EXTERNAL_NEW_WINDOW_FEATURE.toLowerCase());
-}
-
-export function externalSubframeNewWindowRequestUrl(
-  rawUrl: string,
-  features: string,
-  sourceIsSubframe: boolean,
-  userActivationIsActive: boolean,
-): string | null {
-  if (!sourceIsSubframe || !userActivationIsActive || !isMarkedExternalSubframeWindowOpen(features)) {
-    return null;
-  }
-  return resolveExternalHttpUrl(rawUrl);
 }
 
 export function resolveExternalHttpUrl(rawUrl: string, baseUrl?: string): string | null {

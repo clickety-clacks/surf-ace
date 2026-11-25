@@ -86,9 +86,6 @@ import {
 import { isAddressInUse, isPortBoundOnIpv6Any } from "./port-selection.js";
 import {
   embeddedNewWindowAction,
-  externalNewWindowFrameScript,
-  externalSubframeNewWindowRequestUrl,
-  isMarkedExternalSubframeWindowOpen,
   resolveExternalHttpUrl,
 } from "./external-new-window.js";
 import { SurfaceWsServer, type CommittedSurfaceObservation } from "./ws-server.js";
@@ -1501,34 +1498,12 @@ function openExternalBrowserUrl(surfaceId: string, url: string): void {
 
 function wireWindowInputMenus(surfaceId: string, window: BrowserWindow): void {
   wireEditableContextMenu(window.webContents, window);
+  window.webContents.on("will-attach-webview", (_event, webPreferences) => {
+    webPreferences.nodeIntegrationInSubFrames = true;
+  });
   window.webContents.on("did-attach-webview", (_event, webContents) => {
     wireEditableContextMenu(webContents, window);
-    webContents.on("frame-created", (_frameEvent, details) => {
-      if (!details.frame || details.frame.parent === null) {
-        return;
-      }
-      void details.frame.executeJavaScript(externalNewWindowFrameScript).catch(() => undefined);
-    });
-    webContents.setWindowOpenHandler((details) => {
-      if (isMarkedExternalSubframeWindowOpen(details.features)) {
-        const sourceFrame = webContents.focusedFrame;
-        if (sourceFrame && sourceFrame !== webContents.mainFrame) {
-          void sourceFrame.executeJavaScript("navigator.userActivation?.isActive === true")
-            .then((isActive) => {
-              const externalUrl = externalSubframeNewWindowRequestUrl(
-                details.url,
-                details.features,
-                sourceFrame !== webContents.mainFrame,
-                isActive === true,
-              );
-              if (externalUrl) {
-                openExternalBrowserUrl(surfaceId, externalUrl);
-              }
-            })
-            .catch(() => undefined);
-        }
-        return { action: "deny" };
-      }
+    webContents.setWindowOpenHandler(() => {
       return { action: embeddedNewWindowAction(webContents.getURL().startsWith("data:")) };
     });
     wireWebContentsShortcuts(surfaceId, window, webContents, () => {
@@ -1622,8 +1597,10 @@ async function createWindowForSurface(surfaceId: string): Promise<BrowserWindow>
     }),
     webPreferences: {
       contextIsolation: true,
+      nodeIntegration: false,
       offscreen: captureMode.offscreen,
       preload: path.join(distDir, "preload.cjs"),
+      sandbox: true,
       webviewTag: true,
     },
   });

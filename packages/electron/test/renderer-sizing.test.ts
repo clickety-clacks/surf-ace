@@ -602,6 +602,7 @@ test("html and browser_url frames have a non-auto CSS height fallback", async ()
 test("html content is loaded through the browser webview surface", async () => {
   const source = await rendererSource();
   const styles = await rendererStyles();
+  const main = await mainSource();
   const guestPreload = await guestPreloadSource();
   const preload = await preloadSource();
 
@@ -620,6 +621,17 @@ test("html content is loaded through the browser webview surface", async () => {
   assert.match(source, /if \(options\?\.allowPopups\)[\s\S]*browserView\.setAttribute\("allowpopups", "true"\)/);
   assert.match(source.slice(browserUrlIndex), /allowPopups: true/);
   assert.doesNotMatch(source.slice(htmlIndex, browserUrlIndex), /allowPopups: true/);
+  assert.doesNotMatch(source.slice(htmlIndex, browserUrlIndex), /allowpopups/);
+  const attachWebViewIndex = main.indexOf('window.webContents.on("will-attach-webview"');
+  const attachWebViewEnd = main.indexOf('window.webContents.on("did-attach-webview"', attachWebViewIndex);
+  assert.ok(attachWebViewIndex >= 0 && attachWebViewEnd > attachWebViewIndex);
+  assert.match(main.slice(attachWebViewIndex, attachWebViewEnd), /webPreferences\.nodeIntegrationInSubFrames = true/);
+  assert.doesNotMatch(main.slice(main.indexOf('const window = new BrowserWindow('), main.indexOf('if (restoredPlacement?.bounds)')), /nodeIntegrationInSubFrames/);
+  assert.match(main, /contextIsolation: true,[\s\S]*nodeIntegration: false,[\s\S]*sandbox: true/);
+  assert.match(guestPreload, /window\.addEventListener\(EXTERNAL_NEW_WINDOW_EVENT[\s\S]*navigator\.userActivation\?\.isActive === true/);
+  assert.match(guestPreload, /const isMainFrame = process\.isMainFrame/);
+  assert.match(guestPreload, /document\.addEventListener\("click", \(event\) => \{\s*if \(!isMainFrame\) return;/);
+  assert.doesNotMatch(guestPreload, /window\.addEventListener\("message"/);
   assert.match(source, /const blockStaticHtmlNavigation = \(event: Event\) =>[\s\S]*sendNavigationIntent\(view, pane\.paneId, nextUrl\)/);
   const wrapperIndex = source.indexOf("function reportSnapshot(");
   const wrapperEnd = source.indexOf("function reportPaneSnapshot(", wrapperIndex);

@@ -2991,8 +2991,8 @@ function renderBrowserContent(
   const browserView = document.createElement("webview") as BrowserUrlWebViewElement;
   browserView.className = "content-html-frame content-browser-url-frame";
   view.currentBrowserFrame = browserView;
-  if (options?.allowPopups || options?.staticHtmlSourceUrl) {
-    // The main process denies static windows and routes marked subframe HTTP(S) requests externally.
+  if (options?.allowPopups) {
+    // Browser URL panes keep their existing native popup behavior; static HTML stays isolated.
     browserView.setAttribute("allowpopups", "true");
   }
   browserView.setAttribute("preload", window.surfAce.guestPreloadPath);
