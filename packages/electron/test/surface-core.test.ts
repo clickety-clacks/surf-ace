@@ -2272,14 +2272,16 @@ test("surface core records confirmed browser_url navigation success evidence", (
     targetPayload: { url: "https://google.com/" },
   });
 
-  const result = core.completeBrowserUrlNavigation(surface.surfaceId, paneId, {
+  const result = {
+    appliedAt: new Date().toISOString(),
+    materializedState: { navigationStatus: "loaded", replaySemantics: "navigate", url: "https://google.com/" },
+    paneLineageId,
+    requestId: "tr_test",
     status: "applied",
+    targetEpoch: 1,
     targetId: "tg_google",
-    url: "https://google.com/",
-  });
-
-  assert.equal(result?.status, "applied");
-  assert.equal(result?.materializedState?.navigationStatus, "loaded");
+  } as const;
+  assert.equal(core.completeBrowserUrlNavigation(surface.surfaceId, paneId, result), "completed");
   const pairTarget = core.pairState(surface.surfaceId).panes[0]!.currentTarget;
   assert.equal(pairTarget?.lastApplyEvidence?.status, "applied");
   assert.equal(pairTarget?.lastApplyEvidence?.materializedState?.navigationStatus, "loaded");
@@ -2318,16 +2320,19 @@ test("surface core records confirmed browser_url navigation failure evidence", (
     targetPayload: { url: "https://blocked.invalid/" },
   });
 
-  const result = core.completeBrowserUrlNavigation(surface.surfaceId, paneId, {
-    errorMessage: "Blocked",
+  const result = {
+    appliedAt: new Date().toISOString(),
+    errorCode: "materialization_failed",
+    materializedState: { navigationStatus: "failed", replaySemantics: "navigate", url: "https://blocked.invalid/" },
+    message: "Blocked",
+    paneLineageId,
+    requestId: "tr_test",
     status: "failed",
+    targetEpoch: 1,
     targetId: "tg_blocked",
-    url: "https://blocked.invalid/",
-  });
-
-  assert.equal(result?.status, "failed");
-  assert.equal(result?.errorCode, "materialization_failed");
-  assert.equal(result?.materializedState?.navigationStatus, "failed");
+  } as const;
+  assert.equal(core.completeBrowserUrlNavigation(surface.surfaceId, paneId, result), "completed");
+  assert.deepEqual(core.pairState(surface.surfaceId).panes[0]!.currentTarget?.lastApplyEvidence, result);
 });
 
 test("surface core rejects browser_url target when live browser capability is not requested", () => {

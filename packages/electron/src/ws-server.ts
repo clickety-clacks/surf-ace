@@ -128,6 +128,9 @@ type LocklessTransportSession = {
 };
 
 type PendingBrowserUrlApply = {
+  paneId: number;
+  surfaceId: string;
+  url: string;
   appliedAt: string;
   committedLocklessIntent: boolean;
   request: TargetApplyRequest;
@@ -966,7 +969,9 @@ export class SurfaceWsServer {
           v: 1,
         });
         return;
-      case "pane-removed":
+      case "pane-removed": {
+        const pending = this.pendingBrowserUrlApplies.get(browserUrlApplyKey(event.surfaceId, event.paneId));
+        if (pending) this.settleBrowserUrlNavigation(pending, { kind: "pane_closed" });
         await this.broadcastLifecycleEvent({
           eventId: makeEventId(),
           op: "event.pane_removed",
@@ -982,6 +987,7 @@ export class SurfaceWsServer {
           v: 1,
         });
         return;
+      }
       case "pane-renamed":
         await this.broadcastLifecycleEvent({
           eventId: makeEventId(),
@@ -1025,6 +1031,11 @@ export class SurfaceWsServer {
         await this.broadcastSurfaceAppeared(event.surfaceId);
         return;
       case "surface-removed":
+        for (const pending of this.pendingBrowserUrlApplies.values()) {
+          if (pending.surfaceId === event.surfaceId) {
+            this.settleBrowserUrlNavigation(pending, { kind: "pane_closed" });
+          }
+        }
         this.stopNativePaneStatusPollingForSurface(event.surfaceId);
         await this.broadcastSurfaceRemoved(event.surfaceId, event.recoverable ?? false);
         return;
@@ -1176,24 +1187,23 @@ export class SurfaceWsServer {
       }
     }
     // surface.describe bypasses the authority queue, so fence the full mutation
-    // dispatch through its durable receipt write and response.
+    // dispatch through its durable receipt write.
     const changesApplicationState = request.op === "pair.request" ||
       (session !== undefined && locklessOperationMutates(request.op));
-    if (!changesApplicationState) {
-      return await this.handleOrdinaryLocklessMessageBody(socket, request);
-    }
-    const finishMutation = this.beginApplicationStateMutation();
+    const finishMutation = changesApplicationState ? this.beginApplicationStateMutation() : () => {};
+    let afterCommit: (() => Promise<void>) | void;
     try {
-      await this.handleOrdinaryLocklessMessageBody(socket, request);
+      afterCommit = await this.handleOrdinaryLocklessMessageBody(socket, request);
     } finally {
       finishMutation();
     }
+    await afterCommit?.();
   }
 
   private async handleOrdinaryLocklessMessageBody(
     socket: WebSocket,
     request: LocklessRequest,
-  ): Promise<void> {
+  ): Promise<(() => Promise<void>) | void> {
     const meta = this.socketMeta.get(socket);
     if (!meta) return;
     const initialSession = this.locklessSessions.get(socket);
@@ -1208,13 +1218,12 @@ export class SurfaceWsServer {
           op: request.op,
           ...errorDiagnosticFields(error),
         });
-        await this.send(socket, JSON.stringify(errorResponse(
+        return () => this.send(socket, JSON.stringify(errorResponse(
           request.op,
           request.id as never,
           "internal_error",
           "Saved state is still being reconciled; retry this operation after recovery",
         )));
-        return;
       }
     }
     const validation = validateLocklessEnvelope(request);
@@ -1240,14 +1249,13 @@ export class SurfaceWsServer {
           });
         } catch (error) {
           if (!(error instanceof PersistentStateOutcomeUnknownError)) throw error;
-          await this.send(socket, JSON.stringify(errorResponse(
+          return () => this.send(socket, JSON.stringify(errorResponse(
             request.op, request.id as never, "internal_error",
             "Persistent state commit outcome is unknown; dependent operations are paused pending reconciliation",
           )));
-          return;
         }
       }
-      await this.send(
+      return () => this.send(
         socket,
         JSON.stringify(
           errorResponse(
@@ -1258,7 +1266,6 @@ export class SurfaceWsServer {
           ),
         ),
       );
-      return;
     }
     const payloadHash = JSON.stringify({
       op: request.op,
@@ -1285,12 +1292,11 @@ export class SurfaceWsServer {
             });
           } catch (error) {
             if (!(error instanceof PersistentStateOutcomeUnknownError)) throw error;
-            await this.send(socket, JSON.stringify(errorResponse(request.op, request.id as never,
+            return () => this.send(socket, JSON.stringify(errorResponse(request.op, request.id as never,
               "internal_error", "Persistent state commit outcome is unknown; dependent operations are paused pending reconciliation")));
-            return;
           }
         }
-        await this.send(
+        return () => this.send(
           socket,
           JSON.stringify(
             errorResponse(
@@ -1301,23 +1307,14 @@ export class SurfaceWsServer {
             ),
           ),
         );
-        return;
       }
-      await this.send(socket, JSON.stringify(cached.response));
-      return;
+      return () => this.send(socket, JSON.stringify(cached.response));
     }
 
     if (request.op === "target.apply") {
       const session = this.locklessSessions.get(socket);
       if (session) {
-        await this.handleLocklessTargetApply(
-          socket,
-          meta,
-          session,
-          request,
-          payloadHash,
-        );
-        return;
+        return await this.commitLocklessTargetApply(socket, meta, session, request, payloadHash);
       }
     }
 
@@ -1595,16 +1592,16 @@ export class SurfaceWsServer {
       meta.cache.set(request.id, { payloadHash, response });
       trimCache(meta.cache);
     }
-    await this.send(socket, JSON.stringify(response));
+    return () => this.send(socket, JSON.stringify(response));
   }
 
-  private async handleLocklessTargetApply(
+  private async commitLocklessTargetApply(
     socket: WebSocket,
     meta: SocketMeta,
     session: LocklessTransportSession,
     request: Extract<LocklessRequest, { op: "target.apply" }>,
     payloadHash: string,
-  ): Promise<void> {
+  ): Promise<() => Promise<void>> {
     let converted: TargetApplyRequest | null = null;
     let response: Response;
     let uncertain = false;
@@ -1711,22 +1708,26 @@ export class SurfaceWsServer {
       trimCache(meta.cache);
     }
     if (!response.ok) {
-      await this.send(socket, JSON.stringify(response));
-      return;
+      return () => this.send(socket, JSON.stringify(response));
     }
-    if (!converted) {
+    const committedRequest = converted;
+    if (!committedRequest) {
       throw new Error("target.apply committed without a validated request");
     }
-    try {
-      await this.send(socket, JSON.stringify(response));
-    } finally {
-      await this.continueTargetApplyWorkItem(
-        session.controllerInstanceId,
-        request.id,
-        converted,
-        socket,
-      );
-    }
+    // DESIGN requires the send attempt to precede materialization. Neither
+    // the send nor the renderer's evidence wait owns the intent mutation.
+    return async () => {
+      try {
+        await this.send(socket, JSON.stringify(response));
+      } finally {
+        await this.continueTargetApplyWorkItem(
+          session.controllerInstanceId,
+          request.id,
+          committedRequest,
+          socket,
+        );
+      }
+    };
   }
 
   private preflightLocklessTargetApply(
@@ -3828,14 +3829,16 @@ export class SurfaceWsServer {
     });
     const queued = previous.catch(() => undefined).then(() => current);
     this.mutationQueues.set(surfaceId, queued);
-    // Renderer and lifecycle mutations also need to hide candidate geometry
-    // while they wait for resolution, apply native geometry, or roll back.
-    const finishMutation = this.beginApplicationStateMutation();
     try {
       await previous.catch(() => undefined);
-      return await operation();
+      // Only the queue holder can expose candidate geometry.
+      const finishMutation = this.beginApplicationStateMutation();
+      try {
+        return await operation();
+      } finally {
+        finishMutation();
+      }
     } finally {
-      finishMutation();
       releaseQueue();
       if (this.mutationQueues.get(surfaceId) === queued) {
         this.mutationQueues.delete(surfaceId);
@@ -4397,14 +4400,15 @@ export class SurfaceWsServer {
         }
         const rollback = this.core.captureSurfaceMutationRollback(surfaceId);
         try {
-          return {
-            payload: this.core.transaction(() => {
-              return this.core.targetApply(
-                surfaceId,
-                request.payload,
-              );
-            }),
-          };
+          const payload = this.core.transaction(() => this.core.targetApply(surfaceId, request.payload));
+          const paneId = this.core.pairState(surfaceId).panes.find((pane) =>
+            pane.paneLineageId === request.payload.paneLineageId
+          )?.paneId;
+          const navigation = paneId !== undefined &&
+            payload.materializedState?.navigationStatus === "started_unverified"
+            ? this.waitForBrowserUrlNavigation(surfaceId, Number(paneId), request, socket, appliedAt, committedLocklessIntent)
+            : null;
+          return { navigation, paneId, payload };
         } catch (error) {
           rollback();
           throw error;
@@ -4430,25 +4434,12 @@ export class SurfaceWsServer {
         );
         return this.targetApplyFailureResponse(request, appliedAt, "materialization_failed", releaseResult.failure);
       }
-      const result = releaseResult.payload;
-      const paneId = this.core.pairState(surfaceId).panes.find((pane) =>
-        pane.paneLineageId === request.payload.paneLineageId
-      )?.paneId;
-      const shouldWaitForBrowserUrl =
-        paneId !== undefined &&
-        result.status === "failed" &&
-        result.errorCode === "materialization_failed" &&
-        result.materializedState?.navigationStatus === "started_unverified";
-      const payload = shouldWaitForBrowserUrl
-        ? await this.waitForBrowserUrlNavigation(
-            surfaceId,
-            Number(paneId),
-            request,
-            socket,
-            appliedAt,
-            committedLocklessIntent,
-          )
-        : result;
+      // Arm the waiter while the pane is still current, then release the
+      // surface queue before waiting for the renderer.
+      const paneId = releaseResult.paneId;
+      const payload = releaseResult.navigation
+        ? await releaseResult.navigation
+        : releaseResult.payload;
       persistentServerDiagnostic(
         "info",
         "target_apply_browser_url_result",
@@ -4763,8 +4754,7 @@ export class SurfaceWsServer {
       this.earlyBrowserUrlNavigationEvidence.set(`${key}:${evidence.targetId}`, evidence);
       return;
     }
-    this.pendingBrowserUrlApplies.delete(key);
-    clearTimeout(pending.timeout);
+    this.settleBrowserUrlNavigation(pending, { kind: "evidence", evidence });
     persistentServerDiagnostic(
       "info",
       "target_apply_browser_url_renderer_evidence",
@@ -4781,7 +4771,6 @@ export class SurfaceWsServer {
         ...browserUrlDiagnosticFields(evidence.url),
       },
     );
-    pending.resolve(this.browserUrlNavigationPayload(surfaceId, paneId, pending, evidence));
   }
 
   private async sendNativeOverlayRequestWithLivenessRetry(
@@ -4854,124 +4843,99 @@ export class SurfaceWsServer {
     return await new Promise((resolve) => {
       const key = browserUrlApplyKey(surfaceId, paneId);
       const previous = this.pendingBrowserUrlApplies.get(key);
-      if (previous) {
-        this.pendingBrowserUrlApplies.delete(key);
-        clearTimeout(previous.timeout);
-        const superseded = browserUrlApplyResult(
-          previous.request.payload,
-          "failed",
-          "materialization_failed",
-          "browser_url navigation superseded before verification",
-          {
-            navigationStatus: "failed",
-            replaySemantics: "navigate",
-            url: String((previous.request.payload.targetPayload as { url?: unknown }).url ?? ""),
-          },
-        );
-        this.core.completeBrowserUrlNavigation(surfaceId, paneId, {
-          errorMessage: "browser_url navigation superseded before verification",
-          status: "failed",
-          targetId: previous.request.payload.targetId,
-          url: String((previous.request.payload.targetPayload as { url?: unknown }).url ?? ""),
-        }, superseded);
-        previous.resolve(superseded);
-      }
-      const payload = request.payload;
-      const targetUrl = String((payload.targetPayload as { url?: unknown }).url ?? "");
-      const evidenceKey = `${key}:${payload.targetId}`;
-      const earlyEvidence = this.earlyBrowserUrlNavigationEvidence.get(evidenceKey);
-      if (earlyEvidence) {
-        this.earlyBrowserUrlNavigationEvidence.delete(evidenceKey);
-        resolve(this.browserUrlNavigationPayload(surfaceId, paneId, {
-          appliedAt,
-          committedLocklessIntent,
-          request,
-          resolve,
-          socket,
-        }, earlyEvidence));
-        return;
-      }
-      const timeout = setTimeout(() => {
-        this.pendingBrowserUrlApplies.delete(key);
-        this.earlyBrowserUrlNavigationEvidence.delete(evidenceKey);
-        const sessionFailure = committedLocklessIntent || !socket
-          ? null
-          : this.targetApplySessionFailurePayload(
-              surfaceId,
-              socket,
-              request,
-              appliedAt,
-            );
-        if (sessionFailure) {
-          resolve(sessionFailure);
-          return;
-        }
-        const timedOut = browserUrlApplyResult(
-          payload,
-          "failed",
-          "materialization_failed",
-          "browser_url navigation was not verified before timeout",
-          { navigationStatus: "started_unverified", replaySemantics: "navigate", url: targetUrl },
-        );
-        this.core.completeBrowserUrlNavigation(surfaceId, paneId, {
-          errorMessage: "browser_url navigation was not verified before timeout",
-          status: "failed",
-          targetId: payload.targetId,
-          url: targetUrl,
-        }, timedOut);
-        resolve(timedOut);
-      }, BROWSER_URL_NAVIGATION_TIMEOUT_MS);
-      this.pendingBrowserUrlApplies.set(key, {
+      if (previous) this.settleBrowserUrlNavigation(previous, { kind: "superseded" });
+
+      const url = String((request.payload.targetPayload as { url?: unknown }).url ?? "");
+      const pending: PendingBrowserUrlApply = {
         appliedAt,
         committedLocklessIntent,
+        paneId,
         request,
         resolve,
         socket,
-        timeout,
-      });
+        surfaceId,
+        timeout: setTimeout(() => {
+          this.settleBrowserUrlNavigation(pending, { kind: "timeout" });
+        }, BROWSER_URL_NAVIGATION_TIMEOUT_MS),
+        url,
+      };
+      this.pendingBrowserUrlApplies.set(key, pending);
+
+      const earlyEvidence = this.earlyBrowserUrlNavigationEvidence.get(`${key}:${request.payload.targetId}`);
+      if (earlyEvidence) {
+        this.settleBrowserUrlNavigation(pending, { kind: "evidence", evidence: earlyEvidence });
+      }
     });
   }
 
-  private browserUrlNavigationPayload(
-    surfaceId: string,
-    paneId: number,
-    pending: Omit<PendingBrowserUrlApply, "timeout">,
-    evidence: BrowserUrlNavigationEvidence,
-  ): TargetApplyResponse["payload"] {
-    const sessionFailure =
-      pending.committedLocklessIntent || !pending.socket
+  private settleBrowserUrlNavigation(
+    pending: PendingBrowserUrlApply,
+    outcome: { kind: "evidence"; evidence: BrowserUrlNavigationEvidence } |
+      { kind: "pane_closed" | "superseded" | "timeout" },
+  ): void {
+    const { appliedAt, committedLocklessIntent, paneId, request, socket, surfaceId, url } = pending;
+    const key = browserUrlApplyKey(surfaceId, paneId);
+    if (this.pendingBrowserUrlApplies.get(key) !== pending) return;
+    this.pendingBrowserUrlApplies.delete(key);
+    clearTimeout(pending.timeout);
+    this.earlyBrowserUrlNavigationEvidence.delete(`${key}:${request.payload.targetId}`);
+
+    const failure = (errorCode: "materialization_failed" | "pane_closed" | "target_superseded", message: string) =>
+      browserUrlApplyResult(request.payload, "failed", errorCode, message, {
+        navigationStatus: "failed", replaySemantics: "navigate", url,
+      });
+    const paneClosed = () => failure("pane_closed", "browser_url pane closed before verification");
+    const superseded = () => failure("target_superseded", "browser_url navigation was superseded before verification");
+    let result = failure("materialization_failed", "browser_url navigation bookkeeping failed");
+    try {
+      if (outcome.kind === "pane_closed") {
+        result = paneClosed();
+        return;
+      }
+      if (outcome.kind === "superseded") {
+        result = superseded();
+        return;
+      }
+      const sessionFailure = committedLocklessIntent || !socket
         ? null
-        : this.targetApplySessionFailurePayload(
-            surfaceId,
-            pending.socket,
-            pending.request,
-            pending.appliedAt,
-          );
-    if (sessionFailure) {
-      return sessionFailure;
-    }
-    let payload = browserUrlApplyResult(
-      pending.request.payload,
-      evidence.status,
-      evidence.status === "failed" ? "materialization_failed" : undefined,
-      evidence.status === "applied" ? "browser_url navigation loaded" : evidence.errorMessage ?? "browser_url navigation failed",
-      {
-        navigationStatus: evidence.status === "applied" ? "loaded" : "failed",
-        replaySemantics: "navigate",
-        url: evidence.url,
-      },
-    );
-    const completed = this.core.completeBrowserUrlNavigation(surfaceId, paneId, evidence, payload);
-    if (!completed) {
-      payload = browserUrlApplyResult(
-        pending.request.payload,
-        "failed",
-        "materialization_failed",
-        "browser_url navigation was superseded before verification",
-        { navigationStatus: "failed", replaySemantics: "navigate", url: evidence.url },
+        : this.targetApplySessionFailurePayload(surfaceId, socket, request, appliedAt);
+      if (sessionFailure) {
+        result = sessionFailure;
+        return;
+      }
+      const evidence = outcome.kind === "evidence" ? outcome.evidence : {
+        errorMessage: "browser_url navigation was not verified before timeout",
+        status: "failed" as const,
+        targetId: request.payload.targetId,
+        url,
+      };
+      const payload = browserUrlApplyResult(
+        request.payload,
+        evidence.status,
+        evidence.status === "failed" ? "materialization_failed" : undefined,
+        evidence.status === "applied"
+          ? "browser_url navigation loaded"
+          : evidence.errorMessage ?? "browser_url navigation failed",
+        {
+          navigationStatus: outcome.kind === "timeout" ? "started_unverified"
+            : evidence.status === "applied" ? "loaded" : "failed",
+          replaySemantics: "navigate",
+          url: evidence.url,
+        },
       );
+      const completion = this.core.completeBrowserUrlNavigation(surfaceId, paneId, payload);
+      result = completion === "pane_closed" ? paneClosed()
+        : completion === "superseded" ? superseded() : payload;
+    } catch (error) {
+      persistentServerDiagnostic("warn", "target_apply_browser_url_bookkeeping_failed", {
+        pane_id: paneId,
+        surface_id: surfaceId,
+        request_id: request.payload.requestId,
+        ...errorDiagnosticFields(error),
+      });
+    } finally {
+      pending.resolve(result);
     }
-    return payload;
   }
 
   private async releaseNativePanesBeforeRendererContent(

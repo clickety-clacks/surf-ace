@@ -3559,33 +3559,18 @@ export class SurfaceCore {
   completeBrowserUrlNavigation(
     surfaceId: string,
     paneId: number,
-    evidence: { errorMessage?: string; status: "applied" | "failed"; targetId: string; url: string },
-    applyResult?: TargetApplyResponse["payload"],
-  ): TargetApplyResponse["payload"] | null {
-    const pane = this.expectPane(surfaceId, paneId);
+    result: TargetApplyResponse["payload"],
+  ): "completed" | "pane_closed" | "superseded" {
+    const pane = this.surfaces.get(surfaceId)?.panes.get(paneId);
+    if (!pane) return "pane_closed";
+    if (pane.paneLineageId !== result.paneLineageId) return "superseded";
     const entry = currentEntry(pane);
-    if (entry.contentType !== "browser_url" || entry.contentId !== evidence.targetId) {
-      return null;
+    if (entry.contentType !== "browser_url" || entry.contentId !== result.targetId) {
+      return "superseded";
     }
-    const payload = applyResult ?? targetApplyResult(
-      {
-        paneLineageId: pane.paneLineageId,
-        requestId: "",
-        targetEpoch: entry.revision,
-        targetId: evidence.targetId,
-      } as TargetApplyRequest["payload"],
-      evidence.status,
-      evidence.status === "failed" ? "materialization_failed" : undefined,
-      evidence.status === "applied" ? "browser_url navigation loaded" : evidence.errorMessage ?? "browser_url navigation failed",
-      {
-        navigationStatus: evidence.status === "applied" ? "loaded" : "failed",
-        replaySemantics: "navigate",
-        url: evidence.url,
-      },
-    );
-    entry.lastApplyEvidence = payload;
+    entry.lastApplyEvidence = result;
     this.emit({ surfaceId, type: "surface-changed" });
-    return payload;
+    return "completed";
   }
 
   paneSplit(
