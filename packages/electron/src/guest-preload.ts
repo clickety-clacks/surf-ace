@@ -1,6 +1,8 @@
-import { ipcRenderer } from "electron";
+import { ipcRenderer, webFrame } from "electron";
+import { externalNewWindowFrameScript, isExternalNewWindowLink } from "./external-new-window.js";
 
 type ContentEventPayload =
+  | { type: "external-navigation"; url: string }
   | { type: "focus" }
   | { type: "navigation"; url: string }
   | { selection: SelectionPayload | null; type: "selection" }
@@ -133,6 +135,17 @@ document.addEventListener("selectionchange", () => {
   emit({ selection: currentSelection(), type: "selection" });
 });
 
+window.addEventListener("message", (event) => {
+  const payload = event.data as { type?: unknown; url?: unknown } | null;
+  if (payload?.type !== "surf-ace-external-new-window" || !navigator.userActivation?.isActive) {
+    return;
+  }
+  if (typeof payload.url !== "string" || !isExternalNewWindowLink("_blank", payload.url)) {
+    return;
+  }
+  emit({ type: "external-navigation", url: payload.url });
+});
+
 document.addEventListener("pointerdown", (event) => {
   emit({ type: "focus" });
   if (navigationTarget(event.target)) {
@@ -181,11 +194,16 @@ document.addEventListener("click", (event) => {
   if (!link?.href) {
     return;
   }
+  if (isExternalNewWindowLink(link.target, link.href)) {
+    return;
+  }
   if (window.location.protocol === "data:") {
     event.preventDefault();
   }
   emit({ type: "navigation", url: link.href });
 }, { capture: true });
+
+void webFrame.executeJavaScript(externalNewWindowFrameScript).catch(() => undefined);
 
 document.addEventListener("submit", (event) => {
   if (!(event.target instanceof HTMLFormElement)) {

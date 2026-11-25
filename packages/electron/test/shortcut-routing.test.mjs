@@ -21,6 +21,7 @@ function fixture({ native = false } = {}) {
   let active = native ? 2 : 1;
   let doneBusy = false;
   const contents = id => ({ id, handlers: new Map(),
+    setWindowOpenHandler(handler) { this.windowOpenHandler = handler; },
     on(name, listener) { this.handlers.set(name, listener); },
     once(name, listener) { this.handlers.set(name, listener); },
     send(...args) { sends.push(args); } });

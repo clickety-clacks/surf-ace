@@ -2822,6 +2822,9 @@ function wireBrowserContentEvents(view: PaneView, paneId: number, webview: Brows
     } else if (payload.type === "navigation") {
       collapsePaneToolbar(view);
       sendNavigationIntent(view, paneId, String(payload.url ?? ""));
+    } else if (payload.type === "external-navigation") {
+      collapsePaneToolbar(view);
+      window.surfAce.openExternalUrl(String(payload.url ?? ""));
     } else if (payload.type === "ready") {
       reportSnapshot({
         bounds: paneBounds(view),

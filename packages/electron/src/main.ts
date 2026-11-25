@@ -16,6 +16,7 @@ import {
   nativeImage,
   screen,
   session,
+  shell,
   webContents as electronWebContents,
   type ContextMenuParams,
   type MenuItemConstructorOptions,
@@ -83,6 +84,11 @@ import {
   runtimeAppBindingDiagnosticsFromCompositorResponse,
 } from "./runtime-identity.js";
 import { isAddressInUse, isPortBoundOnIpv6Any } from "./port-selection.js";
+import {
+  embeddedNewWindowAction,
+  externalNewWindowFrameScript,
+  resolveExternalHttpUrl,
+} from "./external-new-window.js";
 import { SurfaceWsServer, type CommittedSurfaceObservation } from "./ws-server.js";
 import { PanePresentationCoordinator } from "./pane-presentation-coordinator.js";
 import { NativePresentationWindowBinding, panePresentationWindowRoute } from "./pane-presentation.js";
@@ -1486,6 +1492,15 @@ function wireWindowInputMenus(surfaceId: string, window: BrowserWindow): void {
   wireEditableContextMenu(window.webContents, window);
   window.webContents.on("did-attach-webview", (_event, webContents) => {
     wireEditableContextMenu(webContents, window);
+    webContents.setWindowOpenHandler(() => {
+      return { action: embeddedNewWindowAction(webContents.getURL().startsWith("data:")) };
+    });
+    webContents.on("frame-created", (_frameEvent, details) => {
+      if (!details.frame || details.frame.parent === null) {
+        return;
+      }
+      void details.frame.executeJavaScript(externalNewWindowFrameScript).catch(() => undefined);
+    });
     wireWebContentsShortcuts(surfaceId, window, webContents, () => {
       const binding = browserUrlWebContentsPanes.get(webContents.id);
       return binding?.surfaceId === surfaceId ? binding.paneId : null;
@@ -2063,6 +2078,23 @@ function installIpc(): void {
 
   ipcMain.on("surface:get-guest-preload-path", (event) => {
     event.returnValue = path.join(distDir, "guest-preload.cjs");
+  });
+
+  ipcMain.on("surface:open-external-url", (event, payload) => {
+    const surfaceId = surfaceIdForSender(event.sender);
+    if (!surfaceId || event.senderFrame !== event.sender.mainFrame || !payload || typeof payload !== "object") {
+      return;
+    }
+    const externalUrl = resolveExternalHttpUrl(String(payload.url ?? ""));
+    if (!externalUrl) {
+      return;
+    }
+    void shell.openExternal(externalUrl).catch((error) => {
+      clientWarn("external_browser_open_failed", {
+        ...errorDiagnosticFields(error),
+        surface_id: surfaceId,
+      });
+    });
   });
 
   ipcMain.on("surface:renderer-diagnostic", (event, payload) => {
