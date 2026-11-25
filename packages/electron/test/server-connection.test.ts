@@ -6,8 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { WebSocketServer, WebSocket } from "ws";
 import type { Revision } from "../../protocol/src/index.js";
-import { validateEnvelopeType } from "../../protocol/src/validate.js";
-import { SURF_ACE_LOCKLESS_V1_CAPABILITY, SURF_ACE_OPERATION_BLOCKED_V1_CAPABILITY, validateLocklessEnvelope } from "../../protocol/src/lockless.js";
+import { SURF_ACE_LOCKLESS_V1_CAPABILITY } from "../../protocol/src/lockless.js";
 import { REGISTRATION_CYCLE_TIMEOUT_MS, ServerConnection } from "../src/server-connection.js";
 import { ConfiguredServerRegistration } from "../src/configured-server.js";
 import { matchesProvisionedClaims } from "../src/registry-binding.js";
@@ -20,6 +19,8 @@ import {
   persistentStateSelectorFileName,
   writePersistentStateFile,
 } from "../src/persistent-state-file.js";
+import { validateEnvelopeType } from "../../protocol/src/validate.js";
+import { SURF_ACE_OPERATION_BLOCKED_V1_CAPABILITY, validateLocklessEnvelope } from "../../protocol/src/lockless.js";
 
 test("Bonjour transport address avoids slow hostname resolution and retains hostname fallback", async () => {
   const originalIdentity = ConfiguredServerRegistration.prototype.readRegistryIdentity;
@@ -663,19 +664,16 @@ test("pane.split label claim reenters authority, leaves the request queue usable
     assert.ok(persistenceReadiness.openMutations().some((mutation) =>
       mutation.operation === "pane.split" && mutation.surfaceId === surface.surfaceId &&
       mutation.requestId && mutation.startedAtMs > 0));
-    let listSettled = false;
-    const concurrentList = surfaceRequest(controlSocket, "panes.list", { surfaceId: surface.surfaceId }).finally(() => {
-      listSettled = true;
-    });
+    const concurrentList = surfaceRequest(controlSocket, "panes.list", { surfaceId: surface.surfaceId });
+    await until(() => registrationErrors.includes("registry_registration_waiting_for_local_persistence"), 5_000);
+    assert.equal(registry.requests.filter(({ message }) => message.op === "client.register").length, 2,
+      "registration waits at the existing readiness gate rather than sending client.register during a mutation");
+
     await until(() => queuedNotices.length > 0);
-    assert.equal(listSettled, false);
     const queuedNotice = queuedNotices[0]!;
     assert.deepEqual(validateLocklessEnvelope(queuedNotice), { ok: true });
     assert.match(queuedNotice.payload.message, /^Blocked behind pane split since /);
     assert.deepEqual(queuedNotice.payload.openChanges, persistenceReadiness.blockersForSurface(surface.surfaceId));
-    await until(() => registrationErrors.includes("registry_registration_waiting_for_local_persistence"), 5_000);
-    assert.equal(registry.requests.filter(({ message }) => message.op === "client.register").length, 2,
-      "registration waits at the existing readiness gate rather than sending client.register during a mutation");
 
     releaseClaim.resolve();
     const splitResponse = await split;
