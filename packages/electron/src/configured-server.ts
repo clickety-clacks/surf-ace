@@ -339,7 +339,8 @@ export class ConfiguredServerRegistration {
         const panes = assignment.panes.filter((confirmed) => {
           const pane = current?.panes.get(Number(confirmed.paneId));
           return pane && pane.paneLineageId === confirmed.paneLineageId &&
-            pane.paneLabel === confirmed.paneLabel && pane.allocationGeneration === confirmed.allocationGeneration;
+            pane.paneLabel === confirmed.paneLabel && pane.allocationGeneration === confirmed.allocationGeneration &&
+            this.core.visiblePaneLabel(assignment.surfaceId, pane.paneId) !== confirmed.paneLabel;
         });
         if (panes.length > 0) this.core.confirmRegistryPaneLabels([{ surfaceId: assignment.surfaceId, panes }]);
       }

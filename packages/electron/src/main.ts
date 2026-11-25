@@ -556,7 +556,14 @@ function trackPendingLabelWrites(registration: RegistryRegistrationState): () =>
         existing.allocationGeneration === pane.allocationGeneration));
   });
   for (const { surfaceId } of surfaces) {
-    pendingLabelWrites.set(surfaceId, (pendingLabelWrites.get(surfaceId) ?? 0) + 1);
+    const count = pendingLabelWrites.get(surfaceId) ?? 0;
+    pendingLabelWrites.set(surfaceId, count + 1);
+    if (count === 0) {
+      clientWarn("registry_label_waiting_for_local_persistence", {
+        surface_id: surfaceId,
+        open_mutations: JSON.stringify(persistentStateWriteReadiness.openMutations()),
+      });
+    }
     if (core.listSurfaces().some((surface) => surface.surfaceId === surfaceId)) {
       broadcastSurfaceState(surfaceId);
     }

@@ -1406,6 +1406,7 @@ export class SurfaceWsServer {
       }
     }
 
+    const committedEvents: LocklessEvent[] = [];
     const dispatch = async (): Promise<{
       rejectionCode: LocklessErrorCode | null;
       response: Response;
@@ -1414,9 +1415,9 @@ export class SurfaceWsServer {
         const response = request.op === "pair.request"
           ? await this.runLocklessPairReservation(
               request.payload.surfaceId ?? null,
-              async () => await this.dispatchLocklessRequest(socket, request),
+              async () => await this.dispatchLocklessRequest(socket, request, committedEvents),
             )
-          : await this.dispatchLocklessRequest(socket, request);
+          : await this.dispatchLocklessRequest(socket, request, committedEvents);
         return {
           rejectionCode: null,
           response: response as Response,
@@ -1626,7 +1627,8 @@ export class SurfaceWsServer {
       // A durable mutation holds the lockless queue while its write is pending.
       // A snapshot of another pane reads no tentative state from that mutation.
       response = (await dispatch()).response;
-    } else if (request.op === "pair.request" || request.op === "topology.apply") {
+    } else if (request.op === "pair.request" || request.op === "topology.apply" ||
+        request.op === "heartbeat.ping") {
       response = (await dispatch()).response;
     } else if (request.op === "surfaces.list") {
       try {
@@ -1670,7 +1672,12 @@ export class SurfaceWsServer {
       meta.cache.set(request.id, { payloadHash, response });
       trimCache(meta.cache);
     }
-    return () => this.send(socket, JSON.stringify(response));
+    return async () => {
+      if (response.ok) {
+        for (const event of committedEvents) await this.broadcastLockless(event);
+      }
+      return await this.send(socket, JSON.stringify(response));
+    };
   }
 
   private async commitLocklessTargetApply(
@@ -2014,6 +2021,7 @@ export class SurfaceWsServer {
   private async dispatchLocklessRequest(
     socket: WebSocket,
     request: LocklessRequest,
+    committedEvents: LocklessEvent[],
   ): Promise<unknown> {
     if (request.op === "pair.request") {
       this.assertPairSocketOpen(socket);
@@ -2701,7 +2709,7 @@ export class SurfaceWsServer {
         scopeKind: "pane",
         triggerOperation: request.op,
       });
-      await this.broadcastLockless({
+      committedEvents.push({
         eventId: makeEventId(),
         op: "event.lockless_content_committed",
         payload: { ...commit, surfaceId },
@@ -2710,7 +2718,8 @@ export class SurfaceWsServer {
         v: 1,
       });
       if (record) {
-        await this.broadcastLocklessDelta(scopeId, [record]);
+        const delta = this.locklessDeltaEvent(scopeId, [record]);
+        if (delta) committedEvents.push(delta);
       }
       this.core.markLocklessAuthorityChanged(surfaceId);
       return locklessSuccess(request, commit);
@@ -2786,7 +2795,10 @@ export class SurfaceWsServer {
         scopeKind: "pane",
         triggerOperation: request.op,
       });
-      if (record) await this.broadcastLocklessDelta(scopeId, [record]);
+      if (record) {
+        const delta = this.locklessDeltaEvent(scopeId, [record]);
+        if (delta) committedEvents.push(delta);
+      }
       this.core.markLocklessAuthorityChanged(surfaceId);
       return locklessSuccess(request, result);
     }
@@ -5803,6 +5815,14 @@ export class SurfaceWsServer {
 
   private async broadcastLocklessDelta(
     scopeId: string,
+    records: Parameters<SurfaceWsServer["locklessDeltaEvent"]>[1],
+  ): Promise<void> {
+    const event = this.locklessDeltaEvent(scopeId, records);
+    if (event) await this.broadcastLockless(event);
+  }
+
+  private locklessDeltaEvent(
+    scopeId: string,
     records: Array<{
       bytes: number;
       payload: unknown;
@@ -5810,7 +5830,7 @@ export class SurfaceWsServer {
       recordId: string;
       sequence: number;
     }>,
-  ): Promise<void> {
+  ): LocklessEvent | undefined {
     const state = this.core.locklessAuthority.exportState().scopes[scopeId];
     if (!state) return;
     const retainedSequences = [
@@ -5819,7 +5839,7 @@ export class SurfaceWsServer {
         (record) => record.sequence,
       ),
     ];
-    await this.broadcastLockless({
+    return {
       eventId: makeEventId(),
       op: "event.lockless_consumable_delta",
       payload: {
@@ -5834,7 +5854,7 @@ export class SurfaceWsServer {
       sentAt: Date.now(),
       type: "event",
       v: 1,
-    });
+    };
   }
 
   private async sendLocklessAuthorityEvent(
