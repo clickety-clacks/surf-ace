@@ -626,16 +626,27 @@ final class SurfAceRuntime {
         }
     }
 
-    private func startCentralRegistration() {
-        guard !isIsolatedTestHost else { return }
+    func startIsolatedRegistryForTesting(_ url: URL) throws {
+        guard isIsolatedTestHost, isStarted, url.scheme == "ws", url.host == "127.0.0.1",
+              url.port != nil, url.user == nil, url.password == nil else {
+            throw SurfAceRegistrationError.noServer
+        }
+        startCentralRegistration(isolatedRegistry: url)
+    }
+
+    private func startCentralRegistration(isolatedRegistry: URL? = nil) {
+        guard !isIsolatedTestHost || isolatedRegistry != nil else { return }
         guard centralRegistration == nil, let identity else { return }
-        let discovery = SurfAceCentralDiscovery()
+        let discovery = isolatedRegistry == nil ? SurfAceCentralDiscovery() : nil
         let registration = SurfAceCentralRegistration(
-            clientId: identity.clientId, configured: nil,
-            registrySources: { [weak self] in self?.currentRegistrySources() ?? [] },
-            discover: { await discovery.discover() },
-            discoveryError: { discovery.lastError },
-            transportFallbacks: { discovery.transportURLs(for: $0) },
+            clientId: identity.clientId, configured: isolatedRegistry,
+            registrySources: { [weak self] in
+                guard isolatedRegistry == nil else { return [] }
+                return self?.currentRegistrySources() ?? []
+            },
+            discover: { await discovery?.discover() ?? [] },
+            discoveryError: { discovery?.lastError },
+            transportFallbacks: { discovery?.transportURLs(for: $0) ?? [] },
             snapshot: { [weak self] in
                 guard let self else { throw SurfAceRegistrationError.stopped }
                 let adapter = try self.ensureLocklessAdapter()
