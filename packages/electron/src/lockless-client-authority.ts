@@ -202,9 +202,16 @@ export type RetainedTombstoneTransition =
   | "configuration"
   | "restart";
 
+export type PaneCloseAuditFields = {
+  paneId: number;
+  paneLabel: number | null;
+  controllerInstanceId?: string;
+};
+
 export type AuthorityEvent =
   | {
       record: LocklessAuditRecord;
+      paneClose?: PaneCloseAuditFields;
       type: "diagnostic.lockless_audit";
     }
   | {
@@ -1716,7 +1723,7 @@ export class LocklessClientAuthority {
 
   recordPaneFinalClose(
     payload: unknown,
-    options: { closeRevision: number; closedSequence?: number; existingTombstone?: PersistentTombstone; surfaceId: string; tombstoneId?: string },
+    options: { closeRevision: number; closedSequence?: number; existingTombstone?: PersistentTombstone; surfaceId: string; tombstoneId?: string; controllerInstanceId?: string },
   ): PersistentFinalCloseRecord {
     const paneTombstone = options.existingTombstone;
     const panePayload = payload as { pane?: Record<string, unknown> };
@@ -1744,17 +1751,22 @@ export class LocklessClientAuthority {
       surfaceId,
       tombstoneId,
     };
+    const paneIdentity = finalClosePaneIdentity(pane);
     const audit = this.acceptAudit(tombstoneId, "pane.close.final", null, surfaceId, {
       closeRevision: options.closeRevision,
       paneId: String(pane.paneId),
       tombstoneId,
+    }, {
+      paneId: Number(pane.paneId),
+      paneLabel: paneIdentity.paneLabel,
+      controllerInstanceId: options.controllerInstanceId,
     });
     this.recordPaneRetirementIntents(transient, audit.commitSequence, true);
     const record: PersistentFinalCloseRecord = {
       closedSequence,
       closeRevision: options.closeRevision,
       kind: "pane",
-      paneIdentities: [finalClosePaneIdentity(pane)],
+      paneIdentities: [paneIdentity],
       sourceTombstoneIds: [],
       surfaceId,
       terminalRetirementRevision: audit.commitSequence,
@@ -2416,6 +2428,7 @@ export class LocklessClientAuthority {
     controllerInstanceId: string | null,
     surfaceId: string | null,
     resultCorrelation: Record<string, unknown> | null = null,
+    paneClose?: PaneCloseAuditFields,
   ): LocklessAuditRecord {
     return this.acceptAudit(
       requestId,
@@ -2423,6 +2436,7 @@ export class LocklessClientAuthority {
       controllerInstanceId,
       surfaceId,
       resultCorrelation,
+      paneClose,
     );
   }
 
@@ -2432,6 +2446,7 @@ export class LocklessClientAuthority {
     controllerInstanceId: string | null,
     errorCode: LocklessErrorCode,
     surfaceId: string | null,
+    paneClose?: PaneCloseAuditFields,
   ): LocklessAuditRecord {
     return this.rejectAudit(
       requestId,
@@ -2439,6 +2454,7 @@ export class LocklessClientAuthority {
       controllerInstanceId,
       errorCode,
       surfaceId,
+      paneClose,
     );
   }
 
@@ -3070,6 +3086,7 @@ export class LocklessClientAuthority {
     controllerInstanceId: string | null,
     surfaceId: string | null,
     resultCorrelation: Record<string, unknown> | null = null,
+    paneClose?: PaneCloseAuditFields,
   ): LocklessAuditRecord {
     const record: LocklessAuditRecord = {
       commitSequence: this.state.nextCommitSequence++,
@@ -3085,6 +3102,7 @@ export class LocklessClientAuthority {
     this.emit({
       type: "diagnostic.lockless_audit",
       record,
+      ...(paneClose ? { paneClose } : {}),
     });
     return clone(record);
   }
@@ -3095,6 +3113,7 @@ export class LocklessClientAuthority {
     controllerInstanceId: string | null,
     errorCode: LocklessErrorCode,
     surfaceId: string | null = null,
+    paneClose?: PaneCloseAuditFields,
   ): LocklessAuditRecord {
     const record: LocklessAuditRecord = {
       commitSequence: this.state.nextCommitSequence++,
@@ -3110,6 +3129,7 @@ export class LocklessClientAuthority {
     this.emit({
       type: "diagnostic.lockless_audit",
       record,
+      ...(paneClose ? { paneClose } : {}),
     });
     return clone(record);
   }

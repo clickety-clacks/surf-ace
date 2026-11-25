@@ -1506,6 +1506,12 @@ export class SurfaceWsServer {
               request.id,
               request.op,
             );
+            const paneClose = request.op === "pane.close" ? {
+              paneId: request.payload.paneId,
+              paneLabel: session.surfaceId && this.core.listSurfaces().some((surface) => surface.surfaceId === session.surfaceId)
+                ? this.core.visiblePaneLabel(session.surfaceId, request.payload.paneId)
+                : null,
+            } : undefined;
             const result = await dispatch();
             response = result.response;
             let operationReceipt: { commitSequence: number; requestId: string };
@@ -1517,6 +1523,7 @@ export class SurfaceWsServer {
                 session.controllerInstanceId,
                 session.surfaceId,
                 correlation,
+                paneClose,
               );
               if (
                 response.payload &&
@@ -1544,6 +1551,7 @@ export class SurfaceWsServer {
                 session.controllerInstanceId,
                 result.rejectionCode ?? "internal_error",
                 session.surfaceId,
+                paneClose,
               );
               operationReceipt = {
                 commitSequence: audit.commitSequence,
@@ -2870,6 +2878,7 @@ export class SurfaceWsServer {
             const closeRevision = Math.max(1, Number(topology.topologyRevision) + 1);
             const finalClose = this.core.locklessAuthority.recordPaneFinalClose(tombstonePayload, {
               closeRevision,
+              controllerInstanceId: session.controllerInstanceId,
               surfaceId,
             });
             this.core.paneClose(surfaceId, request.payload.paneId, {
@@ -5817,7 +5826,9 @@ export class SurfaceWsServer {
       persistentServerDiagnostic("info", "lockless_authority_audit", {
         commit_sequence: event.record.commitSequence,
         controller_instance_id:
-          event.record.controllerInstanceId ?? undefined,
+          event.record.controllerInstanceId ?? event.paneClose?.controllerInstanceId,
+        pane_id: event.paneClose?.paneId,
+        pane_label: event.paneClose?.paneLabel,
         error_code: event.record.errorCode ?? undefined,
         operation: event.record.operation,
         request_id: event.record.requestId,
