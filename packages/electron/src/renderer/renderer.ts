@@ -3642,9 +3642,10 @@ let blockedStatus: string | null | undefined;
 function updateConnectionErrorBanner(wrapper: HTMLElement, state: RendererWindowState): void {
   let banner = wrapper.querySelector(".connection-status-banner") as HTMLDivElement | null;
   const registryMessage = state.connectionBar === "connected" ? "" : state.connectionError?.trim() ?? "";
-  const message = [blockedStatus, state.capabilityStatus, registryMessage && `Registry ${state.connectionBar}: ${registryMessage}`]
+  const message = [state.capabilityStatus, registryMessage && `Registry ${state.connectionBar}: ${registryMessage}`]
     .filter(Boolean).join(" · ");
-  if (!message) {
+  const status = [blockedStatus, message].filter(Boolean).join(" · ");
+  if (!status) {
     banner?.remove();
     return;
   }
@@ -3654,7 +3655,7 @@ function updateConnectionErrorBanner(wrapper: HTMLElement, state: RendererWindow
     banner.setAttribute("role", "status");
     wrapper.appendChild(banner);
   }
-  banner.textContent = message;
+  banner.textContent = status;
 }
 
 function patchSameLayoutWindow(previousState: RendererWindowState, state: RendererWindowState): boolean {
