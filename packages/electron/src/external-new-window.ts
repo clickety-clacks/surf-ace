@@ -18,9 +18,9 @@ export function externalNewWindowFrameScript(): string {
       return null;
     }
   };
-  const dispatchRequestPhase = (phase, requestId, url) => {
+  const dispatchRequestPhase = (phase, requestId, url, kind = "script") => {
     Reflect.apply(dispatchEvent, window, [new CustomEventConstructor(eventName, {
-      detail: { phase, requestId, ...(url ? { url } : {}) },
+      detail: { phase, requestId, kind, ...(url ? { url } : {}) },
     })]);
   };
   const prepareExternalOpen = (rawUrl) => {
@@ -48,14 +48,18 @@ export function externalNewWindowFrameScript(): string {
     if (!event.isTrusted || !navigator.userActivation?.isActive || !(event.target instanceof Element)) return;
     if (wasCanceled(event)) return;
     const link = event.target.closest("a[href]");
-    if (!(link instanceof HTMLAnchorElement) || link.target.trim().toLowerCase() !== "_blank") return;
-    const url = resolveHttpUrl(link.href);
-    if (!url) return;
+    if (!(link instanceof HTMLAnchorElement)) return;
 
-    const requestId = prepareExternalOpen(url);
-    if (!requestId) return;
+    // Preserve the gesture now, but let the page finish choosing the default
+    // action. Both href and target can change during click dispatch.
+    const requestId = ++nextRequestId;
+    dispatchRequestPhase("prepare", requestId, null, "anchor");
     setTimeout(() => {
-      finishExternalOpen(requestId, wasCanceled(event) ? "cancel" : "complete");
+      const url = resolveHttpUrl(link.href);
+      const followsExternally = !wasCanceled(event) && link.hasAttribute("href") &&
+        link.target.trim().toLowerCase() === "_blank" && url;
+      dispatchRequestPhase(followsExternally ? "complete" : "cancel", requestId,
+        followsExternally ? url : null, "anchor");
     });
   }, true);
 
@@ -105,40 +109,65 @@ export function externalNewWindowRequestUrl(detail: unknown, userActivationIsAct
   return typeof rawUrl === "string" ? resolveExternalHttpUrl(rawUrl) : null;
 }
 
+export interface PendingExternalNewWindowRequest {
+  kind: "anchor" | "script";
+  url: string | null;
+}
+
+export function hasPendingExternalNewWindowRequest(
+  requests: Iterable<PendingExternalNewWindowRequest>, rawUrl: string, frameName: string,
+): boolean {
+  const url = resolveExternalHttpUrl(rawUrl);
+  if (!url) return false;
+  for (const request of requests) {
+    // A page may change an anchor URL before its native default action. Its
+    // deferred completion chooses the final URL; deny that blank popup here.
+    if (request.kind === "anchor") {
+      if (frameName === "" || frameName.toLowerCase() === "_blank") return true;
+    } else if (request.url === url) return true;
+  }
+  return false;
+}
+
 export function createExternalNewWindowRequestBridge(
   openExternal: (url: string) => void,
-  onRequestPhase: (phase: "prepare" | "cancel" | "complete", requestId: number, url: string) => boolean = () => true,
+  onRequestPhase: (phase: "prepare" | "cancel" | "complete", requestId: number,
+    url: string | null, kind: "anchor" | "script") => boolean = () => true,
 ): (detail: unknown, userActivationIsActive: boolean) => void {
-  const pending = new Map<number, string>();
+  const pending = new Map<number, PendingExternalNewWindowRequest>();
   return (detail, userActivationIsActive) => {
     if (!detail || typeof detail !== "object") return;
-    const request = detail as { phase?: unknown; requestId?: unknown; url?: unknown };
+    const request = detail as { phase?: unknown; requestId?: unknown; url?: unknown; kind?: unknown };
     if (!Number.isSafeInteger(request.requestId) || (request.requestId as number) < 1) return;
     const requestId = request.requestId as number;
     if (request.phase === "prepare") {
-      const url = externalNewWindowRequestUrl(request, userActivationIsActive);
-      if (url && onRequestPhase("prepare", requestId, url)) {
-        pending.set(requestId, url);
+      const kind = request.kind === "anchor" ? "anchor" : "script";
+      const url = kind === "anchor" ? null : externalNewWindowRequestUrl(request, userActivationIsActive);
+      if (!userActivationIsActive || (kind === "script" && !url)) return;
+      if (onRequestPhase("prepare", requestId, url, kind)) {
+        const prepared: PendingExternalNewWindowRequest = { kind, url };
+        pending.set(requestId, prepared);
         // Anchor completion is queued after click dispatch. Give that task its
         // turn, then cancel any request whose page never sent a final phase.
         setTimeout(() => setTimeout(() => {
-          if (pending.get(requestId) !== url) return;
+          if (pending.get(requestId) !== prepared) return;
           pending.delete(requestId);
-          onRequestPhase("cancel", requestId, url);
+          onRequestPhase("cancel", requestId, url, kind);
         }));
       }
       return;
     }
-    if (request.phase === "cancel") {
-      const url = pending.get(requestId);
-      pending.delete(requestId);
-      if (url) onRequestPhase("cancel", requestId, url);
-      return;
-    }
-    if (request.phase === "complete") {
-      const url = pending.get(requestId);
-      pending.delete(requestId);
-      if (url && onRequestPhase("complete", requestId, url)) openExternal(url);
+    if (request.phase !== "cancel" && request.phase !== "complete") return;
+    const prepared = pending.get(requestId);
+    if (!prepared) return;
+    pending.delete(requestId);
+    const url = prepared.kind === "anchor"
+      ? (typeof request.url === "string" ? resolveExternalHttpUrl(request.url) : null)
+      : prepared.url;
+    if (request.phase === "complete" && url) {
+      if (onRequestPhase("complete", requestId, url, prepared.kind)) openExternal(url);
+    } else {
+      onRequestPhase("cancel", requestId, prepared.url, prepared.kind);
     }
   };
 }

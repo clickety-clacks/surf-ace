@@ -100,8 +100,8 @@ function linkTarget(target: EventTarget | null): HTMLAnchorElement | null {
 const isMainFrame = process.isMainFrame;
 const routeExternalNewWindowRequest = createExternalNewWindowRequestBridge((url) => {
   emit({ type: "external-navigation", url });
-}, (phase, requestId, url) => {
-  return ipcRenderer.sendSync("surface:external-new-window-request", { phase, requestId, url }) === true;
+}, (phase, requestId, url, kind) => {
+  return ipcRenderer.sendSync("surface:external-new-window-request", { phase, requestId, url, kind }) === true;
 });
 window.addEventListener(EXTERNAL_NEW_WINDOW_EVENT, (event) => {
   routeExternalNewWindowRequest(
@@ -206,15 +206,15 @@ document.addEventListener("pointercancel", () => {
 
 document.addEventListener("click", (event) => {
   if (!isMainFrame) return;
+  // The host routes static HTML's native navigation after page dispatch.
+  // Capturing it here would freeze href/target and pre-cancel a mutable click.
+  if (window.location.protocol === "data:") return;
   const link = linkTarget(event.target);
   if (!link?.href) {
     return;
   }
   if (isExternalNewWindowLink(link.target, link.href)) {
     return;
-  }
-  if (window.location.protocol === "data:") {
-    event.preventDefault();
   }
   emit({ type: "navigation", url: link.href });
 }, { capture: true });

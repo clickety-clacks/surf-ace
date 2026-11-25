@@ -86,7 +86,9 @@ import {
 import { isAddressInUse, isPortBoundOnIpv6Any } from "./port-selection.js";
 import {
   embeddedNewWindowAction,
+  type PendingExternalNewWindowRequest,
   hasExternalNewWindowFeature,
+  hasPendingExternalNewWindowRequest,
   resolveExternalHttpUrl,
 } from "./external-new-window.js";
 import { SurfaceWsServer, type CommittedSurfaceObservation } from "./ws-server.js";
@@ -221,7 +223,7 @@ const pendingLocalSurfaceCloses = new Set<string>();
 const pendingWindowStates = new Map<string, RendererWindowState>();
 const browserUrlWebContentsPanes = new Map<number, { paneId: number; surfaceId: string }>();
 const attachedWebContentsSurfaces = new Map<number, string>();
-const pendingExternalNewWindowRequests = new Map<number, Map<string, string>>();
+const pendingExternalNewWindowRequests = new Map<number, Map<string, PendingExternalNewWindowRequest>>();
 const readyWindows = new Set<string>();
 const overlayDiagnostics = new Map<string, Record<string, unknown>>();
 const overlayForwardState = new Map<string, { revision: number; topologyEpoch: string | null }>();
@@ -769,15 +771,6 @@ function surfaceIdForSender(contents: WebContents): string | null {
 
 function externalNewWindowRequestKey(processId: number, routingId: number, requestId: number): string {
   return `${processId}:${routingId}:${requestId}`;
-}
-
-function hasPendingExternalNewWindowRequest(contents: WebContents, rawUrl: string): boolean {
-  const url = resolveExternalHttpUrl(rawUrl);
-  if (!url) return false;
-  for (const pendingUrl of pendingExternalNewWindowRequests.get(contents.id)?.values() ?? []) {
-    if (pendingUrl === url) return true;
-  }
-  return false;
 }
 
 function clearPendingExternalNewWindowRequestsForFrame(contents: WebContents, processId: number, routingId: number): void {
@@ -1531,7 +1524,9 @@ function wireWindowInputMenus(surfaceId: string, window: BrowserWindow): void {
     attachedWebContentsSurfaces.set(webContents.id, surfaceId);
     wireEditableContextMenu(webContents, window);
     webContents.setWindowOpenHandler((details) => {
-      if (hasExternalNewWindowFeature(details.features) || hasPendingExternalNewWindowRequest(webContents, details.url)) {
+      if (hasExternalNewWindowFeature(details.features) || hasPendingExternalNewWindowRequest(
+        pendingExternalNewWindowRequests.get(webContents.id)?.values() ?? [], details.url, details.frameName,
+      )) {
         return { action: "deny" };
       }
       return { action: embeddedNewWindowAction(webContents.getURL().startsWith("data:")) };
@@ -2133,16 +2128,21 @@ function installIpc(): void {
     const request = payload as Record<string, unknown>;
     const phase = request.phase;
     const requestId = request.requestId;
+    const kind = request.kind === "anchor" ? "anchor" : "script";
     const externalUrl = typeof request.url === "string" ? resolveExternalHttpUrl(request.url) : null;
-    if (!Number.isSafeInteger(requestId) || (requestId as number) < 1 || !externalUrl) {
+    if (!Number.isSafeInteger(requestId) || (requestId as number) < 1) {
       event.returnValue = false;
       return;
     }
 
     const key = externalNewWindowRequestKey(frame.processId, frame.routingId, requestId as number);
     if (phase === "prepare") {
-      const pending = pendingExternalNewWindowRequests.get(event.sender.id) ?? new Map<string, string>();
-      pending.set(key, externalUrl);
+      if (kind === "script" && !externalUrl) {
+        event.returnValue = false;
+        return;
+      }
+      const pending = pendingExternalNewWindowRequests.get(event.sender.id) ?? new Map<string, PendingExternalNewWindowRequest>();
+      pending.set(key, { kind, url: externalUrl });
       pendingExternalNewWindowRequests.set(event.sender.id, pending);
       event.returnValue = true;
       return;
@@ -2150,8 +2150,10 @@ function installIpc(): void {
 
     if (phase === "cancel" || phase === "complete") {
       const pending = pendingExternalNewWindowRequests.get(event.sender.id);
-      const preparedUrl = pending?.get(key);
-      const accepted = preparedUrl === externalUrl && pending?.delete(key) === true;
+      const prepared = pending?.get(key);
+      const accepted = prepared?.kind === kind &&
+        (phase === "cancel" || (externalUrl !== null && (kind === "anchor" || prepared.url === externalUrl)));
+      if (prepared) pending?.delete(key);
       if (pending?.size === 0) pendingExternalNewWindowRequests.delete(event.sender.id);
       event.returnValue = accepted;
       return;

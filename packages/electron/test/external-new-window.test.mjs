@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
 
 import {
@@ -11,6 +12,7 @@ import {
   externalNewWindowRequestUrl,
   embeddedNewWindowAction,
   hasExternalNewWindowFeature,
+  hasPendingExternalNewWindowRequest,
   isExternalNewWindowLink,
   resolveExternalHttpUrl,
 } from "../src/external-new-window.ts";
@@ -31,6 +33,11 @@ class FixtureAnchor extends FixtureElement {
     super();
     this.href = href;
     this.target = target;
+    this.hasHref = true;
+  }
+
+  hasAttribute(name) {
+    return name === "href" && this.hasHref;
   }
 }
 
@@ -275,6 +282,83 @@ test("anchor routing leaves cancellation to page handlers and does not deduplica
     "https://example.test/repeated",
     "https://example.test/repeated",
   ]);
+});
+
+test("pending anchor denies its updated HTTP popup without capturing named or non-HTTP windows", () => {
+  const pending = [{ kind: "anchor", url: null }];
+  for (const target of ["", "_blank", "_BLANK"]) {
+    assert.equal(hasPendingExternalNewWindowRequest(pending, "https://example.test/updated", target), true);
+  }
+  assert.equal(hasPendingExternalNewWindowRequest(pending, "https://example.test/named", "named"), false);
+  assert.equal(hasPendingExternalNewWindowRequest(pending, "mailto:person@example.test", "_blank"), false);
+  assert.equal(hasPendingExternalNewWindowRequest([], "https://example.test/updated", "_blank"), false);
+  assert.equal(hasPendingExternalNewWindowRequest([{ kind: "script", url: "https://example.test/original" }],
+    "https://example.test/updated", "_blank"), false);
+});
+
+test("top static navigation capture leaves a page-rewritten target to its default action", () => {
+  const source = readFileSync(new URL("../src/guest-preload.ts", import.meta.url), "utf8");
+  const start = source.indexOf('document.addEventListener("click",');
+  const end = source.indexOf('document.addEventListener("submit",', start);
+  assert.ok(start >= 0 && end > start);
+  let documentClick;
+  const internalNavigation = [];
+  runInNewContext(source.slice(start, end), {
+    document: { addEventListener: (_type, handler) => { documentClick = handler; } },
+    isMainFrame: true,
+    window: { location: { protocol: "data:" } },
+    linkTarget: (target) => target.closest("a[href]"),
+    isExternalNewWindowLink,
+    emit: (payload) => internalNavigation.push(payload),
+  });
+  const fixture = runFrameScript();
+  fixture.userActivation.isActive = true;
+  const anchor = new FixtureAnchor("https://example.test/reverse-target", "_self");
+  const event = clickEvent(anchor);
+  fixture.handlers.get("window:click")(event);
+  documentClick(event);
+  assert.equal(event.defaultPrevented, false);
+  anchor.target = "_blank";
+  fixture.runTasks();
+  assert.deepEqual(internalNavigation, []);
+  assert.deepEqual(fixture.externalRequests, ["https://example.test/reverse-target"]);
+});
+
+test("anchor default action uses href and target after page dispatch", () => {
+  const fixture = runFrameScript();
+  const handler = fixture.handlers.get("window:click");
+  fixture.userActivation.isActive = true;
+  const changed = new FixtureAnchor("https://example.test/old");
+  handler(clickEvent(changed));
+  changed.href = "../final?q=1#part";
+  fixture.userActivation.isActive = false;
+  fixture.runTasks();
+  assert.deepEqual(fixture.externalRequests, ["https://chat.example.test/final?q=1#part"]);
+
+  fixture.userActivation.isActive = true;
+  const internal = new FixtureAnchor("https://example.test/old");
+  handler(clickEvent(internal));
+  internal.target = "_self";
+  internal.href = "https://example.test/internal";
+  fixture.runTasks();
+  assert.equal(fixture.externalRequests.length, 1);
+
+  const newlyExternal = new FixtureAnchor("mailto:old@example.test", "_self");
+  handler(clickEvent(newlyExternal));
+  newlyExternal.target = "_blank";
+  newlyExternal.href = "https://example.test/new";
+  fixture.runTasks();
+  assert.deepEqual(fixture.externalRequests.slice(1), ["https://example.test/new"]);
+
+  const nonHttp = new FixtureAnchor("https://example.test/old");
+  handler(clickEvent(nonHttp));
+  nonHttp.href = "mailto:final@example.test";
+  fixture.runTasks();
+  const removed = new FixtureAnchor("https://example.test/removed");
+  handler(clickEvent(removed));
+  removed.hasHref = false;
+  fixture.runTasks();
+  assert.equal(fixture.externalRequests.length, 2);
 });
 
 test("window.open routes default, empty, and denied new named contexts but preserves existing names", () => {
