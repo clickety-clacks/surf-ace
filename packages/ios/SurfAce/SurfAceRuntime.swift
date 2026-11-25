@@ -160,7 +160,7 @@ actor SurfAceOutboundSender {
         let priority: Priority
         let sequence: Int
         let text: String
-        let continuation: CheckedContinuation<Void, Error>?
+        let completion: @Sendable (Error?) -> Void
     }
 
     private let socket: SurfAceWebSocket
@@ -178,18 +178,17 @@ actor SurfAceOutboundSender {
     }
 
     func send(text: String, priority: Priority) async throws {
-        try await withCheckedThrowingContinuation { continuation in
-            enqueue(text: text, priority: priority, continuation: continuation)
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            enqueue(text: text, priority: priority) { error in
+                if let error { continuation.resume(throwing: error) }
+                else { continuation.resume() }
+            }
         }
     }
 
-    func enqueue(text: String, priority: Priority) {
-        enqueue(text: text, priority: priority, continuation: nil)
-    }
-
-    private func enqueue(text: String, priority: Priority, continuation: CheckedContinuation<Void, Error>?) {
+    func enqueue(text: String, priority: Priority, completion: @escaping @Sendable (Error?) -> Void = { _ in }) {
         nextSequence += 1
-        queue.append(QueuedSend(priority: priority, sequence: nextSequence, text: text, continuation: continuation))
+        queue.append(QueuedSend(priority: priority, sequence: nextSequence, text: text, completion: completion))
         queue.sort { lhs, rhs in
             if lhs.priority == rhs.priority { return lhs.sequence < rhs.sequence }
             return lhs.priority.rawValue > rhs.priority.rawValue
@@ -208,11 +207,11 @@ actor SurfAceOutboundSender {
                     await prepareSend(next.text, next.priority)
                 }
                 try await socket.send(text: next.text)
-                next.continuation?.resume()
+                next.completion(nil)
             } catch {
-                next.continuation?.resume(throwing: error)
+                next.completion(error)
                 for pending in queue {
-                    pending.continuation?.resume(throwing: error)
+                    pending.completion(error)
                 }
                 queue.removeAll()
                 isDraining = false
@@ -434,6 +433,13 @@ final class SurfAceRuntime {
     @ObservationIgnored private var controlProjectionConnections: Set<String> = []
     @ObservationIgnored private var locklessDeliveryActive = false
     @ObservationIgnored private var locklessDeliveryWaiters: [CheckedContinuation<Void, Never>] = []
+    @ObservationIgnored private var queuedReclamations = Set<ReclamationDelivery>()
+    private struct ReclamationDelivery: Hashable {
+        let eventId: String
+        let controllerId: String
+        let connectionToken: String
+    }
+
     @ObservationIgnored private var locklessAdmissionDeliveryBarriers: Set<String> = []
 
     private let maxMessageBytes = 12 * 1024 * 1024
@@ -4037,7 +4043,8 @@ final class SurfAceRuntime {
         eventId: String? = nil
     ) async -> Bool {
         guard let locklessAdapter else { return false }
-        var delivered = true
+        var accepted = true
+        var completions: [AsyncStream<Bool>] = []
         await withLocklessDeliveryTurn {
             let tombstoneBlockedControllerIds = await drainTombstoneReclamationsInCurrentTurn(
                 adapter: locklessAdapter
@@ -4058,21 +4065,30 @@ final class SurfAceRuntime {
                 "payload": Self.foundationJSON(payload),
             ]
             guard let json = encodeJSON(envelope) else {
-                delivered = false
+                accepted = false
                 return
             }
             for connectionUUID in fanout.connectionTokens {
                 guard let connection = locklessConnectionsByConnectionUUID[connectionUUID],
                       !blockedControllerIds.contains(connection.controllerInstanceId) else { continue }
-                do {
-                    try await connection.sender.send(text: json, priority: .event)
-                } catch {
-                    delivered = false
-                    surfAceServerRuntimeLog("event=direct_event_send_failed \(surfAceDiagnosticFields([("op", op), ("event_id", eventId), ("error", String(describing: error))]))")
+                if op == "event.annotation_committed" {
+                    let (result, continuation) = AsyncStream<Bool>.makeStream()
+                    await connection.sender.enqueue(text: json, priority: .event) { error in
+                        continuation.yield(error == nil)
+                        continuation.finish()
+                    }
+                    completions.append(result)
+                } else {
+                    await connection.sender.enqueue(text: json, priority: .event)
                 }
             }
         }
-        return delivered
+        // Annotation delivery receipts depend on the actual writes. Other
+        // operations and all other connections can advance while those settle.
+        for result in completions {
+            for await written in result where !written { accepted = false }
+        }
+        return accepted
     }
 
     private func drainControllerRetentionReclamations(
@@ -4141,25 +4157,27 @@ final class SurfAceRuntime {
             guard let json = encodeJSON(envelope) else {
                 return blockedControllerIds.union(delivery.connectionTokensByControllerInstanceId.keys)
             }
-            var deliveredControllerIds: [String] = []
             for controllerId in delivery.connectionTokensByControllerInstanceId.keys.sorted() {
                 guard !blockedControllerIds.contains(controllerId),
                       let connectionToken = delivery.connectionTokensByControllerInstanceId[controllerId],
                       let connection = locklessConnectionsByConnectionUUID[connectionToken] else { continue }
-                do {
-                    try await connection.sender.send(text: json, priority: .event)
-                    deliveredControllerIds.append(controllerId)
-                } catch {
-                    blockedControllerIds.insert(controllerId)
-                    surfAceLifecycleLog(
-                        "event=lockless_tombstone_reclamation_delivery_deferred event_id=\(record.eventId) controller_instance_id=\(controllerId)"
-                    )
+                let ticket = ReclamationDelivery(eventId: record.eventId, controllerId: controllerId,
+                                                 connectionToken: connectionToken)
+                guard queuedReclamations.insert(ticket).inserted else { continue }
+                await connection.sender.enqueue(text: json, priority: .event) { [weak self, weak adapter] error in
+                    Task { @MainActor in
+                        guard let self else { return }
+                        defer { self.queuedReclamations.remove(ticket) }
+                        guard error == nil else { return }
+                        try? await adapter?.acknowledgeTombstoneReclamation(
+                            eventId: ticket.eventId, deliveredControllerInstanceIds: [ticket.controllerId]
+                        )
+                    }
                 }
             }
-            if !deliveredControllerIds.isEmpty || record.recipientControllerInstanceIds.isEmpty {
+            if record.recipientControllerInstanceIds.isEmpty {
                 try? await adapter.acknowledgeTombstoneReclamation(
-                    eventId: record.eventId,
-                    deliveredControllerInstanceIds: deliveredControllerIds
+                    eventId: record.eventId, deliveredControllerInstanceIds: []
                 )
             }
         }
@@ -4235,30 +4253,27 @@ final class SurfAceRuntime {
             guard let json = encodeJSON(envelope) else {
                 return blockedControllerIds.union(delivery.connectionTokensByControllerInstanceId.keys)
             }
-            var deliveredControllerIds: [String] = []
             for controllerId in delivery.connectionTokensByControllerInstanceId.keys.sorted() {
-                guard !blockedControllerIds.contains(controllerId) else { continue }
-                guard let connectionToken = delivery.connectionTokensByControllerInstanceId[controllerId],
+                guard !blockedControllerIds.contains(controllerId),
+                      let connectionToken = delivery.connectionTokensByControllerInstanceId[controllerId],
                       let connection = locklessConnectionsByConnectionUUID[connectionToken] else { continue }
-                do {
-                    try await connection.sender.send(text: json, priority: .event)
-                    deliveredControllerIds.append(controllerId)
-                } catch {
-                    blockedControllerIds.insert(controllerId)
-                    let deferredFields: [(String, CustomStringConvertible?)] = [
-                        ("event_id", record.eventId),
-                        ("controller_instance_id", controllerId),
-                        ("error", error.localizedDescription),
-                    ]
-                    surfAceLifecycleLog(
-                        "event=lockless_controller_retention_delivery_deferred \(surfAceDiagnosticFields(deferredFields))"
-                    )
+                let ticket = ReclamationDelivery(eventId: record.eventId, controllerId: controllerId,
+                                                 connectionToken: connectionToken)
+                guard queuedReclamations.insert(ticket).inserted else { continue }
+                await connection.sender.enqueue(text: json, priority: .event) { [weak self, weak adapter] error in
+                    Task { @MainActor in
+                        guard let self else { return }
+                        defer { self.queuedReclamations.remove(ticket) }
+                        guard error == nil else { return }
+                        try? await adapter?.acknowledgeControllerRetentionReclamation(
+                            eventId: ticket.eventId, deliveredControllerInstanceIds: [ticket.controllerId]
+                        )
+                    }
                 }
             }
-            if !deliveredControllerIds.isEmpty || record.recipientControllerInstanceIds.isEmpty {
+            if record.recipientControllerInstanceIds.isEmpty {
                 try? await adapter.acknowledgeControllerRetentionReclamation(
-                    eventId: record.eventId,
-                    deliveredControllerInstanceIds: deliveredControllerIds
+                    eventId: record.eventId, deliveredControllerInstanceIds: []
                 )
             }
         }
