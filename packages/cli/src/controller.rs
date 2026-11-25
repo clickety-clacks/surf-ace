@@ -185,7 +185,6 @@ struct RegistrySnapshot {
     payload: Value,
     identity: RegistryIdentity,
     server_time_ms: u64,
-    max_endpoint_lease_ms: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -200,7 +199,6 @@ struct EndpointCandidate {
     pre_pair_describe_supported: bool,
     lease_generation: u64,
     registration_observed_at_ms: u64,
-    lease_expires_at_ms: u64,
 }
 
 enum EndpointProbeOutcome {
@@ -230,12 +228,12 @@ impl EndpointCandidate {
                 "fleetId": self.identity.fleet_id,
             },
             "registryServerTimeMs": snapshot.server_time_ms,
-            "maxEndpointLeaseMs": snapshot.max_endpoint_lease_ms,
+            "presence": "online",
+            "lastSeenAtMs": null,
             "registrationReady": snapshot.payload.get("registrationReady").cloned().unwrap_or(Value::Null),
             "endpointLease": {
                 "leaseGeneration": self.lease_generation,
                 "registrationObservedAtMs": self.registration_observed_at_ms,
-                "leaseExpiresAtMs": self.lease_expires_at_ms,
             },
         })
     }
@@ -259,12 +257,14 @@ fn execute_window_describe(invocation: &Invocation) -> Result<CliOutput, CliErro
         .map_err(|error| with_probe_observation(error, &selected, direct_observed_at_ms, &probe))?;
     let rechecked = select_endpoint_candidate(&after, window_label).map_err(|error| {
         with_probe_observation(
-            discovery_error(
-                "stale_registration",
-                format!(
-                    "Registry row did not remain uniquely current after direct observation: {error}"
-                ),
-            ),
+            if error.code() == "client_offline" {
+                error
+            } else {
+                discovery_error(
+                    "revision_churn",
+                    format!("Registry row did not remain uniquely current after direct observation: {error}"),
+                )
+            },
             &selected,
             direct_observed_at_ms,
             &probe,
@@ -273,7 +273,7 @@ fn execute_window_describe(invocation: &Invocation) -> Result<CliOutput, CliErro
     if !selected.same_registration(&rechecked) {
         return Err(with_probe_observation(
             discovery_error(
-                "stale_registration",
+                "revision_churn",
                 "Registry identity, client, surface, endpoint, window label, or lease generation changed during observation",
             ),
             &selected,
@@ -286,7 +286,7 @@ fn execute_window_describe(invocation: &Invocation) -> Result<CliOutput, CliErro
     {
         return Err(with_probe_observation(
             discovery_error(
-                "stale_registration",
+                "revision_churn",
                 "Registry endpoint source changed during describe-unavailable resolution",
             ),
             &selected,
@@ -464,15 +464,6 @@ fn read_discovery_registry(registry: &str) -> Result<RegistrySnapshot, CliError>
                 "Registry server time is missing or invalid",
             )
         })?;
-    let max_endpoint_lease_ms = object
-        .get("maxEndpointLeaseMs")
-        .and_then(safe_positive_u64)
-        .ok_or_else(|| {
-            discovery_error(
-                "registry_response_invalid",
-                "Registry endpoint lease bound is missing or invalid",
-            )
-        })?;
     if !object
         .get("registrationReady")
         .is_some_and(Value::is_boolean)
@@ -490,7 +481,6 @@ fn read_discovery_registry(registry: &str) -> Result<RegistrySnapshot, CliError>
         payload,
         identity: parsed_identity,
         server_time_ms,
-        max_endpoint_lease_ms,
     })
 }
 
@@ -508,6 +498,8 @@ fn select_endpoint_candidate(
     let mut label_seen = false;
     let mut label_has_supported_endpoint = false;
     let mut candidates = Vec::new();
+    let mut offline = Vec::new();
+    let mut online_matches = 0;
     for client in clients {
         let Some(client_object) = client.as_object() else {
             continue;
@@ -526,6 +518,14 @@ fn select_endpoint_candidate(
                 continue;
             }
             label_seen = true;
+            match client.get("presence").and_then(Value::as_str) {
+                Some("offline") => {
+                    offline.push((client_id, client.get("lastSeenAtMs").cloned().unwrap_or(Value::Null)));
+                    continue;
+                }
+                Some("online") => online_matches += 1,
+                _ => continue,
+            }
             let row_identity = parse_registry_identity(client_object.get("registryIdentity"))
                 .map_err(|message| {
                     discovery_error(
@@ -560,7 +560,6 @@ fn select_endpoint_candidate(
                 ![
                     "leaseGeneration",
                     "registrationObservedAtMs",
-                    "leaseExpiresAtMs",
                 ]
                 .contains(&key.as_str())
             }) {
@@ -576,16 +575,7 @@ fn select_endpoint_candidate(
             else {
                 continue;
             };
-            let Some(lease_expires_at_ms) =
-                lease.get("leaseExpiresAtMs").and_then(safe_positive_u64)
-            else {
-                continue;
-            };
-            if registration_observed_at_ms > snapshot.server_time_ms
-                || lease_expires_at_ms <= snapshot.server_time_ms
-                || lease_expires_at_ms <= registration_observed_at_ms
-                || lease_expires_at_ms - snapshot.server_time_ms > snapshot.max_endpoint_lease_ms
-            {
+            if registration_observed_at_ms > snapshot.server_time_ms {
                 continue;
             }
             candidates.push(EndpointCandidate {
@@ -610,18 +600,26 @@ fn select_endpoint_candidate(
                     .unwrap_or(false),
                 lease_generation,
                 registration_observed_at_ms,
-                lease_expires_at_ms,
             });
         }
     }
     match candidates.len() {
+        0 if online_matches == 0 && offline.len() == 1 => {
+            let (client_id, last_seen) = &offline[0];
+            let message = "The registry reports that the client is offline".to_owned();
+            Err(CliError::Discovery {
+                code: "client_offline",
+                details: json!({ "message": message, "clientId": client_id, "lastSeenAtMs": last_seen }),
+                message,
+            })
+        }
         0 if label_seen && !label_has_supported_endpoint => Err(discovery_error(
             "endpoint_unconfigured",
             "Named window has no supported direct endpoint",
         )),
         0 if label_seen => Err(discovery_error(
-            "stale_registration",
-            "Named window has no current supported endpoint lease",
+            "revision_churn",
+            "Named window has no current supported registration",
         )),
         0 => Err(discovery_error(
             "window_not_found",
@@ -749,7 +747,7 @@ fn probe_surface(
                 "Client application is not ready for an authoritative observation",
             ),
             "surface_not_found" => (
-                "stale_registration",
+                "revision_churn",
                 "Registry surface is no longer live at the endpoint",
             ),
             "unsupported_protocol_version" => (
@@ -887,7 +885,7 @@ fn with_probe_observation(
     observed_at_ms: u64,
     probe: &Result<EndpointProbeOutcome, CliError>,
 ) -> CliError {
-    let CliError::Discovery { code, message, .. } = error else {
+    let CliError::Discovery { code, message, mut details } = error else {
         return error;
     };
     let (transport_reachability, application_readiness, surface_observation) = match probe {
@@ -939,11 +937,8 @@ fn with_probe_observation(
             (transport, readiness, None)
         }
     };
-    let mut details = json!({
-        "message": message,
-        "transportReachability": transport_reachability,
-        "applicationReadiness": application_readiness,
-    });
+    details["transportReachability"] = transport_reachability;
+    details["applicationReadiness"] = application_readiness;
     if let Some(observation) = surface_observation {
         details["surfaceObservation"] = observation;
     }

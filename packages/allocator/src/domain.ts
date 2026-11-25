@@ -49,6 +49,8 @@ export const ALLOCATOR_ERROR_CODES = [
   "invalid_request_id_reuse",
   "persistence_failed",
   "persistence_outcome_unknown",
+  "registry_unavailable",
+  "store_deadline_exceeded",
   "unsupported_protocol_version",
   "writer_fence_unavailable",
 ] as const;
@@ -124,6 +126,7 @@ export type AllocatorErrorResponse = {
     code: AllocatorErrorCode;
     details?: { allocatorId: string };
     message: string;
+    retryable?: true;
   };
   id: string;
   ok: false;

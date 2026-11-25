@@ -10,7 +10,9 @@ use tungstenite::client::{client_with_config, uri_mode, IntoClientRequest};
 use tungstenite::protocol::WebSocketConfig;
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::stream::Mode;
-use tungstenite::{client_tls_with_config, connect, Message, WebSocket};
+use tungstenite::{client_tls_with_config, Message, WebSocket};
+
+const WEBSOCKET_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Envelope {
@@ -62,36 +64,35 @@ pub trait DirectWire {
     fn close(&mut self) -> Result<(), WireFailure>;
 }
 
-pub struct WebSocketWire<S: Read + Write = TcpStream> {
+pub struct WebSocketWire<S: Read + Write = DeadlineTcpStream> {
     socket: WebSocket<MaybeTlsStream<S>>,
     deadline: Option<Instant>,
     max_response_bytes: Option<usize>,
     last_operation_block: Option<Value>,
 }
 
-impl WebSocketWire<TcpStream> {
-    pub fn connect_direct(endpoint: &str) -> Result<Self, WireFailure> {
-        let (socket, _) = connect(endpoint).map_err(|error| WireFailure::BeforeSend {
-            code: format!("reachability:{error}"),
-        })?;
-        Ok(Self {
-            socket,
-            deadline: None,
-            max_response_bytes: None,
-            last_operation_block: None,
-        })
-    }
-}
-
 impl WebSocketWire<DeadlineTcpStream> {
+    pub fn connect_direct(endpoint: &str) -> Result<Self, WireFailure> {
+        Self::connect_with_bounds(endpoint, WEBSOCKET_CONNECT_TIMEOUT, None, None)
+    }
+
     pub fn connect_direct_bounded(
         endpoint: &str,
-        timeout: Duration,
+        response_timeout: Duration,
         max_response_bytes: usize,
+    ) -> Result<Self, WireFailure> {
+        Self::connect_with_bounds(endpoint, WEBSOCKET_CONNECT_TIMEOUT, Some(response_timeout), Some(max_response_bytes))
+    }
+
+    fn connect_with_bounds(
+        endpoint: &str,
+        connect_timeout: Duration,
+        response_timeout: Option<Duration>,
+        max_response_bytes: Option<usize>,
     ) -> Result<Self, WireFailure> {
         let deadline =
             Instant::now()
-                .checked_add(timeout)
+                .checked_add(connect_timeout)
                 .ok_or_else(|| WireFailure::BeforeSend {
                     code: "reachability:deadline_exhausted".into(),
                 })?;
@@ -149,16 +150,16 @@ impl WebSocketWire<DeadlineTcpStream> {
             });
         }
         let stream = DeadlineTcpStream::new(stream, deadline);
-        let config = WebSocketConfig::default()
-            .max_message_size(Some(max_response_bytes))
-            .max_frame_size(Some(max_response_bytes));
-        let socket = match mode {
-            Mode::Plain => client_with_config(request, MaybeTlsStream::Plain(stream), Some(config))
+        let config = max_response_bytes.map(|limit| WebSocketConfig::default()
+            .max_message_size(Some(limit))
+            .max_frame_size(Some(limit)));
+        let mut socket = match mode {
+            Mode::Plain => client_with_config(request, MaybeTlsStream::Plain(stream), config)
                 .map(|(socket, _)| socket)
                 .map_err(|error| WireFailure::BeforeSend {
                     code: format!("reachability:{error}"),
                 })?,
-            Mode::Tls => client_tls_with_config(request, stream, Some(config), None)
+            Mode::Tls => client_tls_with_config(request, stream, config, None)
                 .map(|(socket, _)| socket)
                 .map_err(|error| WireFailure::BeforeSend {
                     code: format!("reachability:{error}"),
@@ -169,58 +170,58 @@ impl WebSocketWire<DeadlineTcpStream> {
                 code: "reachability:deadline_exceeded".into(),
             });
         }
-        let wire = Self {
-            socket,
-            deadline: Some(deadline),
-            max_response_bytes: Some(max_response_bytes),
-            last_operation_block: None,
+        let response_deadline = response_timeout.map(|timeout| Instant::now() + timeout);
+        let transport = match socket.get_mut() {
+            MaybeTlsStream::Plain(stream) => stream,
+            MaybeTlsStream::Rustls(stream) => &mut stream.sock,
+            _ => unreachable!("only plain and rustls WebSockets are enabled"),
         };
-        Ok(wire)
+        transport.deadline = response_deadline;
+        Ok(Self {
+            socket,
+            deadline: response_deadline,
+            max_response_bytes,
+            last_operation_block: None,
+        })
     }
 }
 
 pub struct DeadlineTcpStream {
     stream: TcpStream,
-    deadline: Instant,
+    deadline: Option<Instant>,
 }
 
 impl DeadlineTcpStream {
     fn new(stream: TcpStream, deadline: Instant) -> Self {
-        Self { stream, deadline }
+        Self { stream, deadline: Some(deadline) }
     }
 
-    fn refresh_read_timeout(&self) -> io::Result<()> {
-        let remaining = self.deadline.saturating_duration_since(Instant::now());
+    fn remaining_timeout(&self) -> io::Result<Option<Duration>> {
+        let Some(deadline) = self.deadline else { return Ok(None) };
+        let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             return Err(io::Error::new(io::ErrorKind::TimedOut, "deadline_exceeded"));
         }
-        self.stream.set_read_timeout(Some(remaining))
+        Ok(Some(remaining))
     }
 
-    fn refresh_write_timeout(&self) -> io::Result<()> {
-        let remaining = self.deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err(io::Error::new(io::ErrorKind::TimedOut, "deadline_exceeded"));
-        }
-        self.stream.set_write_timeout(Some(remaining))
-    }
 }
 
 impl Read for DeadlineTcpStream {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        self.refresh_read_timeout()?;
+        self.stream.set_read_timeout(self.remaining_timeout()?)?;
         self.stream.read(buffer)
     }
 }
 
 impl Write for DeadlineTcpStream {
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        self.refresh_write_timeout()?;
+        self.stream.set_write_timeout(self.remaining_timeout()?)?;
         self.stream.write(buffer)
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        self.refresh_write_timeout()?;
+        self.stream.set_write_timeout(self.remaining_timeout()?)?;
         self.stream.flush()
     }
 }
@@ -823,7 +824,7 @@ mod deadline_tests {
     }
 
     #[test]
-    fn websocket_handshake_uses_the_same_absolute_deadline() {
+    fn websocket_handshake_obeys_the_connection_deadline() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let server = thread::spawn(move || {
@@ -844,7 +845,7 @@ mod deadline_tests {
         let timeout = Duration::from_millis(180);
         let started = Instant::now();
         let result =
-            WebSocketWire::connect_direct_bounded(&format!("ws://{address}"), timeout, 65_536);
+            WebSocketWire::connect_with_bounds(&format!("ws://{address}"), timeout, None, Some(65_536));
         assert!(result.is_err());
         assert!(
             started.elapsed() < timeout + Duration::from_millis(140),

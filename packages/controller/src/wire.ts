@@ -1,12 +1,16 @@
 import { randomUUID } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
 
 import WebSocket, { type RawData } from "ws";
+
+import { reconnectDelayMs, REGISTRY_FRAME_TIMEOUT_MS, WEBSOCKET_CONNECT_TIMEOUT_MS } from "@surf-ace/protocol";
 
 export type ControllerWireEnvelope = {
   error?: {
     code?: string;
     details?: unknown;
     message?: string;
+    retryable?: boolean;
   };
   id?: string;
   ok?: boolean;
@@ -57,7 +61,7 @@ export function parseRegistryIdentity(payload: unknown): RegistryIdentity {
 type PendingRequest = {
   reject: (error: Error) => void;
   resolve: (response: ControllerWireEnvelope) => void;
-  timeout: NodeJS.Timeout;
+  timeout?: NodeJS.Timeout;
 };
 
 export class PublicControllerWireClient {
@@ -67,35 +71,63 @@ export class PublicControllerWireClient {
   private readonly pending = new Map<string, PendingRequest>();
   private socket: WebSocket | null = null;
 
+  private opening: Promise<void> | null = null;
+  private readonly registry: boolean;
+  private readonly requestTimeoutMs: number;
+  private readonly onRetry?: (error: NonNullable<ControllerWireEnvelope["error"]>) => void;
+
   constructor(
     readonly url: string,
-    private readonly requestTimeoutMs = 10_000,
-  ) {}
+    options: number | { registry: true; onRetry?: (error: NonNullable<ControllerWireEnvelope["error"]>) => void } = 10_000,
+  ) {
+    this.registry = typeof options !== "number";
+    this.requestTimeoutMs = typeof options === "number" ? options : 10_000;
+    if (typeof options !== "number") this.onRetry = options.onRetry;
+  }
 
   async connect(): Promise<void> {
-    if (this.socket?.readyState === WebSocket.OPEN) {
-      return;
-    }
-    const socket = new WebSocket(this.url, { handshakeTimeout: this.requestTimeoutMs });
+    if (this.socket?.readyState === WebSocket.OPEN) return;
+    if (this.opening) return await this.opening;
+    if (this.socket) throw new Error("controller_wire_closing");
+
+    const socket = new WebSocket(this.url, { handshakeTimeout: WEBSOCKET_CONNECT_TIMEOUT_MS });
     this.socket = socket;
-    socket.on("message", (data) => this.handleMessage(data));
-    socket.on("close", () => {
-      for (const [id, pending] of this.pending) {
-        clearTimeout(pending.timeout);
-        pending.reject(new Error("controller_wire_closed"));
-        this.pending.delete(id);
-      }
-      if (this.socket === socket) {
+    let frameDeadline: NodeJS.Timeout | undefined;
+    const receivedFrame = () => {
+      if (!this.registry) return;
+      clearTimeout(frameDeadline);
+      frameDeadline = setTimeout(() => socket.terminate(), REGISTRY_FRAME_TIMEOUT_MS);
+    };
+    socket.on("message", (data) => {
+      receivedFrame();
+      if (this.socket === socket) this.handleMessage(data);
+    });
+    socket.on("ping", receivedFrame);
+    socket.on("pong", receivedFrame);
+    this.opening = new Promise<void>((resolve, reject) => {
+      socket.on("error", reject);
+      socket.once("open", () => {
+        receivedFrame();
+        resolve();
+      });
+      socket.once("close", () => {
+        clearTimeout(frameDeadline);
+        reject(new Error("controller_wire_closed"));
+        if (this.socket !== socket) return;
         this.socket = null;
-      }
-      for (const listener of this.closeListeners) {
-        listener();
-      }
+        for (const pending of this.pending.values()) {
+          clearTimeout(pending.timeout);
+          pending.reject(new Error("controller_wire_closed"));
+        }
+        this.pending.clear();
+        for (const listener of this.closeListeners) listener();
+      });
     });
-    await new Promise<void>((resolve, reject) => {
-      socket.once("open", () => resolve());
-      socket.once("error", reject);
-    });
+    try {
+      await this.opening;
+    } finally {
+      this.opening = null;
+    }
   }
 
   // Identity comes from the caller's existing authority. This connection never
@@ -178,6 +210,29 @@ export class PublicControllerWireClient {
     payload: unknown = {},
     id = `rq_${randomUUID().replaceAll("-", "")}`,
   ): Promise<ControllerWireEnvelope> {
+    if (!this.registry) return await this.sendRequest(op, payload, id);
+    const socket = this.socket;
+    const retry = new AbortController();
+    const unlisten = this.onClose(() => retry.abort(new Error("controller_wire_closed")));
+    try {
+      for (let attempt = 0; ; attempt += 1) {
+        if (socket !== this.socket) throw new Error("controller_wire_closed");
+        const response = await this.sendRequest(op, payload, id);
+        if (response.ok !== false || !response.error?.retryable ||
+            response.op !== op || response.v !== 1) return response;
+        this.onRetry?.(response.error);
+        try {
+          await delay(reconnectDelayMs(attempt), undefined, { signal: retry.signal });
+        } catch (error) {
+          throw retry.signal.aborted ? retry.signal.reason : error;
+        }
+      }
+    } finally {
+      unlisten();
+    }
+  }
+
+  private async sendRequest(op: string, payload: unknown, id: string): Promise<ControllerWireEnvelope> {
     const socket = this.socket;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       throw new Error("controller_wire_not_connected");
@@ -191,12 +246,22 @@ export class PublicControllerWireClient {
       v: 1,
     };
     return await new Promise<ControllerWireEnvelope>((resolve, reject) => {
-      const timeout = setTimeout(() => {
+      if (this.pending.has(id)) {
+        reject(new Error("controller_wire_request_already_pending"));
+        return;
+      }
+      const timeout = this.registry ? undefined : setTimeout(() => {
         this.pending.delete(id);
         reject(new Error(`controller_wire_timeout:${op}`));
       }, this.requestTimeoutMs);
-      this.pending.set(id, { reject, resolve, timeout });
-      socket.send(JSON.stringify(envelope));
+      const pending = { reject, resolve, timeout };
+      this.pending.set(id, pending);
+      socket.send(JSON.stringify(envelope), (error) => {
+        if (!error || this.pending.get(id) !== pending) return;
+        clearTimeout(timeout);
+        this.pending.delete(id);
+        reject(error);
+      });
     });
   }
 
@@ -207,7 +272,8 @@ export class PublicControllerWireClient {
     }
     await new Promise<void>((resolve) => {
       socket.once("close", () => resolve());
-      socket.close(1000, "controller_shutdown");
+      if (this.registry || socket.readyState === WebSocket.CONNECTING) socket.terminate();
+      else socket.close(1000, "controller_shutdown");
     });
   }
 

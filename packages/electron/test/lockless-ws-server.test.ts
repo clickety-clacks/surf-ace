@@ -319,7 +319,6 @@ function describeFixture() {
   core.setRegistryEndpointLease({
     leaseGeneration: 17,
     registrationObservedAtMs: now - 1_000,
-    leaseExpiresAtMs: now + 14_000,
   });
   return { binding, core, surface };
 }
@@ -573,7 +572,6 @@ test("surface.describe keeps saved windows observable and readable during uncert
   core.setRegistryEndpointLease({
     leaseGeneration: 17,
     registrationObservedAtMs: Date.now() - 1_000,
-    leaseExpiresAtMs: Date.now() + 14_000,
   });
   let durableState = core.getPersistentState();
   const port = nextPort++;
@@ -703,7 +701,6 @@ test("surface.describe reports readiness degradation until durable persistence c
       fixture.core.setRegistryEndpointLease({
         leaseGeneration: 18,
         registrationObservedAtMs: Date.now(),
-        leaseExpiresAtMs: Date.now() + 14_000,
       });
       await readiness.track(async () => {
         signalStarted();
@@ -735,7 +732,6 @@ test("surface.describe reports readiness degradation until durable persistence c
       fixture.core.setRegistryEndpointLease({
         leaseGeneration: 19,
         registrationObservedAtMs: Date.now(),
-        leaseExpiresAtMs: Date.now() + 14_000,
       });
       await readiness.track(async () => {
         signalFailureStarted();
@@ -4964,7 +4960,6 @@ test("surface.describe returns topology when saved registry binding or lease is 
         state.registryEndpointLease = {
           leaseGeneration: 0,
           registrationObservedAtMs: Date.now() - 1_000,
-          leaseExpiresAtMs: Date.now() + 14_000,
         };
       },
       expectedClientId: "a".repeat(64),
@@ -4972,21 +4967,6 @@ test("surface.describe returns topology when saved registry binding or lease is 
       expectedRegistryIdentityUnavailable: false,
       expectedEndpointLeaseUnavailable: true,
       expectedLimitations: ["endpoint_lease_unavailable"],
-    },
-    {
-      name: "lease-expired-matching",
-      prepare: (state: ReturnType<ReturnType<typeof describeFixture>["core"]["getPersistentState"]>) => {
-        state.registryEndpointLease = {
-          leaseGeneration: 17,
-          registrationObservedAtMs: Date.now() - 20_000,
-          leaseExpiresAtMs: Date.now() - 1_000,
-        };
-      },
-      expectedClientId: "a".repeat(64),
-      expectedLeaseGeneration: 17,
-      expectedRegistryIdentityUnavailable: false,
-      expectedEndpointLeaseUnavailable: false,
-      expectedLimitations: ["endpoint_lease_expired"],
     },
     {
       name: "stale",
@@ -4999,14 +4979,13 @@ test("surface.describe returns topology when saved registry binding or lease is 
         state.registryEndpointLease = {
           leaseGeneration: 16,
           registrationObservedAtMs: Date.now() - 20_000,
-          leaseExpiresAtMs: Date.now() - 1_000,
         };
       },
       expectedClientId: "a".repeat(64),
       expectedLeaseGeneration: 16,
       expectedRegistryIdentityUnavailable: false,
       expectedEndpointLeaseUnavailable: false,
-      expectedLimitations: ["registry_binding_stale", "endpoint_lease_expired", "endpoint_lease_stale"],
+      expectedLimitations: ["registry_binding_stale", "endpoint_lease_stale"],
     },
   ] as const;
 

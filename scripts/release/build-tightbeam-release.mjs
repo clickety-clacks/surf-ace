@@ -44,6 +44,7 @@ export const TIGHTBEAM_LINUX_SERVER_FILES = Object.freeze([
   "schemas/allocator/004_pane_label_reuse.sql",
   "schemas/allocator/005_window_label_reuse.sql",
   "schemas/allocator/006_disable_window_label_reuse.sql",
+  "schemas/allocator/007_registration_projection.sql",
   "schemas/protocol/schema.json",
   "server/central-server.cjs",
   "service/surf-ace-server@.service",
@@ -170,6 +171,8 @@ const linuxServerReadme = [
   "Apply `schemas/allocator/006_disable_window_label_reuse.sql` once 005 is installed;",
   "do not reapply 005. This additive function installation changes no gate, label,",
   "allocation or identity. Stage and verify it before a separately authorized installation.",
+  "Apply `schemas/allocator/007_registration_projection.sql` before upgrading the registry.",
+  "It retains the last registered inventory for offline lookups after a restart.",
   "",
   "To disable future window-label reuse, connect to the intended primary as an",
   "operator with membership in `surf_ace_allocator_owner` and run:",
@@ -276,6 +279,7 @@ export async function assembleTightbeamLinuxStage({ sourceDir, stageDir, target 
     "schemas/allocator/004_pane_label_reuse.sql": path.join(source, "packages/allocator/sql/004_pane_label_reuse.sql"),
     "schemas/allocator/005_window_label_reuse.sql": path.join(source, "packages/allocator/sql/005_window_label_reuse.sql"),
     "schemas/allocator/006_disable_window_label_reuse.sql": path.join(source, "packages/allocator/sql/006_disable_window_label_reuse.sql"),
+    "schemas/allocator/007_registration_projection.sql": path.join(source, "packages/allocator/sql/007_registration_projection.sql"),
     "schemas/protocol/schema.json": path.join(source, "packages/electron/dist/schema.json"),
     "server/central-server.cjs": path.join(source, "packages/electron/dist/central-server.cjs"),
     "service/surf-ace-server@.service": path.join(toolingRoot, "scripts/release/templates/surf-ace-server@.service"),
@@ -514,6 +518,8 @@ export async function writeTightbeamManifest({
   const windowLabelMigration = path.join(source, "packages/allocator/sql/005_window_label_reuse.sql");
   const disableWindowLabelMigrationPath = "schemas/allocator/006_disable_window_label_reuse.sql";
   const disableWindowLabelMigration = path.join(source, "packages/allocator/sql/006_disable_window_label_reuse.sql");
+  const registrationProjectionMigrationPath = "schemas/allocator/007_registration_projection.sql";
+  const registrationProjectionMigration = path.join(source, "packages/allocator/sql/007_registration_projection.sql");
   const manifestPath = path.join(output, TIGHTBEAM.manifest);
   await writeCanonicalJson(manifestPath, {
     acceptance: {
@@ -554,6 +560,10 @@ export async function writeTightbeamManifest({
         path: disableWindowLabelMigrationPath,
         sha256: await sha256(disableWindowLabelMigration),
         sizeBytes: (await fs.stat(disableWindowLabelMigration)).size,
+      }, {
+        path: registrationProjectionMigrationPath,
+        sha256: await sha256(registrationProjectionMigration),
+        sizeBytes: (await fs.stat(registrationProjectionMigration)).size,
       }],
     } } : {}),
     toolchains: TOOLCHAINS,

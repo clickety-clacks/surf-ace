@@ -1745,6 +1745,10 @@ actor SurfAceLocklessRuntimeAdapter {
         }
     }
 
+    nonisolated func committedRegistrationSnapshot() -> SurfAceLocklessAuthorityState {
+        coordinator.committedSnapshot()
+    }
+
     func snapshot() async -> SurfAceLocklessAuthorityState {
         await coordinator.snapshot()
     }

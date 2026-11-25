@@ -3,7 +3,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 
 import WebSocket, { WebSocketServer, type RawData } from "ws";
-import { parseAnnotationCursor } from "@surf-ace/protocol";
+import { keepWebSocketAlive, parseAnnotationCursor, reconnectDelayMs } from "@surf-ace/protocol";
 
 import { WindowLabelAuthority } from "./authority.js";
 import { AnnotationJournal } from "./annotation-journal.js";
@@ -19,7 +19,7 @@ import {
   type LabelClaimPayload,
   type LabelReconfirmPayload,
 } from "./domain.js";
-import { PostgresCustodyAdapter, type AdapterTestHooks, type AnnotationInfo, type PaneRetirementEvidence, type PostgresCustodyConfig, type WindowRetirementEvidence } from "./custody.js";
+import { PostgresCustodyAdapter, storeStatementDeadlineExceeded, type AdapterTestHooks, type AnnotationInfo, type PaneRetirementEvidence, type PostgresCustodyConfig, type WindowRetirementEvidence } from "./custody.js";
 import { parseAllocatorRequest } from "./validation.js";
 import {
   EndpointLeaseBook,
@@ -27,8 +27,6 @@ import {
   type DirectEndpointSource,
   type EndpointLease,
 } from "./endpoint-leases.js";
-
-const DEFAULT_MAX_ENDPOINT_LEASE_MS = 15_000;
 
 type RegisteredClientProjection = {
   clientId: string;
@@ -52,7 +50,6 @@ export type AllocatorServerConfig = {
   hostLockPath: string;
   listenHost: string;
   listenPort: number;
-  maxEndpointLeaseMs?: number;
 };
 
 export type AllocatorDiagnostics = {
@@ -101,14 +98,16 @@ export class AllocatorServer {
   private readonly annotationRoles = new WeakMap<WebSocket, "publisher" | "consumer">();
   private readonly annotationLeases = new Map<string, AnnotationLease>();
   private readonly registeredClients = new Map<string, RegisteredClientProjection>();
+  private readonly clientConnections = new Map<string, WebSocket>();
+  private readonly socketClients = new WeakMap<WebSocket, Set<string>>();
   private registrationTail: Promise<unknown> = Promise.resolve();
 
-  private async registerClient(payload: unknown, acceptedPeerAddress: string | null): Promise<unknown> {
+  private async registerClient(payload: unknown, acceptedPeerAddress: string | null, socket: WebSocket): Promise<unknown> {
     const registrationResultsV1 = isRecord(payload) ? payload.registrationResultsV1 : undefined;
     if (registrationResultsV1 !== undefined && typeof registrationResultsV1 !== "boolean") {
       throw new Error("invalid_registration");
     }
-    if (registrationResultsV1 === true) return await this.registerClientWithResults(payload, acceptedPeerAddress);
+    if (registrationResultsV1 === true) return await this.registerClientWithResults(payload, acceptedPeerAddress, socket);
 
     const value = payload as {
       clientId?: unknown;
@@ -267,7 +266,7 @@ export class AllocatorServer {
         (!this.custody.registrationReady || this.authority.serveStatus !== "serving")) {
       throw new AllocatorError("writer_fence_unavailable", "endpoint lease requires a validated serving writer");
     }
-    const endpointLease = this.endpointLeases.renew(
+    const endpointLease = this.endpointLeases.observe(
       clientId,
       leaseSignature,
       directEndpoint !== null,
@@ -283,11 +282,11 @@ export class AllocatorServer {
       registryIdentity: { allocatorId: state.allocatorId, fleetId: state.fleetId },
       surfaces: registered,
     };
-    this.registeredClients.set(clientId, result);
+    await this.publishRegistration(socket, result);
     return { ...result, completedPaneReleaseIds, completedWindowReleaseIds };
   }
 
-  private async registerClientWithResults(payload: unknown, acceptedPeerAddress: string | null): Promise<unknown> {
+  private async registerClientWithResults(payload: unknown, acceptedPeerAddress: string | null, socket: WebSocket): Promise<unknown> {
     const value = payload as {
       clientId?: unknown;
       directEndpoint?: unknown;
@@ -508,7 +507,7 @@ export class AllocatorServer {
         (!this.custody.registrationReady || this.authority.serveStatus !== "serving")) {
       throw new AllocatorError("writer_fence_unavailable", "endpoint lease requires a validated serving writer");
     }
-    const endpointLease = this.endpointLeases.renew(
+    const endpointLease = this.endpointLeases.observe(
       clientId,
       leaseSignature,
       directEndpoint !== null,
@@ -524,7 +523,7 @@ export class AllocatorServer {
       registryIdentity: { allocatorId: state.allocatorId, fleetId: state.fleetId },
       surfaces: registered,
     };
-    this.registeredClients.set(clientId, result);
+    await this.publishRegistration(socket, result);
     return {
       ...result,
       completedPaneReleaseIds: paneReleases.completedReleaseIds,
@@ -660,13 +659,37 @@ export class AllocatorServer {
     return { paneLabel: await this.custody.claimPane(value.clientId, value.surfaceId, value.paneId, value.paneLineageId) };
   }
 
+  private async publishRegistration(socket: WebSocket, result: RegisteredClientProjection): Promise<void> {
+    const previousProjection = this.registeredClients.get(result.clientId);
+    if (canonicalJson((previousProjection ?? null) as never) !== canonicalJson(result as never)) {
+      await this.custody.rememberRegistration(result.clientId, result);
+    }
+    this.registeredClients.set(result.clientId, result);
+    // A connection that closed mid-request must never take presence away from
+    // a still-connected incumbent. A later successful registration supersedes it.
+    if (socket.readyState !== WebSocket.OPEN) return;
+    const previous = this.clientConnections.get(result.clientId);
+    if (previous && previous !== socket) this.socketClients.get(previous)?.delete(result.clientId);
+    this.clientConnections.set(result.clientId, socket);
+    this.socketClients.get(socket)?.add(result.clientId);
+    this.lastSeen.delete(result.clientId);
+  }
+
+  private readonly lastSeen = new Map<string, number>();
+
   private async fleetTopology(): Promise<unknown> {
     const readiness = await this.authority.refreshReadinessSnapshot();
     const state = readiness.acceptedState ?? await this.custody.readAcceptedState();
     const registryServerTimeMs = this.endpointLeases.serverTimeMs();
     return {
-      clients: [...this.registeredClients.values()],
-      maxEndpointLeaseMs: this.endpointLeases.maxEndpointLeaseMs,
+      clients: [...this.registeredClients.values()].map((client) => {
+        const online = this.clientConnections.has(client.clientId);
+        return {
+          ...client,
+          presence: online ? "online" : "offline",
+          lastSeenAtMs: online ? null : this.lastSeen.get(client.clientId) ?? null,
+        };
+      }),
       registrationReady: readiness.ready,
       registryIdentity: {
         allocatorId: state.allocatorId,
@@ -679,10 +702,10 @@ export class AllocatorServer {
   private constructor(
     private readonly config: AllocatorServerConfig,
     private readonly hostLock: HostLock,
-    private readonly custody: PostgresCustodyAdapter<"writer">,
-    private readonly authority: WindowLabelAuthority,
+    private custody: PostgresCustodyAdapter<"writer">,
+    private authority: WindowLabelAuthority,
     private readonly webSocketServer: WebSocketServer,
-    private readonly annotationVerified: boolean,
+    private annotationVerified: boolean,
     private readonly endpointLeases: EndpointLeaseBook,
   ) {}
 
@@ -693,29 +716,8 @@ export class AllocatorServer {
     const { hostLock, custody } = await acquireStartupOwnership(config, testHooks, retrySignal);
     try {
       try {
-        const authority = new WindowLabelAuthority(custody);
-        // Retry only the unfinished stage: a busy port must not repeat completed
-        // journal verification or invalidate annotation consumer leases again.
-        await custody.finishStartup(() => authority.recoverPreparedTransactions(), retrySignal);
-        await custody.finishStartup(() => custody.validateLease(), retrySignal);
-        const annotationInstalled = await custody.finishStartup(async () => {
-          try {
-            await custody.annotationInfo();
-            return true;
-          } catch (error) {
-            if ((error as { code?: string }).code !== "42883") throw error;
-            return false;
-          }
-        }, retrySignal);
-        const annotationVerified = !annotationInstalled || await custody.finishStartup(async () => {
-          try {
-            await custody.verifyAnnotationStartup();
-            return true;
-          } catch (error) {
-            if (asAllocatorError(error).code !== "annotation_journal_unverified") throw error;
-            return false;
-          }
-        }, retrySignal);
+        const { authority, annotationVerified } = await prepareStore(custody, retrySignal);
+        const registrations = await custody.finishStartup(() => custody.readRegistrations(), retrySignal);
         const webSocketServer = await custody.finishStartup(async () => {
           const listener = new WebSocketServer({ host: config.listenHost, port: config.listenPort });
           try {
@@ -736,11 +738,11 @@ export class AllocatorServer {
           authority,
           webSocketServer,
           annotationVerified,
-          new EndpointLeaseBook(
-            custody.token.leaseGeneration,
-            config.maxEndpointLeaseMs ?? DEFAULT_MAX_ENDPOINT_LEASE_MS,
-          ),
+          new EndpointLeaseBook(custody.token.leaseGeneration),
         );
+        for (const projection of registrations as RegisteredClientProjection[]) {
+          server.registeredClients.set(projection.clientId, projection);
+        }
         webSocketServer.on("connection", (socket, request) => {
           server.accept(socket, request.socket.remoteAddress ?? null);
         });
@@ -765,6 +767,36 @@ export class AllocatorServer {
       port: address.port,
       url: `ws://${this.config.listenHost}:${address.port}`,
     };
+  }
+
+  async recoverStore(testHooks: AdapterTestHooks, signal: AbortSignal): Promise<void> {
+    await this.custody.terminate();
+    for (let attempt = 0; ; attempt += 1) {
+      await delay(reconnectDelayMs(attempt), undefined, { signal });
+      let custody: PostgresCustodyAdapter<"writer"> | undefined;
+      try {
+        custody = await PostgresCustodyAdapter.acquireWriter(this.config.custody, testHooks, signal);
+        const { authority, annotationVerified } = await prepareStore(custody, signal);
+        signal.throwIfAborted();
+        this.authority = authority;
+        this.annotationVerified = annotationVerified;
+        this.custody = custody;
+        return;
+      } catch {
+        await custody?.terminate();
+        signal.throwIfAborted();
+      }
+    }
+  }
+
+  private storeFailure(error?: unknown): { code: "registry_unavailable" | "store_deadline_exceeded"; message: string; retryable: true } | undefined {
+    if (this.custody.hasLostConnection) {
+      return { code: "registry_unavailable", message: "registry store unavailable", retryable: true };
+    }
+    if (storeStatementDeadlineExceeded(error)) {
+      return { code: "store_deadline_exceeded", message: "registry store statement deadline exceeded", retryable: true };
+    }
+    return undefined;
   }
 
   get connectionLost(): Promise<void> {
@@ -825,6 +857,9 @@ export class AllocatorServer {
   }
 
   private accept(socket: WebSocket, acceptedPeerAddress: string | null): void {
+    keepWebSocketAlive(socket);
+    this.socketClients.set(socket, new Set());
+    socket.on("error", () => socket.terminate());
     const replay = new Map<string, { fingerprint: string; response: string }>();
     let annotationTail: Promise<unknown> = Promise.resolve();
     socket.on("message", (data) => {
@@ -838,6 +873,12 @@ export class AllocatorServer {
       }
     });
     socket.on("close", () => {
+      const closedAt = Date.now();
+      for (const clientId of this.socketClients.get(socket) ?? []) {
+        if (this.clientConnections.get(clientId) !== socket) continue;
+        this.clientConnections.delete(clientId);
+        this.lastSeen.set(clientId, closedAt);
+      }
       for (const lease of this.annotationLeases.values()) {
         if (lease.socket !== socket) continue;
         lease.socket = null;
@@ -866,9 +907,26 @@ export class AllocatorServer {
       return;
     }
     if (registration && (registration.op === "client.register" || registration.op === "pane.claim" || registration.op === "fleet.topology")) {
+      if (registration.v !== 1 || registration.type !== "request" || typeof registration.id !== "string" || !registration.id) {
+        socket.close(1008, "invalid_envelope");
+        return;
+      }
+      const reply = (ok: boolean, body: unknown): void => {
+        if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({
+          v: 1, type: "response", id: registration.id, op: registration.op, ok,
+          [ok ? "payload" : "error"]: body, sentAt: Date.now(),
+        }));
+      };
+      const unavailable = this.storeFailure();
+      if (unavailable) {
+        reply(false, unavailable);
+        return;
+      }
       const run = this.registrationTail.then(async () => {
-        if (registration.v !== 1 || registration.type !== "request" || typeof registration.id !== "string" || !registration.id) {
-          socket.close(1008, "invalid_envelope");
+        if (socket.readyState !== WebSocket.OPEN) return;
+        const unavailable = this.storeFailure();
+        if (unavailable) {
+          reply(false, unavailable);
           return;
         }
         try {
@@ -878,19 +936,16 @@ export class AllocatorServer {
             await this.authority.refreshReadiness();
           }
           const payload = registration.op === "client.register"
-            ? await this.registerClient(registration.payload, acceptedPeerAddress)
+            ? await this.registerClient(registration.payload, acceptedPeerAddress, socket)
             : registration.op === "pane.claim"
               ? await this.claimPane(registration.payload)
               : await this.fleetTopology();
-          if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({
-            v: 1, type: "response", id: registration.id, op: registration.op, ok: true, payload, sentAt: Date.now(),
-          }));
+          reply(true, payload);
         } catch (error) {
-          if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({
-            v: 1, type: "response", id: registration.id, op: registration.op, ok: false,
-            error: { code: "registration_failed", message: error instanceof Error ? error.message : "registration_failed" },
-            sentAt: Date.now(),
-          }));
+          reply(false, this.storeFailure(error) ?? {
+            code: "registration_failed",
+            message: error instanceof Error ? error.message : "registration_failed",
+          });
         }
       });
       this.registrationTail = run.catch(() => undefined);
@@ -924,6 +979,14 @@ export class AllocatorServer {
       return;
     }
 
+    const unavailable = this.storeFailure();
+    if (unavailable) {
+      if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(
+        { ...errorResponse(request.id, request.op, new AllocatorError(unavailable.code, unavailable.message)),
+          error: unavailable },
+      ));
+      return;
+    }
     let response: AllocatorSuccessResponse | AllocatorErrorResponse;
     try {
       const payload = request.op === "authority.bind"
@@ -941,10 +1004,13 @@ export class AllocatorServer {
         v: 1,
       };
     } catch (error) {
-      response = errorResponse(request.id, request.op, asAllocatorError(error));
+      const failure = this.storeFailure(error);
+      response = failure
+        ? { ...errorResponse(request.id, request.op, new AllocatorError(failure.code, failure.message)), error: failure }
+        : errorResponse(request.id, request.op, asAllocatorError(error));
     }
     const encoded = JSON.stringify(response);
-    replay.set(request.id, { fingerprint, response: encoded });
+    if (response.ok || !response.error.retryable) replay.set(request.id, { fingerprint, response: encoded });
     if (replay.size > 1024) replay.delete(replay.keys().next().value!);
     if (socket.readyState === WebSocket.OPEN) socket.send(encoded);
   }
@@ -964,6 +1030,11 @@ export class AllocatorServer {
       socket.send(JSON.stringify({ v: 1, type: "response", op, id: request.id,
         ok, sentAt: Date.now(), [ok ? "payload" : "error"]: value }));
     };
+    const unavailable = this.storeFailure();
+    if (unavailable) {
+      reply(false, unavailable);
+      return;
+    }
     try {
       if (!this.annotationVerified) {
         throw new AllocatorError("annotation_journal_unverified", "annotation continuity could not be verified");
@@ -1132,8 +1203,8 @@ export class AllocatorServer {
         throw new AllocatorError("annotation_protocol_unsupported", "annotation operation is not implemented");
       }
     } catch (error) {
-      const failure = error instanceof AllocatorError ? error : asAllocatorError(error);
-      reply(false, { code: failure.code, message: failure.message,
+      const failure = asAllocatorError(error);
+      reply(false, this.storeFailure(error) ?? { code: failure.code, message: failure.message,
         ...(failure.details ? { details: failure.details } : {}) });
     }
   }
@@ -1193,36 +1264,54 @@ export class AllocatorServer {
   }
 }
 
-// A dead pg Client cannot reconnect. Restart the registry instance through its
-// existing acquisition path so every in-memory lease belongs to the new writer.
+async function prepareStore(custody: PostgresCustodyAdapter<"writer">, retrySignal?: AbortSignal) {
+  const authority = new WindowLabelAuthority(custody);
+  // Retry only the unfinished stage: a busy port must not repeat completed
+  // journal verification or invalidate annotation consumer leases again.
+  await custody.finishStartup(() => authority.recoverPreparedTransactions(), retrySignal);
+  await custody.finishStartup(() => custody.validateLease(), retrySignal);
+  const annotationInstalled = await custody.finishStartup(async () => {
+    try {
+      await custody.annotationInfo();
+      return true;
+    } catch (error) {
+      if ((error as { code?: string }).code !== "42883") throw error;
+      return false;
+    }
+  }, retrySignal);
+  const annotationVerified = !annotationInstalled || await custody.finishStartup(async () => {
+    try {
+      await custody.verifyAnnotationStartup();
+      return true;
+    } catch (error) {
+      if (asAllocatorError(error).code !== "annotation_journal_unverified") throw error;
+      return false;
+    }
+  }, retrySignal);
+
+  return { authority, annotationVerified };
+}
+
+// Reacquire custody without interrupting WebSocket liveness or presence.
 export async function startRecoveringAllocatorServer(
   config: AllocatorServerConfig,
   lifecycle: { unavailable?: () => void; recovered?: () => void } = {},
   testHooks: AdapterTestHooks = {},
 ) {
-  let server = await AllocatorServer.start(config, testHooks);
-  const restartConfig = { ...config, listenPort: server.address.port };
+  const server = await AllocatorServer.start(config, testHooks);
   let stopped = false;
   let stop!: () => void;
   const stopping = new Promise<void>((resolve) => { stop = resolve; });
   const retryCancellation = new AbortController();
-  let serverClose: Promise<void> | undefined;
-  const closeServer = () => serverClose ??= server.close();
   const recovery = (async () => {
     while (!stopped) {
       await Promise.race([server.connectionLost, stopping]);
       if (stopped) return;
       lifecycle.unavailable?.();
-      await closeServer();
-      while (!stopped) {
-        try {
-          server = await AllocatorServer.start(restartConfig, testHooks, retryCancellation.signal);
-          serverClose = undefined;
-          break;
-        } catch {
-          try { await delay(2_000, undefined, { signal: retryCancellation.signal }); }
-          catch (error) { if (!stopped) throw error; }
-        }
+      try {
+        await server.recoverStore(testHooks, retryCancellation.signal);
+      } catch (error) {
+        if (!stopped) throw error;
       }
       if (!stopped) lifecycle.recovered?.();
     }
@@ -1236,7 +1325,7 @@ export async function startRecoveringAllocatorServer(
       stopped = true;
       stop();
       retryCancellation.abort();
-      await recovery.finally(closeServer);
+      await recovery.finally(() => server.close());
     },
   };
 }
@@ -1594,8 +1683,5 @@ function validateServerConfig(config: AllocatorServerConfig): void {
     throw new TypeError("allocator listenHost and listenPort must be explicit and valid");
   }
   if (!config.hostLockPath) throw new TypeError("allocator hostLockPath is required");
-  const leaseLimit = config.maxEndpointLeaseMs ?? DEFAULT_MAX_ENDPOINT_LEASE_MS;
-  if (!Number.isSafeInteger(leaseLimit) || leaseLimit < 1) {
-    throw new TypeError("maxEndpointLeaseMs must be a positive safe integer");
-  }
+
 }

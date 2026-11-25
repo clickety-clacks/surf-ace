@@ -605,3 +605,64 @@ test("transport loss marks projection unsynchronized and reconciles with the sam
   );
   await session.stop();
 });
+// DESIGN §4.5: only consecutive missed pongs cause loss, and a late pong
+// cannot satisfy a later heartbeat. Short intervals exercise the same path.
+for (const lateReply of [false, true]) {
+  test(`two missed pongs reconnect with stable identity (late reply: ${lateReply})`, { timeout: 5_000 }, async () => {
+    let pings = 0;
+    let connects = 0;
+    let aborts = 0;
+    let firstReply: ((response: ControllerWireEnvelope) => void) | undefined;
+    let firstNonce: unknown;
+    let reconnected!: () => void;
+    const recovered = new Promise<void>((resolve) => { reconnected = resolve; });
+    const wire: ControllerWire = {
+      abort() {
+        aborts += 1;
+        assert.equal(pings, 4, "a successful second pong resets the missed count");
+      },
+      async close() {},
+      async connect() { connects += 1; },
+      onEvent() { return () => {}; },
+      async request(op, payload) {
+        if (op === "pair.request") {
+          assert.equal((payload as { controllerInstanceId: string }).controllerInstanceId, "ci_heartbeat");
+          if (connects === 2) setImmediate(reconnected);
+          return {
+            type: "response", op, ok: true,
+            payload: {
+              capabilities: {}, controllerInstanceId: "ci_heartbeat", limits: {},
+              mode: "lockless", receiptResolutions: [], scopes: [], sessionId: "session-test",
+            },
+          };
+        }
+        assert.equal(op, "heartbeat.ping");
+        pings += 1;
+        if (pings === 2) return { type: "response", op, ok: true, payload };
+        if (pings === 4 && lateReply) {
+          firstReply?.({ type: "response", op, ok: true, payload: { nonce: firstNonce } });
+        }
+        return await new Promise<ControllerWireEnvelope>((resolve) => {
+          if (pings === 1) {
+            firstReply = resolve;
+            firstNonce = (payload as { nonce: unknown }).nonce;
+          }
+        });
+      },
+    };
+    const session = new LocklessControllerSession({
+      heartbeatIntervalMs: 30, heartbeatTimeoutMs: 5, reconnectInitialDelayMs: 1,
+      preflightComplete: true,
+      identity: new ControllerIdentity(new MemoryStore(), () => "ci_heartbeat" as ControllerInstanceId),
+      projection: new BoundedControllerProjection(new MemoryStore(), 4096), wire,
+    });
+    try {
+      await session.start();
+      await recovered;
+      assert.equal(aborts, 1);
+      assert.equal(connects, 2);
+    } finally {
+      await session.stop();
+    }
+  });
+}

@@ -59,9 +59,10 @@ authorize a later mutation.
 
 `window_not_found` and `window_ambiguous` require a fresh explicit selection;
 never guess an endpoint from the registry host or choose the first duplicate.
-`endpoint_unconfigured` means the matching client did not register both a direct
-endpoint and pre-pair capability. `stale_registration` means the row or lease
-was absent, invalid, expired, or changed during observation.
+`client_offline` includes the last time the registry saw the client's connection
+close, or null after a registry restart. `endpoint_unconfigured` means the client
+did not publish a supported direct endpoint. `revision_churn` reports a
+registration or topology change during observation.
 `endpoint_unreachable` reports a failed direct connection. If the WebSocket
 connects but does not return a valid describe response, `application_unresponsive`
 reports the reachable transport separately from unknown application readiness.

@@ -40,6 +40,7 @@ import type {
   TopologyApplyRequest,
   Viewport,
 } from "../../protocol/src/index.js";
+import { keepWebSocketAlive } from "../../protocol/src/connection-liveness.js";
 import { validateEnvelopeType } from "../../protocol/src/validate.js";
 import {
   SURF_ACE_LOCKLESS_V1_CAPABILITY,
@@ -398,6 +399,7 @@ export class SurfaceWsServer {
     });
 
     this.wss.on("connection", (socket, request) => {
+      keepWebSocketAlive(socket);
       const remoteAddress = request.socket.remoteAddress ?? "<unknown>";
       const socketId = `sock_${randomUUID().replaceAll("-", "").slice(0, 12)}`;
       this.socketMeta.set(socket, {
@@ -3539,9 +3541,6 @@ export class SurfaceWsServer {
     if (!lease) {
       limitationCodes.push("endpoint_lease_unavailable");
     } else {
-      if (observedAtMs >= lease.leaseExpiresAtMs) {
-        limitationCodes.push("endpoint_lease_expired");
-      }
       if (lease.leaseGeneration !== request.payload.endpointLeaseGeneration) {
         limitationCodes.push("endpoint_lease_stale");
       }
@@ -6070,19 +6069,12 @@ export class SurfaceWsServer {
     if (socket.readyState !== WebSocket.OPEN) {
       return false;
     }
-    return await new Promise<boolean>((resolve, reject) => {
-      socket.send(payload, (error) => {
-        if (error) {
-          if (socket.readyState !== WebSocket.OPEN || isSocketClosedError(error)) {
-            resolve(false);
-            return;
-          }
-          reject(error);
-          return;
-        }
-        resolve(true);
-      });
+    // Enqueue in socket order, but do not let delivery extend a mutation
+    // or keep another controller from receiving its own reply.
+    socket.send(payload, (error) => {
+      if (error && socket.readyState === WebSocket.OPEN) socket.terminate();
     });
+    return true;
   }
 
   private tryCaptureSnapshot(
@@ -6198,13 +6190,6 @@ function errorResponse(
     type: "response",
     v: 1,
   };
-}
-
-function isSocketClosedError(error: unknown): boolean {
-  if (!(error instanceof Error)) {
-    return false;
-  }
-  return error.message.includes("WebSocket is not open");
 }
 
 function trimCache(cache: Map<string, SocketCacheEntry>): void {

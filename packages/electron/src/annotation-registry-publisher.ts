@@ -1,4 +1,5 @@
 import { parseAnnotationCursor, type AnnotationCursor } from "@surf-ace/protocol";
+import { reconnectDelayMs } from "../../protocol/src/connection-liveness.js";
 import { PublicControllerWireClient, type ControllerWireEnvelope } from "../../controller/src/wire.js";
 import type { SurfaceCore } from "./surface-core.js";
 import type { AnnotationDeliveryReceipt } from "./annotation-publisher-outbox.js";
@@ -19,6 +20,7 @@ export class AnnotationRegistryPublisher {
   private wanted = false;
   private stopped = false;
   private helloDone = false;
+  private retryAttempt = 0;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private active: Promise<void> = Promise.resolve();
   private lastSurfaceId: string | null = null;
@@ -32,7 +34,7 @@ export class AnnotationRegistryPublisher {
     private readonly core: SurfaceCore,
     private readonly persist: () => Promise<void>,
     private readonly onError: (error: unknown) => void,
-    wireFactory: (url: string) => AnnotationPublisherWire = (url) => new PublicControllerWireClient(url),
+    wireFactory: (url: string) => AnnotationPublisherWire = (url) => new PublicControllerWireClient(url, { registry: true }),
     private readonly onStatus: () => void = () => {},
   ) {
     const url = new URL(address);
@@ -84,7 +86,7 @@ export class AnnotationRegistryPublisher {
     this.wanted = true;
     if (this.running) return;
     this.running = true;
-    this.active = this.drain().catch((error) => {
+    this.active = this.drain().then(() => { this.retryAttempt = 0; }).catch((error) => {
       if (this.sending || this.lastSurfaceId) this.deliveryErrors.add(this.sending?.surfaceId ?? this.lastSurfaceId!);
       this.sending = null;
       this.publishStatus();
@@ -101,7 +103,7 @@ export class AnnotationRegistryPublisher {
     this.retryTimer = setTimeout(() => {
       this.retryTimer = null;
       this.notify();
-    }, 2_000);
+    }, reconnectDelayMs(this.retryAttempt++));
   }
 
   private async ensureHello(): Promise<void> {

@@ -3641,7 +3641,7 @@ let blockedStatus: string | null | undefined;
 
 function updateConnectionErrorBanner(wrapper: HTMLElement, state: RendererWindowState): void {
   let banner = wrapper.querySelector(".connection-status-banner") as HTMLDivElement | null;
-  const registryMessage = state.connectionBar === "connected" ? "" : state.connectionError?.trim() ?? "";
+  const registryMessage = state.connectionError?.trim() ?? "";
   const message = [state.capabilityStatus, registryMessage && `Registry ${state.connectionBar}: ${registryMessage}`]
     .filter(Boolean).join(" · ");
   const status = [blockedStatus, message].filter(Boolean).join(" · ");

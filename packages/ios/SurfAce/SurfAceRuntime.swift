@@ -160,7 +160,7 @@ actor SurfAceOutboundSender {
         let priority: Priority
         let sequence: Int
         let text: String
-        let continuation: CheckedContinuation<Void, Error>
+        let continuation: CheckedContinuation<Void, Error>?
     }
 
     private let socket: SurfAceWebSocket
@@ -179,28 +179,24 @@ actor SurfAceOutboundSender {
 
     func send(text: String, priority: Priority) async throws {
         try await withCheckedThrowingContinuation { continuation in
-            nextSequence += 1
-            queue.append(
-                QueuedSend(
-                    priority: priority,
-                    sequence: nextSequence,
-                    text: text,
-                    continuation: continuation
-                )
-            )
-            queue.sort { lhs, rhs in
-                if lhs.priority == rhs.priority {
-                    return lhs.sequence < rhs.sequence
-                }
-                return lhs.priority.rawValue > rhs.priority.rawValue
-            }
+            enqueue(text: text, priority: priority, continuation: continuation)
+        }
+    }
 
-            if !isDraining {
-                isDraining = true
-                Task {
-                    await drainQueue()
-                }
-            }
+    func enqueue(text: String, priority: Priority) {
+        enqueue(text: text, priority: priority, continuation: nil)
+    }
+
+    private func enqueue(text: String, priority: Priority, continuation: CheckedContinuation<Void, Error>?) {
+        nextSequence += 1
+        queue.append(QueuedSend(priority: priority, sequence: nextSequence, text: text, continuation: continuation))
+        queue.sort { lhs, rhs in
+            if lhs.priority == rhs.priority { return lhs.sequence < rhs.sequence }
+            return lhs.priority.rawValue > rhs.priority.rawValue
+        }
+        if !isDraining {
+            isDraining = true
+            Task { await drainQueue() }
         }
     }
 
@@ -212,11 +208,11 @@ actor SurfAceOutboundSender {
                     await prepareSend(next.text, next.priority)
                 }
                 try await socket.send(text: next.text)
-                next.continuation.resume()
+                next.continuation?.resume()
             } catch {
-                next.continuation.resume(throwing: error)
+                next.continuation?.resume(throwing: error)
                 for pending in queue {
-                    pending.continuation.resume(throwing: error)
+                    pending.continuation?.resume(throwing: error)
                 }
                 queue.removeAll()
                 isDraining = false
@@ -623,7 +619,7 @@ final class SurfAceRuntime {
             snapshot: { [weak self] in
                 guard let self else { throw SurfAceRegistrationError.stopped }
                 let adapter = try self.ensureLocklessAdapter()
-                return SurfAceRegistrationSurface.snapshot(await adapter.snapshot())
+                return SurfAceRegistrationSurface.snapshot(adapter.committedRegistrationSnapshot())
             },
             apply: { [weak self] assignments, expected in
                 guard let self else { throw SurfAceRegistrationError.stopped }
@@ -669,7 +665,7 @@ final class SurfAceRuntime {
                     allowLoopbackObservedAddress: self.isIsolatedTestHost
                 )
                 return try SurfAceRegistrationInput(
-                    state: await adapter.snapshot(),
+                    state: adapter.committedRegistrationSnapshot(),
                     clientId: identity.clientId,
                     directEndpoint: selection.endpoint,
                     directEndpointSource: selection.source,
@@ -1342,6 +1338,7 @@ final class SurfAceRuntime {
             if reidentifiedSurface { persistSurfaceTopology(surfaceId: surface.surfaceId) }
         }
         projectAnnotationDeliveryFeedback(state)
+        centralRegistration?.registrationStateCommitted()
     }
 
     private func projectAnnotationDeliveryFeedback(_ state: SurfAceLocklessAuthorityState,
@@ -2439,13 +2436,10 @@ final class SurfAceRuntime {
             }
         }
 
-        while true {
-            do {
-                guard let message = try await socket.receive() else {
-                    await handleSocketTermination(connectionUUID: connectionUUID)
-                    return
-                }
-
+        let messages = await socket.messages()
+        do {
+            for try await message in messages {
+                guard !terminatedConnectionUUIDs.contains(connectionUUID) else { break }
                 switch message {
                 case .close(let code, let reason):
                     surfAceGatewayLog(
@@ -2486,7 +2480,7 @@ final class SurfAceRuntime {
                     if let cached = replayCache[id] {
                         if cached.payloadDigest == payloadDigest {
                             let priority: SurfAceOutboundSender.Priority = (op == "heartbeat.ping") ? .heartbeat : .response
-                            try await sender.send(text: cached.responseJSON, priority: priority)
+                            await sender.enqueue(text: cached.responseJSON, priority: priority)
                             continue
                         }
 
@@ -2497,7 +2491,7 @@ final class SurfAceRuntime {
                             message: "request id reused with different payload"
                         )
                         if let json = encodeJSON(mismatch) {
-                            try await sender.send(text: json, priority: .response)
+                            await sender.enqueue(text: json, priority: .response)
                         }
                         continue
                     }
@@ -2517,7 +2511,7 @@ final class SurfAceRuntime {
                     }
 
                     let priority: SurfAceOutboundSender.Priority = (op == "heartbeat.ping") ? .heartbeat : .response
-                    try await sender.send(text: responseJSON, priority: priority)
+                    await sender.enqueue(text: responseJSON, priority: priority)
                     if let postSendAction = processed.postSendAction,
                        !terminatedConnectionUUIDs.contains(connectionUUID) {
                         await postSendAction()
@@ -2528,12 +2522,11 @@ final class SurfAceRuntime {
                         replayCache.removeValue(forKey: replayOrder.removeFirst())
                     }
                 }
-            } catch {
-                surfAceGatewayLog("socket loop failed connectionUUID=\(connectionUUID) error=\(error.localizedDescription)")
-                await handleSocketTermination(connectionUUID: connectionUUID)
-                return
             }
+        } catch {
+            surfAceGatewayLog("socket loop failed connectionUUID=\(connectionUUID) error=\(error.localizedDescription)")
         }
+        await handleSocketTermination(connectionUUID: connectionUUID)
     }
 
     private func processRequest(
@@ -4364,7 +4357,7 @@ final class SurfAceRuntime {
                 ])
                 for envelope in envelopes {
                     guard let json = encodeJSON(envelope) else { continue }
-                    try? await connection.sender.send(text: json, priority: .event)
+                    await connection.sender.enqueue(text: json, priority: .event)
                 }
             }
         }

@@ -16,7 +16,7 @@ import type {
   LocklessSurfaceOpenIntent,
   LocklessSurfaceRestoreIntent,
 } from "@surf-ace/protocol";
-import { SURF_ACE_LOCKLESS_V1_CAPABILITY } from "@surf-ace/protocol";
+import { reconnectDelayMs, SURF_ACE_LOCKLESS_V1_CAPABILITY } from "@surf-ace/protocol";
 
 import { ControllerIdentity } from "./identity.js";
 import {
@@ -131,7 +131,9 @@ export class LocklessControllerSession {
   private controllerInstanceId: ControllerInstanceId | null = null;
   private eventWork: Promise<void> = Promise.resolve();
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
-  private lastHeartbeatSuccessAt = 0;
+  private missedHeartbeats = 0;
+  private heartbeatPending = false;
+  private transportGeneration = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnecting = false;
   private stopRequested = false;
@@ -153,6 +155,7 @@ export class LocklessControllerSession {
   }
 
   private async startInternal(): Promise<LocklessPairResult> {
+    this.transportGeneration += 1;
     await this.options.projection.start();
     await this.options.projection.markUnsynchronized();
     for (const scopeId of this.options.projection.scopeIds()) {
@@ -242,10 +245,11 @@ export class LocklessControllerSession {
         }
       });
     }, 250);
-    this.lastHeartbeatSuccessAt = Date.now();
+    this.missedHeartbeats = 0;
+    this.heartbeatPending = false;
     this.heartbeatInterval = setInterval(() => {
       void this.sendHeartbeat();
-    }, this.options.heartbeatIntervalMs ?? 15_000);
+    }, this.options.heartbeatIntervalMs ?? 10_000);
     return {
       capabilities: record(payload.capabilities),
       controllerInstanceId: this.controllerInstanceId,
@@ -274,6 +278,7 @@ export class LocklessControllerSession {
   }
 
   private async cleanupTransport(): Promise<void> {
+    this.transportGeneration += 1;
     if (this.backgroundInterval) {
       clearInterval(this.backgroundInterval);
       this.backgroundInterval = null;
@@ -466,31 +471,32 @@ export class LocklessControllerSession {
   }
 
   private async sendHeartbeat(): Promise<void> {
-    if (
-      Date.now() - this.lastHeartbeatSuccessAt >=
-        (this.options.heartbeatTimeoutMs ?? 45_000)
-    ) {
-      this.options.wire.abort?.();
-      await this.handleTransportLoss();
-      return;
-    }
+    if (this.heartbeatPending || this.stopRequested || this.reconnecting) return;
+    this.heartbeatPending = true;
+    const generation = this.transportGeneration;
+    let deadline: ReturnType<typeof setTimeout> | undefined;
     try {
-      const nonce = `hb_${Date.now()}`;
-      const payload = responsePayload(
-        await this.options.wire.request("heartbeat.ping", { nonce }),
-      );
-      if (payload.nonce !== nonce) {
-        throw new Error("lockless_heartbeat_nonce_mismatch");
-      }
-      this.lastHeartbeatSuccessAt = Date.now();
+      const nonce = `hb_${randomUUID()}`;
+      const response = await Promise.race([
+        this.options.wire.request("heartbeat.ping", { nonce }),
+        new Promise<never>((_, reject) => {
+          deadline = setTimeout(() => reject(new Error("heartbeat_pong_missing")),
+            this.options.heartbeatTimeoutMs ?? 3_000);
+        }),
+      ]);
+      const payload = responsePayload(response);
+      if (payload.nonce !== nonce) throw new Error("lockless_heartbeat_nonce_mismatch");
+      if (generation === this.transportGeneration) this.missedHeartbeats = 0;
     } catch {
-      if (
-        Date.now() - this.lastHeartbeatSuccessAt >=
-          (this.options.heartbeatTimeoutMs ?? 45_000)
-      ) {
+      if (generation !== this.transportGeneration || this.stopRequested) return;
+      this.missedHeartbeats += 1;
+      if (this.missedHeartbeats >= 2) {
         this.options.wire.abort?.();
         await this.handleTransportLoss();
       }
+    } finally {
+      clearTimeout(deadline);
+      if (generation === this.transportGeneration) this.heartbeatPending = false;
     }
   }
 
@@ -499,6 +505,7 @@ export class LocklessControllerSession {
       return;
     }
     this.reconnecting = true;
+    this.transportGeneration += 1;
     if (this.backgroundInterval) {
       clearInterval(this.backgroundInterval);
       this.backgroundInterval = null;
@@ -519,24 +526,24 @@ export class LocklessControllerSession {
   }
 
   private scheduleReconnect(
-    delayMs = this.options.reconnectInitialDelayMs ?? 2_000,
+    attempt = 0,
   ): void {
     if (this.stopRequested || this.reconnectTimer) {
       return;
     }
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
-      void this.reconnect(delayMs);
-    }, delayMs);
+      void this.reconnect(attempt);
+    }, reconnectDelayMs(attempt, this.options.reconnectInitialDelayMs));
   }
 
-  private async reconnect(previousDelayMs: number): Promise<void> {
+  private async reconnect(attempt: number): Promise<void> {
     try {
       await this.startInternal();
       this.reconnecting = false;
     } catch {
       await this.cleanupTransport().catch(() => {});
-      this.scheduleReconnect(Math.min(previousDelayMs * 2, 30_000));
+      this.scheduleReconnect(attempt + 1);
     }
   }
 }

@@ -9,6 +9,7 @@ import type { PersistentPaneRetirement, PersistentWindowRetirement } from "./loc
 import {
   type PaneLabelAllocation,
   type PersistentRegistryEndpointLease,
+  type RegistryRegistrationState,
   type SurfaceCore,
 } from "./surface-core.js";
 
@@ -36,14 +37,12 @@ function registrationEndpointLease(payload: unknown): PersistentRegistryEndpoint
   if (!isRecord(lease)) return null;
   const value = lease as Record<string, unknown>;
   if (!Number.isSafeInteger(value.leaseGeneration) || Number(value.leaseGeneration) < 1 ||
-      !Number.isSafeInteger(value.registrationObservedAtMs) || Number(value.registrationObservedAtMs) < 0 ||
-      !Number.isSafeInteger(value.leaseExpiresAtMs) || Number(value.leaseExpiresAtMs) <= Number(value.registrationObservedAtMs)) {
+      !Number.isSafeInteger(value.registrationObservedAtMs) || Number(value.registrationObservedAtMs) < 0) {
     return null;
   }
   return {
     leaseGeneration: Number(value.leaseGeneration),
     registrationObservedAtMs: Number(value.registrationObservedAtMs),
-    leaseExpiresAtMs: Number(value.leaseExpiresAtMs),
   };
 }
 
@@ -70,6 +69,11 @@ type RegistrationPayload = {
   registrationResultsV1: true;
   surfaces: RegistrationSurface[];
   windowGenerationV1: true;
+};
+
+export type PendingCommittedRegistration = {
+  identity: RegistryIdentity;
+  state: RegistryRegistrationState;
 };
 
 type RegistrationRefusal = {
@@ -125,12 +129,12 @@ function responseError(response: ControllerWireEnvelope): Error {
 // MagicDNS and stable Tailscale Service names. Discovery fallback is a later slice.
 export class ConfiguredServerRegistration {
   private readonly wire: PublicControllerWireClient;
-  private timer: ReturnType<typeof setTimeout> | undefined;
   private stopped = false;
   private pending: Promise<void> = Promise.resolve();
   private reportedPendingWindowReleaseIds = new Set<string>();
   private readonly retrySuppressedClaimKeys = new Set<string>();
   private readonly reportedCompatibilityWarnings = new Set<string>();
+  private lastRegistrationKey: string | null = null;
   private registryIdentity: RegistryIdentity | null = null;
   private readonly abandonController = new AbortController();
 
@@ -140,13 +144,20 @@ export class ConfiguredServerRegistration {
     private readonly core: SurfaceCore,
     private readonly persist: () => Promise<void>,
     private readonly onError: (error: unknown) => void = () => undefined,
-    requestTimeoutMs = 10_000,
+    _requestTimeoutMs = 10_000,
     directEndpoint: string | null = null,
     private readonly onStage: (stage: string) => void = () => undefined,
+    private readonly committedState?: () => RegistryRegistrationState,
+    private readonly pendingRegistration?: { request: PendingCommittedRegistration | null },
   ) {
     const url = new URL(address);
     if (url.protocol !== "ws:" && url.protocol !== "wss:") throw new Error("server address must use ws or wss");
-    this.wire = new PublicControllerWireClient(url.toString(), requestTimeoutMs);
+    this.wire = new PublicControllerWireClient(url.toString(), {
+      registry: true,
+      onRetry: (error) => this.onError(new Error(error.code === "store_deadline_exceeded"
+        ? "registry store not responding"
+        : error.message ?? "registry unavailable")),
+    });
     this.directEndpoint = validateConfiguredDirectEndpoint(directEndpoint);
   }
 
@@ -181,20 +192,18 @@ export class ConfiguredServerRegistration {
     this.assertActive();
     this.setStage(stage);
     const transaction = this.core.locklessAuthority.transactionAsync(() => this.core.transactionAsync(async () => {
-      // The cycle deadline may expire while either authoritative queue is
-      // occupied. Recheck after acquiring both locks and before commit so a
-      // late result cannot publish mutations from an abandoned attempt.
+      // An abandoned connection cannot start a queued local mutation. Once
+      // the write starts, let its durable result settle before releasing it.
       this.assertActive();
-      const result = await this.raceAbandon(Promise.resolve().then(() => {
-        this.assertActive();
-        return operation();
-      }));
-      this.assertActive();
-      return result;
+      return await operation();
     }));
     const result = await this.raceAbandon(transaction);
     this.assertActive();
     return result;
+  }
+
+  isOpen(): boolean {
+    return this.wire.isOpen();
   }
 
   onClose(listener: () => void): () => void {
@@ -220,10 +229,7 @@ export class ConfiguredServerRegistration {
       throw new Error("allocator_release_pending");
     }
     this.setStage("pane claim registry identity");
-    const identity = await this.wire.readRegistryIdentity();
-    this.assertActive();
-    await this.confirmRegistryIdentity(identity, false);
-    this.assertActive();
+    if (!this.registryIdentity) throw new Error("allocator_unavailable");
     this.setStage("pane.claim request");
     const response = await this.wire.request("pane.claim", {
       clientId: this.clientId, surfaceId, paneId: String(paneId), paneLineageId,
@@ -254,10 +260,17 @@ export class ConfiguredServerRegistration {
       await this.wire.connect();
       this.assertActive();
       this.setStage("registry identity request");
-      const identity = await this.wire.readRegistryIdentity();
+      const identity = options.expectedIdentity ?? this.registryIdentity ?? await this.wire.readRegistryIdentity();
       this.assertActive();
-      if (options.expectedIdentity && !sameRegistry(identity, options.expectedIdentity)) {
-        throw new Error("registry_identity_changed_during_connection");
+      const committed = this.committedState?.();
+      if (committed?.binding?.clientId === this.clientId && sameRegistry(committed.binding, identity)) {
+        this.registryIdentity = identity;
+        const pending = this.pendingRegistration?.request;
+        if (pending && sameRegistry(pending.identity, identity)) {
+          await this.registerCommittedState(pending.state);
+        }
+        await this.registerCommittedState(committed);
+        return;
       }
       await this.confirmRegistryIdentity(identity, options.allowRebind === true);
       this.assertActive();
@@ -282,6 +295,63 @@ export class ConfiguredServerRegistration {
     });
     this.pending = run.catch(() => undefined);
     return run;
+  }
+
+  private async registerCommittedState(state: RegistryRegistrationState): Promise<void> {
+    const payload: RegistrationPayload = {
+      allocationGenerationV1: true,
+      clientId: this.clientId,
+      directEndpoint: this.directEndpoint,
+      pendingPaneReleases: state.pendingPaneReleases,
+      pendingWindowReleases: state.pendingWindowReleases,
+      prePairDescribeV1: true,
+      registrationResultsV1: true,
+      surfaces: state.surfaces.map(({ windowLabel, ...surface }) => surface),
+      windowGenerationV1: true,
+    };
+    const key = JSON.stringify(payload);
+    if (key === this.lastRegistrationKey) return;
+
+    const request = { identity: this.registryIdentity!, state };
+    if (this.pendingRegistration) this.pendingRegistration.request = request;
+    const response = await this.sendRegistration(payload);
+    if (this.pendingRegistration?.request === request) this.pendingRegistration.request = null;
+    if (!response.ok) throw responseError(response);
+    const parsed = this.parseRegistrationResponse(response, payload, this.registryIdentity!);
+    this.lastRegistrationKey = key;
+    this.core.setRegistryEndpointLease(parsed.endpointLease);
+    const writesLabels = parsed.refusedSurfaces.length > 0 || parsed.refusedPanes.length > 0 ||
+      parsed.surfaces.some((assignment) => {
+        const committed = state.surfaces.find((surface) => surface.surfaceId === assignment.surfaceId);
+        return !committed || assignment.windowLabel !== committed.windowLabel ||
+          (parsed.windowGenerationV1 && assignment.windowGeneration !== committed.windowGeneration) ||
+          assignment.panes.some((pane) => {
+            const previous = committed.panes.find((candidate) => candidate.paneId === pane.paneId);
+            return !previous || pane.paneLabel !== previous.paneLabel ||
+              (parsed.allocationGenerationV1 && pane.allocationGeneration !== previous.allocationGeneration);
+          });
+      });
+    const releases = payload.pendingPaneReleases.length > 0 || payload.pendingWindowReleases.length > 0;
+    if (!writesLabels && !releases) return;
+    // The registration itself is already complete. Applying an allocation or
+    // acknowledging a release only updates the dependent durable local state.
+    void this.applyCommittedAllocations(response, parsed, payload, writesLabels).catch((error) => {
+      if (!this.stopped) this.onError(error);
+    });
+  }
+
+  private async applyCommittedAllocations(
+    response: ControllerWireEnvelope,
+    parsed: ParsedRegistrationResponse,
+    payload: RegistrationPayload,
+    writesLabels: boolean,
+  ): Promise<void> {
+    const { pendingPaneReleases, pendingWindowReleases } = payload;
+    if (pendingPaneReleases.length > 0 || pendingWindowReleases.length > 0) {
+      const outcomes = this.releaseResults(response, pendingPaneReleases, pendingWindowReleases);
+      if (outcomes) await this.applyReleaseResults(outcomes, pendingPaneReleases, pendingWindowReleases);
+    }
+    if (writesLabels) await this.applyRegistrationResponse(parsed, payload);
   }
 
   private reportPendingWindowReleases(): void {
@@ -313,7 +383,6 @@ export class ConfiguredServerRegistration {
       // may leave the exact candidate in memory while local persistence is fenced.
       await this.localTransaction("local registry binding persistence", async () => {
         await this.persist();
-        this.assertActive();
       });
       return;
     }
@@ -323,7 +392,6 @@ export class ConfiguredServerRegistration {
     await this.localTransaction("local registry binding persistence", async () => {
       this.core.beginRegistryBinding({ ...identity, clientId: this.clientId });
       await this.persist();
-      this.assertActive();
     });
   }
 
@@ -331,7 +399,6 @@ export class ConfiguredServerRegistration {
     return await this.localTransaction("local registration snapshot", async () => {
       if (this.core.normalizeRefusedRegistryClaims()) {
         await this.persist();
-        this.assertActive();
       }
       const surfaces = this.core.listSurfaces();
       for (const surface of surfaces) this.core.admitSurfaceToLockless(surface.surfaceId);
@@ -341,7 +408,6 @@ export class ConfiguredServerRegistration {
         // Persist the live snapshot and terminal close evidence together before
         // the allocator can observe either the release or replacement claims.
         await this.persist();
-        this.assertActive();
       }
       return {
         clientId: this.clientId,
@@ -461,7 +527,6 @@ export class ConfiguredServerRegistration {
     await this.localTransaction("local refused claim update", async () => {
       this.core.reidentifyRegistryClaim(surfaceId, paneId);
       await this.persist();
-      this.assertActive();
     });
   }
 
@@ -1008,7 +1073,6 @@ export class ConfiguredServerRegistration {
       }
       this.core.setRegistryEndpointLease(parsed.endpointLease);
       await this.persist();
-      this.assertActive();
     });
     this.assertActive();
     this.core.confirmRegistryPaneLabels(paneAssignments);
@@ -1172,7 +1236,6 @@ export class ConfiguredServerRegistration {
       this.core.locklessAuthority.acknowledgePaneReleases(paneReleases.map((release) => release.releaseId));
       this.core.locklessAuthority.acknowledgeWindowReleases(windowReleases.map((release) => release.releaseId));
       await this.persist();
-      this.assertActive();
     });
   }
 
@@ -1181,7 +1244,6 @@ export class ConfiguredServerRegistration {
       if (kind === "pane") this.core.locklessAuthority.discardRejectedPaneRelease(releaseId);
       else this.core.locklessAuthority.discardRejectedWindowRelease(releaseId);
       await this.persist();
-      this.assertActive();
     });
   }
 
@@ -1242,19 +1304,10 @@ export class ConfiguredServerRegistration {
       : "unknown";
   }
 
-  start(): void {
-    const tick = async () => {
-      try { await this.synchronize(); } catch (error) { this.onError(error); }
-      if (!this.stopped) this.timer = setTimeout(() => void tick(), 2000);
-    };
-    void tick();
-  }
-
   abandon(): void {
     if (this.stopped) return;
     this.stopped = true;
     this.abandonController.abort();
-    clearTimeout(this.timer);
     this.wire.abort();
   }
 

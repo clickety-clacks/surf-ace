@@ -148,8 +148,8 @@ pub fn document(target: Option<&str>) -> Result<Value, String> {
             "errorSchema": error_schema(),
             "errorBehavior": "Success and error records are one JSON object on stdout; nonzero exit indicates failure.",
             "discoveryLimits": [
-                "fleet-list reads registry inventory and configured endpoint leases; it does not prove endpoint reachability.",
-                "window-describe reads fleet.topology, connects to a leased direct endpoint, sends one nonce-correlated surface.describe only when prePairDescribeV1 is supported, then rechecks fleet.topology; when that operation is unsupported it keeps the registry window and pane resolution, reports unknown application readiness, includes directEndpointSource, and returns prepair_describe_unavailable plus direct_endpoint_unconfirmed for a non-configured or unknown endpoint source. Registry identity matching remains consistency-only and does not authenticate either peer.",
+                "fleet-list reads registry inventory, client presence, last-seen time, and published endpoints. Direct endpoint reachability is a separate observation.",
+                "window-describe reads fleet.topology, connects to the published direct endpoint of an online client, sends one nonce-correlated surface.describe only when prePairDescribeV1 is supported, then rechecks fleet.topology; when that operation is unsupported it keeps the registry window and pane resolution, reports unknown application readiness, includes directEndpointSource, and returns prepair_describe_unavailable plus direct_endpoint_unconfirmed for a non-configured or unknown endpoint source. Registry identity matching remains consistency-only and does not authenticate either peer.",
                 "If window-describe reports endpoint_unconfigured and no direct endpoint is otherwise available, continue with Bonjour/DNS-SD browse and resolve for _surf-ace._tcp; use the resolved WebSocket endpoint for direct-client commands.",
                 "For a readable client and surface match, missing or unreadable saved registry values and pane details do not suppress the topology; unavailable values stay null, different readable registry values are retained, and scoped limitations are reported separately.",
                 "For client_not_ready, window-describe includes the direct client's existing message as applicationReadiness.readinessReason, limited to 512 characters.",
@@ -495,17 +495,17 @@ fn command_spec(command: Command) -> Value {
             "registry",
             "registry_inventory_read",
             "Read registered client, window, and pane labels from the explicitly selected registry.",
-            "Registry fleet.topology payload with per-client direct endpoints and leases; it does not prove client reachability.",
+            "Registry fleet.topology payload with client presence, last-seen time, and published endpoints.",
             vec!["missing_registry", "invalid_registry", "invalid_fleet_topology_clients"],
         ),
         Command::WindowDescribe => (
             "registry-and-direct-client",
             "registry_leased_read_only_pre_pair_probe",
-            "Resolve exactly one current endpoint lease for a named window, connect before pairing, and send surface.describe only when the client advertises pre-pair describe support; recheck the registry row.",
-            "Separate registry identity, registration and lease freshness, direct transport reachability, client application readiness, topology/layout, and per-pane content revision evidence. If pre-pair describe is unsupported, retain registry window and pane resolution with unknown readiness; include directEndpointSource and report prepair_describe_unavailable plus direct_endpoint_unconfirmed for non-configured or unknown sources. This is consistency only, does not authenticate either peer, and does not authorize a later mutation.",
+            "Resolve exactly one online client with a supported endpoint for a named window, connect before pairing, and send surface.describe only when the client advertises pre-pair describe support; recheck the registry row.",
+            "Separate registry identity, registration generation and presence, direct transport reachability, client application readiness, topology/layout, and per-pane content revision evidence. If pre-pair describe is unsupported, retain registry window and pane resolution with unknown readiness; include directEndpointSource and report prepair_describe_unavailable plus direct_endpoint_unconfirmed for non-configured or unknown sources. This is consistency only, does not authenticate either peer, and does not authorize a later mutation.",
             vec![
                 "missing_registry", "invalid_registry", "registry_timeout", "registry_unreachable",
-                "registry_response_invalid", "registry_unavailable", "window_not_found", "window_ambiguous", "endpoint_unconfigured", "stale_registration",
+                "registry_response_invalid", "registry_unavailable", "window_not_found", "window_ambiguous", "endpoint_unconfigured", "client_offline",
                 "endpoint_unreachable", "application_unresponsive", "describe_timeout", "describe_response_too_large",
                 "describe_response_invalid", "describe_rejected", "identity_mismatch",
                 "revision_churn", "client_not_ready", "unsupported_protocol_version", "clock_unavailable",
@@ -982,7 +982,7 @@ fn result_schema(command: Command, description: &str) -> Value {
 fn registry_candidate_schema() -> Value {
     json!({
         "type": "object",
-        "required": ["clientId", "surfaceId", "windowLabel", "directEndpoint", "registryIdentity", "registryServerTimeMs", "maxEndpointLeaseMs", "registrationReady", "endpointLease"],
+        "required": ["clientId", "surfaceId", "windowLabel", "directEndpoint", "registryIdentity", "registryServerTimeMs", "presence", "lastSeenAtMs", "registrationReady", "endpointLease"],
         "properties": {
             "clientId": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
             "surfaceId": string_schema(),
@@ -990,9 +990,10 @@ fn registry_candidate_schema() -> Value {
             "directEndpoint": { "type": "string", "format": "uri" },
             "registryIdentity": { "type": "object", "required": ["allocatorId", "fleetId"], "properties": { "allocatorId": string_schema(), "fleetId": string_schema() }, "additionalProperties": false },
             "registryServerTimeMs": nonnegative_integer_schema(),
-            "maxEndpointLeaseMs": positive_integer_schema(),
+            "presence": { "const": "online" },
+            "lastSeenAtMs": { "type": "null" },
             "registrationReady": { "type": "boolean" },
-            "endpointLease": { "type": "object", "required": ["leaseGeneration", "registrationObservedAtMs", "leaseExpiresAtMs"], "properties": { "leaseGeneration": positive_integer_schema(), "registrationObservedAtMs": nonnegative_integer_schema(), "leaseExpiresAtMs": positive_integer_schema() }, "additionalProperties": false }
+            "endpointLease": { "type": "object", "required": ["leaseGeneration", "registrationObservedAtMs"], "properties": { "leaseGeneration": positive_integer_schema(), "registrationObservedAtMs": nonnegative_integer_schema() }, "additionalProperties": false }
         },
         "additionalProperties": false
     })
@@ -1005,7 +1006,7 @@ fn error_schema() -> Value {
         "required": ["ok", "error"],
         "properties": {
             "ok": { "const": false },
-            "error": { "type": "object", "required": ["code", "details"], "properties": { "code": { "enum": ["invalid_input", "outcome_unknown", "projection_unavailable_after_commit", "protocol_error", "operation_rejected", "state_error", "still_pending", "transport_error", "json_error", "registry_timeout", "registry_unreachable", "registry_response_invalid", "registry_unavailable", "window_not_found", "window_ambiguous", "endpoint_unconfigured", "stale_registration", "endpoint_unreachable", "application_unresponsive", "describe_timeout", "describe_response_too_large", "describe_response_invalid", "describe_rejected", "prepair_describe_unsupported", "identity_mismatch", "revision_churn", "client_not_ready", "unsupported_protocol_version", "clock_unavailable"] }, "details": { "type": "object" } }, "additionalProperties": false }
+            "error": { "type": "object", "required": ["code", "details"], "properties": { "code": { "enum": ["invalid_input", "outcome_unknown", "projection_unavailable_after_commit", "protocol_error", "operation_rejected", "state_error", "still_pending", "transport_error", "json_error", "registry_timeout", "registry_unreachable", "registry_response_invalid", "registry_unavailable", "window_not_found", "window_ambiguous", "endpoint_unconfigured", "client_offline", "endpoint_unreachable", "application_unresponsive", "describe_timeout", "describe_response_too_large", "describe_response_invalid", "describe_rejected", "prepair_describe_unsupported", "identity_mismatch", "revision_churn", "client_not_ready", "unsupported_protocol_version", "clock_unavailable"] }, "details": { "type": "object" } }, "additionalProperties": false }
         },
         "additionalProperties": false
     })

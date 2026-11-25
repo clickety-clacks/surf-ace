@@ -3,7 +3,6 @@ import { isIP } from "node:net";
 export type EndpointLease = {
   leaseGeneration: number;
   registrationObservedAtMs: number;
-  leaseExpiresAtMs: number;
 };
 
 export type DirectEndpointSource = "configured" | "client-reported" | "registry-observed";
@@ -152,21 +151,14 @@ function endpointHost(acceptedPeerAddress: string): string | null {
 export class EndpointLeaseBook {
   private readonly leases = new Map<string, LeaseRecord>();
   private readonly clock: () => number;
-  readonly maxEndpointLeaseMs: number;
   private nextGeneration: number;
   private issuedInEpoch = 0;
   private lastServerTimeMs: number;
 
   constructor(
     writerLeaseGeneration: number,
-    maxEndpointLeaseMs: number,
     clock: () => number = Date.now,
   ) {
-    if (!Number.isSafeInteger(writerLeaseGeneration) || writerLeaseGeneration < 1 ||
-        !Number.isSafeInteger(maxEndpointLeaseMs) || maxEndpointLeaseMs < 1) {
-      throw new RangeError("invalid_endpoint_lease_configuration");
-    }
-    this.maxEndpointLeaseMs = maxEndpointLeaseMs;
     this.clock = clock;
     const now = clock();
     if (!Number.isSafeInteger(now) || now < 0) throw new RangeError("invalid_registry_clock");
@@ -182,7 +174,7 @@ export class EndpointLeaseBook {
     return this.lastServerTimeMs;
   }
 
-  renew(clientId: string, signature: string, eligible: boolean): EndpointLease | null {
+  observe(clientId: string, signature: string, eligible: boolean): EndpointLease | null {
     if (!eligible) {
       this.leases.delete(clientId);
       return null;
@@ -191,10 +183,7 @@ export class EndpointLeaseBook {
     const previous = this.leases.get(clientId);
     let lease: EndpointLease;
     if (previous?.signature === signature) {
-      lease = {
-        ...previous.lease,
-        leaseExpiresAtMs: now + this.maxEndpointLeaseMs,
-      };
+      return { ...previous.lease };
     } else {
       if (this.issuedInEpoch >= GENERATIONS_PER_WRITER_EPOCH) {
         throw new RangeError("endpoint_lease_generation_exhausted");
@@ -204,10 +193,8 @@ export class EndpointLeaseBook {
       lease = {
         leaseGeneration: this.nextGeneration,
         registrationObservedAtMs: now,
-        leaseExpiresAtMs: now + this.maxEndpointLeaseMs,
       };
     }
-    if (!Number.isSafeInteger(lease.leaseExpiresAtMs)) throw new RangeError("endpoint_lease_expiry_exhausted");
     this.leases.set(clientId, { lease, signature });
     return { ...lease };
   }

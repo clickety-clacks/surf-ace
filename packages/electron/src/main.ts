@@ -73,6 +73,8 @@ import {
   type PersistentSurfaceStateSnapshot,
   type ReloadEntryIdentity,
   type RendererWindowState,
+  registryRegistrationState,
+  type RegistryRegistrationState,
 } from "./surface-core.js";
 import {
   buildCompositorAppBindingRequest,
@@ -229,6 +231,13 @@ const nativeOverlaySnapshots = new Map<string, {
 const singleInstanceLock = app.requestSingleInstanceLock();
 let advertiser: BonjourAdvertiser | null = null;
 let configuredRegistration: ServerConnection | null = null;
+let committedRegistration: RegistryRegistrationState = registryRegistrationState({});
+
+function confirmRegistrationState(registration: RegistryRegistrationState): void {
+  const changed = JSON.stringify(registration) !== JSON.stringify(committedRegistration);
+  committedRegistration = registration;
+  if (changed) configuredRegistration?.registrationStateCommitted();
+}
 let annotationRegistryPublisher: AnnotationRegistryPublisher | null = null;
 let annotationSourceCoordinator: AnnotationSourceCoordinator | null = null;
 const annotationDoneFence = new AnnotationDoneFence((scope) => {
@@ -534,6 +543,7 @@ async function persistState(): Promise<void> {
         try {
           await writePersistentStateFileContents(stateDir, STATE_FILE_NAME, candidate.contents);
           persistentStateWriteGuard = false;
+          confirmRegistrationState(candidate.registration);
           confirmedAnnotationLocalSaves.confirmCandidates(candidate.annotationLocalSaveCandidates);
         } catch (error) {
           if (error instanceof PersistentStateOutcomeUnknownError) {
@@ -619,6 +629,7 @@ async function reconcilePersistence(): Promise<void> {
     // state meanwhile; queue its save after reopening the persistence seam.
     const changedWhilePaused = core.capturePersistentStateSnapshot().contents !== uncertainStateCandidate.contents;
     const verifiedCandidate = uncertainStateCandidate;
+    confirmRegistrationState(verifiedCandidate.registration);
     confirmedAnnotationLocalSaves.confirmCandidates(verifiedCandidate.annotationLocalSaveCandidates);
     persistentStateOutcomeUnknown = null;
     uncertainStateCandidate = null;
@@ -717,6 +728,7 @@ function rendererWindowState(surfaceId: string): RendererWindowState {
   state.capabilityStatus = [
     persistentStateOutcomeUnknown ? "Local changes paused: saved state is being reconciled" : null,
     !providerEndpointAvailable ? "Direct connection unavailable; retrying" : null,
+    configuredRegistration?.labelClaimPending(surfaceId) ? "Label claim pending" : null,
   ].filter(Boolean).join(" · ") || undefined;
   return state;
 }
@@ -2206,6 +2218,7 @@ async function boot(): Promise<void> {
     persistentState: corePersistentState,
   });
   const restoredSurfaces = core.restorePersistedSurfaces(endpointName(), displayViewport());
+  committedRegistration = registryRegistrationState(core.getPersistentState());
   if (shouldGuardUnrestorablePersistentState(persistentState, restoredSurfaces.length)) {
     persistentStateWriteGuard = "unrestorable-primary";
     clientWarn("state_restore_unrestorable_write_guard", {
@@ -2291,10 +2304,8 @@ async function boot(): Promise<void> {
     clientId: identityClientId,
     core,
     persist: persistRegistryState,
-    canPersistRegistration: () => persistentStateWriteReadiness.isReady &&
-      !persistentStateOutcomeUnknown &&
-      (!persistentStateWriteGuard || persistentStateWriteGuard === "corrupt-primary"),
-    openApplicationStateMutations: () => persistentStateWriteReadiness.openMutations(),
+    committedState: () => committedRegistration,
+    onClaimStatusChange: broadcastSurfaceState,
     onError: (error) => clientWarn("server_registration_failed", errorDiagnosticFields(error)),
   }) : null;
   configuredRegistration?.start();
