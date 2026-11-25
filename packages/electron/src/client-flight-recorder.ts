@@ -49,11 +49,26 @@ export function errorDiagnosticFields(error: unknown): ClientDiagnosticFields {
 }
 
 export function installMainProcessFailureDiagnostics(): void {
-  // The monitor observes both uncaught exceptions and fatal unhandled
-  // rejections while preserving the runtime's existing exception policy.
   process.on("uncaughtExceptionMonitor", (error, origin) => {
     recordClientDiagnostic("error", "app", origin === "unhandledRejection"
-      ? "app_unhandled_rejection" : "app_uncaught_exception", errorDiagnosticFields(error));
+      ? "app_unhandled_rejection" : "app_uncaught_exception", {
+      ...errorDiagnosticFields(error),
+      error_stack: error.stack,
+    });
+  });
+  // Electron can warn and continue. Observing warnings preserves the
+  // runtime's rejection policy, including modes that promote to an exception.
+  process.on("warning", (warning) => {
+    if (warning.name !== "UnhandledPromiseRejectionWarning" ||
+        warning.constructor.name === "UnhandledPromiseRejectionWarning") return;
+    // Node emits the reason first, followed by a generic companion warning.
+    const reason = warning.message;
+    const stackStart = reason.search(/\n[ \t]+at /);
+    recordClientDiagnostic("error", "app", "app_unhandled_rejection", {
+      error_message: stackStart < 0 ? reason : reason.slice(0, stackStart),
+      error_stack: stackStart < 0 ? undefined : reason,
+      warning_stack: stackStart < 0 ? warning.stack : undefined,
+    });
   });
 }
 
