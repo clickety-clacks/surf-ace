@@ -159,7 +159,7 @@ export class LocklessControllerSession {
   }
 
   private async startInternal(): Promise<LocklessPairResult> {
-    this.transportGeneration += 1;
+    const generation = ++this.transportGeneration;
     await this.options.projection.start();
     await this.options.projection.markUnsynchronized();
     for (const scopeId of this.options.projection.scopeIds()) {
@@ -167,8 +167,10 @@ export class LocklessControllerSession {
     }
     this.controllerInstanceId = await this.options.identity.loadOrCreate();
     await this.options.wire.connect();
+    let transportClosed = false;
     this.unsubscribeClose = this.options.wire.onClose?.(() => {
-      void this.handleTransportLoss();
+      transportClosed = true;
+      if (this.paired) void this.handleTransportLoss();
     }) ?? null;
     if (!this.options.preflightComplete) {
       const advertised = responsePayload(
@@ -239,6 +241,9 @@ export class LocklessControllerSession {
       this.repairScopes.delete(snapshot.scopeId);
     }
     await this.flushAcknowledgements();
+    if (transportClosed || this.stopRequested || generation !== this.transportGeneration) {
+      throw new Error("controller_wire_closed");
+    }
     this.paired = true;
     this.backgroundInterval = setInterval(() => {
       this.backgroundWork = this.backgroundWork.then(async () => {

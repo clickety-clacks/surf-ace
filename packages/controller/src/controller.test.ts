@@ -517,6 +517,35 @@ test("failed admission closes its wire so the stable identity can retry", async 
   assert.equal(admittedCloseCount, 1);
 });
 
+test("a transport closed during admission is never a live direct session", async () => {
+  let closeListener: (() => void) | undefined;
+  const wire: ControllerWire = {
+    async connect() {},
+    async close() {},
+    onClose(listener) {
+      closeListener = listener;
+      return () => { closeListener = undefined; };
+    },
+    onEvent() { return () => {}; },
+    async request(op, payload) {
+      const { controllerInstanceId } = payload as { controllerInstanceId: string };
+      closeListener?.();
+      return {
+        type: "response", op, ok: true,
+        payload: { controllerInstanceId, mode: "lockless", scopes: [], receiptResolutions: [] },
+      };
+    },
+  };
+  const session = new LocklessControllerSession({
+    wire,
+    preflightComplete: true,
+    identity: new ControllerIdentity(new MemoryStore()),
+    projection: new BoundedControllerProjection(new MemoryStore(), 4096),
+  });
+  await assert.rejects(session.start(), /controller_wire_closed/);
+  assert.equal(session.hasLiveDirectSession(), false);
+});
+
 test("transport loss marks projection unsynchronized and reconciles with the same identity", async () => {
   let closeListener: (() => void) | null = null;
   let connectCount = 0;
