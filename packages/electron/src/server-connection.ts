@@ -117,7 +117,7 @@ export class ServerConnection {
     if (cycle !== undefined && !this.isCurrentCycle(cycle)) return;
     failures.push(message);
     if (visible && !this.selected) {
-      this.lastFailure = message;
+      this.lastFailure ??= `registry unreachable: ${message}`;
       this.setStatus("connecting");
     }
     this.logFailure(message);
