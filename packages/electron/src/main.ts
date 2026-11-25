@@ -236,6 +236,7 @@ let advertiser: BonjourAdvertiser | null = null;
 let configuredRegistration: ServerConnection | null = null;
 let committedRegistration: RegistryRegistrationState = registryRegistrationState({});
 let committedSurfaceObservations = new Map<string, CommittedSurfaceObservation>();
+const pendingLabelWrites = new Map<string, number>();
 
 function captureSurfaceObservations(): Map<string, CommittedSurfaceObservation> {
   const surfaceSetRevision = core.locklessAuthority.surfaceSetRevision;
@@ -544,6 +545,34 @@ async function loadPersistentState(): Promise<PersistentSurfaceState | undefined
   return undefined;
 }
 
+function trackPendingLabelWrites(registration: RegistryRegistrationState): () => void {
+  if (!configuredRegistration) return () => {};
+  const surfaces = registration.surfaces.filter((surface) => {
+    const saved = committedRegistration.surfaces.find((candidate) => candidate.surfaceId === surface.surfaceId);
+    return (Boolean(surface.windowLabel) && (surface.windowLabel !== saved?.windowLabel ||
+      surface.windowGeneration !== saved?.windowGeneration)) ||
+      surface.panes.some((pane) => pane.paneLabel > 0 && !saved?.panes.some((existing) =>
+        existing.paneLineageId === pane.paneLineageId && existing.paneLabel === pane.paneLabel &&
+        existing.allocationGeneration === pane.allocationGeneration));
+  });
+  for (const { surfaceId } of surfaces) {
+    pendingLabelWrites.set(surfaceId, (pendingLabelWrites.get(surfaceId) ?? 0) + 1);
+    if (core.listSurfaces().some((surface) => surface.surfaceId === surfaceId)) {
+      broadcastSurfaceState(surfaceId);
+    }
+  }
+  return () => {
+    for (const { surfaceId } of surfaces) {
+      const count = pendingLabelWrites.get(surfaceId) ?? 1;
+      if (count === 1) pendingLabelWrites.delete(surfaceId);
+      else pendingLabelWrites.set(surfaceId, count - 1);
+      if (core.listSurfaces().some((surface) => surface.surfaceId === surfaceId)) {
+        broadcastSurfaceState(surfaceId);
+      }
+    }
+  };
+}
+
 async function persistState(): Promise<void> {
   assertWritesAllowed(isQuitting);
   if (persistentStateOutcomeUnknown) {
@@ -566,6 +595,7 @@ async function persistState(): Promise<void> {
       ...core.capturePersistentStateSnapshot(),
       observations: captureSurfaceObservations(),
     };
+    const finishLabelWrites = trackPendingLabelWrites(candidate.registration);
     stateWrite = stateWrite
       .catch(() => {})
       .then(async () => {
@@ -594,6 +624,8 @@ async function persistState(): Promise<void> {
         schedulePersistenceReconciliation();
       }
       throw error;
+    } finally {
+      finishLabelWrites();
     }
   });
 }
@@ -757,9 +789,19 @@ function rendererWindowState(surfaceId: string): RendererWindowState {
       if (delivery) pane.annotationDelivery = delivery;
     }
   }
-  const savedPanes = committedRegistration.surfaces.find((surface) => surface.surfaceId === surfaceId)?.panes;
-  const labelWaitingOnSave = configuredRegistration && state.panes.some((pane) =>
-    !pane.label && !savedPanes?.some((saved) => saved.paneLineageId === pane.paneLineageId));
+  const savedSurface = committedRegistration.surfaces.find((surface) => surface.surfaceId === surfaceId);
+  const labelWaitingOnSave = pendingLabelWrites.has(surfaceId) || (configuredRegistration && state.panes.some((pane) =>
+    !pane.label && !savedSurface?.panes.some((saved) => saved.paneLineageId === pane.paneLineageId)));
+  if (configuredRegistration && committedRegistration.binding) {
+    state.windowLabel = savedSurface?.windowLabel ?? "";
+    for (const pane of state.panes) {
+      const saved = savedSurface?.panes.find((candidate) => candidate.paneLineageId === pane.paneLineageId);
+      if (!saved || pane.label !== String(saved.paneLabel)) pane.label = "";
+      const address = state.windowLabel && pane.label ? `${state.windowLabel}${pane.label}` : "";
+      pane.displayId = address;
+      pane.visibleAddress = address;
+    }
+  }
   state.capabilityStatus = [
     persistentStateOutcomeUnknown ? "Local changes paused: saved state is being reconciled" : null,
     !providerEndpointAvailable ? "Direct connection unavailable; retrying" : null,
