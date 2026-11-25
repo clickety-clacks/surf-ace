@@ -727,12 +727,7 @@ final class SurfAceRuntime {
                     )
                 }
                 let state = application.state
-                self.confirmedPaneLabels = Dictionary(uniqueKeysWithValues: state.liveSurfaces.values.flatMap { surface -> [(String, Int64)] in
-                    guard state.registryBinding != nil, surface.windowLabelConfirmed != false else { return [] }
-                    return surface.panes.values.filter { $0.paneLabel > 0 }.map { pane in
-                        ("\(surface.surfaceId):\(pane.paneLineageId)", pane.paneLabel)
-                    }
-                })
+                self.restoreConfirmedRegistryLabels(from: state)
                 try self.projectLocklessAuthorityState(state)
                 return application.needsRetry
             },
@@ -1268,6 +1263,16 @@ final class SurfAceRuntime {
         refreshBonjourTXT()
     }
 
+    private func restoreConfirmedRegistryLabels(from state: SurfAceLocklessAuthorityState) {
+        guard let binding = state.registryBinding, binding.clientId == identity?.clientId else { return }
+        confirmedPaneLabels = Dictionary(uniqueKeysWithValues: state.liveSurfaces.values.flatMap { surface -> [(String, Int64)] in
+            guard surface.windowLabelConfirmed != false else { return [] }
+            return surface.panes.values.filter { $0.paneLabel > 0 }.map { pane in
+                ("\(surface.surfaceId):\(pane.paneLineageId)", pane.paneLabel)
+            }
+        })
+    }
+
     func restoreLocklessAuthority(reason: String) async {
         guard SurfAceLocklessTargetAdmission.platformPermitsLockless else { return }
         do {
@@ -1287,6 +1292,7 @@ final class SurfAceRuntime {
             guard readiness.targetWorkRecovered else {
                 throw SurfAceLocklessAuthorityError.invalidState("target_work_not_recovered")
             }
+            if reason == "process_start" { restoreConfirmedRegistryLabels(from: readiness.state) }
             try projectLocklessAuthorityState(readiness.state)
             for result in recovered {
                 await fanoutLocklessTargetResult(result)
