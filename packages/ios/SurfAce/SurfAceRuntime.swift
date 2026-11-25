@@ -485,6 +485,7 @@ final class SurfAceRuntime {
         annotationDirectStageMaxBytesForTesting: Int? = nil,
         enableFleetDiscovery: Bool = true,
         isolatedTestLoopback: Bool = false,
+        isolatedTestIdentity: SurfAceIdentity? = nil,
         bonjourPublisher: SurfAceBonjourPublisher = SurfAceBonjourPublisher(),
         foregroundCompletion: (@MainActor () -> Void)? = nil,
         outboundSendPreparation: (@Sendable (
@@ -525,7 +526,8 @@ final class SurfAceRuntime {
         self.instanceDisambiguator = String(vendorID.prefix(6))
 
         do {
-            let identity = try identityStore.loadOrCreateIdentity()
+            // An unsigned simulator can exercise loopback registration with an ephemeral key.
+            let identity = try (isolatedTestLoopback ? isolatedTestIdentity : nil) ?? identityStore.loadOrCreateIdentity()
             self.identity = identity
             self.fingerprint = identity.fingerprint
         } catch {
@@ -627,7 +629,7 @@ final class SurfAceRuntime {
     }
 
     func startIsolatedRegistryForTesting(_ url: URL) throws {
-        guard isIsolatedTestHost, isStarted, url.scheme == "ws", url.host == "127.0.0.1",
+        guard isIsolatedTestHost, isStarted, identity != nil, url.scheme == "ws", url.host == "127.0.0.1",
               url.port != nil, url.user == nil, url.password == nil else {
             throw SurfAceRegistrationError.noServer
         }
