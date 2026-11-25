@@ -725,10 +725,14 @@ function rendererWindowState(surfaceId: string): RendererWindowState {
       if (delivery) pane.annotationDelivery = delivery;
     }
   }
+  const savedPanes = committedRegistration.surfaces.find((surface) => surface.surfaceId === surfaceId)?.panes;
+  const labelWaitingOnSave = configuredRegistration && state.panes.some((pane) =>
+    !pane.label && !savedPanes?.some((saved) => saved.paneLineageId === pane.paneLineageId));
   state.capabilityStatus = [
     persistentStateOutcomeUnknown ? "Local changes paused: saved state is being reconciled" : null,
     !providerEndpointAvailable ? "Direct connection unavailable; retrying" : null,
-    configuredRegistration?.labelClaimPending(surfaceId) ? "Label claim pending" : null,
+    labelWaitingOnSave ? "Label claim waiting on local persistence"
+      : configuredRegistration?.labelClaimPending(surfaceId) ? "Label claim pending" : null,
   ].filter(Boolean).join(" · ") || undefined;
   return state;
 }

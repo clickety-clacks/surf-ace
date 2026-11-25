@@ -3,7 +3,7 @@ import {
   type SurfAceDiscoveryEndpoint,
   type SurfAceDiscoveryService,
 } from "./surf-ace-discovery.js";
-import { ConfiguredServerRegistration, type PendingCommittedRegistration } from "./configured-server.js";
+import { ConfiguredServerRegistration, RegistryRegistrationRefused, type PendingCommittedRegistration } from "./configured-server.js";
 import type { PaneLabelAllocation, RegistryRegistrationState, SurfaceCore } from "./surface-core.js";
 import { reconnectDelayMs } from "../../protocol/src/connection-liveness.js";
 import type { RegistryIdentity } from "../../controller/src/wire.js";
@@ -59,6 +59,7 @@ export class ServerConnection {
   private running = false;
   private retryAttempt = 0;
   private lastReportedAt = 0;
+  private diagnostics: ReturnType<typeof setInterval> | undefined;
   private commitPending = false;
   private readonly pendingRegistration: { request: PendingCommittedRegistration | null } = { request: null };
   private readonly pendingClaimsBySurface = new Map<string, number>();
@@ -93,6 +94,8 @@ export class ServerConnection {
   private setStatus(status: "connected" | "connecting" | "disconnected"): void {
     this.status = status;
     if (status === "connected") {
+      clearInterval(this.diagnostics);
+      this.diagnostics = undefined;
       for (const resolve of this.connectedWaiters) resolve();
       this.connectedWaiters.clear();
     }
@@ -155,15 +158,23 @@ export class ServerConnection {
       registration.abandon();
       if (this.selected?.registration !== registration) return;
       this.selected = null;
-      this.lastFailure = "registry unreachable";
-      this.setStatus("disconnected");
-      this.logFailure(this.lastFailure);
+      this.reportOffline("registry unreachable");
       this.scheduleRecovery();
     });
     const registrations = this.cycleRegistrations.get(cycle) ?? new Set<ConfiguredServerRegistration>();
     registrations.add(registration);
     this.cycleRegistrations.set(cycle, registrations);
     return registration;
+  }
+
+  private reportOffline(cause: string): void {
+    this.lastFailure = cause;
+    this.setStatus("disconnected");
+    this.logFailure(cause);
+    if (this.diagnostics || !this.running || this.stopped) return;
+    this.diagnostics = setInterval(() => {
+      if (this.status !== "connected" && this.lastFailure) this.logFailure(this.lastFailure);
+    }, 60_000);
   }
 
   private scheduleRecovery(): void {
@@ -259,6 +270,7 @@ export class ServerConnection {
     if (!this.isCurrentCycle(cycle)) return;
     if (!this.selected || this.status !== "connected") this.setStatus("connecting");
     const failures: string[] = [];
+    let refused = false;
     const visited = new Set<string>();
 
     if (this.selected) {
@@ -382,6 +394,7 @@ export class ServerConnection {
         }
         return true;
       } catch (error) {
+        if (error instanceof RegistryRegistrationRefused) refused = true;
         await candidate.registration.stop();
         if (!this.isCurrentCycle(cycle)) return false;
         this.reportFailure(`${candidate.context} ${candidate.address} failed: ${describeError(error)}`, !this.selected, failures, cycle);
@@ -484,9 +497,8 @@ export class ServerConnection {
     const message = failures.length > 0
       ? `no_surf_ace_server: ${failures.join("; ")}`
       : "no_surf_ace_server: no valid _surf-ace._tcp role=server ws=/ws advertisement";
-    this.lastFailure = message;
-    this.setStatus("disconnected");
-    this.logFailure(message);
+    const cause = refused ? "registry refused registration" : "registry unreachable";
+    this.reportOffline(`${cause}: ${message}`);
     throw new Error(message);
   }
 
@@ -498,6 +510,7 @@ export class ServerConnection {
 
   async stop(): Promise<void> {
     this.stopped = true;
+    clearInterval(this.diagnostics);
     for (const resolve of this.connectedWaiters) resolve();
     this.connectedWaiters.clear();
     clearTimeout(this.recoveryTimer);

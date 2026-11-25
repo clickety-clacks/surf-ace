@@ -282,6 +282,11 @@ export class PublicControllerWireClient {
     try {
       envelope = JSON.parse(data.toString()) as ControllerWireEnvelope;
     } catch {
+      if (this.registry) this.abort();
+      return;
+    }
+    if (!envelope || typeof envelope !== "object") {
+      if (this.registry) this.abort();
       return;
     }
     if (envelope.type === "event") {

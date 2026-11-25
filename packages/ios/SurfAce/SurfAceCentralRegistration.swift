@@ -1629,7 +1629,14 @@ final class SurfAceRegistrationWebSocket: SurfAceRegistrationTransport {
     func readRegistryIdentity(fallbackIdentity: SurfAceRegistryIdentity?) async throws -> SurfAceRegistryIdentityRead {
         let id = "rq_" + UUID().uuidString.replacingOccurrences(of: "-", with: "")
         let data = try await exchange(SurfAceRegistrationWire.topologyData(id: id))
-        return SurfAceRegistrationWire.registryIdentityReply(from: data, requestId: id, fallbackIdentity: fallbackIdentity)
+        guard let envelope = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              envelope["type"] as? String == "response",
+              envelope["v"] as? Int == 1,
+              envelope["ok"] as? Bool == true,
+              envelope["payload"] is [String: Any] else {
+            throw SurfAceRegistrationError.invalidResponse
+        }
+        return SurfAceRegistrationWire.registryIdentityReply(from: data, requestId: id, fallbackIdentity: nil)
     }
 
     func register(clientId: String, surfaces: [SurfAceRegistrationSurface],
@@ -1771,8 +1778,8 @@ final class SurfAceRegistrationWebSocket: SurfAceRegistrationTransport {
             if opcode == .ping {
                 enqueue(data, opcode: .pong, on: connection)
             } else if opcode == .text || opcode == .binary {
-                guard let reply = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-                      let id = reply["id"] as? String else { continue }
+                guard let reply = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { break }
+                guard let id = reply["id"] as? String else { continue }
                 pending.removeValue(forKey: id)?.resume(returning: data)
             }
         }

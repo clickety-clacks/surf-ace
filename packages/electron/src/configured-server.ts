@@ -121,8 +121,10 @@ function refusalCode(value: unknown): string {
     : "registration_claim_refused";
 }
 
+export class RegistryRegistrationRefused extends Error {}
+
 function responseError(response: ControllerWireEnvelope): Error {
-  return new Error(response.error?.message ?? "registration_failed");
+  return new RegistryRegistrationRefused(response.error?.message ?? "registration_failed");
 }
 
 // The configured route uses normal DNS and WebSocket transport, including LAN,
