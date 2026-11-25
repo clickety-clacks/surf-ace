@@ -77,6 +77,7 @@ function runFrameScript({ subframe = false, readyState = "complete", openResults
     },
     document,
     Element: FixtureElement,
+    Event: FixtureClickEvent,
     HTMLAnchorElement: FixtureAnchor,
     navigator: { userActivation },
     Reflect,
@@ -98,14 +99,24 @@ function runFrameScript({ subframe = false, readyState = "complete", openResults
   };
 }
 
+class FixtureClickEvent {
+  constructor(anchor, defaultPrevented = false) {
+    this.isTrusted = true;
+    this.target = new FixtureElement(anchor);
+    this._defaultPrevented = defaultPrevented;
+  }
+
+  get defaultPrevented() {
+    return this._defaultPrevented;
+  }
+
+  preventDefault() {
+    this._defaultPrevented = true;
+  }
+}
+
 function clickEvent(anchor, { defaultPrevented = false } = {}) {
-  let prevented = defaultPrevented;
-  return {
-    isTrusted: true,
-    target: new FixtureElement(anchor),
-    get defaultPrevented() { return prevented; },
-    preventDefault() { prevented = true; },
-  };
+  return new FixtureClickEvent(anchor, defaultPrevented);
 }
 
 test("HTTP(S) new-window links resolve relative paths with query and fragment intact", () => {
@@ -160,6 +171,48 @@ test("external request bridge validates activation at prepare and completes afte
   assert.deepEqual(opened, ["https://example.test/named"]);
 });
 
+test("external request bridge mirrors prepare, cancel, and complete phases", () => {
+  const opened = [];
+  const phases = [];
+  const route = createExternalNewWindowRequestBridge(
+    (url) => opened.push(url),
+    (phase, requestId, url) => {
+      phases.push({ phase, requestId, url });
+      return true;
+    },
+  );
+
+  route({ phase: "prepare", requestId: 1, url: "https://example.test/canceled" }, true);
+  route({ phase: "cancel", requestId: 1 }, false);
+  route({ phase: "complete", requestId: 1 }, false);
+  route({ phase: "prepare", requestId: 2, url: "https://example.test/completed" }, true);
+  route({ phase: "complete", requestId: 2 }, false);
+
+  assert.deepEqual(phases, [
+    { phase: "prepare", requestId: 1, url: "https://example.test/canceled" },
+    { phase: "cancel", requestId: 1, url: "https://example.test/canceled" },
+    { phase: "prepare", requestId: 2, url: "https://example.test/completed" },
+    { phase: "complete", requestId: 2, url: "https://example.test/completed" },
+  ]);
+  assert.deepEqual(opened, ["https://example.test/completed"]);
+});
+
+test("abandoned external requests are canceled after the completion task", async () => {
+  const opened = [];
+  const phases = [];
+  const route = createExternalNewWindowRequestBridge(
+    (url) => opened.push(url),
+    (phase, requestId) => { phases.push([phase, requestId]); return true; },
+  );
+  route({ phase: "prepare", requestId: 1, url: "https://example.test/abandoned" }, true);
+  route({ phase: "prepare", requestId: 2, url: "https://example.test/anchor" }, true);
+  setTimeout(() => route({ phase: "complete", requestId: 2 }, false));
+  await new Promise((resolve) => setTimeout(() => setTimeout(resolve)));
+  route({ phase: "complete", requestId: 1 }, false);
+  assert.deepEqual(opened, ["https://example.test/anchor"]);
+  assert.deepEqual(phases, [["prepare", 1], ["prepare", 2], ["complete", 2], ["cancel", 1]]);
+});
+
 test("anchor routing is installed before load and captures clicks before page handlers", () => {
   const fixture = runFrameScript({ readyState: "loading" });
   const handler = fixture.handlers.get("window:click");
@@ -170,7 +223,7 @@ test("anchor routing is installed before load and captures clicks before page ha
   assert.equal(fixture.externalRequests[0], "https://example.test/early-script");
 });
 
-test("anchor routing preserves same-pane behavior, waits for page cancellation, and does not deduplicate URLs", () => {
+test("anchor routing leaves cancellation to page handlers and does not deduplicate URLs", () => {
   const fixture = runFrameScript();
   const handler = fixture.handlers.get("window:click");
   handler(clickEvent(new FixtureAnchor("https://example.test/path")));
@@ -181,7 +234,7 @@ test("anchor routing preserves same-pane behavior, waits for page cancellation, 
   fixture.userActivation.isActive = true;
   const routedAnchor = clickEvent(new FixtureAnchor("../article?q=term#section"));
   handler(routedAnchor);
-  assert.equal(routedAnchor.defaultPrevented, true);
+  assert.equal(routedAnchor.defaultPrevented, false);
   assert.equal(fixture.externalRequests.length, 0);
   fixture.userActivation.isActive = false;
   fixture.runTasks();
@@ -191,6 +244,14 @@ test("anchor routing preserves same-pane behavior, waits for page cancellation, 
   const canceledAnchor = clickEvent(new FixtureAnchor("https://example.test/canceled"));
   handler(canceledAnchor);
   canceledAnchor.preventDefault();
+  fixture.runTasks();
+  assert.equal(fixture.externalRequests.length, 1);
+
+  fixture.userActivation.isActive = true;
+  const nativeCanceledAnchor = clickEvent(new FixtureAnchor("https://example.test/native-canceled"));
+  handler(nativeCanceledAnchor);
+  assert.equal(nativeCanceledAnchor.defaultPrevented, false);
+  FixtureClickEvent.prototype.preventDefault.call(nativeCanceledAnchor);
   fixture.runTasks();
   assert.equal(fixture.externalRequests.length, 1);
 
@@ -278,7 +339,7 @@ test("subframes dispatch active HTTP(S) new-window requests locally without open
   const routed = clickEvent(new FixtureAnchor("https://example.test/iframe?q=1#part"));
   handler(routed);
   fixture.runTasks();
-  assert.equal(routed.defaultPrevented, true);
+  assert.equal(routed.defaultPrevented, false);
   assert.deepEqual(fixture.externalRequests, ["https://example.test/iframe?q=1#part"]);
   assert.equal(fixture.opened.length, 0);
 

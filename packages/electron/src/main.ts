@@ -220,6 +220,8 @@ const programmaticSurfaceCloses = new Set<string>();
 const pendingLocalSurfaceCloses = new Set<string>();
 const pendingWindowStates = new Map<string, RendererWindowState>();
 const browserUrlWebContentsPanes = new Map<number, { paneId: number; surfaceId: string }>();
+const attachedWebContentsSurfaces = new Map<number, string>();
+const pendingExternalNewWindowRequests = new Map<number, Map<string, string>>();
 const readyWindows = new Set<string>();
 const overlayDiagnostics = new Map<string, Record<string, unknown>>();
 const overlayForwardState = new Map<string, { revision: number; topologyEpoch: string | null }>();
@@ -763,6 +765,29 @@ function surfaceIdForSender(contents: WebContents): string | null {
     }
   }
   return null;
+}
+
+function externalNewWindowRequestKey(processId: number, routingId: number, requestId: number): string {
+  return `${processId}:${routingId}:${requestId}`;
+}
+
+function hasPendingExternalNewWindowRequest(contents: WebContents, rawUrl: string): boolean {
+  const url = resolveExternalHttpUrl(rawUrl);
+  if (!url) return false;
+  for (const pendingUrl of pendingExternalNewWindowRequests.get(contents.id)?.values() ?? []) {
+    if (pendingUrl === url) return true;
+  }
+  return false;
+}
+
+function clearPendingExternalNewWindowRequestsForFrame(contents: WebContents, processId: number, routingId: number): void {
+  const pending = pendingExternalNewWindowRequests.get(contents.id);
+  if (!pending) return;
+  const prefix = `${processId}:${routingId}:`;
+  for (const key of pending.keys()) {
+    if (key.startsWith(prefix)) pending.delete(key);
+  }
+  if (pending.size === 0) pendingExternalNewWindowRequests.delete(contents.id);
 }
 
 function rendererDiagnosticFields(
@@ -1503,9 +1528,10 @@ function wireWindowInputMenus(surfaceId: string, window: BrowserWindow): void {
     webPreferences.nodeIntegrationInSubFrames = true;
   });
   window.webContents.on("did-attach-webview", (_event, webContents) => {
+    attachedWebContentsSurfaces.set(webContents.id, surfaceId);
     wireEditableContextMenu(webContents, window);
     webContents.setWindowOpenHandler((details) => {
-      if (hasExternalNewWindowFeature(details.features)) {
+      if (hasExternalNewWindowFeature(details.features) || hasPendingExternalNewWindowRequest(webContents, details.url)) {
         return { action: "deny" };
       }
       return { action: embeddedNewWindowAction(webContents.getURL().startsWith("data:")) };
@@ -1514,7 +1540,12 @@ function wireWindowInputMenus(surfaceId: string, window: BrowserWindow): void {
       const binding = browserUrlWebContentsPanes.get(webContents.id);
       return binding?.surfaceId === surfaceId ? binding.paneId : null;
     });
+    webContents.on("did-frame-navigate", (_event, _url, _status, _statusText, _isMainFrame, processId, routingId) => {
+      clearPendingExternalNewWindowRequestsForFrame(webContents, processId, routingId);
+    });
     webContents.once("destroyed", () => {
+      attachedWebContentsSurfaces.delete(webContents.id);
+      pendingExternalNewWindowRequests.delete(webContents.id);
       browserUrlWebContentsPanes.delete(webContents.id);
     });
   });
@@ -2089,6 +2120,44 @@ function installIpc(): void {
 
   ipcMain.on("surface:get-guest-preload-path", (event) => {
     event.returnValue = path.join(distDir, "guest-preload.cjs");
+  });
+
+  ipcMain.on("surface:external-new-window-request", (event, payload) => {
+    const surfaceId = attachedWebContentsSurfaces.get(event.sender.id);
+    const frame = event.senderFrame;
+    if (!surfaceId || !windows.has(surfaceId) || !frame || !payload || typeof payload !== "object") {
+      event.returnValue = false;
+      return;
+    }
+
+    const request = payload as Record<string, unknown>;
+    const phase = request.phase;
+    const requestId = request.requestId;
+    const externalUrl = typeof request.url === "string" ? resolveExternalHttpUrl(request.url) : null;
+    if (!Number.isSafeInteger(requestId) || (requestId as number) < 1 || !externalUrl) {
+      event.returnValue = false;
+      return;
+    }
+
+    const key = externalNewWindowRequestKey(frame.processId, frame.routingId, requestId as number);
+    if (phase === "prepare") {
+      const pending = pendingExternalNewWindowRequests.get(event.sender.id) ?? new Map<string, string>();
+      pending.set(key, externalUrl);
+      pendingExternalNewWindowRequests.set(event.sender.id, pending);
+      event.returnValue = true;
+      return;
+    }
+
+    if (phase === "cancel" || phase === "complete") {
+      const pending = pendingExternalNewWindowRequests.get(event.sender.id);
+      const preparedUrl = pending?.get(key);
+      const accepted = preparedUrl === externalUrl && pending?.delete(key) === true;
+      if (pending?.size === 0) pendingExternalNewWindowRequests.delete(event.sender.id);
+      event.returnValue = accepted;
+      return;
+    }
+
+    event.returnValue = false;
   });
 
   ipcMain.on("surface:open-external-url", (event, payload) => {

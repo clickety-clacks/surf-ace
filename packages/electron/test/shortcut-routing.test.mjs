@@ -16,6 +16,7 @@ const code = transformSync(section('function keyboardDirectionForVimKey', 'funct
   section('function handleShortcutInput', 'function wireWindowDiagnostics'), { loader: 'ts' }).code;
 function fixture({ native = false } = {}) {
   const annotations = [], sends = [], activations = [], navigation = [], history = [];
+  const attachedWebContentsSurfaces = new Map(), pendingExternalNewWindowRequests = new Map();
   const panes = [{ paneId: 1, paneLineageId: 'lineage-1', content: { contentType: 'markdown', contentId:'content-1', revision:1, renderVersion:1 } },
     { paneId: 2, externalNative: native, content: { contentType: native ? 'terminal' : 'browser_url' } }];
   let active = native ? 2 : 1;
@@ -32,6 +33,7 @@ function fixture({ native = false } = {}) {
     core: { setActiveKeyboardPane(_s, id) { active = id; activations.push(id); },
       activeKeyboardPaneId() { return active; }, navigateActiveKeyboardPane(...args) { navigation.push(args); } },
     rendererWindowState: () => ({ panes }), browserUrlWebContentsPanes: bindings,
+    attachedWebContentsSurfaces, pendingExternalNewWindowRequests,
     annotationSourceCoordinator: { setAnnotating(...args) { annotations.push(args); return Promise.resolve(); } },
     navigateHistoryAfterNativeRelease(...args) { history.push(args); return Promise.resolve(); },
     wireEditableContextMenu() {}, clientWarn() {}, errorDiagnosticFields: x => x, focusNextWindow() {},
@@ -46,7 +48,7 @@ function fixture({ native = false } = {}) {
       { type: 'keyDown', key, meta: false, control: false, alt: false, shift: false, ...modifiers });
     return prevented;
   }
-  return { window, guest, bindings, annotations, sends, activations, navigation, history, key,
+  return { window, guest, bindings, attachedWebContentsSurfaces, pendingExternalNewWindowRequests, annotations, sends, activations, navigation, history, key,
     setDoneBusy(value) { doneBusy = value; } };
 }
 test('attached guest retains keyboard routing and releases its binding on destruction', () => {
@@ -55,6 +57,8 @@ test('attached guest retains keyboard routing and releases its binding on destru
   f.key(f.guest, 'a');
   f.guest.handlers.get('destroyed')();
   assert.equal(f.bindings.has(f.guest.id), false);
+  assert.equal(f.attachedWebContentsSurfaces.has(f.guest.id), false);
+  assert.equal(f.pendingExternalNewWindowRequests.has(f.guest.id), false);
 });
 test('focused guest owns ordinary typing, modifiers, arrows and page keys', () => {
   const f = fixture();
