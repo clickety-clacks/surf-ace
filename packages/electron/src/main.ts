@@ -86,6 +86,7 @@ import {
 import { isAddressInUse, isPortBoundOnIpv6Any } from "./port-selection.js";
 import {
   embeddedNewWindowAction,
+  hasExternalNewWindowFeature,
   resolveExternalHttpUrl,
 } from "./external-new-window.js";
 import { SurfaceWsServer, type CommittedSurfaceObservation } from "./ws-server.js";
@@ -1503,7 +1504,10 @@ function wireWindowInputMenus(surfaceId: string, window: BrowserWindow): void {
   });
   window.webContents.on("did-attach-webview", (_event, webContents) => {
     wireEditableContextMenu(webContents, window);
-    webContents.setWindowOpenHandler(() => {
+    webContents.setWindowOpenHandler((details) => {
+      if (hasExternalNewWindowFeature(details.features)) {
+        return { action: "deny" };
+      }
       return { action: embeddedNewWindowAction(webContents.getURL().startsWith("data:")) };
     });
     wireWebContentsShortcuts(surfaceId, window, webContents, () => {

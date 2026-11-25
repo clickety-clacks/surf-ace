@@ -1,8 +1,8 @@
 import { ipcRenderer, webFrame } from "electron";
 import {
   EXTERNAL_NEW_WINDOW_EVENT,
+  createExternalNewWindowRequestBridge,
   externalNewWindowFrameScript,
-  externalNewWindowRequestUrl,
   isExternalNewWindowLink,
 } from "./external-new-window.js";
 
@@ -98,14 +98,14 @@ function linkTarget(target: EventTarget | null): HTMLAnchorElement | null {
 }
 
 const isMainFrame = process.isMainFrame;
+const routeExternalNewWindowRequest = createExternalNewWindowRequestBridge((url) => {
+  emit({ type: "external-navigation", url });
+});
 window.addEventListener(EXTERNAL_NEW_WINDOW_EVENT, (event) => {
-  const url = externalNewWindowRequestUrl(
+  routeExternalNewWindowRequest(
     (event as CustomEvent<unknown>).detail,
     navigator.userActivation?.isActive === true,
   );
-  if (url) {
-    emit({ type: "external-navigation", url });
-  }
 });
 void webFrame.executeJavaScript(externalNewWindowFrameScript()).catch(() => undefined);
 

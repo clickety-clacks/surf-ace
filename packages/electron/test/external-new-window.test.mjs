@@ -4,9 +4,13 @@ import { runInNewContext } from "node:vm";
 
 import {
   EXTERNAL_NEW_WINDOW_EVENT,
+  EXTERNAL_NEW_WINDOW_FEATURE,
+  appendExternalNewWindowFeature,
+  createExternalNewWindowRequestBridge,
   externalNewWindowFrameScript,
   externalNewWindowRequestUrl,
   embeddedNewWindowAction,
+  hasExternalNewWindowFeature,
   isExternalNewWindowLink,
   resolveExternalHttpUrl,
 } from "../src/external-new-window.ts";
@@ -30,20 +34,32 @@ class FixtureAnchor extends FixtureElement {
   }
 }
 
-function runFrameScript({ subframe = false, readyState = "complete" } = {}) {
+function runFrameScript({ subframe = false, readyState = "complete", openResults = [], consumeActivationOnNull = false } = {}) {
   const handlers = new Map();
+  const listenerOptions = new Map();
   const events = [];
   const opened = [];
-  const microtasks = [];
+  const tasks = [];
+  const results = [...openResults];
   const userActivation = { isActive: false };
   const requestEventName = EXTERNAL_NEW_WINDOW_EVENT;
+  const externalRequests = [];
+  const routeRequest = createExternalNewWindowRequestBridge((url) => externalRequests.push(url));
   const window = {
-    addEventListener: (type, handler) => handlers.set(`window:${type}`, handler),
-    dispatchEvent: (event) => events.push(event),
+    addEventListener: (type, handler, options) => {
+      handlers.set(`window:${type}`, handler);
+      listenerOptions.set(`window:${type}`, options);
+    },
+    dispatchEvent: (event) => {
+      events.push(event);
+      routeRequest(event.detail, userActivation.isActive);
+    },
     removeEventListener: (type) => handlers.delete(`window:${type}`),
     open: (...args) => {
       opened.push(args);
-      return "embedded-window";
+      const result = results.length > 0 ? results.shift() : "embedded-window";
+      if (consumeActivationOnNull && result === null) userActivation.isActive = false;
+      return result;
     },
   };
   window.top = window;
@@ -63,20 +79,32 @@ function runFrameScript({ subframe = false, readyState = "complete" } = {}) {
     Element: FixtureElement,
     HTMLAnchorElement: FixtureAnchor,
     navigator: { userActivation },
-    queueMicrotask: (callback) => microtasks.push(callback),
     Reflect,
+    setTimeout: (callback) => tasks.push(callback),
     URL,
     window,
   });
   return {
     document,
     handlers,
+    listenerOptions,
     events,
+    externalRequests,
     opened,
     requestEventName,
     userActivation,
     window,
-    runMicrotasks: () => microtasks.splice(0).forEach((callback) => callback()),
+    runTasks: () => tasks.splice(0).forEach((callback) => callback()),
+  };
+}
+
+function clickEvent(anchor, { defaultPrevented = false } = {}) {
+  let prevented = defaultPrevented;
+  return {
+    isTrusted: true,
+    target: new FixtureElement(anchor),
+    get defaultPrevented() { return prevented; },
+    preventDefault() { prevented = true; },
   };
 }
 
@@ -113,128 +141,151 @@ test("source-frame requests require active activation and an HTTP(S) destination
   assert.equal(externalNewWindowRequestUrl({ url: "javascript:window.close()" }, true), null);
 });
 
-test("top-frame anchor routing waits until page load handlers have run while window.open is wrapped early", () => {
-  const fixture = runFrameScript({ readyState: "loading" });
-  assert.equal(fixture.handlers.has("window:click"), false);
-  fixture.userActivation.isActive = true;
-  assert.equal(fixture.window.open("https://example.test/early-script"), null);
-  assert.equal(fixture.events[0].detail.url, "https://example.test/early-script");
+test("external request bridge validates activation at prepare and completes after native popup denial", () => {
+  const opened = [];
+  const route = createExternalNewWindowRequestBridge((url) => opened.push(url));
+  const request = { phase: "prepare", requestId: 1, url: "https://example.test/named" };
 
-  const installAfterLoad = fixture.handlers.get("window:load");
-  assert.equal(typeof installAfterLoad, "function");
-  installAfterLoad({ isTrusted: false });
-  assert.equal(fixture.handlers.has("window:click"), false);
-  installAfterLoad({ isTrusted: true });
-  assert.equal(fixture.handlers.has("window:click"), false);
-  fixture.runMicrotasks();
-  assert.equal(fixture.handlers.has("window:click"), true);
+  route(request, false);
+  route({ phase: "complete", requestId: 1 }, false);
+  assert.deepEqual(opened, []);
+
+  route(request, true);
+  route({ phase: "cancel", requestId: 1 }, false);
+  route({ phase: "complete", requestId: 1 }, false);
+  assert.deepEqual(opened, []);
+
+  route({ ...request, requestId: 2 }, true);
+  route({ phase: "complete", requestId: 2 }, false);
+  assert.deepEqual(opened, ["https://example.test/named"]);
 });
 
-test("frame fixture routes only active HTTP(S) new-window requests and leaves same-pane links alone", () => {
+test("anchor routing is installed before load and captures clicks before page handlers", () => {
+  const fixture = runFrameScript({ readyState: "loading" });
+  const handler = fixture.handlers.get("window:click");
+  assert.equal(typeof handler, "function");
+  assert.equal(fixture.listenerOptions.get("window:click"), true);
+  fixture.userActivation.isActive = true;
+  assert.equal(fixture.window.open("https://example.test/early-script"), null);
+  assert.equal(fixture.externalRequests[0], "https://example.test/early-script");
+});
+
+test("anchor routing preserves same-pane behavior, waits for page cancellation, and does not deduplicate URLs", () => {
   const fixture = runFrameScript();
-  let prevented = false;
-  fixture.handlers.get("window:click")?.({
-    isTrusted: true,
-    target: new FixtureElement(new FixtureAnchor("https://example.test/path")),
-    defaultPrevented: false,
-    preventDefault: () => { prevented = true; },
-  });
-  assert.equal(prevented, false);
-  assert.deepEqual(fixture.events, []);
+  const handler = fixture.handlers.get("window:click");
+  handler(clickEvent(new FixtureAnchor("https://example.test/path")));
+  assert.equal(fixture.externalRequests.length, 0);
   assert.equal(fixture.window.open("https://example.test/path"), "embedded-window");
-  assert.deepEqual(fixture.events, []);
+  assert.deepEqual(fixture.externalRequests, []);
 
   fixture.userActivation.isActive = true;
-  const canceledAnchor = {
-    isTrusted: true,
-    target: new FixtureElement(new FixtureAnchor("https://example.test/canceled")),
-    defaultPrevented: true,
-    preventDefault: () => { throw new Error("already-canceled anchor should not be prevented again"); },
-  };
-  fixture.handlers.get("window:click")?.(canceledAnchor);
-  assert.equal(fixture.events.length, 0);
+  const routedAnchor = clickEvent(new FixtureAnchor("../article?q=term#section"));
+  handler(routedAnchor);
+  assert.equal(routedAnchor.defaultPrevented, true);
+  assert.equal(fixture.externalRequests.length, 0);
+  fixture.userActivation.isActive = false;
+  fixture.runTasks();
+  assert.deepEqual(fixture.externalRequests, ["https://chat.example.test/article?q=term#section"]);
 
-  fixture.handlers.get("window:click")?.({
-    isTrusted: true,
-    target: new FixtureElement(new FixtureAnchor("../article?q=term#section")),
-    defaultPrevented: false,
-    preventDefault: () => { prevented = true; },
-  });
-  assert.equal(prevented, true);
-  assert.equal(fixture.events.length, 1);
-  assert.equal(fixture.events[0].type, fixture.requestEventName);
-  assert.equal(fixture.events[0].detail.url, "https://chat.example.test/article?q=term#section");
-  prevented = false;
-  fixture.handlers.get("window:click")?.({
-    isTrusted: true,
-    target: new FixtureElement(new FixtureAnchor("https://example.test/same-pane", "_self")),
-    defaultPrevented: false,
-    preventDefault: () => { prevented = true; },
-  });
-  assert.equal(prevented, false);
-  assert.equal(fixture.window.open("https://example.test/scripted"), null);
-  const canceledWithScript = {
-    isTrusted: true,
-    target: new FixtureElement(new FixtureAnchor("https://example.test/canceled-shared")),
-    defaultPrevented: true,
-    preventDefault: () => { throw new Error("already-canceled anchor should not be prevented again"); },
-  };
-  fixture.window.open("https://example.test/canceled-shared");
-  fixture.handlers.get("window:click")?.(canceledWithScript);
-  fixture.window.open("https://example.test/shared");
-  fixture.handlers.get("window:click")?.({
-    isTrusted: true,
-    target: new FixtureElement(new FixtureAnchor("https://example.test/shared")),
-    defaultPrevented: false,
-    preventDefault: () => { prevented = true; },
-  });
-  assert.equal(fixture.window.open("https://example.test/same-pane", "_self"), "embedded-window");
-  assert.equal(fixture.window.open("https://example.test/parent-pane", "_parent"), "embedded-window");
-  assert.equal(fixture.window.open("https://example.test/named", "existing-frame"), "embedded-window");
+  fixture.userActivation.isActive = true;
+  const canceledAnchor = clickEvent(new FixtureAnchor("https://example.test/canceled"));
+  handler(canceledAnchor);
+  canceledAnchor.preventDefault();
+  fixture.runTasks();
+  assert.equal(fixture.externalRequests.length, 1);
+
+  const alreadyCanceled = clickEvent(new FixtureAnchor("https://example.test/already-canceled"), { defaultPrevented: true });
+  handler(alreadyCanceled);
+  fixture.runTasks();
+  assert.equal(fixture.externalRequests.length, 1);
+
+  const samePane = clickEvent(new FixtureAnchor("https://example.test/same-pane", "_self"));
+  handler(samePane);
+  assert.equal(samePane.defaultPrevented, false);
+  assert.equal(fixture.externalRequests.length, 1);
+
+  const repeated = clickEvent(new FixtureAnchor("https://example.test/repeated"));
+  handler(repeated);
+  fixture.runTasks();
+  handler(clickEvent(new FixtureAnchor("https://example.test/repeated")));
+  fixture.runTasks();
+  assert.equal(fixture.externalRequests.length, 3);
+  assert.deepEqual(fixture.externalRequests.slice(1), [
+    "https://example.test/repeated",
+    "https://example.test/repeated",
+  ]);
+});
+
+test("window.open routes default, empty, and denied new named contexts but preserves existing names", () => {
+  const fixture = runFrameScript({ openResults: ["existing-window", null], consumeActivationOnNull: true });
+  fixture.userActivation.isActive = true;
+
+  assert.equal(fixture.window.open("https://example.test/default"), null);
+  assert.equal(fixture.externalRequests[0], "https://example.test/default");
+  assert.equal(fixture.window.open("https://example.test/empty", ""), null);
+  assert.equal(fixture.externalRequests[1], "https://example.test/empty");
+  assert.equal(fixture.opened.length, 0);
+
+  assert.equal(fixture.window.open("https://example.test/named-existing", "existing-frame", "width=400"), "existing-window");
+  assert.equal(fixture.externalRequests.length, 2);
+  assert.equal(fixture.opened[0][1], "existing-frame");
+  assert.equal(fixture.opened[0][2], `width=400,${EXTERNAL_NEW_WINDOW_FEATURE}=1`);
+
+  assert.equal(fixture.window.open("https://example.test/named-new", "new-frame", "height=300"), null);
+  assert.equal(fixture.externalRequests[2], "https://example.test/named-new");
+  assert.equal(fixture.opened[1][2], `height=300,${EXTERNAL_NEW_WINDOW_FEATURE}=1`);
+  assert.equal(fixture.window.open("https://example.test/parent", "_parent"), "embedded-window");
+  assert.equal(fixture.window.open("https://example.test/top", "_top"), "embedded-window");
+});
+
+test("external new-context marker is parsed from Electron window features", () => {
+  assert.equal(appendExternalNewWindowFeature("width=400"), `width=400,${EXTERNAL_NEW_WINDOW_FEATURE}=1`);
+  assert.equal(appendExternalNewWindowFeature(undefined), `${EXTERNAL_NEW_WINDOW_FEATURE}=1`);
+  assert.equal(hasExternalNewWindowFeature(`width=400, ${EXTERNAL_NEW_WINDOW_FEATURE}=1`), true);
+  assert.equal(hasExternalNewWindowFeature("width=400,noopener"), false);
+  assert.equal(hasExternalNewWindowFeature(`${EXTERNAL_NEW_WINDOW_FEATURE}=0`), false);
+});
+
+test("frame fixture routes only active HTTP(S) new-window requests and leaves same-context calls alone", () => {
+  const fixture = runFrameScript({ openResults: ["embedded-window", "named-window"] });
+  const handler = fixture.handlers.get("window:click");
+  const inactive = clickEvent(new FixtureAnchor("https://example.test/inactive"));
+  handler(inactive);
+  assert.equal(inactive.defaultPrevented, false);
+  assert.equal(fixture.externalRequests.length, 0);
+
+  fixture.userActivation.isActive = true;
+  assert.equal(fixture.window.open("https://example.test/same", "_self"), "embedded-window");
+  assert.equal(fixture.window.open("https://example.test/named", "existing-frame"), "named-window");
   assert.equal(fixture.window.open("", "_blank"), "embedded-window");
   assert.equal(fixture.window.open(undefined, "_blank"), "embedded-window");
   assert.equal(fixture.window.open(null, "_blank"), "embedded-window");
   assert.equal(fixture.window.open("mailto:person@example.test"), "embedded-window");
-  assert.equal(fixture.opened.length, 8);
-  assert.equal(fixture.events.length, 5);
-  assert.deepEqual(fixture.events.slice(1).map((event) => event.detail.url), [
-    "https://example.test/scripted",
-    "https://example.test/canceled-shared",
-    "https://example.test/shared",
-    "https://example.test/shared",
-  ]);
+  assert.equal(fixture.opened.length, 6);
+  assert.equal(fixture.externalRequests.length, 0);
 });
 
 test("subframes dispatch active HTTP(S) new-window requests locally without opening a popup", () => {
-  const fixture = runFrameScript({ subframe: true });
-  let prevented = false;
-  fixture.handlers.get("window:click")?.({
-    isTrusted: true,
-    target: new FixtureElement(new FixtureAnchor("https://example.test/iframe")),
-    defaultPrevented: false,
-    preventDefault: () => { prevented = true; },
-  });
-  assert.equal(prevented, false);
-  assert.equal(fixture.opened.length, 0);
+  const fixture = runFrameScript({ subframe: true, openResults: ["existing-frame"] });
+  const handler = fixture.handlers.get("window:click");
+  const inactive = clickEvent(new FixtureAnchor("https://example.test/iframe"));
+  handler(inactive);
+  fixture.runTasks();
+  assert.equal(inactive.defaultPrevented, false);
+  assert.equal(fixture.externalRequests.length, 0);
 
   fixture.userActivation.isActive = true;
-  fixture.handlers.get("window:click")?.({
-    isTrusted: true,
-    target: new FixtureElement(new FixtureAnchor("https://example.test/iframe?q=1#part")),
-    defaultPrevented: false,
-    preventDefault: () => { prevented = true; },
-  });
-  assert.equal(prevented, true);
-  assert.equal(fixture.events[0].type, fixture.requestEventName);
-  assert.equal(fixture.events[0].detail.url, "https://example.test/iframe?q=1#part");
+  const routed = clickEvent(new FixtureAnchor("https://example.test/iframe?q=1#part"));
+  handler(routed);
+  fixture.runTasks();
+  assert.equal(routed.defaultPrevented, true);
+  assert.deepEqual(fixture.externalRequests, ["https://example.test/iframe?q=1#part"]);
   assert.equal(fixture.opened.length, 0);
 
   assert.equal(fixture.window.open("https://example.test/scripted"), null);
-  assert.equal(fixture.events[1].type, fixture.requestEventName);
-  assert.equal(fixture.events[1].detail.url, "https://example.test/scripted");
-  assert.equal(fixture.window.open("https://example.test/named", "existing-frame"), "embedded-window");
+  assert.equal(fixture.externalRequests[1], "https://example.test/scripted");
+  assert.equal(fixture.window.open("https://example.test/named", "existing-frame"), "existing-frame");
+  assert.equal(fixture.externalRequests.length, 2);
   assert.equal(fixture.window.open("", "_blank"), "embedded-window");
-  assert.equal(fixture.window.open(undefined, "_blank"), "embedded-window");
-  assert.equal(fixture.window.open(null, "_blank"), "embedded-window");
-  assert.equal(fixture.opened.length, 4);
+  assert.equal(fixture.opened.length, 2);
 });
