@@ -13,6 +13,7 @@ use tungstenite::client::{uri_mode, IntoClientRequest};
 use uuid::Uuid;
 
 const LOCKLESS_CAPABILITY: &str = "surf-ace.lockless-multi-controller.v1";
+const OPERATION_BLOCKED_CAPABILITY: &str = "surf-ace.operation-blocked.v1";
 const RECEIPT_CAPABILITY: &str = "operation-receipt-replay-v1";
 const CONTROL_PROJECTION_V1: &str = "control_projection_v1";
 const DISCOVERY_TIMEOUT: Duration = Duration::from_millis(2_000);
@@ -63,17 +64,20 @@ pub fn execute(invocation: Invocation) -> Result<CliOutput, CliError> {
     validate_expected_controller(&invocation, &root)?;
     let surface_id = operation_surface_id(&invocation)?;
     let mut operation_wire = WebSocketWire::connect_direct(&endpoint).map_err(CliError::Wire)?;
-    if invocation.command != crate::command::Command::PaneDescribe {
-        if let Some(surface_id) = surface_id.as_deref() {
-            discover_surface(&mut root, &mut operation_wire, surface_id)?;
+    let result = (|| {
+        if invocation.command != crate::command::Command::PaneDescribe {
+            if let Some(surface_id) = surface_id.as_deref() {
+                discover_surface(&mut root, &mut operation_wire, surface_id)?;
+            }
         }
-    }
-    execute_locked(
-        invocation,
-        &mut root,
-        &mut operation_wire,
-        surface_id.as_deref(),
-    )
+        execute_locked(invocation, &mut root, &mut operation_wire, surface_id.as_deref())
+    })();
+    result.map_err(|source| match operation_wire.operation_block() {
+        Some(notice) if source.details().get("blockedBy").is_none() => CliError::WithOperationBlock {
+            source: Box::new(source), notice: notice.clone(),
+        },
+        _ => source,
+    })
 }
 
 pub fn execute_with_wire(
@@ -1206,11 +1210,42 @@ fn normalize_application_readiness(
         "status".into(),
         Value::String(if codes.is_empty() { "ready" } else { "degraded" }.into()),
     );
+    let open_changes = codes.iter().filter_map(|code| surface_open_change(code)).collect::<Vec<_>>();
+    if let Some(first) = open_changes.first() {
+        readiness.insert("readinessReason".into(), first["message"].clone());
+        readiness.insert("openChanges".into(), Value::Array(open_changes));
+    }
     readiness.insert(
         "limitationCodes".into(),
         Value::Array(codes.into_iter().map(Value::String).collect()),
     );
     payload.insert("applicationReadiness".into(), Value::Object(readiness));
+}
+
+fn surface_open_change(code: &str) -> Option<Value> {
+    let (change, encoded_start) = code.strip_prefix("blocked_by_")?.rsplit_once("_since_")?;
+    if change.is_empty() || encoded_start.is_empty() {
+        return None;
+    }
+    let started_at_ms = encoded_start.bytes().try_fold(0_i64, |millis, digit| {
+        if !(b'a'..=b'j').contains(&digit) {
+            return None;
+        }
+        millis.checked_mul(10)?.checked_add(i64::from(digit - b'a'))
+    })?;
+    use chrono::Timelike;
+    let start = chrono::DateTime::from_timestamp_millis(started_at_ms)?;
+    let time = start.time();
+    let since = format!(
+        "{}T{:02}:{:02}:{:02}.{:03}Z",
+        start.date_naive(), time.hour(), time.minute(), time.second(), time.nanosecond() / 1_000_000,
+    );
+    let change = change.replace('_', " ");
+    Some(json!({
+        "message": format!("Blocked behind {change} since {since}"),
+        "change": change,
+        "startedAtMs": started_at_ms,
+    }))
 }
 
 fn identity_consistency(
@@ -1672,7 +1707,7 @@ fn execute_locked(
         "controllerInstanceId": controller_id,
         "controllerProductName": product_label,
         "projectionCapacityBytes": invocation.projection_capacity_bytes,
-        "protocolFeatures": [LOCKLESS_CAPABILITY, RECEIPT_CAPABILITY, CONTROL_PROJECTION_V1],
+        "protocolFeatures": [LOCKLESS_CAPABILITY, RECEIPT_CAPABILITY, CONTROL_PROJECTION_V1, OPERATION_BLOCKED_CAPABILITY],
         "protocolVersion": 1,
         "resume": resume_payload(root.state(), true),
     });
@@ -2235,7 +2270,18 @@ fn perform_mutation(
         return Ok(terminal);
     }
     if response.response.ok == Some(false) {
-        return resolve_committed_rejection(root, wire, &request_id, &terminal);
+        return resolve_committed_rejection(root, wire, &request_id, &terminal)
+            .map_err(|source| {
+                let notice = response.response.error.as_ref().and_then(|error| {
+                    let changes = error.get("details")?.get("openChanges")?.as_array()?;
+                    if changes.is_empty() { return None; }
+                    Some(json!({ "openChanges": changes, "message": error.get("message")? }))
+                });
+                match notice {
+                    Some(notice) => CliError::WithOperationBlock { source: Box::new(source), notice },
+                    None => source,
+                }
+            });
     }
     require_operation_receipt(&terminal, &request_id)?;
     if op == "target.apply" {
@@ -2647,6 +2693,9 @@ fn control_sync_successful_payload(response: &Envelope) -> Result<&Map<String, V
         ));
     }
     if response.ok == Some(false) {
+        if let Some(error) = blocked_response_error(response, "consumable.sync") {
+            return Err(error);
+        }
         let code = response
             .error
             .as_ref()
@@ -3366,11 +3415,25 @@ fn require_replayed_receipt(
     Ok(())
 }
 
+fn blocked_response_error(response: &Envelope, operation: &str) -> Option<CliError> {
+    let error = response.error.as_ref()?;
+    let blocker = error.get("details")?.get("blockedBy")?;
+    Some(CliError::Blocked {
+        operation: operation.into(),
+        code: error.get("code")?.as_str()?.into(),
+        message: error.get("message")?.as_str()?.into(),
+        blocker: blocker.clone(),
+    })
+}
+
 fn successful_payload<'a>(
     response: &'a Envelope,
     operation: &str,
 ) -> Result<&'a Map<String, Value>, CliError> {
     if response.ok == Some(false) {
+        if let Some(error) = blocked_response_error(response, operation) {
+            return Err(error);
+        }
         let code = response
             .error
             .as_ref()
@@ -3409,6 +3472,9 @@ fn pane_describe_successful_payload<'a>(
         )));
     }
     if response.ok == Some(false) {
+        if let Some(error) = blocked_response_error(response, operation) {
+            return Err(error);
+        }
         let code = response
             .error
             .as_ref()
@@ -3487,6 +3553,13 @@ pub enum CliError {
         operation: String,
         code: String,
     },
+    Blocked {
+        operation: String,
+        code: String,
+        message: String,
+        blocker: Value,
+    },
+    WithOperationBlock { source: Box<CliError>, notice: Value },
     State(StateError),
     StillPending,
     Wire(WireFailure),
@@ -3501,7 +3574,8 @@ impl CliError {
             Self::OutcomeUnknown { .. } => "outcome_unknown",
             Self::ProjectionAfterCommit { .. } => "projection_unavailable_after_commit",
             Self::Protocol(_) => "protocol_error",
-            Self::Rejected { .. } => "operation_rejected",
+            Self::Rejected { .. } | Self::Blocked { .. } => "operation_rejected",
+            Self::WithOperationBlock { source, .. } => source.code(),
             Self::State(_) => "state_error",
             Self::StillPending => "still_pending",
             Self::Wire(_) => "transport_error",
@@ -3521,6 +3595,16 @@ impl CliError {
             Self::Rejected { operation, code } => {
                 json!({ "operation": operation, "rejectionCode": code })
             }
+            Self::Blocked { operation, code, message, blocker } => {
+                json!({ "operation": operation, "rejectionCode": code, "message": message, "blockedBy": blocker })
+            }
+            Self::WithOperationBlock { source, notice } => {
+                let mut details = source.details();
+                details["blockedBy"] = notice["openChanges"][0].clone();
+                details["openChanges"] = notice["openChanges"].clone();
+                details["blockedMessage"] = notice["message"].clone();
+                details
+            }
             _ => json!({ "message": self.to_string() }),
         }
     }
@@ -3538,6 +3622,10 @@ impl std::fmt::Display for CliError {
             Self::Protocol(value) => write!(formatter, "protocol_error:{value}"),
             Self::Rejected { operation, code } => {
                 write!(formatter, "operation_rejected:{operation}:{code}")
+            }
+            Self::Blocked { message, .. } => formatter.write_str(message),
+            Self::WithOperationBlock { source, notice } => {
+                write!(formatter, "{source}. {}", notice["message"].as_str().unwrap_or_default())
             }
             Self::State(error) => error.fmt(formatter),
             Self::StillPending => formatter.write_str("still_pending"),

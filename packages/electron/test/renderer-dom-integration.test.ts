@@ -77,6 +77,7 @@ test("renderer DOM integrates authoritative connection states and live scale con
     "<!doctype html><html lang=\"en\"><body><div id=\"app\"></div><div id=\"provenance-announcer\" aria-atomic=\"true\" aria-live=\"polite\"></div></body></html>",
   );
   let ownershipListener: ((notice: unknown) => void) | null = null;
+  let blockerListener: ((message: string | null) => void) | null = null;
   let stateListener: ((next: unknown) => void) | null = null;
   let keyboardListener: ((intent: unknown) => void) | null = null;
   let focusStateUpdate: (() => void) | null = null;
@@ -105,6 +106,7 @@ test("renderer DOM integrates authoritative connection states and live scale con
       }
     },
     getBootstrap: async () => ({ state: state("disconnected"), surfaceId: "surface-1" }),
+    onBlockedStatus(listener: (message: string | null) => void) { blockerListener = listener; },
     onPanePresentationOwnership(listener: (notice: unknown) => void) { ownershipListener = listener; },
     onKeyboardIntent(listener: (intent: unknown) => void) { keyboardListener = listener; },
     onState(listener: (next: unknown) => void) {
@@ -226,6 +228,11 @@ test("renderer DOM integrates authoritative connection states and live scale con
   assert.equal(chrome().pane.hasAttribute("hidden"), false);
   assert.equal(chrome().window.hasAttribute("hidden"), false);
   stateListener!(state("connected"));
+  const blockedMessage = "Blocked behind pane split since 2026-11-25T21:00:00.000Z";
+  blockerListener!(blockedMessage);
+  assert.equal(document.querySelector('[role="status"]')?.textContent, blockedMessage);
+  blockerListener!(null);
+  assert.equal(document.querySelector(".connection-status-banner"), null);
   assert.equal(chrome().glyph.hasAttribute("hidden"), true);
   assert.equal(chrome().pane.hasAttribute("hidden"), false);
   assert.equal(chrome().window.hasAttribute("hidden"), false);

@@ -10,6 +10,11 @@ contextBridge.exposeInMainWorld("surfAce", {
     ipcRenderer.invoke("surface:annotation-open", { paneId, openedAt }) as Promise<boolean>,
   guestPreloadPath,
   getBootstrap: () => ipcRenderer.invoke("surface:get-bootstrap"),
+  onBlockedStatus: (listener: (message: string | null) => void) => {
+    const wrapped = (_event: Electron.IpcRendererEvent, message: string | null) => listener(message);
+    ipcRenderer.on("surface:blocked-status", wrapped);
+    return () => ipcRenderer.removeListener("surface:blocked-status", wrapped);
+  },
   setPanePresentation: (payload: Record<string, unknown>) => ipcRenderer.invoke("surface:pane-presentation", payload),
   onPanePresentationOwnership: (listener: (notice: unknown) => void) => {
     const wrapped = (_event: unknown, notice: unknown) => listener(notice);
@@ -42,6 +47,7 @@ declare global {
       captureAnnotationOpen: (paneId: number, openedAt: number) => Promise<boolean>;
       guestPreloadPath: string;
       getBootstrap: () => Promise<unknown>;
+      onBlockedStatus: (listener: (message: string | null) => void) => () => void;
       setPanePresentation: (payload: Record<string, unknown>) => Promise<{ ok: boolean; error?: string; revision?: number; authorityRevision?: number; presentationCleared?: boolean; presentationBlocked?: boolean }>;
       onPanePresentationOwnership: (listener: (notice: unknown) => void) => () => void;
       onKeyboardIntent: (listener: (intent: unknown) => void) => () => void;

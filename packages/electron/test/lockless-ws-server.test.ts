@@ -5321,6 +5321,8 @@ test("guarded restore keeps two visible panes and local input while refusing an 
     newPaneLabels: [secondPaneId], paneId: firstPaneId,
   });
   let durable = core.getPersistentState();
+  const readiness = new PersistenceWriteReadiness();
+  let finishBlocker = () => {};
   let guarded = false;
   let entered = (): void => {};
   const pendingWrite = new Promise<void>((resolve) => { entered = resolve; });
@@ -5329,6 +5331,8 @@ test("guarded restore keeps two visible panes and local input while refusing an 
   const port = nextPort++;
   const server = new SurfaceWsServer({
     bindAddress: "127.0.0.1", capturePaneImage: async () => "cG5n",
+    getSurfaceBlockers: (surfaceId, requestId) => readiness.blockersForSurface(surfaceId, requestId),
+    beginApplicationStateMutation: (details) => readiness.beginAuthorityMutation(details),
     compositorSocketPath: null, core, endpointName: "Surf Ace", hostName: "localhost",
     persistLocklessState: async () => {
       if (guarded) {
@@ -5353,6 +5357,8 @@ test("guarded restore keeps two visible panes and local input while refusing an 
     }
     const committed = structuredClone(durable);
     guarded = true;
+    finishBlocker = readiness.beginAuthorityMutation({ operation: "pane.resize", surfaceId: surface.surfaceId });
+    const [blocker] = readiness.blockersForSurface(surface.surfaceId);
     const refused = request(socket, "content.set", {
       content: { html: "<p>unproven</p>" }, contentId: "unproven",
       contentType: "html", friendlyChatName: "Unproven", paneId: firstPaneId,
@@ -5375,11 +5381,15 @@ test("guarded restore keeps two visible panes and local input while refusing an 
     const writeResponse = await refused;
     assert.equal(writeResponse.ok, false, JSON.stringify(writeResponse));
     assert.equal(writeResponse.error?.code, "internal_error");
+    assert.match(writeResponse.error.message, /^Blocked behind pane resize since /);
+    assert.deepEqual(writeResponse.error.details.blockedBy, blocker);
+    console.log("Guarded write response", JSON.stringify(writeResponse));
     assert.equal(core.captureSnapshot(surface.surfaceId, firstPaneId).contentId, "first-visible");
     assert.deepEqual(durable, committed, "the guarded write must not change durable state");
     assert.equal((await request(socket, "heartbeat.ping", { nonce: "guarded-alive" })).ok, true,
       "the app and direct connection remain responsive");
   } finally {
+    finishBlocker();
     release();
     socket.close();
     await server.stop();

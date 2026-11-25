@@ -19,6 +19,8 @@ import {
   persistentStateSelectorFileName,
   writePersistentStateFile,
 } from "../src/persistent-state-file.js";
+import { validateEnvelopeType } from "../../protocol/src/validate.js";
+import { SURF_ACE_OPERATION_BLOCKED_V1_CAPABILITY, validateLocklessEnvelope } from "../../protocol/src/lockless.js";
 
 test("Bonjour transport address avoids slow hostname resolution and retains hostname fallback", async () => {
   const originalIdentity = ConfiguredServerRegistration.prototype.readRegistryIdentity;
@@ -575,6 +577,7 @@ test("pane.split label claim reenters authority, leaves the request queue usable
     surfaceServer = new SurfaceWsServer({
       beginApplicationStateMutation: (details) => persistenceReadiness.beginAuthorityMutation(details),
       openApplicationStateMutations: () => persistenceReadiness.openMutations(),
+      getSurfaceBlockers: (surfaceId, excludingRequestId) => persistenceReadiness.blockersForSurface(surfaceId, excludingRequestId),
       bindAddress: "127.0.0.1",
       capturePaneImage: async () => null,
       claimPaneLabel: async (surfaceId, paneId, paneLineageId) => {
@@ -612,11 +615,16 @@ test("pane.split label claim reenters authority, leaves the request queue usable
       controlSocket!.once("open", resolve);
       controlSocket!.once("error", reject);
     });
+    const queuedNotices: Record<string, any>[] = [];
+    controlSocket.on("message", (raw) => {
+      const envelope = JSON.parse(String(raw));
+      if (envelope.op === "event.operation_blocked") queuedNotices.push(envelope);
+    });
     const paired = await surfaceRequest(controlSocket, "pair.request", {
       controllerInstanceId: "controller_reentrant_split",
       controllerProductName: "OpenClaw",
       projectionCapacityBytes: 5 * 1024 * 1024,
-      protocolFeatures: [SURF_ACE_LOCKLESS_V1_CAPABILITY],
+      protocolFeatures: [SURF_ACE_LOCKLESS_V1_CAPABILITY, SURF_ACE_OPERATION_BLOCKED_V1_CAPABILITY],
       protocolVersion: 1,
       surfaceId: surface.surfaceId,
     });
@@ -636,13 +644,23 @@ test("pane.split label claim reenters authority, leaves the request queue usable
     assert.equal(persistenceReadiness.isReady, false,
       "the ordinary mutation readiness gate stays closed while the registry label claim is outstanding");
 
+    const releaseSave = deferred();
+    const saving = persistenceReadiness.track(() => releaseSave.promise);
     const described = await surfaceRequest(controlSocket, "surface.describe", {
       clientId, endpointLeaseGeneration: 2, nonce: "a".repeat(32),
       registryIdentity: { allocatorId: "alloc_fixture", fleetId: "fixture-fleet" },
       surfaceId: surface.surfaceId,
     });
     assert.equal(described.ok, true, JSON.stringify(described));
+    assert.deepEqual(validateEnvelopeType("surface.describe", described), { ok: true });
     assert.ok(described.payload.applicationReadiness.limitationCodes.includes("application_mutation_in_progress"));
+    const openChangeCodes = described.payload.applicationReadiness.limitationCodes
+      .filter((code: string) => code.startsWith("blocked_by_"));
+    assert.equal(openChangeCodes.length, 2);
+    assert.match(openChangeCodes[0], /^blocked_by_pane_split_since_[a-j]+$/);
+    assert.match(openChangeCodes[1], /^blocked_by_saving_application_state_since_[a-j]+$/);
+    releaseSave.resolve();
+    await saving;
     assert.ok(persistenceReadiness.openMutations().some((mutation) =>
       mutation.operation === "pane.split" && mutation.surfaceId === surface.surfaceId &&
       mutation.requestId && mutation.startedAtMs > 0));
@@ -651,15 +669,30 @@ test("pane.split label claim reenters authority, leaves the request queue usable
     assert.equal(registry.requests.filter(({ message }) => message.op === "client.register").length, 2,
       "registration waits at the existing readiness gate rather than sending client.register during a mutation");
 
+    await until(() => queuedNotices.length > 0);
+    const queuedNotice = queuedNotices[0]!;
+    assert.deepEqual(validateLocklessEnvelope(queuedNotice), { ok: true });
+    assert.match(queuedNotice.payload.message, /^Blocked behind pane split since /);
+    assert.deepEqual(queuedNotice.payload.openChanges, persistenceReadiness.blockersForSurface(surface.surfaceId));
+
     releaseClaim.resolve();
     const splitResponse = await split;
     assert.equal(splitResponse.ok, true, JSON.stringify(splitResponse));
     const listResponse = await concurrentList;
     assert.equal(listResponse.ok, true, JSON.stringify(listResponse));
+    assert.equal(queuedNotices.length, 1);
+    assert.equal(queuedNotice.payload.requestId, listResponse.id);
     assert.equal(listResponse.payload.panes.length, 2,
       "the queued request is served with the committed split after the nested claim completes");
     assert.equal(persistenceReadiness.isReady, true,
       "the split releases its application-state mutation readiness gate");
+    const cleared = await surfaceRequest(controlSocket, "surface.describe", {
+      clientId, endpointLeaseGeneration: 2, nonce: "a".repeat(32),
+      registryIdentity: { allocatorId: "alloc_fixture", fleetId: "fixture-fleet" },
+      surfaceId: surface.surfaceId,
+    });
+    assert.equal(cleared.ok, true, JSON.stringify(cleared));
+    assert.ok(!cleared.payload.applicationReadiness.limitationCodes.some((code: string) => code.startsWith("blocked_by_")));
 
     const staleSplit = await surfaceRequest(controlSocket, "pane.split", {
       count: 2,

@@ -1,4 +1,5 @@
-import type { ApplicationStateMutation } from "./persistence-write-readiness.js";
+import { applicationQueueWait, surfaceBlockerLimitation, surfaceBlockerMessage, type ApplicationStateMutation, type SurfaceBlocker } from "./persistence-write-readiness.js";
+import { AsyncLocalStorage } from "node:async_hooks";
 import http from "node:http";
 import { splitResizeMatches, splitResizeIsNoOp, type SplitResizeExpectation, type SplitResizeGeometry, splitResizeGeometryIsValid } from "./split-resize.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -42,6 +43,7 @@ import type {
 import { validateEnvelopeType } from "../../protocol/src/validate.js";
 import {
   SURF_ACE_LOCKLESS_V1_CAPABILITY,
+  SURF_ACE_OPERATION_BLOCKED_V1_CAPABILITY,
   locklessPaneScopeId,
   validateLocklessEnvelope,
   type LocklessEvent,
@@ -124,6 +126,7 @@ type LocklessTransportSession = {
   connectionToken: string;
   controllerInstanceId: string;
   controllerProductName: string | null;
+  operationBlockedV1?: boolean;
   surfaceId: string | null;
   socket: WebSocket;
 };
@@ -177,6 +180,7 @@ export type SurfaceWsServerOptions = {
   isApplicationStateReady?: () => boolean;
   beginApplicationStateMutation?: (details: Omit<ApplicationStateMutation, "startedAtMs">) => () => void;
   openApplicationStateMutations?: () => ApplicationStateMutation[];
+  getSurfaceBlockers?: (surfaceId?: string, excludingRequestId?: string) => SurfaceBlocker[];
   port: number;
   protocolVersion?: number;
   viewport: () => SurfaceViewport;
@@ -289,6 +293,7 @@ export class SurfaceWsServer {
   private readonly isApplicationStateReady: () => boolean;
   private readonly beginApplicationStateMutation: NonNullable<SurfaceWsServerOptions["beginApplicationStateMutation"]>;
   private readonly openApplicationStateMutations: () => ApplicationStateMutation[];
+  private readonly getSurfaceBlockers: NonNullable<SurfaceWsServerOptions["getSurfaceBlockers"]>;
   private stopping = false;
   private readonly capturePaneImage: SurfaceWsServerOptions["capturePaneImage"];
   private readonly viewportProvider: SurfaceWsServerOptions["viewport"];
@@ -301,6 +306,7 @@ export class SurfaceWsServer {
   private readonly socketMeta = new WeakMap<WebSocket, SocketMeta>();
   private readonly closedSockets = new WeakSet<WebSocket>();
   private readonly locklessSessions = new Map<WebSocket, LocklessTransportSession>();
+  private readonly trackedLocklessMutation = new AsyncLocalStorage<{ surfaceId?: string; active: boolean; queuedBehind?: SurfaceBlocker[] }>();
   private readonly mutationQueues = new Map<string, Promise<void>>();
   private nativePaneStatusRefresh: Promise<CompositorControlResponse | null> | null = null;
   private readonly nativePaneStatusPollSurfaces = new Set<string>();
@@ -354,6 +360,7 @@ export class SurfaceWsServer {
     this.isApplicationStateReady = options.isApplicationStateReady ?? (() => true);
     this.beginApplicationStateMutation = options.beginApplicationStateMutation ?? (() => () => {});
     this.openApplicationStateMutations = options.openApplicationStateMutations ?? (() => []);
+    this.getSurfaceBlockers = options.getSurfaceBlockers ?? (() => []);
     this.protocolVersion = options.protocolVersion ?? 1;
     this.viewportProvider = options.viewport;
     this.wsPath = options.wsPath ?? "/ws";
@@ -1123,7 +1130,7 @@ export class SurfaceWsServer {
         });
         return null;
       }
-    });
+    }, { operation: "native pane focus" });
   }
 
   private async handleMessage(socket: WebSocket, raw: string): Promise<void> {
@@ -1162,10 +1169,7 @@ export class SurfaceWsServer {
         await this.handleLocklessMessage(socket, parsedRequest);
       } catch (error) {
         if (!(error instanceof PersistentStateWriteGuardError)) throw error;
-        await this.send(socket, JSON.stringify(errorResponse(
-          parsedRequest.op, parsedRequest.id as never, "internal_error",
-          "Local persistence is guarded; durable operations are unavailable",
-        )));
+        await this.send(socket, JSON.stringify(this.persistenceBlockedResponse(socket, parsedRequest, "Local persistence is guarded; durable operations are unavailable")));
       }
       return;
     }
@@ -1220,16 +1224,64 @@ export class SurfaceWsServer {
       (session !== undefined && locklessOperationMutates(request.op));
     const payloadSurfaceId = (request.payload as { surfaceId?: unknown } | null)?.surfaceId;
     const surfaceId = typeof payloadSurfaceId === "string" ? payloadSurfaceId : session?.surfaceId;
+    const tracking: { surfaceId?: string; active: boolean; queuedBehind?: SurfaceBlocker[] } = {
+      surfaceId: surfaceId ?? undefined, active: changesApplicationState,
+    };
+    const supportsBlocked = session?.operationBlockedV1 ?? (
+      request.op === "pair.request" &&
+      Array.isArray(request.payload?.protocolFeatures) &&
+      request.payload.protocolFeatures.includes(SURF_ACE_OPERATION_BLOCKED_V1_CAPABILITY));
+    let inDispatch = true;
+    const onQueueWait = (scope: "surface" | "client"): void => {
+      if (!inDispatch || !surfaceId || tracking.queuedBehind) return;
+      const openChanges = this.getSurfaceBlockers(scope === "surface" ? surfaceId : undefined, request.id);
+      if (openChanges.length === 0) return;
+      tracking.queuedBehind = openChanges;
+      if (supportsBlocked) {
+        const event: LocklessEvent = {
+          eventId: makeEventId(),
+          op: "event.operation_blocked",
+          payload: { requestId: request.id, surfaceId, openChanges, message: surfaceBlockerMessage(openChanges[0]!) },
+          sentAt: Date.now(),
+          type: "event",
+          v: 1,
+        };
+        void this.send(socket, JSON.stringify(event)).catch(() => {});
+      }
+    };
     const finishMutation = changesApplicationState
       ? this.beginApplicationStateMutation({ operation: request.op, requestId: request.id, surfaceId: surfaceId ?? undefined })
       : () => {};
     let afterCommit: (() => Promise<unknown>) | void;
     try {
-      afterCommit = await this.handleOrdinaryLocklessMessageBody(socket, request);
+      afterCommit = await applicationQueueWait.run(onQueueWait, () =>
+        this.trackedLocklessMutation.run(tracking, async () => {
+          try {
+            return await this.handleOrdinaryLocklessMessageBody(socket, request);
+          } catch (error) {
+            if (!(error instanceof PersistentStateWriteGuardError)) throw error;
+            const response = this.persistenceBlockedResponse(socket, request,
+              "Local persistence is guarded; durable operations are unavailable");
+            return () => this.send(socket, JSON.stringify(response));
+          }
+        }));
     } finally {
+      inDispatch = false;
+      tracking.active = false;
       finishMutation();
     }
     await afterCommit?.();
+  }
+
+  private persistenceBlockedResponse(socket: WebSocket, request: LocklessRequest, message: string): Response {
+    const payloadSurfaceId = (request.payload as { surfaceId?: unknown } | null)?.surfaceId;
+    const surfaceId = this.locklessSessions.get(socket)?.surfaceId ?? payloadSurfaceId;
+    const openChanges = this.trackedLocklessMutation.getStore()?.queuedBehind ??
+      (typeof surfaceId === "string" ? this.getSurfaceBlockers(surfaceId, request.id) : []);
+    const [blocker] = openChanges;
+    return errorResponse(request.op, request.id, "internal_error",
+      blocker ? `${surfaceBlockerMessage(blocker)}. ${message}` : message,
+      blocker ? { blockedBy: blocker, openChanges } : undefined);
   }
 
   private async handleOrdinaryLocklessMessageBody(
@@ -1250,12 +1302,7 @@ export class SurfaceWsServer {
           op: request.op,
           ...errorDiagnosticFields(error),
         });
-        return () => this.send(socket, JSON.stringify(errorResponse(
-          request.op,
-          request.id as never,
-          "internal_error",
-          "Saved state is still being reconciled; retry this operation after recovery",
-        )));
+        return () => this.send(socket, JSON.stringify(this.persistenceBlockedResponse(socket, request, "Saved state is still being reconciled; retry this operation after recovery")));
       }
     }
     const validation = validateLocklessEnvelope(request);
@@ -1281,10 +1328,7 @@ export class SurfaceWsServer {
           });
         } catch (error) {
           if (!(error instanceof PersistentStateOutcomeUnknownError)) throw error;
-          return () => this.send(socket, JSON.stringify(errorResponse(
-            request.op, request.id as never, "internal_error",
-            "Persistent state commit outcome is unknown; dependent operations are paused pending reconciliation",
-          )));
+          return () => this.send(socket, JSON.stringify(this.persistenceBlockedResponse(socket, request, "Persistent state commit outcome is unknown; dependent operations are paused pending reconciliation")));
         }
       }
       return () => this.send(
@@ -1324,8 +1368,7 @@ export class SurfaceWsServer {
             });
           } catch (error) {
             if (!(error instanceof PersistentStateOutcomeUnknownError)) throw error;
-            return () => this.send(socket, JSON.stringify(errorResponse(request.op, request.id as never,
-              "internal_error", "Persistent state commit outcome is unknown; dependent operations are paused pending reconciliation")));
+            return () => this.send(socket, JSON.stringify(this.persistenceBlockedResponse(socket, request, "Persistent state commit outcome is unknown; dependent operations are paused pending reconciliation")));
           }
         }
         return () => this.send(
@@ -1405,23 +1448,13 @@ export class SurfaceWsServer {
           // from any other internal fault.
           return {
             rejectionCode: "internal_error",
-            response: errorResponse(
-              request.op,
-              request.id as never,
-              "internal_error",
-              "Persistent state commit outcome is unknown; dependent operations are paused pending reconciliation",
-            ),
+            response: this.persistenceBlockedResponse(socket, request, "Persistent state commit outcome is unknown; dependent operations are paused pending reconciliation"),
           };
         }
         if (error instanceof PersistentStateWriteGuardError) {
           return {
             rejectionCode: "internal_error",
-            response: errorResponse(
-              request.op,
-              request.id as never,
-              "internal_error",
-              "Local persistence is guarded; pairing and durable writes are unavailable until state recovery",
-            ),
+            response: this.persistenceBlockedResponse(socket, request, "Local persistence is guarded; pairing and durable writes are unavailable until state recovery"),
           };
         }
         return {
@@ -1473,6 +1506,12 @@ export class SurfaceWsServer {
               request.id,
               request.op,
             );
+            const paneClose = request.op === "pane.close" ? {
+              paneId: request.payload.paneId,
+              paneLabel: session.surfaceId && this.core.listSurfaces().some((surface) => surface.surfaceId === session.surfaceId)
+                ? this.core.visiblePaneLabel(session.surfaceId, request.payload.paneId)
+                : null,
+            } : undefined;
             const result = await dispatch();
             response = result.response;
             let operationReceipt: { commitSequence: number; requestId: string };
@@ -1484,6 +1523,7 @@ export class SurfaceWsServer {
                 session.controllerInstanceId,
                 session.surfaceId,
                 correlation,
+                paneClose,
               );
               if (
                 response.payload &&
@@ -1511,6 +1551,7 @@ export class SurfaceWsServer {
                 session.controllerInstanceId,
                 result.rejectionCode ?? "internal_error",
                 session.surfaceId,
+                paneClose,
               );
               operationReceipt = {
                 commitSequence: audit.commitSequence,
@@ -1541,15 +1582,9 @@ export class SurfaceWsServer {
         }, undefined, "enclosing-core");
       } catch (error) {
         if (error instanceof PersistentStateOutcomeUnknownError) {
-          response = errorResponse(
-            request.op,
-            request.id as never,
-            "internal_error",
-            "Persistent state commit outcome is unknown; dependent operations are paused pending reconciliation",
-          );
+          response = this.persistenceBlockedResponse(socket, request, "Persistent state commit outcome is unknown; dependent operations are paused pending reconciliation");
         } else if (error instanceof LocklessAuthorityError && this.persistenceOutcomeUnknown) {
-          response = errorResponse(request.op, request.id as never, "internal_error",
-            "Local persistence is paused pending reconciliation");
+          response = this.persistenceBlockedResponse(socket, request, "Local persistence is paused pending reconciliation");
         } else {
           if (!(error instanceof LocklessAuthorityError)) throw error;
           response = await this.core.locklessAuthority.transactionAsync(async () => {
@@ -1598,8 +1633,7 @@ export class SurfaceWsServer {
       } catch (error) {
         if (!(error instanceof PersistentStateOutcomeUnknownError) &&
             !(this.persistenceOutcomeUnknown && error instanceof LocklessAuthorityError)) throw error;
-        response = errorResponse(request.op, request.id as never, "internal_error",
-          "Persistent state commit outcome is unknown; dependent operations are paused pending reconciliation");
+        response = this.persistenceBlockedResponse(socket, request, "Persistent state commit outcome is unknown; dependent operations are paused pending reconciliation");
       }
     } else {
       try {
@@ -1616,8 +1650,7 @@ export class SurfaceWsServer {
       } catch (error) {
         if (!(error instanceof PersistentStateOutcomeUnknownError) &&
             !(this.persistenceOutcomeUnknown && error instanceof LocklessAuthorityError)) throw error;
-        response = errorResponse(request.op, request.id as never, "internal_error",
-          "Persistent state commit outcome is unknown; dependent operations are paused pending reconciliation");
+        response = this.persistenceBlockedResponse(socket, request, "Persistent state commit outcome is unknown; dependent operations are paused pending reconciliation");
       }
     }
     if (!this.persistenceOutcomeUnknown) {
@@ -1695,15 +1728,9 @@ export class SurfaceWsServer {
     } catch (error) {
       if (error instanceof PersistentStateOutcomeUnknownError) {
         uncertain = true;
-        response = errorResponse(
-          request.op,
-          request.id as never,
-          "internal_error",
-          "Persistent state commit outcome is unknown; dependent operations are paused pending reconciliation",
-        );
+        response = this.persistenceBlockedResponse(socket, request, "Persistent state commit outcome is unknown; dependent operations are paused pending reconciliation");
       } else if (error instanceof LocklessAuthorityError && this.persistenceOutcomeUnknown) {
-        response = errorResponse(request.op, request.id as never, "internal_error",
-          "Local persistence is paused pending reconciliation");
+        response = this.persistenceBlockedResponse(socket, request, "Local persistence is paused pending reconciliation");
       } else {
         if (
           !(error instanceof LocklessAuthorityError) &&
@@ -2131,6 +2158,7 @@ export class SurfaceWsServer {
         controllerInstanceId: request.payload.controllerInstanceId,
         controllerProductName:
           request.payload.controllerProductName?.trim() || null,
+        operationBlockedV1: request.payload.protocolFeatures.includes(SURF_ACE_OPERATION_BLOCKED_V1_CAPABILITY),
         socket,
         surfaceId,
       };
@@ -2850,6 +2878,7 @@ export class SurfaceWsServer {
             const closeRevision = Math.max(1, Number(topology.topologyRevision) + 1);
             const finalClose = this.core.locklessAuthority.recordPaneFinalClose(tombstonePayload, {
               closeRevision,
+              controllerInstanceId: session.controllerInstanceId,
               surfaceId,
             });
             this.core.paneClose(surfaceId, request.payload.paneId, {
@@ -3499,6 +3528,9 @@ export class SurfaceWsServer {
         });
       }
     }
+    for (const blocker of this.getSurfaceBlockers(request.payload.surfaceId)) {
+      limitationCodes.push(surfaceBlockerLimitation(blocker));
+    }
     if (!binding) {
       limitationCodes.push("registry_binding_unavailable");
     } else if (!bindingMatchesRequest) {
@@ -3868,17 +3900,22 @@ export class SurfaceWsServer {
     operation: () => Promise<T> | T,
     details: Pick<ApplicationStateMutation, "operation" | "requestId"> = { operation: "surface_mutation" },
   ): Promise<T> {
-    const previous = this.mutationQueues.get(surfaceId) ?? Promise.resolve();
+    const previous = this.mutationQueues.get(surfaceId);
+    if (previous) applicationQueueWait.getStore()?.("surface");
     let releaseQueue = (): void => {};
     const current = new Promise<void>((resolve) => {
       releaseQueue = resolve;
     });
-    const queued = previous.catch(() => undefined).then(() => current);
+    const queued = (previous ?? Promise.resolve()).catch(() => undefined).then(() => current);
     this.mutationQueues.set(surfaceId, queued);
     try {
-      await previous.catch(() => undefined);
-      // Only the queue holder can expose candidate geometry.
-      const finishMutation = this.beginApplicationStateMutation({ ...details, surfaceId });
+      await previous?.catch(() => undefined);
+      // The enclosing lockless request already owns generic surface work.
+      // Local and explicitly named work still owns its own readiness scope.
+      const enclosing = this.trackedLocklessMutation.getStore();
+      const alreadyTracked = enclosing?.active && details.operation === "surface_mutation" &&
+        (enclosing.surfaceId === undefined || enclosing.surfaceId === surfaceId);
+      const finishMutation = alreadyTracked ? () => {} : this.beginApplicationStateMutation({ ...details, surfaceId });
       try {
         return await operation();
       } finally {
@@ -3907,7 +3944,7 @@ export class SurfaceWsServer {
 
   private async runLifecycleTransactionAsync<T>(operation: () => Promise<T>, surfaceId: string): Promise<T> {
     return await this.core.locklessAuthority.transactionAsync(() =>
-      this.core.transactionAsync(() => this.runSurfaceMutation(surfaceId, operation)));
+      this.core.transactionAsync(() => this.runSurfaceMutation(surfaceId, operation, { operation: "surface.close" })));
   }
 
   private async runProviderWindowLabelMutation<T>(operation: () => Promise<T> | T): Promise<T> {
@@ -4016,7 +4053,7 @@ export class SurfaceWsServer {
         });
         return false;
       }
-    });
+    }, { operation: "viewport resize" });
   }
 
   async resizeSplit(surfaceId: string, path: number[], weights: number[], expected?: SplitResizeExpectation, geometry?: SplitResizeGeometry[]): Promise<boolean> {
@@ -4054,7 +4091,7 @@ export class SurfaceWsServer {
         });
         return false;
       }
-    });
+    }, { operation: "pane.resize" });
     const onNotificationError = (error: unknown) => persistentServerDiagnostic("warn", "pane_resize_notification_failed", { surface_id: surfaceId, ...errorDiagnosticFields(error) });
     try {
       // Authority -> core -> surface matches paired network and local-close paths.
@@ -4091,7 +4128,7 @@ export class SurfaceWsServer {
             }
             throw error;
           }
-        }), { retainUncertainEvents: true, onNotificationError }), { onNotificationError });
+        }, { operation: "pane.resize" }), { retainUncertainEvents: true, onNotificationError }), { onNotificationError });
     } catch (error) {
       persistentServerDiagnostic("warn", "pane_resize_commit_failed", { surface_id: surfaceId, ...errorDiagnosticFields(error) });
       return false;
@@ -4118,7 +4155,7 @@ export class SurfaceWsServer {
       }
       this.core.navigateHistory(surfaceId, paneId, direction);
       return true;
-    });
+    }, { operation: `history.${direction}` });
   }
 
   private async handleTopologyApply(socket: WebSocket, request: TopologyApplyRequest): Promise<Response> {
@@ -5789,7 +5826,9 @@ export class SurfaceWsServer {
       persistentServerDiagnostic("info", "lockless_authority_audit", {
         commit_sequence: event.record.commitSequence,
         controller_instance_id:
-          event.record.controllerInstanceId ?? undefined,
+          event.record.controllerInstanceId ?? event.paneClose?.controllerInstanceId,
+        pane_id: event.paneClose?.paneId,
+        pane_label: event.paneClose?.paneLabel,
         error_code: event.record.errorCode ?? undefined,
         operation: event.record.operation,
         request_id: event.record.requestId,
@@ -5920,7 +5959,7 @@ export class SurfaceWsServer {
     return {
       ...capabilities,
       limits: this.core.locklessAuthority.limits,
-      protocolFeatures: [SURF_ACE_LOCKLESS_V1_CAPABILITY],
+      protocolFeatures: [SURF_ACE_LOCKLESS_V1_CAPABILITY, SURF_ACE_OPERATION_BLOCKED_V1_CAPABILITY],
       ...(runtimeAppBinding ? { runtimeAppBinding } : {}),
       surfaceLifecycle: true,
       targetCapabilities: this.compositorSocketPath

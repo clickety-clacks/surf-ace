@@ -1,3 +1,4 @@
+import { applicationQueueWait } from "./persistence-write-readiness.js";
 import { randomBytes, randomUUID } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 
@@ -759,7 +760,7 @@ export class SurfaceCore {
   private deferredVerifiedEvents: { state: string; events: CoreEvent[] } | null = null;
   private readonly transactionContext = new AsyncLocalStorage<symbol>();
   private activeAsyncTransaction: symbol | null = null;
-  private transactionTail: Promise<void> = Promise.resolve();
+  private transactionTail: Promise<void> | null = null;
   private readonly logger: { warn?: (message: string) => void };
   private readonly now: () => number;
   private nextAdmissionAttemptSequence: number;
@@ -875,19 +876,19 @@ export class SurfaceCore {
     const previous = this.transactionTail;
     let release = (): void => {};
     const current = new Promise<void>((resolve) => { release = resolve; });
-    this.transactionTail = previous.catch(() => undefined).then(() => current);
-    await previous.catch(() => undefined);
-    if (this.pendingEvents) {
-      release();
-      throw new Error("Surface transaction is already in progress");
-    }
-    const token = Symbol("surface transaction");
-    this.activeAsyncTransaction = token;
+    const queued = (previous ?? Promise.resolve()).catch(() => undefined).then(() => current);
+    this.transactionTail = queued;
+    if (previous) applicationQueueWait.getStore()?.("client");
+    await previous?.catch(() => undefined);
     try {
+      if (this.pendingEvents) throw new Error("Surface transaction is already in progress");
+      const token = Symbol("surface transaction");
+      this.activeAsyncTransaction = token;
       return await this.transactionContext.run(token, () => this.transactionAsyncExclusive(operation, committed));
     } finally {
       this.activeAsyncTransaction = null;
       release();
+      if (this.transactionTail === queued) this.transactionTail = null;
     }
   }
 
