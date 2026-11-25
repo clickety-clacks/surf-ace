@@ -86,7 +86,6 @@ import {
 import { isAddressInUse, isPortBoundOnIpv6Any } from "./port-selection.js";
 import {
   embeddedNewWindowAction,
-  externalNewWindowFrameScript,
   resolveExternalHttpUrl,
 } from "./external-new-window.js";
 import { SurfaceWsServer, type CommittedSurfaceObservation } from "./ws-server.js";
@@ -207,6 +206,7 @@ function configurePlatformWebAuthn(): void {
 configurePlatformWebAuthn();
 
 const windows = new Map<string, BrowserWindow>();
+const webviewGuestContents = new WeakSet<WebContents>();
 const nativePresentationWindowBinding = new NativePresentationWindowBinding(
   process.pid, process.env.SURF_ACE_COMPOSITOR_LAUNCH_TOKEN,
 );
@@ -1491,15 +1491,10 @@ function wireWindowShortcuts(surfaceId: string, window: BrowserWindow): void {
 function wireWindowInputMenus(surfaceId: string, window: BrowserWindow): void {
   wireEditableContextMenu(window.webContents, window);
   window.webContents.on("did-attach-webview", (_event, webContents) => {
+    webviewGuestContents.add(webContents);
     wireEditableContextMenu(webContents, window);
     webContents.setWindowOpenHandler(() => {
       return { action: embeddedNewWindowAction(webContents.getURL().startsWith("data:")) };
-    });
-    webContents.on("frame-created", (_frameEvent, details) => {
-      if (!details.frame || details.frame.parent === null) {
-        return;
-      }
-      void details.frame.executeJavaScript(externalNewWindowFrameScript).catch(() => undefined);
     });
     wireWebContentsShortcuts(surfaceId, window, webContents, () => {
       const binding = browserUrlWebContentsPanes.get(webContents.id);
@@ -2080,6 +2075,10 @@ function installIpc(): void {
     event.returnValue = path.join(distDir, "guest-preload.cjs");
   });
 
+  ipcMain.on("surface:is-webview-guest", (event) => {
+    event.returnValue = webviewGuestContents.has(event.sender);
+  });
+
   ipcMain.on("surface:open-external-url", (event, payload) => {
     const surfaceId = surfaceIdForSender(event.sender);
     if (!surfaceId || event.senderFrame !== event.sender.mainFrame || !payload || typeof payload !== "object") {
@@ -2440,6 +2439,10 @@ async function boot(): Promise<void> {
   installMenu();
   installIpc();
   installWebAuthnAccountSelection();
+  session.defaultSession.registerPreloadScript({
+    filePath: path.join(distDir, "external-new-window-subframe-preload.cjs"),
+    type: "frame",
+  });
   await acknowledgeCompositorMainAppBinding();
 
   configuredRegistration = identityClientId ? new ServerConnection({

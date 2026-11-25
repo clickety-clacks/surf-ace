@@ -4,6 +4,7 @@ import { runInNewContext } from "node:vm";
 
 import {
   externalNewWindowFrameScript,
+  externalNewWindowRequestUrl,
   embeddedNewWindowAction,
   isExternalNewWindowLink,
   resolveExternalHttpUrl,
@@ -30,11 +31,11 @@ class FixtureAnchor extends FixtureElement {
 
 function runFrameScript() {
   const handlers = new Map();
-  const messages = [];
+  const events = [];
   const opened = [];
   const userActivation = { isActive: false };
   const window = {
-    top: { postMessage: (message) => messages.push(message) },
+    dispatchEvent: (event) => events.push(event),
     open: (...args) => {
       opened.push(args);
       return "embedded-window";
@@ -45,6 +46,12 @@ function runFrameScript() {
     addEventListener: (type, handler) => handlers.set(type, handler),
   };
   runInNewContext(externalNewWindowFrameScript, {
+    CustomEvent: class FixtureCustomEvent {
+      constructor(type, options = {}) {
+        this.type = type;
+        this.detail = options.detail;
+      }
+    },
     document,
     Element: FixtureElement,
     HTMLAnchorElement: FixtureAnchor,
@@ -54,7 +61,7 @@ function runFrameScript() {
     URL,
     window,
   });
-  return { document, handlers, messages, opened, userActivation, window };
+  return { document, handlers, events, opened, userActivation, window };
 }
 
 test("HTTP(S) new-window links resolve relative paths with query and fragment intact", () => {
@@ -80,6 +87,16 @@ test("only static HTML denies uncaptured embedded windows", () => {
   }
 });
 
+test("source-frame requests require active activation and an HTTP(S) destination", () => {
+  assert.equal(externalNewWindowRequestUrl({ url: "https://example.test/path?q=1#part" }, false), null);
+  assert.equal(
+    externalNewWindowRequestUrl({ url: "https://example.test/path?q=1#part" }, true),
+    "https://example.test/path?q=1#part",
+  );
+  assert.equal(externalNewWindowRequestUrl({ url: "mailto:person@example.test" }, true), null);
+  assert.equal(externalNewWindowRequestUrl({ url: "javascript:window.close()" }, true), null);
+});
+
 test("frame fixture routes only active HTTP(S) new-window requests and leaves same-pane links alone", () => {
   const fixture = runFrameScript();
   let prevented = false;
@@ -89,9 +106,9 @@ test("frame fixture routes only active HTTP(S) new-window requests and leaves sa
     preventDefault: () => { prevented = true; },
   });
   assert.equal(prevented, false);
-  assert.deepEqual(fixture.messages, []);
+  assert.deepEqual(fixture.events, []);
   assert.equal(fixture.window.open("https://example.test/path"), "embedded-window");
-  assert.deepEqual(fixture.messages, []);
+  assert.deepEqual(fixture.events, []);
 
   fixture.userActivation.isActive = true;
   fixture.handlers.get("click")?.({
@@ -100,9 +117,9 @@ test("frame fixture routes only active HTTP(S) new-window requests and leaves sa
     preventDefault: () => { prevented = true; },
   });
   assert.equal(prevented, true);
-  assert.equal(fixture.messages.length, 1);
-  assert.equal(fixture.messages[0].type, "surf-ace-external-new-window");
-  assert.equal(fixture.messages[0].url, "https://chat.example.test/article?q=term#section");
+  assert.equal(fixture.events.length, 1);
+  assert.equal(fixture.events[0].type, "surf-ace-external-new-window");
+  assert.equal(fixture.events[0].detail.url, "https://chat.example.test/article?q=term#section");
   prevented = false;
   fixture.handlers.get("click")?.({
     isTrusted: true,
@@ -115,7 +132,7 @@ test("frame fixture routes only active HTTP(S) new-window requests and leaves sa
   assert.equal(fixture.window.open("https://example.test/parent-pane", "_parent"), "embedded-window");
   assert.equal(fixture.window.open("mailto:person@example.test"), "embedded-window");
   assert.equal(fixture.opened.length, 4);
-  assert.equal(fixture.messages.length, 2);
-  assert.equal(fixture.messages[1].type, "surf-ace-external-new-window");
-  assert.equal(fixture.messages[1].url, "https://example.test/scripted");
+  assert.equal(fixture.events.length, 2);
+  assert.equal(fixture.events[1].type, "surf-ace-external-new-window");
+  assert.equal(fixture.events[1].detail.url, "https://example.test/scripted");
 });

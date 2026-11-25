@@ -1,4 +1,7 @@
+export const EXTERNAL_NEW_WINDOW_EVENT = "surf-ace-external-new-window";
+
 export const externalNewWindowFrameScript = `(() => {
+  const requestEventName = ${JSON.stringify(EXTERNAL_NEW_WINDOW_EVENT)};
   const resolveHttpUrl = (rawUrl) => {
     try {
       const url = new URL(String(rawUrl), document.baseURI);
@@ -11,7 +14,7 @@ export const externalNewWindowFrameScript = `(() => {
     if (!navigator.userActivation?.isActive) return false;
     const url = resolveHttpUrl(rawUrl);
     if (!url) return false;
-    window.top.postMessage({ type: "surf-ace-external-new-window", url }, "*");
+    window.dispatchEvent(new CustomEvent(requestEventName, { detail: { url } }));
     return true;
   };
   let anchorOpenUrl = null;
@@ -40,6 +43,14 @@ export const externalNewWindowFrameScript = `(() => {
     return Reflect.apply(originalOpen, this, arguments);
   };
 })();`;
+
+export function externalNewWindowRequestUrl(detail: unknown, userActivationIsActive: boolean): string | null {
+  if (!userActivationIsActive || !detail || typeof detail !== "object") {
+    return null;
+  }
+  const rawUrl = (detail as { url?: unknown }).url;
+  return typeof rawUrl === "string" ? resolveExternalHttpUrl(rawUrl) : null;
+}
 
 export function resolveExternalHttpUrl(rawUrl: string, baseUrl?: string): string | null {
   try {

@@ -1,5 +1,10 @@
 import { ipcRenderer, webFrame } from "electron";
-import { externalNewWindowFrameScript, isExternalNewWindowLink } from "./external-new-window.js";
+import {
+  EXTERNAL_NEW_WINDOW_EVENT,
+  externalNewWindowFrameScript,
+  externalNewWindowRequestUrl,
+  isExternalNewWindowLink,
+} from "./external-new-window.js";
 
 type ContentEventPayload =
   | { type: "external-navigation"; url: string }
@@ -135,15 +140,14 @@ document.addEventListener("selectionchange", () => {
   emit({ selection: currentSelection(), type: "selection" });
 });
 
-window.addEventListener("message", (event) => {
-  const payload = event.data as { type?: unknown; url?: unknown } | null;
-  if (payload?.type !== "surf-ace-external-new-window" || !navigator.userActivation?.isActive) {
-    return;
+window.addEventListener(EXTERNAL_NEW_WINDOW_EVENT, (event) => {
+  const url = externalNewWindowRequestUrl(
+    (event as CustomEvent<unknown>).detail,
+    navigator.userActivation?.isActive === true,
+  );
+  if (url) {
+    emit({ type: "external-navigation", url });
   }
-  if (typeof payload.url !== "string" || !isExternalNewWindowLink("_blank", payload.url)) {
-    return;
-  }
-  emit({ type: "external-navigation", url: payload.url });
 });
 
 document.addEventListener("pointerdown", (event) => {
