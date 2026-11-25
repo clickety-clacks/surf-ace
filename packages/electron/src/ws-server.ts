@@ -3561,7 +3561,16 @@ export class SurfaceWsServer {
         });
       }
     }
+    // Repeated saves can share one operation while occupying many queue slots.
+    // Report its oldest active instance so diagnostics leave room for topology.
+    const oldestBlockers = new Map<string, SurfaceBlocker>();
     for (const blocker of this.getSurfaceBlockers(request.payload.surfaceId)) {
+      const prior = oldestBlockers.get(blocker.operation);
+      if (!prior || blocker.startedAtMs < prior.startedAtMs) {
+        oldestBlockers.set(blocker.operation, blocker);
+      }
+    }
+    for (const blocker of oldestBlockers.values()) {
       limitationCodes.push(surfaceBlockerLimitation(blocker));
     }
     if (!binding) {

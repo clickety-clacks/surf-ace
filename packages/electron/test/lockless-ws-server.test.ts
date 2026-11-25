@@ -28,9 +28,9 @@ import {
   loadPersistentStateFile,
   writePersistentStateFile,
 } from "../src/persistent-state-file.js";
-import { SurfaceWsServer } from "../src/ws-server.js";
+import { SurfaceWsServer, type SurfaceWsServerOptions } from "../src/ws-server.js";
 import { ConfiguredServerRegistration } from "../src/configured-server.js";
-import { PersistenceWriteReadiness } from "../src/persistence-write-readiness.js";
+import { PersistenceWriteReadiness, surfaceBlockerLimitation } from "../src/persistence-write-readiness.js";
 import { PublicControllerWireClient } from "../../controller/src/wire.js";
 
 let nextPort = 25901;
@@ -341,6 +341,7 @@ function describeServer(
   core: SurfaceCore,
   isApplicationStateReady: () => boolean = () => true,
   clientId: string | null = core.registryBinding()?.clientId ?? null,
+  getSurfaceBlockers?: SurfaceWsServerOptions["getSurfaceBlockers"],
 ) {
   return new SurfaceWsServer({
     bindAddress: "127.0.0.1",
@@ -349,6 +350,7 @@ function describeServer(
     compositorSocketPath: null,
     core,
     endpointName: "Surf Ace fixture",
+    getSurfaceBlockers,
     hostName: "localhost",
     isApplicationStateReady,
     port: nextPort++,
@@ -403,6 +405,34 @@ test("surface.describe returns revision-bound topology before pairing without ad
       Object.keys(pane).sort().join(",") === "contentObservation,paneId,paneLabel"));
     assert.equal(JSON.stringify(response).includes("currentTarget"), false);
     assert.equal(JSON.stringify(response).includes("paneLineageId"), false);
+  } finally {
+    socket?.close();
+    await server.stop();
+  }
+});
+
+test("surface.describe keeps committed topology readable during a backlog of saves", async () => {
+  const fixture = describeFixture();
+  const expected = fixture.core.pairState(fixture.surface.surfaceId);
+  const oldestSave = { operation: "saving application state", startedAtMs: 1_790_000_000_000 };
+  const split = { operation: "pane.split", startedAtMs: oldestSave.startedAtMs + 1 };
+  const saves = Array.from({ length: 1_500 }, (_, index) => ({
+    operation: oldestSave.operation, startedAtMs: oldestSave.startedAtMs + index + 1,
+  }));
+  const server = describeServer(fixture.core, () => false, fixture.binding.clientId,
+    () => [...saves, split, oldestSave]);
+  let socket: WebSocket | undefined;
+  try {
+    await server.start();
+    socket = await connect(`ws://127.0.0.1:${server.port}/ws`);
+    const response = await request(socket, "surface.describe", describePayload(fixture));
+    assert.equal(response.ok, true, JSON.stringify(response));
+    assert.deepEqual(response.payload.layout, expected.layout);
+    assert.equal(response.payload.panes.length, expected.panes.length);
+    assert.deepEqual(response.payload.applicationReadiness, {
+      status: "degraded",
+      limitationCodes: ["application_state_unverified", surfaceBlockerLimitation(oldestSave), surfaceBlockerLimitation(split)],
+    });
   } finally {
     socket?.close();
     await server.stop();
