@@ -3139,6 +3139,7 @@ test("browser navigation leaves registration and later pane mutations free to co
     await server.stop();
     await connection.stop();
     await registry.close();
+    await until(() => readiness.isReady);
     await fs.rm(stateDir, { force: true, recursive: true });
   }
 });
