@@ -364,7 +364,6 @@ final class SurfAceRuntime {
     @ObservationIgnored private let annotationDirectEventResultOverride: (@Sendable (String, Bool) async -> Bool)?
     @ObservationIgnored private let annotationModeMutationPreparation: (@Sendable (Bool) async throws -> Void)?
     @ObservationIgnored private let annotationModeProjectionObserver: (@Sendable (Bool) async -> Void)?
-    @ObservationIgnored private let locklessDeliveryWaitObserver: (@Sendable () -> Void)?
     @ObservationIgnored private let foregroundCompletion: (@MainActor () -> Void)?
     @ObservationIgnored private var identity: SurfAceIdentity?
     @ObservationIgnored private var centralRegistration: SurfAceCentralRegistration?
@@ -409,6 +408,8 @@ final class SurfAceRuntime {
 
     @ObservationIgnored private var isStarted = false
     @ObservationIgnored private var isStarting = false
+    @ObservationIgnored private var listenerGeneration: UInt64 = 0
+    @ObservationIgnored private var listenerRetryTask: Task<Void, Never>?
     @ObservationIgnored private var isolatedTestHostAtStart = false
     private var isIsolatedTestHost: Bool {
         if isolatedTestHostAtStart || forceIsolatedTestLoopback { return true }
@@ -493,8 +494,7 @@ final class SurfAceRuntime {
         annotationFrameCommitPreparation: (@Sendable () async throws -> Void)? = nil,
         annotationDirectEventResultOverride: (@Sendable (String, Bool) async -> Bool)? = nil,
         annotationModeProjectionObserver: (@Sendable (Bool) async -> Void)? = nil,
-        annotationModeMutationPreparation: (@Sendable (Bool) async throws -> Void)? = nil,
-        locklessDeliveryWaitObserver: (@Sendable () -> Void)? = nil
+        annotationModeMutationPreparation: (@Sendable (Bool) async throws -> Void)? = nil
     ) {
         self.userDefaults = userDefaults
         self.registrySettingStore = SurfAceRegistrySettingStore(defaults: userDefaults)
@@ -514,7 +514,6 @@ final class SurfAceRuntime {
         self.annotationDirectEventResultOverride = annotationDirectEventResultOverride
         self.annotationModeProjectionObserver = annotationModeProjectionObserver
         self.annotationModeMutationPreparation = annotationModeMutationPreparation
-        self.locklessDeliveryWaitObserver = locklessDeliveryWaitObserver
         let fallbackName = "Surf Ace"
         let deviceName = UIDevice.current.name
         self.screenName = "\(fallbackName) - \(deviceName)"
@@ -547,12 +546,14 @@ final class SurfAceRuntime {
     }
 
     func start() async {
-        guard !isStarted, !isStarting else { return }
+        guard !isStarted, !isStarting, listenerRetryTask == nil else { return }
         isStarting = true
+        let generation = listenerGeneration
         defer { isStarting = false }
         let isolatedTestHost = isIsolatedTestHost
         isolatedTestHostAtStart = isolatedTestHost
         await restoreLocklessAuthority(reason: "process_start")
+        guard generation == listenerGeneration else { return }
         isSceneAuthorityReady = true
         observeLifecycle()
         surfAceLifecycleLog(
@@ -562,6 +563,10 @@ final class SurfAceRuntime {
             "event=server_start_request \(surfAceDiagnosticFields([("fixed_port", isolatedTestHost ? 0 : fixedServerPort), ("health_path", healthPath), ("ws_path", webSocketPath), ("isolated_test_host", isolatedTestHost)]))"
         )
 
+        await startListener(isolatedTestHost: isolatedTestHost, generation: generation, attempt: 0)
+    }
+
+    private func startListener(isolatedTestHost: Bool, generation: UInt64, attempt: Int) async {
         do {
             let httpHandler: SurfAceHTTPServer.HTTPHandler = { [weak self] request in
                 guard let self else { return HTTPServerResponse(statusCode: 500) }
@@ -587,7 +592,10 @@ final class SurfAceRuntime {
                     webSocketHandler: webSocketHandler
                 )
             }
+            guard generation == listenerGeneration else { return }
+            listenerRetryTask = nil
             serverPort = Int(port)
+            endpointError = nil
             isStarted = true
             surfAceServerRuntimeLog(
                 "event=server_start_ok \(surfAceDiagnosticFields([("fingerprint", fingerprint), ("port", serverPort), ("requested_port", isolatedTestHost ? 0 : fixedServerPort), ("screen_name", screenName)]))"
@@ -604,11 +612,17 @@ final class SurfAceRuntime {
                 await resumeRequestedAnnotationSourceCommits()
             }
         } catch {
+            guard generation == listenerGeneration else { return }
             let details = startupFailureMessage(for: error)
             surfAceServerRuntimeLog(
                 "event=server_start_failed \(surfAceDiagnosticFields([("error", details), ("fixed_port", fixedServerPort)]))"
             )
             endpointError = details
+            listenerRetryTask = Task { [weak self] in
+                do { try await Task.sleep(for: surfAceRegistryRetryDelay(attempt)) } catch { return }
+                guard let self, self.listenerGeneration == generation else { return }
+                await self.startListener(isolatedTestHost: isolatedTestHost, generation: generation, attempt: attempt + 1)
+            }
         }
     }
 
@@ -778,6 +792,9 @@ final class SurfAceRuntime {
     }
 
     func stop() async {
+        listenerGeneration &+= 1
+        listenerRetryTask?.cancel()
+        listenerRetryTask = nil
         annotationRecoveryTask?.cancel()
         await annotationRecoveryTask?.value
         annotationRecoveryTask = nil
@@ -2442,7 +2459,10 @@ final class SurfAceRuntime {
             }
         }
 
-        let messages = await socket.messages()
+        let messages = await socket.messages { [weak self] text in
+            guard text.contains("heartbeat.ping"), let self else { return false }
+            return await self.replyToHeartbeat(text, from: connectionUUID, through: sender)
+        }
         do {
             for try await message in messages {
                 guard !terminatedConnectionUUIDs.contains(connectionUUID) else { break }
@@ -2533,6 +2553,33 @@ final class SurfAceRuntime {
             surfAceGatewayLog("socket loop failed connectionUUID=\(connectionUUID) error=\(error.localizedDescription)")
         }
         await handleSocketTermination(connectionUUID: connectionUUID)
+    }
+
+    private func replyToHeartbeat(
+        _ text: String, from connectionUUID: String, through sender: SurfAceOutboundSender
+    ) async -> Bool {
+        // The reader services paired heartbeats even while the ordinary request
+        // stream is waiting for a durable mutation or renderer result.
+        guard locklessConnectionsByConnectionUUID[connectionUUID] != nil,
+              !terminatedConnectionUUIDs.contains(connectionUUID),
+              text.utf8.count <= maxMessageBytes,
+              let request = decodeJSONObject(from: text),
+              request["type"] as? String == "request",
+              request["op"] as? String == "heartbeat.ping",
+              let id = request["id"] as? String else { return false }
+        let reply = locklessHeartbeatResponse(id: id, payload: request["payload"] as? [String: Any] ?? [:])
+        if let response = encodeJSON(reply) {
+            await sender.enqueue(text: response, priority: .heartbeat)
+        }
+        return true
+    }
+
+    private func locklessHeartbeatResponse(id: String, payload: [String: Any]) -> [String: Any] {
+        guard let nonce = payload["nonce"] as? String, !nonce.isEmpty else {
+            return locklessAdapterErrorResult(op: "heartbeat.ping", id: id, error: .invalidAdmission).responseObject
+        }
+        return ["v": 1, "type": "response", "op": "heartbeat.ping", "id": id,
+                "ok": true, "sentAt": timestampNow(), "payload": ["nonce": nonce]]
     }
 
     private func processRequest(
@@ -2922,10 +2969,7 @@ final class SurfAceRuntime {
                     adapter: adapter
                 )
             case "heartbeat.ping":
-                guard let nonce = payload["nonce"] as? String, !nonce.isEmpty else {
-                    throw SurfAceLocklessRuntimeAdapterError.invalidAdmission
-                }
-                responsePayload = ["nonce": nonce]
+                return SurfAceProcessedRequestResult(responseObject: locklessHeartbeatResponse(id: id, payload: payload))
             default:
                 return SurfAceProcessedRequestResult(
                     responseObject: makeErrorResponse(
@@ -4307,7 +4351,6 @@ final class SurfAceRuntime {
             || locklessAdmissionDeliveryBarriers.contains(where: { $0 != bypassingAdmissionBarrier }) {
             await withCheckedContinuation { continuation in
                 locklessDeliveryWaiters.append(continuation)
-                locklessDeliveryWaitObserver?()
             }
         }
         locklessDeliveryActive = true

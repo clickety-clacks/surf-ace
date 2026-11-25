@@ -91,6 +91,10 @@ export class ServerConnection {
     this.discovery = options.discovery ?? createBonjourSurfAceDiscoveryService({ timeoutMs: 1500 });
   }
 
+  get connectionStatus() {
+    return this.status;
+  }
+
   private setStatus(status: "connected" | "connecting" | "disconnected"): void {
     this.status = status;
     if (status === "connected") {
@@ -173,7 +177,9 @@ export class ServerConnection {
     this.logFailure(cause);
     if (this.diagnostics || !this.running || this.stopped) return;
     this.diagnostics = setInterval(() => {
-      if (this.status !== "connected" && this.lastFailure) this.logFailure(this.lastFailure);
+      if (this.status !== "connected" && this.lastFailure) {
+        this.options.onError?.(new Error(this.lastFailure));
+      }
     }, 60_000);
   }
 
@@ -251,9 +257,7 @@ export class ServerConnection {
     if (this.selected) registrations.add(this.selected.registration);
     const run = this.runSynchronization(cycle).catch((error) => {
       if (this.isCurrentCycle(cycle) && !this.selected) {
-        this.lastFailure ??= "registry unreachable";
-        this.setStatus("disconnected");
-        this.logFailure(this.lastFailure);
+        this.reportOffline(this.lastFailure ?? "registry unreachable");
         this.scheduleRecovery();
       }
       throw error;

@@ -1722,16 +1722,13 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         let pairResponseGate = SurfAceLocklessPairResponseSendGate(
             requestId: "pair-order-c"
         )
-        let deliveryContention = expectation(description: "N+1 queued behind pair response")
+        addTeardownBlock { await pairResponseGate.release() }
         let runtime = SurfAceRuntime(
             userDefaults: defaults,
             locklessStateURL: stateURL,
             enableFleetDiscovery: false, isolatedTestLoopback: true,
             outboundSendPreparation: { text, priority in
                 await pairResponseGate.prepareSend(text: text, priority: priority)
-            },
-            locklessDeliveryWaitObserver: {
-                deliveryContention.fulfill()
             }
         )
         await runtime.start()
@@ -1783,7 +1780,14 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
             "paneId": paneId,
             "surfaceId": surface.surfaceId,
         ])
-        await fulfillment(of: [deliveryContention], timeout: 2)
+        let observerReclamation = try await receive(second, matchingOp: "event.controller_retention_reclaimed")
+        let laterCommit = try await receive(second, matchingOp: "event.lockless_content_committed")
+        XCTAssertEqual(payload(laterCommit)["contentId"] as? String, "content-after-reclamation")
+        let mutationResponse = try await receive(second, matchingId: "mutation-after-reclamation")
+        XCTAssertEqual(
+            (payload(mutationResponse)["operationReceipt"] as? [String: Any])?["requestId"] as? String,
+            "mutation-after-reclamation"
+        )
         let whileDeliveryBlocked = try await runtime.locklessReadinessSnapshot().state
         let mutationReceipt = try XCTUnwrap(
             whileDeliveryBlocked.controllers["controller-order-b"]?
@@ -1806,17 +1810,7 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
             "controller-order-a"
         )
         XCTAssertFalse((reclamation["eventId"] as? String)?.isEmpty ?? true)
-        let observerReclamation = try await receive(
-            second, matchingOp: "event.controller_retention_reclaimed"
-        )
         XCTAssertEqual(observerReclamation["eventId"] as? String, reclamation["eventId"] as? String)
-        let laterCommit = try await receive(second, matchingOp: "event.lockless_content_committed")
-        XCTAssertEqual(payload(laterCommit)["contentId"] as? String, "content-after-reclamation")
-        let mutationResponse = try await receive(second, matchingId: "mutation-after-reclamation")
-        XCTAssertEqual(
-            (payload(mutationResponse)["operationReceipt"] as? [String: Any])?["requestId"] as? String,
-            "mutation-after-reclamation"
-        )
 
         second.cancel(with: .normalClosure, reason: nil)
         third.cancel(with: .normalClosure, reason: nil)

@@ -161,6 +161,11 @@ type SocketMeta = {
   socketId: string;
 };
 
+export type CommittedSurfaceObservation = {
+  state: ReturnType<SurfaceCore["pairState"]>;
+  surfaceSetRevision: number;
+};
+
 export type SurfaceWsServerOptions = {
   bindAddress?: string;
   capturePaneImage: (surfaceId: string, paneId: number) => Promise<string | null>;
@@ -179,6 +184,8 @@ export type SurfaceWsServerOptions = {
   onNativeReleased?: (surfaceId: string, paneIds: string[]) => Promise<void> | void;
   persistLocklessState?: () => Promise<void>;
   isApplicationStateReady?: () => boolean;
+  committedSurfaceObservation?: (surfaceId: string) => CommittedSurfaceObservation | undefined;
+  registryConnectionStatus?: () => "connected" | "connecting" | "disconnected" | undefined;
   beginApplicationStateMutation?: (details: Omit<ApplicationStateMutation, "startedAtMs">) => () => void;
   openApplicationStateMutations?: () => ApplicationStateMutation[];
   getSurfaceBlockers?: (surfaceId?: string, excludingRequestId?: string) => SurfaceBlocker[];
@@ -292,6 +299,8 @@ export class SurfaceWsServer {
   private readonly protocolVersion: number;
   private readonly persistLocklessState: () => Promise<void>;
   private readonly isApplicationStateReady: () => boolean;
+  private readonly committedSurfaceObservation: SurfaceWsServerOptions["committedSurfaceObservation"];
+  private readonly registryConnectionStatus: SurfaceWsServerOptions["registryConnectionStatus"];
   private readonly beginApplicationStateMutation: NonNullable<SurfaceWsServerOptions["beginApplicationStateMutation"]>;
   private readonly openApplicationStateMutations: () => ApplicationStateMutation[];
   private readonly getSurfaceBlockers: NonNullable<SurfaceWsServerOptions["getSurfaceBlockers"]>;
@@ -359,6 +368,8 @@ export class SurfaceWsServer {
       }
     };
     this.isApplicationStateReady = options.isApplicationStateReady ?? (() => true);
+    this.committedSurfaceObservation = options.committedSurfaceObservation;
+    this.registryConnectionStatus = options.registryConnectionStatus;
     this.beginApplicationStateMutation = options.beginApplicationStateMutation ?? (() => () => {});
     this.openApplicationStateMutations = options.openApplicationStateMutations ?? (() => []);
     this.getSurfaceBlockers = options.getSurfaceBlockers ?? (() => []);
@@ -3469,10 +3480,15 @@ export class SurfaceWsServer {
     } catch {
       // An unavailable saved lease limits consistency reporting, not the topology read.
     }
-    let snapshot: ReturnType<SurfaceCore["pairState"]> | null = null;
-    let surfaceSetAfter = 0;
-    let stableSnapshot = false;
-    for (let attempt = 0; attempt < 3; attempt += 1) {
+    const committed = this.committedSurfaceObservation?.(request.payload.surfaceId);
+    if (this.committedSurfaceObservation && !committed) {
+      return errorResponse("surface.describe", request.id, "surface_not_found",
+        "Requested surface has no committed observation");
+    }
+    let snapshot: ReturnType<SurfaceCore["pairState"]> | null = committed?.state ?? null;
+    let surfaceSetAfter = committed?.surfaceSetRevision ?? 0;
+    let stableSnapshot = committed != null;
+    for (let attempt = 0; !committed && attempt < 3; attempt += 1) {
       if (!this.core.listSurfaces().some((surface) => surface.surfaceId === request.payload.surfaceId)) {
         return errorResponse("surface.describe", request.id, "surface_not_found",
           "Requested surface is not live on this endpoint");
@@ -3518,6 +3534,9 @@ export class SurfaceWsServer {
       request.payload.registryIdentity.allocatorId === binding.allocatorId &&
       request.payload.registryIdentity.fleetId === binding.fleetId;
     const limitationCodes: string[] = [];
+    const registryStatus = this.registryConnectionStatus?.();
+    if (registryStatus === "connecting") limitationCodes.push("registry_registration_pending");
+    if (registryStatus === "disconnected") limitationCodes.push("registry_connection_offline");
     if (persistenceOutcomeUnknown) limitationCodes.push("persistence_outcome_unknown");
     if (!applicationStateReady) {
       limitationCodes.push("application_state_unverified");

@@ -186,11 +186,14 @@ actor SurfAceWebSocket {
         }
     }
 
-    func messages() -> AsyncThrowingStream<Message, Error> {
+    func messages(
+        interceptText: @escaping @Sendable (String) async -> Bool = { _ in false }
+    ) -> AsyncThrowingStream<Message, Error> {
         let (stream, continuation) = AsyncThrowingStream<Message, Error>.makeStream()
         reader = Task {
             do {
                 while !Task.isCancelled, let message = try await receive() {
+                    if case .text(let text) = message, await interceptText(text) { continue }
                     continuation.yield(message)
                 }
                 continuation.finish()

@@ -83,7 +83,7 @@ import {
   runtimeAppBindingDiagnosticsFromCompositorResponse,
 } from "./runtime-identity.js";
 import { isAddressInUse, isPortBoundOnIpv6Any } from "./port-selection.js";
-import { SurfaceWsServer } from "./ws-server.js";
+import { SurfaceWsServer, type CommittedSurfaceObservation } from "./ws-server.js";
 import { PanePresentationCoordinator } from "./pane-presentation-coordinator.js";
 import { NativePresentationWindowBinding, panePresentationWindowRoute } from "./pane-presentation.js";
 import { PersistenceWriteReadiness, surfaceBlockerMessage } from "./persistence-write-readiness.js";
@@ -117,7 +117,10 @@ const ADVERTISER_TXT_REFRESH_DEBOUNCE_MS = 500;
 const SURF_ACE_WEBAUTHN_KEYCHAIN_ACCESS_GROUP = "Z7R59J7QV8.ai.surf-ace.electron.webauthn";
 let persistentStateWriteGuard: PersistentStateLoadResult["writeGuard"] = false;
 let persistentStateOutcomeUnknown: PersistentStateOutcomeUnknownError | null = null;
-let uncertainStateCandidate: PersistentSurfaceStateSnapshot | null = null;
+type StateWriteCandidate = PersistentSurfaceStateSnapshot & {
+  observations: Map<string, CommittedSurfaceObservation>;
+};
+let uncertainStateCandidate: StateWriteCandidate | null = null;
 const confirmedAnnotationLocalSaves = new ConfirmedAnnotationLocalSaves();
 let persistenceRecoveryTimer: NodeJS.Timeout | null = null;
 let persistenceRetryDelayMs = 1_000;
@@ -232,6 +235,14 @@ const singleInstanceLock = app.requestSingleInstanceLock();
 let advertiser: BonjourAdvertiser | null = null;
 let configuredRegistration: ServerConnection | null = null;
 let committedRegistration: RegistryRegistrationState = registryRegistrationState({});
+let committedSurfaceObservations = new Map<string, CommittedSurfaceObservation>();
+
+function captureSurfaceObservations(): Map<string, CommittedSurfaceObservation> {
+  const surfaceSetRevision = core.locklessAuthority.surfaceSetRevision;
+  return new Map(core.listSurfaces().map(({ surfaceId }) => [surfaceId, {
+    state: core.pairState(surfaceId), surfaceSetRevision,
+  }]));
+}
 
 function confirmRegistrationState(registration: RegistryRegistrationState): void {
   const changed = JSON.stringify(registration) !== JSON.stringify(committedRegistration);
@@ -289,6 +300,8 @@ function createServer(coreValue: SurfaceCore, clientId: string | null): SurfaceW
       getSurfaceBlockers: (surfaceId, excludingRequestId) => persistentStateWriteReadiness.blockersForSurface(surfaceId, excludingRequestId),
       isApplicationStateReady: () => persistentStateWriteReadiness.isReady &&
         !persistentStateWriteGuard && !persistentStateOutcomeUnknown,
+      committedSurfaceObservation: (surfaceId) => committedSurfaceObservations.get(surfaceId),
+      registryConnectionStatus: () => configuredRegistration?.connectionStatus,
       onNativeMaterialized: (surfaceId, materialization) => {
         recordNativePaneInstances(surfaceId, materialization);
         broadcastSurfaceState(surfaceId);
@@ -535,7 +548,10 @@ async function persistState(): Promise<void> {
   await persistentStateWriteReadiness.track(async () => {
     // Bind this write to the state that requested it. A later source mutation
     // must enqueue its own write before the publisher can send its bytes.
-    const candidate = core.capturePersistentStateSnapshot();
+    const candidate: StateWriteCandidate = {
+      ...core.capturePersistentStateSnapshot(),
+      observations: captureSurfaceObservations(),
+    };
     stateWrite = stateWrite
       .catch(() => {})
       .then(async () => {
@@ -543,6 +559,7 @@ async function persistState(): Promise<void> {
         try {
           await writePersistentStateFileContents(stateDir, STATE_FILE_NAME, candidate.contents);
           persistentStateWriteGuard = false;
+          committedSurfaceObservations = candidate.observations;
           confirmRegistrationState(candidate.registration);
           confirmedAnnotationLocalSaves.confirmCandidates(candidate.annotationLocalSaveCandidates);
         } catch (error) {
@@ -629,6 +646,7 @@ async function reconcilePersistence(): Promise<void> {
     // state meanwhile; queue its save after reopening the persistence seam.
     const changedWhilePaused = core.capturePersistentStateSnapshot().contents !== uncertainStateCandidate.contents;
     const verifiedCandidate = uncertainStateCandidate;
+    committedSurfaceObservations = verifiedCandidate.observations;
     confirmRegistrationState(verifiedCandidate.registration);
     confirmedAnnotationLocalSaves.confirmCandidates(verifiedCandidate.annotationLocalSaveCandidates);
     persistentStateOutcomeUnknown = null;
@@ -2223,6 +2241,7 @@ async function boot(): Promise<void> {
   });
   const restoredSurfaces = core.restorePersistedSurfaces(endpointName(), displayViewport());
   committedRegistration = registryRegistrationState(core.getPersistentState());
+  committedSurfaceObservations = captureSurfaceObservations();
   if (shouldGuardUnrestorablePersistentState(persistentState, restoredSurfaces.length)) {
     persistentStateWriteGuard = "unrestorable-primary";
     clientWarn("state_restore_unrestorable_write_guard", {

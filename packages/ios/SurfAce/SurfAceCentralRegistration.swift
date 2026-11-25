@@ -1963,6 +1963,13 @@ final class SurfAceCentralRegistration {
     private var retryAttempt = 0
     private var registrationDirty = false
     private var lastRegisteredInput: SurfAceRegistrationInput?
+    private struct PendingRegistration {
+        let id = UUID()
+        let identity: SurfAceRegistryIdentity?
+        let input: SurfAceRegistrationInput
+        let request: SurfAceRegistrationInput
+    }
+    private var pendingRegistration: PendingRegistration?
     private var lastReportedTime: ContinuousClock.Instant?
     private var synchronizationTask: Task<Void, Error>?
     private var synchronizationTaskId: UUID?
@@ -1975,6 +1982,7 @@ final class SurfAceCentralRegistration {
     private(set) var sourceReports: [SurfAceRegistrySourceReport] = []
     private(set) var lastError: String?
     private var lastReportedError: String?
+    private var failureDiagnostics: Task<Void, Never>?
     private(set) var status: SurfAceCentralRegistrationStatus = .disconnected
 
     private func setStatus(_ next: SurfAceCentralRegistrationStatus) {
@@ -1987,6 +1995,20 @@ final class SurfAceCentralRegistration {
         guard lastError != message else { return }
         lastError = message
         onConnectionError(message)
+        if message == nil {
+            failureDiagnostics?.cancel()
+            failureDiagnostics = nil
+        } else if running && failureDiagnostics == nil {
+            failureDiagnostics = Task { [weak self] in
+                while !Task.isCancelled {
+                    do { try await Task.sleep(for: .seconds(60)) } catch { return }
+                    guard let self, let message = self.lastError else { return }
+                    self.onError(SurfAceCentralRegistrationFailure(
+                        phase: "ongoing", endpoint: nil, underlying: message
+                    ))
+                }
+            }
+        }
     }
 
     private func reportFailure(
@@ -2349,9 +2371,10 @@ final class SurfAceCentralRegistration {
         // an identified registry; if every topology reply is incomplete, still
         // register with the discovered server and leave its claims unbound.
         guard let preferredCandidate = matching ?? identified.first(where: { $0.identity != nil }) ?? identified.first else {
-            let reason = failures.values.isEmpty
+            let detail = failures.values.isEmpty
                 ? "Bonjour found no _surf-ace._tcp service with role=server v=1 ws=/ws"
                 : failures.values.joined(separator: "; ")
+            let reason = "registry unreachable: " + detail
             let failure = SurfAceCentralRegistrationFailure(phase: "retry", endpoint: nil, underlying: reason)
             setSourceReports(report(
                 winner: nil,
@@ -2369,6 +2392,7 @@ final class SurfAceCentralRegistration {
         }
         let selectedIdentity = preferredCandidate.identity
 
+        var registrationRefused = false
         for identifiedCandidate in identified where identifiedCandidate.identity == selectedIdentity {
             let candidate = identifiedCandidate.candidate
             do {
@@ -2409,6 +2433,10 @@ final class SurfAceCentralRegistration {
                     }
                     try ensureCurrent(attempt)
                 }
+                if let registrationError = error as? SurfAceRegistrationError,
+                   case .serverRejected = registrationError {
+                    registrationRefused = true
+                }
                 let description = surfAceRegistrationErrorDescription(error)
                 if candidate.kind != .bonjour { outcomes[candidate.url.absoluteString] = .failed(description) }
                 failures.values.append(reportFailure(
@@ -2429,10 +2457,11 @@ final class SurfAceCentralRegistration {
             winner: nil,
             bonjourFailure: bonjourFailureReason("Bonjour found no _surf-ace._tcp service with role=server v=1 ws=/ws")
         ))
-        let reason = failures.values.isEmpty
+        let detail = failures.values.isEmpty
             ? "registry registration failed for every endpoint with identity \(selectedIdentity.map { "\($0.allocatorId)/\($0.fleetId)" } ?? "unreported")"
             : failures.values.joined(separator: "; ")
-        throw reportFailure(phase: "retry", endpoint: nil, underlying: reason, showInStatus: true)
+        let cause = registrationRefused ? "registry refused registration" : "registry unreachable"
+        throw reportFailure(phase: "retry", endpoint: nil, underlying: "\(cause): \(detail)", showInStatus: true)
     }
 
     private func candidateURLs(
@@ -2487,22 +2516,33 @@ final class SurfAceCentralRegistration {
         identity: SurfAceRegistryIdentity?,
         input: SurfAceRegistrationInput
     ) async throws {
-        var current = input
+        let replay = pendingRegistration.flatMap { $0.identity == identity ? $0 : nil }
+        var current = replay?.input ?? input
         var currentIdentity = identity
         var registryIdentityConfirmedForReleases = false
-        let maximumRecoveryAttempts = 1 + input.pendingPaneReleases.count
-            + input.pendingWindowReleases.count
-            + input.surfaces.reduce(0) { $0 + 1 + $1.panes.count }
-        for _ in 0..<maximumRecoveryAttempts {
+        let maximumRecoveryAttempts = (replay == nil ? 1 : 2) + current.pendingPaneReleases.count
+            + current.pendingWindowReleases.count
+            + current.surfaces.reduce(0) { $0 + 1 + $1.panes.count }
+        for index in 0..<maximumRecoveryAttempts {
             guard !stopped else { throw SurfAceRegistrationError.stopped }
             do {
-                let request = !registryIdentityConfirmedForReleases
-                    && current.registryIdentity != currentIdentity
-                    && (!current.pendingPaneReleases.isEmpty || !current.pendingWindowReleases.isEmpty)
-                    ? current.withoutReleases : current
-                let reply = try await transport.register(
-                    clientId: clientId, input: request, expectedIdentity: currentIdentity
-                )
+                let replaying = index == 0 ? replay : nil
+                let includeReleases = registryIdentityConfirmedForReleases
+                    || current.registryIdentity == currentIdentity
+                    || (current.pendingPaneReleases.isEmpty && current.pendingWindowReleases.isEmpty)
+                let request = replaying?.request ?? (includeReleases ? current : current.withoutReleases)
+                let attempt = PendingRegistration(identity: currentIdentity, input: current, request: request)
+                if running { pendingRegistration = attempt }
+                let reply: SurfAceRegistrationReply
+                do {
+                    reply = try await transport.register(
+                        clientId: clientId, input: request, expectedIdentity: currentIdentity
+                    )
+                } catch SurfAceRegistrationError.serverRejected(let code, let message) {
+                    if pendingRegistration?.id == attempt.id { pendingRegistration = nil }
+                    throw SurfAceRegistrationError.serverRejected(code: code, message: message)
+                }
+                if pendingRegistration?.id == attempt.id { pendingRegistration = nil }
                 if let replyIdentity = reply.registryIdentity, replyIdentity != current.registryIdentity {
                     onWarning("registration_registry_identity_changed; rebinding and retrying")
                     try await bindCandidateRegistry(replyIdentity)
@@ -2520,13 +2560,15 @@ final class SurfAceCentralRegistration {
                    reply.registryIdentity == nil || reply.registryIdentity == currentIdentity {
                     registryIdentityConfirmedForReleases = true
                 }
-                if try await applyRegistrationReply(reply, input: current, request: request) {
+                let needsRetry = try await applyRegistrationReply(reply, input: current, request: request)
+                if needsRetry || (replaying != nil && current != input) {
                     current = try await currentInputSnapshot()
                     continue
                 }
                 return
             } catch let error as SurfAceRegistrationError {
                 guard case .serverRejected = error else {
+                    if running { throw error }
                     if !current.pendingPaneReleases.isEmpty || !current.pendingWindowReleases.isEmpty {
                         let noReleases = current.withoutReleases
                         do {
@@ -2555,6 +2597,7 @@ final class SurfAceCentralRegistration {
                     current = updated
                 }
             } catch {
+                if running { throw error }
                 if !current.pendingPaneReleases.isEmpty || !current.pendingWindowReleases.isEmpty {
                     let noReleases = current.withoutReleases
                     let reply = try await transport.register(
@@ -2868,6 +2911,8 @@ final class SurfAceCentralRegistration {
 
     func stop() {
         stopped = true
+        failureDiagnostics?.cancel()
+        failureDiagnostics = nil
         loop?.cancel()
         loop = nil
         selected?.transport.close()
