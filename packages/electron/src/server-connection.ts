@@ -1,3 +1,4 @@
+import { recordClientDiagnostic } from "./client-flight-recorder.js";
 import {
   createBonjourSurfAceDiscoveryService,
   type SurfAceDiscoveryEndpoint,
@@ -185,10 +186,13 @@ export class ServerConnection {
 
   private scheduleRecovery(): void {
     if (this.stopped || !this.running || this.recoveryTimer) return;
+    const attempt = this.retryAttempt++;
+    const delay = reconnectDelayMs(attempt);
     this.recoveryTimer = setTimeout(() => {
       this.recoveryTimer = undefined;
+      recordClientDiagnostic("info", "registry", "registry_reconnect_attempt", { attempt, delay_ms: delay });
       void this.synchronize().catch(() => undefined);
-    }, reconnectDelayMs(this.retryAttempt++));
+    }, delay);
   }
 
   labelClaimPending(surfaceId: string): boolean {
