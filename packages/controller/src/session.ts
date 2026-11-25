@@ -19,6 +19,7 @@ import type {
 import { reconnectDelayMs, SURF_ACE_LOCKLESS_V1_CAPABILITY } from "@surf-ace/protocol";
 
 import { ControllerIdentity } from "./identity.js";
+import { observeClientOffline, type ControllerRegistryTarget } from "./registry-presence.js";
 import {
   BoundedControllerProjection,
   type LocalConsumableRead,
@@ -66,6 +67,7 @@ export type LocklessControllerSessionOptions = {
   projection: BoundedControllerProjection;
   protocolFeatures?: string[];
   reconnectInitialDelayMs?: number;
+  registryTarget?: ControllerRegistryTarget;
   onConsumableAvailable?: (scopeId: LocklessScopeId) => void;
   onConsumableAcknowledged?: (scopeId: LocklessScopeId) => void;
   preflightComplete?: boolean;
@@ -136,6 +138,7 @@ export class LocklessControllerSession {
   private transportGeneration = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnecting = false;
+  private paired = false;
   private stopRequested = false;
   private unsubscribeClose: (() => void) | null = null;
   private readonly repairScopes = new Set<LocklessScopeId>();
@@ -146,6 +149,7 @@ export class LocklessControllerSession {
   async start(): Promise<LocklessPairResult> {
     this.stopRequested = false;
     try {
+      await this.checkRegistryPresence();
       return await this.startInternal();
     } catch (error) {
       this.stopRequested = true;
@@ -235,6 +239,7 @@ export class LocklessControllerSession {
       this.repairScopes.delete(snapshot.scopeId);
     }
     await this.flushAcknowledgements();
+    this.paired = true;
     this.backgroundInterval = setInterval(() => {
       this.backgroundWork = this.backgroundWork.then(async () => {
         await this.runBackgroundMaintenance();
@@ -279,6 +284,7 @@ export class LocklessControllerSession {
 
   private async cleanupTransport(): Promise<void> {
     this.transportGeneration += 1;
+    this.paired = false;
     if (this.backgroundInterval) {
       clearInterval(this.backgroundInterval);
       this.backgroundInterval = null;
@@ -296,14 +302,30 @@ export class LocklessControllerSession {
     await this.options.wire.close();
   }
 
+  hasLiveDirectSession(): boolean {
+    return this.paired;
+  }
+
+  private async checkRegistryPresence(): Promise<void> {
+    const target = this.options.registryTarget;
+    if (this.paired || !target) return;
+    const offline = await observeClientOffline(target);
+    if (offline && !this.paired) throw offline;
+  }
+
+  private async requestDirect(op: string, payload?: unknown): Promise<ControllerWireEnvelope> {
+    await this.checkRegistryPresence();
+    return await this.options.wire.request(op, payload);
+  }
+
   async listSurfaces(): Promise<unknown> {
     return responsePayload(
-      await this.options.wire.request(LOCKLESS_WIRE_OPS.listSurfaces),
+      await this.requestDirect(LOCKLESS_WIRE_OPS.listSurfaces),
     );
   }
 
   async requestPublic(op: string, payload: unknown = {}): Promise<unknown> {
-    return responsePayload(await this.options.wire.request(op, payload));
+    return responsePayload(await this.requestDirect(op, payload));
   }
 
   async push(
@@ -311,7 +333,7 @@ export class LocklessControllerSession {
     input: LocklessContentPush,
   ): Promise<unknown> {
     return responsePayload(
-      await this.options.wire.request(LOCKLESS_WIRE_OPS.contentPush, {
+      await this.requestDirect(LOCKLESS_WIRE_OPS.contentPush, {
         surfaceId,
         ...input,
       }),
@@ -323,7 +345,7 @@ export class LocklessControllerSession {
     input: LocklessPaneSplitIntent,
   ): Promise<unknown> {
     return responsePayload(
-      await this.options.wire.request(LOCKLESS_WIRE_OPS.splitPane, {
+      await this.requestDirect(LOCKLESS_WIRE_OPS.splitPane, {
         surfaceId,
         ...input,
       }),
@@ -335,7 +357,7 @@ export class LocklessControllerSession {
     input: LocklessPaneCloseIntent,
   ): Promise<unknown> {
     return responsePayload(
-      await this.options.wire.request(LOCKLESS_WIRE_OPS.closePane, {
+      await this.requestDirect(LOCKLESS_WIRE_OPS.closePane, {
         surfaceId,
         ...input,
       }),
@@ -347,7 +369,7 @@ export class LocklessControllerSession {
     input: LocklessPaneRestoreIntent,
   ): Promise<unknown> {
     return responsePayload(
-      await this.options.wire.request(LOCKLESS_WIRE_OPS.restorePane, {
+      await this.requestDirect(LOCKLESS_WIRE_OPS.restorePane, {
         surfaceId,
         ...input,
       }),
@@ -356,7 +378,7 @@ export class LocklessControllerSession {
 
   async openSurface(input: LocklessSurfaceOpenIntent): Promise<unknown> {
     return responsePayload(
-      await this.options.wire.request(LOCKLESS_WIRE_OPS.openSurface, input),
+      await this.requestDirect(LOCKLESS_WIRE_OPS.openSurface, input),
     );
   }
 
@@ -365,7 +387,7 @@ export class LocklessControllerSession {
     input: Omit<LocklessSurfaceCloseIntent, "surfaceId">,
   ): Promise<unknown> {
     return responsePayload(
-      await this.options.wire.request(LOCKLESS_WIRE_OPS.closeSurface, {
+      await this.requestDirect(LOCKLESS_WIRE_OPS.closeSurface, {
         surfaceId,
         ...input,
       }),
@@ -377,7 +399,7 @@ export class LocklessControllerSession {
     input: Omit<LocklessSurfaceRestoreIntent, "tombstoneId">,
   ): Promise<unknown> {
     return responsePayload(
-      await this.options.wire.request(LOCKLESS_WIRE_OPS.restoreSurface, {
+      await this.requestDirect(LOCKLESS_WIRE_OPS.restoreSurface, {
         tombstoneId,
         ...input,
       }),
@@ -506,6 +528,7 @@ export class LocklessControllerSession {
     }
     this.reconnecting = true;
     this.transportGeneration += 1;
+    this.paired = false;
     if (this.backgroundInterval) {
       clearInterval(this.backgroundInterval);
       this.backgroundInterval = null;

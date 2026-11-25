@@ -74,13 +74,19 @@ export class PublicControllerWireClient {
   private opening: Promise<void> | null = null;
   private readonly registry: boolean;
   private readonly requestTimeoutMs: number;
+  private readonly retryStoreFailures: boolean;
   private readonly onRetry?: (error: NonNullable<ControllerWireEnvelope["error"]>) => void;
 
   constructor(
     readonly url: string,
-    options: number | { registry: true; onRetry?: (error: NonNullable<ControllerWireEnvelope["error"]>) => void } = 10_000,
+    options: number | {
+      registry: true;
+      onRetry?: (error: NonNullable<ControllerWireEnvelope["error"]>) => void;
+      retryStoreFailures?: boolean;
+    } = 10_000,
   ) {
     this.registry = typeof options !== "number";
+    this.retryStoreFailures = typeof options !== "number" && options.retryStoreFailures !== false;
     this.requestTimeoutMs = typeof options === "number" ? options : 10_000;
     if (typeof options !== "number") this.onRetry = options.onRetry;
   }
@@ -210,7 +216,7 @@ export class PublicControllerWireClient {
     payload: unknown = {},
     id = `rq_${randomUUID().replaceAll("-", "")}`,
   ): Promise<ControllerWireEnvelope> {
-    if (!this.registry) return await this.sendRequest(op, payload, id);
+    if (!this.retryStoreFailures) return await this.sendRequest(op, payload, id);
     const socket = this.socket;
     const retry = new AbortController();
     const unlisten = this.onClose(() => retry.abort(new Error("controller_wire_closed")));

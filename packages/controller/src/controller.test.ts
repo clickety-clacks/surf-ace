@@ -666,3 +666,61 @@ for (const lateReply of [false, true]) {
     }
   });
 }
+
+test("registry presence refuses a missing direct session and leaves a paired session usable", async () => {
+  const { once } = await import("node:events");
+  const { WebSocketServer } = await import("ws");
+  const registry = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  await once(registry, "listening");
+  const address = registry.address();
+  assert.ok(address && typeof address !== "string");
+  const clientId = "7".repeat(64);
+  let offline = true;
+  let registryReads = 0;
+  registry.on("connection", (socket) => {
+    socket.on("message", (data) => {
+      const request = JSON.parse(String(data));
+      assert.equal(request.op, "fleet.topology");
+      registryReads++;
+      socket.send(JSON.stringify({
+        type: "response", v: 1, id: request.id, op: request.op, ok: true,
+        payload: { clients: [{
+          clientId, presence: offline ? "offline" : "online", lastSeenAtMs: offline ? 123 : null,
+        }] },
+      }));
+    });
+  });
+  const controllerInstanceId = "ci_presence" as ControllerInstanceId;
+  let directConnects = 0;
+  const wire: ControllerWire = {
+    async close() {},
+    async connect() { directConnects++; },
+    onEvent() { return () => {}; },
+    async request(op) {
+      const payload = op === "pair.request"
+        ? { capabilities: {}, controllerInstanceId, limits: {}, mode: "lockless",
+            receiptResolutions: [], scopes: [], sessionId: "session-test" }
+        : { surfaces: [] };
+      return { type: "response", op, ok: true, payload };
+    },
+  };
+  const session = new LocklessControllerSession({
+    preflightComplete: true,
+    registryTarget: { url: `ws://127.0.0.1:${address.port}`, clientId },
+    identity: new ControllerIdentity(new MemoryStore(), () => controllerInstanceId),
+    projection: new BoundedControllerProjection(new MemoryStore(), 4096), wire,
+  });
+  try {
+    await assert.rejects(session.start(), { code: "client_offline", clientId, lastSeenAtMs: 123 });
+    assert.equal(directConnects, 0);
+    offline = false;
+    await session.start();
+    assert.equal(directConnects, 1);
+    offline = true;
+    assert.deepEqual((await session.listSurfaces() as { surfaces: unknown[] }).surfaces, []);
+    assert.equal(registryReads, 2, "the paired direct request did not depend on the registry");
+  } finally {
+    await session.stop();
+    await new Promise<void>((resolve, reject) => registry.close((error) => error ? reject(error) : resolve()));
+  }
+});

@@ -10,6 +10,7 @@ import type {
   LocklessSurfaceRestoreIntent,
 } from "@surf-ace/protocol";
 
+import { observeClientOffline, type ControllerRegistryTarget } from "./registry-presence.js";
 import type { ControllerIdentity } from "./identity.js";
 import type {
   BoundedControllerProjection,
@@ -25,6 +26,7 @@ export type MultiSurfaceControllerOptions = {
   createProjection(scopeKey: string): BoundedControllerProjection;
   createWire(): ControllerWire;
   identity: ControllerIdentity;
+  registryTarget?: ControllerRegistryTarget;
   onConsumableAvailable?: (
     surfaceId: string,
     scopeId: LocklessScopeId,
@@ -88,28 +90,28 @@ export class MultiSurfaceController {
   }
 
   async push(surfaceId: string, input: LocklessContentPush): Promise<unknown> {
-    return await this.surfaceSession(surfaceId).push(surfaceId, input);
+    return await (await this.surfaceSessionForRequest(surfaceId)).push(surfaceId, input);
   }
 
   async splitPane(
     surfaceId: string,
     input: LocklessPaneSplitIntent,
   ): Promise<unknown> {
-    return await this.surfaceSession(surfaceId).splitPane(surfaceId, input);
+    return await (await this.surfaceSessionForRequest(surfaceId)).splitPane(surfaceId, input);
   }
 
   async closePane(
     surfaceId: string,
     input: LocklessPaneCloseIntent,
   ): Promise<unknown> {
-    return await this.surfaceSession(surfaceId).closePane(surfaceId, input);
+    return await (await this.surfaceSessionForRequest(surfaceId)).closePane(surfaceId, input);
   }
 
   async restorePane(
     surfaceId: string,
     input: LocklessPaneRestoreIntent,
   ): Promise<unknown> {
-    return await this.surfaceSession(surfaceId).restorePane(surfaceId, input);
+    return await (await this.surfaceSessionForRequest(surfaceId)).restorePane(surfaceId, input);
   }
 
   async openSurface(input: LocklessSurfaceOpenIntent): Promise<unknown> {
@@ -122,7 +124,7 @@ export class MultiSurfaceController {
     surfaceId: string,
     input: Omit<LocklessSurfaceCloseIntent, "surfaceId">,
   ): Promise<unknown> {
-    const session = this.surfaceSession(surfaceId);
+    const session = await this.surfaceSessionForRequest(surfaceId);
     const result = await session.closeSurface(surfaceId, input);
     this.surfaces.delete(surfaceId);
     await session.stop();
@@ -167,7 +169,7 @@ export class MultiSurfaceController {
     op: string,
     payload: Record<string, unknown>,
   ): Promise<unknown> {
-    return await this.surfaceSession(surfaceId).requestPublic(op, {
+    return await (await this.surfaceSessionForRequest(surfaceId)).requestPublic(op, {
       ...payload,
       surfaceId,
     });
@@ -203,6 +205,17 @@ export class MultiSurfaceController {
     }
   }
 
+  private async surfaceSessionForRequest(surfaceId: string): Promise<LocklessControllerSession> {
+    const session = this.surfaces.get(surfaceId);
+    if (session) return session;
+    const target = this.options.registryTarget;
+    if (target && !this.lifecycle?.hasLiveDirectSession()) {
+      const offline = await observeClientOffline(target);
+      if (offline && !this.lifecycle?.hasLiveDirectSession()) throw offline;
+    }
+    return this.surfaceSession(surfaceId);
+  }
+
   private createSession(
     scopeKey: string,
     surfaceId?: string,
@@ -210,6 +223,7 @@ export class MultiSurfaceController {
     return new LocklessControllerSession({
       controllerProductName: this.options.controllerProductName,
       identity: this.options.identity,
+      registryTarget: this.options.registryTarget,
       onConsumableAvailable: surfaceId
         ? (scopeId) => {
             this.options.onConsumableAvailable?.(surfaceId, scopeId);
