@@ -1191,7 +1191,7 @@ export class SurfaceWsServer {
     const changesApplicationState = request.op === "pair.request" ||
       (session !== undefined && locklessOperationMutates(request.op));
     const finishMutation = changesApplicationState ? this.beginApplicationStateMutation() : () => {};
-    let afterCommit: (() => Promise<void>) | void;
+    let afterCommit: (() => Promise<unknown>) | void;
     try {
       afterCommit = await this.handleOrdinaryLocklessMessageBody(socket, request);
     } finally {
@@ -1203,7 +1203,7 @@ export class SurfaceWsServer {
   private async handleOrdinaryLocklessMessageBody(
     socket: WebSocket,
     request: LocklessRequest,
-  ): Promise<(() => Promise<void>) | void> {
+  ): Promise<(() => Promise<unknown>) | void> {
     const meta = this.socketMeta.get(socket);
     if (!meta) return;
     const initialSession = this.locklessSessions.get(socket);
@@ -1601,7 +1601,7 @@ export class SurfaceWsServer {
     session: LocklessTransportSession,
     request: Extract<LocklessRequest, { op: "target.apply" }>,
     payloadHash: string,
-  ): Promise<() => Promise<void>> {
+  ): Promise<() => Promise<unknown>> {
     let converted: TargetApplyRequest | null = null;
     let response: Response;
     let uncertain = false;
