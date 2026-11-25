@@ -244,6 +244,20 @@ function captureSurfaceObservations(): Map<string, CommittedSurfaceObservation> 
   }]));
 }
 
+function committedSurfaceObservation(surfaceId: string): CommittedSurfaceObservation | undefined {
+  const observation = committedSurfaceObservations.get(surfaceId);
+  const saved = committedRegistration.surfaces.find((surface) => surface.surfaceId === surfaceId);
+  if (!observation || !saved) return observation;
+  // An allocation is made visible after its write completes. Reconcile its
+  // confirmation with the exact saved identity without reading live topology.
+  const panes = observation.state.panes.map((pane) => {
+    if (pane.paneLabel !== null) return pane;
+    const claim = saved.panes.find((candidate) => candidate.paneId === String(pane.paneId));
+    return claim ? { ...pane, paneLabel: core.confirmedPaneLabelFor(surfaceId, claim) } : pane;
+  });
+  return { ...observation, state: { ...observation.state, panes } };
+}
+
 function confirmRegistrationState(registration: RegistryRegistrationState): void {
   const changed = JSON.stringify(registration) !== JSON.stringify(committedRegistration);
   committedRegistration = registration;
@@ -300,7 +314,7 @@ function createServer(coreValue: SurfaceCore, clientId: string | null): SurfaceW
       getSurfaceBlockers: (surfaceId, excludingRequestId) => persistentStateWriteReadiness.blockersForSurface(surfaceId, excludingRequestId),
       isApplicationStateReady: () => persistentStateWriteReadiness.isReady &&
         !persistentStateWriteGuard && !persistentStateOutcomeUnknown,
-      committedSurfaceObservation: (surfaceId) => committedSurfaceObservations.get(surfaceId),
+      committedSurfaceObservation,
       registryConnectionStatus: () => configuredRegistration?.connectionStatus,
       onNativeMaterialized: (surfaceId, materialization) => {
         recordNativePaneInstances(surfaceId, materialization);

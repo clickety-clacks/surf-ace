@@ -3030,6 +3030,19 @@ export class SurfaceCore {
       ? pane.paneLabel : null;
   }
 
+  confirmedPaneLabelFor(
+    surfaceId: string,
+    saved: RegistryRegistrationState["surfaces"][number]["panes"][number],
+  ): number | null {
+    const paneId = Number(saved.paneId);
+    const pane = this.surfaces.get(surfaceId)?.panes.get(paneId);
+    if (!pane || pane.paneLineageId !== saved.paneLineageId ||
+        pane.allocationGeneration !== saved.allocationGeneration || pane.paneLabel !== saved.paneLabel) {
+      return null;
+    }
+    return this.isRegistryPaneConfirmed(surfaceId, paneId, pane) ? pane.paneLabel : null;
+  }
+
   applyWindowLabelOnly(surfaceId: string, windowLabel: string): void {
     this.applyWindowLabels([{ surfaceId, windowLabel }]);
   }
