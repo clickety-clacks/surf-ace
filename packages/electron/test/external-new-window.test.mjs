@@ -7,38 +7,42 @@ import {
   embeddedNewWindowAction,
   isExternalNewWindowLink,
   resolveExternalHttpUrl,
-} from "../src/external-new-window.js";
+} from "../src/external-new-window.ts";
 
 class FixtureElement {
-  constructor(readonly link: FixtureAnchor | null = null) {}
+  constructor(link = null) {
+    this.link = link;
+  }
 
-  closest(selector: string): FixtureAnchor | null {
+  closest(selector) {
     assert.equal(selector, "a[href]");
     return this.link;
   }
 }
 
 class FixtureAnchor extends FixtureElement {
-  constructor(readonly href: string, readonly target = "_blank") {
+  constructor(href, target = "_blank") {
     super();
+    this.href = href;
+    this.target = target;
   }
 }
 
 function runFrameScript() {
-  const handlers = new Map<string, (event: unknown) => void>();
-  const messages: unknown[] = [];
-  const opened: unknown[][] = [];
+  const handlers = new Map();
+  const messages = [];
+  const opened = [];
   const userActivation = { isActive: false };
   const window = {
-    top: { postMessage: (message: unknown) => messages.push(message) },
-    open: (...args: unknown[]) => {
+    top: { postMessage: (message) => messages.push(message) },
+    open: (...args) => {
       opened.push(args);
       return "embedded-window";
     },
   };
   const document = {
     baseURI: "https://chat.example.test/messages/thread",
-    addEventListener: (type: string, handler: (event: unknown) => void) => handlers.set(type, handler),
+    addEventListener: (type, handler) => handlers.set(type, handler),
   };
   runInNewContext(externalNewWindowFrameScript, {
     document,
@@ -76,7 +80,7 @@ test("only static HTML denies uncaptured embedded windows", () => {
   }
 });
 
-test("static fixture routes only active HTTP(S) new-window requests and leaves same-pane links alone", () => {
+test("frame fixture routes only active HTTP(S) new-window requests and leaves same-pane links alone", () => {
   const fixture = runFrameScript();
   let prevented = false;
   fixture.handlers.get("click")?.({
@@ -97,8 +101,8 @@ test("static fixture routes only active HTTP(S) new-window requests and leaves s
   });
   assert.equal(prevented, true);
   assert.equal(fixture.messages.length, 1);
-  assert.equal((fixture.messages[0] as { type: string }).type, "surf-ace-external-new-window");
-  assert.equal((fixture.messages[0] as { url: string }).url, "https://chat.example.test/article?q=term#section");
+  assert.equal(fixture.messages[0].type, "surf-ace-external-new-window");
+  assert.equal(fixture.messages[0].url, "https://chat.example.test/article?q=term#section");
   prevented = false;
   fixture.handlers.get("click")?.({
     isTrusted: true,
@@ -112,6 +116,6 @@ test("static fixture routes only active HTTP(S) new-window requests and leaves s
   assert.equal(fixture.window.open("mailto:person@example.test"), "embedded-window");
   assert.equal(fixture.opened.length, 4);
   assert.equal(fixture.messages.length, 2);
-  assert.equal((fixture.messages[1] as { type: string }).type, "surf-ace-external-new-window");
-  assert.equal((fixture.messages[1] as { url: string }).url, "https://example.test/scripted");
+  assert.equal(fixture.messages[1].type, "surf-ace-external-new-window");
+  assert.equal(fixture.messages[1].url, "https://example.test/scripted");
 });
