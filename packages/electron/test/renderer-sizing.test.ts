@@ -150,7 +150,7 @@ test("pane capture reserves compositor pixels for native-hosted panes", async ()
   const reloadIndex = source.indexOf("async function reloadPaneFromSource", captureIndex);
   const captureSource = source.slice(captureIndex, reloadIndex);
   const compositorIndex = captureSource.indexOf("type: \"capture_screen\"");
-  const rendererIndex = captureSource.indexOf("window.capturePage");
+  const rendererIndex = captureSource.indexOf("captureWindowPageForPane(window,");
 
   assert.ok(captureIndex > -1);
   assert.ok(reloadIndex > captureIndex);
