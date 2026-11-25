@@ -3556,19 +3556,27 @@ export class SurfaceCore {
     return { pane, url };
   }
 
+  browserUrlNavigationStatus(
+    surfaceId: string,
+    paneId: number,
+    target: { paneLineageId?: string; targetId: string },
+  ): "current" | "pane_closed" | "superseded" {
+    const pane = this.surfaces.get(surfaceId)?.panes.get(paneId);
+    if (!pane) return "pane_closed";
+    if (target.paneLineageId !== undefined && pane.paneLineageId !== target.paneLineageId) return "superseded";
+    const entry = currentEntry(pane);
+    return entry.contentType === "browser_url" && entry.contentId === target.targetId
+      ? "current" : "superseded";
+  }
+
   completeBrowserUrlNavigation(
     surfaceId: string,
     paneId: number,
     result: TargetApplyResponse["payload"],
   ): "completed" | "pane_closed" | "superseded" {
-    const pane = this.surfaces.get(surfaceId)?.panes.get(paneId);
-    if (!pane) return "pane_closed";
-    if (pane.paneLineageId !== result.paneLineageId) return "superseded";
-    const entry = currentEntry(pane);
-    if (entry.contentType !== "browser_url" || entry.contentId !== result.targetId) {
-      return "superseded";
-    }
-    entry.lastApplyEvidence = result;
+    const status = this.browserUrlNavigationStatus(surfaceId, paneId, result);
+    if (status !== "current") return status;
+    currentEntry(this.expectPane(surfaceId, paneId)).lastApplyEvidence = result;
     this.emit({ surfaceId, type: "surface-changed" });
     return "completed";
   }

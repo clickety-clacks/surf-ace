@@ -542,7 +542,7 @@ test("pane.split label claim reenters authority, leaves the request queue usable
       };
     },
   });
-  const clientId = "reentrant-split-registration-client";
+  const clientId = "d".repeat(64);
   const core = new SurfaceCore({ clientIdentity: clientId });
   const surface = core.ensurePrimarySurface("Reentrant split recovery", {
     height: 600, scale: 1, width: 800,
@@ -557,6 +557,7 @@ test("pane.split label claim reenters authority, leaves the request queue usable
   };
   const connection = new ServerConnection({
     canPersistRegistration: () => persistenceReadiness.isReady,
+    openApplicationStateMutations: () => persistenceReadiness.openMutations(),
     clientId,
     configuredAddress: registry.address,
     core,
@@ -572,7 +573,8 @@ test("pane.split label claim reenters authority, leaves the request queue usable
 
   try {
     surfaceServer = new SurfaceWsServer({
-      beginApplicationStateMutation: () => persistenceReadiness.beginAuthorityMutation(),
+      beginApplicationStateMutation: (details) => persistenceReadiness.beginAuthorityMutation(details),
+      openApplicationStateMutations: () => persistenceReadiness.openMutations(),
       bindAddress: "127.0.0.1",
       capturePaneImage: async () => null,
       claimPaneLabel: async (surfaceId, paneId, paneLineageId) => {
@@ -634,6 +636,16 @@ test("pane.split label claim reenters authority, leaves the request queue usable
     assert.equal(persistenceReadiness.isReady, false,
       "the ordinary mutation readiness gate stays closed while the registry label claim is outstanding");
 
+    const described = await surfaceRequest(controlSocket, "surface.describe", {
+      clientId, endpointLeaseGeneration: 2, nonce: "a".repeat(32),
+      registryIdentity: { allocatorId: "alloc_fixture", fleetId: "fixture-fleet" },
+      surfaceId: surface.surfaceId,
+    });
+    assert.equal(described.ok, true, JSON.stringify(described));
+    assert.ok(described.payload.applicationReadiness.limitationCodes.includes("application_mutation_in_progress"));
+    assert.ok(persistenceReadiness.openMutations().some((mutation) =>
+      mutation.operation === "pane.split" && mutation.surfaceId === surface.surfaceId &&
+      mutation.requestId && mutation.startedAtMs > 0));
     const concurrentList = surfaceRequest(controlSocket, "panes.list", { surfaceId: surface.surfaceId });
     await until(() => registrationErrors.includes("registry_registration_waiting_for_local_persistence"), 5_000);
     assert.equal(registry.requests.filter(({ message }) => message.op === "client.register").length, 2,
@@ -3207,6 +3219,11 @@ test("browser navigation leaves registry renewal and later pane mutations free t
     assert.equal(realized.ok, true, JSON.stringify(realized));
     await until(() => results.has("destroy-during-navigation"));
     assert.equal(results.get("destroy-during-navigation"), "pane_closed");
+
+    await startNavigation(paneId, "quit-during-navigation");
+    server.stopBrowserUrlNavigation();
+    await until(() => results.has("quit-during-navigation"));
+    assert.equal(results.get("quit-during-navigation"), "provider_shutdown");
     assert.deepEqual(core.locklessAuthority.targetApplyWorkItems(), []);
   } finally {
     for (const socket of sockets) socket.terminate();

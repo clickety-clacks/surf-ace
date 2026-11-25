@@ -17,7 +17,7 @@ export function clientFlightRecorderTailCommand(logPath = CLIENT_FLIGHT_RECORDER
 }
 
 export function clientFlightRecorderGrepCommand(logPath = CLIENT_FLIGHT_RECORDER_LOG_PATH): string {
-  return `rg 'event=(app_|server_|socket_|pair_|panes_|topology_|surface_|window_)' ${shellQuote(logPath)}`;
+  return `rg 'event=(app_|server_|socket_|pair_|pane_|panes_|topology_|surface_|window_|target_apply_browser_url_|registry_)' ${shellQuote(logPath)}`;
 }
 
 export function formatClientDiagnosticValue(value: string | number | boolean): string {
@@ -46,6 +46,15 @@ export function errorDiagnosticFields(error: unknown): ClientDiagnosticFields {
     };
   }
   return { error_message: String(error) };
+}
+
+export function installMainProcessFailureDiagnostics(): void {
+  // The monitor observes both uncaught exceptions and fatal unhandled
+  // rejections while preserving the runtime's existing exception policy.
+  process.on("uncaughtExceptionMonitor", (error, origin) => {
+    recordClientDiagnostic("error", "app", origin === "unhandledRejection"
+      ? "app_unhandled_rejection" : "app_uncaught_exception", errorDiagnosticFields(error));
+  });
 }
 
 export function recordClientDiagnostic(

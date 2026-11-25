@@ -1,3 +1,4 @@
+import type { ApplicationStateMutation } from "./persistence-write-readiness.js";
 import http from "node:http";
 import { splitResizeMatches, splitResizeIsNoOp, type SplitResizeExpectation, type SplitResizeGeometry, splitResizeGeometryIsValid } from "./split-resize.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -174,7 +175,8 @@ export type SurfaceWsServerOptions = {
   onNativeReleased?: (surfaceId: string, paneIds: string[]) => Promise<void> | void;
   persistLocklessState?: () => Promise<void>;
   isApplicationStateReady?: () => boolean;
-  beginApplicationStateMutation?: () => () => void;
+  beginApplicationStateMutation?: (details: Omit<ApplicationStateMutation, "startedAtMs">) => () => void;
+  openApplicationStateMutations?: () => ApplicationStateMutation[];
   port: number;
   protocolVersion?: number;
   viewport: () => SurfaceViewport;
@@ -285,7 +287,9 @@ export class SurfaceWsServer {
   private readonly protocolVersion: number;
   private readonly persistLocklessState: () => Promise<void>;
   private readonly isApplicationStateReady: () => boolean;
-  private readonly beginApplicationStateMutation: () => () => void;
+  private readonly beginApplicationStateMutation: NonNullable<SurfaceWsServerOptions["beginApplicationStateMutation"]>;
+  private readonly openApplicationStateMutations: () => ApplicationStateMutation[];
+  private stopping = false;
   private readonly capturePaneImage: SurfaceWsServerOptions["capturePaneImage"];
   private readonly viewportProvider: SurfaceWsServerOptions["viewport"];
   private readonly pendingBrowserUrlApplies = new Map<string, PendingBrowserUrlApply>();
@@ -349,6 +353,7 @@ export class SurfaceWsServer {
     };
     this.isApplicationStateReady = options.isApplicationStateReady ?? (() => true);
     this.beginApplicationStateMutation = options.beginApplicationStateMutation ?? (() => () => {});
+    this.openApplicationStateMutations = options.openApplicationStateMutations ?? (() => []);
     this.protocolVersion = options.protocolVersion ?? 1;
     this.viewportProvider = options.viewport;
     this.wsPath = options.wsPath ?? "/ws";
@@ -458,6 +463,7 @@ export class SurfaceWsServer {
   }
 
   async start(port = this.port): Promise<void> {
+    this.stopping = false;
     this.port = port;
     persistentServerDiagnostic(
       "info",
@@ -502,6 +508,7 @@ export class SurfaceWsServer {
   }
 
   async stop(): Promise<void> {
+    this.stopBrowserUrlNavigation();
     this.stopNativePaneStatusPolling();
     persistentServerDiagnostic(
       "info",
@@ -932,6 +939,14 @@ export class SurfaceWsServer {
     }
   }
 
+  stopBrowserUrlNavigation(): void {
+    this.stopping = true;
+    for (const pending of this.pendingBrowserUrlApplies.values()) {
+      this.settleBrowserUrlNavigation(pending, { kind: "provider_shutdown" });
+    }
+    this.earlyBrowserUrlNavigationEvidence.clear();
+  }
+
   private async handleCoreEvent(event: CoreEvent): Promise<void> {
     switch (event.type) {
       case "keyboard-focus-changed":
@@ -970,6 +985,12 @@ export class SurfaceWsServer {
         });
         return;
       case "pane-removed": {
+        persistentServerDiagnostic("info", "pane_removed", {
+          pane_id: event.paneId,
+          surface_id: event.surfaceId,
+          closed_sequence: event.closedSequence,
+          tombstone_id: event.tombstoneId,
+        });
         const pending = this.pendingBrowserUrlApplies.get(browserUrlApplyKey(event.surfaceId, event.paneId));
         if (pending) this.settleBrowserUrlNavigation(pending, { kind: "pane_closed" });
         await this.broadcastLifecycleEvent({
@@ -1040,6 +1061,13 @@ export class SurfaceWsServer {
         await this.broadcastSurfaceRemoved(event.surfaceId, event.recoverable ?? false);
         return;
       case "surface-changed":
+        for (const pending of this.pendingBrowserUrlApplies.values()) {
+          if (pending.surfaceId !== event.surfaceId) continue;
+          const status = this.core.browserUrlNavigationStatus(
+            event.surfaceId, pending.paneId, pending.request.payload,
+          );
+          if (status !== "current") this.settleBrowserUrlNavigation(pending, { kind: status });
+        }
         this.syncNativePaneStatusPolling(event.surfaceId);
         return;
       case "pane-geometry-changed":
@@ -1190,7 +1218,11 @@ export class SurfaceWsServer {
     // dispatch through its durable receipt write.
     const changesApplicationState = request.op === "pair.request" ||
       (session !== undefined && locklessOperationMutates(request.op));
-    const finishMutation = changesApplicationState ? this.beginApplicationStateMutation() : () => {};
+    const payloadSurfaceId = (request.payload as { surfaceId?: unknown } | null)?.surfaceId;
+    const surfaceId = typeof payloadSurfaceId === "string" ? payloadSurfaceId : session?.surfaceId;
+    const finishMutation = changesApplicationState
+      ? this.beginApplicationStateMutation({ operation: request.op, requestId: request.id, surfaceId: surfaceId ?? undefined })
+      : () => {};
     let afterCommit: (() => Promise<unknown>) | void;
     try {
       afterCommit = await this.handleOrdinaryLocklessMessageBody(socket, request);
@@ -3456,7 +3488,17 @@ export class SurfaceWsServer {
       request.payload.registryIdentity.fleetId === binding.fleetId;
     const limitationCodes: string[] = [];
     if (persistenceOutcomeUnknown) limitationCodes.push("persistence_outcome_unknown");
-    if (!applicationStateReady) limitationCodes.push("application_state_unverified");
+    if (!applicationStateReady) {
+      limitationCodes.push("application_state_unverified");
+      const openMutations = this.openApplicationStateMutations();
+      if (openMutations.length > 0) {
+        limitationCodes.push("application_mutation_in_progress");
+        persistentServerDiagnostic("info", "surface_describe_mutation_in_progress", {
+          surface_id: request.payload.surfaceId,
+          open_mutations: JSON.stringify(openMutations),
+        });
+      }
+    }
     if (!binding) {
       limitationCodes.push("registry_binding_unavailable");
     } else if (!bindingMatchesRequest) {
@@ -3821,7 +3863,11 @@ export class SurfaceWsServer {
     );
   }
 
-  private async runSurfaceMutation<T>(surfaceId: string, operation: () => Promise<T> | T): Promise<T> {
+  private async runSurfaceMutation<T>(
+    surfaceId: string,
+    operation: () => Promise<T> | T,
+    details: Pick<ApplicationStateMutation, "operation" | "requestId"> = { operation: "surface_mutation" },
+  ): Promise<T> {
     const previous = this.mutationQueues.get(surfaceId) ?? Promise.resolve();
     let releaseQueue = (): void => {};
     const current = new Promise<void>((resolve) => {
@@ -3832,7 +3878,7 @@ export class SurfaceWsServer {
     try {
       await previous.catch(() => undefined);
       // Only the queue holder can expose candidate geometry.
-      const finishMutation = this.beginApplicationStateMutation();
+      const finishMutation = this.beginApplicationStateMutation({ ...details, surfaceId });
       try {
         return await operation();
       } finally {
@@ -4413,7 +4459,7 @@ export class SurfaceWsServer {
           rollback();
           throw error;
         }
-      });
+      }, { operation: "target.apply.materialization", requestId: request.id });
       if ("response" in releaseResult) {
         return releaseResult.response;
       }
@@ -4440,23 +4486,7 @@ export class SurfaceWsServer {
       const payload = releaseResult.navigation
         ? await releaseResult.navigation
         : releaseResult.payload;
-      persistentServerDiagnostic(
-        "info",
-        "target_apply_browser_url_result",
-        {
-          current_url: payload.materializedState?.url,
-          error_code: payload.errorCode,
-          materialized_navigation_status: payload.materializedState?.navigationStatus,
-          message: payload.message,
-          pane_id: paneId,
-          pane_lineage_id: request.payload.paneLineageId,
-          request_id: request.payload.requestId,
-          status: payload.status,
-          surface_id: surfaceId,
-          target_id: request.payload.targetId,
-          ...browserUrlDiagnosticFields(targetUrl),
-        },
-      );
+      if (!releaseResult.navigation) this.logBrowserUrlApplyResult(surfaceId, request, payload, paneId);
       return {
         id: request.id,
         ok: true,
@@ -4725,7 +4755,7 @@ export class SurfaceWsServer {
           v: 1,
         };
       }
-    });
+    }, { operation: "target.apply.materialization", requestId: request.id });
   }
 
   resolveBrowserUrlNavigation(
@@ -4736,6 +4766,7 @@ export class SurfaceWsServer {
     const key = browserUrlApplyKey(surfaceId, paneId);
     const pending = this.pendingBrowserUrlApplies.get(key);
     if (!pending || pending.request.payload.targetId !== evidence.targetId) {
+      if (this.stopping || this.core.browserUrlNavigationStatus(surfaceId, paneId, evidence) !== "current") return;
       persistentServerDiagnostic(
         "info",
         "target_apply_browser_url_renderer_evidence_early",
@@ -4862,7 +4893,9 @@ export class SurfaceWsServer {
       this.pendingBrowserUrlApplies.set(key, pending);
 
       const earlyEvidence = this.earlyBrowserUrlNavigationEvidence.get(`${key}:${request.payload.targetId}`);
-      if (earlyEvidence) {
+      if (this.stopping) {
+        this.settleBrowserUrlNavigation(pending, { kind: "provider_shutdown" });
+      } else if (earlyEvidence) {
         this.settleBrowserUrlNavigation(pending, { kind: "evidence", evidence: earlyEvidence });
       }
     });
@@ -4871,7 +4904,7 @@ export class SurfaceWsServer {
   private settleBrowserUrlNavigation(
     pending: PendingBrowserUrlApply,
     outcome: { kind: "evidence"; evidence: BrowserUrlNavigationEvidence } |
-      { kind: "pane_closed" | "superseded" | "timeout" },
+      { kind: "pane_closed" | "provider_shutdown" | "superseded" | "timeout" },
   ): void {
     const { appliedAt, committedLocklessIntent, paneId, request, socket, surfaceId, url } = pending;
     const key = browserUrlApplyKey(surfaceId, paneId);
@@ -4880,14 +4913,19 @@ export class SurfaceWsServer {
     clearTimeout(pending.timeout);
     this.earlyBrowserUrlNavigationEvidence.delete(`${key}:${request.payload.targetId}`);
 
-    const failure = (errorCode: "materialization_failed" | "pane_closed" | "target_superseded", message: string) =>
+    const failure = (errorCode: "materialization_failed" | "pane_closed" | "provider_shutdown" | "target_superseded", message: string) =>
       browserUrlApplyResult(request.payload, "failed", errorCode, message, {
         navigationStatus: "failed", replaySemantics: "navigate", url,
       });
     const paneClosed = () => failure("pane_closed", "browser_url pane closed before verification");
     const superseded = () => failure("target_superseded", "browser_url navigation was superseded before verification");
     let result = failure("materialization_failed", "browser_url navigation bookkeeping failed");
+    let recordEvidence = false;
     try {
+      if (outcome.kind === "provider_shutdown") {
+        result = failure("provider_shutdown", "provider stopped before browser_url verification");
+        return;
+      }
       if (outcome.kind === "pane_closed") {
         result = paneClosed();
         return;
@@ -4923,9 +4961,10 @@ export class SurfaceWsServer {
           url: evidence.url,
         },
       );
-      const completion = this.core.completeBrowserUrlNavigation(surfaceId, paneId, payload);
-      result = completion === "pane_closed" ? paneClosed()
-        : completion === "superseded" ? superseded() : payload;
+      const status = this.core.browserUrlNavigationStatus(surfaceId, paneId, payload);
+      result = status === "pane_closed" ? paneClosed()
+        : status === "superseded" ? superseded() : payload;
+      recordEvidence = status === "current";
     } catch (error) {
       persistentServerDiagnostic("warn", "target_apply_browser_url_bookkeeping_failed", {
         pane_id: paneId,
@@ -4935,7 +4974,48 @@ export class SurfaceWsServer {
       });
     } finally {
       pending.resolve(result);
+      try {
+        persistentServerDiagnostic("info", "target_apply_browser_url_waiter_settled", {
+          pane_id: paneId,
+          surface_id: surfaceId,
+          request_id: request.payload.requestId,
+          target_id: request.payload.targetId,
+          outcome: outcome.kind,
+          status: result.status,
+          error_code: result.errorCode,
+        });
+        this.logBrowserUrlApplyResult(surfaceId, request, result, paneId);
+        if (recordEvidence) this.core.completeBrowserUrlNavigation(surfaceId, paneId, result);
+      } catch (error) {
+        persistentServerDiagnostic("warn", "target_apply_browser_url_bookkeeping_failed", {
+          pane_id: paneId, surface_id: surfaceId, request_id: request.payload.requestId,
+          ...errorDiagnosticFields(error),
+        });
+      }
     }
+  }
+
+  private logBrowserUrlApplyResult(
+    surfaceId: string,
+    request: TargetApplyRequest,
+    payload: TargetApplyResponse["payload"],
+    paneId?: number,
+  ): void {
+    const state = payload.materializedState;
+    const browserState = state && "navigationStatus" in state ? state : undefined;
+    persistentServerDiagnostic("info", "target_apply_browser_url_result", {
+      current_url: browserState?.url,
+      error_code: payload.errorCode,
+      materialized_navigation_status: browserState?.navigationStatus,
+      message: payload.message,
+      pane_id: paneId,
+      pane_lineage_id: request.payload.paneLineageId,
+      request_id: request.payload.requestId,
+      status: payload.status,
+      surface_id: surfaceId,
+      target_id: request.payload.targetId,
+      ...browserUrlDiagnosticFields(String((request.payload.targetPayload as { url?: unknown }).url ?? "")),
+    });
   }
 
   private async releaseNativePanesBeforeRendererContent(

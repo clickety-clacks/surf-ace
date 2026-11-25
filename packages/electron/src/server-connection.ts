@@ -1,3 +1,5 @@
+import { recordClientDiagnostic } from "./client-flight-recorder.js";
+import type { ApplicationStateMutation } from "./persistence-write-readiness.js";
 import {
   createBonjourSurfAceDiscoveryService,
   type SurfAceDiscoveryEndpoint,
@@ -82,6 +84,7 @@ export class ServerConnection {
     core: SurfaceCore;
     persist: () => Promise<void>;
     canPersistRegistration?: () => boolean;
+    openApplicationStateMutations?: () => ApplicationStateMutation[];
     onError?: (error: unknown) => void;
     discovery?: SurfAceDiscoveryService;
     registryRebindWaitMs?: number;
@@ -248,6 +251,9 @@ export class ServerConnection {
       }
       if (this.lastReportedFailure !== message) {
         this.lastReportedFailure = message;
+        recordClientDiagnostic("warn", "registry", message, {
+          open_mutations: JSON.stringify(this.options.openApplicationStateMutations?.() ?? []),
+        });
         this.options.onError?.(new Error(message));
       }
       return Promise.reject(new Error(message));

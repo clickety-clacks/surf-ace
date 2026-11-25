@@ -165,6 +165,7 @@ export type TargetErrorCode =
   | "approval_required"
   | "unsafe_payload"
   | "pane_closed"
+  | "provider_shutdown"
   | "pane_lineage_missing"
   | "pane_lineage_ambiguous"
   | "target_epoch_stale"
