@@ -1139,6 +1139,9 @@ async function connect(connectionString: string): Promise<PgClient> {
     statement_timeout: STORE_STATEMENT_TIMEOUT_MS,
     keepAlive: true,
     keepAliveInitialDelayMillis: WEBSOCKET_PING_INTERVAL_MS,
+    // The backend must also reap a lost writer session and its advisory lock
+    // when the client cannot get a FIN through the failed path.
+    options: "-c tcp_keepalives_idle=15 -c tcp_keepalives_interval=15 -c tcp_keepalives_count=2",
   });
   client.on("error", () => undefined);
   await client.connect();

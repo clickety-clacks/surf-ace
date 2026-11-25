@@ -333,6 +333,17 @@ export class ConfiguredServerRegistration {
               (parsed.allocationGenerationV1 && pane.allocationGeneration !== previous.allocationGeneration);
           });
       });
+    if (!writesLabels) {
+      for (const assignment of parsed.surfaces) {
+        const current = this.core.listSurfaces().find((surface) => surface.surfaceId === assignment.surfaceId);
+        const panes = assignment.panes.filter((confirmed) => {
+          const pane = current?.panes.get(Number(confirmed.paneId));
+          return pane && pane.paneLineageId === confirmed.paneLineageId &&
+            pane.paneLabel === confirmed.paneLabel && pane.allocationGeneration === confirmed.allocationGeneration;
+        });
+        if (panes.length > 0) this.core.confirmRegistryPaneLabels([{ surfaceId: assignment.surfaceId, panes }]);
+      }
+    }
     const releases = payload.pendingPaneReleases.length > 0 || payload.pendingWindowReleases.length > 0;
     if (!writesLabels && !releases) return;
     // The registration itself is already complete. Applying an allocation or
