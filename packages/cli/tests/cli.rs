@@ -1183,7 +1183,7 @@ fn window_describe_reads_a_leased_endpoint_before_pairing_and_rechecks_the_regis
     let mut observation = describe_observation(&client_id, surface_id, 9);
     observation["applicationReadiness"] = json!({
         "status": "degraded",
-        "limitationCodes": ["application_state_unverified", "blocked_by_pane_split_since_baaa"],
+        "limitationCodes": ["application_state_unverified", "blocked_by_pane_split_since_baaa", "blocked_by_saving_application_state_since_caaa"],
     });
     let (endpoint, endpoint_server) = spawn_surface_describe_server(observation);
     let first = discovery_topology(
@@ -1250,6 +1250,12 @@ fn window_describe_reads_a_leased_endpoint_before_pairing_and_rechecks_the_regis
         result["result"]["applicationReadiness"]["readinessReason"],
         "Blocked behind pane split since 1970-01-01T00:00:01.000Z"
     );
+    let changes = result["result"]["applicationReadiness"]["openChanges"].as_array().unwrap();
+    assert_eq!(changes.len(), 2);
+    assert_eq!(changes[0]["change"], "pane split");
+    assert_eq!(changes[0]["startedAtMs"], 1000);
+    assert_eq!(changes[1]["change"], "saving application state");
+    assert_eq!(changes[1]["startedAtMs"], 2000);
     assert_eq!(result["result"]["identityConsistency"]["clientId"], "matched");
     assert_eq!(result["result"]["identityConsistency"]["surfaceId"], "matched");
     assert_eq!(result["result"]["identityConsistency"]["registryIdentity"], "matched");

@@ -877,7 +877,17 @@ fn result_schema(command: Command, description: &str) -> Value {
                     "properties": {
                         "status": { "enum": ["ready", "degraded", "unknown"] },
                         "limitationCodes": { "type": "array", "items": { "type": "string", "pattern": "^[a-z_]{1,64}$" } },
-                        "readinessReason": { "type": "string" }
+                        "readinessReason": { "type": "string" },
+                        "openChanges": { "type": "array", "items": {
+                            "type": "object",
+                            "required": ["change", "startedAtMs", "message"],
+                            "properties": {
+                                "change": { "type": "string" },
+                                "startedAtMs": nonnegative_integer_schema(),
+                                "message": { "type": "string" }
+                            },
+                            "additionalProperties": false
+                        } }
                     },
                     "additionalProperties": false
                 },

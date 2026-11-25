@@ -68,12 +68,14 @@ open change affecting the requested surface, or a save in the shared
 application-state write queue. The status clears or advances to the next
 blocker when that work settles.
 
-A direct `surface.describe` response carries the same observation as a
-`blocked_by_<change>_since_<start>` entry in `applicationReadiness.limitationCodes`.
+A direct `surface.describe` response lists open changes and saves affecting
+that surface as `blocked_by_<change>_since_<start>` entries in
+`applicationReadiness.limitationCodes`, oldest first.
 Underscores in the change name represent spaces. The start value is the
 decimal Unix epoch in milliseconds, with digits 0 through 9 encoded as letters
 `a` through `j`. The v1 response schema is unchanged. The CLI decodes the
-entry into `applicationReadiness.readinessReason` with a UTC timestamp.
+entries into `applicationReadiness.openChanges` and shows the oldest in
+`applicationReadiness.readinessReason` with a UTC timestamp.
 
 To reproduce in isolation, start a scratch app profile against a loopback
 registry fixture. Issue `pane.split` on a registered window and hold the

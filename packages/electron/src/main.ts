@@ -277,7 +277,7 @@ function createServer(coreValue: SurfaceCore, clientId: string | null): SurfaceW
       getRuntimeAppBinding: refreshRuntimeAppBindingDiagnostics,
       beginApplicationStateMutation: (details) => persistentStateWriteReadiness.beginAuthorityMutation(details),
       openApplicationStateMutations: () => persistentStateWriteReadiness.openMutations(),
-      getSurfaceBlocker: (surfaceId) => persistentStateWriteReadiness.blockerForSurface(surfaceId),
+      getSurfaceBlockers: (surfaceId, excludingRequestId) => persistentStateWriteReadiness.blockersForSurface(surfaceId, excludingRequestId),
       isApplicationStateReady: () => persistentStateWriteReadiness.isReady &&
         !persistentStateWriteGuard && !persistentStateOutcomeUnknown,
       onNativeMaterialized: (surfaceId, materialization) => {
@@ -722,7 +722,7 @@ function rendererWindowState(surfaceId: string): RendererWindowState {
 }
 
 function surfaceBlockedStatus(surfaceId: string): string | null {
-  const blocker = persistentStateWriteReadiness.blockerForSurface(surfaceId);
+  const blocker = persistentStateWriteReadiness.blockersForSurface(surfaceId)[0];
   return blocker ? surfaceBlockerMessage(blocker) : null;
 }
 

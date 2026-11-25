@@ -28,21 +28,22 @@ test("readiness remains closed until every queued durable write settles", async 
 test("surface blockers keep the first relevant change until it settles and expose a queued save", async () => {
   const readiness = new PersistenceWriteReadiness();
   const finish = readiness.beginAuthorityMutation({ operation: "pane.split", surfaceId: "sf_one" });
-  const change = readiness.blockerForSurface("sf_one")!;
+  const change = readiness.blockersForSurface("sf_one")[0]!;
   assert.match(surfaceBlockerMessage(change), /^Blocked behind pane split since /);
   assert.match(surfaceBlockerLimitation(change), /^blocked_by_pane_split_since_[a-j]+$/);
-  assert.equal(readiness.blockerForSurface("sf_two"), null);
+  assert.equal(readiness.blockersForSurface("sf_two")[0], undefined);
 
   let finishWrite!: () => void;
   const write = readiness.track(() => new Promise<void>((resolve) => { finishWrite = resolve; }));
-  assert.deepEqual(readiness.blockerForSurface("sf_one"), change);
-  assert.equal(readiness.blockerForSurface("sf_two")?.operation, "saving application state");
+  assert.deepEqual(readiness.blockersForSurface("sf_one")[0], change);
+  assert.equal(readiness.blockersForSurface("sf_one").length, 2);
+  assert.equal(readiness.blockersForSurface("sf_two")[0]?.operation, "saving application state");
   finish();
-  assert.equal(readiness.blockerForSurface("sf_one")?.operation, "saving application state");
+  assert.equal(readiness.blockersForSurface("sf_one")[0]?.operation, "saving application state");
   finishWrite();
   await write;
-  assert.equal(readiness.blockerForSurface("sf_one"), null);
-  assert.equal(readiness.blockerForSurface("sf_two"), null);
+  assert.equal(readiness.blockersForSurface("sf_one")[0], undefined);
+  assert.equal(readiness.blockersForSurface("sf_two")[0], undefined);
 });
 
 test("readiness remains closed through overlapping authority mutations", () => {

@@ -576,7 +576,7 @@ test("pane.split label claim reenters authority, leaves the request queue usable
     surfaceServer = new SurfaceWsServer({
       beginApplicationStateMutation: (details) => persistenceReadiness.beginAuthorityMutation(details),
       openApplicationStateMutations: () => persistenceReadiness.openMutations(),
-      getSurfaceBlocker: (surfaceId) => persistenceReadiness.blockerForSurface(surfaceId),
+      getSurfaceBlockers: (surfaceId, excludingRequestId) => persistenceReadiness.blockersForSurface(surfaceId, excludingRequestId),
       bindAddress: "127.0.0.1",
       capturePaneImage: async () => null,
       claimPaneLabel: async (surfaceId, paneId, paneLineageId) => {
@@ -638,6 +638,8 @@ test("pane.split label claim reenters authority, leaves the request queue usable
     assert.equal(persistenceReadiness.isReady, false,
       "the ordinary mutation readiness gate stays closed while the registry label claim is outstanding");
 
+    const releaseSave = deferred();
+    const saving = persistenceReadiness.track(() => releaseSave.promise);
     const described = await surfaceRequest(controlSocket, "surface.describe", {
       clientId, endpointLeaseGeneration: 2, nonce: "a".repeat(32),
       registryIdentity: { allocatorId: "alloc_fixture", fleetId: "fixture-fleet" },
@@ -646,8 +648,13 @@ test("pane.split label claim reenters authority, leaves the request queue usable
     assert.equal(described.ok, true, JSON.stringify(described));
     assert.deepEqual(validateEnvelopeType("surface.describe", described), { ok: true });
     assert.ok(described.payload.applicationReadiness.limitationCodes.includes("application_mutation_in_progress"));
-    assert.ok(described.payload.applicationReadiness.limitationCodes.some((code: string) =>
-      /^blocked_by_pane_split_since_[a-j]+$/.test(code)));
+    const openChangeCodes = described.payload.applicationReadiness.limitationCodes
+      .filter((code: string) => code.startsWith("blocked_by_"));
+    assert.equal(openChangeCodes.length, 2);
+    assert.match(openChangeCodes[0], /^blocked_by_pane_split_since_[a-j]+$/);
+    assert.match(openChangeCodes[1], /^blocked_by_saving_application_state_since_[a-j]+$/);
+    releaseSave.resolve();
+    await saving;
     assert.ok(persistenceReadiness.openMutations().some((mutation) =>
       mutation.operation === "pane.split" && mutation.surfaceId === surface.surfaceId &&
       mutation.requestId && mutation.startedAtMs > 0));
@@ -672,7 +679,6 @@ test("pane.split label claim reenters authority, leaves the request queue usable
     });
     assert.equal(cleared.ok, true, JSON.stringify(cleared));
     assert.ok(!cleared.payload.applicationReadiness.limitationCodes.some((code: string) => code.startsWith("blocked_by_")));
-
 
     const staleSplit = await surfaceRequest(controlSocket, "pane.split", {
       count: 2,

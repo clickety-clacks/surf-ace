@@ -1206,8 +1206,10 @@ fn normalize_application_readiness(
         "status".into(),
         Value::String(if codes.is_empty() { "ready" } else { "degraded" }.into()),
     );
-    if let Some(reason) = codes.iter().find_map(|code| surface_blocker_reason(code)) {
-        readiness.insert("readinessReason".into(), Value::String(reason));
+    let open_changes = codes.iter().filter_map(|code| surface_open_change(code)).collect::<Vec<_>>();
+    if let Some(first) = open_changes.first() {
+        readiness.insert("readinessReason".into(), first["message"].clone());
+        readiness.insert("openChanges".into(), Value::Array(open_changes));
     }
     readiness.insert(
         "limitationCodes".into(),
@@ -1216,7 +1218,7 @@ fn normalize_application_readiness(
     payload.insert("applicationReadiness".into(), Value::Object(readiness));
 }
 
-fn surface_blocker_reason(code: &str) -> Option<String> {
+fn surface_open_change(code: &str) -> Option<Value> {
     let (change, encoded_start) = code.strip_prefix("blocked_by_")?.rsplit_once("_since_")?;
     if change.is_empty() || encoded_start.is_empty() {
         return None;
@@ -1234,7 +1236,12 @@ fn surface_blocker_reason(code: &str) -> Option<String> {
         "{}T{:02}:{:02}:{:02}.{:03}Z",
         start.date_naive(), time.hour(), time.minute(), time.second(), time.nanosecond() / 1_000_000,
     );
-    Some(format!("Blocked behind {} since {since}", change.replace('_', " ")))
+    let change = change.replace('_', " ");
+    Some(json!({
+        "message": format!("Blocked behind {change} since {since}"),
+        "change": change,
+        "startedAtMs": started_at_ms,
+    }))
 }
 
 fn identity_consistency(
@@ -3390,11 +3397,25 @@ fn require_replayed_receipt(
     Ok(())
 }
 
+fn blocked_response_error(response: &Envelope, operation: &str) -> Option<CliError> {
+    let error = response.error.as_ref()?;
+    let blocker = error.get("details")?.get("blockedBy")?;
+    Some(CliError::Blocked {
+        operation: operation.into(),
+        code: error.get("code")?.as_str()?.into(),
+        message: error.get("message")?.as_str()?.into(),
+        blocker: blocker.clone(),
+    })
+}
+
 fn successful_payload<'a>(
     response: &'a Envelope,
     operation: &str,
 ) -> Result<&'a Map<String, Value>, CliError> {
     if response.ok == Some(false) {
+        if let Some(error) = blocked_response_error(response, operation) {
+            return Err(error);
+        }
         let code = response
             .error
             .as_ref()
@@ -3433,6 +3454,9 @@ fn pane_describe_successful_payload<'a>(
         )));
     }
     if response.ok == Some(false) {
+        if let Some(error) = blocked_response_error(response, operation) {
+            return Err(error);
+        }
         let code = response
             .error
             .as_ref()
@@ -3511,6 +3535,12 @@ pub enum CliError {
         operation: String,
         code: String,
     },
+    Blocked {
+        operation: String,
+        code: String,
+        message: String,
+        blocker: Value,
+    },
     State(StateError),
     StillPending,
     Wire(WireFailure),
@@ -3525,7 +3555,7 @@ impl CliError {
             Self::OutcomeUnknown { .. } => "outcome_unknown",
             Self::ProjectionAfterCommit { .. } => "projection_unavailable_after_commit",
             Self::Protocol(_) => "protocol_error",
-            Self::Rejected { .. } => "operation_rejected",
+            Self::Rejected { .. } | Self::Blocked { .. } => "operation_rejected",
             Self::State(_) => "state_error",
             Self::StillPending => "still_pending",
             Self::Wire(_) => "transport_error",
@@ -3545,6 +3575,9 @@ impl CliError {
             Self::Rejected { operation, code } => {
                 json!({ "operation": operation, "rejectionCode": code })
             }
+            Self::Blocked { operation, code, message, blocker } => {
+                json!({ "operation": operation, "rejectionCode": code, "message": message, "blockedBy": blocker })
+            }
             _ => json!({ "message": self.to_string() }),
         }
     }
@@ -3563,6 +3596,7 @@ impl std::fmt::Display for CliError {
             Self::Rejected { operation, code } => {
                 write!(formatter, "operation_rejected:{operation}:{code}")
             }
+            Self::Blocked { message, .. } => formatter.write_str(message),
             Self::State(error) => error.fmt(formatter),
             Self::StillPending => formatter.write_str("still_pending"),
             Self::Wire(error) => error.fmt(formatter),

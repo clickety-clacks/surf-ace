@@ -37,11 +37,12 @@ export class PersistenceWriteReadiness {
     return [...this.pending].flatMap(([entry, kind]) => kind === "mutation" ? [{ ...entry }] : []);
   }
 
-  blockerForSurface(surfaceId: string): SurfaceBlocker | null {
-    for (const { operation, startedAtMs, surfaceId: owner } of this.pending.keys()) {
-      if (owner === undefined || owner === surfaceId) return { operation, startedAtMs };
-    }
-    return null;
+  blockersForSurface(surfaceId: string, excludingRequestId?: string): SurfaceBlocker[] {
+    return Array.from(this.pending.keys())
+      .filter((entry) =>
+        (entry.surfaceId === undefined || entry.surfaceId === surfaceId) &&
+        (excludingRequestId === undefined || entry.requestId !== excludingRequestId))
+      .map(({ operation, startedAtMs }) => ({ operation, startedAtMs }));
   }
 
   subscribe(listener: (surfaceId?: string) => void): void {
