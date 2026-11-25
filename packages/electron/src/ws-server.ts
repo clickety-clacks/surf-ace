@@ -1126,7 +1126,7 @@ export class SurfaceWsServer {
         });
         return null;
       }
-    });
+    }, { operation: "native pane focus" });
   }
 
   private async handleMessage(socket: WebSocket, raw: string): Promise<void> {
@@ -3912,7 +3912,7 @@ export class SurfaceWsServer {
 
   private async runLifecycleTransactionAsync<T>(operation: () => Promise<T>, surfaceId: string): Promise<T> {
     return await this.core.locklessAuthority.transactionAsync(() =>
-      this.core.transactionAsync(() => this.runSurfaceMutation(surfaceId, operation)));
+      this.core.transactionAsync(() => this.runSurfaceMutation(surfaceId, operation, { operation: "surface.close" })));
   }
 
   private async runProviderWindowLabelMutation<T>(operation: () => Promise<T> | T): Promise<T> {
@@ -4021,7 +4021,7 @@ export class SurfaceWsServer {
         });
         return false;
       }
-    });
+    }, { operation: "viewport resize" });
   }
 
   async resizeSplit(surfaceId: string, path: number[], weights: number[], expected?: SplitResizeExpectation, geometry?: SplitResizeGeometry[]): Promise<boolean> {
@@ -4059,7 +4059,7 @@ export class SurfaceWsServer {
         });
         return false;
       }
-    });
+    }, { operation: "pane.resize" });
     const onNotificationError = (error: unknown) => persistentServerDiagnostic("warn", "pane_resize_notification_failed", { surface_id: surfaceId, ...errorDiagnosticFields(error) });
     try {
       // Authority -> core -> surface matches paired network and local-close paths.
@@ -4096,7 +4096,7 @@ export class SurfaceWsServer {
             }
             throw error;
           }
-        }), { retainUncertainEvents: true, onNotificationError }), { onNotificationError });
+        }, { operation: "pane.resize" }), { retainUncertainEvents: true, onNotificationError }), { onNotificationError });
     } catch (error) {
       persistentServerDiagnostic("warn", "pane_resize_commit_failed", { surface_id: surfaceId, ...errorDiagnosticFields(error) });
       return false;
@@ -4123,7 +4123,7 @@ export class SurfaceWsServer {
       }
       this.core.navigateHistory(surfaceId, paneId, direction);
       return true;
-    });
+    }, { operation: `history.${direction}` });
   }
 
   private async handleTopologyApply(socket: WebSocket, request: TopologyApplyRequest): Promise<Response> {
