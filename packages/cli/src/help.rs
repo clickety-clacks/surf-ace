@@ -874,7 +874,11 @@ fn result_schema(command: Command, description: &str) -> Value {
                 "registryAfter": registry_candidate_schema(),
                 "applicationReadiness": {
                     "type": "object", "required": ["status", "limitationCodes"],
-                    "properties": { "status": { "enum": ["ready", "degraded", "unknown"] }, "limitationCodes": { "type": "array", "items": { "type": "string", "pattern": "^[a-z_]{1,64}$" } } },
+                    "properties": {
+                        "status": { "enum": ["ready", "degraded", "unknown"] },
+                        "limitationCodes": { "type": "array", "items": { "type": "string", "pattern": "^[a-z_]{1,64}$" } },
+                        "readinessReason": { "type": "string" }
+                    },
                     "additionalProperties": false
                 },
                 "identityConsistency": {

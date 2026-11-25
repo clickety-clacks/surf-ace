@@ -1206,11 +1206,35 @@ fn normalize_application_readiness(
         "status".into(),
         Value::String(if codes.is_empty() { "ready" } else { "degraded" }.into()),
     );
+    if let Some(reason) = codes.iter().find_map(|code| surface_blocker_reason(code)) {
+        readiness.insert("readinessReason".into(), Value::String(reason));
+    }
     readiness.insert(
         "limitationCodes".into(),
         Value::Array(codes.into_iter().map(Value::String).collect()),
     );
     payload.insert("applicationReadiness".into(), Value::Object(readiness));
+}
+
+fn surface_blocker_reason(code: &str) -> Option<String> {
+    let (change, encoded_start) = code.strip_prefix("blocked_by_")?.rsplit_once("_since_")?;
+    if change.is_empty() || encoded_start.is_empty() {
+        return None;
+    }
+    let started_at_ms = encoded_start.bytes().try_fold(0_i64, |millis, digit| {
+        if !(b'a'..=b'j').contains(&digit) {
+            return None;
+        }
+        millis.checked_mul(10)?.checked_add(i64::from(digit - b'a'))
+    })?;
+    use chrono::Timelike;
+    let start = chrono::DateTime::from_timestamp_millis(started_at_ms)?;
+    let time = start.time();
+    let since = format!(
+        "{}T{:02}:{:02}:{:02}.{:03}Z",
+        start.date_naive(), time.hour(), time.minute(), time.second(), time.nanosecond() / 1_000_000,
+    );
+    Some(format!("Blocked behind {} since {since}", change.replace('_', " ")))
 }
 
 fn identity_consistency(

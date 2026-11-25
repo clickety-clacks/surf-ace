@@ -203,6 +203,7 @@ type RendererWindowState = {
 };
 
 type Bootstrap = {
+  blockedStatus?: string | null;
   compositorHosted?: boolean;
   overlayDebugBorders?: boolean;
   state: RendererWindowState;
@@ -3636,10 +3637,12 @@ function chromeKey(state: RendererWindowState): string {
   });
 }
 
+let blockedStatus: string | null | undefined;
+
 function updateConnectionErrorBanner(wrapper: HTMLElement, state: RendererWindowState): void {
   let banner = wrapper.querySelector(".connection-status-banner") as HTMLDivElement | null;
   const registryMessage = state.connectionBar === "connected" ? "" : state.connectionError?.trim() ?? "";
-  const message = [state.capabilityStatus, registryMessage && `Registry ${state.connectionBar}: ${registryMessage}`]
+  const message = [blockedStatus, state.capabilityStatus, registryMessage && `Registry ${state.connectionBar}: ${registryMessage}`]
     .filter(Boolean).join(" · ");
   if (!message) {
     banner?.remove();
@@ -3835,6 +3838,11 @@ function renderWindow(state: RendererWindowState): void {
 }
 
 async function init(): Promise<void> {
+  window.surfAce.onBlockedStatus((message) => {
+    blockedStatus = message;
+    const wrapper = appRoot.querySelector<HTMLElement>(".surface-window");
+    if (wrapper && latestState) updateConnectionErrorBanner(wrapper, latestState);
+  });
   rendererDiagnostic("bootstrap_start", {
     appRootPresent: Boolean(appRoot),
     bodyChildCount: document.body.childElementCount,
@@ -3859,6 +3867,7 @@ async function init(): Promise<void> {
     document.body.classList.toggle("compositor-hosted", Boolean(bootstrap.compositorHosted));
     document.body.classList.toggle("overlay-debug-borders", Boolean(bootstrap.overlayDebugBorders));
     installProvenanceMetricObservers();
+    if (blockedStatus === undefined) blockedStatus = bootstrap.blockedStatus ?? null;
     latestState = bootstrap.state;
     renderWindow(bootstrap.state);
   } catch (error) {

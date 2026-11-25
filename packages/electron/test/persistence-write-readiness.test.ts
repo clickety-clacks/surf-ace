@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import WebSocket from "ws";
 
-import { PersistenceWriteReadiness } from "../src/persistence-write-readiness.js";
+import { PersistenceWriteReadiness, surfaceBlockerLimitation, surfaceBlockerMessage } from "../src/persistence-write-readiness.js";
 import { PersistentStateOutcomeUnknownError } from "../src/persistent-state-file.js";
 import { SurfaceCore } from "../src/surface-core.js";
 import { SurfaceWsServer } from "../src/ws-server.js";
@@ -23,6 +23,26 @@ test("readiness remains closed until every queued durable write settles", async 
   rejectSecond(new Error("write failed"));
   await assert.rejects(second, /write failed/);
   assert.equal(readiness.isReady, true);
+});
+
+test("surface blockers keep the first relevant change until it settles and expose a queued save", async () => {
+  const readiness = new PersistenceWriteReadiness();
+  const finish = readiness.beginAuthorityMutation({ operation: "pane.split", surfaceId: "sf_one" });
+  const change = readiness.blockerForSurface("sf_one")!;
+  assert.match(surfaceBlockerMessage(change), /^Blocked behind pane split since /);
+  assert.match(surfaceBlockerLimitation(change), /^blocked_by_pane_split_since_[a-j]+$/);
+  assert.equal(readiness.blockerForSurface("sf_two"), null);
+
+  let finishWrite!: () => void;
+  const write = readiness.track(() => new Promise<void>((resolve) => { finishWrite = resolve; }));
+  assert.deepEqual(readiness.blockerForSurface("sf_one"), change);
+  assert.equal(readiness.blockerForSurface("sf_two")?.operation, "saving application state");
+  finish();
+  assert.equal(readiness.blockerForSurface("sf_one")?.operation, "saving application state");
+  finishWrite();
+  await write;
+  assert.equal(readiness.blockerForSurface("sf_one"), null);
+  assert.equal(readiness.blockerForSurface("sf_two"), null);
 });
 
 test("readiness remains closed through overlapping authority mutations", () => {

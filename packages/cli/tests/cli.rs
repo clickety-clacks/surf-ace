@@ -1180,8 +1180,12 @@ fn window_describe_reads_a_leased_endpoint_before_pairing_and_rechecks_the_regis
     let now = epoch_ms();
     let client_id = "a".repeat(64);
     let surface_id = "sf_window_fixture";
-    let (endpoint, endpoint_server) =
-        spawn_surface_describe_server(describe_observation(&client_id, surface_id, 9));
+    let mut observation = describe_observation(&client_id, surface_id, 9);
+    observation["applicationReadiness"] = json!({
+        "status": "degraded",
+        "limitationCodes": ["application_state_unverified", "blocked_by_pane_split_since_baaa"],
+    });
+    let (endpoint, endpoint_server) = spawn_surface_describe_server(observation);
     let first = discovery_topology(
         vec![discovery_client(
             &client_id,
@@ -1241,7 +1245,11 @@ fn window_describe_reads_a_leased_endpoint_before_pairing_and_rechecks_the_regis
         result["result"]["transportReachability"]["directEndpoint"],
         endpoint
     );
-    assert_eq!(result["result"]["applicationReadiness"]["status"], "ready");
+    assert_eq!(result["result"]["applicationReadiness"]["status"], "degraded");
+    assert_eq!(
+        result["result"]["applicationReadiness"]["readinessReason"],
+        "Blocked behind pane split since 1970-01-01T00:00:01.000Z"
+    );
     assert_eq!(result["result"]["identityConsistency"]["clientId"], "matched");
     assert_eq!(result["result"]["identityConsistency"]["surfaceId"], "matched");
     assert_eq!(result["result"]["identityConsistency"]["registryIdentity"], "matched");

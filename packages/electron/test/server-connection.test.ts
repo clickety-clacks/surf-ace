@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { WebSocketServer, WebSocket } from "ws";
 import type { Revision } from "../../protocol/src/index.js";
+import { validateEnvelopeType } from "../../protocol/src/validate.js";
 import { SURF_ACE_LOCKLESS_V1_CAPABILITY } from "../../protocol/src/lockless.js";
 import { REGISTRATION_CYCLE_TIMEOUT_MS, ServerConnection } from "../src/server-connection.js";
 import { ConfiguredServerRegistration } from "../src/configured-server.js";
@@ -575,6 +576,7 @@ test("pane.split label claim reenters authority, leaves the request queue usable
     surfaceServer = new SurfaceWsServer({
       beginApplicationStateMutation: (details) => persistenceReadiness.beginAuthorityMutation(details),
       openApplicationStateMutations: () => persistenceReadiness.openMutations(),
+      getSurfaceBlocker: (surfaceId) => persistenceReadiness.blockerForSurface(surfaceId),
       bindAddress: "127.0.0.1",
       capturePaneImage: async () => null,
       claimPaneLabel: async (surfaceId, paneId, paneLineageId) => {
@@ -642,7 +644,10 @@ test("pane.split label claim reenters authority, leaves the request queue usable
       surfaceId: surface.surfaceId,
     });
     assert.equal(described.ok, true, JSON.stringify(described));
+    assert.deepEqual(validateEnvelopeType("surface.describe", described), { ok: true });
     assert.ok(described.payload.applicationReadiness.limitationCodes.includes("application_mutation_in_progress"));
+    assert.ok(described.payload.applicationReadiness.limitationCodes.some((code: string) =>
+      /^blocked_by_pane_split_since_[a-j]+$/.test(code)));
     assert.ok(persistenceReadiness.openMutations().some((mutation) =>
       mutation.operation === "pane.split" && mutation.surfaceId === surface.surfaceId &&
       mutation.requestId && mutation.startedAtMs > 0));
@@ -660,6 +665,14 @@ test("pane.split label claim reenters authority, leaves the request queue usable
       "the queued request is served with the committed split after the nested claim completes");
     assert.equal(persistenceReadiness.isReady, true,
       "the split releases its application-state mutation readiness gate");
+    const cleared = await surfaceRequest(controlSocket, "surface.describe", {
+      clientId, endpointLeaseGeneration: 2, nonce: "a".repeat(32),
+      registryIdentity: { allocatorId: "alloc_fixture", fleetId: "fixture-fleet" },
+      surfaceId: surface.surfaceId,
+    });
+    assert.equal(cleared.ok, true, JSON.stringify(cleared));
+    assert.ok(!cleared.payload.applicationReadiness.limitationCodes.some((code: string) => code.startsWith("blocked_by_")));
+
 
     const staleSplit = await surfaceRequest(controlSocket, "pane.split", {
       count: 2,

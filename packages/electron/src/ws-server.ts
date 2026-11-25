@@ -1,4 +1,4 @@
-import type { ApplicationStateMutation } from "./persistence-write-readiness.js";
+import { surfaceBlockerLimitation, type ApplicationStateMutation, type SurfaceBlocker } from "./persistence-write-readiness.js";
 import http from "node:http";
 import { splitResizeMatches, splitResizeIsNoOp, type SplitResizeExpectation, type SplitResizeGeometry, splitResizeGeometryIsValid } from "./split-resize.js";
 import { createHash, randomUUID } from "node:crypto";
@@ -177,6 +177,7 @@ export type SurfaceWsServerOptions = {
   isApplicationStateReady?: () => boolean;
   beginApplicationStateMutation?: (details: Omit<ApplicationStateMutation, "startedAtMs">) => () => void;
   openApplicationStateMutations?: () => ApplicationStateMutation[];
+  getSurfaceBlocker?: (surfaceId: string) => SurfaceBlocker | null;
   port: number;
   protocolVersion?: number;
   viewport: () => SurfaceViewport;
@@ -289,6 +290,7 @@ export class SurfaceWsServer {
   private readonly isApplicationStateReady: () => boolean;
   private readonly beginApplicationStateMutation: NonNullable<SurfaceWsServerOptions["beginApplicationStateMutation"]>;
   private readonly openApplicationStateMutations: () => ApplicationStateMutation[];
+  private readonly getSurfaceBlocker: (surfaceId: string) => SurfaceBlocker | null;
   private stopping = false;
   private readonly capturePaneImage: SurfaceWsServerOptions["capturePaneImage"];
   private readonly viewportProvider: SurfaceWsServerOptions["viewport"];
@@ -354,6 +356,7 @@ export class SurfaceWsServer {
     this.isApplicationStateReady = options.isApplicationStateReady ?? (() => true);
     this.beginApplicationStateMutation = options.beginApplicationStateMutation ?? (() => () => {});
     this.openApplicationStateMutations = options.openApplicationStateMutations ?? (() => []);
+    this.getSurfaceBlocker = options.getSurfaceBlocker ?? (() => null);
     this.protocolVersion = options.protocolVersion ?? 1;
     this.viewportProvider = options.viewport;
     this.wsPath = options.wsPath ?? "/ws";
@@ -3499,6 +3502,8 @@ export class SurfaceWsServer {
         });
       }
     }
+    const blocker = this.getSurfaceBlocker(request.payload.surfaceId);
+    if (blocker) limitationCodes.push(surfaceBlockerLimitation(blocker));
     if (!binding) {
       limitationCodes.push("registry_binding_unavailable");
     } else if (!bindingMatchesRequest) {

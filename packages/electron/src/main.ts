@@ -84,7 +84,7 @@ import { isAddressInUse, isPortBoundOnIpv6Any } from "./port-selection.js";
 import { SurfaceWsServer } from "./ws-server.js";
 import { PanePresentationCoordinator } from "./pane-presentation-coordinator.js";
 import { NativePresentationWindowBinding, panePresentationWindowRoute } from "./pane-presentation.js";
-import { PersistenceWriteReadiness } from "./persistence-write-readiness.js";
+import { PersistenceWriteReadiness, surfaceBlockerMessage } from "./persistence-write-readiness.js";
 import {
   handleSurfaceWindowClose,
   surfaceWindowCloseOrigin,
@@ -277,6 +277,7 @@ function createServer(coreValue: SurfaceCore, clientId: string | null): SurfaceW
       getRuntimeAppBinding: refreshRuntimeAppBindingDiagnostics,
       beginApplicationStateMutation: (details) => persistentStateWriteReadiness.beginAuthorityMutation(details),
       openApplicationStateMutations: () => persistentStateWriteReadiness.openMutations(),
+      getSurfaceBlocker: (surfaceId) => persistentStateWriteReadiness.blockerForSurface(surfaceId),
       isApplicationStateReady: () => persistentStateWriteReadiness.isReady &&
         !persistentStateWriteGuard && !persistentStateOutcomeUnknown,
       onNativeMaterialized: (surfaceId, materialization) => {
@@ -718,6 +719,11 @@ function rendererWindowState(surfaceId: string): RendererWindowState {
     !providerEndpointAvailable ? "Direct connection unavailable; retrying" : null,
   ].filter(Boolean).join(" · ") || undefined;
   return state;
+}
+
+function surfaceBlockedStatus(surfaceId: string): string | null {
+  const blocker = persistentStateWriteReadiness.blockerForSurface(surfaceId);
+  return blocker ? surfaceBlockerMessage(blocker) : null;
 }
 
 function broadcastSurfaceState(surfaceId: string): void {
@@ -1923,6 +1929,7 @@ function installIpc(): void {
       window_label: state.windowLabel,
     });
     return {
+      blockedStatus: surfaceBlockedStatus(surfaceId),
       compositorHosted: Boolean(resolveCompositorControlSocketPath()),
       overlayDebugBorders: false,
       state,
@@ -2219,6 +2226,18 @@ async function boot(): Promise<void> {
     restored_surface_count: restoredSurfaces.length,
   });
 
+  persistentStateWriteReadiness.subscribe((changedSurfaceId) => {
+    for (const [surfaceId, window] of windows) {
+      if (changedSurfaceId !== undefined && surfaceId !== changedSurfaceId) continue;
+      if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+        try {
+          window.webContents.send("surface:blocked-status", surfaceBlockedStatus(surfaceId));
+        } catch (error) {
+          clientWarn("surface_blocked_status_delivery_failed", errorDiagnosticFields(error));
+        }
+      }
+    }
+  });
   server = createServer(core, identityClientId);
 
   annotationSourceCoordinator = new AnnotationSourceCoordinator(
