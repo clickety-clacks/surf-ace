@@ -1,4 +1,5 @@
 export const EXTERNAL_NEW_WINDOW_EVENT = "surf-ace-external-new-window";
+export const EXTERNAL_NEW_WINDOW_FEATURE = "surfAceExternalNewWindow=1";
 
 export const externalNewWindowFrameScript = `(() => {
   const requestEventName = ${JSON.stringify(EXTERNAL_NEW_WINDOW_EVENT)};
@@ -14,7 +15,11 @@ export const externalNewWindowFrameScript = `(() => {
     if (!navigator.userActivation?.isActive) return false;
     const url = resolveHttpUrl(rawUrl);
     if (!url) return false;
-    window.dispatchEvent(new CustomEvent(requestEventName, { detail: { url } }));
+    if (window.top !== window) {
+      Reflect.apply(originalOpen, window, [url, "_blank", ${JSON.stringify(EXTERNAL_NEW_WINDOW_FEATURE)}]);
+    } else {
+      window.dispatchEvent(new CustomEvent(requestEventName, { detail: { url } }));
+    }
     return true;
   };
   let anchorOpenUrl = null;
@@ -50,6 +55,22 @@ export function externalNewWindowRequestUrl(detail: unknown, userActivationIsAct
   }
   const rawUrl = (detail as { url?: unknown }).url;
   return typeof rawUrl === "string" ? resolveExternalHttpUrl(rawUrl) : null;
+}
+
+export function isMarkedExternalSubframeWindowOpen(features: string): boolean {
+  return features.split(",").some((feature) => feature.trim().toLowerCase() === EXTERNAL_NEW_WINDOW_FEATURE.toLowerCase());
+}
+
+export function externalSubframeNewWindowRequestUrl(
+  rawUrl: string,
+  features: string,
+  sourceIsSubframe: boolean,
+  userActivationIsActive: boolean,
+): string | null {
+  if (!sourceIsSubframe || !userActivationIsActive || !isMarkedExternalSubframeWindowOpen(features)) {
+    return null;
+  }
+  return resolveExternalHttpUrl(rawUrl);
 }
 
 export function resolveExternalHttpUrl(rawUrl: string, baseUrl?: string): string | null {

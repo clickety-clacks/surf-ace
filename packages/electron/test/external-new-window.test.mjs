@@ -3,9 +3,12 @@ import test from "node:test";
 import { runInNewContext } from "node:vm";
 
 import {
+  EXTERNAL_NEW_WINDOW_FEATURE,
   externalNewWindowFrameScript,
   externalNewWindowRequestUrl,
+  externalSubframeNewWindowRequestUrl,
   embeddedNewWindowAction,
+  isMarkedExternalSubframeWindowOpen,
   isExternalNewWindowLink,
   resolveExternalHttpUrl,
 } from "../src/external-new-window.ts";
@@ -29,7 +32,7 @@ class FixtureAnchor extends FixtureElement {
   }
 }
 
-function runFrameScript() {
+function runFrameScript({ subframe = false } = {}) {
   const handlers = new Map();
   const events = [];
   const opened = [];
@@ -41,6 +44,7 @@ function runFrameScript() {
       return "embedded-window";
     },
   };
+  window.top = subframe ? {} : window;
   const document = {
     baseURI: "https://chat.example.test/messages/thread",
     addEventListener: (type, handler) => handlers.set(type, handler),
@@ -97,6 +101,20 @@ test("source-frame requests require active activation and an HTTP(S) destination
   assert.equal(externalNewWindowRequestUrl({ url: "javascript:window.close()" }, true), null);
 });
 
+test("marked subframe requests require an active gesture and an HTTP(S) destination", () => {
+  assert.equal(isMarkedExternalSubframeWindowOpen(EXTERNAL_NEW_WINDOW_FEATURE), true);
+  assert.equal(isMarkedExternalSubframeWindowOpen("width=400,surfAceExternalNewWindow=1"), true);
+  assert.equal(isMarkedExternalSubframeWindowOpen("width=400"), false);
+  assert.equal(
+    externalSubframeNewWindowRequestUrl("https://example.test/path?q=1#part", EXTERNAL_NEW_WINDOW_FEATURE, true, true),
+    "https://example.test/path?q=1#part",
+  );
+  assert.equal(externalSubframeNewWindowRequestUrl("https://example.test/path", EXTERNAL_NEW_WINDOW_FEATURE, false, true), null);
+  assert.equal(externalSubframeNewWindowRequestUrl("https://example.test/path", EXTERNAL_NEW_WINDOW_FEATURE, true, false), null);
+  assert.equal(externalSubframeNewWindowRequestUrl("https://example.test/path", "width=400", true, true), null);
+  assert.equal(externalSubframeNewWindowRequestUrl("mailto:person@example.test", EXTERNAL_NEW_WINDOW_FEATURE, true, true), null);
+});
+
 test("frame fixture routes only active HTTP(S) new-window requests and leaves same-pane links alone", () => {
   const fixture = runFrameScript();
   let prevented = false;
@@ -135,4 +153,37 @@ test("frame fixture routes only active HTTP(S) new-window requests and leaves sa
   assert.equal(fixture.events.length, 2);
   assert.equal(fixture.events[1].type, "surf-ace-external-new-window");
   assert.equal(fixture.events[1].detail.url, "https://example.test/scripted");
+});
+
+test("subframe requests reach the native popup gate with a marker", () => {
+  const fixture = runFrameScript({ subframe: true });
+  let prevented = false;
+  fixture.handlers.get("click")?.({
+    isTrusted: true,
+    target: new FixtureElement(new FixtureAnchor("https://example.test/iframe")),
+    preventDefault: () => { prevented = true; },
+  });
+  assert.equal(prevented, false);
+  assert.equal(fixture.opened.length, 0);
+
+  fixture.userActivation.isActive = true;
+  fixture.handlers.get("click")?.({
+    isTrusted: true,
+    target: new FixtureElement(new FixtureAnchor("https://example.test/iframe?q=1#part")),
+    preventDefault: () => { prevented = true; },
+  });
+  assert.equal(prevented, true);
+  assert.deepEqual(fixture.events, []);
+  assert.deepEqual(fixture.opened[0], [
+    "https://example.test/iframe?q=1#part",
+    "_blank",
+    EXTERNAL_NEW_WINDOW_FEATURE,
+  ]);
+
+  assert.equal(fixture.window.open("https://example.test/scripted"), null);
+  assert.deepEqual(fixture.opened[1], [
+    "https://example.test/scripted",
+    "_blank",
+    EXTERNAL_NEW_WINDOW_FEATURE,
+  ]);
 });

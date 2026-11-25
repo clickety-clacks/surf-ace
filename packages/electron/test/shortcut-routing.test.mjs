@@ -16,7 +16,6 @@ const code = transformSync(section('function keyboardDirectionForVimKey', 'funct
   section('function handleShortcutInput', 'function wireWindowDiagnostics'), { loader: 'ts' }).code;
 function fixture({ native = false } = {}) {
   const annotations = [], sends = [], activations = [], navigation = [], history = [];
-  const webviewGuestContents = new WeakSet();
   const panes = [{ paneId: 1, paneLineageId: 'lineage-1', content: { contentType: 'markdown', contentId:'content-1', revision:1, renderVersion:1 } },
     { paneId: 2, externalNative: native, content: { contentType: native ? 'terminal' : 'browser_url' } }];
   let active = native ? 2 : 1;
@@ -28,7 +27,7 @@ function fixture({ native = false } = {}) {
     send(...args) { sends.push(args); } });
   const window = { webContents: contents(1) }, guest = contents(2);
   const bindings = new Map([[2, { surfaceId: 'sf', paneId: 2 }]]);
-  const context = vm.createContext({ process, console, parseAnnotationDoneContext, webviewGuestContents,
+  const context = vm.createContext({ process, console, parseAnnotationDoneContext,
     annotationDoneFence: { isBusy() { return doneBusy; } },
     core: { setActiveKeyboardPane(_s, id) { active = id; activations.push(id); },
       activeKeyboardPaneId() { return active; }, navigateActiveKeyboardPane(...args) { navigation.push(args); } },
@@ -47,12 +46,11 @@ function fixture({ native = false } = {}) {
       { type: 'keyDown', key, meta: false, control: false, alt: false, shift: false, ...modifiers });
     return prevented;
   }
-  return { window, guest, bindings, webviewGuestContents, annotations, sends, activations, navigation, history, key,
+  return { window, guest, bindings, annotations, sends, activations, navigation, history, key,
     setDoneBusy(value) { doneBusy = value; } };
 }
 test('attached guest retains keyboard routing and releases its binding on destruction', () => {
   const f = fixture();
-  assert.equal(f.webviewGuestContents.has(f.guest), true);
   assert.ok(f.guest.handlers.has('before-input-event'));
   f.key(f.guest, 'a');
   f.guest.handlers.get('destroyed')();
