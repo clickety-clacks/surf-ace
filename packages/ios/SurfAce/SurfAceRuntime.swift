@@ -160,7 +160,7 @@ actor SurfAceOutboundSender {
         let priority: Priority
         let sequence: Int
         let text: String
-        let continuation: CheckedContinuation<Void, Error>
+        let completion: @Sendable (Error?) -> Void
     }
 
     private let socket: SurfAceWebSocket
@@ -178,29 +178,24 @@ actor SurfAceOutboundSender {
     }
 
     func send(text: String, priority: Priority) async throws {
-        try await withCheckedThrowingContinuation { continuation in
-            nextSequence += 1
-            queue.append(
-                QueuedSend(
-                    priority: priority,
-                    sequence: nextSequence,
-                    text: text,
-                    continuation: continuation
-                )
-            )
-            queue.sort { lhs, rhs in
-                if lhs.priority == rhs.priority {
-                    return lhs.sequence < rhs.sequence
-                }
-                return lhs.priority.rawValue > rhs.priority.rawValue
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            enqueue(text: text, priority: priority) { error in
+                if let error { continuation.resume(throwing: error) }
+                else { continuation.resume() }
             }
+        }
+    }
 
-            if !isDraining {
-                isDraining = true
-                Task {
-                    await drainQueue()
-                }
-            }
+    func enqueue(text: String, priority: Priority, completion: @escaping @Sendable (Error?) -> Void = { _ in }) {
+        nextSequence += 1
+        queue.append(QueuedSend(priority: priority, sequence: nextSequence, text: text, completion: completion))
+        queue.sort { lhs, rhs in
+            if lhs.priority == rhs.priority { return lhs.sequence < rhs.sequence }
+            return lhs.priority.rawValue > rhs.priority.rawValue
+        }
+        if !isDraining {
+            isDraining = true
+            Task { await drainQueue() }
         }
     }
 
@@ -212,11 +207,11 @@ actor SurfAceOutboundSender {
                     await prepareSend(next.text, next.priority)
                 }
                 try await socket.send(text: next.text)
-                next.continuation.resume()
+                next.completion(nil)
             } catch {
-                next.continuation.resume(throwing: error)
+                next.completion(error)
                 for pending in queue {
-                    pending.continuation.resume(throwing: error)
+                    pending.completion(error)
                 }
                 queue.removeAll()
                 isDraining = false
@@ -369,7 +364,6 @@ final class SurfAceRuntime {
     @ObservationIgnored private let annotationDirectEventResultOverride: (@Sendable (String, Bool) async -> Bool)?
     @ObservationIgnored private let annotationModeMutationPreparation: (@Sendable (Bool) async throws -> Void)?
     @ObservationIgnored private let annotationModeProjectionObserver: (@Sendable (Bool) async -> Void)?
-    @ObservationIgnored private let locklessDeliveryWaitObserver: (@Sendable () -> Void)?
     @ObservationIgnored private let foregroundCompletion: (@MainActor () -> Void)?
     @ObservationIgnored private var identity: SurfAceIdentity?
     @ObservationIgnored private var centralRegistration: SurfAceCentralRegistration?
@@ -414,6 +408,8 @@ final class SurfAceRuntime {
 
     @ObservationIgnored private var isStarted = false
     @ObservationIgnored private var isStarting = false
+    @ObservationIgnored private var listenerGeneration: UInt64 = 0
+    @ObservationIgnored private var listenerRetryTask: Task<Void, Never>?
     @ObservationIgnored private var isolatedTestHostAtStart = false
     private var isIsolatedTestHost: Bool {
         if isolatedTestHostAtStart || forceIsolatedTestLoopback { return true }
@@ -438,6 +434,13 @@ final class SurfAceRuntime {
     @ObservationIgnored private var controlProjectionConnections: Set<String> = []
     @ObservationIgnored private var locklessDeliveryActive = false
     @ObservationIgnored private var locklessDeliveryWaiters: [CheckedContinuation<Void, Never>] = []
+    @ObservationIgnored private var queuedReclamations = Set<ReclamationDelivery>()
+    private struct ReclamationDelivery: Hashable {
+        let eventId: String
+        let controllerId: String
+        let connectionToken: String
+    }
+
     @ObservationIgnored private var locklessAdmissionDeliveryBarriers: Set<String> = []
 
     private let maxMessageBytes = 12 * 1024 * 1024
@@ -482,6 +485,7 @@ final class SurfAceRuntime {
         annotationDirectStageMaxBytesForTesting: Int? = nil,
         enableFleetDiscovery: Bool = true,
         isolatedTestLoopback: Bool = false,
+        isolatedTestIdentity: SurfAceIdentity? = nil,
         bonjourPublisher: SurfAceBonjourPublisher = SurfAceBonjourPublisher(),
         foregroundCompletion: (@MainActor () -> Void)? = nil,
         outboundSendPreparation: (@Sendable (
@@ -491,8 +495,7 @@ final class SurfAceRuntime {
         annotationFrameCommitPreparation: (@Sendable () async throws -> Void)? = nil,
         annotationDirectEventResultOverride: (@Sendable (String, Bool) async -> Bool)? = nil,
         annotationModeProjectionObserver: (@Sendable (Bool) async -> Void)? = nil,
-        annotationModeMutationPreparation: (@Sendable (Bool) async throws -> Void)? = nil,
-        locklessDeliveryWaitObserver: (@Sendable () -> Void)? = nil
+        annotationModeMutationPreparation: (@Sendable (Bool) async throws -> Void)? = nil
     ) {
         self.userDefaults = userDefaults
         self.registrySettingStore = SurfAceRegistrySettingStore(defaults: userDefaults)
@@ -512,7 +515,6 @@ final class SurfAceRuntime {
         self.annotationDirectEventResultOverride = annotationDirectEventResultOverride
         self.annotationModeProjectionObserver = annotationModeProjectionObserver
         self.annotationModeMutationPreparation = annotationModeMutationPreparation
-        self.locklessDeliveryWaitObserver = locklessDeliveryWaitObserver
         let fallbackName = "Surf Ace"
         let deviceName = UIDevice.current.name
         self.screenName = "\(fallbackName) - \(deviceName)"
@@ -524,7 +526,8 @@ final class SurfAceRuntime {
         self.instanceDisambiguator = String(vendorID.prefix(6))
 
         do {
-            let identity = try identityStore.loadOrCreateIdentity()
+            // An unsigned simulator can exercise loopback registration with an ephemeral key.
+            let identity = try (isolatedTestLoopback ? isolatedTestIdentity : nil) ?? identityStore.loadOrCreateIdentity()
             self.identity = identity
             self.fingerprint = identity.fingerprint
         } catch {
@@ -545,12 +548,14 @@ final class SurfAceRuntime {
     }
 
     func start() async {
-        guard !isStarted, !isStarting else { return }
+        guard !isStarted, !isStarting, listenerRetryTask == nil else { return }
         isStarting = true
+        let generation = listenerGeneration
         defer { isStarting = false }
         let isolatedTestHost = isIsolatedTestHost
         isolatedTestHostAtStart = isolatedTestHost
         await restoreLocklessAuthority(reason: "process_start")
+        guard generation == listenerGeneration else { return }
         isSceneAuthorityReady = true
         observeLifecycle()
         surfAceLifecycleLog(
@@ -560,6 +565,10 @@ final class SurfAceRuntime {
             "event=server_start_request \(surfAceDiagnosticFields([("fixed_port", isolatedTestHost ? 0 : fixedServerPort), ("health_path", healthPath), ("ws_path", webSocketPath), ("isolated_test_host", isolatedTestHost)]))"
         )
 
+        await startListener(isolatedTestHost: isolatedTestHost, generation: generation, attempt: 0)
+    }
+
+    private func startListener(isolatedTestHost: Bool, generation: UInt64, attempt: Int) async {
         do {
             let httpHandler: SurfAceHTTPServer.HTTPHandler = { [weak self] request in
                 guard let self else { return HTTPServerResponse(statusCode: 500) }
@@ -585,7 +594,10 @@ final class SurfAceRuntime {
                     webSocketHandler: webSocketHandler
                 )
             }
+            guard generation == listenerGeneration else { return }
+            listenerRetryTask = nil
             serverPort = Int(port)
+            endpointError = nil
             isStarted = true
             surfAceServerRuntimeLog(
                 "event=server_start_ok \(surfAceDiagnosticFields([("fingerprint", fingerprint), ("port", serverPort), ("requested_port", isolatedTestHost ? 0 : fixedServerPort), ("screen_name", screenName)]))"
@@ -602,28 +614,45 @@ final class SurfAceRuntime {
                 await resumeRequestedAnnotationSourceCommits()
             }
         } catch {
+            guard generation == listenerGeneration else { return }
             let details = startupFailureMessage(for: error)
             surfAceServerRuntimeLog(
                 "event=server_start_failed \(surfAceDiagnosticFields([("error", details), ("fixed_port", fixedServerPort)]))"
             )
             endpointError = details
+            listenerRetryTask = Task { [weak self] in
+                do { try await Task.sleep(for: surfAceRegistryRetryDelay(attempt)) } catch { return }
+                guard let self, self.listenerGeneration == generation else { return }
+                await self.startListener(isolatedTestHost: isolatedTestHost, generation: generation, attempt: attempt + 1)
+            }
         }
     }
 
-    private func startCentralRegistration() {
-        guard !isIsolatedTestHost else { return }
+    func startIsolatedRegistryForTesting(_ url: URL) throws {
+        guard isIsolatedTestHost, isStarted, identity != nil, url.scheme == "ws", url.host == "127.0.0.1",
+              url.port != nil, url.user == nil, url.password == nil else {
+            throw SurfAceRegistrationError.noServer
+        }
+        startCentralRegistration(isolatedRegistry: url)
+    }
+
+    private func startCentralRegistration(isolatedRegistry: URL? = nil) {
+        guard !isIsolatedTestHost || isolatedRegistry != nil else { return }
         guard centralRegistration == nil, let identity else { return }
-        let discovery = SurfAceCentralDiscovery()
+        let discovery = isolatedRegistry == nil ? SurfAceCentralDiscovery() : nil
         let registration = SurfAceCentralRegistration(
-            clientId: identity.clientId, configured: nil,
-            registrySources: { [weak self] in self?.currentRegistrySources() ?? [] },
-            discover: { await discovery.discover() },
-            discoveryError: { discovery.lastError },
-            transportFallbacks: { discovery.transportURLs(for: $0) },
+            clientId: identity.clientId, configured: isolatedRegistry,
+            registrySources: { [weak self] in
+                guard isolatedRegistry == nil else { return [] }
+                return self?.currentRegistrySources() ?? []
+            },
+            discover: { await discovery?.discover() ?? [] },
+            discoveryError: { discovery?.lastError },
+            transportFallbacks: { discovery?.transportURLs(for: $0) ?? [] },
             snapshot: { [weak self] in
                 guard let self else { throw SurfAceRegistrationError.stopped }
                 let adapter = try self.ensureLocklessAdapter()
-                return SurfAceRegistrationSurface.snapshot(await adapter.snapshot())
+                return SurfAceRegistrationSurface.snapshot(adapter.committedRegistrationSnapshot())
             },
             apply: { [weak self] assignments, expected in
                 guard let self else { throw SurfAceRegistrationError.stopped }
@@ -669,7 +698,7 @@ final class SurfAceRuntime {
                     allowLoopbackObservedAddress: self.isIsolatedTestHost
                 )
                 return try SurfAceRegistrationInput(
-                    state: await adapter.snapshot(),
+                    state: adapter.committedRegistrationSnapshot(),
                     clientId: identity.clientId,
                     directEndpoint: selection.endpoint,
                     directEndpointSource: selection.source,
@@ -682,21 +711,25 @@ final class SurfAceRuntime {
             applyReplySubset: { [weak self] reply, input, request in
                 guard let self else { throw SurfAceRegistrationError.stopped }
                 let adapter = try self.ensureLocklessAdapter()
-                let application = try await adapter.applyRegistration(
-                    reply, expectedInput: input, requestInput: request, clientId: identity.clientId
-                )
+                let surfacesWithChanges = reply.assignments.compactMap { assignment -> String? in
+                    let saved = input.surfaces.first { $0.surfaceId == assignment.surfaceId }
+                    let samePanes = saved?.panes.sorted(by: { $0.paneId < $1.paneId })
+                        == assignment.panes.sorted(by: { $0.paneId < $1.paneId })
+                    if samePanes && saved?.windowGeneration == assignment.windowAllocationGeneration { return nil }
+                    return assignment.surfaceId
+                }
+                let application = try await self.withRegistryLabelStatus(surfacesWithChanges, waitingOnPersistence: true) {
+                    try await adapter.applyRegistration(
+                        reply, expectedInput: input, requestInput: request, clientId: identity.clientId
+                    )
+                }
                 for warning in application.warnings {
                     surfAceServerRuntimeLog(
                         "event=central_registration_warning \(surfAceDiagnosticFields([("warning", warning)]))"
                     )
                 }
                 let state = application.state
-                self.confirmedPaneLabels = Dictionary(uniqueKeysWithValues: state.liveSurfaces.values.flatMap { surface -> [(String, Int64)] in
-                    guard state.registryBinding != nil, surface.windowLabelConfirmed != false else { return [] }
-                    return surface.panes.values.filter { $0.paneLabel > 0 }.map { pane in
-                        ("\(surface.surfaceId):\(pane.paneLineageId)", pane.paneLabel)
-                    }
-                })
+                self.restoreConfirmedRegistryLabels(from: state)
                 try self.projectLocklessAuthorityState(state)
                 return application.needsRetry
             },
@@ -776,6 +809,9 @@ final class SurfAceRuntime {
     }
 
     func stop() async {
+        listenerGeneration &+= 1
+        listenerRetryTask?.cancel()
+        listenerRetryTask = nil
         annotationRecoveryTask?.cancel()
         await annotationRecoveryTask?.value
         annotationRecoveryTask = nil
@@ -1229,6 +1265,16 @@ final class SurfAceRuntime {
         refreshBonjourTXT()
     }
 
+    private func restoreConfirmedRegistryLabels(from state: SurfAceLocklessAuthorityState) {
+        guard let binding = state.registryBinding, binding.clientId == identity?.clientId else { return }
+        confirmedPaneLabels = Dictionary(uniqueKeysWithValues: state.liveSurfaces.values.flatMap { surface -> [(String, Int64)] in
+            guard surface.windowLabelConfirmed != false else { return [] }
+            return surface.panes.values.filter { $0.paneLabel > 0 }.map { pane in
+                ("\(surface.surfaceId):\(pane.paneLineageId)", pane.paneLabel)
+            }
+        })
+    }
+
     func restoreLocklessAuthority(reason: String) async {
         guard SurfAceLocklessTargetAdmission.platformPermitsLockless else { return }
         do {
@@ -1248,6 +1294,7 @@ final class SurfAceRuntime {
             guard readiness.targetWorkRecovered else {
                 throw SurfAceLocklessAuthorityError.invalidState("target_work_not_recovered")
             }
+            if reason == "process_start" { restoreConfirmedRegistryLabels(from: readiness.state) }
             try projectLocklessAuthorityState(readiness.state)
             for result in recovered {
                 await fanoutLocklessTargetResult(result)
@@ -1342,6 +1389,7 @@ final class SurfAceRuntime {
             if reidentifiedSurface { persistSurfaceTopology(surfaceId: surface.surfaceId) }
         }
         projectAnnotationDeliveryFeedback(state)
+        centralRegistration?.registrationStateCommitted()
     }
 
     private func projectAnnotationDeliveryFeedback(_ state: SurfAceLocklessAuthorityState,
@@ -2439,13 +2487,13 @@ final class SurfAceRuntime {
             }
         }
 
-        while true {
-            do {
-                guard let message = try await socket.receive() else {
-                    await handleSocketTermination(connectionUUID: connectionUUID)
-                    return
-                }
-
+        let messages = await socket.messages { [weak self] text in
+            guard text.contains("heartbeat.ping"), let self else { return false }
+            return await self.replyToHeartbeat(text, from: connectionUUID, through: sender)
+        }
+        do {
+            for try await message in messages {
+                guard !terminatedConnectionUUIDs.contains(connectionUUID) else { break }
                 switch message {
                 case .close(let code, let reason):
                     surfAceGatewayLog(
@@ -2486,7 +2534,7 @@ final class SurfAceRuntime {
                     if let cached = replayCache[id] {
                         if cached.payloadDigest == payloadDigest {
                             let priority: SurfAceOutboundSender.Priority = (op == "heartbeat.ping") ? .heartbeat : .response
-                            try await sender.send(text: cached.responseJSON, priority: priority)
+                            await sender.enqueue(text: cached.responseJSON, priority: priority)
                             continue
                         }
 
@@ -2497,7 +2545,7 @@ final class SurfAceRuntime {
                             message: "request id reused with different payload"
                         )
                         if let json = encodeJSON(mismatch) {
-                            try await sender.send(text: json, priority: .response)
+                            await sender.enqueue(text: json, priority: .response)
                         }
                         continue
                     }
@@ -2517,7 +2565,7 @@ final class SurfAceRuntime {
                     }
 
                     let priority: SurfAceOutboundSender.Priority = (op == "heartbeat.ping") ? .heartbeat : .response
-                    try await sender.send(text: responseJSON, priority: priority)
+                    await sender.enqueue(text: responseJSON, priority: priority)
                     if let postSendAction = processed.postSendAction,
                        !terminatedConnectionUUIDs.contains(connectionUUID) {
                         await postSendAction()
@@ -2528,12 +2576,38 @@ final class SurfAceRuntime {
                         replayCache.removeValue(forKey: replayOrder.removeFirst())
                     }
                 }
-            } catch {
-                surfAceGatewayLog("socket loop failed connectionUUID=\(connectionUUID) error=\(error.localizedDescription)")
-                await handleSocketTermination(connectionUUID: connectionUUID)
-                return
             }
+        } catch {
+            surfAceGatewayLog("socket loop failed connectionUUID=\(connectionUUID) error=\(error.localizedDescription)")
         }
+        await handleSocketTermination(connectionUUID: connectionUUID)
+    }
+
+    private func replyToHeartbeat(
+        _ text: String, from connectionUUID: String, through sender: SurfAceOutboundSender
+    ) async -> Bool {
+        // The reader services paired heartbeats even while the ordinary request
+        // stream is waiting for a durable mutation or renderer result.
+        guard locklessConnectionsByConnectionUUID[connectionUUID] != nil,
+              !terminatedConnectionUUIDs.contains(connectionUUID),
+              text.utf8.count <= maxMessageBytes,
+              let request = decodeJSONObject(from: text),
+              request["type"] as? String == "request",
+              request["op"] as? String == "heartbeat.ping",
+              let id = request["id"] as? String else { return false }
+        let reply = locklessHeartbeatResponse(id: id, payload: request["payload"] as? [String: Any] ?? [:])
+        if let response = encodeJSON(reply) {
+            await sender.enqueue(text: response, priority: .heartbeat)
+        }
+        return true
+    }
+
+    private func locklessHeartbeatResponse(id: String, payload: [String: Any]) -> [String: Any] {
+        guard let nonce = payload["nonce"] as? String, !nonce.isEmpty else {
+            return locklessAdapterErrorResult(op: "heartbeat.ping", id: id, error: .invalidAdmission).responseObject
+        }
+        return ["v": 1, "type": "response", "op": "heartbeat.ping", "id": id,
+                "ok": true, "sentAt": timestampNow(), "payload": ["nonce": nonce]]
     }
 
     private func processRequest(
@@ -2923,10 +2997,7 @@ final class SurfAceRuntime {
                     adapter: adapter
                 )
             case "heartbeat.ping":
-                guard let nonce = payload["nonce"] as? String, !nonce.isEmpty else {
-                    throw SurfAceLocklessRuntimeAdapterError.invalidAdmission
-                }
-                responsePayload = ["nonce": nonce]
+                return SurfAceProcessedRequestResult(responseObject: locklessHeartbeatResponse(id: id, payload: payload))
             default:
                 return SurfAceProcessedRequestResult(
                     responseObject: makeErrorResponse(
@@ -3533,9 +3604,11 @@ final class SurfAceRuntime {
                 throw SurfAceLocklessRuntimeAdapterError.invalidAdmission
             }
             do {
-                let allocation = try await registration.claimPaneLabel(
-                    surfaceId: surfaceId, paneId: paneId, paneLineageId: lineageId
-                )
+                let allocation = try await withRegistryLabelStatus([surfaceId], waitingOnPersistence: false) {
+                    try await registration.claimPaneLabel(
+                        surfaceId: surfaceId, paneId: paneId, paneLineageId: lineageId
+                    )
+                }
                 if allocation.paneLabel > 0 { labels[paneId] = allocation.paneLabel }
                 if let generation = allocation.allocationGeneration {
                     generations[paneId] = generation
@@ -3546,6 +3619,18 @@ final class SurfAceRuntime {
             }
         }
         return (labels, lineages, generations)
+    }
+
+    private func withRegistryLabelStatus<Result>(
+        _ surfaceIds: [String], waitingOnPersistence: Bool,
+        operation: () async throws -> Result
+    ) async rethrows -> Result {
+        let keyPath = waitingOnPersistence
+            ? \SurfAceSurfaceModel.registryLabelWritesPending : \SurfAceSurfaceModel.registryClaimsPending
+        let affected = surfaceIds.compactMap { surfaceById[$0] }
+        for surface in affected { surface[keyPath: keyPath] += 1 }
+        defer { for surface in affected { surface[keyPath: keyPath] -= 1 } }
+        return try await operation()
     }
 
     private func claimRestoredPaneLabel(
@@ -3561,9 +3646,11 @@ final class SurfAceRuntime {
             return (pane.paneId, pane.paneLineageId, nil, pane.allocationGeneration)
         }
         do {
-            let allocation = try await registration.claimPaneLabel(
-                surfaceId: surfaceId, paneId: pane.paneId, paneLineageId: pane.paneLineageId
-            )
+            let allocation = try await withRegistryLabelStatus([surfaceId], waitingOnPersistence: false) {
+                try await registration.claimPaneLabel(
+                    surfaceId: surfaceId, paneId: pane.paneId, paneLineageId: pane.paneLineageId
+                )
+            }
             guard allocation.paneLabel > 0 else {
                 return (pane.paneId, pane.paneLineageId, nil, pane.allocationGeneration)
             }
@@ -4044,7 +4131,8 @@ final class SurfAceRuntime {
         eventId: String? = nil
     ) async -> Bool {
         guard let locklessAdapter else { return false }
-        var delivered = true
+        var accepted = true
+        var completions: [AsyncStream<Bool>] = []
         await withLocklessDeliveryTurn {
             let tombstoneBlockedControllerIds = await drainTombstoneReclamationsInCurrentTurn(
                 adapter: locklessAdapter
@@ -4065,21 +4153,30 @@ final class SurfAceRuntime {
                 "payload": Self.foundationJSON(payload),
             ]
             guard let json = encodeJSON(envelope) else {
-                delivered = false
+                accepted = false
                 return
             }
             for connectionUUID in fanout.connectionTokens {
                 guard let connection = locklessConnectionsByConnectionUUID[connectionUUID],
                       !blockedControllerIds.contains(connection.controllerInstanceId) else { continue }
-                do {
-                    try await connection.sender.send(text: json, priority: .event)
-                } catch {
-                    delivered = false
-                    surfAceServerRuntimeLog("event=direct_event_send_failed \(surfAceDiagnosticFields([("op", op), ("event_id", eventId), ("error", String(describing: error))]))")
+                if op == "event.annotation_committed" {
+                    let (result, continuation) = AsyncStream<Bool>.makeStream()
+                    await connection.sender.enqueue(text: json, priority: .event) { error in
+                        continuation.yield(error == nil)
+                        continuation.finish()
+                    }
+                    completions.append(result)
+                } else {
+                    await connection.sender.enqueue(text: json, priority: .event)
                 }
             }
         }
-        return delivered
+        // Annotation delivery receipts depend on the actual writes. Other
+        // operations and all other connections can advance while those settle.
+        for result in completions {
+            for await written in result where !written { accepted = false }
+        }
+        return accepted
     }
 
     private func drainControllerRetentionReclamations(
@@ -4148,25 +4245,27 @@ final class SurfAceRuntime {
             guard let json = encodeJSON(envelope) else {
                 return blockedControllerIds.union(delivery.connectionTokensByControllerInstanceId.keys)
             }
-            var deliveredControllerIds: [String] = []
             for controllerId in delivery.connectionTokensByControllerInstanceId.keys.sorted() {
                 guard !blockedControllerIds.contains(controllerId),
                       let connectionToken = delivery.connectionTokensByControllerInstanceId[controllerId],
                       let connection = locklessConnectionsByConnectionUUID[connectionToken] else { continue }
-                do {
-                    try await connection.sender.send(text: json, priority: .event)
-                    deliveredControllerIds.append(controllerId)
-                } catch {
-                    blockedControllerIds.insert(controllerId)
-                    surfAceLifecycleLog(
-                        "event=lockless_tombstone_reclamation_delivery_deferred event_id=\(record.eventId) controller_instance_id=\(controllerId)"
-                    )
+                let ticket = ReclamationDelivery(eventId: record.eventId, controllerId: controllerId,
+                                                 connectionToken: connectionToken)
+                guard queuedReclamations.insert(ticket).inserted else { continue }
+                await connection.sender.enqueue(text: json, priority: .event) { [weak self, weak adapter] error in
+                    Task { @MainActor in
+                        guard let self else { return }
+                        defer { self.queuedReclamations.remove(ticket) }
+                        guard error == nil else { return }
+                        try? await adapter?.acknowledgeTombstoneReclamation(
+                            eventId: ticket.eventId, deliveredControllerInstanceIds: [ticket.controllerId]
+                        )
+                    }
                 }
             }
-            if !deliveredControllerIds.isEmpty || record.recipientControllerInstanceIds.isEmpty {
+            if record.recipientControllerInstanceIds.isEmpty {
                 try? await adapter.acknowledgeTombstoneReclamation(
-                    eventId: record.eventId,
-                    deliveredControllerInstanceIds: deliveredControllerIds
+                    eventId: record.eventId, deliveredControllerInstanceIds: []
                 )
             }
         }
@@ -4242,30 +4341,27 @@ final class SurfAceRuntime {
             guard let json = encodeJSON(envelope) else {
                 return blockedControllerIds.union(delivery.connectionTokensByControllerInstanceId.keys)
             }
-            var deliveredControllerIds: [String] = []
             for controllerId in delivery.connectionTokensByControllerInstanceId.keys.sorted() {
-                guard !blockedControllerIds.contains(controllerId) else { continue }
-                guard let connectionToken = delivery.connectionTokensByControllerInstanceId[controllerId],
+                guard !blockedControllerIds.contains(controllerId),
+                      let connectionToken = delivery.connectionTokensByControllerInstanceId[controllerId],
                       let connection = locklessConnectionsByConnectionUUID[connectionToken] else { continue }
-                do {
-                    try await connection.sender.send(text: json, priority: .event)
-                    deliveredControllerIds.append(controllerId)
-                } catch {
-                    blockedControllerIds.insert(controllerId)
-                    let deferredFields: [(String, CustomStringConvertible?)] = [
-                        ("event_id", record.eventId),
-                        ("controller_instance_id", controllerId),
-                        ("error", error.localizedDescription),
-                    ]
-                    surfAceLifecycleLog(
-                        "event=lockless_controller_retention_delivery_deferred \(surfAceDiagnosticFields(deferredFields))"
-                    )
+                let ticket = ReclamationDelivery(eventId: record.eventId, controllerId: controllerId,
+                                                 connectionToken: connectionToken)
+                guard queuedReclamations.insert(ticket).inserted else { continue }
+                await connection.sender.enqueue(text: json, priority: .event) { [weak self, weak adapter] error in
+                    Task { @MainActor in
+                        guard let self else { return }
+                        defer { self.queuedReclamations.remove(ticket) }
+                        guard error == nil else { return }
+                        try? await adapter?.acknowledgeControllerRetentionReclamation(
+                            eventId: ticket.eventId, deliveredControllerInstanceIds: [ticket.controllerId]
+                        )
+                    }
                 }
             }
-            if !deliveredControllerIds.isEmpty || record.recipientControllerInstanceIds.isEmpty {
+            if record.recipientControllerInstanceIds.isEmpty {
                 try? await adapter.acknowledgeControllerRetentionReclamation(
-                    eventId: record.eventId,
-                    deliveredControllerInstanceIds: deliveredControllerIds
+                    eventId: record.eventId, deliveredControllerInstanceIds: []
                 )
             }
         }
@@ -4299,7 +4395,6 @@ final class SurfAceRuntime {
             || locklessAdmissionDeliveryBarriers.contains(where: { $0 != bypassingAdmissionBarrier }) {
             await withCheckedContinuation { continuation in
                 locklessDeliveryWaiters.append(continuation)
-                locklessDeliveryWaitObserver?()
             }
         }
         locklessDeliveryActive = true
@@ -4364,7 +4459,7 @@ final class SurfAceRuntime {
                 ])
                 for envelope in envelopes {
                     guard let json = encodeJSON(envelope) else { continue }
-                    try? await connection.sender.send(text: json, priority: .event)
+                    await connection.sender.enqueue(text: json, priority: .event)
                 }
             }
         }

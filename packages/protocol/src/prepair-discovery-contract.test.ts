@@ -4,14 +4,13 @@ import test from "node:test";
 /*
  * Reference model for DESIGN §§3.1.3, 3.1.4, and 6.0.1 only.
  * It imports no production wire/client/registry code and does not claim that
- * endpoint leases or surface.describe are implemented.
+ * the runtime implements connection presence or surface.describe.
  */
 
 type RegistryIdentity = { fleetId: string; allocatorId: string };
 type EndpointLease = {
   leaseGeneration: number;
   registrationObservedAtMs: number;
-  leaseExpiresAtMs: number;
 };
 type SurfaceRegistration = { surfaceId: string; windowLabel: string };
 type RegisteredClient = {
@@ -19,12 +18,13 @@ type RegisteredClient = {
   directEndpoint: string | null;
   prePairDescribeV1: boolean;
   endpointLease: EndpointLease | null;
+  presence: "online" | "offline";
+  lastSeenAtMs: number | null;
   surfaces: SurfaceRegistration[];
 };
 type RegistryTopology = {
   registryIdentity: RegistryIdentity;
   registryServerTimeMs: number;
-  maxEndpointLeaseMs: number;
   clients: RegisteredClient[];
 };
 
@@ -38,16 +38,16 @@ function registry(overrides: Partial<RegistryTopology> = {}): RegistryTopology {
   return {
     registryIdentity: { ...identity },
     registryServerTimeMs: 10_000,
-    maxEndpointLeaseMs: 30_000,
     clients: [
       {
         clientId,
         directEndpoint: endpointUrl,
         prePairDescribeV1: true,
+        presence: "online",
+        lastSeenAtMs: null,
         endpointLease: {
           leaseGeneration: 4,
           registrationObservedAtMs: 9_000,
-          leaseExpiresAtMs: 19_000,
         },
         surfaces: [{ ...selectedSurface }],
       },
@@ -99,17 +99,13 @@ function describeResponse(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function currentLease(snapshot: RegistryTopology, row: RegisteredClient): boolean {
+function validObservation(snapshot: RegistryTopology, row: RegisteredClient): boolean {
   const lease = row.endpointLease;
   return lease !== null
     && Number.isSafeInteger(lease.leaseGeneration)
     && lease.leaseGeneration > 0
     && Number.isSafeInteger(lease.registrationObservedAtMs)
-    && Number.isSafeInteger(lease.leaseExpiresAtMs)
-    && lease.registrationObservedAtMs <= snapshot.registryServerTimeMs
-    && lease.leaseExpiresAtMs > snapshot.registryServerTimeMs
-    && lease.leaseExpiresAtMs > lease.registrationObservedAtMs
-    && lease.leaseExpiresAtMs - snapshot.registryServerTimeMs <= snapshot.maxEndpointLeaseMs;
+    && lease.registrationObservedAtMs <= snapshot.registryServerTimeMs;
 }
 
 function endpointIsConfigured(value: string | null, registryAddress: string): boolean {
@@ -134,9 +130,7 @@ function select(
 ): { status: string; row?: RegisteredClient; registryIdentity?: RegistryIdentity } {
   if (snapshot === null) return { status: "registry_unavailable" };
   if (!snapshot.registryIdentity?.fleetId || !snapshot.registryIdentity?.allocatorId
-      || !Number.isSafeInteger(snapshot.registryServerTimeMs)
-      || !Number.isSafeInteger(snapshot.maxEndpointLeaseMs)
-      || snapshot.maxEndpointLeaseMs <= 0) {
+      || !Number.isSafeInteger(snapshot.registryServerTimeMs)) {
     return { status: "unsupported_protocol" };
   }
 
@@ -144,8 +138,11 @@ function select(
     row.surfaces
       .filter((surface) => surface.windowLabel === label)
       .map((surface) => ({ row, surface })));
-  const current = matches.filter(({ row }) => currentLease(snapshot, row));
+  const current = matches.filter(({ row }) => row.presence === "online" && validObservation(snapshot, row));
   if (current.length === 0) {
+    if (matches.length === 1 && matches[0]!.row.presence === "offline") {
+      return { status: "client_offline", row: matches[0]!.row };
+    }
     return { status: matches.length > 0 ? "stale_registration" : "not_found" };
   }
   if (current.length > 1) return { status: "ambiguous" };
@@ -242,7 +239,9 @@ function discover(input: {
   const operations = ["fleet.topology"];
   const initial = select(input.before, input.label, address);
   if (initial.status !== "selected" || !initial.row || !initial.registryIdentity) {
-    return fail(initial.status, operations);
+    return initial.status === "client_offline"
+      ? { ...fail(initial.status, operations), lastSeenAtMs: initial.row!.lastSeenAtMs }
+      : fail(initial.status, operations);
   }
 
   const request = buildDescribeRequest(initial as {
@@ -382,7 +381,6 @@ function discover(input: {
     registryServerTimeMs: input.after!.registryServerTimeMs,
     registrationAgeMs: input.after!.registryServerTimeMs
       - final.row.endpointLease!.registrationObservedAtMs,
-    leaseExpiresAtMs: final.row.endpointLease!.leaseExpiresAtMs,
     surfaceSetRevision: payload.surfaceSetRevision,
     topologyRevision: payload.topologyRevision,
     layout: payload.layout,
@@ -454,64 +452,31 @@ test("request shape has no pair, controller admission, or registry mutation fiel
   assert.equal(/^[0-9a-f]{32}$/.test(request.payload.nonce), true);
 });
 
-test("renewal horizon is measured from registry server time while generation age remains visible", () => {
-  const renewed = registry({
-    registryServerTimeMs: 10_000,
-    maxEndpointLeaseMs: 10_000,
-    clients: [{
-      ...registry().clients[0]!,
-      endpointLease: {
-        leaseGeneration: 4,
-        registrationObservedAtMs: 1_000,
-        leaseExpiresAtMs: 20_000,
-      },
-    }],
-  });
-  const output = discover(validInput({ before: renewed, after: renewed }) as any);
+test("registration age remains visible without invalidating an online connection", () => {
+  const old = registry({ registryServerTimeMs: 609_000 });
+  const output = discover(validInput({ before: old, after: old }) as any);
   assert.equal(output.status, "current");
-  assert.equal(output.registrationAgeMs, 9_000);
-  assert.equal(output.leaseExpiresAtMs, 20_000);
+  assert.equal(output.registrationAgeMs, 600_000);
 });
 
-test("future registration time and leases beyond the current bounded horizon are stale", () => {
-  const futureRegistration = registry({
-    clients: [{
-      ...registry().clients[0]!,
-      endpointLease: {
-        leaseGeneration: 4,
-        registrationObservedAtMs: 10_001,
-        leaseExpiresAtMs: 19_000,
-      },
-    }],
-  });
-  const overHorizon = registry({ maxEndpointLeaseMs: 8_999 });
-  for (const invalid of [futureRegistration, overHorizon]) {
-    const output = discover(validInput({ before: invalid, after: invalid }) as any);
+test("unusable endpoint observations fail before direct connect", () => {
+  const row = registry().clients[0]!;
+  const futureRegistration = { ...row, endpointLease: { leaseGeneration: 4, registrationObservedAtMs: 10_001 } };
+  for (const candidate of [{ ...row, endpointLease: null }, futureRegistration]) {
+    const before = registry({ clients: [candidate] });
+    const output = discover(validInput({ before }) as any);
     assert.equal(output.status, "stale_registration");
     assert.deepEqual(output.operations, ["fleet.topology"]);
   }
 });
 
-test("missing, expired, and unbounded leases fail before direct connect", () => {
-  const noLease = registry({ clients: [{ ...registry().clients[0]!, endpointLease: null }] });
-  assert.equal(discover(validInput({ before: noLease, after: noLease }) as any).status,
-    "stale_registration");
-
-  const expired = registry({
-    registryServerTimeMs: 20_000,
-    clients: registry().clients,
-  });
-  assert.equal(discover(validInput({ before: expired, after: expired }) as any).status,
-    "stale_registration");
-
-  const tooLong = registry({
-    maxEndpointLeaseMs: 100,
-    clients: registry().clients,
-  });
-  assert.equal(discover(validInput({ before: tooLong, after: tooLong }) as any).status,
-    "stale_registration");
-  assert.deepEqual(discover(validInput({ before: expired, after: expired }) as any).operations,
-    ["fleet.topology"]);
+test("an offline client reports its last-seen time before direct connect", () => {
+  const row = registry().clients[0]!;
+  const before = registry({ clients: [{ ...row, presence: "offline", lastSeenAtMs: 9_999 }] });
+  const output = discover(validInput({ before }) as any);
+  assert.equal(output.status, "client_offline");
+  assert.equal("lastSeenAtMs" in output && output.lastSeenAtMs, 9_999);
+  assert.deepEqual(output.operations, ["fleet.topology"]);
 });
 
 test("missing endpoint, unsupported capability, and registry URL substitution fail closed", () => {
@@ -671,14 +636,14 @@ test("request id and nonce bind one response and reject cached or cross-request 
   assert.deepEqual(shortNonce.operations, ["fleet.topology"]);
 });
 
-test("registry lease replacement or expiry during the probe invalidates the result", () => {
+test("endpoint generation change or client disconnect during a probe invalidates the result", () => {
   const changed = registry({
+    registryServerTimeMs: 10_001,
     clients: [{
       ...registry().clients[0]!,
       endpointLease: {
         leaseGeneration: 5,
         registrationObservedAtMs: 10_001,
-        leaseExpiresAtMs: 20_000,
       },
     }],
   });
@@ -688,11 +653,10 @@ test("registry lease replacement or expiry during the probe invalidates the resu
   assert.equal(changedOutput.applicationReadiness, "ready", "a valid describe remains a known observation when only the later registry recheck is stale");
   assert.equal("panes" in changedOutput, false);
 
-  const expiredAfter = registry({
-    registryServerTimeMs: 19_000,
-    clients: registry().clients,
+  const offline = registry({
+    clients: [{ ...registry().clients[0]!, presence: "offline", lastSeenAtMs: 10_000 }],
   });
-  assert.equal(discover(validInput({ after: expiredAfter }) as any).status, "stale_registration");
+  assert.equal(discover(validInput({ after: offline }) as any).status, "client_offline");
 });
 
 test("revision churn is a refusal with no partial topology", () => {

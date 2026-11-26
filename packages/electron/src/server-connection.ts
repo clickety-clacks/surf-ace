@@ -1,16 +1,12 @@
 import { recordClientDiagnostic } from "./client-flight-recorder.js";
-import type { ApplicationStateMutation } from "./persistence-write-readiness.js";
 import {
   createBonjourSurfAceDiscoveryService,
   type SurfAceDiscoveryEndpoint,
   type SurfAceDiscoveryService,
 } from "./surf-ace-discovery.js";
-import {
-  ConfiguredServerRegistration,
-  isControllerWireTimeout,
-  RegistrationStageTimeoutError,
-} from "./configured-server.js";
-import type { PaneLabelAllocation, SurfaceCore } from "./surface-core.js";
+import { ConfiguredServerRegistration, RegistryRegistrationRefused, type PendingCommittedRegistration } from "./configured-server.js";
+import type { PaneLabelAllocation, RegistryRegistrationState, SurfaceCore } from "./surface-core.js";
+import { reconnectDelayMs } from "../../protocol/src/connection-liveness.js";
 import type { RegistryIdentity } from "../../controller/src/wire.js";
 
 type SelectedRegistration = {
@@ -20,8 +16,6 @@ type SelectedRegistration = {
 };
 
 type CandidateRegistration = SelectedRegistration & { context: string; identity: RegistryIdentity };
-
-export const REGISTRATION_CYCLE_TIMEOUT_MS = 10_000;
 
 function describeError(error: unknown): string {
   if (!(error instanceof Error)) return String(error);
@@ -63,16 +57,20 @@ function sameRegistry(left: RegistryIdentity, right: RegistryIdentity): boolean 
 export class ServerConnection {
   private selected: SelectedRegistration | null = null;
   private status: "connected" | "connecting" | "disconnected" = "disconnected";
-  private timer: ReturnType<typeof setTimeout> | undefined;
-  private leaseTimer: ReturnType<typeof setTimeout> | undefined;
+  private running = false;
+  private retryAttempt = 0;
+  private lastReportedAt = 0;
+  private diagnostics: ReturnType<typeof setInterval> | undefined;
+  private commitPending = false;
+  private readonly pendingRegistration: { request: PendingCommittedRegistration | null } = { request: null };
+  private readonly pendingClaimsBySurface = new Map<string, number>();
+  private readonly connectedWaiters = new Set<() => void>();
   private recoveryTimer: ReturnType<typeof setTimeout> | undefined;
   private stopped = false;
   private browsing = false;
   private pending: Promise<void> | null = null;
   private cycleId = 0;
-  private currentStage = "registry discovery";
   private readonly cycleRegistrations = new Map<number, Set<ConfiguredServerRegistration>>();
-  private readonly cyclesWithRouteTimeouts = new Set<number>();
   private lastFailure: string | null = null;
   private lastReportedFailure: string | null = null;
   private readonly discovery: SurfAceDiscoveryService;
@@ -83,19 +81,27 @@ export class ServerConnection {
     clientId: string;
     core: SurfaceCore;
     persist: () => Promise<void>;
-    canPersistRegistration?: () => boolean;
-    openApplicationStateMutations?: () => ApplicationStateMutation[];
+    committedState?: () => RegistryRegistrationState;
+    onClaimStatusChange?: (surfaceId: string) => void;
     onError?: (error: unknown) => void;
     discovery?: SurfAceDiscoveryService;
     registryRebindWaitMs?: number;
-    requestTimeoutMs?: number;
-    registrationCycleTimeoutMs?: number;
   }) {
     this.discovery = options.discovery ?? createBonjourSurfAceDiscoveryService({ timeoutMs: 1500 });
   }
 
+  get connectionStatus() {
+    return this.status;
+  }
+
   private setStatus(status: "connected" | "connecting" | "disconnected"): void {
     this.status = status;
+    if (status === "connected") {
+      clearInterval(this.diagnostics);
+      this.diagnostics = undefined;
+      for (const resolve of this.connectedWaiters) resolve();
+      this.connectedWaiters.clear();
+    }
     for (const surface of this.options.core.listSurfaces()) {
       this.options.core.setConnectionBar(surface.surfaceId, status, this.lastFailure);
     }
@@ -109,13 +115,18 @@ export class ServerConnection {
     if (cycle !== undefined && !this.isCurrentCycle(cycle)) return;
     failures.push(message);
     if (visible && !this.selected) {
-      this.lastFailure = message;
+      this.lastFailure ??= `registry unreachable: ${message}`;
       this.setStatus("connecting");
     }
-    if (this.lastReportedFailure !== message) {
-      this.lastReportedFailure = message;
-      this.options.onError?.(new Error(message));
-    }
+    this.logFailure(message);
+  }
+
+  private logFailure(message: string): void {
+    const now = Date.now();
+    if (this.lastReportedFailure === message && now - this.lastReportedAt < 60_000) return;
+    this.lastReportedFailure = message;
+    this.lastReportedAt = now;
+    this.options.onError?.(new Error(message));
   }
 
   private clearFailure(): void {
@@ -127,107 +138,96 @@ export class ServerConnection {
     cycle: number,
     address: string,
   ): ConfiguredServerRegistration {
-    let registration: ConfiguredServerRegistration;
-    registration = new ConfiguredServerRegistration(
+    const registration = new ConfiguredServerRegistration(
       address,
       this.options.clientId,
       this.options.core,
       this.options.persist,
-      this.options.onError,
-      this.options.requestTimeoutMs ?? 2000,
-      this.options.directEndpoint ?? null,
-      (stage) => {
-        if (this.isCurrentCycle(cycle) || this.selected?.registration === registration) this.currentStage = stage;
+      (error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        if (message === "registry store not responding" || message === "registry store unavailable") {
+          this.lastFailure = message;
+          this.setStatus(this.status);
+        }
+        this.logFailure(message);
       },
+      this.options.directEndpoint ?? null,
+      undefined,
+      this.options.committedState,
+      this.pendingRegistration,
     );
+    registration.onClose(() => {
+      registration.abandon();
+      if (this.selected?.registration !== registration) return;
+      this.selected = null;
+      this.reportOffline("registry unreachable");
+      this.scheduleRecovery();
+    });
     const registrations = this.cycleRegistrations.get(cycle) ?? new Set<ConfiguredServerRegistration>();
     registrations.add(registration);
     this.cycleRegistrations.set(cycle, registrations);
     return registration;
   }
 
-  private isStallTimeout(error: unknown): boolean {
-    return isControllerWireTimeout(error) || error instanceof RegistrationStageTimeoutError;
-  }
-
-  private reportStall(error: unknown, cycle: number): void {
-    if (!this.isCurrentCycle(cycle)) return;
-    const stage = error instanceof RegistrationStageTimeoutError ? error.stage : this.currentStage;
-    this.abandonCycle(cycle, new Error(`registry_cycle_timed_out:${stage}`));
-  }
-
-  private abandonCycle(cycle: number, error: Error): void {
-    if (!this.isCurrentCycle(cycle)) return;
-    this.cycleId += 1;
-    clearTimeout(this.leaseTimer);
-    const registrations = this.cycleRegistrations.get(cycle) ?? new Set<ConfiguredServerRegistration>();
-    this.cycleRegistrations.delete(cycle);
-    for (const registration of registrations) registration.abandon();
-    this.selected?.registration.abandon();
-    this.selected = null;
-    this.lastFailure = error.message;
+  private reportOffline(cause: string): void {
+    this.lastFailure = cause;
     this.setStatus("disconnected");
-    if (this.lastReportedFailure !== error.message) {
-      this.lastReportedFailure = error.message;
-      this.options.onError?.(error);
-    }
-    this.scheduleRecovery();
+    this.logFailure(cause);
+    if (this.diagnostics || !this.running || this.stopped) return;
+    this.diagnostics = setInterval(() => {
+      if (this.status !== "connected" && this.lastFailure) {
+        this.options.onError?.(new Error(this.lastFailure));
+      }
+    }, 60_000);
   }
 
   private scheduleRecovery(): void {
-    if (this.stopped || this.recoveryTimer) return;
+    if (this.stopped || !this.running || this.recoveryTimer) return;
+    const attempt = this.retryAttempt++;
+    const delay = reconnectDelayMs(attempt);
     this.recoveryTimer = setTimeout(() => {
       this.recoveryTimer = undefined;
-      if (!this.stopped) void this.synchronize().catch(() => undefined);
-    }, 100);
+      recordClientDiagnostic("info", "registry", "registry_reconnect_attempt", { attempt, delay_ms: delay });
+      void this.synchronize().catch(() => undefined);
+    }, delay);
   }
 
-  private leaseIsFresh(): boolean {
-    const lease = this.options.core.registryEndpointLease();
-    return lease === null || Date.now() < lease.leaseExpiresAtMs;
-  }
-
-  private armLeaseExpiry(): void {
-    clearTimeout(this.leaseTimer);
-    if (this.status !== "connected" || !this.selected) return;
-    const lease = this.options.core.registryEndpointLease();
-    if (!lease) return;
-    const expire = (): void => {
-      if (this.stopped || this.status !== "connected" || !this.selected) return;
-      const current = this.options.core.registryEndpointLease();
-      if (!current || current.leaseGeneration !== lease.leaseGeneration) return;
-      const remaining = current.leaseExpiresAtMs - Date.now();
-      if (remaining > 0) {
-        this.leaseTimer = setTimeout(expire, Math.min(remaining, 2_147_000_000));
-        return;
-      }
-      this.lastFailure = "registry_lease_expired";
-      this.setStatus("disconnected");
-      const error = new Error("registry_lease_expired");
-      if (this.lastReportedFailure !== error.message) {
-        this.lastReportedFailure = error.message;
-        this.options.onError?.(error);
-      }
-      this.scheduleRecovery();
-    };
-    this.leaseTimer = setTimeout(expire, Math.min(
-      Math.max(0, lease.leaseExpiresAtMs - Date.now()),
-      2_147_000_000,
-    ));
+  labelClaimPending(surfaceId: string): boolean {
+    return this.pendingClaimsBySurface.has(surfaceId);
   }
 
   async claimPaneLabel(surfaceId: string, paneId: number, paneLineageId: string): Promise<PaneLabelAllocation> {
-    if (this.status !== "connected" || !this.selected) throw new Error("allocator_unavailable");
-    if (this.options.core.locklessAuthority.listPendingPaneReleases().length > 0 ||
-        this.options.core.locklessAuthority.listPendingWindowReleases().length > 0) {
-      throw new Error("allocator_release_pending");
+    this.pendingClaimsBySurface.set(surfaceId, (this.pendingClaimsBySurface.get(surfaceId) ?? 0) + 1);
+    this.options.onClaimStatusChange?.(surfaceId);
+    try {
+      return await this.sendPaneClaim(surfaceId, paneId, paneLineageId);
+    } finally {
+      const pending = this.pendingClaimsBySurface.get(surfaceId) ?? 1;
+      if (pending === 1) this.pendingClaimsBySurface.delete(surfaceId);
+      else this.pendingClaimsBySurface.set(surfaceId, pending - 1);
+      this.options.onClaimStatusChange?.(surfaceId);
     }
-    const registration = this.selected.registration;
-    const allocation = await registration.claimPaneLabel(surfaceId, paneId, paneLineageId);
-    if (this.status !== "connected" || this.selected?.registration !== registration || !this.leaseIsFresh()) {
-      throw new Error("allocator_unavailable");
+  }
+
+  private async sendPaneClaim(surfaceId: string, paneId: number, paneLineageId: string): Promise<PaneLabelAllocation> {
+    for (;;) {
+      if (this.stopped) throw new Error("allocator_unavailable");
+      if (this.status !== "connected" || !this.selected) {
+        if (!this.running) throw new Error("allocator_unavailable");
+        await new Promise<void>((resolve) => this.connectedWaiters.add(resolve));
+        continue;
+      }
+      if (this.options.core.locklessAuthority.listPendingPaneReleases().length > 0 ||
+          this.options.core.locklessAuthority.listPendingWindowReleases().length > 0) {
+        throw new Error("allocator_release_pending");
+      }
+      const registration = this.selected.registration;
+      try {
+        return await registration.claimPaneLabel(surfaceId, paneId, paneLineageId);
+      } catch (error) {
+        if (this.selected?.registration === registration && registration.isOpen()) throw error;
+      }
     }
-    return allocation;
   }
 
   async preparePaneLabelClaim(): Promise<void> {
@@ -240,56 +240,32 @@ export class ServerConnection {
     }
   }
 
+  registrationStateCommitted(): void {
+    this.commitPending = true;
+    if (this.pending || !this.selected || this.stopped) return;
+    this.commitPending = false;
+    void this.synchronize().catch(() => undefined);
+  }
+
   synchronize(): Promise<void> {
     if (this.stopped) return Promise.resolve();
     if (this.pending) return this.pending;
-    if (this.options.canPersistRegistration && !this.options.canPersistRegistration()) {
-      const message = "registry_registration_waiting_for_local_persistence";
-      if (!this.selected || !this.leaseIsFresh()) {
-        this.lastFailure = message;
-        this.setStatus("disconnected");
-      }
-      if (this.lastReportedFailure !== message) {
-        this.lastReportedFailure = message;
-        recordClientDiagnostic("warn", "registry", message, {
-          open_mutations: JSON.stringify(this.options.openApplicationStateMutations?.() ?? []),
-        });
-        this.options.onError?.(new Error(message));
-      }
-      return Promise.reject(new Error(message));
-    }
     clearTimeout(this.recoveryTimer);
     this.recoveryTimer = undefined;
     const cycle = ++this.cycleId;
-    this.currentStage = "registry discovery";
     const registrations = new Set<ConfiguredServerRegistration>();
     this.cycleRegistrations.set(cycle, registrations);
     if (this.selected) registrations.add(this.selected.registration);
-    let timeout: ReturnType<typeof setTimeout> | undefined;
-    const deadline = new Promise<never>((_resolve, reject) => {
-      timeout = setTimeout(
-        () => reject(new RegistrationStageTimeoutError(this.currentStage)),
-        this.options.registrationCycleTimeoutMs ?? REGISTRATION_CYCLE_TIMEOUT_MS,
-      );
-    });
-    const work = this.runSynchronization(cycle);
-    const run = Promise.race([work, deadline]).catch((error: unknown) => {
-      if (this.isStallTimeout(error)) this.reportStall(error, cycle);
-      else if (this.isCurrentCycle(cycle) && !this.selected) this.setStatus("disconnected");
-      throw error;
-    }).finally(() => {
-      clearTimeout(timeout);
-      this.cycleRegistrations.delete(cycle);
-      const routeTimedOut = this.cyclesWithRouteTimeouts.delete(cycle);
-      if (this.pending === run) this.pending = null;
-      if (this.isCurrentCycle(cycle) && this.status === "connected") this.armLeaseExpiry();
-      else if (!this.stopped && cycle !== this.cycleId && this.status === "disconnected" && !this.selected) {
-        this.scheduleRecovery();
-      } else if (!this.stopped && this.isCurrentCycle(cycle) && routeTimedOut && this.status === "disconnected") {
-        // A request timeout may be recoverable through another route in this
-        // cycle. If no route succeeds, keep autonomous retry alive.
+    const run = this.runSynchronization(cycle).catch((error) => {
+      if (this.isCurrentCycle(cycle) && !this.selected) {
+        this.reportOffline(this.lastFailure ?? "registry unreachable");
         this.scheduleRecovery();
       }
+      throw error;
+    }).finally(() => {
+      this.cycleRegistrations.delete(cycle);
+      if (this.pending === run) this.pending = null;
+      if (this.commitPending && this.selected) this.registrationStateCommitted();
     });
     this.pending = run;
     return run;
@@ -299,6 +275,7 @@ export class ServerConnection {
     if (!this.isCurrentCycle(cycle)) return;
     if (!this.selected || this.status !== "connected") this.setStatus("connecting");
     const failures: string[] = [];
+    let refused = false;
     const visited = new Set<string>();
 
     if (this.selected) {
@@ -306,14 +283,12 @@ export class ServerConnection {
       try {
         await current.registration.synchronize();
         if (!this.isCurrentCycle(cycle)) return;
-        if (!this.leaseIsFresh()) throw new RegistrationStageTimeoutError("registry lease");
+        this.retryAttempt = 0;
         this.clearFailure();
         this.setStatus("connected");
         return;
       } catch (error) {
-        if (error instanceof RegistrationStageTimeoutError) throw error;
         visited.add(current.address);
-        if (isControllerWireTimeout(error)) this.cyclesWithRouteTimeouts.add(cycle);
         await current.registration.stop();
         if (!this.isCurrentCycle(cycle)) return;
         this.selected = null;
@@ -327,7 +302,6 @@ export class ServerConnection {
       addresses.push({ address: this.options.configuredAddress, configured: true, context: "configured registry" });
     }
 
-    this.currentStage = "registry discovery";
     try {
       if (!this.browsing) {
         await this.discovery.start();
@@ -397,20 +371,11 @@ export class ServerConnection {
     let firstForeign: CandidateRegistration | null = null;
     const adopt = async (candidate: CandidateRegistration, allowRebind: boolean): Promise<boolean> => {
       try {
-        candidate.registration.onClose(() => {
-          if (this.selected?.registration === candidate.registration) {
-            clearTimeout(this.leaseTimer);
-            this.lastFailure = "registry_connection_closed";
-            this.setStatus("disconnected");
-            this.scheduleRecovery();
-          }
-        });
         await candidate.registration.synchronize({
           allowRebind,
           expectedIdentity: candidate.identity,
         });
         if (!this.isCurrentCycle(cycle)) { candidate.registration.abandon(); return false; }
-        if (!this.leaseIsFresh()) throw new RegistrationStageTimeoutError("registry lease");
         const previous = this.selected;
         this.selected = {
           address: candidate.address,
@@ -422,6 +387,7 @@ export class ServerConnection {
           if (!this.isCurrentCycle(cycle)) return false;
         }
         firstForeign = null;
+        this.retryAttempt = 0;
         this.clearFailure();
         this.setStatus("connected");
         await previous?.registration.stop();
@@ -433,8 +399,7 @@ export class ServerConnection {
         }
         return true;
       } catch (error) {
-        if (error instanceof RegistrationStageTimeoutError) throw error;
-        if (isControllerWireTimeout(error)) this.cyclesWithRouteTimeouts.add(cycle);
+        if (error instanceof RegistryRegistrationRefused) refused = true;
         await candidate.registration.stop();
         if (!this.isCurrentCycle(cycle)) return false;
         this.reportFailure(`${candidate.context} ${candidate.address} failed: ${describeError(error)}`, !this.selected, failures, cycle);
@@ -475,19 +440,6 @@ export class ServerConnection {
         else await registration.stop();
         registration = null;
       } catch (error) {
-        if (isControllerWireTimeout(error) && this.currentStage === "registry identity request") {
-          await registration?.stop();
-          if (!this.isCurrentCycle(cycle)) return;
-          registration = null;
-          this.reportFailure(
-            `${route.context} ${route.address} identity probe timed out at ${this.currentStage}: ${describeError(error)}`,
-            true,
-            failures,
-            cycle,
-          );
-          continue;
-        }
-        if (this.isStallTimeout(error)) throw error;
         await registration?.stop();
         if (!this.isCurrentCycle(cycle)) return;
         this.reportFailure(`${route.context} ${route.address} identity probe failed: ${describeError(error)}`, true, failures, cycle);
@@ -530,7 +482,6 @@ export class ServerConnection {
               break;
             }
           } catch (error) {
-            if (this.isStallTimeout(error)) throw error;
             if (!this.isCurrentCycle(cycle)) return;
             // A failed probe during the bounded wait does not make a foreign identity eligible.
           } finally {
@@ -551,35 +502,22 @@ export class ServerConnection {
     const message = failures.length > 0
       ? `no_surf_ace_server: ${failures.join("; ")}`
       : "no_surf_ace_server: no valid _surf-ace._tcp role=server ws=/ws advertisement";
-    this.lastFailure = message;
-    this.setStatus("disconnected");
-    if (this.lastReportedFailure !== message) {
-      this.lastReportedFailure = message;
-      this.options.onError?.(new Error(message));
-    }
+    const cause = refused ? "registry refused registration" : "registry unreachable";
+    this.reportOffline(`${cause}: ${message}`);
     throw new Error(message);
   }
 
   start(): void {
-    const tick = async () => {
-      try { await this.synchronize(); } catch (error) {
-        if (!this.isStallTimeout(error)) {
-          const message = error instanceof Error ? error.message : String(error);
-          if (this.lastReportedFailure !== message) {
-            this.lastReportedFailure = message;
-            this.options.onError?.(error);
-          }
-        }
-      }
-      if (!this.stopped) this.timer = setTimeout(() => void tick(), 2000);
-    };
-    void tick();
+    if (this.running || this.stopped) return;
+    this.running = true;
+    void this.synchronize().catch(() => undefined);
   }
 
   async stop(): Promise<void> {
     this.stopped = true;
-    clearTimeout(this.timer);
-    clearTimeout(this.leaseTimer);
+    clearInterval(this.diagnostics);
+    for (const resolve of this.connectedWaiters) resolve();
+    this.connectedWaiters.clear();
     clearTimeout(this.recoveryTimer);
     this.cycleId += 1;
     for (const registrations of this.cycleRegistrations.values()) {

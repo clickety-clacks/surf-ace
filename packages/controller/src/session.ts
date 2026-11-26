@@ -16,9 +16,10 @@ import type {
   LocklessSurfaceOpenIntent,
   LocklessSurfaceRestoreIntent,
 } from "@surf-ace/protocol";
-import { SURF_ACE_LOCKLESS_V1_CAPABILITY } from "@surf-ace/protocol";
+import { reconnectDelayMs, SURF_ACE_LOCKLESS_V1_CAPABILITY } from "@surf-ace/protocol";
 
 import { ControllerIdentity } from "./identity.js";
+import { observeClientOffline, type ControllerRegistryTarget } from "./registry-presence.js";
 import {
   BoundedControllerProjection,
   type LocalConsumableRead,
@@ -66,6 +67,7 @@ export type LocklessControllerSessionOptions = {
   projection: BoundedControllerProjection;
   protocolFeatures?: string[];
   reconnectInitialDelayMs?: number;
+  registryTarget?: ControllerRegistryTarget;
   onConsumableAvailable?: (scopeId: LocklessScopeId) => void;
   onConsumableAcknowledged?: (scopeId: LocklessScopeId) => void;
   preflightComplete?: boolean;
@@ -131,9 +133,12 @@ export class LocklessControllerSession {
   private controllerInstanceId: ControllerInstanceId | null = null;
   private eventWork: Promise<void> = Promise.resolve();
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
-  private lastHeartbeatSuccessAt = 0;
+  private missedHeartbeats = 0;
+  private heartbeatPending = false;
+  private transportGeneration = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnecting = false;
+  private paired = false;
   private stopRequested = false;
   private unsubscribeClose: (() => void) | null = null;
   private readonly repairScopes = new Set<LocklessScopeId>();
@@ -144,6 +149,7 @@ export class LocklessControllerSession {
   async start(): Promise<LocklessPairResult> {
     this.stopRequested = false;
     try {
+      await this.checkRegistryPresence();
       return await this.startInternal();
     } catch (error) {
       this.stopRequested = true;
@@ -153,6 +159,7 @@ export class LocklessControllerSession {
   }
 
   private async startInternal(): Promise<LocklessPairResult> {
+    const generation = ++this.transportGeneration;
     await this.options.projection.start();
     await this.options.projection.markUnsynchronized();
     for (const scopeId of this.options.projection.scopeIds()) {
@@ -160,8 +167,10 @@ export class LocklessControllerSession {
     }
     this.controllerInstanceId = await this.options.identity.loadOrCreate();
     await this.options.wire.connect();
+    let transportClosed = false;
     this.unsubscribeClose = this.options.wire.onClose?.(() => {
-      void this.handleTransportLoss();
+      transportClosed = true;
+      if (this.paired) void this.handleTransportLoss();
     }) ?? null;
     if (!this.options.preflightComplete) {
       const advertised = responsePayload(
@@ -232,6 +241,10 @@ export class LocklessControllerSession {
       this.repairScopes.delete(snapshot.scopeId);
     }
     await this.flushAcknowledgements();
+    if (transportClosed || this.stopRequested || generation !== this.transportGeneration) {
+      throw new Error("controller_wire_closed");
+    }
+    this.paired = true;
     this.backgroundInterval = setInterval(() => {
       this.backgroundWork = this.backgroundWork.then(async () => {
         await this.runBackgroundMaintenance();
@@ -242,10 +255,11 @@ export class LocklessControllerSession {
         }
       });
     }, 250);
-    this.lastHeartbeatSuccessAt = Date.now();
+    this.missedHeartbeats = 0;
+    this.heartbeatPending = false;
     this.heartbeatInterval = setInterval(() => {
       void this.sendHeartbeat();
-    }, this.options.heartbeatIntervalMs ?? 15_000);
+    }, this.options.heartbeatIntervalMs ?? 10_000);
     return {
       capabilities: record(payload.capabilities),
       controllerInstanceId: this.controllerInstanceId,
@@ -274,6 +288,8 @@ export class LocklessControllerSession {
   }
 
   private async cleanupTransport(): Promise<void> {
+    this.transportGeneration += 1;
+    this.paired = false;
     if (this.backgroundInterval) {
       clearInterval(this.backgroundInterval);
       this.backgroundInterval = null;
@@ -291,14 +307,30 @@ export class LocklessControllerSession {
     await this.options.wire.close();
   }
 
+  hasLiveDirectSession(): boolean {
+    return this.paired;
+  }
+
+  private async checkRegistryPresence(): Promise<void> {
+    const target = this.options.registryTarget;
+    if (this.paired || !target) return;
+    const offline = await observeClientOffline(target);
+    if (offline && !this.paired) throw offline;
+  }
+
+  private async requestDirect(op: string, payload?: unknown): Promise<ControllerWireEnvelope> {
+    await this.checkRegistryPresence();
+    return await this.options.wire.request(op, payload);
+  }
+
   async listSurfaces(): Promise<unknown> {
     return responsePayload(
-      await this.options.wire.request(LOCKLESS_WIRE_OPS.listSurfaces),
+      await this.requestDirect(LOCKLESS_WIRE_OPS.listSurfaces),
     );
   }
 
   async requestPublic(op: string, payload: unknown = {}): Promise<unknown> {
-    return responsePayload(await this.options.wire.request(op, payload));
+    return responsePayload(await this.requestDirect(op, payload));
   }
 
   async push(
@@ -306,7 +338,7 @@ export class LocklessControllerSession {
     input: LocklessContentPush,
   ): Promise<unknown> {
     return responsePayload(
-      await this.options.wire.request(LOCKLESS_WIRE_OPS.contentPush, {
+      await this.requestDirect(LOCKLESS_WIRE_OPS.contentPush, {
         surfaceId,
         ...input,
       }),
@@ -318,7 +350,7 @@ export class LocklessControllerSession {
     input: LocklessPaneSplitIntent,
   ): Promise<unknown> {
     return responsePayload(
-      await this.options.wire.request(LOCKLESS_WIRE_OPS.splitPane, {
+      await this.requestDirect(LOCKLESS_WIRE_OPS.splitPane, {
         surfaceId,
         ...input,
       }),
@@ -330,7 +362,7 @@ export class LocklessControllerSession {
     input: LocklessPaneCloseIntent,
   ): Promise<unknown> {
     return responsePayload(
-      await this.options.wire.request(LOCKLESS_WIRE_OPS.closePane, {
+      await this.requestDirect(LOCKLESS_WIRE_OPS.closePane, {
         surfaceId,
         ...input,
       }),
@@ -342,7 +374,7 @@ export class LocklessControllerSession {
     input: LocklessPaneRestoreIntent,
   ): Promise<unknown> {
     return responsePayload(
-      await this.options.wire.request(LOCKLESS_WIRE_OPS.restorePane, {
+      await this.requestDirect(LOCKLESS_WIRE_OPS.restorePane, {
         surfaceId,
         ...input,
       }),
@@ -351,7 +383,7 @@ export class LocklessControllerSession {
 
   async openSurface(input: LocklessSurfaceOpenIntent): Promise<unknown> {
     return responsePayload(
-      await this.options.wire.request(LOCKLESS_WIRE_OPS.openSurface, input),
+      await this.requestDirect(LOCKLESS_WIRE_OPS.openSurface, input),
     );
   }
 
@@ -360,7 +392,7 @@ export class LocklessControllerSession {
     input: Omit<LocklessSurfaceCloseIntent, "surfaceId">,
   ): Promise<unknown> {
     return responsePayload(
-      await this.options.wire.request(LOCKLESS_WIRE_OPS.closeSurface, {
+      await this.requestDirect(LOCKLESS_WIRE_OPS.closeSurface, {
         surfaceId,
         ...input,
       }),
@@ -372,7 +404,7 @@ export class LocklessControllerSession {
     input: Omit<LocklessSurfaceRestoreIntent, "tombstoneId">,
   ): Promise<unknown> {
     return responsePayload(
-      await this.options.wire.request(LOCKLESS_WIRE_OPS.restoreSurface, {
+      await this.requestDirect(LOCKLESS_WIRE_OPS.restoreSurface, {
         tombstoneId,
         ...input,
       }),
@@ -466,31 +498,32 @@ export class LocklessControllerSession {
   }
 
   private async sendHeartbeat(): Promise<void> {
-    if (
-      Date.now() - this.lastHeartbeatSuccessAt >=
-        (this.options.heartbeatTimeoutMs ?? 45_000)
-    ) {
-      this.options.wire.abort?.();
-      await this.handleTransportLoss();
-      return;
-    }
+    if (this.heartbeatPending || this.stopRequested || this.reconnecting) return;
+    this.heartbeatPending = true;
+    const generation = this.transportGeneration;
+    let deadline: ReturnType<typeof setTimeout> | undefined;
     try {
-      const nonce = `hb_${Date.now()}`;
-      const payload = responsePayload(
-        await this.options.wire.request("heartbeat.ping", { nonce }),
-      );
-      if (payload.nonce !== nonce) {
-        throw new Error("lockless_heartbeat_nonce_mismatch");
-      }
-      this.lastHeartbeatSuccessAt = Date.now();
+      const nonce = `hb_${randomUUID()}`;
+      const response = await Promise.race([
+        this.options.wire.request("heartbeat.ping", { nonce }),
+        new Promise<never>((_, reject) => {
+          deadline = setTimeout(() => reject(new Error("heartbeat_pong_missing")),
+            this.options.heartbeatTimeoutMs ?? 3_000);
+        }),
+      ]);
+      const payload = responsePayload(response);
+      if (payload.nonce !== nonce) throw new Error("lockless_heartbeat_nonce_mismatch");
+      if (generation === this.transportGeneration) this.missedHeartbeats = 0;
     } catch {
-      if (
-        Date.now() - this.lastHeartbeatSuccessAt >=
-          (this.options.heartbeatTimeoutMs ?? 45_000)
-      ) {
+      if (generation !== this.transportGeneration || this.stopRequested) return;
+      this.missedHeartbeats += 1;
+      if (this.missedHeartbeats >= 2) {
         this.options.wire.abort?.();
         await this.handleTransportLoss();
       }
+    } finally {
+      clearTimeout(deadline);
+      if (generation === this.transportGeneration) this.heartbeatPending = false;
     }
   }
 
@@ -499,6 +532,8 @@ export class LocklessControllerSession {
       return;
     }
     this.reconnecting = true;
+    this.transportGeneration += 1;
+    this.paired = false;
     if (this.backgroundInterval) {
       clearInterval(this.backgroundInterval);
       this.backgroundInterval = null;
@@ -519,24 +554,24 @@ export class LocklessControllerSession {
   }
 
   private scheduleReconnect(
-    delayMs = this.options.reconnectInitialDelayMs ?? 2_000,
+    attempt = 0,
   ): void {
     if (this.stopRequested || this.reconnectTimer) {
       return;
     }
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
-      void this.reconnect(delayMs);
-    }, delayMs);
+      void this.reconnect(attempt);
+    }, reconnectDelayMs(attempt, this.options.reconnectInitialDelayMs));
   }
 
-  private async reconnect(previousDelayMs: number): Promise<void> {
+  private async reconnect(attempt: number): Promise<void> {
     try {
       await this.startInternal();
       this.reconnecting = false;
     } catch {
       await this.cleanupTransport().catch(() => {});
-      this.scheduleReconnect(Math.min(previousDelayMs * 2, 30_000));
+      this.scheduleReconnect(attempt + 1);
     }
   }
 }

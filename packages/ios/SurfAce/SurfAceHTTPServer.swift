@@ -150,7 +150,7 @@ struct HTTPServerResponse {
 }
 
 actor SurfAceWebSocket {
-    enum Message {
+    enum Message: Sendable {
         case text(String)
         case close(code: UInt16?, reason: String?)
     }
@@ -160,6 +160,11 @@ actor SurfAceWebSocket {
     private var buffer = Data()
     private var closeHandlers: [@Sendable () -> Void] = []
     private var isClosed = false
+    private var reader: Task<Void, Never>?
+    private var keepalive: Task<Void, Never>?
+    private var pingSequence: UInt64 = 0
+    private var outstandingPing: Data?
+    private var missedPongs = 0
     private let maxFrameBytes = 16 * 1024 * 1024
 
     init(connection: NWConnection, queue: DispatchQueue) {
@@ -181,8 +186,54 @@ actor SurfAceWebSocket {
         }
     }
 
+    func messages(
+        interceptText: @escaping @Sendable (String) async -> Bool = { _ in false }
+    ) -> AsyncThrowingStream<Message, Error> {
+        let (stream, continuation) = AsyncThrowingStream<Message, Error>.makeStream()
+        reader = Task {
+            do {
+                while !Task.isCancelled, let message = try await receive() {
+                    if case .text(let text) = message, await interceptText(text) { continue }
+                    continuation.yield(message)
+                }
+                continuation.finish()
+            } catch {
+                continuation.finish(throwing: error)
+            }
+        }
+        keepalive = Task { [weak self] in
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(15)) } catch { return }
+                guard let self else { return }
+                await self.pingPeer()
+            }
+        }
+        return stream
+    }
+
+    private func pingPeer() {
+        guard !isClosed else { return }
+        if outstandingPing != nil {
+            missedPongs += 1
+            if missedPongs >= 2 {
+                terminate()
+                return
+            }
+        }
+        pingSequence &+= 1
+        var payload = Data()
+        payload.appendUInt64(pingSequence)
+        outstandingPing = payload
+        try? enqueueFrame(opcode: 0x9, payload: payload)
+    }
+
+    private func terminate() {
+        markClosedIfNeeded()
+        connection.cancel()
+    }
+
     func receive() async throws -> Message? {
-        while true {
+        while !isClosed {
             if let parsed = try parseNextFrame() {
                 switch parsed.opcode {
                 case 0x1:
@@ -191,12 +242,16 @@ actor SurfAceWebSocket {
                     }
                     return .text(text)
                 case 0x8:
-                    markClosedIfNeeded()
+                    terminate()
                     return .close(code: closeCode(from: parsed.payload), reason: closeReason(from: parsed.payload))
                 case 0x9:
-                    try await sendFrame(opcode: 0xA, payload: parsed.payload)
+                    try enqueueFrame(opcode: 0xA, payload: parsed.payload)
                     continue
                 case 0xA:
+                    if parsed.payload == outstandingPing {
+                        outstandingPing = nil
+                        missedPongs = 0
+                    }
                     continue
                 default:
                     throw SurfAceWebSocketError.unsupportedFrame
@@ -213,6 +268,7 @@ actor SurfAceWebSocket {
                 throw SurfAceWebSocketError.protocolViolation("WebSocket frame exceeded max size")
             }
         }
+        return nil
     }
 
     func send(text: String) async throws {
@@ -224,21 +280,34 @@ actor SurfAceWebSocket {
             connection.cancel()
             return
         }
-        markClosedIfNeeded()
         var payload = Data()
         payload.appendUInt16(code)
         if !reason.isEmpty {
             payload.append(reason)
         }
         _ = try? await sendFrame(opcode: 0x8, payload: payload)
-        connection.cancel()
+        terminate()
     }
 
     private func sendFrame(opcode: UInt8, payload: Data) async throws {
-        guard !isClosed else {
-            throw SurfAceWebSocketError.connectionClosed
+        guard !isClosed else { throw SurfAceWebSocketError.connectionClosed }
+        let frame = encodeFrame(opcode: opcode, payload: payload)
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            connection.send(content: frame, completion: .contentProcessed { error in
+                if let error { continuation.resume(throwing: error) }
+                else { continuation.resume() }
+            })
         }
+    }
 
+    private func enqueueFrame(opcode: UInt8, payload: Data) throws {
+        guard !isClosed else { throw SurfAceWebSocketError.connectionClosed }
+        connection.send(content: encodeFrame(opcode: opcode, payload: payload), completion: .contentProcessed { [weak self] error in
+            if error != nil { Task { await self?.terminate() } }
+        })
+    }
+
+    private func encodeFrame(opcode: UInt8, payload: Data) -> Data {
         var frame = Data()
         frame.append(0x80 | (opcode & 0x0F))
 
@@ -255,20 +324,14 @@ actor SurfAceWebSocket {
 
         frame.append(payload)
 
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            connection.send(content: frame, completion: .contentProcessed { error in
-                if let error {
-                    continuation.resume(throwing: error)
-                } else {
-                    continuation.resume()
-                }
-            })
-        }
+        return frame
     }
 
     private func markClosedIfNeeded() {
         guard !isClosed else { return }
         isClosed = true
+        keepalive?.cancel()
+        reader?.cancel()
         let handlers = closeHandlers
         closeHandlers.removeAll()
         for handler in handlers {

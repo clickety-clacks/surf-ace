@@ -45,40 +45,7 @@ protocol SurfAceAnnotationWireTransport: AnyObject {
     func close()
 }
 
-@MainActor
-private final class SurfAceAnnotationURLSessionTransport: SurfAceAnnotationWireTransport {
-    private let session: URLSession
-    private let socket: URLSessionWebSocketTask
-
-    init(url: URL) {
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = 5
-        session = URLSession(configuration: configuration)
-        socket = session.webSocketTask(with: url)
-        socket.resume()
-    }
-
-    func exchange(_ data: Data) async throws -> Data {
-        let timeout = Task { [socket] in
-            try? await Task.sleep(for: .seconds(5))
-            if !Task.isCancelled { socket.cancel(with: .goingAway, reason: nil) }
-        }
-        defer { timeout.cancel() }
-        try await socket.send(.data(data))
-        switch try await socket.receive() {
-        case .data(let value): return value
-        case .string(let value): return Data(value.utf8)
-        @unknown default: throw SurfAceAnnotationWireError.invalidResponse
-        }
-    }
-
-    func close() {
-        socket.cancel(with: .normalClosure, reason: nil)
-        session.invalidateAndCancel()
-    }
-}
-
-extension SurfAceLocalNumericRegistrationWebSocket: SurfAceAnnotationWireTransport {}
+extension SurfAceRegistrationWebSocket: SurfAceAnnotationWireTransport {}
 
 /// Drains committed authority-state records to a configured or verified selected registry.
 @MainActor
@@ -94,6 +61,7 @@ final class SurfAceAnnotationPublisher {
     private var helloDone = false
     private var active: Task<Void, Never>?
     private var retry: Task<Void, Never>?
+    private var retryAttempt = 0
     private var wanted = false
     private var stopped = false
     private var lastSurfaceId: String?
@@ -109,12 +77,7 @@ final class SurfAceAnnotationPublisher {
         }
         self.adapter = adapter
         self.endpoint = endpoint
-        self.makeTransport = makeTransport ?? { url in
-            if SurfAceRegistrationEndpoint.usesLocalNumericTransport(url) {
-                return SurfAceLocalNumericRegistrationWebSocket(url: url)
-            }
-            return SurfAceAnnotationURLSessionTransport(url: url)
-        }
+        self.makeTransport = makeTransport ?? { SurfAceRegistrationWebSocket(url: $0) }
         self.onError = onError
         self.onDiagnostic = onDiagnostic
         self.headAcquisitionCompletionForTesting = headAcquisitionCompletionForTesting
@@ -141,7 +104,10 @@ final class SurfAceAnnotationPublisher {
         guard active == nil, retry == nil else { return }
         active = Task { [weak self] in
             guard let self else { return }
-            do { try await self.drain() }
+            do {
+                try await self.drain()
+                self.retryAttempt = 0
+            }
             catch {
                 self.disconnect()
                 self.emit("retry_scheduled", errorCode: Self.safeErrorCode(error))
@@ -171,8 +137,10 @@ final class SurfAceAnnotationPublisher {
 
     private func scheduleRetry() {
         guard !stopped, retry == nil else { return }
+        let delay = surfAceRegistryRetryDelay(retryAttempt)
+        retryAttempt += 1
         retry = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(2))
+            do { try await Task.sleep(for: delay) } catch { return }
             guard let self else { return }
             self.retry = nil
             self.notify()

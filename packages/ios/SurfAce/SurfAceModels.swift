@@ -1420,6 +1420,13 @@ final class SurfAceSurfaceModel {
     var providerTopologyInitialized = false
     var connectionBarState: SurfAceConnectionBarState = .disconnected
     var centralConnectionError: String?
+    var registryClaimsPending = 0
+    var registryLabelWritesPending = 0
+    var registryLabelStatus: String? {
+        if registryLabelWritesPending > 0 { return "Label claim waiting on local persistence" }
+        if registryClaimsPending > 0 { return "Label claim pending" }
+        return nil
+    }
     var viewportSize = CGSize(width: 1, height: 1)
     var viewportScale: CGFloat = 1
     var surfaceEpoch = 0

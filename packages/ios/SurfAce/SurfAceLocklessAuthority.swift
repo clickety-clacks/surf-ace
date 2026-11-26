@@ -1815,16 +1815,30 @@ struct SurfAceLocklessGenerationStore: Sendable {
 final class SurfAceLocklessTransactionCoordinator: @unchecked Sendable {
     private let queue = DispatchQueue(label: "co.clicketyclacks.SurfAce.lockless-authority")
     private var state: SurfAceLocklessAuthorityState
+    private let snapshotLock = NSLock()
+    private var committed: SurfAceLocklessAuthorityState
     private let store: SurfAceLocklessGenerationStore
 
     init(state: SurfAceLocklessAuthorityState, store: SurfAceLocklessGenerationStore) throws {
         try state.validate()
         self.state = state
+        self.committed = state
         self.store = store
     }
 
     convenience init(store: SurfAceLocklessGenerationStore) throws {
         try self.init(state: store.load() ?? .empty(), store: store)
+    }
+
+    // The write queue can be blocked in the store. Registry registration
+    // reads the last durable value without waiting for that queue.
+    func committedSnapshot() -> SurfAceLocklessAuthorityState {
+        snapshotLock.withLock { committed }
+    }
+
+    private func publishCommitted(_ state: SurfAceLocklessAuthorityState) {
+        self.state = state
+        snapshotLock.withLock { committed = state }
     }
 
     func snapshot() async -> SurfAceLocklessAuthorityState {
@@ -1849,7 +1863,7 @@ final class SurfAceLocklessTransactionCoordinator: @unchecked Sendable {
                         guard comparable == self.state else {
                             throw SurfAceRegistrationError.registryBindingPersistencePending
                         }
-                        self.state = stored
+                        self.publishCommitted(stored)
                     }
                     if stored?.unconfirmedMigration != self.state.unconfirmedMigration {
                         guard self.state.unconfirmedMigration == nil,
@@ -1859,7 +1873,7 @@ final class SurfAceLocklessTransactionCoordinator: @unchecked Sendable {
                               SurfAceProvisionedRegistryBinding.confirmedClaims(stored).isEmpty else {
                             throw SurfAceRegistrationError.registryBindingPersistencePending
                         }
-                        self.state = stored
+                        self.publishCommitted(stored)
                     }
                     continuation.resume(returning: self.state)
                 } catch {
@@ -1879,7 +1893,7 @@ final class SurfAceLocklessTransactionCoordinator: @unchecked Sendable {
                         throw SurfAceRegistrationError.registryBindingPersistencePending
                     }
                     try stored.validate()
-                    self.state = stored
+                    self.publishCommitted(stored)
                     continuation.resume(returning: stored)
                 } catch {
                     continuation.resume(throwing: error)
@@ -1900,7 +1914,7 @@ final class SurfAceLocklessTransactionCoordinator: @unchecked Sendable {
                           SurfAceProvisionedRegistryBinding.confirmedClaims(stored).isEmpty else {
                         throw SurfAceRegistrationError.registryBindingPersistencePending
                     }
-                    self.state = stored
+                    self.publishCommitted(stored)
                     continuation.resume(returning: stored)
                 } catch {
                     continuation.resume(throwing: error)
@@ -1931,7 +1945,7 @@ final class SurfAceLocklessTransactionCoordinator: @unchecked Sendable {
                     )
                     candidate.generation += 1
                     try self.store.save(candidate)
-                    self.state = candidate
+                    self.publishCommitted(candidate)
                     continuation.resume(returning: result)
                 } catch {
                     continuation.resume(throwing: error)

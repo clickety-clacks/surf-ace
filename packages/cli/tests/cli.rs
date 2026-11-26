@@ -667,7 +667,6 @@ fn discovery_client(
     surface_rows: Vec<Value>,
     generation: u64,
     registered_at: u64,
-    expires_at: u64,
     supports_describe: bool,
 ) -> Value {
     json!({
@@ -678,9 +677,10 @@ fn discovery_client(
         "registryIdentity": { "allocatorId": "alloc_fixture", "fleetId": "fleet_fixture" },
         "endpointLease": {
             "leaseGeneration": generation,
-            "registrationObservedAtMs": registered_at,
-            "leaseExpiresAtMs": expires_at
+            "registrationObservedAtMs": registered_at
         },
+        "presence": "online",
+        "lastSeenAtMs": null,
         "surfaces": surface_rows,
     })
 }
@@ -698,7 +698,6 @@ fn discovery_topology(clients: Vec<Value>, server_time_ms: u64) -> Value {
         "clients": clients,
         "registryIdentity": { "allocatorId": "alloc_fixture", "fleetId": "fleet_fixture" },
         "registryServerTimeMs": server_time_ms,
-        "maxEndpointLeaseMs": 15_000,
         "registrationReady": true,
     })
 }
@@ -775,7 +774,7 @@ fn help_and_schema_are_json_and_do_not_require_operational_arguments() {
     assert!(discovery_limits.iter().any(|limit| limit
         .as_str()
         .is_some_and(|text| text.contains("fleet-list")
-            && text.contains("does not prove endpoint reachability"))));
+            && text.contains("Direct endpoint reachability is a separate observation"))));
     assert!(discovery_limits
         .iter()
         .any(|limit| limit.as_str().is_some_and(|text| {
@@ -1193,7 +1192,6 @@ fn window_describe_reads_a_leased_endpoint_before_pairing_and_rechecks_the_regis
             vec![discovery_surface(surface_id, "a")],
             9,
             now - 100,
-            now + 10_000,
             true,
         )],
         now,
@@ -1205,7 +1203,6 @@ fn window_describe_reads_a_leased_endpoint_before_pairing_and_rechecks_the_regis
             vec![discovery_surface(surface_id, "a")],
             9,
             now - 100,
-            now + 12_000,
             true,
         )],
         now + 5,
@@ -1265,8 +1262,8 @@ fn window_describe_reads_a_leased_endpoint_before_pairing_and_rechecks_the_regis
         9
     );
     assert_eq!(
-        result["result"]["registryAfter"]["endpointLease"]["leaseExpiresAtMs"],
-        now + 12_000
+        result["result"]["registryAfter"]["endpointLease"]["registrationObservedAtMs"],
+        now - 100
     );
     assert_eq!(
         result["result"]["surfaceObservation"]["surfaceSetRevision"],
@@ -1342,7 +1339,6 @@ fn window_describe_resolves_a_leased_window_when_pre_pair_describe_is_unsupporte
             vec![discovery_surface(surface_id, "a")],
             9,
             now - 100,
-            now + 10_000,
             supports_describe.unwrap_or(false),
         );
         if supports_describe.is_none() {
@@ -1457,7 +1453,6 @@ fn window_describe_accepts_restored_pane_id_zero() {
             vec![discovery_surface(surface_id, "a")],
             9,
             now - 100,
-            now + 10_000,
             true,
         )],
         now,
@@ -1507,7 +1502,6 @@ fn window_describe_rejects_missing_ambiguous_and_stale_registry_rows() {
                     vec![discovery_surface("sf_window_unconfigured", "a")],
                     2,
                     now - 10,
-                    now + 10_000,
                     false,
                 )],
                 now,
@@ -1523,7 +1517,6 @@ fn window_describe_rejects_missing_ambiguous_and_stale_registry_rows() {
                         vec![discovery_surface("sf_window_one", "a")],
                         2,
                         now - 10,
-                        now + 10_000,
                         true,
                     ),
                     discovery_client(
@@ -1532,7 +1525,6 @@ fn window_describe_rejects_missing_ambiguous_and_stale_registry_rows() {
                         vec![discovery_surface("sf_window_two", "a")],
                         3,
                         now - 10,
-                        now + 10_000,
                         true,
                     ),
                 ],
@@ -1540,17 +1532,21 @@ fn window_describe_rejects_missing_ambiguous_and_stale_registry_rows() {
             ),
         ),
         (
-            "stale_registration",
+            "client_offline",
             discovery_topology(
-                vec![discovery_client(
+                vec![{
+                    let mut client = discovery_client(
                     &id_a,
                     Some("ws://127.0.0.1:1"),
                     vec![discovery_surface("sf_window_stale", "a")],
                     2,
                     now - 20_000,
-                    now - 1,
                     true,
-                )],
+                );
+                    client["presence"] = json!("offline");
+                    client["lastSeenAtMs"] = json!(now - 1);
+                    client
+                }],
                 now,
             ),
         ),
@@ -1561,7 +1557,57 @@ fn window_describe_rejects_missing_ambiguous_and_stale_registry_rows() {
         assert!(!output.status.success());
         let result: Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(result["error"]["code"], expected_code);
+        if expected_code == "client_offline" {
+            assert_eq!(result["error"]["details"]["clientId"], id_a);
+            assert_eq!(result["error"]["details"]["lastSeenAtMs"], now - 1);
+        }
         assert_eq!(server.join().unwrap().len(), 1);
+    }
+}
+
+#[test]
+fn push_classifies_only_a_confirmed_offline_direct_target() {
+    let now = epoch_ms();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("ws://{}/ws", listener.local_addr().unwrap());
+    drop(listener);
+    let client_id = "6".repeat(64);
+
+    for (presence, surface, expected) in [
+        ("offline", "sf_target", "client_offline"),
+        ("online", "sf_target", "transport_error"),
+        ("offline", "sf_another", "transport_error"),
+    ] {
+        let mut client = discovery_client(
+            &client_id,
+            Some(&endpoint),
+            vec![discovery_surface(surface, "a")],
+            4,
+            now - 10,
+            true,
+        );
+        client["presence"] = json!(presence);
+        client["lastSeenAtMs"] = if presence == "offline" { json!(now - 1) } else { Value::Null };
+        let (registry, server) = spawn_registry_server(
+            discovery_topology(vec![client], now), "fleet.topology", true,
+        );
+        let temp = TempDir::new().unwrap();
+        let output = run_native_cli(&[
+            "--state-root", temp.path().to_str().unwrap(), "--endpoint", &endpoint,
+            "--surface-id", "sf_target", "--registry", &registry, "--product-label", "Proof controller",
+            "--input-json", r#"{"paneId":1,"contentId":"candidate","contentType":"markdown","content":{"markdown":"test"}}"#,
+            "push",
+        ]);
+        assert!(!output.status.success());
+        let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(result["error"]["code"], expected, "{result}");
+        if expected == "client_offline" {
+            assert_eq!(result["error"]["details"]["clientId"], client_id);
+            assert_eq!(result["error"]["details"]["lastSeenAtMs"], now - 1);
+        } else {
+            assert!(result["error"]["details"]["message"].as_str().unwrap().starts_with("before_send:reachability:"));
+        }
+        assert_eq!(server.join().unwrap()["op"], "fleet.topology");
     }
 }
 
@@ -1577,7 +1623,6 @@ fn window_describe_requires_selected_row_identity_to_match_registry_identity() {
             vec![discovery_surface("sf_row_missing_identity", "a")],
             3,
             now - 10,
-            now + 10_000,
             true,
         )],
         now,
@@ -1594,7 +1639,6 @@ fn window_describe_requires_selected_row_identity_to_match_registry_identity() {
             vec![discovery_surface("sf_row_foreign_allocator", "a")],
             3,
             now - 10,
-            now + 10_000,
             true,
         )],
         now,
@@ -1608,7 +1652,6 @@ fn window_describe_requires_selected_row_identity_to_match_registry_identity() {
             vec![discovery_surface("sf_row_foreign_fleet", "a")],
             3,
             now - 10,
-            now + 10_000,
             true,
         )],
         now,
@@ -1639,7 +1682,6 @@ fn window_describe_requires_selected_row_identity_to_match_registry_identity() {
             vec![discovery_surface(surface_id, "a")],
             4,
             now - 10,
-            now + 10_000,
             true,
         )],
         now,
@@ -1652,7 +1694,7 @@ fn window_describe_requires_selected_row_identity_to_match_registry_identity() {
     assert!(!output.status.success());
     let result: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(
-        result["error"]["code"], "stale_registration",
+        result["error"]["code"], "revision_churn",
         "result={result}"
     );
     assert_eq!(
@@ -1685,7 +1727,6 @@ fn window_describe_rejects_unreachable_endpoints_and_stale_rechecks() {
             vec![discovery_surface("sf_unreachable", "a")],
             5,
             now - 10,
-            now + 10_000,
             true,
         )],
         now,
@@ -1715,7 +1756,6 @@ fn window_describe_rejects_unreachable_endpoints_and_stale_rechecks() {
             vec![discovery_surface(surface_id, "a")],
             5,
             now - 10,
-            now + 10_000,
             true,
         )],
         now,
@@ -1727,7 +1767,6 @@ fn window_describe_rejects_unreachable_endpoints_and_stale_rechecks() {
             vec![discovery_surface(surface_id, "a")],
             6,
             now - 10,
-            now + 10_000,
             true,
         )],
         now + 1,
@@ -1736,7 +1775,7 @@ fn window_describe_rejects_unreachable_endpoints_and_stale_rechecks() {
     let stale = run_window_describe(&registry, "a");
     assert!(!stale.status.success());
     let stale_json: Value = serde_json::from_slice(&stale.stdout).unwrap();
-    assert_eq!(stale_json["error"]["code"], "stale_registration");
+    assert_eq!(stale_json["error"]["code"], "revision_churn");
     assert_eq!(
         stale_json["error"]["details"]["transportReachability"]["status"],
         "reachable"
@@ -1776,7 +1815,6 @@ fn window_describe_preserves_transport_and_unknown_readiness_when_recheck_fails(
                 vec![discovery_surface(surface_id, "a")],
                 5,
                 now - 10,
-                now + 10_000,
                 true,
             )],
             now,
@@ -1785,7 +1823,7 @@ fn window_describe_preserves_transport_and_unknown_readiness_when_recheck_fails(
             "stale" => {
                 let mut changed = first.clone();
                 changed["clients"][0]["endpointLease"]["leaseGeneration"] = json!(6);
-                (changed, true, "stale_registration")
+                (changed, true, "revision_churn")
             }
             "ambiguous" => (
                 discovery_topology(
@@ -1796,7 +1834,6 @@ fn window_describe_preserves_transport_and_unknown_readiness_when_recheck_fails(
                             vec![discovery_surface(surface_id, "a")],
                             5,
                             now - 10,
-                            now + 10_000,
                             true,
                         ),
                         discovery_client(
@@ -1805,14 +1842,13 @@ fn window_describe_preserves_transport_and_unknown_readiness_when_recheck_fails(
                             vec![discovery_surface("sf_ambiguous_recheck", "a")],
                             7,
                             now - 10,
-                            now + 10_000,
                             true,
                         ),
                     ],
                     now,
                 ),
                 true,
-                "stale_registration",
+                "revision_churn",
             ),
             _ => (json!({}), false, "registry_unavailable"),
         };
@@ -1874,7 +1910,6 @@ fn window_describe_serialized_discovery_errors_match_advertised_error_schema() {
             vec![discovery_surface(surface_id, "a")],
             5,
             now - 10,
-            now + 10_000,
             true,
         )],
         now,
@@ -1921,7 +1956,6 @@ fn window_describe_exposes_a_bounded_server_not_ready_message() {
                 vec![discovery_surface(surface_id, "a")],
                 5,
                 now - 10,
-                now + 10_000,
                 true,
             )],
             now,
@@ -1970,7 +2004,6 @@ fn window_describe_rejects_a_different_client_or_surface_but_keeps_registry_mism
             vec![discovery_surface(surface_id, "a")],
             7,
             now - 10,
-            now + 10_000,
             true,
         )],
         now,
@@ -1996,7 +2029,6 @@ fn window_describe_rejects_a_different_client_or_surface_but_keeps_registry_mism
             vec![discovery_surface(surface_id, "a")],
             7,
             now - 10,
-            now + 10_000,
             true,
         )],
         now,
@@ -2047,7 +2079,6 @@ fn window_describe_rejects_a_different_client_or_surface_but_keeps_registry_mism
             vec![discovery_surface(surface_id, "a")],
             7,
             now - 10,
-            now + 10_000,
             true,
         )],
         now,
@@ -2131,7 +2162,6 @@ fn window_describe_keeps_topology_when_saved_registry_state_is_unavailable_stale
                 vec![discovery_surface(surface_id, "a")],
                 8,
                 now - 10,
-                now + 10_000,
                 true,
             )],
             now,
@@ -2198,7 +2228,6 @@ fn window_describe_salvages_unreadable_saved_fields_and_keeps_fleet_list_availab
             vec![discovery_surface(surface_id, "a")],
             8,
             now - 10,
-            now + 10_000,
             true,
         )],
         now,
@@ -2295,7 +2324,6 @@ fn window_describe_salvages_unreadable_saved_fields_and_keeps_fleet_list_availab
             vec![discovery_surface(surface_id, "a")],
             8,
             now - 10,
-            now + 10_000,
             true,
         )],
         now,
@@ -2375,7 +2403,6 @@ fn window_describe_keeps_reachable_transport_separate_from_unresponsive_applicat
             vec![discovery_surface(surface_id, "a")],
             7,
             now - 10,
-            now + 10_000,
             true,
         )],
         now,

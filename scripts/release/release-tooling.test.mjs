@@ -1398,6 +1398,7 @@ test("Tightbeam manifest assembles the six hosted assets including the exact ski
   assert.deepEqual(manifest.assets.map(({ name }) => name), TIGHTBEAM.assets);
   const migrationBytes = await fs.readFile(path.join(repository, "packages/allocator/sql/005_window_label_reuse.sql"));
   const disableMigrationBytes = await fs.readFile(path.join(repository, "packages/allocator/sql/006_disable_window_label_reuse.sql"));
+  const registrationProjectionMigration = await fs.readFile(path.join(repository, "packages/allocator/sql/007_registration_projection.sql"));
   assert.deepEqual(manifest.serverPackage.schemaMigrations, [{
     path: "schemas/allocator/005_window_label_reuse.sql",
     sha256: createHash("sha256").update(migrationBytes).digest("hex"),
@@ -1406,6 +1407,10 @@ test("Tightbeam manifest assembles the six hosted assets including the exact ski
     path: "schemas/allocator/006_disable_window_label_reuse.sql",
     sha256: createHash("sha256").update(disableMigrationBytes).digest("hex"),
     sizeBytes: disableMigrationBytes.length,
+  }, {
+    path: "schemas/allocator/007_registration_projection.sql",
+    sha256: createHash("sha256").update(registrationProjectionMigration).digest("hex"),
+    sizeBytes: registrationProjectionMigration.length,
   }]);
   const skillRecord = manifest.assets.find(({ name }) => name === TIGHTBEAM_SKILL_ASSET);
   const skillDigest = createHash("sha256").update(toolingSkillBytes).digest("hex");
@@ -1695,6 +1700,7 @@ test("Tightbeam Linux stage contains only the standalone CLI, callable server cl
     "packages/allocator/sql/004_pane_label_reuse.sql": "-- pane generation migration\n",
     "packages/allocator/sql/005_window_label_reuse.sql": "-- window generation migration\n",
     "packages/allocator/sql/006_disable_window_label_reuse.sql": "-- window reuse operator disable\n",
+    "packages/allocator/sql/007_registration_projection.sql": "-- registration inventory migration\n",
   };
   for (const [relative, contents] of Object.entries(files)) {
     const file = path.join(source, relative);

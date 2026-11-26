@@ -28,9 +28,9 @@ import {
   loadPersistentStateFile,
   writePersistentStateFile,
 } from "../src/persistent-state-file.js";
-import { SurfaceWsServer } from "../src/ws-server.js";
+import { SurfaceWsServer, type SurfaceWsServerOptions } from "../src/ws-server.js";
 import { ConfiguredServerRegistration } from "../src/configured-server.js";
-import { PersistenceWriteReadiness } from "../src/persistence-write-readiness.js";
+import { PersistenceWriteReadiness, surfaceBlockerLimitation } from "../src/persistence-write-readiness.js";
 import { PublicControllerWireClient } from "../../controller/src/wire.js";
 
 let nextPort = 25901;
@@ -319,7 +319,6 @@ function describeFixture() {
   core.setRegistryEndpointLease({
     leaseGeneration: 17,
     registrationObservedAtMs: now - 1_000,
-    leaseExpiresAtMs: now + 14_000,
   });
   return { binding, core, surface };
 }
@@ -342,6 +341,7 @@ function describeServer(
   core: SurfaceCore,
   isApplicationStateReady: () => boolean = () => true,
   clientId: string | null = core.registryBinding()?.clientId ?? null,
+  getSurfaceBlockers?: SurfaceWsServerOptions["getSurfaceBlockers"],
 ) {
   return new SurfaceWsServer({
     bindAddress: "127.0.0.1",
@@ -350,6 +350,7 @@ function describeServer(
     compositorSocketPath: null,
     core,
     endpointName: "Surf Ace fixture",
+    getSurfaceBlockers,
     hostName: "localhost",
     isApplicationStateReady,
     port: nextPort++,
@@ -404,6 +405,34 @@ test("surface.describe returns revision-bound topology before pairing without ad
       Object.keys(pane).sort().join(",") === "contentObservation,paneId,paneLabel"));
     assert.equal(JSON.stringify(response).includes("currentTarget"), false);
     assert.equal(JSON.stringify(response).includes("paneLineageId"), false);
+  } finally {
+    socket?.close();
+    await server.stop();
+  }
+});
+
+test("surface.describe keeps committed topology readable during a backlog of saves", async () => {
+  const fixture = describeFixture();
+  const expected = fixture.core.pairState(fixture.surface.surfaceId);
+  const oldestSave = { operation: "saving application state", startedAtMs: 1_790_000_000_000 };
+  const split = { operation: "pane.split", startedAtMs: oldestSave.startedAtMs + 1 };
+  const saves = Array.from({ length: 1_500 }, (_, index) => ({
+    operation: oldestSave.operation, startedAtMs: oldestSave.startedAtMs + index + 1,
+  }));
+  const server = describeServer(fixture.core, () => false, fixture.binding.clientId,
+    () => [...saves, split, oldestSave]);
+  let socket: WebSocket | undefined;
+  try {
+    await server.start();
+    socket = await connect(`ws://127.0.0.1:${server.port}/ws`);
+    const response = await request(socket, "surface.describe", describePayload(fixture));
+    assert.equal(response.ok, true, JSON.stringify(response));
+    assert.deepEqual(response.payload.layout, expected.layout);
+    assert.equal(response.payload.panes.length, expected.panes.length);
+    assert.deepEqual(response.payload.applicationReadiness, {
+      status: "degraded",
+      limitationCodes: ["application_state_unverified", surfaceBlockerLimitation(oldestSave), surfaceBlockerLimitation(split)],
+    });
   } finally {
     socket?.close();
     await server.stop();
@@ -573,7 +602,6 @@ test("surface.describe keeps saved windows observable and readable during uncert
   core.setRegistryEndpointLease({
     leaseGeneration: 17,
     registrationObservedAtMs: Date.now() - 1_000,
-    leaseExpiresAtMs: Date.now() + 14_000,
   });
   let durableState = core.getPersistentState();
   const port = nextPort++;
@@ -703,7 +731,6 @@ test("surface.describe reports readiness degradation until durable persistence c
       fixture.core.setRegistryEndpointLease({
         leaseGeneration: 18,
         registrationObservedAtMs: Date.now(),
-        leaseExpiresAtMs: Date.now() + 14_000,
       });
       await readiness.track(async () => {
         signalStarted();
@@ -735,7 +762,6 @@ test("surface.describe reports readiness degradation until durable persistence c
       fixture.core.setRegistryEndpointLease({
         leaseGeneration: 19,
         registrationObservedAtMs: Date.now(),
-        leaseExpiresAtMs: Date.now() + 14_000,
       });
       await readiness.track(async () => {
         signalFailureStarted();
@@ -2516,7 +2542,7 @@ test("new panes stay unnumbered when the registry rejects a pane claim and recov
   await new Promise<void>((resolve) => registry.once("listening", resolve));
   const registryAddress = `ws://127.0.0.1:${(registry.address() as AddressInfo).port}/`;
   const clientRegistration = new ConfiguredServerRegistration(
-    registryAddress, "allocator-recovery-client", core, async () => {}, () => {}, 500,
+    registryAddress, "allocator-recovery-client", core, async () => {},
   );
   try {
     assert.equal((await pair(controller, "allocator-recovery-controller", surface.surfaceId)).ok, true);
@@ -3903,8 +3929,6 @@ test("explicit window close sends an allocator-compatible windowGeneration relea
     clientId,
     core,
     async () => {},
-    () => {},
-    500,
   );
   const registrationRequests: Array<{ socket: WebSocket; message: any }> = [];
   const registrationWaiters: Array<(request: { socket: WebSocket; message: any }) => void> = [];
@@ -4964,7 +4988,6 @@ test("surface.describe returns topology when saved registry binding or lease is 
         state.registryEndpointLease = {
           leaseGeneration: 0,
           registrationObservedAtMs: Date.now() - 1_000,
-          leaseExpiresAtMs: Date.now() + 14_000,
         };
       },
       expectedClientId: "a".repeat(64),
@@ -4972,21 +4995,6 @@ test("surface.describe returns topology when saved registry binding or lease is 
       expectedRegistryIdentityUnavailable: false,
       expectedEndpointLeaseUnavailable: true,
       expectedLimitations: ["endpoint_lease_unavailable"],
-    },
-    {
-      name: "lease-expired-matching",
-      prepare: (state: ReturnType<ReturnType<typeof describeFixture>["core"]["getPersistentState"]>) => {
-        state.registryEndpointLease = {
-          leaseGeneration: 17,
-          registrationObservedAtMs: Date.now() - 20_000,
-          leaseExpiresAtMs: Date.now() - 1_000,
-        };
-      },
-      expectedClientId: "a".repeat(64),
-      expectedLeaseGeneration: 17,
-      expectedRegistryIdentityUnavailable: false,
-      expectedEndpointLeaseUnavailable: false,
-      expectedLimitations: ["endpoint_lease_expired"],
     },
     {
       name: "stale",
@@ -4999,14 +5007,13 @@ test("surface.describe returns topology when saved registry binding or lease is 
         state.registryEndpointLease = {
           leaseGeneration: 16,
           registrationObservedAtMs: Date.now() - 20_000,
-          leaseExpiresAtMs: Date.now() - 1_000,
         };
       },
       expectedClientId: "a".repeat(64),
       expectedLeaseGeneration: 16,
       expectedRegistryIdentityUnavailable: false,
       expectedEndpointLeaseUnavailable: false,
-      expectedLimitations: ["registry_binding_stale", "endpoint_lease_expired", "endpoint_lease_stale"],
+      expectedLimitations: ["registry_binding_stale", "endpoint_lease_stale"],
     },
   ] as const;
 

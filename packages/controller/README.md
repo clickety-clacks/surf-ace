@@ -52,3 +52,11 @@ It uses Homebrew PostgreSQL 16 on macOS and `/usr/lib/postgresql/16/bin` on Linu
 pnpm --filter @surf-ace/allocator test
 pnpm --filter @surf-ace/controller test
 ```
+
+For a direct `LocklessControllerSession` or `MultiSurfaceController`, pass
+`registryTarget: { url, clientId }` when you know the client's registry and
+identity. Before opening a direct session or issuing a request without one,
+the controller checks that client's presence. An offline row produces
+`ClientOfflineError` with code `client_offline`, `clientId`, and
+`lastSeenAtMs` (null when unknown). A paired direct session continues to serve
+requests during a registry outage or when the registry reports it offline.

@@ -1239,6 +1239,8 @@ async function packagedV023MigrationSmoke(options: Options) {
     await command(path.join(cluster.postgresBin, "psql"), [cluster.adminUrl, "-v", "ON_ERROR_STOP=1", "-f", paneGenerationMigration]);
     await command(path.join(cluster.postgresBin, "psql"), [cluster.adminUrl, "-v", "ON_ERROR_STOP=1", "-f", windowGenerationMigration]);
     await command(path.join(cluster.postgresBin, "psql"), [cluster.adminUrl, "-v", "ON_ERROR_STOP=1", "-f", windowDisableMigration]);
+    await command(path.join(cluster.postgresBin, "psql"), [cluster.adminUrl, "-v", "ON_ERROR_STOP=1", "-f",
+      path.join(options.candidateRoot, "schemas/allocator/007_registration_projection.sql")]);
     const annotationRows = await postgresQuery(cluster.adminUrl, `
       SELECT epoch, head_sequence::text AS "headSequence"
       FROM surf_ace_allocator.annotation_journal_head WHERE fleet_id = $1
@@ -1330,6 +1332,8 @@ async function freshInstallMain(options: Options) {
       path.join(options.candidateRoot, "schemas/allocator/005_window_label_reuse.sql")]);
     await command(path.join(cluster.postgresBin, "psql"), [cluster.adminUrl, "-v", "ON_ERROR_STOP=1", "-f",
       path.join(options.candidateRoot, "schemas/allocator/006_disable_window_label_reuse.sql")]);
+    await command(path.join(cluster.postgresBin, "psql"), [cluster.adminUrl, "-v", "ON_ERROR_STOP=1", "-f",
+      path.join(options.candidateRoot, "schemas/allocator/007_registration_projection.sql")]);
     const initialization = await PostgresCustodyAdapter.initializeAbsentFleet(cluster.config, "alloc_release-smoke");
     await initialization.release();
     registryProcess = await startPackagedServer(registryLauncher, registryConfig, cluster.root, "fresh-install-registry");

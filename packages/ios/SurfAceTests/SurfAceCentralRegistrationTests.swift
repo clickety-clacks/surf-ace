@@ -15,6 +15,8 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         var failRegistrationOnce = false
         var fails = false
         var closed = false
+        var isOpen: Bool { !closed }
+        var onLoss: (@MainActor () -> Void)?
         var clients: [String] = []
         var label = "z"
         var assignsPaneLabels = false
@@ -52,6 +54,7 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         var identityError: Error?
 
         func readRegistryIdentity() async throws -> SurfAceRegistryIdentity {
+            closed = false
             identityReads += 1
             if let identityError { throw identityError }
             return registryIdentity
@@ -212,7 +215,16 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
             }
         }
 
-        func close() { closed = true }
+        func close() {
+            guard !closed else { return }
+            closed = true
+            onLoss?()
+        }
+
+        func setLivenessHandlers(onLoss: @escaping @MainActor () -> Void,
+                                 onRetry: @escaping @MainActor (String) -> Void) {
+            self.onLoss = onLoss
+        }
     }
 
     private final class DiscoveryBrowser: NetServiceBrowser {
@@ -576,7 +588,7 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         let remoteTransport = SurfAceRegistrationTransportFactory.make(url: remote)
         let hostnameTransport = SurfAceRegistrationTransportFactory.make(url: hostname)
         let secureTransport = SurfAceRegistrationTransportFactory.make(url: secure)
-        XCTAssertTrue(localTransport is SurfAceLocalNumericRegistrationWebSocket)
+        XCTAssertTrue(localTransport is SurfAceRegistrationWebSocket)
         XCTAssertTrue(remoteTransport is SurfAceRegistrationWebSocket)
         XCTAssertTrue(hostnameTransport is SurfAceRegistrationWebSocket)
         XCTAssertTrue(secureTransport is SurfAceRegistrationWebSocket)
@@ -584,6 +596,93 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         remoteTransport.close()
         hostnameTransport.close()
         secureTransport.close()
+    }
+
+    func testRunningRegistrationReconnectsWhileLabelApplicationIsUnsettled() async throws {
+        let endpoint = try XCTUnwrap(URL(string: "ws://127.0.0.1:29989/ws"))
+        let first = Transport()
+        let replacement = Transport()
+        let waiting = expectation(description: "label application started")
+        let reconnected = expectation(description: "replacement connection admitted")
+        var waitingWrites: [CheckedContinuation<Void, Never>] = []
+        var holdsWrites = true
+        var transportsMade = 0
+        let registration = SurfAceCentralRegistration(
+            clientId: "pending-label-client", configured: endpoint, discover: { [] },
+            makeTransport: { _ in
+                transportsMade += 1
+                return transportsMade == 1 ? first : replacement
+            },
+            snapshot: { [.init(surfaceId: "sf_pending", panes: [])] },
+            apply: { _, _ in XCTFail("expected registration subset application") },
+            verifyRegistry: { _, _ in },
+            applyReplySubset: { _, _, _ in
+                if holdsWrites {
+                    await withCheckedContinuation { continuation in
+                        waitingWrites.append(continuation)
+                        if waitingWrites.count == 1 { waiting.fulfill() }
+                    }
+                }
+                return false
+            },
+            onVerifiedEndpoint: { _ in
+                if transportsMade == 2 { reconnected.fulfill() }
+            }
+        )
+        defer {
+            registration.stop()
+            holdsWrites = false
+            for write in waitingWrites { write.resume() }
+        }
+
+        registration.start()
+        await fulfillment(of: [waiting], timeout: 5)
+        XCTAssertEqual(registration.status, .connected)
+        let claim = try await registration.claimPaneLabel(surfaceId: "sf_pending", paneId: 1, paneLineageId: "pl_pending")
+        XCTAssertEqual(claim.paneLabel, 700)
+        first.close()
+        XCTAssertEqual(registration.status, .disconnected)
+        await fulfillment(of: [reconnected], timeout: 5)
+        XCTAssertEqual(registration.status, .connected)
+        XCTAssertTrue(replacement.isOpen)
+        XCTAssertEqual(replacement.registrationInputs.count, 1)
+        XCTAssertFalse(waitingWrites.isEmpty, "the replacement registers before the local write is released")
+    }
+
+    func testRunningRegistrationRejectsCandidateClosedAfterItsReply() async throws {
+        let endpoint = try XCTUnwrap(URL(string: "ws://127.0.0.1:29988/ws"))
+        let first = Transport()
+        let replacement = Transport()
+        first.onInputRegister = { _ in first.close() }
+        let connected = expectation(description: "live candidate selected")
+        var transportsMade = 0
+        var publishedSelections = 0
+        let registration = SurfAceCentralRegistration(
+            clientId: "closed-candidate-client", configured: endpoint, discover: { [] },
+            makeTransport: { _ in
+                transportsMade += 1
+                return transportsMade == 1 ? first : replacement
+            },
+            snapshot: { [.init(surfaceId: "sf_closed", panes: [])] },
+            apply: { _, _ in }, verifyRegistry: { _, _ in },
+            onVerifiedEndpoint: { _ in
+                publishedSelections += 1
+                XCTAssertEqual(replacement.registrationInputs.count, 1,
+                               "the first transport closed before selection")
+                connected.fulfill()
+            }
+        )
+        defer {
+            registration.stop()
+            first.onInputRegister = nil
+        }
+
+        registration.start()
+        await fulfillment(of: [connected], timeout: 5)
+        XCTAssertFalse(first.isOpen)
+        XCTAssertTrue(replacement.isOpen)
+        XCTAssertEqual(registration.status, .connected)
+        XCTAssertEqual(publishedSelections, 1)
     }
 
     func testVerifiedEndpointWaitsForDiscoveryIdentityAndDurableApplyThenReconcilesReconnect() async throws {
@@ -2771,7 +2870,7 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
           "directEndpoint":"ws://192.168.50.135:19001/ws",
           "directEndpointSource":"client-reported",
           "prePairDescribeV1":false,
-          "endpointLease":{"leaseGeneration":41,"registrationObservedAtMs":1000,"leaseExpiresAtMs":2000}
+          "endpointLease":{"leaseGeneration":41,"registrationObservedAtMs":1000}
         }}
         """.utf8)
         let reply = try SurfAceRegistrationWire.registration(
@@ -2785,7 +2884,7 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         XCTAssertEqual(reply.projection.directEndpointSource, .clientReported)
         XCTAssertFalse(reply.projection.prePairDescribeV1)
         XCTAssertEqual(reply.projection.endpointLease, .init(
-            leaseGeneration: 41, registrationObservedAtMs: 1000, leaseExpiresAtMs: 2000
+            leaseGeneration: 41, registrationObservedAtMs: 1000
         ))
 
         let configuredInput = SurfAceRegistrationInput(
@@ -2851,13 +2950,13 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
           "prePairDescribeV1":false,
           "allocationGenerationV1":true,
           "windowGenerationV1":true,
-          "endpointLease":{"leaseGeneration":41,"registrationObservedAtMs":1000,"leaseExpiresAtMs":2000},
+          "endpointLease":{"leaseGeneration":41,"registrationObservedAtMs":1000},
           "completedPaneReleaseIds":[],
           "completedWindowReleaseIds":[]
         }}
         """.utf8)
 
-        let reply = try SurfAceLocalNumericRegistrationWebSocket.registrationReply(
+        let reply = try SurfAceRegistrationWebSocket.registrationReply(
             from: response,
             requestId: "local-register",
             clientId: "stable-client",
@@ -2868,7 +2967,7 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         XCTAssertEqual(reply.projection.directEndpoint, endpoint)
         XCTAssertEqual(reply.projection.directEndpointSource, .clientReported)
         XCTAssertEqual(reply.projection.endpointLease, .init(
-            leaseGeneration: 41, registrationObservedAtMs: 1000, leaseExpiresAtMs: 2000
+            leaseGeneration: 41, registrationObservedAtMs: 1000
         ))
         XCTAssertFalse(reply.warnings.contains("registration_endpoint_capability_mismatch"))
         XCTAssertFalse(reply.warnings.contains("registration_endpoint_source_mismatch"))
@@ -2940,7 +3039,7 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
           "directEndpoint":"ws://192.0.2.7:19001/ws",
           "directEndpointSource":"registry-observed",
           "prePairDescribeV1":false,
-          "endpointLease":{"leaseGeneration":41,"registrationObservedAtMs":1000,"leaseExpiresAtMs":2000}
+          "endpointLease":{"leaseGeneration":41,"registrationObservedAtMs":1000}
         }}
         """.utf8)
         let reply = try SurfAceRegistrationWire.registration(
@@ -2984,7 +3083,7 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
     func testRegistrationProjectionRequiresMatchingEndpointAndLeaseCapability() throws {
         let expected = SurfAceRegistryIdentity(allocatorId: "alloc_home", fleetId: "fleet-home")
         let endpoint = "wss://client.example/ws"
-        let leasedResponse = Data(#"{"id":"register-1","op":"client.register","ok":true,"payload":{"clientId":"stable-client","registryIdentity":{"allocatorId":"alloc_home","fleetId":"fleet-home"},"surfaces":[],"directEndpoint":"wss://client.example/ws","prePairDescribeV1":true,"allocationGenerationV1":false,"endpointLease":{"leaseGeneration":41,"registrationObservedAtMs":1000,"leaseExpiresAtMs":2000},"completedPaneReleaseIds":[]}}"#.utf8)
+        let leasedResponse = Data(#"{"id":"register-1","op":"client.register","ok":true,"payload":{"clientId":"stable-client","registryIdentity":{"allocatorId":"alloc_home","fleetId":"fleet-home"},"surfaces":[],"directEndpoint":"wss://client.example/ws","prePairDescribeV1":true,"allocationGenerationV1":false,"endpointLease":{"leaseGeneration":41,"registrationObservedAtMs":1000},"completedPaneReleaseIds":[]}}"#.utf8)
         let reply = try SurfAceRegistrationWire.registration(
             from: leasedResponse, requestId: "register-1", clientId: "stable-client",
             surfaces: [], expectedIdentity: expected,
@@ -2993,7 +3092,7 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
         XCTAssertEqual(reply.projection.directEndpoint, endpoint)
         XCTAssertTrue(reply.projection.prePairDescribeV1)
         XCTAssertEqual(reply.projection.endpointLease, .init(
-            leaseGeneration: 41, registrationObservedAtMs: 1000, leaseExpiresAtMs: 2000
+            leaseGeneration: 41, registrationObservedAtMs: 1000
         ))
 
         let unexpectedEndpoint = try SurfAceRegistrationWire.registration(
@@ -3069,11 +3168,10 @@ final class SurfAceCentralRegistrationTests: XCTestCase {
     func testRegistrationKeepsEndpointWhenLeaseIsMalformedButRejectsMalformedEndpoint() throws {
         let expected = SurfAceRegistryIdentity(allocatorId: "alloc_home", fleetId: "fleet-home")
         let cases: [(payload: String, endpointRemainsUsable: Bool)] = [
-            (#"{"directEndpoint":"wss://client.example/ws","prePairDescribeV1":false,"endpointLease":{"leaseGeneration":0,"registrationObservedAtMs":1000,"leaseExpiresAtMs":2000}}"#, true),
-            (#"{"directEndpoint":"wss://client.example/ws","prePairDescribeV1":false,"endpointLease":{"leaseGeneration":41,"registrationObservedAtMs":-1,"leaseExpiresAtMs":2000}}"#, true),
-            (#"{"directEndpoint":"wss://client.example/ws","prePairDescribeV1":false,"endpointLease":{"leaseGeneration":41,"registrationObservedAtMs":2000,"leaseExpiresAtMs":2000}}"#, true),
-            (#"{"directEndpoint":"wss://client.example/ws","prePairDescribeV1":false,"endpointLease":{"leaseGeneration":41,"registrationObservedAtMs":1000,"leaseExpiresAtMs":9007199254740992}}"#, true),
-            (#"{"directEndpoint":"wss://user:example@client.example/ws","prePairDescribeV1":false,"endpointLease":{"leaseGeneration":41,"registrationObservedAtMs":1000,"leaseExpiresAtMs":2000}}"#, false),
+            (#"{"directEndpoint":"wss://client.example/ws","prePairDescribeV1":false,"endpointLease":{"leaseGeneration":0,"registrationObservedAtMs":1000}}"#, true),
+            (#"{"directEndpoint":"wss://client.example/ws","prePairDescribeV1":false,"endpointLease":{"leaseGeneration":41,"registrationObservedAtMs":-1}}"#, true),
+            (#"{"directEndpoint":"wss://client.example/ws","prePairDescribeV1":false,"endpointLease":{"leaseGeneration":41,"registrationObservedAtMs":9007199254740992}}"#, true),
+            (#"{"directEndpoint":"wss://user:example@client.example/ws","prePairDescribeV1":false,"endpointLease":{"leaseGeneration":41,"registrationObservedAtMs":1000}}"#, false),
             (#"{"directEndpoint":"wss://client.example/ws","prePairDescribeV1":false,"endpointLease":null}"#, true),
         ]
         for (payloadFields, endpointRemainsUsable) in cases {

@@ -21,7 +21,6 @@ function serverForTopology(
     authority,
     custody,
     endpointLeases: {
-      maxEndpointLeaseMs: 5_000,
       serverTimeMs: () => 1234,
     },
     registeredClients: new Map(),

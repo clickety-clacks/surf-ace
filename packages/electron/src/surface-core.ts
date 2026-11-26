@@ -227,9 +227,33 @@ export type PersistentSurfaceState = {
   version: 1;
 };
 
+export function registryRegistrationState(
+  state: Pick<PersistentSurfaceState, "surfaces" | "lockless" | "registryBinding">,
+) {
+  return {
+    binding: state.registryBinding ? { ...state.registryBinding } : null,
+    pendingPaneReleases: structuredClone(state.lockless?.pendingPaneReleases ?? []),
+    pendingWindowReleases: structuredClone(state.lockless?.pendingWindowReleases ?? []),
+    surfaces: (state.surfaces ?? []).map((surface) => ({
+      surfaceId: surface.surfaceId,
+      windowLabel: surface.windowLabel,
+      windowGeneration: surface.windowAllocationGeneration ?? null,
+      panes: surface.panes.map((pane) => ({
+        paneId: String(pane.paneId),
+        paneLabel: pane.paneLabel,
+        paneLineageId: pane.paneLineageId,
+        allocationGeneration: pane.allocationGeneration ?? null,
+      })),
+    })),
+  };
+}
+
+export type RegistryRegistrationState = ReturnType<typeof registryRegistrationState>;
+
 export type PersistentSurfaceStateSnapshot = {
   annotationLocalSaveCandidates: ConfirmedAnnotationLocalSaveCandidate[];
   contents: string;
+  registration: RegistryRegistrationState;
 };
 
 export type PersistentRegistryBinding = {
@@ -241,7 +265,6 @@ export type PersistentRegistryBinding = {
 export type PersistentRegistryEndpointLease = {
   leaseGeneration: number;
   registrationObservedAtMs: number;
-  leaseExpiresAtMs: number;
 };
 
 export type ConfirmedRegistryClaim = {
@@ -1099,6 +1122,7 @@ export class SurfaceCore {
     return {
       annotationLocalSaveCandidates,
       contents: JSON.stringify(state, null, 2),
+      registration: registryRegistrationState(state),
     };
   }
 
@@ -1288,17 +1312,16 @@ export class SurfaceCore {
     const lease = this.persistentState.registryEndpointLease;
     if (!lease) return null;
     if (!Number.isSafeInteger(lease.leaseGeneration) || lease.leaseGeneration < 1 ||
-        !Number.isSafeInteger(lease.registrationObservedAtMs) || lease.registrationObservedAtMs < 0 ||
-        !Number.isSafeInteger(lease.leaseExpiresAtMs) || lease.leaseExpiresAtMs <= lease.registrationObservedAtMs) {
+        !Number.isSafeInteger(lease.registrationObservedAtMs) || lease.registrationObservedAtMs < 0) {
       throw new SurfaceCoreError("invalid_payload", "Stored registry endpoint lease is invalid");
     }
-    return structuredClone(lease);
+    const { leaseGeneration, registrationObservedAtMs } = lease;
+    return { leaseGeneration, registrationObservedAtMs };
   }
 
   setRegistryEndpointLease(lease: PersistentRegistryEndpointLease | null): void {
     if (lease && (!Number.isSafeInteger(lease.leaseGeneration) || lease.leaseGeneration < 1 ||
-        !Number.isSafeInteger(lease.registrationObservedAtMs) || lease.registrationObservedAtMs < 0 ||
-        !Number.isSafeInteger(lease.leaseExpiresAtMs) || lease.leaseExpiresAtMs <= lease.registrationObservedAtMs)) {
+        !Number.isSafeInteger(lease.registrationObservedAtMs) || lease.registrationObservedAtMs < 0)) {
       throw new SurfaceCoreError("invalid_payload", "Proposed registry endpoint lease is invalid");
     }
     this.persistentState.registryEndpointLease = lease ? structuredClone(lease) : null;
@@ -2155,17 +2178,13 @@ export class SurfaceCore {
 
   setConnectionBar(surfaceId: string, state: SurfaceState["connectionBar"], error?: string | null): void {
     const surface = this.getSurface(surfaceId);
-    const nextError = state === "connected" ? null : error === undefined ? surface.connectionError : error;
-    if (surface.connectionBar === state && surface.connectionError === nextError &&
-        (state === "connected" || surface.providerName === null)) {
+    const nextError = error === undefined ? surface.connectionError : error;
+    if (surface.connectionBar === state && surface.connectionError === nextError) {
       return;
     }
     surface.connectionBar = state;
     surface.connectionError = nextError;
-    if (state !== "connected") {
-      surface.providerName = null;
-    }
-    this.emit({ surfaceId, type: "surface-changed" });
+    this.emit({ surfaceId, type: "surface-changed", persistence: "committed" });
   }
 
   setProviderName(surfaceId: string, providerName: string | null): void {
@@ -3009,6 +3028,19 @@ export class SurfaceCore {
     const pane = this.getSurface(surfaceId).panes.get(paneId);
     return pane && this.isRegistryPaneConfirmed(surfaceId, paneId, pane)
       ? pane.paneLabel : null;
+  }
+
+  confirmedPaneLabelFor(
+    surfaceId: string,
+    saved: RegistryRegistrationState["surfaces"][number]["panes"][number],
+  ): number | null {
+    const paneId = Number(saved.paneId);
+    const pane = this.surfaces.get(surfaceId)?.panes.get(paneId);
+    if (!pane || pane.paneLineageId !== saved.paneLineageId ||
+        pane.allocationGeneration !== saved.allocationGeneration || pane.paneLabel !== saved.paneLabel) {
+      return null;
+    }
+    return this.isRegistryPaneConfirmed(surfaceId, paneId, pane) ? pane.paneLabel : null;
   }
 
   applyWindowLabelOnly(surfaceId: string, windowLabel: string): void {

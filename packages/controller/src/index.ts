@@ -4,3 +4,4 @@ export * from "./projection.js";
 export * from "./session.js";
 export * from "./state-store.js";
 export * from "./wire.js";
+export * from "./registry-presence.js";

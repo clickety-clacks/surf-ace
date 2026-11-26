@@ -40,6 +40,7 @@ import type {
   TopologyApplyRequest,
   Viewport,
 } from "../../protocol/src/index.js";
+import { keepWebSocketAlive } from "../../protocol/src/connection-liveness.js";
 import { validateEnvelopeType } from "../../protocol/src/validate.js";
 import {
   SURF_ACE_LOCKLESS_V1_CAPABILITY,
@@ -160,6 +161,11 @@ type SocketMeta = {
   socketId: string;
 };
 
+export type CommittedSurfaceObservation = {
+  state: ReturnType<SurfaceCore["pairState"]>;
+  surfaceSetRevision: number;
+};
+
 export type SurfaceWsServerOptions = {
   bindAddress?: string;
   capturePaneImage: (surfaceId: string, paneId: number) => Promise<string | null>;
@@ -178,6 +184,8 @@ export type SurfaceWsServerOptions = {
   onNativeReleased?: (surfaceId: string, paneIds: string[]) => Promise<void> | void;
   persistLocklessState?: () => Promise<void>;
   isApplicationStateReady?: () => boolean;
+  committedSurfaceObservation?: (surfaceId: string) => CommittedSurfaceObservation | undefined;
+  registryConnectionStatus?: () => "connected" | "connecting" | "disconnected" | undefined;
   beginApplicationStateMutation?: (details: Omit<ApplicationStateMutation, "startedAtMs">) => () => void;
   openApplicationStateMutations?: () => ApplicationStateMutation[];
   getSurfaceBlockers?: (surfaceId?: string, excludingRequestId?: string) => SurfaceBlocker[];
@@ -291,6 +299,8 @@ export class SurfaceWsServer {
   private readonly protocolVersion: number;
   private readonly persistLocklessState: () => Promise<void>;
   private readonly isApplicationStateReady: () => boolean;
+  private readonly committedSurfaceObservation: SurfaceWsServerOptions["committedSurfaceObservation"];
+  private readonly registryConnectionStatus: SurfaceWsServerOptions["registryConnectionStatus"];
   private readonly beginApplicationStateMutation: NonNullable<SurfaceWsServerOptions["beginApplicationStateMutation"]>;
   private readonly openApplicationStateMutations: () => ApplicationStateMutation[];
   private readonly getSurfaceBlockers: NonNullable<SurfaceWsServerOptions["getSurfaceBlockers"]>;
@@ -358,6 +368,8 @@ export class SurfaceWsServer {
       }
     };
     this.isApplicationStateReady = options.isApplicationStateReady ?? (() => true);
+    this.committedSurfaceObservation = options.committedSurfaceObservation;
+    this.registryConnectionStatus = options.registryConnectionStatus;
     this.beginApplicationStateMutation = options.beginApplicationStateMutation ?? (() => () => {});
     this.openApplicationStateMutations = options.openApplicationStateMutations ?? (() => []);
     this.getSurfaceBlockers = options.getSurfaceBlockers ?? (() => []);
@@ -398,6 +410,7 @@ export class SurfaceWsServer {
     });
 
     this.wss.on("connection", (socket, request) => {
+      keepWebSocketAlive(socket);
       const remoteAddress = request.socket.remoteAddress ?? "<unknown>";
       const socketId = `sock_${randomUUID().replaceAll("-", "").slice(0, 12)}`;
       this.socketMeta.set(socket, {
@@ -1393,6 +1406,7 @@ export class SurfaceWsServer {
       }
     }
 
+    const committedEvents: LocklessEvent[] = [];
     const dispatch = async (): Promise<{
       rejectionCode: LocklessErrorCode | null;
       response: Response;
@@ -1401,9 +1415,9 @@ export class SurfaceWsServer {
         const response = request.op === "pair.request"
           ? await this.runLocklessPairReservation(
               request.payload.surfaceId ?? null,
-              async () => await this.dispatchLocklessRequest(socket, request),
+              async () => await this.dispatchLocklessRequest(socket, request, committedEvents),
             )
-          : await this.dispatchLocklessRequest(socket, request);
+          : await this.dispatchLocklessRequest(socket, request, committedEvents);
         return {
           rejectionCode: null,
           response: response as Response,
@@ -1613,7 +1627,8 @@ export class SurfaceWsServer {
       // A durable mutation holds the lockless queue while its write is pending.
       // A snapshot of another pane reads no tentative state from that mutation.
       response = (await dispatch()).response;
-    } else if (request.op === "pair.request" || request.op === "topology.apply") {
+    } else if (request.op === "pair.request" || request.op === "topology.apply" ||
+        request.op === "heartbeat.ping") {
       response = (await dispatch()).response;
     } else if (request.op === "surfaces.list") {
       try {
@@ -1657,7 +1672,12 @@ export class SurfaceWsServer {
       meta.cache.set(request.id, { payloadHash, response });
       trimCache(meta.cache);
     }
-    return () => this.send(socket, JSON.stringify(response));
+    return async () => {
+      if (response.ok) {
+        for (const event of committedEvents) await this.broadcastLockless(event);
+      }
+      return await this.send(socket, JSON.stringify(response));
+    };
   }
 
   private async commitLocklessTargetApply(
@@ -2001,6 +2021,7 @@ export class SurfaceWsServer {
   private async dispatchLocklessRequest(
     socket: WebSocket,
     request: LocklessRequest,
+    committedEvents: LocklessEvent[],
   ): Promise<unknown> {
     if (request.op === "pair.request") {
       this.assertPairSocketOpen(socket);
@@ -2688,7 +2709,7 @@ export class SurfaceWsServer {
         scopeKind: "pane",
         triggerOperation: request.op,
       });
-      await this.broadcastLockless({
+      committedEvents.push({
         eventId: makeEventId(),
         op: "event.lockless_content_committed",
         payload: { ...commit, surfaceId },
@@ -2697,7 +2718,8 @@ export class SurfaceWsServer {
         v: 1,
       });
       if (record) {
-        await this.broadcastLocklessDelta(scopeId, [record]);
+        const delta = this.locklessDeltaEvent(scopeId, [record]);
+        if (delta) committedEvents.push(delta);
       }
       this.core.markLocklessAuthorityChanged(surfaceId);
       return locklessSuccess(request, commit);
@@ -2773,7 +2795,10 @@ export class SurfaceWsServer {
         scopeKind: "pane",
         triggerOperation: request.op,
       });
-      if (record) await this.broadcastLocklessDelta(scopeId, [record]);
+      if (record) {
+        const delta = this.locklessDeltaEvent(scopeId, [record]);
+        if (delta) committedEvents.push(delta);
+      }
       this.core.markLocklessAuthorityChanged(surfaceId);
       return locklessSuccess(request, result);
     }
@@ -3467,10 +3492,15 @@ export class SurfaceWsServer {
     } catch {
       // An unavailable saved lease limits consistency reporting, not the topology read.
     }
-    let snapshot: ReturnType<SurfaceCore["pairState"]> | null = null;
-    let surfaceSetAfter = 0;
-    let stableSnapshot = false;
-    for (let attempt = 0; attempt < 3; attempt += 1) {
+    const committed = this.committedSurfaceObservation?.(request.payload.surfaceId);
+    if (this.committedSurfaceObservation && !committed) {
+      return errorResponse("surface.describe", request.id, "surface_not_found",
+        "Requested surface has no committed observation");
+    }
+    let snapshot: ReturnType<SurfaceCore["pairState"]> | null = committed?.state ?? null;
+    let surfaceSetAfter = committed?.surfaceSetRevision ?? 0;
+    let stableSnapshot = committed != null;
+    for (let attempt = 0; !committed && attempt < 3; attempt += 1) {
       if (!this.core.listSurfaces().some((surface) => surface.surfaceId === request.payload.surfaceId)) {
         return errorResponse("surface.describe", request.id, "surface_not_found",
           "Requested surface is not live on this endpoint");
@@ -3516,6 +3546,9 @@ export class SurfaceWsServer {
       request.payload.registryIdentity.allocatorId === binding.allocatorId &&
       request.payload.registryIdentity.fleetId === binding.fleetId;
     const limitationCodes: string[] = [];
+    const registryStatus = this.registryConnectionStatus?.();
+    if (registryStatus === "connecting") limitationCodes.push("registry_registration_pending");
+    if (registryStatus === "disconnected") limitationCodes.push("registry_connection_offline");
     if (persistenceOutcomeUnknown) limitationCodes.push("persistence_outcome_unknown");
     if (!applicationStateReady) {
       limitationCodes.push("application_state_unverified");
@@ -3528,7 +3561,16 @@ export class SurfaceWsServer {
         });
       }
     }
+    // Repeated saves can share one operation while occupying many queue slots.
+    // Report its oldest active instance so diagnostics leave room for topology.
+    const oldestBlockers = new Map<string, SurfaceBlocker>();
     for (const blocker of this.getSurfaceBlockers(request.payload.surfaceId)) {
+      const prior = oldestBlockers.get(blocker.operation);
+      if (!prior || blocker.startedAtMs < prior.startedAtMs) {
+        oldestBlockers.set(blocker.operation, blocker);
+      }
+    }
+    for (const blocker of oldestBlockers.values()) {
       limitationCodes.push(surfaceBlockerLimitation(blocker));
     }
     if (!binding) {
@@ -3539,9 +3581,6 @@ export class SurfaceWsServer {
     if (!lease) {
       limitationCodes.push("endpoint_lease_unavailable");
     } else {
-      if (observedAtMs >= lease.leaseExpiresAtMs) {
-        limitationCodes.push("endpoint_lease_expired");
-      }
       if (lease.leaseGeneration !== request.payload.endpointLeaseGeneration) {
         limitationCodes.push("endpoint_lease_stale");
       }
@@ -5785,6 +5824,14 @@ export class SurfaceWsServer {
 
   private async broadcastLocklessDelta(
     scopeId: string,
+    records: Parameters<SurfaceWsServer["locklessDeltaEvent"]>[1],
+  ): Promise<void> {
+    const event = this.locklessDeltaEvent(scopeId, records);
+    if (event) await this.broadcastLockless(event);
+  }
+
+  private locklessDeltaEvent(
+    scopeId: string,
     records: Array<{
       bytes: number;
       payload: unknown;
@@ -5792,7 +5839,7 @@ export class SurfaceWsServer {
       recordId: string;
       sequence: number;
     }>,
-  ): Promise<void> {
+  ): LocklessEvent | undefined {
     const state = this.core.locklessAuthority.exportState().scopes[scopeId];
     if (!state) return;
     const retainedSequences = [
@@ -5801,7 +5848,7 @@ export class SurfaceWsServer {
         (record) => record.sequence,
       ),
     ];
-    await this.broadcastLockless({
+    return {
       eventId: makeEventId(),
       op: "event.lockless_consumable_delta",
       payload: {
@@ -5816,7 +5863,7 @@ export class SurfaceWsServer {
       sentAt: Date.now(),
       type: "event",
       v: 1,
-    });
+    };
   }
 
   private async sendLocklessAuthorityEvent(
@@ -6070,19 +6117,12 @@ export class SurfaceWsServer {
     if (socket.readyState !== WebSocket.OPEN) {
       return false;
     }
-    return await new Promise<boolean>((resolve, reject) => {
-      socket.send(payload, (error) => {
-        if (error) {
-          if (socket.readyState !== WebSocket.OPEN || isSocketClosedError(error)) {
-            resolve(false);
-            return;
-          }
-          reject(error);
-          return;
-        }
-        resolve(true);
-      });
+    // Enqueue in socket order, but do not let delivery extend a mutation
+    // or keep another controller from receiving its own reply.
+    socket.send(payload, (error) => {
+      if (error && socket.readyState === WebSocket.OPEN) socket.terminate();
     });
+    return true;
   }
 
   private tryCaptureSnapshot(
@@ -6198,13 +6238,6 @@ function errorResponse(
     type: "response",
     v: 1,
   };
-}
-
-function isSocketClosedError(error: unknown): boolean {
-  if (!(error instanceof Error)) {
-    return false;
-  }
-  return error.message.includes("WebSocket is not open");
 }
 
 function trimCache(cache: Map<string, SocketCacheEntry>): void {

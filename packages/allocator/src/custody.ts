@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
 
+import { reconnectDelayMs, WEBSOCKET_PING_INTERVAL_MS } from "@surf-ace/protocol";
 import pg, { type Client as PgClient, type QueryResultRow } from "pg";
 
 import {
@@ -15,6 +16,7 @@ import {
 } from "./domain.js";
 
 const { Client } = pg;
+const STORE_STATEMENT_TIMEOUT_MS = 10_000;
 
 export type PostgresCustodyConfig = {
   expectedClusterSystemId: string;
@@ -396,14 +398,14 @@ export class PostgresCustodyAdapter<M extends LeaseMode> {
   // Once acquisition commits, keep that writer while startup is fenced. Repeated
   // validation must not allocate more generations or custody history rows.
   async finishStartup<T>(operation: () => Promise<T>, retrySignal?: AbortSignal): Promise<T> {
-    while (true) {
+    for (let attempt = 0; ; attempt += 1) {
       retrySignal?.throwIfAborted();
       try {
         return await operation();
       } catch (error) {
         if (!retrySignal || retrySignal.aborted || this.hasLostConnection) throw error;
         await this.hooks.afterStartupFailure?.(error);
-        await delay(2_000, undefined, { signal: retrySignal });
+        await delay(reconnectDelayMs(attempt), undefined, { signal: retrySignal });
       }
     }
   }
@@ -433,6 +435,26 @@ export class PostgresCustodyAdapter<M extends LeaseMode> {
     this.validated = false;
     this.validatedJournalCheckpoint = null;
     await this.primary.end().catch(() => undefined);
+  }
+
+  async readRegistrations(): Promise<unknown[]> {
+    return await this.enqueuePrimary(async () => {
+      this.assertUsable();
+      return await transaction(this.primary, "read_registrations", undefined, async () => {
+        const result = await this.primary.query<{ projection: unknown }>(
+          "SELECT surf_ace_allocator.read_registrations($1, $2, $3) AS projection",
+          [this.config.fleetId, this.token.leaseGeneration, this.token.leaseId],
+        );
+        return result.rows.map((row) => row.projection);
+      });
+    });
+  }
+
+  async rememberRegistration(clientId: string, projection: unknown): Promise<void> {
+    await this.mutate("remember_registration", () => this.primary.query(
+      "SELECT surf_ace_allocator.remember_registration($1, $2, $3, $4, $5::jsonb)",
+      [this.config.fleetId, this.token.leaseGeneration, this.token.leaseId, clientId, JSON.stringify(projection)],
+    ));
   }
 
   async readAcceptedState(): Promise<AcceptedState> {
@@ -529,7 +551,8 @@ export class PostgresCustodyAdapter<M extends LeaseMode> {
     try {
       const state = await this.validateLeaseAndReadAcceptedState();
       return this.registrationReady ? state : null;
-    } catch {
+    } catch (error) {
+      if (storeStatementDeadlineExceeded(error)) throw error;
       return null;
     }
   }
@@ -1111,7 +1134,15 @@ export async function revokeWriter(
 }
 
 async function connect(connectionString: string): Promise<PgClient> {
-  const client = new Client({ connectionString });
+  const client = new Client({
+    connectionString,
+    statement_timeout: STORE_STATEMENT_TIMEOUT_MS,
+    keepAlive: true,
+    keepAliveInitialDelayMillis: WEBSOCKET_PING_INTERVAL_MS,
+    // The backend must also reap a lost writer session and its advisory lock
+    // when the client cannot get a FIN through the failed path.
+    options: "-c tcp_keepalives_idle=15 -c tcp_keepalives_interval=15 -c tcp_keepalives_count=2",
+  });
   client.on("error", () => undefined);
   await client.connect();
   return client;
@@ -1512,6 +1543,13 @@ function mapDatabaseError(error: unknown): AllocatorError {
 
 function topologyError(message: string): never {
   throw new AllocatorError("writer_fence_unavailable", message);
+}
+
+export function storeStatementDeadlineExceeded(error: unknown): boolean {
+  for (let cause = error; cause instanceof Error; cause = cause.cause) {
+    if (isSqlState(cause, "57014") && cause.message.includes("statement timeout")) return true;
+  }
+  return false;
 }
 
 function isSqlState(error: unknown, code: string): boolean {

@@ -12,6 +12,13 @@ supplies its friendly chat label in the command input. `fleet-list` and
 client admission. Nothing about a host, surface, deployment, or provenance
 label is compiled in.
 
+For `push`, supply the direct `--endpoint` and the target through
+`--surface-id` or the input's `surfaceId`. An optional `--registry` can
+classify an unreachable or closed direct connection as `client_offline`
+with `lastSeenAtMs` when it confirms the same client is offline. A usable direct
+connection proceeds without looking up registry presence. Uncertain write
+outcomes still carry the original request correlation.
+
 To discover registered client and surface identities, query the configured
 registry explicitly:
 
@@ -25,14 +32,16 @@ surf-ace \
 The command requires the explicit `--registry` URL; it does not select a default
 registry or read one from environment/configuration. The result is the
 registry's current `fleet.topology` snapshot: client IDs,
-registered surfaces, window labels, pane IDs, pane labels, and pane addresses.
-It reports registration inventory only, not endpoint addresses, client
-reachability, or live application health. An empty `clients` array is a
+registered surfaces, window labels, pane IDs, pane labels, pane addresses,
+and published endpoints. Each client row reports `presence` and `lastSeenAtMs`.
+The last-seen value is null for an online client or when the registry has no
+known disconnect time. Direct endpoint reachability and application readiness
+are separate observations. An empty `clients` array is a
 successful empty inventory; an invalid or unavailable registry is an error.
 Do not combine `--registry` and `--endpoint`; the command never pairs with or
 mutates clients.
 
-To resolve one lowercase window label against a fresh leased registry route and
+To resolve one lowercase window label for an online client and
 observe the client directly before pairing, use `window-describe`:
 
 ```sh
@@ -45,8 +54,9 @@ surf-ace \
 This command needs neither `--state-root`, `--endpoint`, nor
 `--product-label`. It requires exactly one current registry candidate, probes
 the registered direct endpoint with a nonce-correlated `surface.describe`, and
-rechecks the same registration and lease after the response. The result keeps
-registry identity and lease freshness, transport reachability, application
+rechecks the client identity, connection presence, and registration generation
+after the response. The result keeps registry identity and connection presence,
+transport reachability, application
 readiness, surface topology/layout, and each pane's content revision in
 separate fields. Missing or unreadable saved registry values and per-pane label
 or content-observation details are reported as unavailable with limitation
@@ -59,9 +69,10 @@ authorize a later mutation.
 
 `window_not_found` and `window_ambiguous` require a fresh explicit selection;
 never guess an endpoint from the registry host or choose the first duplicate.
-`endpoint_unconfigured` means the matching client did not register both a direct
-endpoint and pre-pair capability. `stale_registration` means the row or lease
-was absent, invalid, expired, or changed during observation.
+`client_offline` includes the last time the registry saw the client's connection
+close, or null after a registry restart. `endpoint_unconfigured` means the client
+did not publish a supported direct endpoint. `revision_churn` reports a
+registration or topology change during observation.
 `endpoint_unreachable` reports a failed direct connection. If the WebSocket
 connects but does not return a valid describe response, `application_unresponsive`
 reports the reachable transport separately from unknown application readiness.

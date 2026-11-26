@@ -193,7 +193,8 @@ async function run() {
   } finally {
     cover?.destroy();
     target?.destroy();
-    await fs.rm(scratch, { force: true, recursive: true });
+    // Chromium's storage process can finish a write after the windows close.
+    await fs.rm(scratch, { force: true, recursive: true, maxRetries: 3 });
   }
 }
 

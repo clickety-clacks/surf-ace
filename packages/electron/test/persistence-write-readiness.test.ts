@@ -148,7 +148,6 @@ test("pre-pair describe keeps complete topology readable with a warning through 
   core.setRegistryEndpointLease({
     leaseGeneration: 17,
     registrationObservedAtMs: now - 1_000,
-    leaseExpiresAtMs: now + 14_000,
   });
   const readiness = new PersistenceWriteReadiness();
   const server = new SurfaceWsServer({

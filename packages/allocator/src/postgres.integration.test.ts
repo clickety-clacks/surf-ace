@@ -748,7 +748,6 @@ test("real PostgreSQL allocator authority", { timeout: 180_000 }, async (t) => {
       });
       const endpoint = registry.server.address.url;
       const wire = await WireClient.connect(endpoint);
-      let retried: WireClient | undefined;
       const clientId = createHash("sha256").update("primary-reconnect-client").digest("hex");
       const surfaceId = "sf_primary-reconnect";
       const registration = {
@@ -769,16 +768,16 @@ test("real PostgreSQL allocator authority", { timeout: 180_000 }, async (t) => {
         backendPid = before.leaseBackendPid;
         cutClaim = true;
         fenceStartup = true;
-        // A lost socket need not deliver the failed request's response. Recovery
-        // is observed from the newly acquired registry, not a response timeout.
-        void wire.request("pane.claim", {
+        const interrupted = await wire.request("pane.claim", {
           clientId, surfaceId, paneId: "pane-cut", paneLineageId: "pl_primary-cut",
-        }).catch(() => undefined);
+        });
+        assert.deepEqual(interrupted.error, {
+          code: "registry_unavailable", message: "registry store unavailable", retryable: true,
+        });
         await recovery;
         assert.deepEqual(lifecycle, ["unavailable", "acquire-refused", "recovered"]);
         assert.equal(registry.server.address.url, endpoint);
-        retried = await WireClient.connect(endpoint);
-        const result = await retried.request("client.register", {
+        const result = await wire.request("client.register", {
           ...registration,
           surfaces: [{ surfaceId, panes: [registration.surfaces[0]!.panes[0]!, {
             paneId: "pane-cut", paneLineageId: "pl_primary-cut", paneLabel: 0,
@@ -793,7 +792,7 @@ test("real PostgreSQL allocator authority", { timeout: 180_000 }, async (t) => {
         assert.deepEqual(validationHeads[1], validationHeads[0],
           "a persistent startup fence must not allocate more writer generations or custody history");
         assert.notEqual(after.leaseBackendPid, before.leaseBackendPid);
-        assert.ok(resumed.endpointLease.leaseGeneration > first.endpointLease.leaseGeneration);
+        assert.equal(resumed.endpointLease.leaseGeneration, first.endpointLease.leaseGeneration);
         assert.equal(resumed.surfaces[0]!.windowLabel, first.surfaces[0]!.windowLabel);
         assert.equal(resumed.surfaces[0]!.panes[0]!.paneLabel, first.surfaces[0]!.panes[0]!.paneLabel);
         assert.equal(resumed.surfaces[0]!.panes[0]!.allocationGeneration,
@@ -820,7 +819,6 @@ test("real PostgreSQL allocator authority", { timeout: 180_000 }, async (t) => {
       } finally {
         cluster.config.witnessServerId = originalWitnessId;
         await wire.close();
-        await retried?.close();
         await registry.close();
         await inspector.end();
       }
@@ -1178,16 +1176,78 @@ test(
   },
 );
 
-test("recovery waits for a busy port without repeating annotation consumer lease reset", { timeout: 90_000 }, async () => {
+test("a PostgreSQL lock deadline replies on the registered socket and keeps its presence", { timeout: 90_000 }, async () => {
+  const cluster = await startCluster();
+  const locker = new Client({ connectionString: cluster.adminUrl });
+  let allocator: AllocatorServer | undefined;
+  let wire: WireClient | undefined;
+  try {
+    const initial = await PostgresCustodyAdapter.initializeAbsentFleet(cluster.config, "alloc_store-deadline");
+    await initial.release();
+    allocator = await AllocatorServer.start(serverConfig(cluster));
+    wire = await WireClient.connect(allocator.address.url);
+    const registration = { clientId: "a".repeat(64), surfaces: [] };
+    assert.equal((await wire.request("client.register", registration)).ok, true);
+
+    await locker.connect();
+    await locker.query("BEGIN");
+    await locker.query("LOCK TABLE surf_ace_allocator.fleets IN ACCESS EXCLUSIVE MODE");
+    const started = performance.now();
+    const timedOut = await wire.request("client.register", registration);
+    assert.deepEqual(timedOut.error, {
+      code: "store_deadline_exceeded",
+      message: "registry store statement deadline exceeded",
+      retryable: true,
+    });
+    assert.ok(performance.now() - started >= 9_500);
+    await locker.query("ROLLBACK");
+
+    const topology = await wire.request("fleet.topology", {});
+    assert.equal(topology.ok, true);
+    const [client] = (topology.payload as { clients: Record<string, unknown>[] }).clients;
+    assert.equal(client?.clientId, registration.clientId);
+    assert.equal(client?.presence, "online");
+    assert.equal(client?.lastSeenAtMs, null);
+    assert.equal((await wire.request("client.register", registration)).ok, true);
+    await wire.close();
+
+    const reader = await WireClient.connect(allocator.address.url);
+    try {
+      const offline = await reader.request("fleet.topology", {});
+      const [client] = (offline.payload as { clients: Record<string, unknown>[] }).clients;
+      assert.equal(client?.presence, "offline");
+      assert.equal(typeof client?.lastSeenAtMs, "number");
+    } finally {
+      await reader.close();
+    }
+    await allocator.close();
+    allocator = await AllocatorServer.start(serverConfig(cluster));
+    const afterRestart = await WireClient.connect(allocator.address.url);
+    try {
+      const topology = await afterRestart.request("fleet.topology", {});
+      const [client] = (topology.payload as { clients: Record<string, unknown>[] }).clients;
+      assert.equal(client?.clientId, registration.clientId);
+      assert.equal(client?.presence, "offline");
+      assert.equal(client?.lastSeenAtMs, null);
+      assert.deepEqual(client?.surfaces, []);
+    } finally {
+      await afterRestart.close();
+    }
+  } finally {
+    await locker.end();
+    await wire?.close();
+    await allocator?.close();
+    await cluster.stop();
+  }
+});
+
+test("store recovery retains the listener and fences old annotation consumers once", { timeout: 90_000 }, async () => {
   const cluster = await startCluster();
   const inspector = new Client({ connectionString: cluster.adminUrl });
-  const occupied = createServer();
   let registry: Awaited<ReturnType<typeof startRecoveringAllocatorServer>> | undefined;
   let port = 0;
-  let occupyOnAcquisition = false;
   let recovered!: () => void;
   const recovery = new Promise<void>((resolve) => { recovered = resolve; });
-  const consumerGenerations: string[] = [];
   const readConsumerGeneration = async () => (await inspector.query<{ lease_generation: string }>(
     "SELECT lease_generation FROM surf_ace_allocator.annotation_consumers WHERE fleet_id=$1 AND consumer_id=$2",
     [cluster.config.fleetId, "port-recovery-consumer"],
@@ -1201,42 +1261,19 @@ test("recovery waits for a busy port without repeating annotation consumer lease
     const seed = await PostgresCustodyAdapter.acquireWriter(cluster.config);
     try { await seed.openAnnotationConsumer("port-recovery-consumer", "watch"); }
     finally { await seed.release(); }
-    registry = await startRecoveringAllocatorServer(serverConfig(cluster), { recovered }, {
-      async afterCommitBeforeAck(operation) {
-        if (operation !== "acquire_writer" || !occupyOnAcquisition) return;
-        occupyOnAcquisition = false;
-        await new Promise<void>((resolve, reject) => {
-          occupied.once("error", reject);
-          occupied.listen(port, "127.0.0.1", resolve);
-        });
-      },
-      async afterStartupFailure(error) {
-        assert.equal((error as NodeJS.ErrnoException).code, "EADDRINUSE");
-        consumerGenerations.push(await readConsumerGeneration());
-        // Release the real port only after two observed failed bind attempts.
-        if (consumerGenerations.length === 2) {
-          await new Promise<void>((resolve, reject) => occupied.close((error) => error ? reject(error) : resolve()));
-        }
-      },
-    });
+    registry = await startRecoveringAllocatorServer(serverConfig(cluster), { recovered });
     port = registry.server.address.port;
     const before = await registry.server.diagnostics();
     const beforeConsumer = BigInt(await readConsumerGeneration());
-    occupyOnAcquisition = true;
     await adminQuery(cluster.adminUrl, `SELECT pg_terminate_backend(${before.leaseBackendPid})`);
     await recovery;
-    assert.equal(consumerGenerations.length, 2);
-    assert.equal(BigInt(consumerGenerations[0]!), beforeConsumer + 1n,
+    assert.equal(BigInt(await readConsumerGeneration()), beforeConsumer + 1n,
       "the replacement writer fences the old annotation consumer once");
-    assert.equal(consumerGenerations[1], consumerGenerations[0],
-      "a failed bind must not reset the annotation consumer again");
-    assert.equal(await readConsumerGeneration(), consumerGenerations[0]);
     const after = await registry.server.diagnostics();
     assert.equal(after.leaseGeneration, before.leaseGeneration + 1);
     assert.equal(after.registrationReady, true);
     assert.equal(registry.server.address.port, port);
   } finally {
-    if (occupied.listening) await new Promise<void>((resolve) => occupied.close(() => resolve()));
     await registry?.close();
     await inspector.end();
     await cluster.stop();
@@ -1507,7 +1544,7 @@ test("registration leases valid direct endpoints only behind the writer fence", 
     assertRc11ConfiguredRegistration(accepted, clientId, directEndpoint);
     const acceptedPayload = accepted.payload as {
       completedPaneReleaseIds: string[];
-      endpointLease: { leaseGeneration: number; registrationObservedAtMs: number; leaseExpiresAtMs: number };
+      endpointLease: { leaseGeneration: number; registrationObservedAtMs: number };
       surfaces: Array<{ panes: Array<{ allocationGeneration: number; paneLabel: number }> }>;
     };
     const writerLeaseGeneration = (await allocator.diagnostics()).leaseGeneration;
@@ -1525,7 +1562,6 @@ test("registration leases valid direct endpoints only behind the writer fence", 
     const renewedLease = (renewed.payload as typeof acceptedPayload).endpointLease;
     assert.equal(renewedLease.leaseGeneration, acceptedPayload.endpointLease.leaseGeneration);
     assert.equal(renewedLease.registrationObservedAtMs, acceptedPayload.endpointLease.registrationObservedAtMs);
-    assert.ok(renewedLease.leaseExpiresAtMs >= acceptedPayload.endpointLease.leaseExpiresAtMs);
 
     const pane = acceptedPayload.surfaces[0]?.panes[0];
     assert.ok(pane);
@@ -1650,7 +1686,7 @@ function assertRc11ConfiguredRegistration(
   clientId: string,
   directEndpoint: string,
 ): void {
-  // Response admission follows ConfiguredServerRegistration at rc11 source b23ed0d.
+  // The legacy registration shape keeps its allocation fields after expiry is removed.
   if (response.type !== "response" || response.v !== 1 || response.op !== "client.register" || response.ok !== true) {
     throw new Error("invalid_registration_response");
   }
@@ -1660,8 +1696,6 @@ function assertRc11ConfiguredRegistration(
       payload.prePairDescribeV1 !== true || !lease ||
       !Number.isSafeInteger(lease.leaseGeneration) || Number(lease.leaseGeneration) < 1 ||
       !Number.isSafeInteger(lease.registrationObservedAtMs) ||
-      !Number.isSafeInteger(lease.leaseExpiresAtMs) ||
-      Number(lease.leaseExpiresAtMs) <= Number(lease.registrationObservedAtMs) ||
       !Array.isArray(payload.completedPaneReleaseIds) || !Array.isArray(payload.surfaces)) {
     throw new Error("invalid_registration_response");
   }
@@ -1724,7 +1758,6 @@ test("client.register returns negotiated per-item results and leases only accept
     const firstLease = initialPayload.endpointLease as {
       leaseGeneration: number;
       registrationObservedAtMs: number;
-      leaseExpiresAtMs: number;
     };
     assert.ok(firstLease.leaseGeneration > 0);
 
@@ -1913,7 +1946,6 @@ test("client.register returns negotiated per-item results and leases only accept
     assert.equal(renewedLease.leaseGeneration, partialLease.leaseGeneration,
       "renewing the same accepted set keeps the registry-issued generation");
     assert.equal(renewedLease.registrationObservedAtMs, partialLease.registrationObservedAtMs);
-    assert.ok(renewedLease.leaseExpiresAtMs >= partialLease.leaseExpiresAtMs);
 
     const legacyClientId = createHash("sha256").update("legacy-registration-client").digest("hex");
     const legacy = await wire.request("client.register", {
@@ -3444,6 +3476,7 @@ fsync = on
       await adminQuery(adminUrl, await readFile(new URL("../sql/004_pane_label_reuse.sql", import.meta.url), "utf8"));
       await adminQuery(adminUrl, await readFile(new URL("../sql/005_window_label_reuse.sql", import.meta.url), "utf8"));
       await adminQuery(adminUrl, await readFile(new URL("../sql/006_disable_window_label_reuse.sql", import.meta.url), "utf8"));
+      await adminQuery(adminUrl, await readFile(new URL("../sql/007_registration_projection.sql", import.meta.url), "utf8"));
     }
     await adminQuery(adminUrl, `
       CREATE ROLE allocator_writer LOGIN IN ROLE surf_ace_allocator_writer;

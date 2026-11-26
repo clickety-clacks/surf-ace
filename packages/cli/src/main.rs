@@ -71,6 +71,7 @@ fn parse() -> Result<Invocation, surf_ace_cli::CliError> {
     let mut state_root: Option<PathBuf> = None;
     let mut endpoint = None;
     let mut registry = None;
+    let mut surface_id = None;
     let mut product_label = None;
     let mut projection_capacity_bytes = 16 * 1024 * 1024;
     let mut input_json = None;
@@ -80,6 +81,7 @@ fn parse() -> Result<Invocation, surf_ace_cli::CliError> {
             "--state-root" => state_root = Some(PathBuf::from(value(&mut args, "state-root")?)),
             "--endpoint" => endpoint = Some(value(&mut args, "endpoint")?),
             "--registry" => registry = Some(value(&mut args, "registry")?),
+            "--surface-id" => surface_id = Some(value(&mut args, "surface-id")?),
             "--product-label" => product_label = Some(value(&mut args, "product-label")?),
             "--projection-capacity-bytes" => {
                 projection_capacity_bytes = value(&mut args, "projection-capacity-bytes")?
@@ -102,7 +104,7 @@ fn parse() -> Result<Invocation, surf_ace_cli::CliError> {
         None if command == Command::WindowDescribe => PathBuf::new(),
         None => return Err(input_error("state-root")),
     };
-    if endpoint.is_some() && registry.is_some() {
+    if command != Command::Push && endpoint.is_some() && registry.is_some() {
         return Err(surf_ace_cli::CliError::Input(
             "ambiguous_endpoint_registry".into(),
         ));
@@ -120,11 +122,19 @@ fn parse() -> Result<Invocation, surf_ace_cli::CliError> {
             input
         }
     };
-    let input = serde_json::from_str::<Value>(&encoded)
+    let mut input = serde_json::from_str::<Value>(&encoded)
         .map_err(|_| input_error("input-json"))?
         .as_object()
         .cloned()
         .ok_or_else(|| input_error("input-json-object"))?;
+    if let Some(surface_id) = surface_id {
+        if command != Command::Push ||
+            input.get("surfaceId").is_some_and(|value| value.as_str() != Some(surface_id.as_str()))
+        {
+            return Err(input_error("surface-id"));
+        }
+        input.insert("surfaceId".into(), Value::String(surface_id));
+    }
     Ok(Invocation {
         command,
         endpoint,
