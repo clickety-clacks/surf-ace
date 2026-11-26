@@ -1442,6 +1442,7 @@ enum SurfAceRegistrationEndpoint {
 
 @MainActor
 protocol SurfAceRegistrationTransport: AnyObject {
+    var isOpen: Bool { get }
     func readRegistryIdentity() async throws -> SurfAceRegistryIdentity
     func readRegistryIdentity(fallbackIdentity: SurfAceRegistryIdentity?) async throws -> SurfAceRegistryIdentityRead
     func register(clientId: String, surfaces: [SurfAceRegistrationSurface],
@@ -1551,6 +1552,8 @@ final class SurfAceRegistrationWebSocket: SurfAceRegistrationTransport {
     init(url: URL) {
         self.url = url
     }
+
+    var isOpen: Bool { ready && !closed }
 
     static func registrationReply(
         from data: Data,
@@ -1959,6 +1962,12 @@ final class SurfAceCentralRegistration {
         let candidate: Candidate
         let identity: SurfAceRegistryIdentity?
     }
+
+    private struct RegistrationApplication {
+        let reply: SurfAceRegistrationReply
+        let input: SurfAceRegistrationInput
+        let request: SurfAceRegistrationInput
+    }
     private let clientId: String
     private let configured: URL?
     private let registrySources: @MainActor () -> [SurfAceRegistrySource]
@@ -2195,7 +2204,8 @@ final class SurfAceCentralRegistration {
     private func applyRegistrationReply(
         _ reply: SurfAceRegistrationReply,
         input: SurfAceRegistrationInput,
-        request: SurfAceRegistrationInput
+        request: SurfAceRegistrationInput,
+        deferred: inout [RegistrationApplication]
     ) async throws -> Bool {
         for warning in reply.warnings { onWarning(warning) }
         guard !reply.discarded else { return true }
@@ -2215,14 +2225,45 @@ final class SurfAceCentralRegistration {
             }) {
             return false
         }
+        let application = RegistrationApplication(reply: reply, input: input, request: request)
+        if running {
+            deferred.append(application)
+            return reply.needsRetry
+        }
+        return try await applyRegistration(application) || reply.needsRetry
+    }
+
+    private func applyRegistration(_ application: RegistrationApplication) async throws -> Bool {
+        let (reply, input, request) = (application.reply, application.input, application.request)
         if let applyReplySubset {
-            return try await applyReplySubset(reply, input, request) || reply.needsRetry
+            return try await applyReplySubset(reply, input, request)
         } else if let applyReply {
             try await applyReply(reply, input)
         } else {
             try await apply(reply.assignments, input.surfaces)
         }
-        return reply.needsRetry
+        return false
+    }
+
+    private func applyCommittedRegistrations(_ applications: [RegistrationApplication], attempt: UInt64) {
+        guard !applications.isEmpty else { return }
+        // A registration reply admits the transport. Its local label writes can wait independently.
+        Task { [weak self] in
+            guard let self else { return }
+            for application in applications {
+                guard !self.stopped, self.generation == attempt else { return }
+                do {
+                    let needsRetry = try await self.applyRegistration(application)
+                    if needsRetry, !self.stopped, self.generation == attempt {
+                        self.registrationStateCommitted()
+                    }
+                } catch {
+                    guard !self.stopped, self.generation == attempt else { return }
+                    _ = self.reportFailure(phase: "label persistence", endpoint: nil,
+                                           underlying: surfAceRegistrationErrorDescription(error), showInStatus: false)
+                }
+            }
+        }
     }
 
     private func synchronizeOnce() async throws {
@@ -2257,13 +2298,17 @@ final class SurfAceCentralRegistration {
                 if identity != nil, inputSnapshot != nil, boundInput.registryIdentity != identity {
                     onWarning("registration_binding_not_yet_persisted; continuing with current claims")
                 }
-                try await registerAndApply(using: selected.transport, identity: identity, input: boundInput)
-                lastRegisteredInput = boundInput
+                let applications = try await registerAndCollectApplications(
+                    using: selected.transport, identity: identity, input: boundInput
+                )
                 try ensureCurrent(attempt)
+                guard selected.transport.isOpen else { throw SurfAceRegistrationError.noServer }
+                lastRegisteredInput = boundInput
                 setLastError(nil)
                 lastReportedError = nil
                 setStatus(.connected)
                 onVerifiedEndpoint(selected.url)
+                applyCommittedRegistrations(applications, attempt: attempt)
                 return
             } catch {
                 try ensureCurrent(attempt)
@@ -2426,12 +2471,13 @@ final class SurfAceCentralRegistration {
                    boundInput.registryIdentity != identifiedCandidate.identity {
                     onWarning("registration_binding_not_yet_persisted; continuing with current claims")
                 }
-                try await registerAndApply(
+                let applications = try await registerAndCollectApplications(
                     using: candidate.transport,
                     identity: identifiedCandidate.identity,
                     input: boundInput
                 )
                 try ensureCurrent(attempt)
+                guard candidate.transport.isOpen else { throw SurfAceRegistrationError.noServer }
                 for other in candidates where other.transport !== candidate.transport {
                     other.transport.close()
                 }
@@ -2445,6 +2491,7 @@ final class SurfAceCentralRegistration {
                 lastReportedError = nil
                 setStatus(.connected)
                 onVerifiedEndpoint(candidate.url)
+                applyCommittedRegistrations(applications, attempt: attempt)
                 return
             } catch {
                 if stopped || attempt != generation {
@@ -2532,11 +2579,12 @@ final class SurfAceCentralRegistration {
         onWarning("registration_binding_snapshot_unstable; continuing with best available claims")
     }
 
-    private func registerAndApply(
+    private func registerAndCollectApplications(
         using transport: any SurfAceRegistrationTransport,
         identity: SurfAceRegistryIdentity?,
         input: SurfAceRegistrationInput
-    ) async throws {
+    ) async throws -> [RegistrationApplication] {
+        var deferred: [RegistrationApplication] = []
         let replay = pendingRegistration.flatMap { $0.identity == identity ? $0 : nil }
         var current = replay?.input ?? input
         var currentIdentity = identity
@@ -2581,12 +2629,12 @@ final class SurfAceCentralRegistration {
                    reply.registryIdentity == nil || reply.registryIdentity == currentIdentity {
                     registryIdentityConfirmedForReleases = true
                 }
-                let needsRetry = try await applyRegistrationReply(reply, input: current, request: request)
+                let needsRetry = try await applyRegistrationReply(reply, input: current, request: request, deferred: &deferred)
                 if needsRetry || (replaying != nil && current != input) {
                     current = try await currentInputSnapshot()
                     continue
                 }
-                return
+                return deferred
             } catch let error as SurfAceRegistrationError {
                 guard case .serverRejected = error else {
                     if running { throw error }
@@ -2596,9 +2644,9 @@ final class SurfAceCentralRegistration {
                             let reply = try await transport.register(
                                 clientId: clientId, input: noReleases, expectedIdentity: currentIdentity
                             )
-                            _ = try await applyRegistrationReply(reply, input: current, request: noReleases)
+                            _ = try await applyRegistrationReply(reply, input: current, request: noReleases, deferred: &deferred)
                             onWarning("registration_release_outcome_unknown; retry_deferred")
-                            return
+                            return deferred
                         } catch {
                             throw error
                         }
@@ -2607,10 +2655,10 @@ final class SurfAceCentralRegistration {
                 }
 
                 switch try await recoverSemanticRejection(
-                    using: transport, identity: currentIdentity, input: current
+                    using: transport, identity: currentIdentity, input: current, deferred: &deferred
                 ) {
                 case .applied:
-                    return
+                    return deferred
                 case .retry(let updated):
                     current = updated
                 case .rebind(let updatedIdentity, let updated):
@@ -2624,21 +2672,23 @@ final class SurfAceCentralRegistration {
                     let reply = try await transport.register(
                         clientId: clientId, input: noReleases, expectedIdentity: currentIdentity
                     )
-                    _ = try await applyRegistrationReply(reply, input: current, request: noReleases)
+                    _ = try await applyRegistrationReply(reply, input: current, request: noReleases, deferred: &deferred)
                     onWarning("registration_release_outcome_unknown; retry_deferred")
-                    return
+                    return deferred
                 }
                 throw error
             }
         }
         onWarning("registration_recovery_attempts_exhausted; continuing with confirmed claims")
+        return deferred
     }
 
     private func applyRecoveredReply(
         _ reply: SurfAceRegistrationReply,
         input: SurfAceRegistrationInput,
         request: SurfAceRegistrationInput,
-        identity: SurfAceRegistryIdentity?
+        identity: SurfAceRegistryIdentity?,
+        deferred: inout [RegistrationApplication]
     ) async throws -> RecoveryResult {
         if let replyIdentity = reply.registryIdentity,
            replyIdentity != identity || replyIdentity != input.registryIdentity {
@@ -2651,7 +2701,7 @@ final class SurfAceCentralRegistration {
             }
             return .rebind(replyIdentity, reboundInput)
         }
-        if try await applyRegistrationReply(reply, input: input, request: request) {
+        if try await applyRegistrationReply(reply, input: input, request: request, deferred: &deferred) {
             return .retry(try await currentInputSnapshot())
         }
         return .applied
@@ -2660,7 +2710,8 @@ final class SurfAceCentralRegistration {
     private func recoverSemanticRejection(
         using transport: any SurfAceRegistrationTransport,
         identity: SurfAceRegistryIdentity?,
-        input: SurfAceRegistrationInput
+        input: SurfAceRegistrationInput,
+        deferred: inout [RegistrationApplication]
     ) async throws -> RecoveryResult {
         let withoutReleases = input.withoutReleases
         var acceptedSurfaceReply: SurfAceRegistrationReply?
@@ -2706,7 +2757,7 @@ final class SurfAceCentralRegistration {
                         clientId: clientId, input: withoutReleases, expectedIdentity: identity
                     )
                     return try await applyRecoveredReply(
-                        reply, input: input, request: withoutReleases, identity: identity
+                        reply, input: input, request: withoutReleases, identity: identity, deferred: &deferred
                     )
                 }
 
@@ -2735,7 +2786,7 @@ final class SurfAceCentralRegistration {
                             clientId: clientId, input: withoutReleases, expectedIdentity: identity
                         )
                         return try await applyRecoveredReply(
-                            reply, input: input, request: withoutReleases, identity: identity
+                            reply, input: input, request: withoutReleases, identity: identity, deferred: &deferred
                         )
                     }
                     panes.append(pane)
@@ -2750,7 +2801,7 @@ final class SurfAceCentralRegistration {
         guard let acceptedSurfaceReply else { throw SurfAceRegistrationError.invalidResponse }
         guard !input.pendingPaneReleases.isEmpty || !input.pendingWindowReleases.isEmpty else {
             return try await applyRecoveredReply(
-                acceptedSurfaceReply, input: input, request: withoutReleases, identity: identity
+                acceptedSurfaceReply, input: input, request: withoutReleases, identity: identity, deferred: &deferred
             )
         }
 
@@ -2771,14 +2822,14 @@ final class SurfAceCentralRegistration {
                 guard let recoverRefusedRelease else {
                     onWarning("registration_window_release_refused; keeping its evidence pending")
                     return try await applyRecoveredReply(
-                        acceptedSurfaceReply, input: input, request: withoutReleases, identity: identity
+                        acceptedSurfaceReply, input: input, request: withoutReleases, identity: identity, deferred: &deferred
                     )
                 }
                 try await recoverRefusedRelease(release.releaseId)
                 return .retry(try await currentInputSnapshot())
             } catch {
                 return try await applyRecoveredReply(
-                    acceptedSurfaceReply, input: input, request: withoutReleases, identity: identity
+                    acceptedSurfaceReply, input: input, request: withoutReleases, identity: identity, deferred: &deferred
                 )
             }
             acceptedWindows.append(release)
@@ -2797,19 +2848,19 @@ final class SurfAceCentralRegistration {
                 guard let recoverRefusedRelease else {
                     onWarning("registration_pane_release_refused; keeping its evidence pending")
                     return try await applyRecoveredReply(
-                        acceptedSurfaceReply, input: input, request: withoutReleases, identity: identity
+                        acceptedSurfaceReply, input: input, request: withoutReleases, identity: identity, deferred: &deferred
                     )
                 }
                 try await recoverRefusedRelease(release.releaseId)
                 return .retry(try await currentInputSnapshot())
             } catch {
                 return try await applyRecoveredReply(
-                    acceptedSurfaceReply, input: input, request: withoutReleases, identity: identity
+                    acceptedSurfaceReply, input: input, request: withoutReleases, identity: identity, deferred: &deferred
                 )
             }
             acceptedPanes.append(release)
         }
-        return try await applyRecoveredReply(lastReply, input: input, request: input, identity: identity)
+        return try await applyRecoveredReply(lastReply, input: input, request: input, identity: identity, deferred: &deferred)
     }
 
     func claimPaneLabel(surfaceId: String, paneId: Int64, paneLineageId: String) async throws -> SurfAcePaneAllocation {
@@ -2846,46 +2897,6 @@ final class SurfAceCentralRegistration {
             }
         }
         throw SurfAceRegistrationError.stopped
-    }
-
-    private func attempt(
-        _ url: URL,
-        input: SurfAceRegistrationInput,
-        failures: FailureCollector,
-        phase: String = "registration"
-    ) async throws -> Bool {
-        guard !stopped else { throw SurfAceRegistrationError.stopped }
-        guard url.scheme == "ws" || url.scheme == "wss" else { return false }
-        if selected == nil { setStatus(.connecting) }
-        let candidate = transport(for: url)
-        do {
-            let identityRead = try await candidate.readRegistryIdentity(fallbackIdentity: input.registryIdentity)
-            for warning in identityRead.warnings { onWarning(warning) }
-            if let identity = identityRead.identity { try await bindCandidateRegistry(identity) }
-            let latest = try await currentInputSnapshot()
-            try await registerAndApply(using: candidate, identity: identityRead.identity, input: latest)
-            guard !stopped else { throw SurfAceRegistrationError.stopped }
-            selected?.transport.close()
-            selected = (url, candidate)
-            lastRegisteredInput = latest
-            setLastError(nil)
-            lastReportedError = nil
-            setStatus(.connected)
-            onVerifiedEndpoint(url)
-            return true
-        } catch {
-            candidate.close()
-            if selected == nil { setStatus(.disconnected) }
-            let failure = reportFailure(
-                phase: phase,
-                endpoint: url,
-                underlying: surfAceRegistrationErrorDescription(error),
-                showInStatus: selected == nil
-            )
-            failures.values.append(failure.errorDescription ?? surfAceRegistrationErrorDescription(error))
-            if stopped { throw SurfAceRegistrationError.stopped }
-            return false
-        }
     }
 
     private func nextRetryDelay() -> Duration {
