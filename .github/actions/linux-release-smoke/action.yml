@@ -1,0 +1,123 @@
+name: Packaged Linux release smoke
+description: Run fresh-install acceptance with a disposable PostgreSQL cluster and isolated networking.
+inputs:
+  qualification-only:
+    description: Check SHA-pinned Linux packages from a non-publishing build.
+    default: 'false'
+runs:
+  using: composite
+  steps:
+    - name: Pin Node
+      uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+    - name: Install Linux smoke host dependencies
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo apt-get update
+        sudo apt-get install --yes --no-install-recommends \
+          iproute2 libpq-dev postgresql-16 postgresql-client-16 util-linux \
+          tar unzip x11-utils xauth xvfb
+        for tool in ip unshare runuser xvfb-run Xvfb xauth xdpyinfo pg_config tar unzip timeout; do
+          if ! command -v "${tool}" >/dev/null 2>&1; then
+            echo "linux_smoke_required_tool_missing:${tool}" >&2
+            exit 127
+          fi
+        done
+        pg_bin="$(pg_config --bindir)"
+        for tool in initdb postgres pg_ctl psql pg_basebackup pg_dump pg_restore; do
+          if [[ ! -x "${pg_bin}/${tool}" ]]; then
+            echo "linux_smoke_required_postgres_tool_missing:${pg_bin}/${tool}" >&2
+            exit 127
+          fi
+        done
+    - name: Prepare the exact candidate product and state driver
+      shell: bash
+      run: |
+        set -euo pipefail
+        test "$(pg_config --version | cut -d' ' -f2 | cut -d. -f1)" = "${POSTGRES_VERSION}"
+        test "$(git -C tooling rev-parse HEAD)" = "${TOOLING_COMMIT}"
+        test "$(git -C source rev-parse HEAD)" = "${PRODUCT_COMMIT}"
+        corepack enable
+        corepack prepare "pnpm@${PNPM_VERSION}" --activate
+        pnpm --dir source fetch --frozen-lockfile
+        pnpm --dir source install --offline --frozen-lockfile
+        # The checked-out custody helper resolves @surf-ace/protocol via its dist exports.
+        pnpm --dir source --filter @surf-ace/protocol build
+        pnpm --dir tooling fetch --frozen-lockfile
+        pnpm --dir tooling install --offline --frozen-lockfile
+    - name: Run PostgreSQL-backed server, packaged CLI, and Linux client acceptance
+      env:
+        QUALIFICATION_ONLY: ${{ inputs.qualification-only }}
+        SURF_ACE_TIGHTBEAM_STATE_DRIVER: ${{ github.workspace }}/tooling/scripts/release/tightbeam-state-smoke-fixture.ts
+      shell: bash
+      run: |
+        set -euo pipefail
+        smoke_tmp="$(mktemp -d /tmp/sa.XXXXXX)"
+        trap 'rm -rf "$smoke_tmp"' EXIT
+        smoke_user="$(id -un)"
+        smoke_node="$(command -v node)"
+        timeout --signal=TERM --kill-after=10s 20m sudo -n env \
+          PRODUCT_VERSION="${PRODUCT_VERSION}" \
+          PRODUCT_TAG="${PRODUCT_TAG}" \
+          TOOLING_TAG="${TOOLING_TAG}" \
+          unshare --net -- bash -c '
+          set -euo pipefail
+          smoke_user=$1
+          smoke_tmp=$2
+          smoke_node=$3
+          smoke_path=$4
+          state_driver=$5
+          product_commit=$6
+          tooling_commit=$7
+          qualification_only=$8
+          ip link set lo up
+          ip link add veth0 type veth peer name veth1
+          ip addr add 198.18.0.1/30 dev veth0
+          ip addr add 169.254.77.1/16 dev veth0
+          ip link set veth0 up
+          ip link set veth1 up
+          ip route add 224.0.0.0/4 dev veth0
+          ip -br addr >&2
+          ip route >&2
+          test -z "$(ip route show default)"
+          if [[ "$qualification_only" == true ]]; then
+            candidate_args=(--qualification-only linux --package-dir "$PWD/build/release/tightbeam")
+          else
+            candidate_args=(--candidate-commit "$product_commit" --manifest "build/release/tightbeam/surf-ace-v${PRODUCT_VERSION}-manifest.json")
+          fi
+          exec runuser -u "$smoke_user" -- env \
+            PATH="$smoke_path" TMPDIR="$smoke_tmp" \
+            PRODUCT_COMMIT="$product_commit" \
+            PRODUCT_TAG="$PRODUCT_TAG" \
+            TOOLING_TAG="$TOOLING_TAG" \
+            SURF_ACE_SMOKE_COMPONENT=linux \
+            SURF_ACE_TIGHTBEAM_STATE_DRIVER="$state_driver" \
+            xvfb-run -a "$smoke_node" tooling/scripts/release/smoke-tightbeam-release.mjs \
+              --source-dir "$PWD/source" \
+              --source-commit "$product_commit" \
+              --tooling-commit "$tooling_commit" \
+              "${candidate_args[@]}"
+        ' bash "$smoke_user" "$smoke_tmp" "$smoke_node" "$PATH" \
+          "$SURF_ACE_TIGHTBEAM_STATE_DRIVER" "$PRODUCT_COMMIT" "$TOOLING_COMMIT" "$QUALIFICATION_ONLY" \
+          > linux-smoke.json 2> linux-smoke-stderr.log || {
+            smoke_status=$?
+            echo "Linux acceptance smoke failed with exit ${smoke_status}; diagnostic details follow." >&2
+            if [[ "${smoke_status}" -eq 124 ]]; then
+              echo "linux_smoke_packaged_acceptance_timeout_20m" >&2
+            fi
+            cat linux-smoke-stderr.log >&2
+            if [[ -s linux-smoke.json ]]; then
+              cat linux-smoke.json >&2
+            fi
+            mkdir -p linux-smoke-failure
+            find "$smoke_tmp" -type f \( -name 'fresh-install-state.json' -o -name 'fresh-install-state.json.capture.png' \
+              -o -name 'client-flight-recorder.log' \
+              -o -name 'raw-cli-progress.ndjson' -o -name 'raw-cli-evidence.ndjson' \
+              -o -name 'annotation-journal-progress.ndjson' \
+              -o -name 'fresh-install.client-flight-recorder.log' -o -name 'fresh-install.second-client-flight-recorder.log' \
+              -o -name 'fresh-install-registry.client-flight-recorder.log' -o -name 'primary.log' -o -name 'witness.log' \) \
+              -exec cp {} linux-smoke-failure/ \;
+            exit "${smoke_status}"
+          }

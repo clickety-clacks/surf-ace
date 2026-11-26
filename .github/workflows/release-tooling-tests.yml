@@ -6,6 +6,7 @@ on:
     paths:
       - "scripts/release/**"
       - "integrations/tightbeam/skills/surf-ace/SKILL.md"
+      - ".github/actions/linux-release-smoke/**"
       - ".github/workflows/release-tightbeam.yml"
       - ".github/workflows/release-tooling-tests.yml"
       - "package.json"
@@ -37,3 +38,108 @@ jobs:
           pnpm install --frozen-lockfile
       - name: Run release tooling behavior tests
         run: pnpm test:release
+
+  package-linux:
+    env:
+      NODE_VERSION: 24.3.0
+      PNPM_VERSION: 10.15.1
+      PRODUCT_COMMIT: ${{ github.event.pull_request.head.sha }}
+      # Naming inputs for qualification only. No Git refs are created or used.
+      PRODUCT_VERSION: "0.2.11"
+      PRODUCT_TAG: surf-ace-v0.2.11-r1
+      TOOLING_TAG: surf-ace-release-tooling-v0.2.11-r1
+    runs-on: ubuntu-24.04
+    container:
+      image: rust:1.89.0-bookworm@sha256:948f9b08a66e7fe01b03a98ef1c7568292e07ec2e4fe90d88c07bb14563c84ff
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out tooling at the pull request head
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: tooling
+          ref: ${{ env.PRODUCT_COMMIT }}
+          persist-credentials: false
+      - name: Check out product at the pull request head
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: source
+          ref: ${{ env.PRODUCT_COMMIT }}
+          persist-credentials: false
+      - name: Install checksum-pinned Node and pnpm
+        run: |
+          set -euo pipefail
+          curl -fsSLO https://nodejs.org/dist/v24.3.0/node-v24.3.0-linux-x64.tar.xz
+          printf '%s  %s\n' a962afadaa8b94bae8bff87ddd6c11f7aae621032424ef05c0a4fe2537fa4de0 node-v24.3.0-linux-x64.tar.xz | sha256sum -c -
+          tar -xJf node-v24.3.0-linux-x64.tar.xz -C /usr/local --strip-components=1
+          corepack enable
+          corepack prepare "pnpm@${PNPM_VERSION}" --activate
+          test "$(node --version)" = "v${NODE_VERSION}"
+          test "$(pnpm --version)" = "${PNPM_VERSION}"
+      - name: Build Linux packages for qualification
+        env:
+          SURF_ACE_RELEASE_COMPONENT: linux
+        run: |
+          set -euo pipefail
+          pnpm --dir source fetch --frozen-lockfile
+          pnpm --dir source install --offline --frozen-lockfile
+          node tooling/scripts/release/build-tightbeam-release.mjs \
+            --qualification-only linux \
+            --source-dir source \
+            --output-dir "$PWD/build/release/tightbeam" \
+            --source-commit "$PRODUCT_COMMIT" \
+            --tooling-commit "$PRODUCT_COMMIT" \
+            --version "$PRODUCT_VERSION" \
+            --target x86_64-unknown-linux-gnu
+      - name: Retain the Linux qualification packages
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: linux-qualification-packages
+          path: build/release/tightbeam
+          if-no-files-found: error
+
+  smoke-linux:
+    needs: package-linux
+    env:
+      NODE_VERSION: 24.3.0
+      PNPM_VERSION: 10.15.1
+      POSTGRES_VERSION: "16"
+      PRODUCT_COMMIT: ${{ github.event.pull_request.head.sha }}
+      TOOLING_COMMIT: ${{ github.event.pull_request.head.sha }}
+      # Naming inputs for qualification only. No Git refs are created or used.
+      PRODUCT_VERSION: "0.2.11"
+      PRODUCT_TAG: surf-ace-v0.2.11-r1
+      TOOLING_TAG: surf-ace-release-tooling-v0.2.11-r1
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out tooling at the pull request head
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: tooling
+          ref: ${{ env.PRODUCT_COMMIT }}
+          persist-credentials: false
+      - name: Check out a fresh product tree at the pull request head
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: source
+          ref: ${{ env.PRODUCT_COMMIT }}
+          persist-credentials: false
+      - name: Download the Linux qualification packages
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: linux-qualification-packages
+          path: build/release/tightbeam
+      - name: Run packaged Linux fresh-install smoke
+        uses: ./tooling/.github/actions/linux-release-smoke
+        with:
+          qualification-only: 'true'
+      - name: Retain Linux smoke results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: linux-qualification-smoke
+          path: |
+            linux-smoke.json
+            linux-smoke-stderr.log
+            linux-smoke-failure/

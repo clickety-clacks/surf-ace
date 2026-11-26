@@ -9,6 +9,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
+import { runInNewContext } from "node:vm";
 import {
   assertExactPublicFiles,
   assertDisjointTrees,
@@ -3185,7 +3186,9 @@ test("stable v0.2.8 documentation stays historical and release gates bind the se
   assert.match(readme, /server archive\s+includes `docs\/OPERATIONS\.md`/);
   assert.doesNotMatch(`${readme}\n${skill}`, environmentSpecificReference);
   assert.match(workflow, /^on:\n  workflow_dispatch:/m);
-  for (const match of workflow.matchAll(/^\s*uses:\s*([^\s]+)$/gm)) assert.match(match[1], /@[0-9a-f]{40}$/);
+  for (const [, action] of workflow.matchAll(/^\s*uses:\s*([^\s]+)$/gm)) {
+    if (action !== "./tooling/.github/actions/linux-release-smoke") assert.match(action, /@[0-9a-f]{40}$/);
+  }
   assert.match(workflow, /run_smoke:[\s\S]*?default: false/);
   assert.match(workflow, /publish_release:[\s\S]*?default: false/);
   assert.match(workflow, /product_commit:[\s\S]*?required: true[\s\S]*?type: string/);
@@ -3203,12 +3206,13 @@ test("stable v0.2.8 documentation stays historical and release gates bind the se
   assert.match(workflow, /GITHUB_EVENT_NAME/);
   assert.match(workflow, /GITHUB_REF_TYPE/);
   assert.doesNotMatch(workflow, /build-ios|tightbeam-ios-ipa|xcodebuild archive|-exportArchive|\.ipa\b|IOS_CERTIFICATE|IOS_PROVISIONING_PROFILE|tightbeam-ios-signing/);
-  assert.match(workflow, /trap 'rm -rf "\$smoke_tmp"' EXIT/);
-  assert.match(workflow, /timeout --signal=TERM --kill-after=10s 20m sudo -n env \\\s+PRODUCT_VERSION="\$\{PRODUCT_VERSION\}" \\\s+PRODUCT_TAG="\$\{PRODUCT_TAG\}" \\\s+TOOLING_TAG="\$\{TOOLING_TAG\}" \\\s+unshare --net -- bash -c/);
-  assert.match(workflow, /ip route add 224\.0\.0\.0\/4 dev veth0/);
-  assert.match(workflow, /test -z "\$\(ip route show default\)"/);
-  assert.match(workflow, /exec runuser -u "\$smoke_user" -- env/);
-  assert.match(workflow, /PRODUCT_COMMIT="\$product_commit" \\\s+PRODUCT_TAG="\$PRODUCT_TAG" \\\s+TOOLING_TAG="\$TOOLING_TAG" \\\s+SURF_ACE_SMOKE_COMPONENT=linux \\\s+SURF_ACE_TIGHTBEAM_STATE_DRIVER="\$state_driver"/);
+  const linuxSmokeAction = await fs.readFile(path.join(repository, ".github/actions/linux-release-smoke/action.yml"), "utf8");
+  assert.match(linuxSmokeAction, /trap 'rm -rf "\$smoke_tmp"' EXIT/);
+  assert.match(linuxSmokeAction, /timeout --signal=TERM --kill-after=10s 20m sudo -n env \\\s+PRODUCT_VERSION="\$\{PRODUCT_VERSION\}" \\\s+PRODUCT_TAG="\$\{PRODUCT_TAG\}" \\\s+TOOLING_TAG="\$\{TOOLING_TAG\}" \\\s+unshare --net -- bash -c/);
+  assert.match(linuxSmokeAction, /ip route add 224\.0\.0\.0\/4 dev veth0/);
+  assert.match(linuxSmokeAction, /test -z "\$\(ip route show default\)"/);
+  assert.match(linuxSmokeAction, /exec runuser -u "\$smoke_user" -- env/);
+  assert.match(linuxSmokeAction, /PRODUCT_COMMIT="\$product_commit" \\\s+PRODUCT_TAG="\$PRODUCT_TAG" \\\s+TOOLING_TAG="\$TOOLING_TAG" \\\s+SURF_ACE_SMOKE_COMPONENT=linux \\\s+SURF_ACE_TIGHTBEAM_STATE_DRIVER="\$state_driver"/);
   assert.match(workflow, /subject-path: release\/\.receipts\/linux-smoke-receipt\.json/);
   assert.match(workflow, /subject-path: release\/\.receipts\/macos-smoke-receipt\.json/);
   const linuxCompareStart = workflow.indexOf("  compare-linux:\n");
@@ -3242,17 +3246,70 @@ test("stable v0.2.8 documentation stays historical and release gates bind the se
   assert.match(workflow, /needs\.smoke-macos\.outputs\.gate_state == 'passed'/);
   assert.match(publishJob, /needs\.assemble\.outputs\.has_linux == 'true'/);
   assert.match(publishJob, /needs\.assemble\.outputs\.has_macos == 'true'/);
-  assert.match(publishJob, /if:\s*>-\s*\n\s*\$\{\{\s*always\(\)\s*&&/);
   assert.match(publishJob, /verifyTightbeamOperatingSkillManifest\(manifest\)/);
   assert.match(publishJob, /OPERATING_SKILL_SHA256/);
   assert.match(publishJob, /Surf Ace operating skill asset:/);
   assert.match(publishJob, /iPhone builds carry their own operating skill copy and build manifest/);
-  assert.match(publishJob, /The iOS app is withheld because the complete iOS XCTest result was/);
   assert.match(publishJob, /The tooling tag version label differs from the product tag version label/);
   assert.match(publishJob, /release_assets\+=\("release\/\$\{name\}"\)/);
   assert.match(workflow, /VERSION_NAME_MISMATCH/);
   assert.doesNotMatch(workflow, /test "\$\{tooling_version\}" = "\$\{product_version\}"/);
   assert.doesNotMatch(TIGHTBEAM_BUILD_COMMANDS.join("\n"), /xcodebuild archive|-exportArchive|\.ipa\b/);
+});
+
+test("publication requires every platform gate and both packaged desktop candidates", async () => {
+  const workflow = await fs.readFile(path.join(repository, ".github/workflows/release-tightbeam.yml"), "utf8");
+  const publish = workflow.slice(workflow.indexOf("\n  publish:\n"));
+  const condition = publish.match(/^    if: >-\n\s+\$\{\{([\s\S]+?)\}\}/m)?.[1];
+  assert.ok(condition, "publish job contains its gate condition");
+  const dependencyList = publish.match(/^    needs:\n((?:      - [^\n]+\n)+)/m)?.[1];
+  assert.ok(dependencyList, "publish job contains the dependency list");
+  const dependencies = [...dependencyList.matchAll(/- ([^\n]+)/g)].map(([, name]) => name);
+  const requiredJobs = [
+    "guard", "build-linux", "build-macos", "compare-linux", "compare-macos",
+    "assemble-linux", "assemble-macos", "smoke-linux", "smoke-macos",
+    "test-ios", "summarize-ios-tests", "assemble",
+  ];
+  for (const job of requiredJobs) assert.ok(dependencies.includes(job), `publish waits for ${job}`);
+
+  // Evaluate the actual boolean expression, translating hyphenated needs keys
+  // and modeling the Actions success() status function over direct dependencies.
+  const expression = condition.replace(/needs\.([a-z-]+)\./g, 'needs["$1"].');
+  const inputs = { publish_release: true, run_smoke: true, run_linux_smoke_only: false };
+  const needs = Object.fromEntries(dependencies.map((name) => [name, { result: "success", outputs: {} }]));
+  needs["smoke-linux"].outputs.gate_state = "passed";
+  needs["smoke-macos"].outputs.gate_state = "passed";
+  needs["summarize-ios-tests"].outputs.state = "passed";
+  needs.assemble.outputs = { has_linux: "true", has_macos: "true" };
+  const eligible = () => runInNewContext(expression, {
+    inputs,
+    needs,
+    success: () => Object.values(needs).every(({ result }) => result === "success"),
+  });
+  assert.equal(eligible(), true, "a complete passing release can publish");
+  for (const job of requiredJobs) {
+    for (const result of ["failure", "cancelled", "skipped"]) {
+      needs[job].result = result;
+      assert.equal(eligible(), false, `${job} is ${result}`);
+    }
+    needs[job].result = "success";
+  }
+  for (const [job, output, passing] of [
+    ["smoke-linux", "gate_state", "passed"],
+    ["smoke-macos", "gate_state", "passed"],
+    ["summarize-ios-tests", "state", "passed"],
+    ["assemble", "has_linux", "true"],
+    ["assemble", "has_macos", "true"],
+  ]) {
+    needs[job].outputs[output] = "";
+    assert.equal(eligible(), false, `${job} has no passing ${output}`);
+    needs[job].outputs[output] = passing;
+  }
+  inputs.publish_release = false;
+  assert.equal(eligible(), false, "verification runs cannot publish");
+  inputs.publish_release = true;
+  inputs.run_linux_smoke_only = true;
+  assert.equal(eligible(), false, "Linux-only runs cannot publish");
 });
 
 test("rc2 release smoke gates bind only matching candidate participants", async () => {
@@ -3265,7 +3322,8 @@ test("rc2 release smoke gates bind only matching candidate participants", async 
   for (const input of [workflow, smoke]) assert.doesNotMatch(input, /cf91ef1baab26d6045fac5300487c29d0ddf332d/);
   assert.doesNotMatch(workflow, /build-smoke-baseline|BASELINE_(?:BACKEND|ELECTRON)|baseline-(?:commit|electron|root)/i);
   assert.doesNotMatch(smoke, /SURF_ACE_TIGHTBEAM_BASELINE|function smokeLinux\(|runLinuxStateDriver|validateTightbeamStateSequence/);
-  assert.match(workflow, /--candidate-commit "\$product_commit"/);
+  const linuxSmokeAction = await fs.readFile(path.join(repository, ".github/actions/linux-release-smoke/action.yml"), "utf8");
+  assert.match(linuxSmokeAction, /--candidate-commit "\$product_commit"/);
   assert.match(workflow, /--candidate-commit "\$\{PRODUCT_COMMIT\}"/);
   assert.match(smoke, /tightbeam-\$\{channel\}-v023-candidate-write/);
   assert.match(smoke, /inspectScreenshotPixels\(visible\.capture\.image, expectedScreenshotColors\)/);

@@ -197,6 +197,9 @@ export class ServerConnection {
   }
 
   async claimPaneLabel(surfaceId: string, paneId: number, paneLineageId: string): Promise<PaneLabelAllocation> {
+    // A claim that has not been sent can be supplied by registration after
+    // the local pane commits. Only claims started online need transport replay.
+    if (!this.selected?.registration.isOpen()) throw new Error("allocator_unavailable");
     this.pendingClaimsBySurface.set(surfaceId, (this.pendingClaimsBySurface.get(surfaceId) ?? 0) + 1);
     this.options.onClaimStatusChange?.(surfaceId);
     try {
@@ -233,6 +236,7 @@ export class ServerConnection {
   async preparePaneLabelClaim(): Promise<void> {
     if (this.options.core.locklessAuthority.listPendingPaneReleases().length === 0 &&
         this.options.core.locklessAuthority.listPendingWindowReleases().length === 0) return;
+    if (!this.selected?.registration.isOpen()) throw new Error("allocator_unavailable");
     await this.synchronize();
     if (this.options.core.locklessAuthority.listPendingPaneReleases().length > 0 ||
         this.options.core.locklessAuthority.listPendingWindowReleases().length > 0) {
