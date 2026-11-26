@@ -1409,9 +1409,8 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         let stateURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("\(suiteName).json")
         let flushHeld = expectation(description: "final direct flush held")
-        let reentryProjected = expectation(description: "same-context re-entry projected before flush release")
+        let reentryFinished = expectation(description: "same-context re-entry completed before flush release")
         let flushGate = SurfAceAnnotationFlushSendGate(onHeld: { flushHeld.fulfill() })
-        let modeProjection = SurfAceAnnotationModeProjectionProbe()
         addTeardownBlock {
             defaults.removePersistentDomain(forName: suiteName)
             try? FileManager.default.removeItem(at: stateURL)
@@ -1425,9 +1424,6 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
             enableFleetDiscovery: false, isolatedTestLoopback: true,
             outboundSendPreparation: { text, priority in
                 await flushGate.prepareSend(text: text, priority: priority)
-            },
-            annotationModeProjectionObserver: { enabled in
-                if enabled, await modeProjection.recordSecondProjection() { reentryProjected.fulfill() }
             }
         )
         await runtime.start()
@@ -1534,8 +1530,13 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
             enabled: true,
             fingerDrawEnabled: false
         )
-        guard await XCTWaiter.fulfillment(of: [reentryProjected], timeout: 5) == .completed else {
-            XCTFail("Same-context re-entry did not project while the final flush was held")
+        let reentry = Task { @MainActor in
+            await runtime.awaitAnnotationModeTransition(surfaceId: sourceSurfaceId, paneId: sourcePaneId)
+            if !Task.isCancelled { reentryFinished.fulfill() }
+        }
+        defer { reentry.cancel() }
+        guard await XCTWaiter.fulfillment(of: [reentryFinished], timeout: 5) == .completed else {
+            XCTFail("Same-context re-entry did not complete while the final flush was held")
             return
         }
         XCTAssertTrue(pane.annotationMode)
@@ -2526,15 +2527,6 @@ private final class SurfAceAnnotationAcceptingTestTransport: SurfAceAnnotationWi
     }
 
     func close() {}
-}
-
-private actor SurfAceAnnotationModeProjectionProbe {
-    private var count = 0
-
-    func recordSecondProjection() -> Bool {
-        count += 1
-        return count == 2
-    }
 }
 
 private final class SurfAceNoNetworkTestService: NetService {
