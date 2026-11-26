@@ -101,12 +101,12 @@ export const TIGHTBEAM_TEST_COMMANDS = Object.freeze([
 export const TIGHTBEAM_BUILD_COMMANDS = Object.freeze([
   "pnpm --dir source fetch --frozen-lockfile",
   "pnpm --dir source install --offline --frozen-lockfile",
-  "cargo build --manifest-path source/packages/cli/Cargo.toml --target-dir source/packages/cli/target --release --locked --target x86_64-unknown-linux-gnu",
+  `rustup run ${TOOLCHAINS.rust} cargo build --manifest-path source/packages/cli/Cargo.toml --target-dir source/packages/cli/target --release --locked --target ${TOOLCHAINS.linuxRustTarget}`,
   "pnpm --dir source --filter @surf-ace/protocol build",
   "pnpm --dir source --filter @surf-ace/allocator build",
   "pnpm --dir source --filter @surf-ace/controller build",
   "pnpm --dir source --filter @surf-ace/electron build",
   "pnpm --dir source --filter @surf-ace/electron exec electron-builder --linux dir --x64 --publish never --config.executableName surf-ace",
-  "cargo build --manifest-path source/packages/cli/Cargo.toml --target-dir source/packages/cli/target --release --locked --target aarch64-apple-darwin",
+  `rustup run ${TOOLCHAINS.rust} cargo build --manifest-path source/packages/cli/Cargo.toml --target-dir source/packages/cli/target --release --locked --target ${TOOLCHAINS.macosRustTarget}`,
   "pnpm --dir source --filter @surf-ace/electron exec electron-builder --mac dir --arm64 --publish never",
 ]);

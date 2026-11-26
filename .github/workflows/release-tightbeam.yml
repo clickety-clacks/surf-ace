@@ -520,6 +520,7 @@ jobs:
           SURF_ACE_RELEASE_COMPONENT: macos
         run: |
           set -euo pipefail
+          rustup toolchain install "${RUST_VERSION}" --profile minimal --target "${MACOS_RUST_TARGET}"
           node tooling/scripts/release/build-tightbeam-release.mjs \
             --source-dir source \
             --output-dir build/release/tightbeam \

@@ -11,6 +11,7 @@ on:
       - ".github/workflows/release-tooling-tests.yml"
       - "package.json"
       - "pnpm-lock.yaml"
+      - "rust-toolchain.toml"
 
 permissions:
   contents: read
@@ -143,3 +144,99 @@ jobs:
             linux-smoke.json
             linux-smoke-stderr.log
             linux-smoke-failure/
+
+
+  package-macos:
+    runs-on: xcode-27
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [build-a, build-b]
+    env:
+      PRODUCT_COMMIT: ${{ github.event.pull_request.head.sha }}
+      # Naming inputs for qualification only. No Git refs are created or used.
+      PRODUCT_TAG: surf-ace-v0.2.11-r1
+      TOOLING_TAG: surf-ace-release-tooling-v0.2.11-r1
+    steps:
+      - name: Check out tooling at the pull request head
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: tooling
+          ref: ${{ env.PRODUCT_COMMIT }}
+          persist-credentials: false
+      - name: Check out product at the pull request head
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: source
+          ref: ${{ env.PRODUCT_COMMIT }}
+          persist-credentials: false
+      - name: Pin Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24.3.0
+      - name: Build macOS packages without publication
+        run: |
+          set -euo pipefail
+          sudo xcode-select --switch /Applications/Xcode_27.0.0.app
+          test "$(xcodebuild -version | head -1)" = "Xcode 27.0"
+          test "$(git -C tooling rev-parse HEAD)" = "$PRODUCT_COMMIT"
+          test "$(git -C source rev-parse HEAD)" = "$PRODUCT_COMMIT"
+          corepack enable
+          corepack prepare pnpm@10.15.1 --activate
+          test "$(pnpm --version)" = 10.15.1
+          pnpm --dir source fetch --frozen-lockfile
+          pnpm --dir source install --offline --frozen-lockfile
+          rust_version="$(node --input-type=module -e 'import { TOOLCHAINS } from "./tooling/scripts/release/tightbeam-release-config.mjs"; console.log(TOOLCHAINS.rust)')"
+          rustup toolchain install "$rust_version" --profile minimal --target aarch64-apple-darwin
+          mkdir -p macos-packages
+          node --input-type=module <<'NODE'
+          import { buildTightbeamMacosPackages } from "./tooling/scripts/release/build-tightbeam-release.mjs";
+          import { assertTrackedInputsUnchanged, writeChecksumReceipt } from "./tooling/scripts/release/release-lib.mjs";
+          await assertTrackedInputsUnchanged("source");
+          const { files, outputDir } = await buildTightbeamMacosPackages({
+            sourceDir: "source",
+            outputDir: "macos-packages",
+            unsigned: true,
+          });
+          await writeChecksumReceipt(outputDir, files);
+          NODE
+      - name: Retain macOS qualification packages and checksums
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: macos-qualification-${{ matrix.lane }}
+          path: macos-packages
+          include-hidden-files: true
+          if-no-files-found: error
+
+  compare-macos:
+    needs: package-macos
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out tooling at the pull request head
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Pin Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24.3.0
+      - name: Download both independent macOS builds
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: macos-qualification-build-*
+          path: macos-builds
+      - name: Compare macOS packages byte for byte
+        run: |
+          set -euo pipefail
+          node scripts/release/compare-release-builds.mjs \
+            --build-a macos-builds/macos-qualification-build-a \
+            --build-b macos-builds/macos-qualification-build-b \
+            --files surf-ace-cli-macos-arm64-v0.2.11.tar.gz,surf-ace-electron-macos-arm64-v0.2.11.zip \
+            | tee macos-byte-comparison.json
+      - name: Retain macOS comparison evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: macos-qualification-comparison
+          path: macos-byte-comparison.json
+          if-no-files-found: error
