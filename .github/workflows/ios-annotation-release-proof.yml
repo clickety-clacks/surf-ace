@@ -9,9 +9,9 @@ jobs:
     runs-on: xcode-27
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         lane: [build-a, build-b]
-        repetition: [1, 2, 3]
     env:
       CANDIDATE: 12fa26c7fc169c21ba6c7b3338cc09b50055aac5
     steps:
@@ -78,5 +78,5 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: ios-release-proof-${{ matrix.lane }}-${{ matrix.repetition }}
+          name: ios-release-proof-${{ matrix.lane }}
           path: ${{ runner.temp }}/ios-release-proof.*
