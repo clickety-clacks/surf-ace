@@ -26,7 +26,7 @@ on:
         type: boolean
         default: false
       publish_release:
-        description: Publish assets only for platforms that pass their smoke checks.
+        description: Publish the complete release after all required platform checks and both smokes pass.
         required: true
         type: boolean
         default: false
@@ -543,7 +543,6 @@ jobs:
   test-ios:
     name: iOS XCTest (${{ matrix.lane }})
     needs: guard
-    continue-on-error: true
     env:
       PRODUCT_COMMIT: ${{ needs.guard.outputs.product_commit }}
       PRODUCT_VERSION: ${{ needs.guard.outputs.product_version }}
@@ -645,7 +644,6 @@ jobs:
   summarize-ios-tests:
     if: ${{ always() && needs.guard.result == 'success' }}
     needs: [guard, test-ios]
-    continue-on-error: true
     outputs:
       state: ${{ steps.summarize.outputs.state }}
       build_a: ${{ steps.summarize.outputs.build_a }}
@@ -660,7 +658,7 @@ jobs:
           pattern: surf-ace-ios-xctest-${{ github.run_id }}-${{ github.run_attempt }}-*
           merge-multiple: false
           path: ios-test-evidence
-      - name: Report iOS XCTest outcome without blocking other platforms
+      - name: Report both required iOS XCTest outcomes
         id: summarize
         if: always()
         shell: bash
@@ -693,7 +691,8 @@ jobs:
           printf 'build_b=%s\n' "$build_b" >> "$GITHUB_OUTPUT"
           printf 'iOS XCTest lanes: build-a=%s; build-b=%s.\n' "$build_a" "$build_b" >> "$GITHUB_STEP_SUMMARY"
           if [[ "$state" != passed ]]; then
-            printf '::warning::The iOS app is withheld because the complete iOS XCTest result is %s; other platform assets retain their own gates.\n' "$state"
+            printf '::error::The release requires both iOS XCTest lanes to pass (result: %s).\n' "$state"
+            exit 1
           fi
 
   retain-macos-job-logs:
@@ -856,7 +855,6 @@ jobs:
   compare-linux:
     if: ${{ always() && needs.guard.result == 'success' }}
     needs: [build-linux, guard]
-    continue-on-error: true
     outputs:
       gate_state: ${{ steps.finalize.outputs.gate_state }}
     env:
@@ -931,7 +929,6 @@ jobs:
   compare-macos:
     if: ${{ always() && needs.guard.result == 'success' }}
     needs: [build-macos, guard]
-    continue-on-error: true
     outputs:
       gate_state: ${{ steps.finalize.outputs.gate_state }}
     env:
@@ -1078,7 +1075,6 @@ jobs:
   assemble-linux:
     needs: [compare-linux, guard]
     if: ${{ needs.guard.result == 'success' && needs.compare-linux.outputs.gate_state == 'passed' }}
-    continue-on-error: true
     outputs:
       gate_state: ${{ steps.finalize.outputs.gate_state }}
     env:
@@ -1166,7 +1162,6 @@ jobs:
   assemble-macos:
     needs: [compare-macos, guard]
     if: ${{ needs.guard.result == 'success' && needs.compare-macos.outputs.gate_state == 'passed' }}
-    continue-on-error: true
     outputs:
       gate_state: ${{ steps.finalize.outputs.gate_state }}
     env:
@@ -1253,10 +1248,10 @@ jobs:
   smoke-linux:
     if: ${{ (inputs.run_smoke || inputs.run_linux_smoke_only) && needs.assemble-linux.outputs.gate_state == 'passed' }}
     needs: [assemble-linux, guard]
-    continue-on-error: true
     outputs:
       gate_state: ${{ steps.finalize.outputs.gate_state }}
     env:
+      TOOLING_COMMIT: ${{ github.sha }}
       PRODUCT_COMMIT: ${{ needs.guard.outputs.product_commit }}
       PRODUCT_VERSION: ${{ needs.guard.outputs.product_version }}
     runs-on: ubuntu-24.04
@@ -1278,111 +1273,9 @@ jobs:
         with:
           name: tightbeam-linux-candidate
           path: build/release/tightbeam
-      - name: Pin Node
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-      - name: Install Linux smoke host dependencies
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends \
-            iproute2 libpq-dev postgresql-16 postgresql-client-16 util-linux \
-            tar unzip x11-utils xauth xvfb
-          for tool in ip unshare runuser xvfb-run Xvfb xauth xdpyinfo pg_config tar unzip timeout; do
-            if ! command -v "${tool}" >/dev/null 2>&1; then
-              echo "linux_smoke_required_tool_missing:${tool}" >&2
-              exit 127
-            fi
-          done
-          pg_bin="$(pg_config --bindir)"
-          for tool in initdb postgres pg_ctl psql pg_basebackup pg_dump pg_restore; do
-            if [[ ! -x "${pg_bin}/${tool}" ]]; then
-              echo "linux_smoke_required_postgres_tool_missing:${pg_bin}/${tool}" >&2
-              exit 127
-            fi
-          done
-      - name: Prepare the exact candidate product and state driver
-        run: |
-          set -euo pipefail
-          test "$(pg_config --version | cut -d' ' -f2 | cut -d. -f1)" = "${POSTGRES_VERSION}"
-          test "$(git -C tooling rev-parse HEAD)" = "${GITHUB_SHA}"
-          test "$(git -C source rev-parse HEAD)" = "${PRODUCT_COMMIT}"
-          corepack enable
-          corepack prepare "pnpm@${PNPM_VERSION}" --activate
-          pnpm --dir source fetch --frozen-lockfile
-          pnpm --dir source install --offline --frozen-lockfile
-          pnpm --dir tooling fetch --frozen-lockfile
-          pnpm --dir tooling install --offline --frozen-lockfile
       - name: Run PostgreSQL-backed server, packaged CLI, and Linux client acceptance
         id: linux-acceptance
-        env:
-          SURF_ACE_SMOKE_COMPONENT: linux
-          SURF_ACE_TIGHTBEAM_STATE_DRIVER: ${{ github.workspace }}/tooling/scripts/release/tightbeam-state-smoke-fixture.ts
-        run: |
-          set -euo pipefail
-          smoke_tmp="$(mktemp -d /tmp/sa.XXXXXX)"
-          trap 'rm -rf "$smoke_tmp"' EXIT
-          smoke_user="$(id -un)"
-          smoke_node="$(command -v node)"
-          timeout --signal=TERM --kill-after=10s 20m sudo -n env \
-            PRODUCT_VERSION="${PRODUCT_VERSION}" \
-            PRODUCT_TAG="${PRODUCT_TAG}" \
-            TOOLING_TAG="${TOOLING_TAG}" \
-            unshare --net -- bash -c '
-            set -euo pipefail
-            smoke_user=$1
-            smoke_tmp=$2
-            smoke_node=$3
-            smoke_path=$4
-            state_driver=$5
-            product_commit=$6
-            tooling_commit=$7
-            ip link set lo up
-            ip link add veth0 type veth peer name veth1
-            ip addr add 198.18.0.1/30 dev veth0
-            ip addr add 169.254.77.1/16 dev veth0
-            ip link set veth0 up
-            ip link set veth1 up
-            ip route add 224.0.0.0/4 dev veth0
-            ip -br addr >&2
-            ip route >&2
-            test -z "$(ip route show default)"
-            exec runuser -u "$smoke_user" -- env \
-              PATH="$smoke_path" TMPDIR="$smoke_tmp" \
-              PRODUCT_COMMIT="$product_commit" \
-              PRODUCT_TAG="$PRODUCT_TAG" \
-              TOOLING_TAG="$TOOLING_TAG" \
-              SURF_ACE_SMOKE_COMPONENT=linux \
-              SURF_ACE_TIGHTBEAM_STATE_DRIVER="$state_driver" \
-              xvfb-run -a "$smoke_node" tooling/scripts/release/smoke-tightbeam-release.mjs \
-                --source-dir source \
-                --source-commit "$product_commit" \
-                --tooling-commit "$tooling_commit" \
-                --candidate-commit "$product_commit" \
-                --manifest "build/release/tightbeam/surf-ace-v${PRODUCT_VERSION}-manifest.json"
-          ' bash "$smoke_user" "$smoke_tmp" "$smoke_node" "$PATH" \
-            "$SURF_ACE_TIGHTBEAM_STATE_DRIVER" "$PRODUCT_COMMIT" "$GITHUB_SHA" \
-            > linux-smoke.json 2> linux-smoke-stderr.log || {
-              smoke_status=$?
-              echo "Linux acceptance smoke failed with exit ${smoke_status}; diagnostic details follow." >&2
-              if [[ "${smoke_status}" -eq 124 ]]; then
-                echo "linux_smoke_packaged_acceptance_timeout_20m" >&2
-              fi
-              cat linux-smoke-stderr.log >&2
-              if [[ -s linux-smoke.json ]]; then
-                cat linux-smoke.json >&2
-              fi
-              mkdir -p linux-smoke-failure
-              find "$smoke_tmp" -type f \( -name 'fresh-install-state.json' -o -name 'fresh-install-state.json.capture.png' \
-                -o -name 'client-flight-recorder.log' \
-                -o -name 'raw-cli-progress.ndjson' -o -name 'raw-cli-evidence.ndjson' \
-                -o -name 'annotation-journal-progress.ndjson' \
-                -o -name 'fresh-install.client-flight-recorder.log' -o -name 'fresh-install.second-client-flight-recorder.log' \
-                -o -name 'fresh-install-registry.client-flight-recorder.log' -o -name 'primary.log' -o -name 'witness.log' \) \
-                -exec cp {} linux-smoke-failure/ \;
-              exit "${smoke_status}"
-            }
+        uses: ./tooling/.github/actions/linux-release-smoke
       - name: Create Linux smoke receipt
         id: create-linux-smoke-receipt
         if: ${{ steps.linux-acceptance.outcome == 'success' }}
@@ -1434,11 +1327,11 @@ jobs:
             printf 'Linux smoke passed.\n' >> "$GITHUB_STEP_SUMMARY"
           elif [[ "$ACCEPTANCE_OUTCOME" == failure ]]; then
             gate_state=failed
-            printf '::warning::Linux smoke did not pass; Linux assets were withheld while other eligible platform assets may proceed.\n'
+            printf '::warning::Linux smoke did not pass; Linux assets were withheld, and release publication is blocked.\n'
             printf 'Linux smoke did not pass; Linux assets were withheld.\n' >> "$GITHUB_STEP_SUMMARY"
           else
             gate_state=unavailable
-            printf '::warning::Linux smoke was unavailable; Linux assets were withheld while other eligible platform assets may proceed.\n'
+            printf '::warning::Linux smoke was unavailable; Linux assets were withheld, and release publication is blocked.\n'
             printf 'Linux smoke was unavailable; Linux assets were withheld.\n' >> "$GITHUB_STEP_SUMMARY"
           fi
           printf 'gate_state=%s\n' "$gate_state" >> "$GITHUB_OUTPUT"
@@ -1446,7 +1339,6 @@ jobs:
   smoke-macos:
     if: ${{ inputs.run_smoke && needs.assemble-macos.outputs.gate_state == 'passed' }}
     needs: [assemble-macos, guard]
-    continue-on-error: true
     outputs:
       gate_state: ${{ steps.finalize.outputs.gate_state }}
     env:
@@ -1554,11 +1446,11 @@ jobs:
             printf 'macOS smoke passed.\n' >> "$GITHUB_STEP_SUMMARY"
           elif [[ "$ACCEPTANCE_OUTCOME" == failure ]]; then
             gate_state=failed
-            printf '::warning::macOS smoke did not pass; macOS assets were withheld while other eligible platform assets may proceed.\n'
+            printf '::warning::macOS smoke did not pass; macOS assets were withheld, and release publication is blocked.\n'
             printf 'macOS smoke did not pass; macOS assets were withheld.\n' >> "$GITHUB_STEP_SUMMARY"
           else
             gate_state=unavailable
-            printf '::warning::macOS smoke was unavailable; macOS assets were withheld while other eligible platform assets may proceed.\n'
+            printf '::warning::macOS smoke was unavailable; macOS assets were withheld, and release publication is blocked.\n'
             printf 'macOS smoke was unavailable; macOS assets were withheld.\n' >> "$GITHUB_STEP_SUMMARY"
           fi
           printf 'gate_state=%s\n' "$gate_state" >> "$GITHUB_OUTPUT"
@@ -1781,9 +1673,12 @@ jobs:
 
   publish:
     if: >-
-      ${{ always() && inputs.publish_release && inputs.run_smoke && needs.guard.result == 'success' &&
-      needs.assemble.result == 'success' &&
-      (needs.assemble.outputs.has_linux == 'true' || needs.assemble.outputs.has_macos == 'true') }}
+      ${{ success() && inputs.publish_release && inputs.run_smoke && !inputs.run_linux_smoke_only &&
+      needs.smoke-linux.outputs.gate_state == 'passed' &&
+      needs.smoke-macos.outputs.gate_state == 'passed' &&
+      needs.summarize-ios-tests.outputs.state == 'passed' &&
+      needs.assemble.outputs.has_linux == 'true' &&
+      needs.assemble.outputs.has_macos == 'true' }}
     needs:
       - guard
       - build-linux
@@ -1965,10 +1860,6 @@ jobs:
 
           The informational six-file comparison state was ${SIX_FILE_COMPARE_STATE:-unavailable}; per-platform comparisons determine asset eligibility.
           EOF
-          if [[ "${IOS_TEST_STATE:-unavailable}" != passed ]]; then
-            printf '\nThe iOS app is withheld because the complete iOS XCTest result was %s.\n' \
-              "${IOS_TEST_STATE:-unavailable}" >> release-notes.md
-          fi
           if [[ "${VERSION_NAME_MISMATCH:-false}" == true ]]; then
             printf '\nThe tooling tag version label differs from the product tag version label; exact tag pins remain required, asset names follow the product version, and smoke still checks the app version.\n' \
               >> release-notes.md
