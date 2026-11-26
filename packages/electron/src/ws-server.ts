@@ -1,4 +1,4 @@
-import { applicationQueueWait, surfaceBlockerLimitation, surfaceBlockerMessage, type ApplicationStateMutation, type SurfaceBlocker } from "./persistence-write-readiness.js";
+import { applicationQueueWait, surfaceBlockerLimitation, surfaceBlockerMessage, surfaceWriteLimitationCodes, waitForApplicationQueue, type ApplicationQueueScope, type ApplicationStateMutation, type OpenApplicationChange, type SurfaceBlocker } from "./persistence-write-readiness.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import http from "node:http";
 import { splitResizeMatches, splitResizeIsNoOp, type SplitResizeExpectation, type SplitResizeGeometry, splitResizeGeometryIsValid } from "./split-resize.js";
@@ -182,13 +182,15 @@ export type SurfaceWsServerOptions = {
   getRuntimeAppBinding?: () => Promise<RuntimeAppBindingDiagnostics | null> | RuntimeAppBindingDiagnostics | null;
   onNativeMaterialized?: (surfaceId: string, materialization: NativePaneMaterialization) => void;
   onNativeReleased?: (surfaceId: string, paneIds: string[]) => Promise<void> | void;
-  persistLocklessState?: () => Promise<void>;
+  persistLocklessState?: (surfaceId?: string, awaited?: boolean) => Promise<void>;
   isApplicationStateReady?: () => boolean;
   committedSurfaceObservation?: (surfaceId: string) => CommittedSurfaceObservation | undefined;
   registryConnectionStatus?: () => "connected" | "connecting" | "disconnected" | undefined;
   beginApplicationStateMutation?: (details: Omit<ApplicationStateMutation, "startedAtMs">) => () => void;
   openApplicationStateMutations?: () => ApplicationStateMutation[];
-  getSurfaceBlockers?: (surfaceId?: string, excludingRequestId?: string) => SurfaceBlocker[];
+  getSurfaceBlockers?: (surfaceId?: string, excludingRequestId?: string, scope?: ApplicationQueueScope) => SurfaceBlocker[];
+  getOpenSurfaceChanges?: (surfaceId: string) => OpenApplicationChange[];
+  beginApplicationStateWait?: (surfaceId: string, scope: ApplicationQueueScope, excludingRequestId?: string) => () => void;
   port: number;
   protocolVersion?: number;
   viewport: () => SurfaceViewport;
@@ -297,13 +299,15 @@ export class SurfaceWsServer {
   private readonly onNativeReleased?: (surfaceId: string, paneIds: string[]) => Promise<void> | void;
   private port: number;
   private readonly protocolVersion: number;
-  private readonly persistLocklessState: () => Promise<void>;
+  private readonly persistLocklessState: (surfaceId?: string) => Promise<void>;
   private readonly isApplicationStateReady: () => boolean;
   private readonly committedSurfaceObservation: SurfaceWsServerOptions["committedSurfaceObservation"];
   private readonly registryConnectionStatus: SurfaceWsServerOptions["registryConnectionStatus"];
   private readonly beginApplicationStateMutation: NonNullable<SurfaceWsServerOptions["beginApplicationStateMutation"]>;
   private readonly openApplicationStateMutations: () => ApplicationStateMutation[];
   private readonly getSurfaceBlockers: NonNullable<SurfaceWsServerOptions["getSurfaceBlockers"]>;
+  private readonly getOpenSurfaceChanges: NonNullable<SurfaceWsServerOptions["getOpenSurfaceChanges"]>;
+  private readonly beginApplicationStateWait: NonNullable<SurfaceWsServerOptions["beginApplicationStateWait"]>;
   private stopping = false;
   private readonly capturePaneImage: SurfaceWsServerOptions["capturePaneImage"];
   private readonly viewportProvider: SurfaceWsServerOptions["viewport"];
@@ -355,9 +359,10 @@ export class SurfaceWsServer {
     this.onNativeReleased = options.onNativeReleased;
     this.port = options.port;
     const persistLocklessState = options.persistLocklessState ?? (async () => {});
-    this.persistLocklessState = async () => {
+    this.persistLocklessState = async (surfaceId) => {
       try {
-        await persistLocklessState();
+        const tracking = this.trackedLocklessMutation.getStore();
+        await persistLocklessState(surfaceId ?? tracking?.surfaceId, surfaceId !== undefined || tracking?.active === true);
       } catch (error) {
         const unknownOutcome = normalizeUnknownPersistenceOutcome(error);
         if (unknownOutcome) {
@@ -373,6 +378,9 @@ export class SurfaceWsServer {
     this.beginApplicationStateMutation = options.beginApplicationStateMutation ?? (() => () => {});
     this.openApplicationStateMutations = options.openApplicationStateMutations ?? (() => []);
     this.getSurfaceBlockers = options.getSurfaceBlockers ?? (() => []);
+    this.getOpenSurfaceChanges = options.getOpenSurfaceChanges ?? ((surfaceId) =>
+      this.getSurfaceBlockers(surfaceId).map((blocker) => ({ ...blocker, kind: "mutation" })));
+    this.beginApplicationStateWait = options.beginApplicationStateWait ?? (() => () => {});
     this.protocolVersion = options.protocolVersion ?? 1;
     this.viewportProvider = options.viewport;
     this.wsPath = options.wsPath ?? "/ws";
@@ -905,7 +913,7 @@ export class SurfaceWsServer {
         tombstoneId: finalClose.tombstoneId,
       };
       this.core.markLocklessAuthorityChanged();
-      await this.persistLocklessState();
+      await this.persistLocklessState(surfaceId);
       return committed;
     }, surfaceId);
     return result;
@@ -1245,22 +1253,24 @@ export class SurfaceWsServer {
       Array.isArray(request.payload?.protocolFeatures) &&
       request.payload.protocolFeatures.includes(SURF_ACE_OPERATION_BLOCKED_V1_CAPABILITY));
     let inDispatch = true;
-    const onQueueWait = (scope: "surface" | "client"): void => {
-      if (!inDispatch || !surfaceId || tracking.queuedBehind) return;
-      const openChanges = this.getSurfaceBlockers(scope === "surface" ? surfaceId : undefined, request.id);
-      if (openChanges.length === 0) return;
-      tracking.queuedBehind = openChanges;
-      if (supportsBlocked) {
+    const onQueueWait = (scope: ApplicationQueueScope): (() => void) | undefined => {
+      if (!inDispatch || !surfaceId) return;
+      const openChanges = this.getSurfaceBlockers(scope === "surface" ? surfaceId : undefined, request.id, scope);
+      const blocker = openChanges[0];
+      if (!blocker) return;
+      if (supportsBlocked && !tracking.queuedBehind) {
         const event: LocklessEvent = {
           eventId: makeEventId(),
           op: "event.operation_blocked",
-          payload: { requestId: request.id, surfaceId, openChanges, message: surfaceBlockerMessage(openChanges[0]!) },
+          payload: { requestId: request.id, surfaceId, openChanges, message: surfaceBlockerMessage(blocker) },
           sentAt: Date.now(),
           type: "event",
           v: 1,
         };
         void this.send(socket, JSON.stringify(event)).catch(() => {});
       }
+      tracking.queuedBehind ??= openChanges;
+      return this.beginApplicationStateWait(surfaceId, scope, request.id);
     };
     const finishMutation = changesApplicationState
       ? this.beginApplicationStateMutation({ operation: request.op, requestId: request.id, surfaceId: surfaceId ?? undefined })
@@ -3562,16 +3572,18 @@ export class SurfaceWsServer {
       }
     }
     // Repeated saves can share one operation while occupying many queue slots.
-    // Report its oldest active instance so diagnostics leave room for topology.
-    const oldestBlockers = new Map<string, SurfaceBlocker>();
-    for (const blocker of this.getSurfaceBlockers(request.payload.surfaceId)) {
-      const prior = oldestBlockers.get(blocker.operation);
-      if (!prior || blocker.startedAtMs < prior.startedAtMs) {
-        oldestBlockers.set(blocker.operation, blocker);
+    // Keep the oldest active instance per operation and source surface.
+    const oldestChanges = new Map<string, OpenApplicationChange>();
+    for (const change of this.getOpenSurfaceChanges(request.payload.surfaceId)) {
+      const key = JSON.stringify([change.operation, change.surfaceId]);
+      const prior = oldestChanges.get(key);
+      if (!prior || change.startedAtMs < prior.startedAtMs) {
+        oldestChanges.set(key, change);
       }
     }
-    for (const blocker of oldestBlockers.values()) {
-      limitationCodes.push(surfaceBlockerLimitation(blocker));
+    for (const change of oldestChanges.values()) {
+      limitationCodes.push(surfaceBlockerLimitation(change));
+      if (change.kind === "write") limitationCodes.push(...surfaceWriteLimitationCodes(change.surfaceId));
     }
     if (!binding) {
       limitationCodes.push("registry_binding_unavailable");
@@ -3940,7 +3952,6 @@ export class SurfaceWsServer {
     details: Pick<ApplicationStateMutation, "operation" | "requestId"> = { operation: "surface_mutation" },
   ): Promise<T> {
     const previous = this.mutationQueues.get(surfaceId);
-    if (previous) applicationQueueWait.getStore()?.("surface");
     let releaseQueue = (): void => {};
     const current = new Promise<void>((resolve) => {
       releaseQueue = resolve;
@@ -3948,7 +3959,8 @@ export class SurfaceWsServer {
     const queued = (previous ?? Promise.resolve()).catch(() => undefined).then(() => current);
     this.mutationQueues.set(surfaceId, queued);
     try {
-      await previous?.catch(() => undefined);
+      await waitForApplicationQueue(previous, "surface",
+        applicationQueueWait.getStore() ?? this.observeLocalSurfaceWait(surfaceId));
       // The enclosing lockless request already owns generic surface work.
       // Local and explicitly named work still owns its own readiness scope.
       const enclosing = this.trackedLocklessMutation.getStore();
@@ -3982,8 +3994,13 @@ export class SurfaceWsServer {
   }
 
   private async runLifecycleTransactionAsync<T>(operation: () => Promise<T>, surfaceId: string): Promise<T> {
-    return await this.core.locklessAuthority.transactionAsync(() =>
-      this.core.transactionAsync(() => this.runSurfaceMutation(surfaceId, operation, { operation: "surface.close" })));
+    return await applicationQueueWait.run(this.observeLocalSurfaceWait(surfaceId), () =>
+      this.core.locklessAuthority.transactionAsync(() =>
+        this.core.transactionAsync(() => this.runSurfaceMutation(surfaceId, operation, { operation: "surface.close" }))));
+  }
+
+  private observeLocalSurfaceWait(surfaceId: string): (scope: ApplicationQueueScope) => (() => void) | undefined {
+    return (scope) => this.beginApplicationStateWait(surfaceId, scope);
   }
 
   private async runProviderWindowLabelMutation<T>(operation: () => Promise<T> | T): Promise<T> {
@@ -4134,7 +4151,8 @@ export class SurfaceWsServer {
     const onNotificationError = (error: unknown) => persistentServerDiagnostic("warn", "pane_resize_notification_failed", { surface_id: surfaceId, ...errorDiagnosticFields(error) });
     try {
       // Authority -> core -> surface matches paired network and local-close paths.
-      return await this.core.locklessAuthority.transactionAsync(() => this.core.transactionAsync(() =>
+      return await applicationQueueWait.run(this.observeLocalSurfaceWait(surfaceId), () =>
+        this.core.locklessAuthority.transactionAsync(() => this.core.transactionAsync(() =>
         this.runSurfaceMutation(surfaceId, async () => {
           const current = this.core.getRendererWindowState(surfaceId);
           if (!splitResizeMatches(current, expected)) return false;
@@ -4155,7 +4173,7 @@ export class SurfaceWsServer {
             await this.applyResolvedNativePaneGeometry(surfaceId, materialization, "pane.resize", rollbackNativeGeometry);
             appliedNative = true;
             this.markUpdatedNativePaneGeometry(surfaceId, materialization, false);
-            await this.persistLocklessState();
+            await this.persistLocklessState(surfaceId);
             if (materialization) {
               try { this.onNativeMaterialized?.(surfaceId, materialization); } catch (error) { onNotificationError(error); }
             }
@@ -4167,7 +4185,7 @@ export class SurfaceWsServer {
             }
             throw error;
           }
-        }, { operation: "pane.resize" }), { retainUncertainEvents: true, onNotificationError }), { onNotificationError });
+        }, { operation: "pane.resize" }), { retainUncertainEvents: true, onNotificationError }), { onNotificationError }));
     } catch (error) {
       persistentServerDiagnostic("warn", "pane_resize_commit_failed", { surface_id: surfaceId, ...errorDiagnosticFields(error) });
       return false;

@@ -576,7 +576,11 @@ test("pane.split label claim reenters authority, leaves the request queue usable
     surfaceServer = new SurfaceWsServer({
       beginApplicationStateMutation: (details) => persistenceReadiness.beginAuthorityMutation(details),
       openApplicationStateMutations: () => persistenceReadiness.openMutations(),
-      getSurfaceBlockers: (surfaceId, excludingRequestId) => persistenceReadiness.blockersForSurface(surfaceId, excludingRequestId),
+      getSurfaceBlockers: (surfaceId, excludingRequestId, scope) =>
+        persistenceReadiness.blockersForSurface(surfaceId, excludingRequestId, scope),
+      getOpenSurfaceChanges: (surfaceId) => persistenceReadiness.openChanges(surfaceId),
+      beginApplicationStateWait: (surfaceId, scope, excludingRequestId) =>
+        persistenceReadiness.beginWait(surfaceId, scope, excludingRequestId),
       bindAddress: "127.0.0.1",
       capturePaneImage: async () => null,
       claimPaneLabel: async (surfaceId, paneId, paneLineageId) => {
@@ -641,9 +645,11 @@ test("pane.split label claim reenters authority, leaves the request queue usable
     await until(() => labelClaimStarted, 4_000);
     assert.equal(persistenceReadiness.isReady, false,
       "the ordinary mutation readiness gate stays closed while the registry label claim is outstanding");
+    assert.equal(persistenceReadiness.waitingBlockerForSurface(surface.surfaceId), undefined);
+    assert.equal(queuedNotices.length, 0);
 
     const releaseSave = deferred();
-    const saving = persistenceReadiness.track(() => releaseSave.promise);
+    const saving = persistenceReadiness.track(() => releaseSave.promise, surface.surfaceId);
     const described = await surfaceRequest(controlSocket, "surface.describe", {
       clientId, endpointLeaseGeneration: 2, nonce: "a".repeat(32),
       registryIdentity: { allocatorId: "alloc_fixture", fleetId: "fixture-fleet" },
@@ -657,6 +663,7 @@ test("pane.split label claim reenters authority, leaves the request queue usable
     assert.equal(openChangeCodes.length, 2);
     assert.match(openChangeCodes[0], /^blocked_by_pane_split_since_[a-j]+$/);
     assert.match(openChangeCodes[1], /^blocked_by_saving_application_state_since_[a-j]+$/);
+    assert.ok(described.payload.applicationReadiness.limitationCodes.some((code: string) => code.startsWith("save_surface_")));
     releaseSave.resolve();
     await saving;
     assert.ok(persistenceReadiness.openMutations().some((mutation) =>
@@ -672,6 +679,7 @@ test("pane.split label claim reenters authority, leaves the request queue usable
     assert.deepEqual(validateLocklessEnvelope(queuedNotice), { ok: true });
     assert.match(queuedNotice.payload.message, /^Blocked behind pane split since /);
     assert.deepEqual(queuedNotice.payload.openChanges, persistenceReadiness.blockersForSurface(surface.surfaceId));
+    assert.deepEqual(persistenceReadiness.waitingBlockerForSurface(surface.surfaceId), queuedNotice.payload.openChanges[0]);
 
     releaseClaim.resolve();
     const splitResponse = await split;
@@ -680,6 +688,7 @@ test("pane.split label claim reenters authority, leaves the request queue usable
     assert.equal(listResponse.ok, true, JSON.stringify(listResponse));
     assert.equal(queuedNotices.length, 1);
     assert.equal(queuedNotice.payload.requestId, listResponse.id);
+    assert.equal(persistenceReadiness.waitingBlockerForSurface(surface.surfaceId), undefined);
     assert.equal(listResponse.payload.panes.length, 2,
       "the queued request is served with the committed split after the nested claim completes");
     assert.equal(persistenceReadiness.isReady, true,
