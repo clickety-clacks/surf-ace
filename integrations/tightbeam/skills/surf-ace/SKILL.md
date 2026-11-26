@@ -111,14 +111,15 @@ Start with registry inventory before choosing a client or window:
   --registry "ws://<registry-host>:<port>" fleet-list
 ```
 
-`fleet-list` reports the registry's current client, surface, and pane snapshot,
-including labels and any configured direct endpoint and lease. Endpoint and
-lease values may be absent; their presence does not prove reachability or live
-application health. An empty `clients` array means the registry returned an
-empty inventory; an invalid or unavailable registry is an error. Do not
-combine `--registry` and `--endpoint`, and do not treat a registered client as
-proof that it is online. Pass the registry URL explicitly; the CLI does not
-infer one from configuration or environment variables.
+`fleet-list` reports each client's `presence` (`online` or `offline`),
+`lastSeenAtMs`, surfaces, panes, labels, and any published direct endpoint.
+Online means the client's registration connection to the registry is open.
+Offline rows retain their inventory. `lastSeenAtMs` gives the registry's
+disconnect time in Unix milliseconds, or `null` while online or when the
+registry has no known disconnect time. Direct reachability and application
+readiness are separate observations. An empty `clients` array means the
+registry returned an empty inventory. Pass `--registry` explicitly and omit
+`--endpoint` for `fleet-list`.
 
 Use `window-describe` when the installed CLI schema includes it, to resolve a
 named window through the registry and make a read-only observation:
@@ -129,16 +130,15 @@ named window through the registry and make a read-only observation:
   window-describe
 ```
 
-The label must be lowercase ASCII letters. The command requires exactly one
-current registry registration and a fresh endpoint lease. It sends a
-nonce-correlated `surface.describe` directly to that leased endpoint before
-controller pairing, then rereads the registry and refuses if the registration
-or lease changed. It creates no controller state, does not send `pair.request`,
-and does not authorize a later mutation. Its identity comparison is
+The label must be lowercase ASCII letters. The command resolves a unique
+online registry candidate and sends a nonce-correlated `surface.describe` to
+its published endpoint before pairing. It rereads the registry to check
+presence, identity, and registration generation. It creates no controller
+state and grants no mutation authority. Its identity comparison is
 `consistency_only_not_authentication`: neither the registry identity nor the
 direct response proves cryptographic client identity.
 
-The response keeps registry identity and lease freshness, transport
+The response keeps registry identity and connection presence, transport
 reachability, application readiness, topology/layout, and each pane's current
 content revision separate. `window_not_found` and `window_ambiguous` require a
 fresh explicit selection. `endpoint_unconfigured` means the registry row has no
@@ -148,11 +148,9 @@ is otherwise available, continue with Bonjour/DNS-SD browse and resolve for
 the Surf Ace service (`_surf-ace._tcp`). Use the resolved service host, port,
 and advertised WebSocket path to form `--endpoint`; do not guess an address or
 derive one from the registry URL. A resolved iOS service may therefore remain
-usable even after `window-describe` reports `endpoint_unconfigured`. One
-resolved iOS example advertised port `19001` and path `/ws`; these are
-discovery results, not defaults.
-`stale_registration` means the row or lease is absent, invalid, expired, or
-changed during the probe.
+usable even after `window-describe` reports `endpoint_unconfigured`.
+`client_offline` means the registry reports the selected client offline.
+Read `error.details.lastSeenAtMs` for its known disconnect time.
 `endpoint_unreachable` reports a failed direct connection. If the WebSocket
 connects but does not return a valid describe response, `application_unresponsive`
 reports the reachable transport separately from unknown application readiness.
@@ -161,6 +159,21 @@ and response-size errors are explicit outcomes. A content revision from a
 read-only observation is evidence only and can become stale immediately.
 Before a later mutation, select the direct endpoint explicitly and fetch the
 current state required by that command's schema.
+
+`window-describe` decodes `surface.describe` blocker codes into
+`applicationReadiness.openChanges` when the client reports open changes.
+Each entry identifies the change and `startedAtMs`. For a pending save,
+`surfaceId` identifies the source surface or is `shared` for a client-wide
+save. Describe lists the oldest active change per operation and source
+surface, including saves with no queued request.
+
+The desktop window shows `Blocked behind <change> since <time>` while a
+request for that surface is actually waiting. The describe readiness reason
+can use the same wording for open changes. For a queued direct request,
+a client that negotiates `surf-ace.operation-blocked.v1` can send
+`event.operation_blocked`. The CLI prints one matching `operation_blocked`
+JSON notice on stderr with the request ID, message, and `openChanges`. The
+request is still pending. Read its eventual result on stdout.
 
 `pane-describe` is different: it makes a normal `pair.request` before
 `panes.list` and may persist admission, synchronization, cursor, acknowledgement,
@@ -171,8 +184,8 @@ substitute. Use it only when that paired-controller admission is intended.
 
 Use the direct endpoint reported by the registry when available. Otherwise,
 resolve the client's Bonjour/DNS-SD service and use its advertised WebSocket
-endpoint. Networked CLI operations connect directly to that client, not to
-the registry. Never substitute the registry URL for a client endpoint.
+endpoint. Client-directed commands use that endpoint. Keep the registry URL
+separate.
 
 Supply runtime facts explicitly:
 
@@ -228,6 +241,15 @@ expose those operations. The CLI's `clear` command requires
 `expectedRevision` for the selected pane's current content. Other commands use
 the guards shown in their own schemas, such as topology or surface-set
 revisions where applicable.
+
+For `push`, supply `--endpoint` and the surface ID through `--surface-id`
+or the input's `surfaceId`. Pass `--registry`
+alongside `--endpoint` if you want the CLI to classify an unreachable or
+closed direct connection. It consults the registry after that failure and
+returns `client_offline` with `error.details.lastSeenAtMs` if the registry
+confirms the same target is offline. A healthy direct session keeps working
+while the registry reports offline. An uncertain write still reports
+`outcome_unknown` with its original request correlation.
 
 Example markdown push:
 
