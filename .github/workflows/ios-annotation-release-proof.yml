@@ -1,0 +1,47 @@
+name: Annotation release iOS proof
+on:
+  push:
+    branches: [verify/ios-annotation-flush]
+permissions:
+  contents: read
+jobs:
+  ios-release-proof:
+    runs-on: xcode-27
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [build-a, build-b]
+    env:
+      CANDIDATE: f46d211074ed9429b8510d7c43d9d4503c049402
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ env.CANDIDATE }}
+          persist-credentials: false
+      - name: Confirm candidate and release test toolchain
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE"
+          git rev-parse HEAD HEAD^{tree}
+          sudo xcode-select --switch /Applications/Xcode_27.0.0.app
+          test "$(xcodebuild -version | head -1)" = "Xcode 27.0"
+          xcrun simctl list runtimes
+          xcrun simctl list devices available
+      - name: Run full Release XCTest
+        run: |
+          set -euo pipefail
+          unset SURF_ACE_SERVER SURF_ACE_DIRECT_ENDPOINT
+          xcodebuild test \
+            -project packages/ios/SurfAce.xcodeproj \
+            -scheme SurfAce \
+            -configuration Release ENABLE_TESTABILITY=YES \
+            -parallel-testing-enabled NO \
+            -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M5),OS=27.0' \
+            -resultBundlePath "$RUNNER_TEMP/ios-release-proof.xcresult" \
+            2>&1 | tee "$RUNNER_TEMP/ios-release-proof.log"
+      - name: Retain full suite evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ios-release-proof-${{ matrix.lane }}
+          path: ${{ runner.temp }}/ios-release-proof.*
