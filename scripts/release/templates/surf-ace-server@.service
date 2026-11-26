@@ -4,7 +4,9 @@ After=network-online.target postgresql.service
 Wants=network-online.target
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=all
+WatchdogSec=60s
 User=surf-ace
 Group=surf-ace
 WorkingDirectory=/opt/surf-ace-server

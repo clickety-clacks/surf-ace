@@ -1741,7 +1741,7 @@ test("Tightbeam Linux stage contains only the standalone CLI, callable server cl
   assert.match(guide, /does not install or enable a service/);
   assert.doesNotMatch(actual.join("\n"), /surf-ace-runtime|controller\/dist\/main\.js/);
   const unit = await fs.readFile(path.join(stage, "service/surf-ace-server@.service"), "utf8");
-  assert.match(unit, /Type=simple/);
+  assert.match(unit, /Type=notify/);
   assert.match(unit, /Restart=on-failure/);
   assert.match(unit, /KillSignal=SIGTERM/);
   assert.match(unit, /TimeoutStopSec=30s/);

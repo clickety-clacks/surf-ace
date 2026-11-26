@@ -91,7 +91,9 @@ export async function verifyTightbeamLinuxStage(stageDir) {
   }
   const unit = await fs.readFile(path.join(result.stageDir, "service/surf-ace-server@.service"), "utf8");
   for (const line of [
-    "Type=simple",
+    "Type=notify",
+    "NotifyAccess=all",
+    "WatchdogSec=60s",
     "Restart=on-failure",
     "KillSignal=SIGTERM",
     "TimeoutStopSec=30s",

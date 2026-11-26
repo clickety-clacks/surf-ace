@@ -4,6 +4,10 @@
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { randomUUID } = require("node:crypto");
+const { execFile } = require("node:child_process");
+const { promisify } = require("node:util");
+
+const execFileAsync = promisify(execFile);
 
 const configKeys = ["custody", "hostLockPath", "listenHost", "listenPort", "name"];
 const custodyKeys = [
@@ -301,6 +305,40 @@ function parseCommand(argv) {
   return { command, configPath: path.resolve(required("--config")) };
 }
 
+async function startSystemdSupervision(server) {
+  if (!process.env.NOTIFY_SOCKET) return () => {};
+
+  // Keep systemd-notify's barrier enabled so systemd can attribute the
+  // message to the service before the helper exits (NotifyAccess=all).
+  await execFileAsync("/usr/bin/systemd-notify", ["--ready"]);
+  const watchdogUsec = Number(process.env.WATCHDOG_USEC);
+  const watchdogPid = process.env.WATCHDOG_PID;
+  if (!Number.isSafeInteger(watchdogUsec) || watchdogUsec <= 0 ||
+      (watchdogPid !== undefined && watchdogPid !== String(process.pid))) return () => {};
+
+  let stopped = false;
+  let timer;
+  const schedule = () => {
+    timer = setTimeout(async () => {
+      try {
+        await server.afterRegistrationProgress(async () => {
+          if (!stopped) await execFileAsync("/usr/bin/systemd-notify", ["WATCHDOG=1"]);
+        });
+      } catch {
+        process.stderr.write('{"event":"systemd_watchdog_notification_failed"}\n');
+      } finally {
+        if (!stopped) schedule();
+      }
+    }, watchdogUsec / 2000);
+    timer.unref();
+  };
+  schedule();
+  return () => {
+    stopped = true;
+    clearTimeout(timer);
+  };
+}
+
 async function startForeground(config, options = {}) {
   const launcherDirectory = options.launcherDirectory ?? __dirname;
   const modulePath = options.serverModulePath ?? path.resolve(launcherDirectory, "../server/central-server.cjs");
@@ -308,11 +346,14 @@ async function startForeground(config, options = {}) {
     process.env.SURF_ACE_CLIENT_DIAGNOSTIC_LOG = defaultDiagnosticLogPath(config);
   }
   let service;
+  let stopSupervision;
   try {
     const serverModule = require(modulePath);
     if (typeof serverModule.startCentralServer !== "function") throw publicError("callable_server_missing");
     service = await serverModule.startCentralServer(config, config.name ?? "Surf Ace Server");
+    stopSupervision = await startSystemdSupervision(service.server);
   } catch (cause) {
+    await service?.close().catch(() => {});
     const error = publicError("server_start_failed");
     error.cause = cause;
     throw error;
@@ -343,6 +384,7 @@ async function startForeground(config, options = {}) {
     const close = async (signal) => {
       if (closing) return;
       closing = true;
+      stopSupervision();
       stopHealthSubscription();
       signalSource.removeListener("SIGTERM", onTerm);
       signalSource.removeListener("SIGINT", onInt);

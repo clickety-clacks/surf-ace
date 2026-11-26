@@ -101,6 +101,39 @@ export class AllocatorServer {
   private readonly clientConnections = new Map<string, WebSocket>();
   private readonly socketClients = new WeakMap<WebSocket, Set<string>>();
   private registrationTail: Promise<unknown> = Promise.resolve();
+  private pendingRegistrationTasks = 0;
+  private registrationProgressProbe?: () => Promise<void>;
+
+  private runRegistrationTask<T>(task: () => T | Promise<T>): Promise<T> {
+    this.pendingRegistrationTasks += 1;
+    const run = this.registrationTail.then(async () => {
+      try {
+        return await task();
+      } finally {
+        this.pendingRegistrationTasks -= 1;
+        await this.registrationProgressProbe?.();
+      }
+    });
+    this.registrationTail = run.catch(() => undefined);
+    return run;
+  }
+
+  afterRegistrationProgress(task: () => Promise<void>): Promise<void> {
+    if (this.pendingRegistrationTasks === 0) return this.runRegistrationTask(task);
+    // The launcher submits one probe at a time. Let the next completed
+    // request run it before the next queued request, even under a backlog.
+    return new Promise<void>((resolve, reject) => {
+      this.registrationProgressProbe = async () => {
+        this.registrationProgressProbe = undefined;
+        try {
+          await task();
+          resolve();
+        } catch (error) {
+          reject(error);
+        }
+      };
+    });
+  }
 
   private async registerClient(payload: unknown, acceptedPeerAddress: string | null, socket: WebSocket): Promise<unknown> {
     const registrationResultsV1 = isRecord(payload) ? payload.registrationResultsV1 : undefined;
@@ -922,7 +955,7 @@ export class AllocatorServer {
         reply(false, unavailable);
         return;
       }
-      const run = this.registrationTail.then(async () => {
+      await this.runRegistrationTask(async () => {
         if (socket.readyState !== WebSocket.OPEN) return;
         const unavailable = this.storeFailure();
         if (unavailable) {
@@ -948,8 +981,6 @@ export class AllocatorServer {
           });
         }
       });
-      this.registrationTail = run.catch(() => undefined);
-      await run;
       return;
     }
     let request: AllocatorRequest;
