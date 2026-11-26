@@ -308,13 +308,24 @@ export async function assembleTightbeamCliStage({ binary, stageDir, platform }) 
   return verifyTightbeamCliStage(stage);
 }
 
+async function buildTightbeamCli(source, target) {
+  const toolchain = TOOLCHAINS.rust;
+  const rustc = await capture("rustup", ["which", "--toolchain", toolchain, "rustc"]);
+  const version = await capture(rustc, ["--version", "--verbose"]);
+  if (version.match(/^release: (.+)$/m)?.[1] !== toolchain) {
+    throw new Error(`release_rust_version_mismatch: expected ${toolchain}\n${version}`);
+  }
+  process.stdout.write(`${version}\n`);
+  await run("rustup", ["run", toolchain, "cargo",
+    "build", "--manifest-path", path.join(source, "packages/cli/Cargo.toml"),
+    "--target-dir", path.join(source, "packages/cli/target"), "--release", "--locked", "--target", target,
+  ], { env: { ...process.env, RUSTC: rustc } });
+}
+
 export async function buildTightbeamLinuxStage({ sourceDir, stageDir, target = TOOLCHAINS.linuxRustTarget }) {
   const source = path.resolve(sourceDir);
   await verifyStandaloneElectronSource(source);
-  await run("cargo", [
-    "build", "--manifest-path", path.join(source, "packages/cli/Cargo.toml"),
-    "--target-dir", path.join(source, "packages/cli/target"), "--release", "--locked", "--target", target,
-  ]);
+  await buildTightbeamCli(source, target);
   await run("pnpm", ["--dir", source, "--filter", "@surf-ace/protocol", "build"]);
   await run("pnpm", ["--dir", source, "--filter", "@surf-ace/allocator", "build"]);
   await run("pnpm", ["--dir", source, "--filter", "@surf-ace/controller", "build"]);
@@ -417,16 +428,13 @@ export async function buildTightbeamLinuxPackages({ sourceDir, outputDir, target
   };
 }
 
-export async function buildTightbeamMacosPackages({ sourceDir, outputDir, skillSourceDir = toolingRoot }) {
+export async function buildTightbeamMacosPackages({ sourceDir, outputDir, skillSourceDir = toolingRoot, unsigned = false }) {
   const source = path.resolve(sourceDir);
   const output = path.resolve(outputDir);
   const epoch = await sourceDateEpoch(source);
   const target = TOOLCHAINS.macosRustTarget;
   await verifyStandaloneElectronSource(source);
-  await run("cargo", [
-    "build", "--manifest-path", path.join(source, "packages/cli/Cargo.toml"),
-    "--target-dir", path.join(source, "packages/cli/target"), "--release", "--locked", "--target", target,
-  ]);
+  await buildTightbeamCli(source, target);
   await run("pnpm", ["--dir", source, "--filter", "@surf-ace/protocol", "build"]);
   await run("pnpm", ["--dir", source, "--filter", "@surf-ace/controller", "build"]);
   await run("pnpm", ["--dir", source, "--filter", "@surf-ace/electron", "build"]);
@@ -442,7 +450,10 @@ export async function buildTightbeamMacosPackages({ sourceDir, outputDir, skillS
   await createDirectoryTarGz(cliStage, "surf-ace-cli", cliArchive, epoch);
   await removeIfExists(cliStage);
   await removeIfExists(path.join(source, "packages/electron/dist/package"));
-  await run("pnpm", ["--dir", source, "--filter", "@surf-ace/electron", "exec", "electron-builder", "--mac", "dir", "--arm64", "--publish", "never", "--config.extraMetadata.version", TIGHTBEAM.version]);
+  const electronArgs = ["--dir", source, "--filter", "@surf-ace/electron", "exec", "electron-builder",
+    "--mac", "dir", "--arm64", "--publish", "never", "--config.extraMetadata.version", TIGHTBEAM.version];
+  if (unsigned) electronArgs.push("--config.mac.identity=null");
+  await run("pnpm", electronArgs);
   const app = path.join(source, "packages/electron/dist/package/mac-arm64/Surf Ace.app");
   await fs.access(path.join(app, "Contents/Resources/app.asar"));
   await createDirectoryZip(app, "Surf Ace.app", electronArchive, epoch);
