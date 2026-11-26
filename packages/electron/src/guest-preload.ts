@@ -1,6 +1,13 @@
-import { ipcRenderer } from "electron";
+import { ipcRenderer, webFrame } from "electron";
+import {
+  EXTERNAL_NEW_WINDOW_EVENT,
+  createExternalNewWindowRequestBridge,
+  externalNewWindowFrameScript,
+  isExternalNewWindowLink,
+} from "./external-new-window.js";
 
 type ContentEventPayload =
+  | { type: "external-navigation"; url: string }
   | { type: "focus" }
   | { type: "navigation"; url: string }
   | { selection: SelectionPayload | null; type: "selection" }
@@ -90,7 +97,22 @@ function linkTarget(target: EventTarget | null): HTMLAnchorElement | null {
   return match instanceof HTMLAnchorElement ? match : null;
 }
 
+const isMainFrame = process.isMainFrame;
+const routeExternalNewWindowRequest = createExternalNewWindowRequestBridge((url) => {
+  emit({ type: "external-navigation", url });
+}, (phase, requestId, url, kind) => {
+  return ipcRenderer.sendSync("surface:external-new-window-request", { phase, requestId, url, kind }) === true;
+});
+window.addEventListener(EXTERNAL_NEW_WINDOW_EVENT, (event) => {
+  routeExternalNewWindowRequest(
+    (event as CustomEvent<unknown>).detail,
+    navigator.userActivation?.isActive === true,
+  );
+});
+void webFrame.executeJavaScript(externalNewWindowFrameScript()).catch(() => undefined);
+
 window.addEventListener("scroll", () => {
+  if (!isMainFrame) return;
   if (scrollTimer) {
     clearTimeout(scrollTimer);
   }
@@ -100,6 +122,7 @@ window.addEventListener("scroll", () => {
 }, { passive: true });
 
 window.addEventListener("resize", () => {
+  if (!isMainFrame) return;
   if (resizeTimer) {
     clearTimeout(resizeTimer);
   }
@@ -109,6 +132,7 @@ window.addEventListener("resize", () => {
 });
 
 window.addEventListener("surf-ace-scale-mode", (event) => {
+  if (!isMainFrame) return;
   const detail = (event as CustomEvent<unknown>).detail;
   if (!detail || typeof detail !== "object") {
     return;
@@ -130,10 +154,12 @@ window.addEventListener("surf-ace-scale-mode", (event) => {
 });
 
 document.addEventListener("selectionchange", () => {
+  if (!isMainFrame) return;
   emit({ selection: currentSelection(), type: "selection" });
 });
 
 document.addEventListener("pointerdown", (event) => {
+  if (!isMainFrame) return;
   emit({ type: "focus" });
   if (navigationTarget(event.target)) {
     return;
@@ -150,6 +176,7 @@ document.addEventListener("pointerdown", (event) => {
 });
 
 document.addEventListener("pointerup", (event) => {
+  if (!isMainFrame) return;
   if (navigationTarget(event.target)) {
     if (longPressTimer) {
       clearTimeout(longPressTimer);
@@ -170,6 +197,7 @@ document.addEventListener("pointerup", (event) => {
 });
 
 document.addEventListener("pointercancel", () => {
+  if (!isMainFrame) return;
   if (longPressTimer) {
     clearTimeout(longPressTimer);
     longPressTimer = null;
@@ -177,17 +205,22 @@ document.addEventListener("pointercancel", () => {
 });
 
 document.addEventListener("click", (event) => {
+  if (!isMainFrame) return;
+  // The host routes static HTML's native navigation after page dispatch.
+  // Capturing it here would freeze href/target and pre-cancel a mutable click.
+  if (window.location.protocol === "data:") return;
   const link = linkTarget(event.target);
   if (!link?.href) {
     return;
   }
-  if (window.location.protocol === "data:") {
-    event.preventDefault();
+  if (isExternalNewWindowLink(link.target, link.href)) {
+    return;
   }
   emit({ type: "navigation", url: link.href });
 }, { capture: true });
 
 document.addEventListener("submit", (event) => {
+  if (!isMainFrame) return;
   if (!(event.target instanceof HTMLFormElement)) {
     return;
   }
@@ -198,5 +231,6 @@ document.addEventListener("submit", (event) => {
 }, { capture: true });
 
 window.addEventListener("DOMContentLoaded", () => {
+  if (!isMainFrame) return;
   emit({ type: "ready", viewport: currentViewport() });
 });

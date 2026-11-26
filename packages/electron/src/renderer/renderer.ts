@@ -2822,6 +2822,9 @@ function wireBrowserContentEvents(view: PaneView, paneId: number, webview: Brows
     } else if (payload.type === "navigation") {
       collapsePaneToolbar(view);
       sendNavigationIntent(view, paneId, String(payload.url ?? ""));
+    } else if (payload.type === "external-navigation") {
+      collapsePaneToolbar(view);
+      window.surfAce.openExternalUrl(String(payload.url ?? ""));
     } else if (payload.type === "ready") {
       reportSnapshot({
         bounds: paneBounds(view),
@@ -2989,6 +2992,7 @@ function renderBrowserContent(
   browserView.className = "content-html-frame content-browser-url-frame";
   view.currentBrowserFrame = browserView;
   if (options?.allowPopups) {
+    // Browser URL panes keep their existing native popup behavior; static HTML stays isolated.
     browserView.setAttribute("allowpopups", "true");
   }
   browserView.setAttribute("preload", window.surfAce.guestPreloadPath);

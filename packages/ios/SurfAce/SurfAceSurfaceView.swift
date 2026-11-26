@@ -2706,8 +2706,20 @@ private final class SurfAcePencilContactGestureRecognizer: UIGestureRecognizer {
     }
 }
 
+enum SurfAceExternalBrowserURL {
+    static func resolve(_ rawURL: String, relativeTo baseURL: URL? = nil) -> URL? {
+        guard let resolved = URL(string: rawURL, relativeTo: baseURL)?.absoluteURL,
+              let scheme = resolved.scheme?.lowercased(),
+              (scheme == "http" || scheme == "https"),
+              let host = resolved.host, !host.isEmpty else {
+            return nil
+        }
+        return resolved
+    }
+}
+
 @MainActor
-final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessageHandler, WKNavigationDelegate {
+final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessageHandler, WKNavigationDelegate, WKUIDelegate {
     var onInteractionBegan: (() -> Void)?
     var onPencilContact: (() -> Void)?
     var onSelectionChanged: ((String, CGRect?) -> Void)?
@@ -2768,6 +2780,7 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
         webView = WKWebView(frame: .zero, configuration: config)
         super.init(frame: frame)
         webView.navigationDelegate = self
+        webView.uiDelegate = self
         setupViewHierarchy()
         setupScripts()
         setupPDFTracking()
@@ -3350,6 +3363,20 @@ final class SurfAceSurfaceHostView: UIView, PKCanvasViewDelegate, WKScriptMessag
             self.finishPendingBrowserNavigation(status: "applied", errorMessage: nil, navigation: navigation, url: self.pendingBrowserNavigationURL)
             self.reportBrowserNavigationStateIfNeeded()
         }
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        createWebViewWith configuration: WKWebViewConfiguration,
+        for navigationAction: WKNavigationAction,
+        windowFeatures: WKWindowFeatures
+    ) -> WKWebView? {
+        guard navigationAction.targetFrame == nil,
+              let externalURL = SurfAceExternalBrowserURL.resolve(navigationAction.request.url?.absoluteString ?? "") else {
+            return nil
+        }
+        UIApplication.shared.open(externalURL, options: [:])
+        return nil
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {

@@ -4,6 +4,26 @@ import XCTest
 
 @MainActor
 final class SurfAceBrowserURLTargetApplyTests: XCTestCase {
+    func testExternalNewWindowURLResolutionPreservesHTTPSTargetAndRelativeQueryFragment() throws {
+        let baseURL = try XCTUnwrap(URL(string: "https://chat.example.test/messages/thread"))
+        let relative = try XCTUnwrap(SurfAceExternalBrowserURL.resolve("../article?q=term#section", relativeTo: baseURL))
+
+        XCTAssertEqual(relative.absoluteString, "https://chat.example.test/article?q=term#section")
+        XCTAssertNotNil(SurfAceExternalBrowserURL.resolve("HTTP://example.test/path"))
+    }
+
+    func testExternalNewWindowURLResolutionRejectsNonHTTPSSchemes() {
+        for url in [
+            "mailto:person@example.test",
+            "javascript:window.close()",
+            "data:text/html,content",
+            "custom-app://destination",
+            "not a url",
+        ] {
+            XCTAssertNil(SurfAceExternalBrowserURL.resolve(url), "unexpectedly accepted \(url)")
+        }
+    }
+
     func testIOSAdvertisesLiveBrowserURLTargetCapability() {
         let runtime = SurfAceRuntime(userDefaults: isolatedUserDefaults())
 
