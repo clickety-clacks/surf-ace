@@ -1,0 +1,108 @@
+name: Release iOS diagnostics proof
+on:
+  push:
+    branches: [verify/release-ios-diagnostics]
+permissions:
+  contents: read
+jobs:
+  test-ios:
+    name: iOS XCTest (${{ matrix.lane }})
+    env:
+      PRODUCT_COMMIT: 944faadf5b6e5977bdf01a747730acfd279d534e
+      IOS_EVIDENCE_DIR: ${{ github.workspace }}/ios-test-evidence/${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.lane }}
+      RESULT_BUNDLE: ${{ github.workspace }}/ios-test-evidence/${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.lane }}/native-tests.xcresult
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [build-a, build-b]
+    runs-on: xcode-27
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Prepare run-isolated iOS test evidence
+        run: mkdir -p "$IOS_EVIDENCE_DIR"
+      - name: Check out immutable tooling
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: tooling
+          persist-credentials: false
+          ref: ${{ env.PRODUCT_COMMIT }}
+      - name: Check out immutable product source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          path: source
+          persist-credentials: false
+          ref: ${{ env.PRODUCT_COMMIT }}
+      - name: Select Xcode and verify exact source and simulator
+        run: |
+          set -euo pipefail
+          sudo xcode-select --switch /Applications/Xcode_27.0.0.app
+          xcodebuild -version | tee "$IOS_EVIDENCE_DIR/xcode-version.txt"
+          test "$(xcodebuild -version | head -1)" = "Xcode 27.0"
+          xcrun simctl list runtimes | tee "$IOS_EVIDENCE_DIR/simulator-runtimes.txt" | grep -F 'iOS 27.0'
+          xcrun simctl list devices available | tee "$IOS_EVIDENCE_DIR/simulator-devices.txt" | grep -F 'iPad Pro 13-inch (M5)'
+          test "$(git -C tooling rev-parse HEAD)" = "${PRODUCT_COMMIT}"
+          test "$(git -C source rev-parse HEAD)" = "${PRODUCT_COMMIT}"
+          {
+            printf 'tooling_commit=%s\n' "$(git -C tooling rev-parse HEAD)"
+            printf 'tooling_tree=%s\n' "$(git -C tooling rev-parse 'HEAD^{tree}')"
+            printf 'product_commit=%s\n' "$(git -C source rev-parse HEAD)"
+            printf 'product_tree=%s\n' "$(git -C source rev-parse 'HEAD^{tree}')"
+          } > "$IOS_EVIDENCE_DIR/source-tooling-identity.txt"
+      - name: Run the complete iOS XCTest suite
+        id: ios-tests
+        # Bound the test step so the evidence upload can still run afterward.
+        timeout-minutes: 45
+        run: |
+          set -euo pipefail
+          command=(
+            xcodebuild test \
+            -project source/packages/ios/SurfAce.xcodeproj \
+            -scheme SurfAce \
+            -configuration Release \
+            ENABLE_TESTABILITY=YES \
+            -parallel-testing-enabled NO \
+            -test-timeouts-enabled YES \
+            -default-test-execution-time-allowance 180 \
+            -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M5),OS=27.0' \
+            -resultBundlePath "$RESULT_BUNDLE"
+          )
+          printf '%q ' "${command[@]}" > "$IOS_EVIDENCE_DIR/xcodebuild-command.txt"
+          printf '\n' >> "$IOS_EVIDENCE_DIR/xcodebuild-command.txt"
+          set +e
+          "${command[@]}" 2>&1 | tee "$IOS_EVIDENCE_DIR/xcodebuild.log"
+          pipeline_status=( "${PIPESTATUS[@]}" )
+          set -e
+          xcodebuild_exit_code="${pipeline_status[0]}"
+          tee_exit_code="${pipeline_status[1]}"
+          printf '%s\n' "$xcodebuild_exit_code" > "$IOS_EVIDENCE_DIR/xcodebuild-exit-code.txt"
+          printf '%s\n' "$tee_exit_code" > "$IOS_EVIDENCE_DIR/xcodebuild-tee-exit-code.txt"
+          if [[ "$xcodebuild_exit_code" != 0 ]]; then
+            exit "$xcodebuild_exit_code"
+          fi
+          if [[ "$tee_exit_code" != 0 ]]; then
+            exit "$tee_exit_code"
+          fi
+      - name: Verify checked-out source and tooling remain unchanged
+        if: always()
+        run: |
+          set -euo pipefail
+          test "$(git -C tooling rev-parse HEAD)" = "${PRODUCT_COMMIT}"
+          test "$(git -C source rev-parse HEAD)" = "${PRODUCT_COMMIT}"
+          git -C tooling diff --exit-code HEAD -- .
+          git -C tooling diff --cached --exit-code HEAD -- .
+          git -C source diff --exit-code HEAD -- .
+          git -C source diff --cached --exit-code HEAD -- .
+      - name: Retain iOS XCTest evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: surf-ace-ios-xctest-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.lane }}
+          path: ${{ env.IOS_EVIDENCE_DIR }}/
+          if-no-files-found: warn
+          include-hidden-files: true
+          retention-days: 30
+      - name: Remove job-owned checkout paths
+        if: always()
+        run: rm -rf "${GITHUB_WORKSPACE}/source" "${GITHUB_WORKSPACE}/tooling"
