@@ -1,7 +1,7 @@
-name: Annotation release iOS proof
+name: Repeated release-configuration iOS proof
 on:
   push:
-    branches: [verify/ios-annotation-flush]
+    branches: [verify/ios-release-repeat]
 permissions:
   contents: read
 jobs:
@@ -11,8 +11,9 @@ jobs:
       fail-fast: false
       matrix:
         lane: [build-a, build-b]
+        repetition: [1, 2, 3]
     env:
-      CANDIDATE: f46d211074ed9429b8510d7c43d9d4503c049402
+      CANDIDATE: 12fa26c7fc169c21ba6c7b3338cc09b50055aac5
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -31,17 +32,51 @@ jobs:
         run: |
           set -euo pipefail
           unset SURF_ACE_SERVER SURF_ACE_DIRECT_ENDPOINT
+          log="$RUNNER_TEMP/ios-release-proof.log"
+          bundle="$RUNNER_TEMP/ios-release-proof.xcresult"
+          touch "$log"
+          printf 'XCTest started at %s\n' "$(date -u +%FT%TZ)"
           xcodebuild test \
             -project packages/ios/SurfAce.xcodeproj \
             -scheme SurfAce \
             -configuration Release ENABLE_TESTABILITY=YES \
             -parallel-testing-enabled NO \
             -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M5),OS=27.0' \
-            -resultBundlePath "$RUNNER_TEMP/ios-release-proof.xcresult" \
-            2>&1 | tee "$RUNNER_TEMP/ios-release-proof.log"
+            -resultBundlePath "$bundle" > "$log" 2>&1 &
+          test_pid=$!
+          tail -n +1 -f "$log" &
+          tail_pid=$!
+          trap 'kill "$tail_pid" "$test_pid" 2>/dev/null || true' EXIT
+          deadline=$((SECONDS + 1200))
+          while kill -0 "$test_pid" 2>/dev/null; do
+            if (( SECONDS >= deadline )); then
+              diagnostics="$RUNNER_TEMP/ios-release-proof.stall.log"
+              {
+                printf 'Evidence capture at %s\n' "$(date -u +%FT%TZ)"
+                rg "Test Case .* started\." "$log" | tail -5 || true
+                rg 'url_-1004|SO_ERROR.*61' "$log" | tail -20 || true
+                tail -100 "$log"
+                ps -axo pid,ppid,state,etime,comm
+                for pid in "$test_pid" $(pgrep -x SurfAce || true); do
+                  sample "$pid" 2 10 -file "$RUNNER_TEMP/ios-release-proof.$pid.sample.txt" || true
+                done
+              } > "$diagnostics" 2>&1
+              cat "$diagnostics"
+              kill -INT "$test_pid" 2>/dev/null || true
+              for _ in {1..8}; do
+                kill -0 "$test_pid" 2>/dev/null || break
+                sleep 1
+              done
+              kill -KILL "$test_pid" 2>/dev/null || true
+              exit 124
+            fi
+            sleep 5
+          done
+          wait "$test_pid"
+          printf 'XCTest finished at %s\n' "$(date -u +%FT%TZ)"
       - name: Retain full suite evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: ios-release-proof-${{ matrix.lane }}
+          name: ios-release-proof-${{ matrix.lane }}-${{ matrix.repetition }}
           path: ${{ runner.temp }}/ios-release-proof.*
