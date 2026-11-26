@@ -13,6 +13,7 @@ jobs:
       RESULT_BUNDLE: ${{ github.workspace }}/ios-test-evidence/${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.lane }}/native-tests.xcresult
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         lane: [build-a, build-b]
     runs-on: xcode-27
