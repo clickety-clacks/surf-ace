@@ -591,6 +591,8 @@ jobs:
           } > "$IOS_EVIDENCE_DIR/source-tooling-identity.txt"
       - name: Run the complete iOS XCTest suite
         id: ios-tests
+        # Bound the test step so the evidence upload can still run afterward.
+        timeout-minutes: 45
         run: |
           set -euo pipefail
           command=(
@@ -600,6 +602,8 @@ jobs:
             -configuration Release \
             ENABLE_TESTABILITY=YES \
             -parallel-testing-enabled NO \
+            -test-timeouts-enabled YES \
+            -default-test-execution-time-allowance 180 \
             -destination 'platform=iOS Simulator,name=iPad Pro 13-inch (M5),OS=27.0' \
             -resultBundlePath "$RESULT_BUNDLE"
           )
