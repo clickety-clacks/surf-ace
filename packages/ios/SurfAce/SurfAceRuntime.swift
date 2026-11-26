@@ -4159,7 +4159,7 @@ final class SurfAceRuntime {
             for connectionUUID in fanout.connectionTokens {
                 guard let connection = locklessConnectionsByConnectionUUID[connectionUUID],
                       !blockedControllerIds.contains(connection.controllerInstanceId) else { continue }
-                if op == "event.annotation_committed" {
+                if op == "event.drawing_flush" || op == "event.annotation_committed" {
                     let (result, continuation) = AsyncStream<Bool>.makeStream()
                     await connection.sender.enqueue(text: json, priority: .event) { error in
                         continuation.yield(error == nil)

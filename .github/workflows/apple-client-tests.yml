@@ -70,6 +70,7 @@ jobs:
             -only-testing:SurfAceTests/SurfAceLocklessAuthorityTests \
             -only-testing:SurfAceTests/SurfAceControllerReclamationAccountingTests \
             -only-testing:SurfAceTests/SurfAceLocklessWebSocketIntegrationTests/testContentSetReachesMountedVisiblePixels \
+            -only-testing:SurfAceTests/SurfAceLocklessWebSocketIntegrationTests/testAnnotationFrameReentryUsesTheExplicitCommitBoundary \
             -resultBundlePath "$RUNNER_TEMP/apple-recovery-tests.xcresult"
       - name: Preserve test results
         if: always()

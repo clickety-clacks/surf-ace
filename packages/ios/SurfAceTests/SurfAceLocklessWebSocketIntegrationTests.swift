@@ -1408,7 +1408,9 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         defaults.removePersistentDomain(forName: suiteName)
         let stateURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("\(suiteName).json")
-        let flushGate = SurfAceAnnotationFlushSendGate()
+        let flushHeld = expectation(description: "final direct flush held")
+        let reentryProjected = expectation(description: "same-context re-entry projected before flush release")
+        let flushGate = SurfAceAnnotationFlushSendGate(onHeld: { flushHeld.fulfill() })
         let modeProjection = SurfAceAnnotationModeProjectionProbe()
         addTeardownBlock {
             defaults.removePersistentDomain(forName: suiteName)
@@ -1425,11 +1427,14 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
                 await flushGate.prepareSend(text: text, priority: priority)
             },
             annotationModeProjectionObserver: { enabled in
-                if enabled { await modeProjection.record() }
+                if enabled, await modeProjection.recordSecondProjection() { reentryProjected.fulfill() }
             }
         )
         await runtime.start()
-        addTeardownBlock { await runtime.stop() }
+        addTeardownBlock {
+            await flushGate.release()
+            await runtime.stop()
+        }
         let port = try XCTUnwrap(UInt16(exactly: runtime.serverPort))
         let registeredSurface = await runtime.registerSurfaceForScene(
             sceneKey: "annotation-commit-reentry"
@@ -1438,6 +1443,7 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         let pane = try XCTUnwrap(surface.panes.first)
         let socket = socket(port: port)
         socket.resume()
+        defer { socket.cancel(with: .normalClosure, reason: nil) }
         try await assertOwnedRuntimeDiscovery(runtime, socket: socket, surface: surface,
                                               requestId: "annotation-discovery")
         let pairResponse = try await pair(
@@ -1504,12 +1510,12 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
                                   enabled: false, fingerDrawEnabled: false)
         XCTAssertEqual(pane.annotationDoneGeneration, doneGeneration,
                        "duplicate Done cannot enqueue another transition")
-        let flushHeld = expectation(description: "final direct flush held")
-        Task { if await flushGate.waitUntilHeld() { flushHeld.fulfill() } }
-        await fulfillment(of: [flushHeld], timeout: 5)
+        guard await XCTWaiter.fulfillment(of: [flushHeld], timeout: 5) == .completed else {
+            XCTFail("Final direct flush never reached the send gate")
+            return
+        }
         XCTAssertTrue(pane.isDrawingFlushSending)
         XCTAssertTrue(pane.pendingAnnotationCommit)
-        XCTAssertTrue(pane.isDrawingFlushSending)
         let heldSource = await adapter.snapshot().annotationPublisher
         let heldKinds = try heldSource?.surfaces[surface.surfaceId]?.fifo.map { entry in
             try XCTUnwrap((JSONSerialization.jsonObject(with: Data(entry.canonical.utf8))
@@ -1528,7 +1534,10 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
             enabled: true,
             fingerDrawEnabled: false
         )
-        await modeProjection.waitForCount(2)
+        guard await XCTWaiter.fulfillment(of: [reentryProjected], timeout: 5) == .completed else {
+            XCTFail("Same-context re-entry did not project while the final flush was held")
+            return
+        }
         XCTAssertTrue(pane.annotationMode)
         XCTAssertFalse(pane.pendingAnnotationCommit)
         let reenteredSource = await adapter.snapshot().annotationPublisher
@@ -1614,7 +1623,6 @@ final class SurfAceLocklessWebSocketIntegrationTests: XCTestCase {
         )
         let secondCommit = try await receive(socket, matchingOp: "event.annotation_committed")
         XCTAssertEqual(payload(secondCommit)["contentId"] as? String, "annotation-content-id")
-        socket.cancel(with: .normalClosure, reason: nil)
     }
 
     func testResumeBarrierCannotRegisterInsideAnActiveDeliveryTurn() async throws {
@@ -2442,8 +2450,10 @@ private actor SurfAceAnnotationAmbiguousCommitResult {
 
 private actor SurfAceAnnotationFlushSendGate {
     private var held = false
-    private var heldWaiters: [CheckedContinuation<Void, Never>] = []
+    private let onHeld: @Sendable () -> Void
     private let releaseGate = SurfAceLocklessTestGate()
+
+    init(onHeld: @escaping @Sendable () -> Void) { self.onHeld = onHeld }
 
     func prepareSend(text: String, priority: SurfAceOutboundSender.Priority) async {
         guard priority == .event,
@@ -2452,16 +2462,8 @@ private actor SurfAceAnnotationFlushSendGate {
               object["op"] as? String == "event.drawing_flush",
               !held else { return }
         held = true
-        let waiters = heldWaiters
-        heldWaiters.removeAll()
-        waiters.forEach { $0.resume() }
+        onHeld()
         await releaseGate.wait()
-    }
-
-    func waitUntilHeld() async -> Bool {
-        if held { return true }
-        await withCheckedContinuation { heldWaiters.append($0) }
-        return true
     }
 
     func release() async {
@@ -2528,18 +2530,10 @@ private final class SurfAceAnnotationAcceptingTestTransport: SurfAceAnnotationWi
 
 private actor SurfAceAnnotationModeProjectionProbe {
     private var count = 0
-    private var waiters: [(Int, CheckedContinuation<Void, Never>)] = []
 
-    func record() {
+    func recordSecondProjection() -> Bool {
         count += 1
-        let ready = waiters.filter { $0.0 <= count }
-        waiters.removeAll { $0.0 <= count }
-        ready.forEach { $0.1.resume() }
-    }
-
-    func waitForCount(_ target: Int) async {
-        if count >= target { return }
-        await withCheckedContinuation { waiters.append((target, $0)) }
+        return count == 2
     }
 }
 
