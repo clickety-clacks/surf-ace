@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import WebSocket from "ws";
 
-import { PersistenceWriteReadiness, surfaceBlockerLimitation, surfaceBlockerMessage } from "../src/persistence-write-readiness.js";
+import { applicationQueueWait, PersistenceWriteReadiness, surfaceBlockerLimitation, surfaceBlockerMessage, waitForApplicationQueue } from "../src/persistence-write-readiness.js";
 import { PersistentStateOutcomeUnknownError } from "../src/persistent-state-file.js";
 import { SurfaceCore } from "../src/surface-core.js";
 import { SurfaceWsServer } from "../src/ws-server.js";
@@ -44,6 +44,35 @@ test("surface blockers keep the first relevant change until it settles and expos
   await write;
   assert.equal(readiness.blockersForSurface("sf_one")[0], undefined);
   assert.equal(readiness.blockersForSurface("sf_two")[0], undefined);
+});
+
+test("pending saves identify their source while only actual queue waits set window status", async () => {
+  const readiness = new PersistenceWriteReadiness();
+  let finishFirst!: () => void;
+  const pending = new Promise<void>((resolve) => { finishFirst = resolve; });
+  const write = readiness.track(() => pending, "sf_source");
+  const writeEntry = readiness.pendingWrites()[0]!;
+  assert.equal(writeEntry.surfaceId, "sf_source");
+  assert.deepEqual(readiness.openMutations(), []);
+  assert.deepEqual(readiness.openChanges("sf_other"), [{ ...writeEntry, kind: "write" }]);
+  const blocker = readiness.blockersForSurface("sf_other", undefined, "write")[0]!;
+  assert.equal(readiness.waitingBlockerForSurface("sf_other"), undefined);
+  let finishSecond!: () => void;
+  const following = new Promise<void>((resolve) => { finishSecond = resolve; });
+  const followingWrite = readiness.track(() => following, "sf_following");
+  const waiting = applicationQueueWait.run(
+    (scope) => readiness.beginWait("sf_other", scope),
+    () => waitForApplicationQueue(Promise.all([write, followingWrite]).then(() => {}), "write"),
+  );
+  assert.deepEqual(readiness.waitingBlockerForSurface("sf_other"), blocker);
+  assert.equal(readiness.waitingBlockerForSurface("sf_source"), undefined);
+  finishFirst();
+  await write;
+  assert.deepEqual(readiness.waitingBlockerForSurface("sf_other"), readiness.blockersForSurface()[0]);
+  finishSecond();
+  await waiting;
+  assert.equal(readiness.waitingBlockerForSurface("sf_other"), undefined);
+  assert.deepEqual(readiness.pendingWrites(), []);
 });
 
 test("readiness remains closed through overlapping authority mutations", () => {

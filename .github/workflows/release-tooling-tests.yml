@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - "scripts/release/**"
+      - "integrations/tightbeam/skills/surf-ace/SKILL.md"
       - ".github/workflows/release-tightbeam.yml"
       - ".github/workflows/release-tooling-tests.yml"
       - "package.json"

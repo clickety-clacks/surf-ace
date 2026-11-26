@@ -886,6 +886,7 @@ fn result_schema(command: Command, description: &str) -> Value {
                             "properties": {
                                 "change": { "type": "string" },
                                 "startedAtMs": nonnegative_integer_schema(),
+                                "surfaceId": { "type": "string", "description": "The save's source surface ID, or shared for a client-wide save." },
                                 "message": { "type": "string" }
                             },
                             "additionalProperties": false

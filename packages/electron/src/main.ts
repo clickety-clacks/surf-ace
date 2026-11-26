@@ -86,7 +86,7 @@ import { isAddressInUse, isPortBoundOnIpv6Any } from "./port-selection.js";
 import { SurfaceWsServer, type CommittedSurfaceObservation } from "./ws-server.js";
 import { PanePresentationCoordinator } from "./pane-presentation-coordinator.js";
 import { NativePresentationWindowBinding, panePresentationWindowRoute } from "./pane-presentation.js";
-import { PersistenceWriteReadiness, surfaceBlockerMessage } from "./persistence-write-readiness.js";
+import { applicationQueueWait, PersistenceWriteReadiness, surfaceBlockerMessage, waitForApplicationQueue } from "./persistence-write-readiness.js";
 import {
   handleSurfaceWindowClose,
   surfaceWindowCloseOrigin,
@@ -237,6 +237,7 @@ let configuredRegistration: ServerConnection | null = null;
 let committedRegistration: RegistryRegistrationState = registryRegistrationState({});
 let committedSurfaceObservations = new Map<string, CommittedSurfaceObservation>();
 const pendingLabelWrites = new Map<string, number>();
+const reportedLabelWaits = new Map<string, string>();
 
 function captureSurfaceObservations(): Map<string, CommittedSurfaceObservation> {
   const surfaceSetRevision = core.locklessAuthority.surfaceSetRevision;
@@ -277,7 +278,7 @@ let identityFingerprint = "";
 let isQuitting = false;
 let server: SurfaceWsServer;
 let stateDir = "";
-let stateWrite = Promise.resolve();
+let stateWrite: Promise<void> | null = null;
 const persistentStateWriteReadiness = new PersistenceWriteReadiness();
 const guestConsoleDiagnosticLimiter = new GuestConsoleDiagnosticLimiter();
 
@@ -312,7 +313,11 @@ function createServer(coreValue: SurfaceCore, clientId: string | null): SurfaceW
       getRuntimeAppBinding: refreshRuntimeAppBindingDiagnostics,
       beginApplicationStateMutation: (details) => persistentStateWriteReadiness.beginAuthorityMutation(details),
       openApplicationStateMutations: () => persistentStateWriteReadiness.openMutations(),
-      getSurfaceBlockers: (surfaceId, excludingRequestId) => persistentStateWriteReadiness.blockersForSurface(surfaceId, excludingRequestId),
+      getSurfaceBlockers: (surfaceId, excludingRequestId, scope) =>
+        persistentStateWriteReadiness.blockersForSurface(surfaceId, excludingRequestId, scope),
+      getOpenSurfaceChanges: (surfaceId) => persistentStateWriteReadiness.openChanges(surfaceId),
+      beginApplicationStateWait: (surfaceId, scope, excludingRequestId) =>
+        persistentStateWriteReadiness.beginWait(surfaceId, scope, excludingRequestId),
       isApplicationStateReady: () => persistentStateWriteReadiness.isReady &&
         !persistentStateWriteGuard && !persistentStateOutcomeUnknown,
       committedSurfaceObservation,
@@ -326,7 +331,7 @@ function createServer(coreValue: SurfaceCore, clientId: string | null): SurfaceW
 	        await syncNativeOverlayRegionsAfterRelease(surfaceId, "native release");
 	        broadcastSurfaceState(surfaceId);
 	      },
-      persistLocklessState: persistState,
+      persistLocklessState: (surfaceId, awaited) => persistState(surfaceId, awaited),
       port: WS_PORT,
       viewport: () => displayViewport(),
     });
@@ -545,6 +550,21 @@ async function loadPersistentState(): Promise<PersistentSurfaceState | undefined
   return undefined;
 }
 
+function reportLabelPersistenceWaits(): void {
+  if (!pendingLabelWrites.size) return;
+  const details = {
+    open_mutations: JSON.stringify(persistentStateWriteReadiness.openMutations()),
+    pending_writes: JSON.stringify(persistentStateWriteReadiness.pendingWrites().map((write) =>
+      ({ ...write, surfaceId: write.surfaceId ?? "shared" }))),
+  };
+  const census = JSON.stringify(details);
+  for (const surfaceId of pendingLabelWrites.keys()) {
+    if (reportedLabelWaits.get(surfaceId) === census) continue;
+    reportedLabelWaits.set(surfaceId, census);
+    clientWarn("registry_label_waiting_for_local_persistence", { surface_id: surfaceId, ...details });
+  }
+}
+
 function trackPendingLabelWrites(registration: RegistryRegistrationState): () => void {
   if (!configuredRegistration) return () => {};
   const surfaces = registration.surfaces.filter((surface) => {
@@ -558,21 +578,20 @@ function trackPendingLabelWrites(registration: RegistryRegistrationState): () =>
   for (const { surfaceId } of surfaces) {
     const count = pendingLabelWrites.get(surfaceId) ?? 0;
     pendingLabelWrites.set(surfaceId, count + 1);
-    if (count === 0) {
-      clientWarn("registry_label_waiting_for_local_persistence", {
-        surface_id: surfaceId,
-        open_mutations: JSON.stringify(persistentStateWriteReadiness.openMutations()),
-      });
-    }
     if (core.listSurfaces().some((surface) => surface.surfaceId === surfaceId)) {
       broadcastSurfaceState(surfaceId);
     }
   }
+  reportLabelPersistenceWaits();
   return () => {
     for (const { surfaceId } of surfaces) {
       const count = pendingLabelWrites.get(surfaceId) ?? 1;
-      if (count === 1) pendingLabelWrites.delete(surfaceId);
-      else pendingLabelWrites.set(surfaceId, count - 1);
+      if (count === 1) {
+        pendingLabelWrites.delete(surfaceId);
+        reportedLabelWaits.delete(surfaceId);
+      } else {
+        pendingLabelWrites.set(surfaceId, count - 1);
+      }
       if (core.listSurfaces().some((surface) => surface.surfaceId === surfaceId)) {
         broadcastSurfaceState(surfaceId);
       }
@@ -580,7 +599,7 @@ function trackPendingLabelWrites(registration: RegistryRegistrationState): () =>
   };
 }
 
-async function persistState(): Promise<void> {
+async function persistState(surfaceId?: string, awaited = false): Promise<void> {
   assertWritesAllowed(isQuitting);
   if (persistentStateOutcomeUnknown) {
     await reconcilePersistence();
@@ -595,6 +614,14 @@ async function persistState(): Promise<void> {
     });
     throw new PersistentStateWriteGuardError(persistentStateWriteGuard);
   }
+  // Detached saves can inherit a request's async context. Only the caller of
+  // an awaited save participates in that request's queue notification.
+  const observe = awaited
+    ? applicationQueueWait.getStore() ?? (() =>
+      surfaceId === undefined ? undefined : persistentStateWriteReadiness.beginWait(surfaceId, "write"))
+    : null;
+  const previous = stateWrite;
+  const wait = waitForApplicationQueue(previous, "write", observe);
   await persistentStateWriteReadiness.track(async () => {
     // Bind this write to the state that requested it. A later source mutation
     // must enqueue its own write before the publisher can send its bytes.
@@ -603,25 +630,24 @@ async function persistState(): Promise<void> {
       observations: captureSurfaceObservations(),
     };
     const finishLabelWrites = trackPendingLabelWrites(candidate.registration);
-    stateWrite = stateWrite
-      .catch(() => {})
-      .then(async () => {
-        if (persistentStateOutcomeUnknown) throw new Error("Local persistence is paused pending reconciliation");
-        try {
-          await writePersistentStateFileContents(stateDir, STATE_FILE_NAME, candidate.contents);
-          persistentStateWriteGuard = false;
-          committedSurfaceObservations = candidate.observations;
-          confirmRegistrationState(candidate.registration);
-          confirmedAnnotationLocalSaves.confirmCandidates(candidate.annotationLocalSaveCandidates);
-        } catch (error) {
-          if (error instanceof PersistentStateOutcomeUnknownError) {
-            uncertainStateCandidate = candidate;
-          }
-          throw error;
+    const current = wait.then(async () => {
+      if (persistentStateOutcomeUnknown) throw new Error("Local persistence is paused pending reconciliation");
+      try {
+        await writePersistentStateFileContents(stateDir, STATE_FILE_NAME, candidate.contents);
+        persistentStateWriteGuard = false;
+        committedSurfaceObservations = candidate.observations;
+        confirmRegistrationState(candidate.registration);
+        confirmedAnnotationLocalSaves.confirmCandidates(candidate.annotationLocalSaveCandidates);
+      } catch (error) {
+        if (error instanceof PersistentStateOutcomeUnknownError) {
+          uncertainStateCandidate = candidate;
         }
-      });
+        throw error;
+      }
+    });
+    stateWrite = current;
     try {
-      await stateWrite;
+      await current;
     } catch (error) {
       if (error instanceof PersistentStateOutcomeUnknownError) {
         persistentStateOutcomeUnknown = error;
@@ -632,9 +658,10 @@ async function persistState(): Promise<void> {
       }
       throw error;
     } finally {
+      if (stateWrite === current) stateWrite = null;
       finishLabelWrites();
     }
-  });
+  }, surfaceId);
 }
 
 async function persistRegistryState(): Promise<void> {
@@ -819,7 +846,7 @@ function rendererWindowState(surfaceId: string): RendererWindowState {
 }
 
 function surfaceBlockedStatus(surfaceId: string): string | null {
-  const blocker = persistentStateWriteReadiness.blockersForSurface(surfaceId)[0];
+  const blocker = persistentStateWriteReadiness.waitingBlockerForSurface(surfaceId);
   return blocker ? surfaceBlockerMessage(blocker) : null;
 }
 
@@ -1991,7 +2018,7 @@ function installIpc(): void {
             viewport: { width: Math.max(1, Math.floor(bounds.width)),
               height: Math.max(1, Math.floor(bounds.height)), scale: 1 },
           });
-          await persistState();
+          await persistState(surfaceId, true);
           return true;
         } catch (error) {
           outbox.restore(previous);
@@ -2325,15 +2352,14 @@ async function boot(): Promise<void> {
     restored_surface_count: restoredSurfaces.length,
   });
 
-  persistentStateWriteReadiness.subscribe((changedSurfaceId) => {
-    for (const [surfaceId, window] of windows) {
-      if (changedSurfaceId !== undefined && surfaceId !== changedSurfaceId) continue;
-      if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
-        try {
-          window.webContents.send("surface:blocked-status", surfaceBlockedStatus(surfaceId));
-        } catch (error) {
-          clientWarn("surface_blocked_status_delivery_failed", errorDiagnosticFields(error));
-        }
+  persistentStateWriteReadiness.subscribeToChanges(reportLabelPersistenceWaits);
+  persistentStateWriteReadiness.subscribeToWaits((surfaceId) => {
+    const window = windows.get(surfaceId);
+    if (window && !window.isDestroyed() && !window.webContents.isDestroyed()) {
+      try {
+        window.webContents.send("surface:blocked-status", surfaceBlockedStatus(surfaceId));
+      } catch (error) {
+        clientWarn("surface_blocked_status_delivery_failed", errorDiagnosticFields(error));
       }
     }
   });
@@ -2357,13 +2383,13 @@ async function boot(): Promise<void> {
     }
     if (coreEvent.type === "surface-changed") {
       broadcastSurfaceState(coreEvent.surfaceId);
-      if (coreEventNeedsPersistence(coreEvent)) void persistState().catch((error) =>
+      if (coreEventNeedsPersistence(coreEvent)) void persistState(coreEvent.surfaceId).catch((error) =>
         clientWarn("state_persist_after_surface_change_failed", errorDiagnosticFields(error)));
       return;
     }
     if (coreEvent.type === "surface-created") {
       void createWindowForSurface(coreEvent.surfaceId);
-      if (coreEventNeedsPersistence(coreEvent)) void persistState().catch((error) =>
+      if (coreEventNeedsPersistence(coreEvent)) void persistState(coreEvent.surfaceId).catch((error) =>
         clientWarn("state_persist_after_surface_create_failed", errorDiagnosticFields(error)));
       return;
     }
@@ -2374,7 +2400,7 @@ async function boot(): Promise<void> {
         programmaticSurfaceCloses.add(coreEvent.surfaceId);
         window.close();
       }
-      if (coreEventNeedsPersistence(coreEvent)) void persistState().catch((error) =>
+      if (coreEventNeedsPersistence(coreEvent)) void persistState(coreEvent.surfaceId).catch((error) =>
         clientWarn("state_persist_after_surface_remove_failed", errorDiagnosticFields(error)));
     }
   });

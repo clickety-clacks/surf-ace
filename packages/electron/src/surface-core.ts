@@ -1,4 +1,4 @@
-import { applicationQueueWait } from "./persistence-write-readiness.js";
+import { waitForApplicationQueue } from "./persistence-write-readiness.js";
 import { randomBytes, randomUUID } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 
@@ -901,8 +901,7 @@ export class SurfaceCore {
     const current = new Promise<void>((resolve) => { release = resolve; });
     const queued = (previous ?? Promise.resolve()).catch(() => undefined).then(() => current);
     this.transactionTail = queued;
-    if (previous) applicationQueueWait.getStore()?.("client");
-    await previous?.catch(() => undefined);
+    await waitForApplicationQueue(previous, "client");
     try {
       if (this.pendingEvents) throw new Error("Surface transaction is already in progress");
       const token = Symbol("surface transaction");

@@ -1265,7 +1265,22 @@ fn normalize_application_readiness(
         "status".into(),
         Value::String(if codes.is_empty() { "ready" } else { "degraded" }.into()),
     );
-    let open_changes = codes.iter().filter_map(|code| surface_open_change(code)).collect::<Vec<_>>();
+    let open_changes = codes
+        .iter()
+        .enumerate()
+        .filter_map(|(index, code)| {
+            let mut change = surface_open_change(code)?;
+            if code.starts_with("blocked_by_saving_application_state_since_") {
+                let parts = codes[index + 1..]
+                    .iter()
+                    .map_while(|part| part.strip_prefix("save_surface_"));
+                if let Some(surface) = open_save_surface(parts) {
+                    change["surfaceId"] = Value::String(surface);
+                }
+            }
+            Some(change)
+        })
+        .collect::<Vec<_>>();
     if let Some(first) = open_changes.first() {
         readiness.insert("readinessReason".into(), first["message"].clone());
         readiness.insert("openChanges".into(), Value::Array(open_changes));
@@ -1275,6 +1290,26 @@ fn normalize_application_readiness(
         Value::Array(codes.into_iter().map(Value::String).collect()),
     );
     payload.insert("applicationReadiness".into(), Value::Object(readiness));
+}
+
+fn open_save_surface<'a>(parts: impl Iterator<Item = &'a str>) -> Option<String> {
+    let encoded = parts.collect::<String>();
+    if encoded == "shared" {
+        return Some(encoded);
+    }
+    if encoded.is_empty()
+        || encoded.len() % 2 != 0
+        || !encoded.bytes().all(|digit| (b'a'..=b'p').contains(&digit))
+    {
+        return None;
+    }
+    let bytes = encoded
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| (pair[0] - b'a') * 16 + (pair[1] - b'a'))
+        .collect();
+    let surface = String::from_utf8(bytes).ok()?;
+    surface.starts_with("sf_").then_some(surface)
 }
 
 fn surface_open_change(code: &str) -> Option<Value> {

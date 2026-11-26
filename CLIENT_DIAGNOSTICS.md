@@ -63,14 +63,14 @@ Xcode Devices and Simulators > select device > SurfAce > Download Container; ins
 
 ## Surface blocked behind a change or save
 
-The Electron status banner and `surf-ace window-describe` report the oldest
-open change affecting the requested surface, or a save in the shared
-application-state write queue. The status clears or advances to the next
-blocker when that work settles.
+The Electron status banner reports the blocker while a request or change
+waits. It clears when no waiter remains. `surf-ace window-describe` reports
+open changes and saves independently of whether a request is waiting.
 
 A direct `surface.describe` response lists open changes and saves affecting
 that surface as `blocked_by_<change>_since_<start>` entries in
-`applicationReadiness.limitationCodes`, oldest first.
+`applicationReadiness.limitationCodes`, using the oldest active instance
+of each operation and source surface.
 Underscores in the change name represent spaces. The start value is the
 decimal Unix epoch in milliseconds, with digits 0 through 9 encoded as letters
 `a` through `j`. The v1 response schema is unchanged. The CLI decodes the
@@ -79,12 +79,32 @@ entries into `applicationReadiness.openChanges` and shows the oldest in
 
 To reproduce in isolation, start a scratch app profile against a loopback
 registry fixture. Issue `pane.split` on a registered window and hold the
-registry fixture's `pane.claim` response. While it is held, inspect the window
-banner, query `surface.describe`, and run `surf-ace window-describe` for that
-window. Return the fixture's label allocation and check that all three
-observations clear. The Electron server-connection test
+registry fixture's `pane.claim` response. While it is held, query
+`surface.describe` and run `surf-ace window-describe` for that window.
+Send another request on the window while the claim is held, then inspect
+the banner and, with the capability below, the queued request's notice.
+Return the fixture's allocation and check that the banner and open changes
+clear. The Electron server-connection test
 `pane.split label claim reenters authority` holds and releases this request.
 
+To isolate a pending save, launch the production Electron bundle with a
+scratch profile and a loopback registry. In the test launcher, intercept
+the next `node:fs/promises` rename whose destination is that profile's
+`surface-core-state.json`. Let registration settle, move a local window
+to save its position, and hold the intercepted rename. With no other
+requests waiting, verify the absence of a blocked banner and notice.
+Direct `surface.describe` and `surf-ace window-describe` identify the
+save's start time and source surface. Submit a paired pane
+mutation while the rename is held and observe the banner and the
+negotiated notice. Release the rename and verify that the banner clears
+and the request receives its normal terminal reply.
+
+To exercise the recorder's label persistence diagnostic, hold the rename
+for the save that includes the initial registry label assignment. The
+`registry_label_waiting_for_local_persistence` entry names the label's
+surface and the pending write even with `open_mutations=[]`. Writes without
+a single source surface are listed as `shared`. The recorder logs changes
+to the pending writes or open mutations while a label write is pending.
 
 ### Queued controller requests
 

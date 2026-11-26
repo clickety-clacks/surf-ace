@@ -30,7 +30,7 @@ import {
 } from "../src/persistent-state-file.js";
 import { SurfaceWsServer, type SurfaceWsServerOptions } from "../src/ws-server.js";
 import { ConfiguredServerRegistration } from "../src/configured-server.js";
-import { PersistenceWriteReadiness, surfaceBlockerLimitation } from "../src/persistence-write-readiness.js";
+import { PersistenceWriteReadiness, surfaceBlockerLimitation, surfaceWriteLimitationCodes } from "../src/persistence-write-readiness.js";
 import { PublicControllerWireClient } from "../../controller/src/wire.js";
 
 let nextPort = 25901;
@@ -341,7 +341,7 @@ function describeServer(
   core: SurfaceCore,
   isApplicationStateReady: () => boolean = () => true,
   clientId: string | null = core.registryBinding()?.clientId ?? null,
-  getSurfaceBlockers?: SurfaceWsServerOptions["getSurfaceBlockers"],
+  getOpenSurfaceChanges?: SurfaceWsServerOptions["getOpenSurfaceChanges"],
 ) {
   return new SurfaceWsServer({
     bindAddress: "127.0.0.1",
@@ -350,7 +350,7 @@ function describeServer(
     compositorSocketPath: null,
     core,
     endpointName: "Surf Ace fixture",
-    getSurfaceBlockers,
+    getOpenSurfaceChanges,
     hostName: "localhost",
     isApplicationStateReady,
     port: nextPort++,
@@ -414,13 +414,19 @@ test("surface.describe returns revision-bound topology before pairing without ad
 test("surface.describe keeps committed topology readable during a backlog of saves", async () => {
   const fixture = describeFixture();
   const expected = fixture.core.pairState(fixture.surface.surfaceId);
-  const oldestSave = { operation: "saving application state", startedAtMs: 1_790_000_000_000 };
-  const split = { operation: "pane.split", startedAtMs: oldestSave.startedAtMs + 1 };
+  const oldestSave = {
+    kind: "write" as const,
+    operation: "saving application state",
+    surfaceId: fixture.surface.surfaceId,
+    startedAtMs: 1_790_000_000_000,
+  };
+  const split = { kind: "mutation" as const, operation: "pane.split", startedAtMs: oldestSave.startedAtMs + 1 };
+  const otherSave = { ...oldestSave, surfaceId: "sf_another_window", startedAtMs: oldestSave.startedAtMs + 2 };
   const saves = Array.from({ length: 1_500 }, (_, index) => ({
-    operation: oldestSave.operation, startedAtMs: oldestSave.startedAtMs + index + 1,
+    ...(index % 2 === 0 ? oldestSave : otherSave), startedAtMs: oldestSave.startedAtMs + index + 3,
   }));
   const server = describeServer(fixture.core, () => false, fixture.binding.clientId,
-    () => [...saves, split, oldestSave]);
+    () => [...saves, split, oldestSave, otherSave]);
   let socket: WebSocket | undefined;
   try {
     await server.start();
@@ -431,7 +437,9 @@ test("surface.describe keeps committed topology readable during a backlog of sav
     assert.equal(response.payload.panes.length, expected.panes.length);
     assert.deepEqual(response.payload.applicationReadiness, {
       status: "degraded",
-      limitationCodes: ["application_state_unverified", surfaceBlockerLimitation(oldestSave), surfaceBlockerLimitation(split)],
+      limitationCodes: ["application_state_unverified", surfaceBlockerLimitation(oldestSave),
+        ...surfaceWriteLimitationCodes(oldestSave.surfaceId), surfaceBlockerLimitation(otherSave),
+        ...surfaceWriteLimitationCodes(otherSave.surfaceId), surfaceBlockerLimitation(split)],
     });
   } finally {
     socket?.close();

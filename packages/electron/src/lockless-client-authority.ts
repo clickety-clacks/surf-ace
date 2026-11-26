@@ -1,4 +1,4 @@
-import { applicationQueueWait } from "./persistence-write-readiness.js";
+import { waitForApplicationQueue } from "./persistence-write-readiness.js";
 import { createHash, randomUUID } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 
@@ -689,8 +689,7 @@ export class LocklessClientAuthority {
     });
     const queued = (previous ?? Promise.resolve()).catch(() => undefined).then(() => current);
     this.authorityWorkTail = queued;
-    if (previous) applicationQueueWait.getStore()?.("client");
-    await previous?.catch(() => undefined);
+    await waitForApplicationQueue(previous, "client");
     try {
       return await operation();
     } finally {
