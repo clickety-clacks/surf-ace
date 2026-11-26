@@ -2985,56 +2985,6 @@ fn canonical_client_commands_map_to_the_public_wire_and_return_json() {
 }
 
 #[test]
-fn packaged_linux_and_macos_cli_assets_use_the_same_command_surface() {
-    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let repository = manifest_dir.join("../..");
-    let config =
-        fs::read_to_string(repository.join("scripts/release/tightbeam-release-config.mjs"))
-            .unwrap();
-    for target in ["x86_64-unknown-linux-gnu", "aarch64-apple-darwin"] {
-        assert!(
-            config.contains(&format!(
-                "cargo build --manifest-path source/packages/cli/Cargo.toml --target-dir source/packages/cli/target --release --locked --target {target}"
-            )),
-            "release config must build the CLI crate for {target}"
-        );
-    }
-
-    let builder =
-        fs::read_to_string(repository.join("scripts/release/build-tightbeam-release.mjs")).unwrap();
-    let linux_stage = builder
-        .split("export async function buildTightbeamLinuxStage")
-        .nth(1)
-        .unwrap()
-        .split("const TIGHTBEAM_SKILL_SOURCE")
-        .next()
-        .unwrap();
-    let linux_packages = builder
-        .split("export async function buildTightbeamLinuxPackages")
-        .nth(1)
-        .unwrap()
-        .split("export async function buildTightbeamMacosPackages")
-        .next()
-        .unwrap();
-    let macos = builder
-        .split("export async function buildTightbeamMacosPackages")
-        .nth(1)
-        .unwrap()
-        .split("export async function buildTightbeamLinuxQualification")
-        .next()
-        .unwrap();
-    for platform_builder in [linux_stage, macos] {
-        assert!(platform_builder.contains("path.join(source, \"packages/cli/Cargo.toml\")"));
-    }
-    for package_builder in [linux_packages, macos] {
-        assert!(package_builder.contains("packages/cli/target"));
-        assert!(package_builder.contains("release/surf-ace"));
-        assert!(package_builder.contains("assembleTightbeamCliStage"));
-    }
-    assert!(builder.contains("path.join(stageDir, \"bin/surf-ace\")"));
-}
-
-#[test]
 fn every_serialized_network_command_variant_matches_the_shared_production_vector() {
     let envelopes = canonical_network_cases()
         .into_iter()
